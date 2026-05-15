@@ -186,6 +186,35 @@ jobs:
           node tests/e2e/assert_firefox_cookie.mjs
           tests/e2e/assert_cli_cookie.sh "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
+      - name: Run docs/examples against the seeded profile
+        # Doubles as a smoke gate for examples drifting away from the
+        # public API. Each example expects a cookies.sqlite path as its
+        # first argument and prints every cookie it finds; we grep for
+        # the seeded `rookie_ci=bar` token to confirm the read path is
+        # still wired up correctly.
+        run: |
+          set -euxo pipefail
+          DB="$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
+
+          # Rust
+          cargo run --release --example from_path -p rookie -- "$DB" \
+            | tee /tmp/rookie-example-rust.out
+          grep 'rookie_ci' /tmp/rookie-example-rust.out
+          grep '"bar"' /tmp/rookie-example-rust.out
+
+          # Python
+          .venv/bin/python examples/python/from_path.py "$DB" \
+            | tee /tmp/rookie-example-python.out
+          grep 'rookie_ci' /tmp/rookie-example-python.out
+          grep "'bar'" /tmp/rookie-example-python.out
+
+          # Node
+          cd examples/javascript
+          npm install --silent
+          node from_path.mjs "$DB" | tee /tmp/rookie-example-node.out
+          grep 'rookie_ci' /tmp/rookie-example-node.out
+          grep "'bar'" /tmp/rookie-example-node.out
+
   macos-firefox:
     name: e2e macos × firefox
     runs-on: macos-15
