@@ -50,7 +50,16 @@ jobs:
       - name: Pre-build the e2e test binary (avoid running cargo inside dbus session)
         run: cargo test --test e2e_chrome --no-run
 
-      - name: Seed Chrome profile and run extraction
+      - name: Build and install rookiepy into a venv
+        # `maturin develop` needs an active venv. We pre-build the abi3 wheel
+        # outside the dbus session so cargo's network/cache layer doesn't
+        # have to negotiate with the keyring scope.
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade --quiet pip maturin
+          cd bindings/python && ../../.venv/bin/maturin develop --release
+
+      - name: Seed Chrome profile and run extraction (rust + python)
         run: |
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
           dbus-run-session -- bash -euxo pipefail <<'SH'
@@ -82,8 +91,13 @@ jobs:
             test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
               || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
-            # Run the extraction test against the seeded profile.
+            # Run the rust extraction test against the seeded profile.
             cargo test --test e2e_chrome -- --ignored --nocapture
+
+            # And run the python binding test against the SAME seeded profile,
+            # asserting cross-binding parity (rust and python agree on the
+            # cookie list, modulo dict-vs-struct shape).
+            .venv/bin/python tests/e2e/assert_chrome_cookie.py
           SH
 
   ubuntu-firefox:

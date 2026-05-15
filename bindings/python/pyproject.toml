@@ -9,7 +9,9 @@ license = "MIT"
 authors = [
     {name = "thewh1teagle"},
 ]
-
+# Version comes from bindings/python/Cargo.toml via maturin. Newer maturin
+# (1.6+) requires an explicit declaration here; the older defaults are gone.
+dynamic = ["version"]
 requires-python = ">=3.7"
 classifiers = [
     "License :: OSI Approved :: MIT License",
