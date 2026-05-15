@@ -59,7 +59,10 @@ jobs:
           .venv/bin/pip install --upgrade --quiet pip maturin
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
-      - name: Seed Chrome profile and run extraction (rust + python)
+      - name: Pre-build the rookie CLI
+        run: cargo build -p rookie-cli --release
+
+      - name: Seed Chrome profile and run extraction (rust + python + cli)
         run: |
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
           dbus-run-session -- bash -euxo pipefail <<'SH'
@@ -91,13 +94,14 @@ jobs:
             test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
               || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
-            # Run the rust extraction test against the seeded profile.
+            # Three bindings, one seeded profile — assert that rust, python,
+            # and the CLI binary all agree on rookie_ci=bar.
             cargo test --test e2e_chrome -- --ignored --nocapture
-
-            # And run the python binding test against the SAME seeded profile,
-            # asserting cross-binding parity (rust and python agree on the
-            # cookie list, modulo dict-vs-struct shape).
             .venv/bin/python tests/e2e/assert_chrome_cookie.py
+
+            COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
+            [ -f "$COOKIES_DB" ] || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
+            tests/e2e/assert_cli_cookie.sh "$COOKIES_DB"
           SH
 
   ubuntu-firefox:
@@ -138,7 +142,10 @@ jobs:
           .venv/bin/pip install --upgrade --quiet pip maturin
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
-      - name: Seed Firefox profile and run extraction (rust + python)
+      - name: Pre-build the rookie CLI
+        run: cargo build -p rookie-cli --release
+
+      - name: Seed Firefox profile and run extraction (rust + python + cli)
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_FIREFOX_PROFILE"
@@ -160,6 +167,7 @@ jobs:
 
           cargo test --test e2e_firefox -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_firefox_cookie.py
+          tests/e2e/assert_cli_cookie.sh "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
   macos-firefox:
     name: e2e macos × firefox
@@ -189,7 +197,10 @@ jobs:
           .venv/bin/pip install --upgrade --quiet pip maturin
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
-      - name: Seed Firefox profile and run extraction (rust + python)
+      - name: Pre-build the rookie CLI
+        run: cargo build -p rookie-cli --release
+
+      - name: Seed Firefox profile and run extraction (rust + python + cli)
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_FIREFOX_PROFILE"
@@ -212,6 +223,7 @@ jobs:
 
           cargo test --test e2e_firefox -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_firefox_cookie.py
+          tests/e2e/assert_cli_cookie.sh "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
   macos-chrome:
     name: e2e macos × chrome (keychain)
