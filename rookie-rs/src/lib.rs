@@ -382,6 +382,13 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 
 /// Returns cookies from all browsers
 ///
+/// This is a best-effort aggregator: each browser is probed in turn and
+/// individual failures are surfaced via [`log::warn!`] but do not abort
+/// the load (a browser not being installed, a locked profile, or a
+/// decrypt failure on one browser should not lose cookies from the
+/// others). If you need to know which browsers failed, hook a logger
+/// like [`tracing-subscriber`] and watch for `rookie::load` warnings.
+///
 /// # Arguments
 ///
 /// * `domains` - A optional list that for getting specific domains only
@@ -393,33 +400,44 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie::load(Some(domains));
 /// ```
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
   let mut cookies = Vec::new();
 
-  let mut browser_types = vec![
-    firefox, zen, librewolf, opera, edge, chromium, brave, vivaldi, arc,
+  let mut browser_types: Vec<(&'static str, LoadFn)> = vec![
+    ("firefox", firefox),
+    ("zen", zen),
+    ("librewolf", librewolf),
+    ("opera", opera),
+    ("edge", edge),
+    ("chromium", chromium),
+    ("brave", brave),
+    ("vivaldi", vivaldi),
+    ("arc", arc),
   ];
 
   #[cfg(target_os = "windows")]
   {
-    browser_types.push(chrome);
-    browser_types.push(internet_explorer);
-    browser_types.push(opera_gx);
+    browser_types.push(("chrome", chrome));
+    browser_types.push(("internet_explorer", internet_explorer));
+    browser_types.push(("opera_gx", opera_gx));
   }
   #[cfg(target_os = "linux")]
   {
-    browser_types.push(chrome);
-    browser_types.push(cachy);
+    browser_types.push(("chrome", chrome));
+    browser_types.push(("cachy", cachy));
   }
   #[cfg(target_os = "macos")]
   {
-    browser_types.push(chrome);
-    browser_types.push(opera_gx);
-    browser_types.push(safari);
+    browser_types.push(("chrome", chrome));
+    browser_types.push(("opera_gx", opera_gx));
+    browser_types.push(("safari", safari));
   }
 
-  for browser_fn in browser_types.iter() {
-    let browser_cookies = browser_fn(domains.clone()).unwrap_or(vec![]);
-    cookies.extend(browser_cookies);
+  for (browser_name, browser_fn) in browser_types.iter() {
+    match browser_fn(domains.clone()) {
+      Ok(browser_cookies) => cookies.extend(browser_cookies),
+      Err(err) => log::warn!("rookie::load skipping {browser_name}: {err}"),
+    }
   }
 
   Ok(cookies)
@@ -448,54 +466,66 @@ pub fn any_browser(
   domains: Option<Vec<String>>,
   key_path: Option<&str>,
 ) -> Result<Vec<Cookie>> {
+  // Each parser is probed in turn; the first to succeed wins. Failed
+  // probes are logged at warn level so users can see which decoders
+  // were tried and why they rejected the file.
   // chromium based
   #[cfg(unix)]
   {
     let chrome_configs = &[
-      get_browser_config("chrome"),
-      get_browser_config("brave"),
-      get_browser_config("chromium"),
-      get_browser_config("edge"),
-      get_browser_config("opera"),
-      get_browser_config("opera_gx"),
-      get_browser_config("vivaldi"),
+      ("chrome", get_browser_config("chrome")),
+      ("brave", get_browser_config("brave")),
+      ("chromium", get_browser_config("chromium")),
+      ("edge", get_browser_config("edge")),
+      ("opera", get_browser_config("opera")),
+      ("opera_gx", get_browser_config("opera_gx")),
+      ("vivaldi", get_browser_config("vivaldi")),
     ];
-    for browser_config in chrome_configs {
-      if let Ok(cookies) = chromium_based(browser_config, cookies_path.into(), domains.clone()) {
-        return Ok(cookies);
+    for (name, browser_config) in chrome_configs {
+      match chromium_based(browser_config, cookies_path.into(), domains.clone()) {
+        Ok(cookies) => return Ok(cookies),
+        Err(err) => {
+          log::warn!("any_browser: {name} (chromium) did not decode {cookies_path}: {err}")
+        }
       }
     }
   }
   #[cfg(target_os = "windows")]
   {
     if let Some(key_path) = key_path {
-      if let Ok(cookies) = chromium_based(
+      match chromium_based(
         PathBuf::from(key_path),
         cookies_path.into(),
         domains.clone(),
       ) {
-        return Ok(cookies);
+        Ok(cookies) => return Ok(cookies),
+        Err(err) => {
+          log::warn!("any_browser: chromium (windows) did not decode {cookies_path}: {err}")
+        }
       }
     }
   }
   // Windows chromium
 
   // Firefox
-  if let Ok(cookies) = firefox_based(cookies_path.into(), domains.clone()) {
-    return Ok(cookies);
+  match firefox_based(cookies_path.into(), domains.clone()) {
+    Ok(cookies) => return Ok(cookies),
+    Err(err) => log::warn!("any_browser: firefox did not decode {cookies_path}: {err}"),
   }
 
   #[cfg(target_os = "windows")]
   {
     // Internet Explorer
-    if let Ok(cookies) = internet_explorer_based(cookies_path.into(), domains.clone()) {
-      return Ok(cookies);
+    match internet_explorer_based(cookies_path.into(), domains.clone()) {
+      Ok(cookies) => return Ok(cookies),
+      Err(err) => log::warn!("any_browser: internet_explorer did not decode {cookies_path}: {err}"),
     }
   }
   #[cfg(target_os = "macos")]
   {
-    if let Ok(cookies) = safari_based(cookies_path.into(), domains) {
-      return Ok(cookies);
+    match safari_based(cookies_path.into(), domains) {
+      Ok(cookies) => return Ok(cookies),
+      Err(err) => log::warn!("any_browser: safari did not decode {cookies_path}: {err}"),
     }
   }
   bail!(
