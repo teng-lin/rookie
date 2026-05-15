@@ -189,6 +189,12 @@ jobs:
     name: e2e macos × chrome (keychain)
     runs-on: macos-15
     timeout-minutes: 25
+    # Keychain interaction under Playwright on CI is unresolved: with
+    # --use-mock-keychain the cookie is sealed under a key rookie can't
+    # reproduce, and without it Chrome blocks on TCC prompts for the
+    # Keychain entry until Playwright times out. Tracked separately; do
+    # not block merges on this job until the workaround lands.
+    continue-on-error: true
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
     steps:
