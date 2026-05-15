@@ -244,6 +244,97 @@ mod tests {
     dir
   }
 
+  // (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
+  type CookieRow<'a> = (&'a str, &'a str, bool, u64, &'a str, &'a str, bool, i64);
+
+  // Minimal moz_cookies fixture mirroring the columns firefox_based reads.
+  // Real Firefox schema has more columns but rookie only selects these.
+  fn seed_moz_cookies(db: &Path, rows: &[CookieRow<'_>]) {
+    let conn = rusqlite::Connection::open(db).expect("open writable sqlite");
+    conn
+      .execute(
+        "CREATE TABLE moz_cookies (
+          host TEXT NOT NULL,
+          path TEXT NOT NULL,
+          isSecure INTEGER NOT NULL,
+          expiry INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          isHttpOnly INTEGER NOT NULL,
+          sameSite INTEGER NOT NULL
+        )",
+        [],
+      )
+      .expect("create table");
+    for r in rows {
+      conn
+        .execute(
+          "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+          rusqlite::params![r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7],
+        )
+        .expect("insert row");
+    }
+  }
+
+  #[test]
+  fn firefox_based_reads_seeded_cookies() {
+    let dir = unique_tmpdir("ff-happy");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (
+          ".example.com",
+          "/",
+          false,
+          1_700_000_000,
+          "id",
+          "abc",
+          true,
+          1,
+        ),
+        ("foo.test", "/path", true, 0, "tok", "xyz", false, 2),
+      ],
+    );
+
+    let cookies = firefox_based(db, None).expect("decode");
+    assert_eq!(cookies.len(), 2, "{:?}", cookies);
+
+    let id = cookies.iter().find(|c| c.name == "id").expect("id");
+    assert_eq!(id.domain, ".example.com");
+    assert_eq!(id.value, "abc");
+    assert!(id.http_only);
+    assert!(!id.secure);
+    assert_eq!(id.same_site, 1);
+    // mozilla_timestamp passes seconds through and maps 0 to None.
+    assert_eq!(id.expires, Some(1_700_000_000));
+
+    let tok = cookies.iter().find(|c| c.name == "tok").expect("tok");
+    assert_eq!(tok.domain, "foo.test");
+    assert!(tok.secure);
+    assert!(!tok.http_only);
+    assert_eq!(tok.same_site, 2);
+    assert_eq!(tok.expires, None, "expiry=0 should map to None");
+  }
+
+  #[test]
+  fn firefox_based_filters_by_domain() {
+    let dir = unique_tmpdir("ff-domain-filter");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", false, 0),
+      ],
+    );
+
+    let cookies = firefox_based(db, Some(vec!["example.com".to_string()])).expect("decode");
+    let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
+
   #[test]
   fn firefox_based_missing_db_errors() {
     let result = firefox_based(PathBuf::from("/nonexistent/rookie/cookies.sqlite"), None);
