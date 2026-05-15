@@ -1,0 +1,80 @@
+name: E2E real-browser
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/e2e.yml'
+      - 'rookie-rs/**'
+      - 'cli/**'
+      - 'bindings/**'
+      - 'tests/e2e/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-chrome:
+    name: e2e ubuntu × chrome (libsecret)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Linux desktop / keyring packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            xvfb dbus dbus-x11 gnome-keyring libsecret-tools at-spi2-core
+
+      - name: Install Playwright (API only — Chrome comes from the runner image)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm install --no-save playwright
+
+      - name: Pre-build the e2e test binary (avoid running cargo inside dbus session)
+        run: cargo test --test e2e_chrome --no-run
+
+      - name: Seed Chrome profile and run extraction
+        run: |
+          dbus-run-session -- bash -euxo pipefail <<'SH'
+            # Unlock + start a session-scoped secret service so Chrome's
+            # libsecret writes land somewhere `rookie` can read them back.
+            eval "$(printf '\n' | gnome-keyring-daemon --unlock || true)"
+            eval "$(gnome-keyring-daemon --start --components=secrets || true)"
+            export XDG_CURRENT_DESKTOP=GNOME
+
+            # Local cookie-issuing server.
+            python3 tests/e2e/cookie_server.py &
+            SERVER_PID=$!
+            trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+            # Give the server a moment to bind.
+            for _ in 1 2 3 4 5; do
+              curl -fs http://127.0.0.1:8765/ >/dev/null && break
+              sleep 0.3
+            done
+
+            # Launch Chrome under Xvfb so the persistent profile is created on
+            # disk with libsecret-encrypted cookies.
+            xvfb-run -a node tests/e2e/seed_chromium_cookie.mjs \
+              chrome "$HOME/.config/google-chrome" "http://127.0.0.1:8765/set"
+
+            # Sanity-check the artifacts.
+            ls -la "$HOME/.config/google-chrome/Default/" || true
+            test -f "$HOME/.config/google-chrome/Default/Network/Cookies" \
+              || test -f "$HOME/.config/google-chrome/Default/Cookies"
+
+            # Run the extraction test against the seeded profile.
+            cargo test --test e2e_chrome -- --ignored --nocapture
+          SH
