@@ -79,9 +79,17 @@ const screenshotArg = isWindows
   ? [`--screenshot=${join(screenshotDir, "seed.png")}`]
   : [];
 
+// Headless on macos-15 GitHub runners is unreliable — Chrome starts but
+// the renderer never gets far enough to write the cookie SQLite. macOS
+// runners have a real WindowServer so we just let Chrome put a window
+// up; nobody's there to see it and SIGTERM cleans it up anyway. On
+// Windows the runner is headless-only, and `--headless=new` is required
+// for `--screenshot` to drive a clean exit.
+const headlessArg = isWindows ? ["--headless=new"] : [];
+
 const baseArgs = [
   `--user-data-dir=${userDataDir}`,
-  "--headless=new",
+  ...headlessArg,
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-default-apps",
