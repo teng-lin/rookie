@@ -31,7 +31,11 @@ if [ -n "$KEY_PATH" ]; then
   CLI_ARGS+=("--key-path" "$KEY_PATH")
 fi
 
-OUT=$(./target/release/rookie "${CLI_ARGS[@]}")
+# Suppress rookie's `log::info!` lines — they go through tracing-subscriber
+# which (with RUST_LOG unset) writes INFO to the same place as the JSON
+# output, polluting jq's input. RUST_LOG=error silences everything below
+# error level. stderr is dropped for the same reason.
+OUT=$(RUST_LOG=error ./target/release/rookie "${CLI_ARGS[@]}" 2>/dev/null)
 
 if ! echo "$OUT" | jq -e '.[] | select(.name == "rookie_ci" and .value == "bar")' >/dev/null; then
   echo "CLI did not return rookie_ci=bar; output was:" >&2
