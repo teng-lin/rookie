@@ -292,37 +292,15 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Pre-seed `Chrome Safe Storage` in the login keychain
-        # Chrome itself doesn't touch the keychain — we pass
-        # `--password-store=basic` in the seed script so the cookie is
-        # encrypted with the "peanuts" fallback. But rookie's macOS
-        # chromium code ALWAYS calls `get_osx_keychain_password(...)`
-        # before trying the fallbacks (rookie-rs/src/browser/chromium.rs).
-        # On a fresh CI runner the entry doesn't exist, and reading a
-        # missing entry blocks on a TCC prompt that has nowhere to go
-        # → rookie hangs forever. Seeding the entry with `-A` (allow
-        # any app) makes the read return immediately with a wrong value,
-        # which rookie then discards and falls through to "peanuts".
-        run: |
-          security delete-generic-password \
-            -a Chrome -s "Chrome Safe Storage" \
-            login.keychain-db 2>/dev/null || true
-          security add-generic-password \
-            -a Chrome -s "Chrome Safe Storage" \
-            -w "rookie-ci-chrome-safe-storage" \
-            -A \
-            login.keychain-db
-
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run
 
-      - name: Seed Chrome profile and run extraction
+      - name: Seed Chrome profile
         # The native seed script launches system Chrome directly (no
         # Playwright) with `--password-store=basic`, which makes Chrome
         # encrypt cookies with the hardcoded "peanuts" key — exactly the
         # fallback that rookie's macOS chromium path already tries. No
-        # Keychain access from Chrome, only the unavoidable rookie-side
-        # keychain probe that the pre-seed step above neutralizes.
+        # Keychain access from Chrome at all.
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
@@ -343,7 +321,32 @@ jobs:
           test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
             || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
-          cargo test --test e2e_chrome -- --ignored --nocapture
+      - name: Pre-seed `Chrome Safe Storage` in the login keychain
+        # Order matters: this MUST run AFTER Chrome has finished and
+        # exited. Pre-seeding before Chrome launches makes Chrome see
+        # the existing entry and break the cookie write path on
+        # macos-15 runners (empirically: cookie file never appears).
+        #
+        # rookie's macOS code ALWAYS calls `get_osx_keychain_password()`
+        # before trying its fallbacks (rookie-rs/src/browser/chromium.rs).
+        # On a fresh CI runner that entry doesn't exist, and reading a
+        # missing entry blocks on a TCC prompt that has nowhere to go.
+        # Seeding the entry now with `-A` (allow any app) makes rookie's
+        # read return immediately with a wrong value, which it then
+        # discards and falls through to "peanuts" (the actual key Chrome
+        # used).
+        run: |
+          security delete-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            login.keychain-db 2>/dev/null || true
+          security add-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            -w "rookie-ci-chrome-safe-storage" \
+            -A \
+            login.keychain-db
+
+      - name: Extract cookies via rookie
+        run: cargo test --test e2e_chrome -- --ignored --nocapture
 
   windows-chrome:
     name: e2e windows × chrome (DPAPI)
@@ -410,6 +413,20 @@ jobs:
               Write-Warning "Local State has no app_bound_encrypted_key — exercising only legacy DPAPI path"
             }
             Get-ChildItem $defaultDir | Format-Table
+
+            # Diagnostic: dump the first 8 bytes of the seeded cookie's
+            # encrypted_value so we can see which OS-crypt version Chrome
+            # used (v10 vs v20). Tracked under issue #8.
+            $cookiesDb = Join-Path $defaultDir "Network\Cookies"
+            if (-not (Test-Path $cookiesDb)) { $cookiesDb = Join-Path $defaultDir "Cookies" }
+            python -c @"
+            import sqlite3, sys
+            conn = sqlite3.connect(r'$cookiesDb')
+            for row in conn.execute('SELECT host_key, name, hex(substr(encrypted_value, 1, 8)) FROM cookies WHERE name = ''rookie_ci'''):
+                print('cookie:', row)
+            for row in conn.execute('SELECT name, length(encrypted_value) FROM cookies WHERE name = ''rookie_ci'''):
+                print('cookie_len:', row)
+            "@
 
             cargo test --test e2e_chrome -- --ignored --nocapture
           } finally {
