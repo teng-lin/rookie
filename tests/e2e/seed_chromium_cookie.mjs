@@ -11,6 +11,12 @@
 //
 // Linux requires --password-store=gnome-libsecret to push the OS-encrypted
 // key into libsecret (otherwise Chrome falls back to a basic XOR scheme).
+//
+// Playwright passes --use-mock-keychain by default on macOS, which makes
+// Chrome bypass the real Keychain and use an in-memory placeholder key —
+// the cookie file then can't be decrypted by anything outside that process.
+// We strip that flag so Chrome reads/writes the actual `Chrome Safe Storage`
+// keychain entry that rookie looks up.
 
 import { chromium } from "playwright";
 
@@ -30,6 +36,7 @@ const linuxArgs =
 const context = await chromium.launchPersistentContext(userDataDir, {
   channel,
   headless: false,
+  ignoreDefaultArgs: ["--use-mock-keychain"],
   args: [
     "--no-first-run",
     "--disable-default-apps",
