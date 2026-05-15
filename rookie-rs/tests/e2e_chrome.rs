@@ -14,7 +14,6 @@
 //! Ignored by default; CI runs them via
 //! `cargo test --test e2e_chrome -- --ignored`.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod helpers {
   use std::env;
   use std::path::PathBuf;
@@ -36,6 +35,13 @@ mod helpers {
           default_dir.display()
         )
       })
+  }
+
+  #[cfg(target_os = "windows")]
+  pub fn resolve_key_path() -> PathBuf {
+    let user_data_dir =
+      env::var("ROOKIE_E2E_USER_DATA_DIR").expect("ROOKIE_E2E_USER_DATA_DIR must be set");
+    PathBuf::from(&user_data_dir).join("Local State")
   }
 
   pub fn domain() -> String {
@@ -94,6 +100,20 @@ fn extracts_seeded_cookie_from_chrome_keychain_profile() {
   };
 
   let cookies = rookie::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]))
+    .unwrap_or_else(|e| panic!("rookie::chromium_based({}) failed: {e}", db_path.display()));
+
+  helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore]
+fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
+  let db_path = helpers::resolve_db_path();
+  let key_path = helpers::resolve_key_path();
+  let domain = helpers::domain();
+
+  let cookies = rookie::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]))
     .unwrap_or_else(|e| panic!("rookie::chromium_based({}) failed: {e}", db_path.display()));
 
   helpers::assert_seeded(&cookies, &domain);
