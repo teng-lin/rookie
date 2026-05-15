@@ -157,3 +157,56 @@ pub fn expand_path(path: &str) -> Result<PathBuf> {
   // Convert the expanded path to a PathBuf
   Ok(PathBuf::from(expanded_path))
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[cfg(unix)]
+  #[test]
+  fn expand_path_unix_replaces_tilde_with_home() {
+    let home = env::var("HOME").expect("HOME must be set on unix runners");
+    let expanded = expand_path("~/.config/google-chrome/Default/Cookies").unwrap();
+    assert_eq!(
+      expanded,
+      PathBuf::from(format!("{home}/.config/google-chrome/Default/Cookies"))
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn expand_path_unix_replaces_dollar_home() {
+    let home = env::var("HOME").expect("HOME must be set on unix runners");
+    let expanded = expand_path("$HOME/Library/Cookies").unwrap();
+    assert_eq!(expanded, PathBuf::from(format!("{home}/Library/Cookies")));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn expand_path_unix_leaves_absolute_paths_alone() {
+    let expanded = expand_path("/etc/hosts").unwrap();
+    assert_eq!(expanded, PathBuf::from("/etc/hosts"));
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn expand_path_windows_substitutes_known_env_var() {
+    // SAFETY: tests in the same process share env state; we use a unique key to avoid clashes.
+    let key = "ROOKIE_TEST_EXPAND_PATH";
+    env::set_var(key, "C:\\seeded");
+    let expanded = expand_path(&format!("%{key}%\\Cookies")).unwrap();
+    assert_eq!(expanded, PathBuf::from("C:\\seeded\\Cookies"));
+    env::remove_var(key);
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn expand_path_windows_leaves_unknown_placeholders() {
+    // Unknown placeholders are left literally — surface the failure to the caller instead of silently dropping.
+    let expanded = expand_path("%ROOKIE_TEST_DOES_NOT_EXIST%\\Cookies").unwrap();
+    assert_eq!(
+      expanded,
+      PathBuf::from("%ROOKIE_TEST_DOES_NOT_EXIST%\\Cookies")
+    );
+  }
+}
