@@ -132,7 +132,13 @@ jobs:
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_firefox --no-run
 
-      - name: Seed Firefox profile and run extraction
+      - name: Build and install rookiepy into a venv
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade --quiet pip maturin
+          cd bindings/python && ../../.venv/bin/maturin develop --release
+
+      - name: Seed Firefox profile and run extraction (rust + python)
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_FIREFOX_PROFILE"
@@ -153,6 +159,7 @@ jobs:
           test -f "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
           cargo test --test e2e_firefox -- --ignored --nocapture
+          .venv/bin/python tests/e2e/assert_firefox_cookie.py
 
   macos-firefox:
     name: e2e macos × firefox
@@ -176,7 +183,13 @@ jobs:
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_firefox --no-run
 
-      - name: Seed Firefox profile and run extraction
+      - name: Build and install rookiepy into a venv
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade --quiet pip maturin
+          cd bindings/python && ../../.venv/bin/maturin develop --release
+
+      - name: Seed Firefox profile and run extraction (rust + python)
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_FIREFOX_PROFILE"
@@ -198,6 +211,7 @@ jobs:
           test -f "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
           cargo test --test e2e_firefox -- --ignored --nocapture
+          .venv/bin/python tests/e2e/assert_firefox_cookie.py
 
   macos-chrome:
     name: e2e macos × chrome (keychain)
