@@ -285,7 +285,7 @@ fn unlock_file(mut path: PathBuf) -> Result<PathBuf> {
 }
 
 #[allow(unused_mut)]
-fn query_cookies(
+pub(crate) fn query_cookies(
   keys: Vec<Vec<u8>>,
   mut db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -351,4 +351,178 @@ fn query_cookies(
     cookies.push(cookie);
   }
   Ok(cookies)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::Path;
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  // Per-process unique temp paths without pulling in the `tempfile` dep.
+  fn unique_tmpdir(tag: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir =
+      std::env::temp_dir().join(format!("rookie-test-{}-{}-{}", tag, std::process::id(), n));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+  }
+
+  // (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
+  type ChromiumRow<'a> = (
+    &'a str,
+    &'a str,
+    bool,
+    u64,
+    &'a str,
+    &'a str,
+    &'a [u8],
+    bool,
+    i64,
+  );
+
+  // Minimal `cookies` table mirroring the columns chromium_based reads.
+  // Real Chrome schema has many more columns, but query_cookies only
+  // selects these nine.
+  fn seed_chromium_cookies(db: &Path, rows: &[ChromiumRow<'_>]) {
+    let conn = rusqlite::Connection::open(db).expect("open writable sqlite");
+    conn
+      .execute(
+        "CREATE TABLE cookies (
+          host_key TEXT NOT NULL,
+          path TEXT NOT NULL,
+          is_secure INTEGER NOT NULL,
+          expires_utc INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          encrypted_value BLOB,
+          is_httponly INTEGER NOT NULL,
+          samesite INTEGER NOT NULL
+        )",
+        [],
+      )
+      .expect("create table");
+    for r in rows {
+      conn
+        .execute(
+          "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
+            encrypted_value, is_httponly, samesite) \
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+          rusqlite::params![r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8],
+        )
+        .expect("insert row");
+    }
+  }
+
+  #[test]
+  fn query_cookies_missing_db_errors() {
+    let result = query_cookies(vec![], PathBuf::from("/nonexistent/cookies.db"), None);
+    assert!(
+      result.is_err(),
+      "expected Err for missing db, got {:?}",
+      result
+    );
+  }
+
+  #[test]
+  fn query_cookies_non_sqlite_file_errors() {
+    let dir = unique_tmpdir("chr-bad-sqlite");
+    let db = dir.join("Cookies");
+    std::fs::write(&db, b"not a sqlite database at all").unwrap();
+    let result = query_cookies(vec![], db, None);
+    assert!(
+      result.is_err(),
+      "expected Err for bogus sqlite, got {:?}",
+      result
+    );
+  }
+
+  #[test]
+  fn query_cookies_empty_table_returns_empty() {
+    let dir = unique_tmpdir("chr-empty-table");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(&db, &[]);
+    let cookies = query_cookies(vec![], db, None).expect("decode");
+    assert!(cookies.is_empty(), "{:?}", cookies);
+  }
+
+  #[test]
+  fn query_cookies_skips_rows_with_empty_encrypted_value() {
+    let dir = unique_tmpdir("chr-skip-empty");
+    let db = dir.join("Cookies");
+    // `query_cookies` short-circuits on empty encrypted_value via
+    // `if encrypted_value.is_empty() { continue }`, so this row is
+    // dropped even though every other column is valid.
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "skip",
+        "ignored",
+        b"",
+        false,
+        0,
+      )],
+    );
+    let cookies = query_cookies(vec![], db, None).expect("decode");
+    assert!(cookies.is_empty(), "{:?}", cookies);
+  }
+
+  // Unix-only tests: on unix `decrypt_encrypted_value` short-circuits to
+  // the plain `value` field when it's non-empty OR when the encrypted
+  // prefix isn't a known v10/v11/v20 marker. That lets us exercise the
+  // SQL → Cookie struct mapping end-to-end without a real key.
+  #[cfg(unix)]
+  #[test]
+  fn query_cookies_returns_plaintext_value_when_value_is_set() {
+    let dir = unique_tmpdir("chr-plaintext");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        true,
+        // chromium_timestamp wants microseconds since 1601-01-01.
+        // 11_644_473_600_000_000 us == Unix epoch.
+        11_644_473_600_000_000 + 1_700_000_000 * 1_000_000,
+        "id",
+        "plain",
+        b"v10dummy", // non-empty so the row isn't skipped
+        true,
+        1,
+      )],
+    );
+    let cookies = query_cookies(vec![], db, None).expect("decode");
+    assert_eq!(cookies.len(), 1, "{:?}", cookies);
+    let c = &cookies[0];
+    assert_eq!(c.domain, ".example.com");
+    assert_eq!(c.name, "id");
+    assert_eq!(c.value, "plain");
+    assert!(c.http_only);
+    assert!(c.secure);
+    assert_eq!(c.same_site, 1);
+    assert_eq!(c.expires, Some(1_700_000_000));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn query_cookies_filters_by_domain() {
+    let dir = unique_tmpdir("chr-domain-filter");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
+      ],
+    );
+    let cookies = query_cookies(vec![], db, Some(vec!["example.com".to_string()])).expect("decode");
+    let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
 }
