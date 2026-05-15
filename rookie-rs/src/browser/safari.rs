@@ -1,6 +1,6 @@
 use crate::common::{date, enums::*};
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use anyhow::{anyhow, bail, Context, Result};
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::{fs::File, io::Read, path::PathBuf, vec::Vec};
 
 /// 1. open cookies file

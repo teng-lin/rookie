@@ -2,8 +2,8 @@
 See https://github.com/runassu/chrome_v20_decryption/blob/main/decrypt_chrome_v20_cookie.py
 cargo build --release --features appbound
 */
-use base64::{prelude::BASE64_STANDARD, Engine};
 use anyhow::{anyhow, bail, Result};
+use base64::{prelude::BASE64_STANDARD, Engine};
 
 use aes_gcm::{
   aead::{generic_array::GenericArray, Aead, KeyInit},
