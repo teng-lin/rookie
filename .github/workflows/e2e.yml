@@ -85,3 +85,57 @@ jobs:
             # Run the extraction test against the seeded profile.
             cargo test --test e2e_chrome -- --ignored --nocapture
           SH
+
+  ubuntu-firefox:
+    name: e2e ubuntu × firefox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Firefox stores cookies unencrypted in cookies.sqlite, so no keyring
+      # dance is needed. We still use a workspace-scoped profile dir so the
+      # path is unambiguous and inspectable after the run.
+      ROOKIE_E2E_FIREFOX_PROFILE: ${{ github.workspace }}/.rookie-ci/firefox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb
+
+      - name: Install Playwright + bundled Firefox
+        # Playwright bundles a patched Firefox for DevTools/CDP; system Firefox
+        # cannot drive Playwright. We only download Firefox, not all browsers.
+        run: |
+          npm install --no-save playwright
+          npx playwright install firefox
+
+      - name: Pre-build the e2e test binary
+        run: cargo test --test e2e_firefox --no-run
+
+      - name: Seed Firefox profile and run extraction
+        run: |
+          set -euxo pipefail
+          mkdir -p "$ROOKIE_E2E_FIREFOX_PROFILE"
+
+          python3 tests/e2e/cookie_server.py &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          for _ in 1 2 3 4 5; do
+            curl -fs http://127.0.0.1:8765/ >/dev/null && break
+            sleep 0.3
+          done
+
+          xvfb-run -a node tests/e2e/seed_firefox_cookie.mjs \
+            "$ROOKIE_E2E_FIREFOX_PROFILE" "http://127.0.0.1:8765/set"
+
+          ls -la "$ROOKIE_E2E_FIREFOX_PROFILE/" || true
+          test -f "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
+
+          cargo test --test e2e_firefox -- --ignored --nocapture
