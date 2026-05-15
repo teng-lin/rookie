@@ -225,3 +225,150 @@ pub fn get_default_profile(profiles_path: &Path) -> Result<String> {
   }
   bail!("Can't find any profile")
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::io::Write;
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  // Per-process unique temp paths without pulling in the `tempfile` dep.
+  // Each test gets its own subdirectory so they don't collide when run in
+  // parallel under `cargo test`.
+  fn unique_tmpdir(tag: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir =
+      std::env::temp_dir().join(format!("rookie-test-{}-{}-{}", tag, std::process::id(), n));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+  }
+
+  #[test]
+  fn firefox_based_missing_db_errors() {
+    let result = firefox_based(PathBuf::from("/nonexistent/rookie/cookies.sqlite"), None);
+    assert!(
+      result.is_err(),
+      "expected Err for missing db, got {:?}",
+      result
+    );
+  }
+
+  #[test]
+  fn firefox_based_non_sqlite_file_errors() {
+    let dir = unique_tmpdir("ff-bad-sqlite");
+    let db = dir.join("cookies.sqlite");
+    std::fs::write(&db, b"this is not a sqlite database").unwrap();
+    let result = firefox_based(db, None);
+    assert!(
+      result.is_err(),
+      "expected Err for bogus sqlite, got {:?}",
+      result
+    );
+  }
+
+  #[test]
+  fn get_session_cookies_missing_file_errors() {
+    let dir = unique_tmpdir("ff-no-sessionstore");
+    // sessionstore.js doesn't exist under this dir.
+    let result = get_session_cookies(None, dir);
+    assert!(result.is_err(), "expected Err for missing sessionstore");
+  }
+
+  #[test]
+  fn get_session_cookies_invalid_json_errors() {
+    let dir = unique_tmpdir("ff-bad-sessionstore");
+    std::fs::write(dir.join("sessionstore.js"), b"{not valid json").unwrap();
+    let result = get_session_cookies(None, dir);
+    assert!(result.is_err(), "expected Err for invalid json");
+  }
+
+  #[test]
+  fn get_session_cookies_json_without_windows_errors() {
+    let dir = unique_tmpdir("ff-no-windows");
+    // Valid JSON, but missing the `windows` key the parser requires.
+    std::fs::write(dir.join("sessionstore.js"), b"{\"other\": []}").unwrap();
+    let err = get_session_cookies(None, dir).expect_err("should fail");
+    assert!(
+      err.to_string().contains("no windows in json"),
+      "unexpected error: {}",
+      err
+    );
+  }
+
+  #[test]
+  fn get_session_cookies_lz4_missing_file_errors() {
+    let dir = unique_tmpdir("ff-no-lz4");
+    // sessionstore-backups/recovery.jsonlz4 doesn't exist.
+    let result = get_session_cookies_lz4(None, dir);
+    assert!(result.is_err(), "expected Err for missing lz4");
+  }
+
+  #[test]
+  fn get_session_cookies_lz4_corrupt_payload_errors() {
+    let dir = unique_tmpdir("ff-bad-lz4");
+    let backups = dir.join("sessionstore-backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    // Need at least 8 bytes (the 8-byte mozLz40\0 magic is stripped before
+    // lz4 decompress) plus garbage; the lz4 step should reject this.
+    std::fs::write(
+      backups.join("recovery.jsonlz4"),
+      b"mozLz40\0this-is-not-actually-lz4-compressed",
+    )
+    .unwrap();
+    let result = get_session_cookies_lz4(None, dir);
+    assert!(result.is_err(), "expected Err for corrupt lz4");
+  }
+
+  #[test]
+  fn get_default_profile_missing_ini_errors() {
+    let result = get_default_profile(Path::new("/nonexistent/profiles.ini"));
+    assert!(result.is_err(), "expected Err for missing profiles.ini");
+  }
+
+  #[test]
+  fn get_default_profile_empty_ini_errors() {
+    let dir = unique_tmpdir("ff-empty-ini");
+    let ini_path = dir.join("profiles.ini");
+    std::fs::File::create(&ini_path)
+      .unwrap()
+      .write_all(b"")
+      .unwrap();
+    let err = get_default_profile(&ini_path).expect_err("should fail");
+    assert!(
+      err.to_string().contains("Can't find any profile"),
+      "unexpected error: {}",
+      err
+    );
+  }
+
+  #[test]
+  fn get_default_profile_prefers_install_block() {
+    let dir = unique_tmpdir("ff-install-ini");
+    let ini_path = dir.join("profiles.ini");
+    std::fs::write(
+      &ini_path,
+      b"[Install4F96D1932A9F858E]\nDefault=Profiles/abc.default-release\n\
+        [Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
+    )
+    .unwrap();
+    let path = get_default_profile(&ini_path).expect("should resolve");
+    assert_eq!(path, "Profiles/abc.default-release");
+  }
+
+  #[test]
+  fn get_default_profile_falls_back_to_default_flag() {
+    let dir = unique_tmpdir("ff-default-flag-ini");
+    let ini_path = dir.join("profiles.ini");
+    // No [Install...] block, so the resolver should walk Profiles and pick
+    // the one with Default=1.
+    std::fs::write(
+      &ini_path,
+      b"[Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\nDefault=0\n\
+        [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
+    )
+    .unwrap();
+    let path = get_default_profile(&ini_path).expect("should resolve");
+    assert_eq!(path, "Profiles/abc.default-release");
+  }
+}
