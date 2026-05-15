@@ -321,27 +321,34 @@ jobs:
           test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
             || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
-      - name: Pre-seed `Chrome Safe Storage` in the login keychain
-        # Order matters: this MUST run AFTER Chrome has finished and
-        # exited. Pre-seeding before Chrome launches makes Chrome see
-        # the existing entry and break the cookie write path on
-        # macos-15 runners (empirically: cookie file never appears).
+      - name: Re-add `Chrome Safe Storage` with -A ACL for rookie's read
+        # Order matters: this MUST run AFTER Chrome has finished. Chrome's
+        # first launch creates "Chrome Safe Storage" with a random base64
+        # password, ACL'd Chrome-only. rookie can't read that entry
+        # without a TCC prompt (which has nowhere to go on headless CI),
+        # so its `get_osx_keychain_password()` call would hang.
         #
-        # rookie's macOS code ALWAYS calls `get_osx_keychain_password()`
-        # before trying its fallbacks (rookie-rs/src/browser/chromium.rs).
-        # On a fresh CI runner that entry doesn't exist, and reading a
-        # missing entry blocks on a TCC prompt that has nowhere to go.
-        # Seeding the entry now with `-A` (allow any app) makes rookie's
-        # read return immediately with a wrong value, which it then
-        # discards and falls through to "peanuts" (the actual key Chrome
-        # used).
+        # We extract Chrome's actual password via `security find-... -w`
+        # (works because the runner user owns the keychain), delete the
+        # Chrome-only-ACL entry, and re-add the SAME password with `-A`
+        # (allow any app). rookie now reads the correct key non-
+        # interactively and decrypt succeeds.
         run: |
+          set -euxo pipefail
+          ORIG=$(security find-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            -w login.keychain-db 2>/dev/null || echo "")
+          if [ -z "$ORIG" ]; then
+            echo "WARNING: could not extract Chrome's keychain password — Chrome must not have used the Keychain at all" >&2
+          else
+            echo "extracted Chrome's keychain password (length: ${#ORIG})"
+          fi
           security delete-generic-password \
             -a Chrome -s "Chrome Safe Storage" \
             login.keychain-db 2>/dev/null || true
           security add-generic-password \
             -a Chrome -s "Chrome Safe Storage" \
-            -w "rookie-ci-chrome-safe-storage" \
+            -w "${ORIG:-peanuts}" \
             -A \
             login.keychain-db
 
