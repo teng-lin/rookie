@@ -184,3 +184,63 @@ jobs:
           test -f "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
           cargo test --test e2e_firefox -- --ignored --nocapture
+
+  macos-chrome:
+    name: e2e macos × chrome (keychain)
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright (system Chrome via channel)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm install --no-save playwright
+
+      - name: Pre-seed `Chrome Safe Storage` in the login keychain
+        # MUST happen before Chrome's first launch — otherwise Chrome
+        # generates its own random AES key and seals the cookie under a
+        # value the test fixture cannot reproduce.
+        run: |
+          security delete-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            login.keychain-db 2>/dev/null || true
+          security add-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            -w "rookie-ci-chrome-safe-storage" \
+            -A \
+            login.keychain-db
+
+      - name: Pre-build the e2e test binary
+        run: cargo test --test e2e_chrome --no-run
+
+      - name: Seed Chrome profile and run extraction
+        run: |
+          set -euxo pipefail
+          mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
+
+          python3 tests/e2e/cookie_server.py &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          for _ in 1 2 3 4 5; do
+            curl -fs http://127.0.0.1:8765/ >/dev/null && break
+            sleep 0.3
+          done
+
+          # macos-15 has a real WindowServer; no Xvfb wrapper.
+          node tests/e2e/seed_chromium_cookie.mjs \
+            chrome "$ROOKIE_E2E_USER_DATA_DIR" "http://127.0.0.1:8765/set"
+
+          ls -la "$ROOKIE_E2E_USER_DATA_DIR/Default/" || true
+          test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
+            || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
+
+          cargo test --test e2e_chrome -- --ignored --nocapture
