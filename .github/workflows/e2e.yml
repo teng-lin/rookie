@@ -23,6 +23,11 @@ jobs:
     name: e2e ubuntu × chrome (libsecret)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      # Chrome refuses CDP/remote-debugging when the user-data-dir is the
+      # default profile location (~/.config/google-chrome), so the seed
+      # step uses a dedicated dir. The test reads it back via env var.
+      ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,6 +52,7 @@ jobs:
 
       - name: Seed Chrome profile and run extraction
         run: |
+          mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
           dbus-run-session -- bash -euxo pipefail <<'SH'
             # Unlock + start a session-scoped secret service so Chrome's
             # libsecret writes land somewhere `rookie` can read them back.
@@ -66,14 +72,15 @@ jobs:
             done
 
             # Launch Chrome under Xvfb so the persistent profile is created on
-            # disk with libsecret-encrypted cookies.
+            # disk with libsecret-encrypted cookies. Using a NON-default
+            # user-data-dir — Chrome refuses CDP on its default location.
             xvfb-run -a node tests/e2e/seed_chromium_cookie.mjs \
-              chrome "$HOME/.config/google-chrome" "http://127.0.0.1:8765/set"
+              chrome "$ROOKIE_E2E_USER_DATA_DIR" "http://127.0.0.1:8765/set"
 
             # Sanity-check the artifacts.
-            ls -la "$HOME/.config/google-chrome/Default/" || true
-            test -f "$HOME/.config/google-chrome/Default/Network/Cookies" \
-              || test -f "$HOME/.config/google-chrome/Default/Cookies"
+            ls -la "$ROOKIE_E2E_USER_DATA_DIR/Default/" || true
+            test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
+              || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
             # Run the extraction test against the seeded profile.
             cargo test --test e2e_chrome -- --ignored --nocapture
