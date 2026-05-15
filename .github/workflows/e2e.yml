@@ -292,6 +292,27 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Pre-seed `Chrome Safe Storage` in the login keychain
+        # Chrome itself doesn't touch the keychain — we pass
+        # `--password-store=basic` in the seed script so the cookie is
+        # encrypted with the "peanuts" fallback. But rookie's macOS
+        # chromium code ALWAYS calls `get_osx_keychain_password(...)`
+        # before trying the fallbacks (rookie-rs/src/browser/chromium.rs).
+        # On a fresh CI runner the entry doesn't exist, and reading a
+        # missing entry blocks on a TCC prompt that has nowhere to go
+        # → rookie hangs forever. Seeding the entry with `-A` (allow
+        # any app) makes the read return immediately with a wrong value,
+        # which rookie then discards and falls through to "peanuts".
+        run: |
+          security delete-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            login.keychain-db 2>/dev/null || true
+          security add-generic-password \
+            -a Chrome -s "Chrome Safe Storage" \
+            -w "rookie-ci-chrome-safe-storage" \
+            -A \
+            login.keychain-db
+
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run
 
@@ -300,8 +321,8 @@ jobs:
         # Playwright) with `--password-store=basic`, which makes Chrome
         # encrypt cookies with the hardcoded "peanuts" key — exactly the
         # fallback that rookie's macOS chromium path already tries. No
-        # Keychain access, no TCC prompt. See issue #8 for the long
-        # version.
+        # Keychain access from Chrome, only the unavoidable rookie-side
+        # keychain probe that the pre-seed step above neutralizes.
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"

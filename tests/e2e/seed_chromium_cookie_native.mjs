@@ -24,7 +24,8 @@
 //             Chrome on its default cookie-sealing flow.
 
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const [userDataDir, url] = process.argv.slice(2);
@@ -49,11 +50,15 @@ function chromePath() {
   }
 }
 
-// Flags shared across every platform. Keep this list minimal — anything
-// test-mode-ish risks the same kind of OS-crypt divergence that the
-// Playwright path produces. `--headless=new` is the modern headless
-// mode (Chrome 109+); it still runs full Chrome with persistent profile
-// IO, just without putting a window on screen.
+// Cross-platform Chrome lifecycle: `--screenshot=<file>` instructs
+// Chrome to navigate to the URL, take a screenshot, then exit on its
+// own. This is critical on Windows — `child.kill('SIGTERM')` there
+// resolves to TerminateProcess (force-kill), which doesn't give Chrome
+// a chance to flush cookies to the SQLite. By making Chrome exit
+// itself, we get a clean shutdown + cookie flush on every platform.
+const screenshotDir = mkdtempSync(join(tmpdir(), "rookie-chrome-shot-"));
+const screenshotPath = join(screenshotDir, "seed.png");
+
 const baseArgs = [
   `--user-data-dir=${userDataDir}`,
   "--headless=new",
@@ -63,6 +68,7 @@ const baseArgs = [
   "--disable-background-networking",
   "--disable-component-update",
   "--disable-sync",
+  `--screenshot=${screenshotPath}`,
 ];
 
 // macOS gets `--password-store=basic` so Chrome encrypts cookies with
@@ -78,48 +84,35 @@ console.log(`launching: ${chromePath()} ${args.join(" ")}`);
 
 const child = spawn(chromePath(), args, { stdio: "inherit" });
 
+await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => {
+    child.kill();
+    reject(new Error("chrome did not exit within 90s"));
+  }, 90_000);
+  child.on("exit", (code, signal) => {
+    clearTimeout(timer);
+    // Chrome occasionally prints non-fatal errors and still exits with
+    // a non-zero code while having written the cookie. We treat that
+    // as success and let the caller check the cookie SQLite directly.
+    console.log(`chrome exited: code=${code} signal=${signal}`);
+    resolve();
+  });
+  child.on("error", (err) => {
+    clearTimeout(timer);
+    reject(err);
+  });
+});
+
 const cookiePaths = [
   join(userDataDir, "Default", "Network", "Cookies"),
   join(userDataDir, "Default", "Cookies"),
 ];
-
-function findCookieDb() {
-  for (const p of cookiePaths) {
-    if (existsSync(p) && statSync(p).size > 0) return p;
-  }
-  return null;
-}
-
-async function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function waitForCookieDb(timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const p = findCookieDb();
-    if (p) return p;
-    await sleep(500);
-  }
+const cookieDb = cookiePaths.find(
+  (p) => existsSync(p) && statSync(p).size > 0,
+);
+if (!cookieDb) {
   throw new Error(
-    `no cookie file under ${userDataDir} after ${timeoutMs}ms; ` +
-      `child pid=${child.pid} exitCode=${child.exitCode}`,
+    `no cookie file under ${userDataDir} after chrome exit; tried ${cookiePaths.join(", ")}`,
   );
 }
-
-try {
-  const db = await waitForCookieDb(60_000);
-  console.log(`cookie db ready: ${db}`);
-  // Chrome batches cookie writes. Even after the file appears we need
-  // to give Chrome a few seconds to actually flush the cookie row that
-  // /set produced. Empirically 5s is enough on the GitHub runners.
-  await sleep(5_000);
-} finally {
-  // Send SIGTERM (or Win32 equivalent) and wait briefly for Chrome to
-  // exit cleanly so any in-flight writes are flushed to the SQLite file.
-  child.kill("SIGTERM");
-  await sleep(3_000);
-  if (child.exitCode === null) {
-    child.kill("SIGKILL");
-  }
-}
+console.log(`cookie db ready: ${cookieDb}`);
