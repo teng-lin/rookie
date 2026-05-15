@@ -244,3 +244,72 @@ jobs:
             || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
           cargo test --test e2e_chrome -- --ignored --nocapture
+
+  windows-chrome:
+    name: e2e windows × chrome (DPAPI + AppBound)
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}\.rookie-ci\google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright (system Chrome via channel)
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm install --no-save playwright
+
+      - name: Confirm runner is Administrator (required for AppBound v20+)
+        # GitHub's windows-* runners run as Administrator with UAC disabled,
+        # which satisfies rookie's privilege::user::privileged() check in the
+        # AppBound code path. We assert it explicitly so this test fails fast
+        # rather than silently falling back to the legacy DPAPI-only path.
+        run: |
+          $principal = New-Object Security.Principal.WindowsPrincipal(
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+          )
+          if (-not $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+          )) {
+            throw "windows runner is not Administrator — AppBound test cannot run"
+          }
+
+      - name: Pre-build the e2e test binary
+        run: cargo test --test e2e_chrome --no-run
+
+      - name: Seed Chrome profile and run extraction
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:ROOKIE_E2E_USER_DATA_DIR" | Out-Null
+
+          $server = Start-Process python -ArgumentList "tests/e2e/cookie_server.py" -PassThru
+          try {
+            for ($i = 1; $i -le 5; $i++) {
+              try { Invoke-WebRequest -Uri http://127.0.0.1:8765/ -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 300 }
+            }
+
+            node tests/e2e/seed_chromium_cookie.mjs chrome "$env:ROOKIE_E2E_USER_DATA_DIR" "http://127.0.0.1:8765/set"
+
+            $defaultDir = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Default"
+            $localState = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Local State"
+            if (-not (Test-Path $localState)) { throw "missing Local State at $localState" }
+            $ls = Get-Content $localState -Raw | ConvertFrom-Json
+            if (-not $ls.os_crypt.encrypted_key) { throw "Local State has no DPAPI encrypted_key" }
+            # AppBound key landed = exercising the v20+ path. Recent Chrome
+            # always writes it on first run; surface a clear failure if not.
+            if (-not $ls.os_crypt.app_bound_encrypted_key) {
+              throw "Local State has no app_bound_encrypted_key — this run did not exercise the AppBound path"
+            }
+            Get-ChildItem $defaultDir | Format-Table
+
+            cargo test --test e2e_chrome -- --ignored --nocapture
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
