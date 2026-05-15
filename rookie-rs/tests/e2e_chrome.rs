@@ -14,31 +14,55 @@
 //! Ignored by default; CI runs them via
 //! `cargo test --test e2e_chrome -- --ignored`.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod helpers {
+  use std::env;
+  use std::path::PathBuf;
+
+  pub fn resolve_db_path() -> PathBuf {
+    let user_data_dir =
+      env::var("ROOKIE_E2E_USER_DATA_DIR").expect("ROOKIE_E2E_USER_DATA_DIR must be set");
+    // Modern Chrome writes to Default/Network/Cookies; older builds wrote
+    // straight to Default/Cookies. Probe both before giving up so the test
+    // is insensitive to Chrome's profile-layout migration.
+    let default_dir = PathBuf::from(&user_data_dir).join("Default");
+    ["Network/Cookies", "Cookies"]
+      .iter()
+      .map(|rel| default_dir.join(rel))
+      .find(|p| p.exists())
+      .unwrap_or_else(|| {
+        panic!(
+          "no cookie db found under {} (tried Default/Network/Cookies and Default/Cookies)",
+          default_dir.display()
+        )
+      })
+  }
+
+  pub fn domain() -> String {
+    env::var("ROOKIE_E2E_DOMAIN").unwrap_or_else(|_| "127.0.0.1".to_string())
+  }
+
+  pub fn assert_seeded(cookies: &[rookie::enums::Cookie], domain: &str) {
+    let seeded = cookies
+      .iter()
+      .find(|c| c.name == "rookie_ci")
+      .unwrap_or_else(|| {
+        panic!(
+          "seeded cookie `rookie_ci` not found among {} cookies for domain {}",
+          cookies.len(),
+          domain
+        )
+      });
+    assert_eq!(seeded.value, "bar", "cookie value mismatch");
+  }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
-  use std::env;
-  use std::path::PathBuf;
-
-  let user_data_dir =
-    env::var("ROOKIE_E2E_USER_DATA_DIR").expect("ROOKIE_E2E_USER_DATA_DIR must be set");
-  let domain = env::var("ROOKIE_E2E_DOMAIN").unwrap_or_else(|_| "127.0.0.1".to_string());
-
-  // Modern Chrome writes to Default/Network/Cookies; older builds wrote
-  // straight to Default/Cookies. Probe both before giving up so the test
-  // is insensitive to Chrome's profile-layout migration.
-  let default_dir = PathBuf::from(&user_data_dir).join("Default");
-  let db_path = ["Network/Cookies", "Cookies"]
-    .iter()
-    .map(|rel| default_dir.join(rel))
-    .find(|p| p.exists())
-    .unwrap_or_else(|| {
-      panic!(
-        "no cookie db found under {} (tried Default/Network/Cookies and Default/Cookies)",
-        default_dir.display()
-      )
-    });
+  let db_path = helpers::resolve_db_path();
+  let domain = helpers::domain();
 
   let config = rookie::config::Browser {
     channels: None,
@@ -51,15 +75,26 @@ fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
   let cookies = rookie::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]))
     .unwrap_or_else(|e| panic!("rookie::chromium_based({}) failed: {e}", db_path.display()));
 
-  let seeded = cookies
-    .iter()
-    .find(|c| c.name == "rookie_ci")
-    .unwrap_or_else(|| {
-      panic!(
-        "seeded cookie `rookie_ci` not found among {} cookies for domain {}",
-        cookies.len(),
-        domain
-      )
-    });
-  assert_eq!(seeded.value, "bar", "cookie value mismatch");
+  helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn extracts_seeded_cookie_from_chrome_keychain_profile() {
+  let db_path = helpers::resolve_db_path();
+  let domain = helpers::domain();
+
+  let config = rookie::config::Browser {
+    channels: None,
+    paths: vec![db_path.to_string_lossy().into_owned()],
+    unix_crypt_name: None,
+    osx_key_service: Some("Chrome Safe Storage".to_string()),
+    osx_key_user: Some("Chrome".to_string()),
+  };
+
+  let cookies = rookie::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]))
+    .unwrap_or_else(|e| panic!("rookie::chromium_based({}) failed: {e}", db_path.display()));
+
+  helpers::assert_seeded(&cookies, &domain);
 }
