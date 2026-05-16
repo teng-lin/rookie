@@ -1,5 +1,5 @@
 use crate::common::{date, enums::*, sqlite};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 #[allow(unused)]
@@ -7,6 +7,9 @@ use crate::config::Browser;
 
 #[cfg(target_os = "windows")]
 use crate::windows;
+
+#[cfg(any(windows, test))]
+use anyhow::Context;
 
 #[cfg(target_os = "macos")]
 use crate::macos;
@@ -174,6 +177,7 @@ fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
   )
 }
 
+#[cfg(any(windows, test))]
 fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
   if plaintext.len() <= 32 {
     bail!("Can't decode encrypted value");
@@ -182,6 +186,7 @@ fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
   String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
 }
 
+#[cfg(any(windows, test))]
 fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<String> {
   if key_type == b"v20" {
     return decode_after_host_hash_prefix(plaintext);
