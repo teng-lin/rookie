@@ -333,8 +333,7 @@ jobs:
     timeout-minutes: 25
     # Hosted CI uses a workspace-scoped user-data-dir, so Chromium's AppBound
     # path is not expected. This job exercises legacy DPAPI v10 cookies and
-    # logs non-secret key-shape diagnostics while issue 8 is resolved.
-    continue-on-error: true
+    # logs non-secret key-shape diagnostics when extraction fails.
     defaults:
       run:
         shell: pwsh
