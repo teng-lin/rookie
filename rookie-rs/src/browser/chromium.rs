@@ -8,8 +8,7 @@ use crate::config::Browser;
 #[cfg(target_os = "windows")]
 use crate::windows;
 
-#[cfg(not(target_os = "linux"))]
-#[allow(unused)]
+#[cfg(any(windows, test))]
 use anyhow::Context;
 
 #[cfg(target_os = "macos")]
@@ -87,9 +86,36 @@ fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8>
 
 #[cfg(target_os = "windows")]
 fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
-  let mut keydpapi: Vec<u8> = general_purpose::STANDARD.decode(key64)?;
-  let keydpapi = &mut keydpapi[5..];
-  let v10_key = crate::windows::dpapi::decrypt(keydpapi)?;
+  let mut keydpapi: Vec<u8> = general_purpose::STANDARD
+    .decode(key64)
+    .context("Failed to decode Local State os_crypt.encrypted_key as base64")?;
+  let decoded_len = keydpapi.len();
+  if decoded_len <= 5 {
+    bail!(
+      "Local State os_crypt.encrypted_key decoded to {} bytes, expected DPAPI prefix plus payload",
+      decoded_len
+    );
+  }
+  if &keydpapi[..5] != b"DPAPI" {
+    bail!("Local State os_crypt.encrypted_key is missing DPAPI prefix");
+  }
+
+  let wrapped_len = decoded_len - 5;
+  let v10_key = crate::windows::dpapi::decrypt(&mut keydpapi[5..]).with_context(|| {
+    format!(
+      "Failed to unwrap DPAPI encrypted key (decoded_length={}, wrapped_length={})",
+      decoded_len, wrapped_len
+    )
+  })?;
+  if v10_key.len() != 32 {
+    bail!(
+      "DPAPI unwrapped key length was {}, expected 32 (decoded_length={}, wrapped_length={})",
+      v10_key.len(),
+      decoded_len,
+      wrapped_len
+    );
+  }
+
   let keys: Vec<Vec<u8>> = vec![v10_key];
   Ok(keys)
 }
@@ -123,31 +149,53 @@ fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
 #[cfg(target_os = "macos")]
 fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
   let salt = b"saltysalt";
-
   let iterations = 1003;
+  let mut passwords: Vec<String> = vec![];
 
-  let mut keys: Vec<Vec<u8>> = vec![];
+  let mut push_password = |password: String| {
+    if !passwords.iter().any(|existing| existing == &password) {
+      passwords.push(password);
+    }
+  };
 
-  let key_service = config
-    .osx_key_service
-    .clone()
-    .context("missing osx_key_service")?;
-  let key_user = config
-    .osx_key_user
-    .clone()
-    .context("missing osx_key_user")?;
-  let password =
-    macos::get_osx_keychain_password(&key_service, &key_user).unwrap_or("peanuts".to_string());
+  if let (Some(key_service), Some(key_user)) = (&config.osx_key_service, &config.osx_key_user) {
+    match macos::get_osx_keychain_password(key_service, key_user) {
+      Ok(password) => push_password(password),
+      Err(err) => log::debug!("Failed to retrieve password from OSX Keychain: {}", err),
+    }
+  }
 
-  let key = create_pbkdf2_key(password.as_str(), salt, iterations);
-  keys.push(key);
+  for password in ["mock_password", "peanuts", ""] {
+    push_password(password.to_string());
+  }
 
-  let key = create_pbkdf2_key("peanuts", salt, iterations);
-  keys.push(key);
-  let key = create_pbkdf2_key("", salt, iterations);
-  keys.push(key);
+  Ok(
+    passwords
+      .iter()
+      .map(|password| create_pbkdf2_key(password.as_str(), salt, iterations))
+      .collect(),
+  )
+}
 
-  Ok(keys)
+#[cfg(any(windows, test))]
+fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
+  if plaintext.len() <= 32 {
+    bail!("Can't decode encrypted value");
+  }
+
+  String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
+}
+
+#[cfg(any(windows, test))]
+fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<String> {
+  if key_type == b"v20" {
+    return decode_after_host_hash_prefix(plaintext);
+  }
+
+  match String::from_utf8(plaintext) {
+    Ok(text) => Ok(text),
+    Err(err) => decode_after_host_hash_prefix(err.into_bytes()),
+  }
 }
 
 /// Decrypt cookie value using aes GCM
@@ -176,19 +224,10 @@ fn decrypt_encrypted_value(
     let nonce = GenericArray::from_slice(nonce); // 96-bits; unique per message
 
     match cipher.decrypt(nonce, ciphertext.as_ref()) {
-      Ok(plaintext) => {
-        // Successfully decrypted, try to convert to string
-        let plaintext = if key_type == b"v20" {
-          String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
-        } else {
-          String::from_utf8(plaintext).context("Can't decode encrypted value")
-        };
-
-        match plaintext {
-          Ok(text) => return Ok(text),
-          Err(e) => log::warn!("Failed to decode plaintext: {}", e),
-        }
-      }
+      Ok(plaintext) => match decode_chromium_plaintext(key_type, plaintext) {
+        Ok(text) => return Ok(text),
+        Err(e) => log::warn!("Failed to decode plaintext: {}", e),
+      },
       Err(e) => {
         // We'll get error anyway if decryption failed
         log::debug!("Failed to decrypt with a key: {}", e);
@@ -470,6 +509,52 @@ mod tests {
     );
     let cookies = query_cookies(vec![], db, None).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn chromium_mock_keychain_known_answer() {
+    let salt = b"saltysalt";
+    let key = create_pbkdf2_key("mock_password", salt, 1003);
+    assert_eq!(
+      key,
+      vec![
+        0xaf, 0x0f, 0x76, 0x2a, 0xaf, 0x6d, 0x7d, 0x11, 0x58, 0x1b, 0x7a, 0xa8, 0xce, 0x72, 0x18,
+        0xde,
+      ]
+    );
+
+    let ciphertext = [
+      0x76, 0x31, 0x30, 0xbf, 0x08, 0x6d, 0x20, 0x56, 0x86, 0x1a, 0x80, 0xde, 0x82, 0x5f, 0xc9,
+      0x35, 0x86, 0x86, 0x30, 0x64, 0x4f, 0x2c, 0xa1, 0x87, 0x45, 0x02, 0x13, 0xae, 0x66, 0x81,
+      0xb4, 0xd6, 0x43, 0xd1, 0x9b, 0x25, 0x81, 0xc8, 0x5c, 0x88, 0x78, 0xc1, 0xbc, 0x97, 0xe7,
+      0x26, 0xa1, 0x0e, 0x51, 0xea, 0x77,
+    ];
+    let plaintext = [
+      0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+      0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+      0x1e, 0x1f,
+    ];
+
+    let decrypted =
+      decrypt_encrypted_value("".to_string(), &ciphertext, vec![key]).expect("decrypt vector");
+    assert_eq!(decrypted.as_bytes(), plaintext);
+  }
+
+  #[test]
+  fn decode_chromium_plaintext_handles_plain_and_hash_prefixed_values() {
+    let plain = decode_chromium_plaintext(b"v10", b"bar".to_vec()).expect("plain v10");
+    assert_eq!(plain, "bar");
+
+    let mut hash_prefixed = vec![0xff; 32];
+    hash_prefixed.extend_from_slice(b"bar");
+    let prefixed = decode_chromium_plaintext(b"v10", hash_prefixed).expect("hash-prefixed v10");
+    assert_eq!(prefixed, "bar");
+
+    let mut v20 = vec![0; 32];
+    v20.extend_from_slice(b"bar");
+    let v20 = decode_chromium_plaintext(b"v20", v20).expect("v20");
+    assert_eq!(v20, "bar");
   }
 
   // Unix-only tests: on unix `decrypt_encrypted_value` short-circuits to

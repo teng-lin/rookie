@@ -279,15 +279,12 @@ jobs:
           tests/e2e/assert_cli_cookie.sh "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
   macos-chrome:
-    name: e2e macos × chrome (keychain)
+    name: e2e macos × chrome (mock keychain)
     runs-on: macos-15
     timeout-minutes: 25
-    # Keychain interaction under Playwright on CI is unresolved: with
-    # --use-mock-keychain the cookie is sealed under a key rookie can't
-    # reproduce, and without it Chrome blocks on TCC prompts for the
-    # Keychain entry until Playwright times out. Tracked separately; do
-    # not block merges on this job until the workaround lands.
-    continue-on-error: true
+    # Playwright keeps Chromium's --use-mock-keychain default on macOS.
+    # Chromium's fake keychain uses `mock_password`, so rookie can exercise
+    # Chrome cookie decryption in hosted CI without touching the real Keychain.
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
     steps:
@@ -302,20 +299,6 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
         run: npm install --no-save playwright
-
-      - name: Pre-seed `Chrome Safe Storage` in the login keychain
-        # MUST happen before Chrome's first launch — otherwise Chrome
-        # generates its own random AES key and seals the cookie under a
-        # value the test fixture cannot reproduce.
-        run: |
-          security delete-generic-password \
-            -a Chrome -s "Chrome Safe Storage" \
-            login.keychain-db 2>/dev/null || true
-          security add-generic-password \
-            -a Chrome -s "Chrome Safe Storage" \
-            -w "rookie-ci-chrome-safe-storage" \
-            -A \
-            login.keychain-db
 
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run
@@ -345,16 +328,12 @@ jobs:
           cargo test --test e2e_chrome -- --ignored --nocapture
 
   windows-chrome:
-    name: e2e windows × chrome (DPAPI + AppBound)
+    name: e2e windows × chrome (legacy DPAPI)
     runs-on: windows-2025
     timeout-minutes: 25
-    # Same Playwright-vs-OS-crypt issue as the macos-chrome job: Chrome
-    # writes Local State.os_crypt.encrypted_key but the actual cookie
-    # value isn't sealed with the DPAPI key rookie reads back, so
-    # decrypt_encrypted_value fails. Likely a Playwright launch flag
-    # (--password-store=basic or similar) coercing Chrome onto a basic
-    # encryption path; tracked separately. Don't block merges on it.
-    continue-on-error: true
+    # Hosted CI uses a workspace-scoped user-data-dir, so Chromium's AppBound
+    # path is not expected. This job exercises legacy DPAPI v10 cookies and
+    # logs non-secret key-shape diagnostics when extraction fails.
     defaults:
       run:
         shell: pwsh
@@ -373,20 +352,16 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
         run: npm install --no-save playwright
 
-      - name: Confirm runner is Administrator (required for AppBound v20+)
-        # GitHub's windows-* runners run as Administrator with UAC disabled,
-        # which satisfies rookie's privilege::user::privileged() check in the
-        # AppBound code path. We assert it explicitly so this test fails fast
-        # rather than silently falling back to the legacy DPAPI-only path.
+      - name: Record Windows identity/admin status
         run: |
+          whoami /user
           $principal = New-Object Security.Principal.WindowsPrincipal(
             [Security.Principal.WindowsIdentity]::GetCurrent()
           )
-          if (-not $principal.IsInRole(
+          $isAdmin = $principal.IsInRole(
             [Security.Principal.WindowsBuiltInRole]::Administrator
-          )) {
-            throw "windows runner is not Administrator — AppBound test cannot run"
-          }
+          )
+          Write-Host "Administrator: $isAdmin"
 
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run
@@ -401,13 +376,37 @@ jobs:
               try { Invoke-WebRequest -Uri http://127.0.0.1:8765/ -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 300 }
             }
 
+            Write-Host "Identity before Chrome seed:"
+            whoami /user
             node tests/e2e/seed_chromium_cookie.mjs chrome "$env:ROOKIE_E2E_USER_DATA_DIR" "http://127.0.0.1:8765/set"
 
             $defaultDir = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Default"
+            $cookiesDb = Join-Path $defaultDir "Network\Cookies"
+            if (-not (Test-Path $cookiesDb)) { $cookiesDb = Join-Path $defaultDir "Cookies" }
+            if (-not (Test-Path $cookiesDb)) { throw "missing Cookies database at $cookiesDb" }
+            $py = 'import sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); rows = list(conn.execute("SELECT host_key, name, hex(substr(encrypted_value, 1, 3)), length(encrypted_value) FROM cookies WHERE name = ''rookie_ci''")); print("rookie_ci encrypted_value diagnostics:", rows)'
+            python -c $py "$cookiesDb"
+
             $localState = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Local State"
             if (-not (Test-Path $localState)) { throw "missing Local State at $localState" }
             $ls = Get-Content $localState -Raw | ConvertFrom-Json
             if (-not $ls.os_crypt.encrypted_key) { throw "Local State has no DPAPI encrypted_key" }
+            Add-Type -AssemblyName System.Security.Cryptography.ProtectedData
+            $encryptedKeyBytes = [Convert]::FromBase64String([string]$ls.os_crypt.encrypted_key)
+            if ($encryptedKeyBytes.Length -le 5) {
+              throw "Local State encrypted_key length is $($encryptedKeyBytes.Length), expected DPAPI prefix plus payload"
+            }
+            [byte[]]$prefixBytes = $encryptedKeyBytes[0..4]
+            $prefix = [Text.Encoding]::ASCII.GetString($prefixBytes)
+            if ($prefix -ne "DPAPI") { throw "Local State encrypted_key prefix is '$prefix', expected DPAPI" }
+            [byte[]]$wrapped = $encryptedKeyBytes[5..($encryptedKeyBytes.Length - 1)]
+            $unwrapped = [Security.Cryptography.ProtectedData]::Unprotect(
+              $wrapped,
+              $null,
+              [Security.Cryptography.DataProtectionScope]::CurrentUser
+            )
+            Write-Host "DPAPI encrypted_key diagnostics: wrapped_length=$($wrapped.Length) unwrapped_length=$($unwrapped.Length)"
+            if ($unwrapped.Length -ne 32) { throw "DPAPI unwrapped key length was $($unwrapped.Length), expected 32" }
             # AppBound key requires Chrome's elevation service to register on
             # first launch; on a fresh CI profile it sometimes isn't there,
             # so Chrome falls back to legacy DPAPI. Note it but don't fail —
@@ -418,6 +417,8 @@ jobs:
             }
             Get-ChildItem $defaultDir | Format-Table
 
+            Write-Host "Identity before rookie extraction:"
+            whoami /user
             cargo test --test e2e_chrome -- --ignored --nocapture
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
