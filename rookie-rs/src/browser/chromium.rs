@@ -1,5 +1,5 @@
 use crate::common::{date, enums::*, sqlite};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
 #[allow(unused)]
@@ -7,10 +7,6 @@ use crate::config::Browser;
 
 #[cfg(target_os = "windows")]
 use crate::windows;
-
-#[cfg(not(target_os = "linux"))]
-#[allow(unused)]
-use anyhow::Context;
 
 #[cfg(target_os = "macos")]
 use crate::macos;
@@ -87,9 +83,36 @@ fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8>
 
 #[cfg(target_os = "windows")]
 fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
-  let mut keydpapi: Vec<u8> = general_purpose::STANDARD.decode(key64)?;
-  let keydpapi = &mut keydpapi[5..];
-  let v10_key = crate::windows::dpapi::decrypt(keydpapi)?;
+  let mut keydpapi: Vec<u8> = general_purpose::STANDARD
+    .decode(key64)
+    .context("Failed to decode Local State os_crypt.encrypted_key as base64")?;
+  let decoded_len = keydpapi.len();
+  if decoded_len <= 5 {
+    bail!(
+      "Local State os_crypt.encrypted_key decoded to {} bytes, expected DPAPI prefix plus payload",
+      decoded_len
+    );
+  }
+  if &keydpapi[..5] != b"DPAPI" {
+    bail!("Local State os_crypt.encrypted_key is missing DPAPI prefix");
+  }
+
+  let wrapped_len = decoded_len - 5;
+  let v10_key = crate::windows::dpapi::decrypt(&mut keydpapi[5..]).with_context(|| {
+    format!(
+      "Failed to unwrap DPAPI encrypted key (decoded_length={}, wrapped_length={})",
+      decoded_len, wrapped_len
+    )
+  })?;
+  if v10_key.len() != 32 {
+    bail!(
+      "DPAPI unwrapped key length was {}, expected 32 (decoded_length={}, wrapped_length={})",
+      v10_key.len(),
+      decoded_len,
+      wrapped_len
+    );
+  }
+
   let keys: Vec<Vec<u8>> = vec![v10_key];
   Ok(keys)
 }
@@ -151,6 +174,25 @@ fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
   )
 }
 
+fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
+  if plaintext.len() <= 32 {
+    bail!("Can't decode encrypted value");
+  }
+
+  String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
+}
+
+fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<String> {
+  if key_type == b"v20" {
+    return decode_after_host_hash_prefix(plaintext);
+  }
+
+  match String::from_utf8(plaintext) {
+    Ok(text) => Ok(text),
+    Err(err) => decode_after_host_hash_prefix(err.into_bytes()),
+  }
+}
+
 /// Decrypt cookie value using aes GCM
 #[cfg(windows)]
 fn decrypt_encrypted_value(
@@ -177,19 +219,10 @@ fn decrypt_encrypted_value(
     let nonce = GenericArray::from_slice(nonce); // 96-bits; unique per message
 
     match cipher.decrypt(nonce, ciphertext.as_ref()) {
-      Ok(plaintext) => {
-        // Successfully decrypted, try to convert to string
-        let plaintext = if key_type == b"v20" {
-          String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
-        } else {
-          String::from_utf8(plaintext).context("Can't decode encrypted value")
-        };
-
-        match plaintext {
-          Ok(text) => return Ok(text),
-          Err(e) => log::warn!("Failed to decode plaintext: {}", e),
-        }
-      }
+      Ok(plaintext) => match decode_chromium_plaintext(key_type, plaintext) {
+        Ok(text) => return Ok(text),
+        Err(e) => log::warn!("Failed to decode plaintext: {}", e),
+      },
       Err(e) => {
         // We'll get error anyway if decryption failed
         log::debug!("Failed to decrypt with a key: {}", e);
@@ -501,6 +534,22 @@ mod tests {
     let decrypted =
       decrypt_encrypted_value("".to_string(), &ciphertext, vec![key]).expect("decrypt vector");
     assert_eq!(decrypted.as_bytes(), plaintext);
+  }
+
+  #[test]
+  fn decode_chromium_plaintext_handles_plain_and_hash_prefixed_values() {
+    let plain = decode_chromium_plaintext(b"v10", b"bar".to_vec()).expect("plain v10");
+    assert_eq!(plain, "bar");
+
+    let mut hash_prefixed = vec![0xff; 32];
+    hash_prefixed.extend_from_slice(b"bar");
+    let prefixed = decode_chromium_plaintext(b"v10", hash_prefixed).expect("hash-prefixed v10");
+    assert_eq!(prefixed, "bar");
+
+    let mut v20 = vec![0; 32];
+    v20.extend_from_slice(b"bar");
+    let v20 = decode_chromium_plaintext(b"v20", v20).expect("v20");
+    assert_eq!(v20, "bar");
   }
 
   // Unix-only tests: on unix `decrypt_encrypted_value` short-circuits to

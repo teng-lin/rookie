@@ -19,7 +19,7 @@ pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
   };
 
   unsafe {
-    let _ = match Cryptography::CryptUnprotectData(
+    Cryptography::CryptUnprotectData(
       &data_in,
       Some(ptr::null_mut()),
       Some(ptr::null_mut()),
@@ -27,10 +27,8 @@ pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
       Some(ptr::null_mut()),
       0,
       &mut data_out,
-    ) {
-      Ok(_) => Ok(()),
-      Err(_) => Err(anyhow!("CryptUnprotectData failed")),
-    };
+    )
+    .map_err(|err| anyhow!("CryptUnprotectData failed: {}", err))?;
   }
   if data_out.pbData.is_null() {
     bail!("CryptUnprotectData returned a null pointer");
@@ -40,10 +38,7 @@ pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
     unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec() };
   let pbdata_hlocal = Foundation::HLOCAL(data_out.pbData as *mut c_void);
   unsafe {
-    let _ = match Foundation::LocalFree(pbdata_hlocal) {
-      Ok(_) => Ok(()),
-      Err(_) => Err(anyhow!("LocalFree failed")),
-    };
+    Foundation::LocalFree(pbdata_hlocal).map_err(|err| anyhow!("LocalFree failed: {}", err))?;
   };
   Ok(decrypted_data)
 }
