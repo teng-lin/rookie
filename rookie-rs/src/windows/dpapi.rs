@@ -1,7 +1,12 @@
 use std::{ffi::c_void, ptr};
 
 use anyhow::{anyhow, bail, Result};
-use windows::Win32::{Foundation, Security::Cryptography};
+use windows::Win32::Security::Cryptography;
+
+#[link(name = "kernel32")]
+extern "system" {
+  fn LocalFree(hmem: *mut c_void) -> *mut c_void;
+}
 
 pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
   // https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
@@ -36,9 +41,16 @@ pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
 
   let decrypted_data =
     unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec() };
-  let pbdata_hlocal = Foundation::HLOCAL(data_out.pbData as *mut c_void);
+  // windows 0.51's Foundation::LocalFree wrapper treats the API's null
+  // success return as an error, so call the raw Win32 function directly.
   unsafe {
-    Foundation::LocalFree(pbdata_hlocal).map_err(|err| anyhow!("LocalFree failed: {}", err))?;
+    let local_free_result = LocalFree(data_out.pbData as *mut c_void);
+    if !local_free_result.is_null() {
+      return Err(anyhow!(
+        "LocalFree failed: {}",
+        windows::core::Error::from_win32()
+      ));
+    }
   };
   Ok(decrypted_data)
 }
