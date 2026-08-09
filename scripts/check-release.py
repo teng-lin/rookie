@@ -65,6 +65,7 @@ def main() -> int:
     node_package = load_json("bindings/node/package.json")
     node_lock = load_json("bindings/node/package-lock.json")
     javascript_lock = load_json("examples/javascript/package-lock.json")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     metadata: list[tuple[str, str, str]] = [
         (
@@ -148,6 +149,12 @@ def main() -> int:
                     f"bindings/node/package-lock.json optional dependency {package_name}",
                     node_lock["packages"][""]["optionalDependencies"][package_name],
                 ),
+                (
+                    f"examples/javascript/package-lock.json optional dependency {package_name}",
+                    javascript_lock["packages"]["../../bindings/node"][
+                        "optionalDependencies"
+                    ][package_name],
+                ),
             )
         )
         metadata.extend(
@@ -181,6 +188,8 @@ def main() -> int:
         for label, actual, expected_value in metadata
         if actual != expected_value
     )
+    if f"## [{expected}]" not in changelog:
+        failures.append(f"CHANGELOG.md: missing a {expected} release section")
 
     if failures:
         print("Release metadata is inconsistent:", file=sys.stderr)

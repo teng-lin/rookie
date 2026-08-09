@@ -46,11 +46,13 @@ or repository files.
 
 ## Prepare a release
 
-Update every package and internal dependency constraint to the same version,
-then run:
+Update `CHANGELOG.md`, every package, and every internal dependency constraint
+to the same version. Set that version once for the current shell session, then
+run:
 
 ```console
-python scripts/check-release.py 0.5.7
+export VERSION=0.5.7
+python scripts/check-release.py "$VERSION"
 cargo test --workspace --all-targets
 cargo test --workspace --doc
 cargo publish --dry-run -p rookie-cookies --features appbound
@@ -70,8 +72,8 @@ Create an annotated tag from the resulting main commit:
 ```console
 git switch main
 git pull --ff-only
-git tag -a v0.5.7 -m "rookie-cookies 0.5.7"
-git push origin v0.5.7
+git tag -a "v$VERSION" -m "rookie-cookies $VERSION"
+git push origin "v$VERSION"
 ```
 
 ## Publish
@@ -80,9 +82,9 @@ Dispatch each workflow from the immutable tag and provide the version without
 the `v` prefix:
 
 ```console
-gh workflow run publish-crate.yml --ref v0.5.7 -f version=0.5.7
-gh workflow run publish-py.yml --ref v0.5.7 -f version=0.5.7
-gh workflow run publish-npm.yml --ref v0.5.7 -f version=0.5.7
+gh workflow run publish-crate.yml --ref "v$VERSION" -f version="$VERSION"
+gh workflow run publish-py.yml --ref "v$VERSION" -f version="$VERSION"
+gh workflow run publish-npm.yml --ref "v$VERSION" -f version="$VERSION"
 ```
 
 Do not start all three commands together. Wait for each workflow to finish and
@@ -101,14 +103,14 @@ binary, and publishes these prepared native tarballs before the root package:
 Confirm the exact versions on each registry, then smoke-test clean installs:
 
 ```console
-cargo info rookie-cookies@0.5.7
-python -m pip install --no-cache-dir rookie-cookies==0.5.7
+cargo info "rookie-cookies@$VERSION"
+python -m pip install --no-cache-dir "rookie-cookies==$VERSION"
 python -c "import rookie_cookies; print(rookie_cookies.version())"
-npm view rookie-cookies@0.5.7 version
-npm view rookie-cookies-darwin-arm64@0.5.7 version
-npm view rookie-cookies-darwin-x64@0.5.7 version
-npm view rookie-cookies-linux-x64-gnu@0.5.7 version
-npm view rookie-cookies-win32-x64-msvc@0.5.7 version
+npm view "rookie-cookies@$VERSION" version
+npm view "rookie-cookies-darwin-arm64@$VERSION" version
+npm view "rookie-cookies-darwin-x64@$VERSION" version
+npm view "rookie-cookies-linux-x64-gnu@$VERSION" version
+npm view "rookie-cookies-win32-x64-msvc@$VERSION" version
 ```
 
 Create the GitHub release only after all three registry checks pass.

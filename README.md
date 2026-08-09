@@ -124,6 +124,7 @@ Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/work
 - [JavaScript documentation](docs/JavaScript.md)
 - [Build instructions](docs/BUILDING.md)
 - [Release instructions](docs/RELEASING.md)
+- [Changelog](CHANGELOG.md)
 - [Python examples](examples/python)
 - [Rust examples](examples/rust)
 - [JavaScript examples](examples/javascript)
