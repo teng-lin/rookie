@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "rookie-cookies"
 description = "Load cookies from any browser on any platform"
+readme = "README.md"
 license = "MIT"
 authors = [
     {name = "thewh1teagle"},
