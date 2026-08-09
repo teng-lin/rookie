@@ -1,6 +1,6 @@
 {
   "name": "rookie-cookies",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "readme": "README.md",
   "main": "index.js",
   "types": "index.d.ts",
@@ -31,17 +31,16 @@
     "build:debug": "napi build --platform",
     "postbuild:debug": "node scripts/patch-loader.js",
     "prepack": "node scripts/patch-loader.js",
-    "prepublishOnly": "napi prepublish -t npm",
     "test": "ava",
     "universal": "napi universal",
     "version": "napi version"
   },
   "optionalDependencies": {
-    "rookie-cookies-darwin-arm64": "0.0.0",
-    "rookie-cookies-darwin-x64": "0.0.0",
-    "rookie-cookies-linux-x64-gnu": "0.0.0",
-    "rookie-cookies-win32-x64-msvc": "0.0.0"
+    "rookie-cookies-darwin-arm64": "0.5.7",
+    "rookie-cookies-darwin-x64": "0.5.7",
+    "rookie-cookies-linux-x64-gnu": "0.5.7",
+    "rookie-cookies-win32-x64-msvc": "0.5.7"
   },
-  "repository": "https://github.com/teng-lin/rookie",
+  "repository": "https://github.com/teng-lin/rookie-cookies",
   "description": "Load cookies from any browser on any platform"
 }

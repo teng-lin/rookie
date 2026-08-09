@@ -1,6 +1,6 @@
 {
   "name": "rookie-cookies-win32-x64-msvc",
-  "version": "0.0.1-beta.0",
+  "version": "0.5.7",
   "os": [
     "win32"
   ],
@@ -16,5 +16,5 @@
   "engines": {
     "node": ">= 10"
   },
-  "repository": "https://github.com/teng-lin/rookie"
+  "repository": "https://github.com/teng-lin/rookie-cookies"
 }

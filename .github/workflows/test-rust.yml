@@ -3,14 +3,19 @@ name: Test rookie-cookies
 on:
   pull_request:
     paths:
+      - '.github/workflows/publish-*.yml'
       - '.github/workflows/test-rust.yml'
       - 'rookie-rs/**'
       - 'cli/**'
       - 'bindings/python/**'
       - 'bindings/node/**'
       - 'tests/python/**'
+      - 'examples/javascript/package-lock.json'
+      - 'examples/rust/http/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'docs/RELEASING.md'
+      - 'scripts/check-release.py'
   push:
     branches:
       - main
@@ -20,6 +25,19 @@ permissions:
   contents: read
 
 jobs:
+  release-metadata:
+    name: release metadata consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check release metadata
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("rookie-rs/Cargo.toml", "rb"))["package"]["version"])')
+          python scripts/check-release.py "$version"
+
   cargo-test:
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
