@@ -4,14 +4,14 @@
     "windows": {
       "chrome": {
         "paths": [
-          "%LOCALAPPDATA%/Google/Chrome{channel}/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Google/Chrome{channel}/User Data/Default/Network/Cookies",
-          "%LOCALAPPDATA%/Google/Chrome{channel}/User Data/Profile */Cookies",
+          "%LOCALAPPDATA%/Google/Chrome{channel}/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Google/Chrome{channel}/User Data/Profile */Network/Cookies",
-          "%APPDATA%/Google/Chrome{channel}/User Data/Default/Cookies",
+          "%LOCALAPPDATA%/Google/Chrome{channel}/User Data/Profile */Cookies",
           "%APPDATA%/Google/Chrome{channel}/User Data/Default/Network/Cookies",
-          "%APPDATA%/Google/Chrome{channel}/User Data/Profile */Cookies",
-          "%APPDATA%/Google/Chrome{channel}/User Data/Profile */Network/Cookies"
+          "%APPDATA%/Google/Chrome{channel}/User Data/Default/Cookies",
+          "%APPDATA%/Google/Chrome{channel}/User Data/Profile */Network/Cookies",
+          "%APPDATA%/Google/Chrome{channel}/User Data/Profile */Cookies"
         ],
         "channels": [
           "",
@@ -22,14 +22,14 @@
       },
       "brave": {
         "paths": [
-          "%LOCALAPPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Default/Cookies",
           "%LOCALAPPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Default/Network/Cookies",
-          "%LOCALAPPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Cookies",
+          "%LOCALAPPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Default/Cookies",
           "%LOCALAPPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Network/Cookies",
-          "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Default/Cookies",
+          "%LOCALAPPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Cookies",
           "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Default/Network/Cookies",
-          "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Cookies",
-          "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Network/Cookies"
+          "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Default/Cookies",
+          "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Network/Cookies",
+          "%APPDATA%/BraveSoftware/Brave-Browser{channel}/User Data/Profile */Cookies"
         ],
         "channels": [
           "",
@@ -40,14 +40,14 @@
       },
       "edge": {
         "paths": [
-          "%LOCALAPPDATA%/Microsoft/Edge{channel}/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Microsoft/Edge{channel}/User Data/Default/Network/Cookies",
-          "%LOCALAPPDATA%/Microsoft/Edge{channel}/User Data/Profile */Cookies",
+          "%LOCALAPPDATA%/Microsoft/Edge{channel}/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Microsoft/Edge{channel}/User Data/Profile */Network/Cookies",
-          "%APPDATA%/Microsoft/Edge{channel}/User Data/Default/Cookies",
+          "%LOCALAPPDATA%/Microsoft/Edge{channel}/User Data/Profile */Cookies",
           "%APPDATA%/Microsoft/Edge{channel}/User Data/Default/Network/Cookies",
-          "%APPDATA%/Microsoft/Edge{channel}/User Data/Profile */Cookies",
-          "%APPDATA%/Microsoft/Edge{channel}/User Data/Profile */Network/Cookies"
+          "%APPDATA%/Microsoft/Edge{channel}/User Data/Default/Cookies",
+          "%APPDATA%/Microsoft/Edge{channel}/User Data/Profile */Network/Cookies",
+          "%APPDATA%/Microsoft/Edge{channel}/User Data/Profile */Cookies"
         ],
         "channels": [
           "",
@@ -79,22 +79,22 @@
       },
       "vivaldi": {
         "paths": [
-          "%LOCALAPPDATA%/Vivaldi/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Vivaldi/User Data/Default/Network/Cookies",
-          "%LOCALAPPDATA%/Vivaldi/User Data/Profile */Cookies",
+          "%LOCALAPPDATA%/Vivaldi/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Vivaldi/User Data/Profile */Network/Cookies",
-          "%APPDATA%/Vivaldi/User Data/Default/Cookies",
+          "%LOCALAPPDATA%/Vivaldi/User Data/Profile */Cookies",
           "%APPDATA%/Vivaldi/User Data/Default/Network/Cookies",
-          "%APPDATA%/Vivaldi/User Data/Profile */Cookies",
-          "%APPDATA%/Vivaldi/User Data/Profile */Network/Cookies"
+          "%APPDATA%/Vivaldi/User Data/Default/Cookies",
+          "%APPDATA%/Vivaldi/User Data/Profile */Network/Cookies",
+          "%APPDATA%/Vivaldi/User Data/Profile */Cookies"
         ]
       },
       "opera": {
         "paths": [
-          "%LOCALAPPDATA%/Opera Software/Opera {channel}/Cookies",
           "%LOCALAPPDATA%/Opera Software/Opera {channel}/Network/Cookies",
-          "%APPDATA%/Opera Software/Opera {channel}/Cookies",
-          "%APPDATA%/Opera Software/Opera {channel}/Network/Cookies"
+          "%LOCALAPPDATA%/Opera Software/Opera {channel}/Cookies",
+          "%APPDATA%/Opera Software/Opera {channel}/Network/Cookies",
+          "%APPDATA%/Opera Software/Opera {channel}/Cookies"
         ],
         "channels": [
           "Stable",
@@ -104,14 +104,14 @@
       },
       "chromium": {
         "paths": [
-          "%LOCALAPPDATA%/Chromium/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Chromium/User Data/Default/Network/Cookies",
-          "%LOCALAPPDATA%/Chromium/User Data/Profile */Cookies",
+          "%LOCALAPPDATA%/Chromium/User Data/Default/Cookies",
           "%LOCALAPPDATA%/Chromium/User Data/Profile */Network/Cookies",
-          "%APPDATA%/Chromium/User Data/Default/Cookies",
+          "%LOCALAPPDATA%/Chromium/User Data/Profile */Cookies",
           "%APPDATA%/Chromium/User Data/Default/Network/Cookies",
-          "%APPDATA%/Chromium/User Data/Profile */Cookies",
-          "%APPDATA%/Chromium/User Data/Profile */Network/Cookies"
+          "%APPDATA%/Chromium/User Data/Default/Cookies",
+          "%APPDATA%/Chromium/User Data/Profile */Network/Cookies",
+          "%APPDATA%/Chromium/User Data/Profile */Cookies"
         ]
       },
       "arc": {
@@ -122,10 +122,10 @@
       },
       "opera_gx": {
         "paths": [
-          "%LOCALAPPDATA%/Opera Software/Opera GX {channel}/Cookies",
           "%LOCALAPPDATA%/Opera Software/Opera GX {channel}/Network/Cookies",
-          "%APPDATA%/Opera Software/Opera GX {channel}/Cookies",
-          "%APPDATA%/Opera Software/Opera GX {channel}/Network/Cookies"
+          "%LOCALAPPDATA%/Opera Software/Opera GX {channel}/Cookies",
+          "%APPDATA%/Opera Software/Opera GX {channel}/Network/Cookies",
+          "%APPDATA%/Opera Software/Opera GX {channel}/Cookies"
         ],
         "channels": [
           "Stable",
