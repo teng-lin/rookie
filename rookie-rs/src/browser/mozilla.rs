@@ -122,8 +122,13 @@ pub fn get_session_cookies_lz4(
   let mut cookies: Vec<Cookie> = vec![];
   let session_file_lz4 = cookies_dir.join("sessionstore-backups/recovery.jsonlz4");
   let compressed = fs::read(session_file_lz4)?;
-  let compressed = compressed[8..].to_vec();
-  let decompressed = decompress_size_prepended(&compressed)?;
+  if !compressed.starts_with(b"mozLz40\0") {
+    bail!("Invalid mozLz40 header");
+  }
+  let compressed = compressed
+    .get(8..)
+    .ok_or_else(|| anyhow!("Invalid compressed length"))?;
+  let decompressed = decompress_size_prepended(compressed)?;
   let plain = String::from_utf8(decompressed)?;
   let json: Value = serde_json::from_str(&plain)?;
   let cookies_json = json.get("cookies").ok_or(anyhow!("no cookies in json"))?;
@@ -461,5 +466,15 @@ mod tests {
     .unwrap();
     let path = get_default_profile(&ini_path).expect("should resolve");
     assert_eq!(path, "Profiles/abc.default-release");
+  }
+
+  #[test]
+  fn get_session_cookies_lz4_invalid_magic_header_errors() {
+    let dir = unique_tmpdir("ff-bad-magic-lz4");
+    let backups = dir.join("sessionstore-backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    std::fs::write(backups.join("recovery.jsonlz4"), b"BADMAGICthis-is-garbage").unwrap();
+    let result = get_session_cookies_lz4(None, dir);
+    assert!(result.is_err(), "expected Err for invalid magic header");
   }
 }

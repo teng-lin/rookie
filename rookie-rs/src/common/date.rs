@@ -2,8 +2,8 @@ pub fn chromium_timestamp(timestamp: u64) -> Option<u64> {
   if timestamp == 0 {
     return None;
   }
-  let mut timestamp = timestamp - 11_644_473_600_000_000;
-  timestamp /= 1000000; // milliseconds to seconds
+  let mut timestamp = timestamp.checked_sub(11_644_473_600_000_000)?;
+  timestamp /= 1000000; // microseconds to seconds
   unix_timestamp(timestamp)
 }
 
@@ -34,7 +34,7 @@ pub fn internet_explorer_timestamp(timestamp: u64) -> Option<u64> {
   if timestamp == 0 {
     return None;
   }
-  let mut timestamp = timestamp - 116_444_736_000_000_000;
+  let mut timestamp = timestamp.checked_sub(116_444_736_000_000_000)?;
   timestamp /= 10_000_000;
   unix_timestamp(timestamp)
 }
@@ -97,5 +97,16 @@ mod tests {
     const FILETIME_AT_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
     let one_second_past_unix = FILETIME_AT_UNIX_EPOCH + 10_000_000;
     assert_eq!(internet_explorer_timestamp(one_second_past_unix), Some(1));
+  }
+
+  #[test]
+  fn chromium_timestamp_underflow_is_none() {
+    assert_eq!(chromium_timestamp(100), None);
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn internet_explorer_timestamp_underflow_is_none() {
+    assert_eq!(internet_explorer_timestamp(100), None);
   }
 }
