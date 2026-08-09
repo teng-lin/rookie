@@ -1,6 +1,6 @@
 {
   "name": "rookie-cookies-linux-x64-gnu",
-  "version": "0.0.1-beta.0",
+  "version": "0.5.7",
   "os": [
     "linux"
   ],
@@ -16,7 +16,7 @@
   "engines": {
     "node": ">= 10"
   },
-  "repository": "https://github.com/teng-lin/rookie",
+  "repository": "https://github.com/teng-lin/rookie-cookies",
   "libc": [
     "glibc"
   ]

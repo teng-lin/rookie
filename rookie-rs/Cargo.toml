@@ -1,12 +1,12 @@
 [package]
 name = "rookie-cookies"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 description = "Load cookie from your web browsers"
 license-file = "../MIT-LICENSE.txt"
 homepage = "https://crates.io/crates/rookie-cookies"
 documentation = "https://docs.rs/rookie-cookies/"
-repository = "https://github.com/teng-lin/rookie"
+repository = "https://github.com/teng-lin/rookie-cookies"
 readme = "../README.md"
 keywords = ["windows", "cookies", "rust", "web"]
 
@@ -80,5 +80,3 @@ path = "../examples/rust/simple.rs"
 [[example]]
 name = "from_path"
 path = "../examples/rust/from_path.rs"
-
-include = ["src/**/*", "Cargo.toml", "Cargo.lock"]

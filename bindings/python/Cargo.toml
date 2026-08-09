@@ -1,6 +1,6 @@
 [package]
 name = "rookie-cookies-python"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,7 +13,7 @@ pyo3 = { version = "0.23", features = ["abi3-py37", "anyhow"] }
 pyo3-log = "0.12"
 
 [target.'cfg(windows)'.dependencies]
-rookie-core = { package = "rookie-cookies", path = "../../rookie-rs", version = "0.5.6", features = ["appbound"] }
+rookie-core = { package = "rookie-cookies", path = "../../rookie-rs", version = "0.5.7", features = ["appbound"] }
 
 [target.'cfg(unix)'.dependencies]
-rookie-core = { package = "rookie-cookies", path = "../../rookie-rs", version = "0.5.6" }
+rookie-core = { package = "rookie-cookies", path = "../../rookie-rs", version = "0.5.7" }

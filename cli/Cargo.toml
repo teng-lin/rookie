@@ -1,13 +1,13 @@
 [package]
 name = "rookie-cookies-cli"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 
 [dependencies]
 clap = { version = "4.4.6", features = ["derive"] }
 tracing-subscriber = "0.3.18"
 lazy_static = "1.4.0"
-rookie-cookies = { path = "../rookie-rs", version = "0.5.6" }
+rookie-cookies = { path = "../rookie-rs", version = "0.5.7" }
 serde_json = "1.0.107"
 
 [dev-dependencies]
