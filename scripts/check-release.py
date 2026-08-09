@@ -84,6 +84,11 @@ def main() -> int:
             "rookie-cookies",
         ),
         (
+            "bindings/python pyproject readme",
+            pyproject["project"].get("readme"),
+            "README.md",
+        ),
+        (
             "bindings/python pyproject homepage",
             pyproject["project"]["urls"]["Homepage"],
             CANONICAL_REPOSITORY,
