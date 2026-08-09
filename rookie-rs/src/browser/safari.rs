@@ -89,7 +89,7 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<Cookie> {
   let value_off = T::read_u32(&bs[0x1c..0x20]) as usize;
 
   // i/OS/X to Unix timestamp +(1 Jan 2001 epoch seconds).
-  let expires = T::read_u64(&bs[0x28..0x30]);
+  let expires = T::read_f64(&bs[0x28..0x30]);
   let expires = date::safari_timestamp(expires);
 
   let url = slice_to(bs, url_off, name_off).and_then(c_str)?;

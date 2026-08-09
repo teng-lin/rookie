@@ -18,15 +18,16 @@ fn unix_timestamp(timestamp: u64) -> Option<u64> {
   Some(timestamp)
 }
 
-#[cfg(target_os = "macos")]
-pub fn safari_timestamp(timestamp: u64) -> Option<u64> {
-  if timestamp == 0 {
+#[allow(dead_code)]
+pub fn safari_timestamp(timestamp: f64) -> Option<u64> {
+  if timestamp == 0.0 || !timestamp.is_finite() {
     return None;
   }
-  let unix_timestamp = timestamp + 978_307_200;
-  // nanoseconds to seconds
-  let unix_timestamp = unix_timestamp / 1_000_000_000;
-  Some(unix_timestamp)
+  let unix_timestamp = timestamp + 978_307_200.0;
+  if unix_timestamp < 0.0 || unix_timestamp > u64::MAX as f64 {
+    return None;
+  }
+  Some(unix_timestamp as u64)
 }
 #[cfg(target_os = "windows")]
 pub fn internet_explorer_timestamp(timestamp: u64) -> Option<u64> {
@@ -73,10 +74,14 @@ mod tests {
     assert_eq!(mozilla_timestamp(1_700_000_000), Some(1_700_000_000));
   }
 
-  #[cfg(target_os = "macos")]
   #[test]
   fn safari_timestamp_zero_is_none() {
-    assert_eq!(safari_timestamp(0), None);
+    assert_eq!(safari_timestamp(0.0), None);
+  }
+
+  #[test]
+  fn test_safari_timestamp_ieee754() {
+    assert_eq!(safari_timestamp(750_000_000.0), Some(1_728_307_200));
   }
 
   #[cfg(target_os = "windows")]
