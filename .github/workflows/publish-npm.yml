@@ -249,7 +249,7 @@ jobs:
         run: |
           mkdir -p ../../release-packages/npm
           for package_directory in npm/*; do
-            npm pack "$package_directory" --pack-destination ../../release-packages/npm --ignore-scripts
+            npm pack "./$package_directory" --pack-destination ../../release-packages/npm --ignore-scripts
           done
           npm pack . --pack-destination ../../release-packages/npm --ignore-scripts
           test "$(find ../../release-packages/npm -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 5

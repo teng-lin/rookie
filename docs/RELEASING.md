@@ -48,11 +48,12 @@ or repository files.
 
 Update `CHANGELOG.md`, every package, and every internal dependency constraint
 to the same version. Set that version once for the current shell session, then
-run:
+run the checks below. The release metadata checker requires Python 3.11 or
+newer.
 
 ```console
 export VERSION=0.5.7
-python scripts/check-release.py "$VERSION"
+python3 scripts/check-release.py "$VERSION"
 cargo test --workspace --all-targets
 cargo test --workspace --doc
 cargo publish --dry-run -p rookie-cookies --features appbound

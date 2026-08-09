@@ -7,9 +7,13 @@ import argparse
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError as error:
+    raise SystemExit("check-release.py requires Python 3.11 or newer") from error
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +152,10 @@ def main() -> int:
                 (
                     f"bindings/node/package-lock.json optional dependency {package_name}",
                     node_lock["packages"][""]["optionalDependencies"][package_name],
+                ),
+                (
+                    f"bindings/node/package-lock.json package record {package_name}",
+                    node_lock["packages"][f"node_modules/{package_name}"]["version"],
                 ),
                 (
                     f"examples/javascript/package-lock.json optional dependency {package_name}",

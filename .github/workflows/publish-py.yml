@@ -64,7 +64,7 @@ jobs:
           name: python-linux-${{ matrix.target }}
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   windows:
     name: Build Windows wheel (${{ matrix.target }})
@@ -95,7 +95,7 @@ jobs:
           name: python-windows-${{ matrix.target }}
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   macos:
     name: Build macOS wheel (${{ matrix.target }})
@@ -125,7 +125,7 @@ jobs:
           name: python-macos-${{ matrix.target }}
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   sdist:
     name: Build source distribution
@@ -147,7 +147,7 @@ jobs:
           name: python-sdist
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   release:
     name: Publish rookie-cookies ${{ inputs.version }}
