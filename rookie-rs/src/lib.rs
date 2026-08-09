@@ -534,3 +534,95 @@ pub fn any_browser(
     and run this program with administrator privileges."
   );
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::PathBuf;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::Mutex;
+
+  static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+  fn seed_test_cookies(db_path: &std::path::Path, cookie_name: &str, cookie_value: &str) {
+    let conn = rusqlite::Connection::open(db_path).expect("open sqlite db");
+    conn
+      .execute(
+        "CREATE TABLE cookies (
+          host_key TEXT NOT NULL,
+          path TEXT NOT NULL,
+          is_secure INTEGER NOT NULL,
+          expires_utc INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          encrypted_value BLOB,
+          is_httponly INTEGER NOT NULL,
+          samesite INTEGER NOT NULL
+        )",
+        [],
+      )
+      .expect("create table cookies");
+    conn
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
+         VALUES ('.example.com', '/', 0, 0, ?1, ?2, ?3, 0, 0)",
+        rusqlite::params![cookie_name, cookie_value, &b"x"[..]],
+      )
+      .expect("insert row");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn test_chrome_resolves_network_cookies_on_unix() {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let home_dir =
+      std::env::temp_dir().join(format!("rookie-chrome-home-{}-{}", std::process::id(), n));
+
+    #[cfg(target_os = "macos")]
+    let chrome_dir = home_dir.join("Library/Application Support/Google/Chrome");
+
+    #[cfg(not(target_os = "macos"))]
+    let chrome_dir = home_dir.join(".config/google-chrome");
+
+    let network_dir = chrome_dir.join("Default/Network");
+    let default_dir = chrome_dir.join("Default");
+
+    std::fs::create_dir_all(&network_dir).expect("create network dir");
+    std::fs::create_dir_all(&default_dir).expect("create default dir");
+
+    let local_state = chrome_dir.join("Local State");
+    std::fs::write(&local_state, b"{}").expect("create local state");
+
+    let network_db = network_dir.join("Cookies");
+    let legacy_db = default_dir.join("Cookies");
+
+    seed_test_cookies(&network_db, "net_cookie", "net_val");
+    seed_test_cookies(&legacy_db, "legacy_cookie", "legacy_val");
+
+    let _guard = ENV_MUTEX.lock().unwrap();
+    let old_home = std::env::var_os("HOME");
+
+    std::env::set_var("HOME", &home_dir);
+
+    let result = chrome(None);
+
+    if let Some(old) = old_home {
+      std::env::set_var("HOME", old);
+    } else {
+      std::env::remove_var("HOME");
+    }
+
+    let cookies = result.expect("chrome() should find and parse network cookies");
+    assert_eq!(
+      cookies.len(),
+      1,
+      "expected 1 cookie from Network/Cookies, got {:?}",
+      cookies
+    );
+    assert_eq!(cookies[0].name, "net_cookie");
+    assert_eq!(cookies[0].value, "net_val");
+
+    let _ = std::fs::remove_dir_all(&home_dir);
+  }
+}
