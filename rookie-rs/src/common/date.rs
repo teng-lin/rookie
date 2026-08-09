@@ -18,7 +18,7 @@ fn unix_timestamp(timestamp: u64) -> Option<u64> {
   Some(timestamp)
 }
 
-#[allow(dead_code)]
+#[cfg(any(target_os = "macos", test))]
 pub fn safari_timestamp(timestamp: f64) -> Option<u64> {
   if timestamp == 0.0 || !timestamp.is_finite() {
     return None;
@@ -80,7 +80,7 @@ mod tests {
   }
 
   #[test]
-  fn test_safari_timestamp_ieee754() {
+  fn safari_timestamp_ieee754() {
     assert_eq!(safari_timestamp(750_000_000.0), Some(1_728_307_200));
   }
 
