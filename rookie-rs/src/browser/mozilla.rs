@@ -473,11 +473,7 @@ mod tests {
     let dir = unique_tmpdir("ff-bad-magic-lz4");
     let backups = dir.join("sessionstore-backups");
     std::fs::create_dir_all(&backups).unwrap();
-    std::fs::write(
-      backups.join("recovery.jsonlz4"),
-      b"BADMAGICthis-is-garbage",
-    )
-    .unwrap();
+    std::fs::write(backups.join("recovery.jsonlz4"), b"BADMAGICthis-is-garbage").unwrap();
     let result = get_session_cookies_lz4(None, dir);
     assert!(result.is_err(), "expected Err for invalid magic header");
   }
