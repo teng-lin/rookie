@@ -1,4 +1,4 @@
-use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
+use std::{ffi::OsString, marker::PhantomData, os::windows::ffi::OsStringExt, path::Path, rc::Rc};
 
 use anyhow::{bail, Result};
 use windows::Win32::System::Threading::OpenProcessToken;
@@ -158,16 +158,19 @@ fn get_system_token(lsass_handle: HANDLE) -> Result<HANDLE> {
 
 pub struct ImpersonationGuard {
   duplicated_token: HANDLE,
+  _thread_affinity: PhantomData<Rc<()>>,
 }
 
 impl Drop for ImpersonationGuard {
   fn drop(&mut self) {
     unsafe {
-      if let Err(err) = RevertToSelf() {
-        log::warn!("Failed to revert SYSTEM impersonation: {err}");
-      }
+      let revert_result = RevertToSelf();
       if let Err(err) = CloseHandle(self.duplicated_token) {
         log::warn!("Failed to close SYSTEM impersonation token: {err}");
+      }
+      if let Err(err) = revert_result {
+        log::warn!("Failed to revert SYSTEM impersonation: {err}");
+        std::process::abort();
       }
     }
   }
@@ -183,5 +186,6 @@ pub fn start_impersonate() -> Result<ImpersonationGuard> {
   }
   Ok(ImpersonationGuard {
     duplicated_token: duplicated_token.into_inner(),
+    _thread_affinity: PhantomData,
   })
 }
