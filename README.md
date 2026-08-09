@@ -7,7 +7,7 @@ This fork exists because the original repository is archived. Its immediate down
 [![Python](https://img.shields.io/pypi/pyversions/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
 [![PyPI](https://img.shields.io/pypi/v/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
 [![Rust](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
-[![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](MIT-LICENSE.txt)
+[![License](https://img.shields.io/github/license/teng-lin/rookie?logo=license)](MIT-LICENSE.txt)
 
 ## What is maintained here
 
@@ -51,7 +51,7 @@ The binding is tested on CPython 3.11–3.14. The published wheel uses Python's 
 ## Rust
 
 ```console
-cargo add rookie-cookies
+cargo add rookie-cookies anyhow
 ```
 
 ```rust
@@ -129,7 +129,7 @@ Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/work
 
 ## Contributing
 
-Please open issues and pull requests in [this maintained fork](https://github.com/teng-lin/rookie-cookies). Include the operating system, browser/version, language binding, and whether the browser was running when the failure occurred. Never include real cookie values or browser databases in an issue.
+Please open issues and pull requests in [this maintained fork](https://github.com/teng-lin/rookie). Include the operating system, browser/version, language binding, and whether the browser was running when the failure occurred. Never include real cookie values or browser databases in an issue.
 
 The project is released under the MIT license. See [MIT-LICENSE.txt](MIT-LICENSE.txt).
 

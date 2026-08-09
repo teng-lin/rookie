@@ -13,7 +13,7 @@ sudo apt-get install -y python3-dev
 ## rookie-rs
 
 ```console
-git clone https://github.com/teng-lin/rookie-cookies
+git clone https://github.com/teng-lin/rookie rookie-cookies
 cd rookie-cookies/rookie-rs
 cargo build
 ```
@@ -21,7 +21,7 @@ cargo build
 ## cli
 
 ```console
-git clone https://github.com/teng-lin/rookie-cookies
+git clone https://github.com/teng-lin/rookie rookie-cookies
 cd rookie-cookies/cli
 cargo build --release
 ```
@@ -31,7 +31,7 @@ cargo build --release
 Using [maturin](https://pyo3.rs/main/#usage):
 
 ```console
-git clone https://github.com/teng-lin/rookie-cookies
+git clone https://github.com/teng-lin/rookie rookie-cookies
 cd rookie-cookies/bindings/python
 python3 -m venv venv
 source venv/bin/activate

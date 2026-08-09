@@ -2,7 +2,7 @@
 
 ## Install
 
-```typescript
+```console
 pip3 install -U rookie-cookies
 ```
 
@@ -23,7 +23,7 @@ logging.basicConfig()
 logging.getLogger().setLevel(logging.DEBUG)
 ```
 
-To fully disable `rookie-cookies` logging you can set the level to `CRITICAL`
+To fully disable `rookie_cookies` logging you can set the level to `CRITICAL`
 
 ```python
 import logging

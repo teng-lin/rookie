@@ -2,7 +2,7 @@
 
 ## Install
 
-```typescript
+```console
 npm install rookie-cookies
 ```
 

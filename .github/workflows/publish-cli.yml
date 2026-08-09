@@ -49,13 +49,15 @@ jobs:
         if: contains(matrix.platform, 'windows')
 
       - name: Upload Unix
-        run: gh release upload ${{ github.event.inputs.tag }} rookie-cookies-cli-${{ matrix.target }} --clobber
+        run: gh release upload "$RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }} --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         if: contains(matrix.platform, 'macos') || contains(matrix.platform, 'ubuntu')
 
       - name: Upload Windows
-        run: gh release upload ${{ github.event.inputs.tag }} rookie-cookies-cli-${{ matrix.target }}.exe --clobber
+        run: gh release upload "$env:RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }}.exe --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         if: contains(matrix.platform, 'windows')

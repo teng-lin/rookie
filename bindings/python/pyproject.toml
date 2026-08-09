@@ -28,10 +28,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/teng-lin/rookie-cookies"
-Documentation = "https://github.com/teng-lin/rookie-cookies/blob/main/docs/Python.md"
-Repository = "https://github.com/teng-lin/rookie-cookies"
-Issues = "https://github.com/teng-lin/rookie-cookies/issues"
+Homepage = "https://github.com/teng-lin/rookie"
+Documentation = "https://github.com/teng-lin/rookie/blob/main/docs/Python.md"
+Repository = "https://github.com/teng-lin/rookie"
+Issues = "https://github.com/teng-lin/rookie/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

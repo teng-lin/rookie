@@ -18,10 +18,6 @@ jobs:
         with:
           toolchain: stable
           override: true
-      - name: Prepare appbound binaries (Used on Windows only.)
-        run: |
-          wget https://github.com/thewh1teagle/rookie/releases/download/appbound-binaries/paexec.exe -O rookie-rs/paexec.bin
-          wget https://github.com/thewh1teagle/rookie/releases/download/appbound-binaries/unprotect.exe -O rookie-rs/unprotect.bin
       - run: cargo publish -p rookie-cookies --features appbound
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

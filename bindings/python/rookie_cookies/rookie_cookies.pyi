@@ -1,5 +1,5 @@
-from typing import Any, Dict, List, Optional
 from sys import platform
+from typing import Any, Dict, List, Optional
 
 CookieList = List[Dict[str, Any]]
 
@@ -29,13 +29,10 @@ def zen(domains: Optional[List[str]] = None) -> CookieList:
     """
     ...
 
-def firefox_based(
-    key_path: str, db_path: str, domains: Optional[List[str]] = None
-) -> CookieList:
+def firefox_based(db_path: str, domains: Optional[List[str]] = None) -> CookieList:
     """
     Extract Cookies from Firefox-based browsers
 
-    :param key_path: Path to the key file
     :param db_path: Path to the database file
     :param domains: Optional list of domains to extract only from them
     :return: A list of dictionaries of cookies
@@ -69,15 +66,29 @@ def chrome(domains: Optional[List[str]] = None) -> CookieList:
     """
     ...
 
-def chromium_based(db_path: str, domains: Optional[List[str]] = None) -> CookieList:
-    """
-    Extract Cookies from Chromium-based browsers
+if platform == "win32":
+    def chromium_based(
+        key_path: str, db_path: str, domains: Optional[List[str]] = None
+    ) -> CookieList:
+        """
+        Extract Cookies from Chromium-based browsers on Windows
 
-    :param db_path: Path to the database file
-    :param domains: Optional list of domains to extract only from them
-    :return: A list of dictionaries of cookies
-    """
-    ...
+        :param key_path: Path to the browser's Local State file
+        :param db_path: Path to the database file
+        :param domains: Optional list of domains to extract only from them
+        :return: A list of dictionaries of cookies
+        """
+        ...
+else:
+    def chromium_based(db_path: str, domains: Optional[List[str]] = None) -> CookieList:
+        """
+        Extract Cookies from Chromium-based browsers on Unix
+
+        :param db_path: Path to the database file
+        :param domains: Optional list of domains to extract only from them
+        :return: A list of dictionaries of cookies
+        """
+        ...
 
 def chromium(domains: Optional[List[str]] = None) -> CookieList:
     """
@@ -144,7 +155,7 @@ def load(domains: Optional[List[str]] = None) -> CookieList:
 
 def any_browser(
     db_path: str, domains: Optional[List[str]] = ..., key_path: Optional[str] = ...
-) -> List[Dict[str, str]]:
+) -> CookieList:
     """
     Extract Cookies from any browser.
 

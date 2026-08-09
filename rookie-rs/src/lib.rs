@@ -185,7 +185,7 @@ pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 ///
 /// ```no_run
 /// let domains = vec!["google.com".to_string()];
-/// let cookies = rookie_cookies::brave(Some(domains));
+/// let cookies = rookie_cookies::arc(Some(domains));
 /// ```
 pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let config = get_browser_config("arc");

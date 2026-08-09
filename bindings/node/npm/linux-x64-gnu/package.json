@@ -16,7 +16,7 @@
   "engines": {
     "node": ">= 10"
   },
-  "repository": "https://github.com/teng-lin/rookie-cookies",
+  "repository": "https://github.com/teng-lin/rookie",
   "libc": [
     "glibc"
   ]

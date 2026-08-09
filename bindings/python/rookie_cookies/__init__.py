@@ -1,43 +1,46 @@
+import http.cookiejar
 from sys import platform
 from typing import Any, Dict, List, Optional
-import http.cookiejar
+
 from .rookie_cookies import (
+    any_browser,
+    arc,
+    brave,
+    chrome,
+    chromium,
+    chromium_based,
+    edge,
     firefox,
     firefox_based,
-    brave,
-    edge,
-    chrome,
-    chromium_based,
-    chromium,
-    arc,
-    opera,
-    vivaldi,
-    opera_gx,
     librewolf,
     load,
-    any_browser,
-    version
+    opera,
+    opera_gx,
+    version,
+    vivaldi,
+    zen,
 )
 
 __all__ = [
-    "firefox",
-    "librewolf",
+    "any_browser",
+    "arc",
     "brave",
-    "edge",
     "chrome",
     "chromium",
-    "arc",
+    "chromium_based",
+    "create_cookie",
+    "edge",
+    "firefox",
+    "firefox_based",
+    "librewolf",
+    "load",
     "opera",
     "opera_gx",
-    "vivaldi",
-    "chromium_based",
-    "firefox_based",
-    "create_cookie",
     "to_cookiejar",
     "to_netscape",
     "version",
-    "load",
-    "any_browser"
+    "vivaldi",
+    "zen",
 ]
 
 
@@ -46,30 +49,32 @@ CookieList = List[Dict[str, Any]]
 
 # Windows
 if platform == "win32":
-    from .rookie_cookies import internet_explorer, octo_browser
-    __all__.extend([
-        "internet_explorer",
-        "octo_browser"
-    ])
+    from .rookie_cookies import (
+        internet_explorer as internet_explorer,
+    )
+    from .rookie_cookies import (
+        octo_browser as octo_browser,
+    )
+
+    __all__.extend(["internet_explorer", "octo_browser"])
 
 
 # macOS
 if platform == "darwin":
-    from .rookie_cookies import safari
-    __all__.extend([
-        "safari"
-    ])
+    from .rookie_cookies import safari as safari
+
+    __all__.append("safari")
 
 
 def create_cookie(
-        host: str,
-        path: str,
-        secure: bool,
-        expires: Optional[int],
-        name: str,
-        value: Optional[str],
-        http_only: bool,
-        ) -> http.cookiejar.Cookie:
+    host: str,
+    path: str,
+    secure: bool,
+    expires: Optional[int],
+    name: str,
+    value: Optional[str],
+    http_only: bool,
+) -> http.cookiejar.Cookie:
     """
     Create a Cookie object with the specified attributes.
 
@@ -84,23 +89,24 @@ def create_cookie(
     :rtype: http.cookiejar.Cookie
     """
     # HTTPOnly flag goes in _rest, if present (see https://github.com/python/cpython/pull/17471/files#r511187060)
-    return http.cookiejar.Cookie(version=0,
-                                 name=name,
-                                 value=value,
-                                 port=None,
-                                 port_specified=False,
-                                 domain=host,
-                                 domain_specified=host.startswith('.'),
-                                 domain_initial_dot=host.startswith('.'),
-                                 path=path,
-                                 path_specified=True,
-                                 secure=secure,
-                                 expires=expires,
-                                 discard=False,
-                                 comment=None,
-                                 comment_url=None,
-                                 rest={'HTTPOnly': ''} if http_only else {}
-                                 )
+    return http.cookiejar.Cookie(
+        version=0,
+        name=name,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=host,
+        domain_specified=host.startswith("."),
+        domain_initial_dot=host.startswith("."),
+        path=path,
+        path_specified=True,
+        secure=secure,
+        expires=expires,
+        discard=False,
+        comment=None,
+        comment_url=None,
+        rest={"HTTPOnly": ""} if http_only else {},
+    )
 
 
 def to_cookiejar(cookies: CookieList) -> http.cookiejar.CookieJar:
@@ -114,14 +120,13 @@ def to_cookiejar(cookies: CookieList) -> http.cookiejar.CookieJar:
 
     for cookie_obj in cookies:
         c = create_cookie(
-            cookie_obj['domain'],
-            cookie_obj['path'],
-            cookie_obj['secure'],
-            cookie_obj['expires'],
-            cookie_obj['name'],
-            cookie_obj['value'],
-            cookie_obj['http_only'],
-
+            cookie_obj["domain"],
+            cookie_obj["path"],
+            cookie_obj["secure"],
+            cookie_obj["expires"],
+            cookie_obj["name"],
+            cookie_obj["value"],
+            cookie_obj["http_only"],
         )
         cj.set_cookie(c)
     return cj
@@ -140,11 +145,11 @@ def to_netscape(cookies: CookieList) -> str:
 # Edit at your own risk.\n"""
 
     for cookie in cookies:
-        domain = cookie['domain']
-        if cookie['http_only']:
-            domain = f'#HttpOnly_{domain}'
-        subdomain = repr(cookie['domain'].startswith('.')).upper()
-        https_only = repr(cookie['secure']).upper()
+        domain = cookie["domain"]
+        if cookie["http_only"]:
+            domain = f"#HttpOnly_{domain}"
+        subdomain = repr(cookie["domain"].startswith(".")).upper()
+        https_only = repr(cookie["secure"]).upper()
         data += f"{domain}\t{subdomain}\t{cookie['path']}\t{https_only}\t{cookie['expires'] if cookie['expires'] else 0}\t{cookie['name']}\t{cookie['value']}\n"
 
     return data

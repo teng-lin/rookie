@@ -7,7 +7,6 @@ import unittest
 
 import rookie_cookies
 
-
 COOKIE = {
     "domain": ".example.test",
     "path": "/",
@@ -25,7 +24,9 @@ class RookieCookiesHelpersTest(unittest.TestCase):
 
     def test_all_exports_are_defined(self) -> None:
         self.assertTrue(
-            {"create_cookie", "to_cookiejar", "to_netscape"}.issubset(rookie_cookies.__all__)
+            {"create_cookie", "to_cookiejar", "to_netscape", "zen"}.issubset(
+                rookie_cookies.__all__
+            )
         )
         self.assertNotIn("to_dict", rookie_cookies.__all__)
         for name in rookie_cookies.__all__:
@@ -64,7 +65,10 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         output = rookie_cookies.to_netscape([COOKIE])
 
         self.assertIn("# Netscape HTTP Cookie File", output)
-        self.assertIn("#HttpOnly_.example.test\tTRUE\t/\tTRUE\t1700000000\tsession\tabc123", output)
+        self.assertIn(
+            "#HttpOnly_.example.test\tTRUE\t/\tTRUE\t1700000000\tsession\tabc123",
+            output,
+        )
 
     def test_to_netscape_handles_empty_cookie_list(self) -> None:
         output = rookie_cookies.to_netscape([])

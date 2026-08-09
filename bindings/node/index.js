@@ -8,6 +8,7 @@ const { existsSync, readFileSync } = require('fs')
 const { join } = require('path')
 
 const { platform, arch } = process
+const { optionalDependencies = {} } = require('./package.json')
 
 let nativeBinding = null
 let localFileExisted = false
@@ -304,6 +305,19 @@ switch (platform) {
 }
 
 if (!nativeBinding) {
+  if (loadError && loadError.code === 'MODULE_NOT_FOUND') {
+    const missingPackage = loadError.message.match(
+      /['"](rookie-cookies-[^'"]+)['"]/
+    )
+    if (
+      missingPackage &&
+      !Object.prototype.hasOwnProperty.call(optionalDependencies, missingPackage[1])
+    ) {
+      throw new Error(
+        `No prebuilt rookie-cookies binding is published for ${platform}-${arch}; build the Node binding from source or use a supported platform`
+      )
+    }
+  }
   if (loadError) {
     throw loadError
   }
@@ -311,6 +325,14 @@ if (!nativeBinding) {
 }
 
 const { version, anyBrowser, firefox, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding
+
+function unsupportedPlatform(name, supportedPlatform) {
+  return () => {
+    throw new Error(
+      `${name} is only available on ${supportedPlatform}; current platform is ${platform}`
+    )
+  }
+}
 
 module.exports.version = version
 module.exports.anyBrowser = anyBrowser
@@ -327,7 +349,7 @@ module.exports.chromium = chromium
 module.exports.vivaldi = vivaldi
 module.exports.firefoxBased = firefoxBased
 module.exports.load = load
-module.exports.octoBrowser = octoBrowser
-module.exports.internetExplorer = internetExplorer
-module.exports.safari = safari
+module.exports.octoBrowser = octoBrowser || unsupportedPlatform('octoBrowser', 'Windows')
+module.exports.internetExplorer = internetExplorer || unsupportedPlatform('internetExplorer', 'Windows')
+module.exports.safari = safari || unsupportedPlatform('safari', 'macOS')
 module.exports.chromiumBased = chromiumBased

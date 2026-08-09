@@ -40,8 +40,10 @@ and construct the cookies manually,
 but you must execute it while the specific domain it opened.
 
 ```python
-import rookie_cookies
+import json
 from datetime import datetime, timezone, timedelta
+
+import rookie_cookies
 
 def create_js_code(cookies):
     expires = datetime.now(timezone.utc)
@@ -53,7 +55,8 @@ def create_js_code(cookies):
         name = cookie.get("name", "")
         value = cookie.get("value", "")
         if name and value:
-            js_code += f'document.cookie = "{name}={value};expires={expires};"\n'
+            assignment = f"{name}={value};expires={expires};"
+            js_code += f"document.cookie = {json.dumps(assignment)};\n"
     js_code += 'location.reload()\n'
     return js_code
 

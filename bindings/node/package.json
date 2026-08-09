@@ -25,8 +25,12 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
+    "postartifacts": "node scripts/patch-loader.js",
     "build": "napi build --platform --release",
+    "postbuild": "node scripts/patch-loader.js",
     "build:debug": "napi build --platform",
+    "postbuild:debug": "node scripts/patch-loader.js",
+    "prepack": "node scripts/patch-loader.js",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "ava",
     "universal": "napi universal",
@@ -38,6 +42,6 @@
     "rookie-cookies-linux-x64-gnu": "0.0.0",
     "rookie-cookies-win32-x64-msvc": "0.0.0"
   },
-  "repository": "https://github.com/teng-lin/rookie-cookies",
+  "repository": "https://github.com/teng-lin/rookie",
   "description": "Load cookies from any browser on any platform"
 }

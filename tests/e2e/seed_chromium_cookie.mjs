@@ -1,7 +1,6 @@
 // Launches a real Chromium-family browser via Playwright, navigates to the
 // cookie-seeding URL, and closes — leaving a persistent profile that
 // rookie-cookies' tests extract from.
-// tests then extract from.
 //
 // Usage:
 //   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url>

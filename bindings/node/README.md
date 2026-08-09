@@ -1,7 +1,7 @@
 # rookie-cookies
 
 Extract cookies from web browsers
-Bindings for [rookie-cookies](https://github.com/teng-lin/rookie-cookies)
+Bindings for [rookie-cookies](https://github.com/teng-lin/rookie)
 
 ## Usage
 
