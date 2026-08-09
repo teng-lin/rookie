@@ -1,4 +1,4 @@
-// Assert that @rookie-rs/api extracts the seeded `rookie_ci=bar` cookie
+// Assert that rookie-cookies extracts the seeded `rookie_ci=bar` cookie
 // from the Firefox profile just seeded.
 //
 // Env vars:
@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
-import * as rookie from "../../bindings/node/index.js";
+import * as rookieCookies from "../../bindings/node/index.js";
 
 const profileDir = process.env.ROOKIE_E2E_FIREFOX_PROFILE;
 if (!profileDir) {
@@ -24,7 +24,7 @@ if (!existsSync(dbPath)) {
   process.exit(1);
 }
 
-const cookies = rookie.firefoxBased(dbPath, [domain]);
+const cookies = rookieCookies.firefoxBased(dbPath, [domain]);
 
 const seeded = cookies.find((c) => c.name === "rookie_ci");
 if (!seeded) {
@@ -39,5 +39,5 @@ if (seeded.value !== "bar") {
 }
 
 console.log(
-  `@rookie-rs/api (${process.platform}, firefox): rookie_ci=bar verified (${cookies.length} cookies for ${domain})`,
+  `rookie-cookies (${process.platform}, firefox): rookie_ci=bar verified (${cookies.length} cookies for ${domain})`,
 );

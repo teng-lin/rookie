@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .ok_or("usage: from_path <cookies.sqlite>")?
     .into();
 
-  let cookies = rookie::firefox_based(db_path, None)?;
+  let cookies = rookie_cookies::firefox_based(db_path, None)?;
   for cookie in cookies {
     println!("{:?}", cookie);
   }

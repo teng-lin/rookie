@@ -1,6 +1,6 @@
 import requests
 import re
-from rookiepy import brave, to_cookiejar
+from rookie_cookies import brave, to_cookiejar
 
 def extract_username(html):
     re_pattern = r'<meta name="user-login" content="(.+)">'

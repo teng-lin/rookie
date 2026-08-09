@@ -1,11 +1,11 @@
 // Launches Firefox via Playwright, navigates to the cookie-seeding URL,
-// and closes — leaving a persistent profile that rookie's tests extract from.
+// and closes — leaving a persistent profile that rookie-cookies' tests extract from.
 //
 // Usage:
 //   node tests/e2e/seed_firefox_cookie.mjs <user-data-dir> <url>
 //
 // Firefox stores cookies unencrypted in <user-data-dir>/cookies.sqlite, so no
-// keyring / Keychain / DPAPI dance is needed on any platform — rookie reads
+// keyring / Keychain / DPAPI dance is needed on any platform — rookie-cookies reads
 // the SQLite directly.
 
 import { firefox } from "playwright";

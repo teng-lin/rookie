@@ -1,6 +1,6 @@
 {
   "type": "module",
   "dependencies": {
-    "@rookie-rs/api": "file:../../bindings/node"
+    "rookie-cookies": "file:../../bindings/node"
   }
 }

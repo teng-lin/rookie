@@ -1,8 +1,8 @@
-import rookie from "@rookie-rs/api";
+import rookieCookies from "rookie-cookies";
 
 function createHeaders() {
   // Get all Github cookies from all browsers
-  const cookies = rookie.load(["github.com"]);
+  const cookies = rookieCookies.load(["github.com"]);
   // Create cookie header
   const cookie = cookies
     .map((c) => decodeURIComponent(`${c.name}=${c.value}`))

@@ -1,15 +1,15 @@
 use pyo3::{prelude::*, types::PyDict};
-use rookie::enums::Cookie;
+use rookie_core::enums::Cookie;
 mod browsers;
 use browsers::*;
 
 #[pyfunction]
 fn version() -> PyResult<String> {
-  Ok(rookie::version())
+  Ok(rookie_core::version())
 }
 
 #[pymodule]
-fn rookiepy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   pyo3_log::init();
   m.add_function(wrap_pyfunction!(firefox, m)?)?;
   m.add_function(wrap_pyfunction!(zen, m)?)?;

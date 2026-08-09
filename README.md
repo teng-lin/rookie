@@ -1,13 +1,13 @@
-# rookie
+# rookie-cookies
 
-`rookie` is a maintained fork of the original [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) project. It extracts browser cookies through Rust, Python, and Node.js bindings.
+`rookie-cookies` is a maintained fork of the original [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) project. It extracts browser cookies through Rust, Python, and Node.js bindings under one shared package name.
 
 This fork exists because the original repository is archived. Its immediate downstream consumer is [`notebooklm-py`](https://github.com/teng-lin/notebooklm-py), which uses the Python binding for optional browser-cookie authentication.
 
-[![Python](https://img.shields.io/pypi/pyversions/rookiepy?logo=python)](https://pypi.org/project/rookiepy/)
-[![PyPI](https://img.shields.io/pypi/v/rookiepy?logo=python)](https://pypi.org/project/rookiepy/)
-[![Rust](https://img.shields.io/crates/v/rookie?logo=rust)](https://crates.io/crates/rookie/)
-[![License](https://img.shields.io/github/license/teng-lin/rookie?logo=license)](MIT-LICENSE.txt)
+[![Python](https://img.shields.io/pypi/pyversions/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
+[![PyPI](https://img.shields.io/pypi/v/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
+[![Rust](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
+[![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](MIT-LICENSE.txt)
 
 ## What is maintained here
 
@@ -33,29 +33,29 @@ Only use this software with browser profiles and accounts you are authorized to 
 Install the Python binding:
 
 ```console
-pip install rookiepy
+pip install rookie-cookies
 ```
 
 Use it to load cookies from a browser:
 
 ```python
-import rookiepy
+import rookie_cookies
 
-cookies = rookiepy.chrome(["example.com"])
+cookies = rookie_cookies.chrome(["example.com"])
 for cookie in cookies:
     print(cookie["domain"], cookie["name"])
 ```
 
-The binding supports CPython 3.11–3.14. The published wheel uses Python's stable `abi3` interface, so one wheel can serve multiple supported CPython versions on each platform.
+The binding is tested on CPython 3.11–3.14. The published wheel uses Python's stable `abi3` interface, so one wheel can serve multiple supported CPython versions on each platform.
 
 ## Rust
 
 ```console
-cargo add rookie
+cargo add rookie-cookies
 ```
 
 ```rust
-use rookie::chrome;
+use rookie_cookies::chrome;
 
 fn main() -> anyhow::Result<()> {
     let cookies = chrome(Some(vec!["example.com".to_string()]))?;
@@ -69,11 +69,11 @@ fn main() -> anyhow::Result<()> {
 ## Node.js
 
 ```console
-npm install @rookie-rs/api
+npm install rookie-cookies
 ```
 
 ```javascript
-import { chrome } from "@rookie-rs/api";
+import { chrome } from "rookie-cookies";
 
 const cookies = chrome(["example.com"]);
 console.log(cookies);
@@ -129,7 +129,7 @@ Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/work
 
 ## Contributing
 
-Please open issues and pull requests in [this maintained fork](https://github.com/teng-lin/rookie). Include the operating system, browser/version, language binding, and whether the browser was running when the failure occurred. Never include real cookie values or browser databases in an issue.
+Please open issues and pull requests in [this maintained fork](https://github.com/teng-lin/rookie-cookies). Include the operating system, browser/version, language binding, and whether the browser was running when the failure occurred. Never include real cookie values or browser databases in an issue.
 
 The project is released under the MIT license. See [MIT-LICENSE.txt](MIT-LICENSE.txt).
 

@@ -1,4 +1,4 @@
-name: Test rookie-rs
+name: Test rookie-cookies
 
 on:
   pull_request:

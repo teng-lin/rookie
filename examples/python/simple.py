@@ -1,5 +1,5 @@
 
-import rookiepy
+import rookie_cookies
 
-cookies = rookiepy.chrome()
+cookies = rookie_cookies.chrome()
 print(cookies)

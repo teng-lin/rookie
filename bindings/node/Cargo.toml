@@ -1,6 +1,6 @@
 [package]
 edition = "2021"
-name = "thewh1teagle_rookie"
+name = "rookie-cookies-node"
 version = "0.5.6"
 
 [lib]
@@ -13,12 +13,12 @@ napi-derive = "2.12.2"
 
 
 [target.'cfg(windows)'.dependencies]
-rookie = { path = "../../rookie-rs", version = "0.5.6", features = [
+rookie-cookies = { path = "../../rookie-rs", version = "0.5.6", features = [
   "appbound",
 ] }
 
 [target.'cfg(unix)'.dependencies]
-rookie = { path = "../../rookie-rs", version = "0.5.6" }
+rookie-cookies = { path = "../../rookie-rs", version = "0.5.6" }
 
 [build-dependencies]
 napi-build = "2.0.1"

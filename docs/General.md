@@ -15,7 +15,8 @@ You can grant full disk access through `System Settings` -> Search for `Full dis
 
 ## Using on Unsupported platforms
 
-To use rookie on other platforms for instance on `Android`,  
+To use rookie-cookies on other platforms, for instance on `Android`:
+
 Copy the Cookies file from the mobile phone, you can search using
 
 ```shell
@@ -25,12 +26,12 @@ find /data/data -type f -name Cookies
 And pull the Cookies file you want and then execute `CLI` on that file
 
 ```shell
-./cli --path <Cookies path>
+rookie-cookies --path <Cookies path>
 ```
 
 ## Manually import website cookies
 
-To import cookies from rookiepy into the browser,
+To import cookies from rookie_cookies into the browser,
 
 you can execute short javascript code in the browser console
 
@@ -39,7 +40,7 @@ and construct the cookies manually,
 but you must execute it while the specific domain it opened.
 
 ```python
-import rookiepy
+import rookie_cookies
 from datetime import datetime, timezone, timedelta
 
 def create_js_code(cookies):
@@ -56,7 +57,7 @@ def create_js_code(cookies):
     js_code += 'location.reload()\n'
     return js_code
 
-cookies = rookiepy.brave(["github.com"])
+cookies = rookie_cookies.brave(["github.com"])
 print(create_js_code(cookies))
 ```
 

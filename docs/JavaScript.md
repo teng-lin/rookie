@@ -1,14 +1,14 @@
-# Rookie JavaScript Docs
+# rookie-cookies JavaScript Docs
 
 ## Install
 
 ```typescript
-npm install @rookie-rs/api
+npm install rookie-cookies
 ```
 
 ## Basic Usage
 
 ```js
-import { brave } from "@rookie/api";
+import { brave } from "rookie-cookies";
 const cookies = brave();
 ```

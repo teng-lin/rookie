@@ -1,7 +1,7 @@
 """Minimal local HTTP server used by e2e tests.
 
 Listens on 127.0.0.1:8765. Every GET returns 200 OK with a `Set-Cookie`
-that the e2e tests grep for after extracting cookies via rookie.
+that the e2e tests grep for after extracting cookies via rookie-cookies.
 
 Run from the workspace root: `python3 tests/e2e/cookie_server.py`.
 """

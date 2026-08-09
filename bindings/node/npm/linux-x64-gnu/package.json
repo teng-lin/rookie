@@ -1,5 +1,5 @@
 {
-  "name": "@rookie-rs/api-linux-x64-gnu",
+  "name": "rookie-cookies-linux-x64-gnu",
   "version": "0.0.1-beta.0",
   "os": [
     "linux"
@@ -7,16 +7,16 @@
   "cpu": [
     "x64"
   ],
-  "main": "rookie.linux-x64-gnu.node",
+  "main": "rookie_cookies.linux-x64-gnu.node",
   "files": [
-    "rookie.linux-x64-gnu.node"
+    "rookie_cookies.linux-x64-gnu.node"
   ],
   "description": "Load cookies from any browser on any platform",
   "license": "MIT",
   "engines": {
     "node": ">= 10"
   },
-  "repository": "https://github.com/thewh1teagle/rookie",
+  "repository": "https://github.com/teng-lin/rookie-cookies",
   "libc": [
     "glibc"
   ]

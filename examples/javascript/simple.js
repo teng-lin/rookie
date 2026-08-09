@@ -1,5 +1,5 @@
-import rookie from "@rookie-rs/api";
+import rookieCookies from "rookie-cookies";
 
-for (const cookie of rookie.brave()) {
+for (const cookie of rookieCookies.brave()) {
   console.log(cookie);
 }

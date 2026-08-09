@@ -1,17 +1,17 @@
 [package]
-name = "rookie"
+name = "rookie-cookies"
 version = "0.5.6"
 edition = "2021"
 description = "Load cookie from your web browsers"
 license-file = "../MIT-LICENSE.txt"
-homepage = "https://crates.io/crates/rookie"
-documentation = "https://docs.rs/rookie/"
-repository = "https://github.com/thewh1teagle/rookie"
+homepage = "https://crates.io/crates/rookie-cookies"
+documentation = "https://docs.rs/rookie-cookies/"
+repository = "https://github.com/teng-lin/rookie-cookies"
 readme = "../README.md"
 keywords = ["windows", "cookies", "rust", "web"]
 
 [lib]
-name = "rookie"
+name = "rookie_cookies"
 path = "src/lib.rs"
 
 
