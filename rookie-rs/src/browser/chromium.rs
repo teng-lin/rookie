@@ -205,7 +205,9 @@ fn decrypt_encrypted_value(
   encrypted_value: &[u8],
   keys: Vec<Vec<u8>>,
 ) -> Result<String> {
-  let key_type = &encrypted_value[..3];
+  let Some(key_type) = encrypted_value.get(..3) else {
+    return Ok(value);
+  };
   if !value.is_empty() || !(key_type == b"v11" || key_type == b"v10" || key_type == b"v20") {
     // unknown key_type or value isn't encrypted
     log::warn!("Unknown key type: {:?}", key_type);
@@ -253,7 +255,9 @@ fn decrypt_encrypted_value(
   if encrypted_value.is_empty() {
     return Ok("".into());
   }
-  let key_type = &encrypted_value[..3];
+  let Some(key_type) = encrypted_value.get(..3) else {
+    return Ok(value);
+  };
 
   if !(key_type == b"v11" || key_type == b"v10" || key_type == b"v20") {
     return Ok(value);
@@ -609,5 +613,12 @@ mod tests {
     let cookies = query_cookies(vec![], db, Some(vec!["example.com".to_string()])).expect("decode");
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn decrypt_encrypted_value_short_blob_returns_ok() {
+    let res = decrypt_encrypted_value("orig".to_string(), b"v1", vec![]).expect("should not panic");
+    assert_eq!(res, "orig");
   }
 }

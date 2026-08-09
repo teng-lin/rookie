@@ -168,7 +168,7 @@ fn parse_table<T: ByteOrder>(bs: &[u8], count: usize) -> Result<Vec<usize>> {
 
 fn slice_to(bs: &[u8], off: usize, to: usize) -> Result<&[u8]> {
   if to < off {
-    bail!("negative data length: {}", to - off)
+    bail!("negative data length: -{}", off - to)
   } else {
     slice(bs, off, to - off)
   }
@@ -187,4 +187,16 @@ fn c_str(bs: &[u8]) -> Result<String> {
     .and_then(|elements| {
       String::from_utf8(elements.to_vec()).map_err(|err| anyhow!(err.to_string()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_slice_to_negative_length() {
+    let data = b"hello world";
+    let res = slice_to(data, 10, 5);
+    assert!(res.is_err());
+  }
 }

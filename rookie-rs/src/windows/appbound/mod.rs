@@ -35,6 +35,9 @@ pub fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
   let key64 = BASE64_STANDARD.encode(key_u8);
   let mut system_decrypted = decrypt(&mut BASE64_STANDARD.decode(key64)?, true)?;
   let user_decrypted = decrypt(&mut system_decrypted, false)?;
+  if user_decrypted.len() < 61 {
+    bail!("user_decrypted payload too short");
+  }
   let key = &user_decrypted[user_decrypted.len() - 61..];
 
   // Most chrome browsers can use the system->user decrypted key directly (last 32 bytes)
