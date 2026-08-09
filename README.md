@@ -1,6 +1,5 @@
 # rookie-cookies
 
-[![Python](https://img.shields.io/pypi/pyversions/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
 [![PyPI](https://img.shields.io/pypi/v/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
 [![NPM Version](https://img.shields.io/npm/v/rookie-cookies?logo=npm&color=0076CE)](https://www.npmjs.com/package/rookie-cookies/)
 [![Rust](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
@@ -8,7 +7,6 @@
 
 
 `rookie-cookies` is a maintained fork of the original [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) project. It extracts browser cookies through Rust, Python, and Node.js bindings under one shared package name.
-
 This fork exists because the original repository is archived. Its immediate downstream consumer is [`notebooklm-py`](https://github.com/teng-lin/notebooklm-py), which uses the Python binding for optional browser-cookie authentication.
 
 ## What is maintained here
