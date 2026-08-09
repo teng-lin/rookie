@@ -27,11 +27,26 @@ Platform-specific Windows and Safari findings were source-verified in this Linux
 | `cargo test --workspace --all-targets` | **Pass** | 29 core tests and 2 CLI integration tests passed; 2 real-browser tests were ignored by default |
 | `cargo clippy --workspace --all-targets -- -D warnings` | **Fail** | `cli/src/browsers_map.rs:5`: unused `BrowserFn` |
 | `cargo package -p rookie-cookies --allow-dirty` | **Pass with warnings** | 33 files packaged and the packaged crate compiled; both external-path examples were omitted |
-| Build script with no `git` executable on `PATH` | **Fail, reproduced** | `rookie-rs/build.rs:5` panicked with OS error 2 |
+| Build script with no `git` executable on `PATH` | **Pass (Fixed in [#54](https://github.com/teng-lin/rookie-cookies/pull/54))** | `build.rs` falls back to `"unknown"` commit hash without panicking |
 | Held-WAL SQLite comparison | **Defect reproduced** | normal read returned 1 row; `mode=ro&immutable=1` returned 0 |
 | CLI redirection | **Defect reproduced** | `--load` emitted tracing and cookie output to stdout; stderr had 0 lines |
 | `RUST_LOG=debug` | **Works** | debug run emitted 83 DEBUG lines; the prior “RUST_LOG does nothing” claim is false |
 | `python3 scripts/check-release.py 0.5.7` | **Pass** | release metadata is consistent at current `HEAD` |
+
+---
+
+## Merged PR Tracking & Resolved Upstream Issues
+
+The following merged Pull Requests on `teng-lin/rookie-cookies` address verified audit items and upstream issues:
+
+| Merged PR | Local Issue | Upstream Issue / Description | Resolution & Fix Summary |
+| :--- | :--- | :--- | :--- |
+| **[#27](https://github.com/teng-lin/rookie-cookies/pull/27)** | — | **[thewh1teagle/rookie#105](https://github.com/thewh1teagle/rookie/issues/105)** | Added `readme = "README.md"` to `bindings/python/pyproject.toml` and updated release validator script `scripts/check-release.py`. |
+| **[#54](https://github.com/teng-lin/rookie-cookies/pull/54)** | **[#34](https://github.com/teng-lin/rookie-cookies/issues/34)** | **T1-7** (`build.rs` panic on missing git) | Replaced `.unwrap()` on `git` execution with pattern matching fallback to `"unknown"` commit hash. |
+| **[#53](https://github.com/teng-lin/rookie-cookies/pull/53)** | **[#35](https://github.com/teng-lin/rookie-cookies/issues/35)** | **T1-8** (Cargo.toml package `include` layout) | Moved `include = [...]` under `[package]` table in `rookie-rs/Cargo.toml` including `config.json` & `build.rs`. |
+| **[#52](https://github.com/teng-lin/rookie-cookies/pull/52)** | **[#33](https://github.com/teng-lin/rookie-cookies/issues/33)** | **T1-6** / **[thewh1teagle/rookie#34](https://github.com/thewh1teagle/rookie/issues/34)** | Computed `subdomain = domain.starts_with('.')` before prepending `#HttpOnly_` prefix in `common/format.rs`. |
+
+---
 
 ## Executive summary
 
