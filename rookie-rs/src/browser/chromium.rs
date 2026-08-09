@@ -368,6 +368,7 @@ pub(crate) fn query_cookies(
   query += ";";
 
   let mut cookies: Vec<Cookie> = vec![];
+  let mut last_decrypt_error: Option<anyhow::Error> = None;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query([])?;
 
@@ -430,6 +431,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to decrypt cookie value: {err}");
+        last_decrypt_error = Some(err);
         continue;
       }
     };
@@ -459,6 +461,11 @@ pub(crate) fn query_cookies(
       same_site,
     };
     cookies.push(cookie);
+  }
+  if cookies.is_empty() {
+    if let Some(err) = last_decrypt_error {
+      return Err(err);
+    }
   }
   Ok(cookies)
 }
@@ -781,8 +788,9 @@ mod tests {
       )
       .expect("insert row 4");
 
-    let cookies =
+    let mut cookies =
       query_cookies(vec![], db, None).expect("query_cookies should succeed despite bad rows");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
   }

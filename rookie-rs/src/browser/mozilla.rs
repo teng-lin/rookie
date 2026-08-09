@@ -573,7 +573,9 @@ mod tests {
       )
       .expect("insert row 4");
 
-    let cookies = firefox_based(db, None).expect("firefox_based should succeed despite bad rows");
+    let mut cookies =
+      firefox_based(db, None).expect("firefox_based should succeed despite bad rows");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
   }
