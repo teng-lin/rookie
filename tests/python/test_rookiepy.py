@@ -23,6 +23,10 @@ class RookiepyHelpersTest(unittest.TestCase):
     def test_version_is_nonempty_semver_string(self) -> None:
         self.assertRegex(rookiepy.version(), r"^\d+\.\d+\.\d+")
 
+    def test_all_exports_are_defined(self) -> None:
+        for name in rookiepy.__all__:
+            self.assertTrue(hasattr(rookiepy, name), name)
+
     def test_create_cookie_maps_cookie_fields(self) -> None:
         cookie = rookiepy.create_cookie(
             host=COOKIE["domain"],
@@ -41,14 +45,16 @@ class RookiepyHelpersTest(unittest.TestCase):
         self.assertEqual(cookie.value, "abc123")
         self.assertTrue(cookie.secure)
         self.assertEqual(cookie.expires, 1_700_000_000)
-        self.assertEqual(cookie._rest, {"HTTPOnly": ""})
+        self.assertTrue(cookie.has_nonstandard_attr("HTTPOnly"))
 
     def test_to_cookiejar_returns_usable_cookiejar(self) -> None:
         jar = rookiepy.to_cookiejar([COOKIE])
 
         self.assertIsInstance(jar, http.cookiejar.CookieJar)
         self.assertEqual(len(jar), 1)
-        self.assertEqual(jar._cookies[".example.test"]["/"]["session"].value, "abc123")
+        cookie = next(iter(jar))
+        self.assertEqual(cookie.name, "session")
+        self.assertEqual(cookie.value, "abc123")
 
     def test_to_netscape_serializes_cookie(self) -> None:
         output = rookiepy.to_netscape([COOKIE])
