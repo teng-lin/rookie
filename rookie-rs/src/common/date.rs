@@ -3,7 +3,7 @@ pub fn chromium_timestamp(timestamp: u64) -> Option<u64> {
     return None;
   }
   let mut timestamp = timestamp.checked_sub(11_644_473_600_000_000)?;
-  timestamp /= 1000000; // milliseconds to seconds
+  timestamp /= 1000000; // microseconds to seconds
   unix_timestamp(timestamp)
 }
 

@@ -205,6 +205,9 @@ fn decrypt_encrypted_value(
   encrypted_value: &[u8],
   keys: Vec<Vec<u8>>,
 ) -> Result<String> {
+  if encrypted_value.len() < 15 {
+    return Ok(value);
+  }
   let Some(key_type) = encrypted_value.get(..3) else {
     return Ok(value);
   };
@@ -215,9 +218,8 @@ fn decrypt_encrypted_value(
   }
   log::debug!("key type: {:?}", key_type);
 
-  let encrypted_value = &encrypted_value[3..];
-  let nonce = &encrypted_value[..12]; // iv
-  let ciphertext = &encrypted_value[12..];
+  let nonce = &encrypted_value[3..15]; // iv
+  let ciphertext = &encrypted_value[15..];
 
   // Create a new AES block cipher.
   for key in keys {
@@ -288,7 +290,12 @@ fn decrypt_encrypted_value(
         Err(_) => {
           log::debug!("Error in decode decrypt value with utf8. trying from index 32");
 
-          let decoded = String::from_utf8(plaintext[32..].to_vec()).unwrap_or_else(|_| {
+          let Some(slice) = plaintext.get(32..) else {
+            log::warn!("Plaintext too short to slice from index 32");
+            return Ok("".into());
+          };
+
+          let decoded = String::from_utf8(slice.to_vec()).unwrap_or_else(|_| {
             log::warn!("Error decoding from index 32 with UTF-8");
             "".into()
           });
@@ -620,5 +627,42 @@ mod tests {
   fn decrypt_encrypted_value_short_blob_returns_ok() {
     let res = decrypt_encrypted_value("orig".to_string(), b"v1", vec![]).expect("should not panic");
     assert_eq!(res, "orig");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn decrypt_encrypted_value_short_plaintext_returns_ok() {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let key = vec![0u8; 16];
+    let iv = [b' '; 16];
+    let cipher = Aes128CbcEnc::new((&key[..16]).into(), &iv.into());
+
+    let data = vec![0xffu8; 16];
+    let mut buf = vec![0u8; 32];
+    buf[..16].copy_from_slice(&data);
+
+    let ct = cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, 16).unwrap();
+
+    let mut encrypted_value = b"v10".to_vec();
+    encrypted_value.extend_from_slice(ct);
+
+    let res = decrypt_encrypted_value("".to_string(), &encrypted_value, vec![key])
+      .expect("should not panic");
+    assert_eq!(res, "");
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn decrypt_encrypted_value_windows_truncated_blob_returns_ok() {
+    for len in 3..15 {
+      let mut blob = b"v10".to_vec();
+      blob.resize(len, 0);
+      let res =
+        decrypt_encrypted_value("orig".to_string(), &blob, vec![]).expect("should not panic");
+      assert_eq!(res, "orig");
+    }
   }
 }

@@ -36,7 +36,10 @@ pub fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
   let mut system_decrypted = decrypt(&mut BASE64_STANDARD.decode(key64)?, true)?;
   let user_decrypted = decrypt(&mut system_decrypted, false)?;
   if user_decrypted.len() < 61 {
-    bail!("user_decrypted payload too short");
+    bail!(
+      "user_decrypted payload too short: {} bytes (expected >= 61)",
+      user_decrypted.len()
+    );
   }
   let key = &user_decrypted[user_decrypted.len() - 61..];
 
