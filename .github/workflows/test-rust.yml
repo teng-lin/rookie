@@ -8,6 +8,7 @@ on:
       - 'cli/**'
       - 'bindings/python/**'
       - 'bindings/node/**'
+      - 'tests/python/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
   push:
@@ -70,6 +71,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64]
     steps:
@@ -78,6 +80,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -89,6 +93,35 @@ jobs:
           sccache: 'true'
           manylinux: auto
           working-directory: bindings/python
+
+  python-tests:
+    name: Python module tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build and install Python module
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet maturin
+          cd bindings/python
+          ../../.venv/bin/maturin develop --release
+      - name: Run Python unit tests
+        run: .venv/bin/python -m unittest discover -s tests/python -p 'test_*.py' -v
 
   windows:
     runs-on: windows-latest

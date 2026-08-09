@@ -32,9 +32,10 @@ __all__ = [
     "vivaldi",
     "chromium_based",
     "firefox_based",
-    "to_dict", # type: ignore
-    "to_cookiejar",
     "create_cookie",
+    "to_cookiejar",
+    "to_netscape",
+    "version",
     "load",
     "any_browser"
 ]
