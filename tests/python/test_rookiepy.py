@@ -24,6 +24,10 @@ class RookiepyHelpersTest(unittest.TestCase):
         self.assertRegex(rookiepy.version(), r"^\d+\.\d+\.\d+")
 
     def test_all_exports_are_defined(self) -> None:
+        self.assertTrue(
+            {"create_cookie", "to_cookiejar", "to_netscape"}.issubset(rookiepy.__all__)
+        )
+        self.assertNotIn("to_dict", rookiepy.__all__)
         for name in rookiepy.__all__:
             self.assertTrue(hasattr(rookiepy, name), name)
 

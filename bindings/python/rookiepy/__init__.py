@@ -35,6 +35,7 @@ __all__ = [
     "create_cookie",
     "to_cookiejar",
     "to_netscape",
+    "version",
     "load",
     "any_browser"
 ]
