@@ -7,7 +7,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/lint-cli.yml"
-      - "rookie-rs/src/**"
+      - ".github/workflows/lint.yml"
+      - "rookie-rs/**"
   workflow_dispatch:
 
 env:
@@ -50,3 +51,15 @@ jobs:
 
       - name: run Clippy
         run: cargo clippy --manifest-path Cargo.toml --all-targets -- -D warnings
+
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify cargo package
+        run: cargo package -p rookie-cookies --allow-dirty --list

@@ -7,6 +7,7 @@ include = [
     "Cargo.lock",
     "../MIT-LICENSE.txt",
     "../README.md",
+    "../examples/**/*",
 ]
 name = "rookie-cookies"
 version = "0.5.7"
