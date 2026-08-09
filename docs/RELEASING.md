@@ -17,6 +17,11 @@ Create a protected GitHub Actions environment named `release`. Requiring a
 reviewer for this environment adds a final confirmation before any registry
 write.
 
+Create a repository tag ruleset for `v*` release tags. Block updates and
+deletion, and restrict tag creation to authorized release maintainers. The
+workflows verify the tag name and package version, while the ruleset keeps that
+reviewed tag commit immutable between creation and manual dispatch.
+
 Configure these credentials without committing or pasting their values into an
 issue, pull request, or workflow log:
 

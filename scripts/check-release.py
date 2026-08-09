@@ -66,62 +66,6 @@ def main() -> int:
     node_lock = load_json("bindings/node/package-lock.json")
     javascript_lock = load_json("examples/javascript/package-lock.json")
 
-    versions: list[tuple[str, str]] = [
-        ("rookie-rs/Cargo.toml package", core["package"]["version"]),
-        ("rookie-rs/config.json", config["version"]),
-        ("cli/Cargo.toml package", cli["package"]["version"]),
-        (
-            "cli/Cargo.toml rookie-cookies dependency",
-            cli["dependencies"]["rookie-cookies"]["version"],
-        ),
-        ("bindings/python/Cargo.toml package", python["package"]["version"]),
-        ("bindings/node/Cargo.toml package", node["package"]["version"]),
-        ("bindings/node/package.json", node_package["version"]),
-        ("bindings/node/package-lock.json", node_lock["version"]),
-        (
-            "bindings/node/package-lock.json root package",
-            node_lock["packages"][""]["version"],
-        ),
-        (
-            "examples/rust/http/Cargo.toml rookie-cookies dependency",
-            rust_example["dependencies"]["rookie-cookies"]["version"],
-        ),
-        (
-            "examples/javascript/package-lock.json linked package",
-            javascript_lock["packages"]["../../bindings/node"]["version"],
-        ),
-    ]
-    for package_name in NATIVE_PACKAGES:
-        package_path = f"bindings/node/npm/{package_name.removeprefix('rookie-cookies-')}/package.json"
-        package = load_json(package_path)
-        versions.extend(
-            (
-                (f"{package_path} package", package["version"]),
-                (
-                    f"bindings/node/package.json optional dependency {package_name}",
-                    node_package["optionalDependencies"][package_name],
-                ),
-                (
-                    f"bindings/node/package-lock.json optional dependency {package_name}",
-                    node_lock["packages"][""]["optionalDependencies"][package_name],
-                ),
-            )
-        )
-    versions.extend(
-        (
-            f"bindings/python/Cargo.toml {target} rookie-core dependency",
-            version,
-        )
-        for target, version in target_dependency_versions(python, "rookie-core")
-    )
-    versions.extend(
-        (
-            f"bindings/node/Cargo.toml {target} rookie-cookies dependency",
-            version,
-        )
-        for target, version in target_dependency_versions(node, "rookie-cookies")
-    )
-
     metadata: list[tuple[str, str, str]] = [
         (
             "rookie-rs/Cargo.toml package name",
@@ -165,28 +109,67 @@ def main() -> int:
             CANONICAL_REPOSITORY,
         ),
     ]
+    versions: list[tuple[str, str]] = [
+        ("rookie-rs/Cargo.toml package", core["package"]["version"]),
+        ("rookie-rs/config.json", config["version"]),
+        ("cli/Cargo.toml package", cli["package"]["version"]),
+        (
+            "cli/Cargo.toml rookie-cookies dependency",
+            cli["dependencies"]["rookie-cookies"]["version"],
+        ),
+        ("bindings/python/Cargo.toml package", python["package"]["version"]),
+        ("bindings/node/Cargo.toml package", node["package"]["version"]),
+        ("bindings/node/package.json", node_package["version"]),
+        ("bindings/node/package-lock.json", node_lock["version"]),
+        (
+            "bindings/node/package-lock.json root package",
+            node_lock["packages"][""]["version"],
+        ),
+        (
+            "examples/rust/http/Cargo.toml rookie-cookies dependency",
+            rust_example["dependencies"]["rookie-cookies"]["version"],
+        ),
+        (
+            "examples/javascript/package-lock.json linked package",
+            javascript_lock["packages"]["../../bindings/node"]["version"],
+        ),
+    ]
     for package_name in NATIVE_PACKAGES:
-        package_path = (
-            ROOT
-            / "bindings/node/npm"
-            / package_name.removeprefix("rookie-cookies-")
-            / "package.json"
-        )
-        package = load_json(str(package_path.relative_to(ROOT)))
-        metadata.append(
+        package_path = f"bindings/node/npm/{package_name.removeprefix('rookie-cookies-')}/package.json"
+        package = load_json(package_path)
+        versions.extend(
             (
-                str(package_path.relative_to(ROOT)),
-                package["repository"],
-                CANONICAL_REPOSITORY,
+                (f"{package_path} package", package["version"]),
+                (
+                    f"bindings/node/package.json optional dependency {package_name}",
+                    node_package["optionalDependencies"][package_name],
+                ),
+                (
+                    f"bindings/node/package-lock.json optional dependency {package_name}",
+                    node_lock["packages"][""]["optionalDependencies"][package_name],
+                ),
             )
         )
-        metadata.append(
+        metadata.extend(
             (
-                f"{package_path.relative_to(ROOT)} package name",
-                package["name"],
-                package_name,
+                (package_path, package["repository"], CANONICAL_REPOSITORY),
+                (f"{package_path} package name", package["name"], package_name),
             )
         )
+    versions.extend(
+        (
+            f"bindings/python/Cargo.toml {target} rookie-core dependency",
+            version,
+        )
+        for target, version in target_dependency_versions(python, "rookie-core")
+    )
+    versions.extend(
+        (
+            f"bindings/node/Cargo.toml {target} rookie-cookies dependency",
+            version,
+        )
+        for target, version in target_dependency_versions(node, "rookie-cookies")
+    )
 
     failures = [
         f"{label}: expected {expected}, found {actual}"
