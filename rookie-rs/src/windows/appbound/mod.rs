@@ -13,15 +13,8 @@ use aes_gcm::{
 mod impersonate;
 
 fn decrypt(key: &mut [u8], as_system: bool) -> Result<Vec<u8>> {
-  let mut handle = None;
-  if as_system {
-    handle = Some(impersonate::start_impersonate()?);
-  }
-  let result = crate::windows::dpapi::decrypt(key)?;
-  if let Some(handle) = handle {
-    impersonate::stop_impersonate(handle)?;
-  }
-  Ok(result)
+  let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
+  crate::windows::dpapi::decrypt(key)
 }
 
 pub fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {

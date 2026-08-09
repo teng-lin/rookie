@@ -114,50 +114,74 @@ fn get_process_handle(pid: u32) -> Result<HANDLE> {
   }
 }
 
-fn close_handle(handle: HANDLE) -> Result<()> {
-  unsafe { CloseHandle(handle)? };
-  Ok(())
+struct HandleGuard(HANDLE);
+
+impl HandleGuard {
+  fn into_inner(mut self) -> HANDLE {
+    let handle = self.0;
+    self.0 = HANDLE::default();
+    handle
+  }
+}
+
+impl Drop for HandleGuard {
+  fn drop(&mut self) {
+    if !self.0.is_invalid() {
+      unsafe {
+        let _ = CloseHandle(self.0);
+      }
+    }
+  }
 }
 
 fn get_system_token(lsass_handle: HANDLE) -> Result<HANDLE> {
-  let mut token_handle = HANDLE::default();
+  let mut token_handle = HandleGuard(HANDLE::default());
   unsafe {
     OpenProcessToken(
       lsass_handle,
       TOKEN_DUPLICATE | TOKEN_QUERY,
-      &mut token_handle,
+      &mut token_handle.0,
     )?;
   }
 
-  let mut duplicate_token = HANDLE::default();
+  let mut duplicate_token = HandleGuard(HANDLE::default());
   unsafe {
     DuplicateToken(
-      token_handle,
+      token_handle.0,
       windows::Win32::Security::SECURITY_IMPERSONATION_LEVEL(2), // win32security.SecurityImpersonation
-      &mut duplicate_token,
+      &mut duplicate_token.0,
     )?;
-    CloseHandle(token_handle)?;
   }
 
-  Ok(duplicate_token)
+  Ok(duplicate_token.into_inner())
 }
 
-pub fn start_impersonate() -> Result<HANDLE> {
+pub struct ImpersonationGuard {
+  duplicated_token: HANDLE,
+}
+
+impl Drop for ImpersonationGuard {
+  fn drop(&mut self) {
+    unsafe {
+      if let Err(err) = RevertToSelf() {
+        log::warn!("Failed to revert SYSTEM impersonation: {err}");
+      }
+      if let Err(err) = CloseHandle(self.duplicated_token) {
+        log::warn!("Failed to close SYSTEM impersonation token: {err}");
+      }
+    }
+  }
+}
+
+pub fn start_impersonate() -> Result<ImpersonationGuard> {
   enable_privilege()?;
   let pid = get_system_process_pid()?;
-  let lsass_handle = get_process_handle(pid)?;
-  let duplicated_token = get_system_token(lsass_handle)?;
-  close_handle(lsass_handle)?;
+  let lsass_handle = HandleGuard(get_process_handle(pid)?);
+  let duplicated_token = HandleGuard(get_system_token(lsass_handle.0)?);
   unsafe {
-    ImpersonateLoggedOnUser(duplicated_token)?;
+    ImpersonateLoggedOnUser(duplicated_token.0)?;
   }
-  Ok(duplicated_token)
-}
-
-pub fn stop_impersonate(duplicated_token: HANDLE) -> Result<()> {
-  unsafe {
-    CloseHandle(duplicated_token)?;
-    RevertToSelf()?;
-  }
-  Ok(())
+  Ok(ImpersonationGuard {
+    duplicated_token: duplicated_token.into_inner(),
+  })
 }
