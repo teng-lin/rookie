@@ -35,24 +35,66 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   let mut rows = stmt.query([])?;
 
   while let Some(row) = rows.next()? {
-    let host: Result<String, _> = row.get(0);
-    if host.is_err() {
-      // ignore null rows
-      log::warn!("host is NULL in row");
-      continue;
-    }
-    let host = host?;
-    let path: String = row.get(1)?;
-    let is_secure: bool = row.get(2)?;
-    let expires: u64 = row.get(3)?;
+    let host: String = match row.get(0) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read host from row: {err}");
+        continue;
+      }
+    };
+    let path: String = match row.get(1) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read path from row: {err}");
+        continue;
+      }
+    };
+    let is_secure: bool = match row.get(2) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read isSecure from row: {err}");
+        continue;
+      }
+    };
+    let expires: u64 = match row.get(3) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read expiry from row: {err}");
+        continue;
+      }
+    };
     let expires = date::mozilla_timestamp(expires);
 
-    let name: String = row.get(4)?;
+    let name: String = match row.get(4) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read name from row: {err}");
+        continue;
+      }
+    };
 
-    let value: String = row.get(5)?;
-    let http_only: bool = row.get(6)?;
+    let value: String = match row.get(5) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read value from row: {err}");
+        continue;
+      }
+    };
+    let http_only: bool = match row.get(6) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read isHttpOnly from row: {err}");
+        continue;
+      }
+    };
 
-    let same_site: i64 = row.get(7)?;
+    let same_site: i64 = match row.get(7) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read sameSite from row: {err}");
+        continue;
+      }
+    };
     let cookie = Cookie {
       domain: host.to_string(),
       path: path.to_string(),
@@ -476,5 +518,63 @@ mod tests {
     std::fs::write(backups.join("recovery.jsonlz4"), b"BADMAGICthis-is-garbage").unwrap();
     let result = get_session_cookies_lz4(None, dir);
     assert!(result.is_err(), "expected Err for invalid magic header");
+  }
+
+  #[test]
+  fn firefox_based_ignores_malformed_and_blob_rows() {
+    let dir = unique_tmpdir("ff-malformed-rows");
+    let db = dir.join("cookies.sqlite");
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "CREATE TABLE moz_cookies (
+          host TEXT NOT NULL,
+          path TEXT NOT NULL,
+          isSecure INTEGER NOT NULL,
+          expiry INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          isHttpOnly INTEGER NOT NULL,
+          sameSite INTEGER NOT NULL
+        )",
+        [],
+      )
+      .expect("create table");
+
+    // Row 1: Valid row
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 1700000000, 'valid1', 'abc', 1, 1)",
+        [],
+      )
+      .expect("insert row 1");
+
+    // Row 2: Negative expiry (u64 decoding error)
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, -1, 'bad_expiry', 'abc', 1, 1)",
+        [],
+      )
+      .expect("insert row 2");
+
+    // Row 3: BLOB value column (String decoding error)
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 1700000000, 'bad_blob_val', X'DEADBEEF', 1, 1)",
+        [],
+      )
+      .expect("insert row 3");
+
+    // Row 4: Valid row 2
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES ('foo.test', '/path', 1, 1700000000, 'valid2', 'xyz', 0, 2)",
+        [],
+      )
+      .expect("insert row 4");
+
+    let cookies = firefox_based(db, None).expect("firefox_based should succeed despite bad rows");
+    let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
   }
 }

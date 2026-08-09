@@ -372,22 +372,82 @@ pub(crate) fn query_cookies(
   let mut rows = stmt.query([])?;
 
   while let Some(row) = rows.next()? {
-    let host_key: String = row.get(0)?;
-    let path: String = row.get(1)?;
-    let is_secure: bool = row.get(2)?;
-    let expires: u64 = row.get(3)?;
+    let host_key: String = match row.get(0) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read host_key from row: {err}");
+        continue;
+      }
+    };
+    let path: String = match row.get(1) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read path from row: {err}");
+        continue;
+      }
+    };
+    let is_secure: bool = match row.get(2) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read is_secure from row: {err}");
+        continue;
+      }
+    };
+    let expires: u64 = match row.get(3) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read expires_utc from row: {err}");
+        continue;
+      }
+    };
     let expires = date::chromium_timestamp(expires);
-    let name: String = row.get(4)?;
+    let name: String = match row.get(4) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read name from row: {err}");
+        continue;
+      }
+    };
 
-    let value: String = row.get(5)?;
-    let encrypted_value: Vec<u8> = row.get(6)?;
+    let value: String = match row.get(5) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read value from row: {err}");
+        continue;
+      }
+    };
+    let encrypted_value: Vec<u8> = match row.get(6) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read encrypted_value from row: {err}");
+        continue;
+      }
+    };
     if encrypted_value.is_empty() {
       continue;
     }
-    let decrypted_value = decrypt_encrypted_value(value, &encrypted_value, keys.to_owned())?;
-    let http_only: bool = row.get(7)?;
+    let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, keys.to_owned()) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to decrypt cookie value: {err}");
+        continue;
+      }
+    };
+    let http_only: bool = match row.get(7) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read is_httponly from row: {err}");
+        continue;
+      }
+    };
 
-    let same_site: i64 = row.get(8)?;
+    let same_site: i64 = match row.get(8) {
+      Ok(val) => val,
+      Err(err) => {
+        log::warn!("Failed to read samesite from row: {err}");
+        continue;
+      }
+    };
     let cookie = Cookie {
       domain: host_key.to_string(),
       path: path.to_string(),
@@ -664,5 +724,66 @@ mod tests {
         decrypt_encrypted_value("orig".to_string(), &blob, vec![]).expect("should not panic");
       assert_eq!(res, "orig");
     }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn query_cookies_ignores_malformed_and_undecryptable_rows() {
+    let dir = unique_tmpdir("chr-malformed-rows");
+    let db = dir.join("Cookies");
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "CREATE TABLE cookies (
+          host_key TEXT NOT NULL,
+          path TEXT NOT NULL,
+          is_secure INTEGER NOT NULL,
+          expires_utc INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          encrypted_value BLOB,
+          is_httponly INTEGER NOT NULL,
+          samesite INTEGER NOT NULL
+        )",
+        [],
+      )
+      .expect("create table");
+
+    // Row 1: Valid row
+    conn
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 1, 11644473600000000, 'valid1', 'val1', X'76313064756d6d79', 1, 1)",
+        [],
+      )
+      .expect("insert row 1");
+
+    // Row 2: Malformed row with negative expires_utc (fails u64 decoding)
+    conn
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 1, -100, 'bad_expiry', 'val', X'76313064756d6d79', 1, 1)",
+        [],
+      )
+      .expect("insert row 2");
+
+    // Row 3: Undecryptable row (encrypted_value starts with v10 but fails decryption)
+    conn
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 1, 11644473600000000, 'undecryptable', '', X'763130696e76616c6964', 1, 1)",
+        [],
+      )
+      .expect("insert row 3");
+
+    // Row 4: Valid row 2
+    conn
+      .execute(
+        "INSERT INTO cookies VALUES ('.test.com', '/', 0, 11644473600000000, 'valid2', 'val2', X'76313064756d6d79', 0, 0)",
+        [],
+      )
+      .expect("insert row 4");
+
+    let cookies =
+      query_cookies(vec![], db, None).expect("query_cookies should succeed despite bad rows");
+    let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
   }
 }
