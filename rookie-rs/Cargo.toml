@@ -1,4 +1,13 @@
 [package]
+include = [
+    "config.json",
+    "build.rs",
+    "src/**/*",
+    "Cargo.toml",
+    "Cargo.lock",
+    "../MIT-LICENSE.txt",
+    "../README.md",
+]
 name = "rookie-cookies"
 version = "0.5.7"
 edition = "2021"
