@@ -381,7 +381,7 @@ pub(crate) fn query_cookies(
 
     let value: String = row.get(5)?;
     let encrypted_value: Vec<u8> = row.get(6)?;
-    if encrypted_value.is_empty() {
+    if encrypted_value.is_empty() && value.is_empty() {
       continue;
     }
     let decrypted_value = decrypt_encrypted_value(value, &encrypted_value, keys.to_owned())?;
@@ -498,28 +498,35 @@ mod tests {
   }
 
   #[test]
-  fn query_cookies_skips_rows_with_empty_encrypted_value() {
-    let dir = unique_tmpdir("chr-skip-empty");
+  fn query_cookies_returns_plaintext_value_when_value_is_set() {
+    let dir = unique_tmpdir("chr-plaintext");
     let db = dir.join("Cookies");
-    // `query_cookies` short-circuits on empty encrypted_value via
-    // `if encrypted_value.is_empty() { continue }`, so this row is
-    // dropped even though every other column is valid.
     seed_chromium_cookies(
       &db,
       &[(
         ".example.com",
         "/",
-        false,
-        0,
-        "skip",
-        "ignored",
+        true,
+        // chromium_timestamp wants microseconds since 1601-01-01.
+        // 11_644_473_600_000_000 us == Unix epoch.
+        11_644_473_600_000_000 + 1_700_000_000 * 1_000_000,
+        "id",
+        "plain",
         b"",
-        false,
-        0,
+        true,
+        1,
       )],
     );
     let cookies = query_cookies(vec![], db, None).expect("decode");
-    assert!(cookies.is_empty(), "{:?}", cookies);
+    assert_eq!(cookies.len(), 1, "{:?}", cookies);
+    let c = &cookies[0];
+    assert_eq!(c.domain, ".example.com");
+    assert_eq!(c.name, "id");
+    assert_eq!(c.value, "plain");
+    assert!(c.http_only);
+    assert!(c.secure);
+    assert_eq!(c.same_site, 1);
+    assert_eq!(c.expires, Some(1_700_000_000));
   }
 
   #[cfg(unix)]
@@ -566,43 +573,6 @@ mod tests {
     v20.extend_from_slice(b"bar");
     let v20 = decode_chromium_plaintext(b"v20", v20).expect("v20");
     assert_eq!(v20, "bar");
-  }
-
-  // Unix-only tests: on unix `decrypt_encrypted_value` short-circuits to
-  // the plain `value` field when it's non-empty OR when the encrypted
-  // prefix isn't a known v10/v11/v20 marker. That lets us exercise the
-  // SQL → Cookie struct mapping end-to-end without a real key.
-  #[cfg(unix)]
-  #[test]
-  fn query_cookies_returns_plaintext_value_when_value_is_set() {
-    let dir = unique_tmpdir("chr-plaintext");
-    let db = dir.join("Cookies");
-    seed_chromium_cookies(
-      &db,
-      &[(
-        ".example.com",
-        "/",
-        true,
-        // chromium_timestamp wants microseconds since 1601-01-01.
-        // 11_644_473_600_000_000 us == Unix epoch.
-        11_644_473_600_000_000 + 1_700_000_000 * 1_000_000,
-        "id",
-        "plain",
-        b"v10dummy", // non-empty so the row isn't skipped
-        true,
-        1,
-      )],
-    );
-    let cookies = query_cookies(vec![], db, None).expect("decode");
-    assert_eq!(cookies.len(), 1, "{:?}", cookies);
-    let c = &cookies[0];
-    assert_eq!(c.domain, ".example.com");
-    assert_eq!(c.name, "id");
-    assert_eq!(c.value, "plain");
-    assert!(c.http_only);
-    assert!(c.secure);
-    assert_eq!(c.same_site, 1);
-    assert_eq!(c.expires, Some(1_700_000_000));
   }
 
   #[cfg(unix)]
