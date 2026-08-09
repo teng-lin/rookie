@@ -21,10 +21,12 @@ fn commit_hash() -> String {
 
 fn main() {
   let manifest_dir = env::var("CARGO_MANIFEST_DIR").map(PathBuf::from).ok();
-  
+
   let candidate_head_paths = [
     manifest_dir.as_ref().map(|d| d.join(".git").join("HEAD")),
-    manifest_dir.as_ref().map(|d| d.join("..").join(".git").join("HEAD")),
+    manifest_dir
+      .as_ref()
+      .map(|d| d.join("..").join(".git").join("HEAD")),
     Some(PathBuf::from(".git/HEAD")),
     Some(PathBuf::from("../.git/HEAD")),
   ];
