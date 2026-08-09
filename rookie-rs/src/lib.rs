@@ -538,7 +538,6 @@ pub fn any_browser(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::path::PathBuf;
   use std::sync::atomic::{AtomicU64, Ordering};
   use std::sync::Mutex;
 
