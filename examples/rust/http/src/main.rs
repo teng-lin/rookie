@@ -1,6 +1,6 @@
 use regex::Regex;
 use reqwest::blocking::Client;
-use rookie::{brave, common::enums::CookieToString};
+use rookie_cookies::{brave, common::enums::CookieToString};
 
 fn extract_username(html: &str) -> &str {
   let re = Regex::new(r#"<meta name="user-login" content="(.+)">"#).unwrap();

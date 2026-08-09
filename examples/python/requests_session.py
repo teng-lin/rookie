@@ -1,4 +1,4 @@
-import rookiepy
+import rookie_cookies
 import requests
 
 def create_session() -> requests.Session:
@@ -6,9 +6,9 @@ def create_session() -> requests.Session:
     Create requests session with cookiejar that contains web browsers cookies
     """
     # Load cookies from browser
-    cookies = rookiepy.load()
+    cookies = rookie_cookies.load()
     # Create Cookiejar from cookies
-    cj = rookiepy.to_cookiejar(cookies)
+    cj = rookie_cookies.to_cookiejar(cookies)
     # Create session
     session = requests.session()
     # Set session cookiejar

@@ -38,24 +38,26 @@ jobs:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Build
-        run: cargo build ${{ matrix.args }} --target ${{ matrix.target }} --package rookie-cli --bin rookie --release
+        run: cargo build ${{ matrix.args }} --target ${{ matrix.target }} --package rookie-cookies-cli --bin rookie-cookies --release
 
       - name: Rename Unix
-        run: mv target/${{ matrix.target }}/release/rookie rookie-cli-${{ matrix.target }}
+        run: mv target/${{ matrix.target }}/release/rookie-cookies rookie-cookies-cli-${{ matrix.target }}
         if: contains(matrix.platform, 'macos') || contains(matrix.platform, 'ubuntu')
 
       - name: Rename Windows
-        run: Move-Item target/${{ matrix.target }}/release/rookie.exe rookie-cli-${{ matrix.target }}.exe
+        run: Move-Item target/${{ matrix.target }}/release/rookie-cookies.exe rookie-cookies-cli-${{ matrix.target }}.exe
         if: contains(matrix.platform, 'windows')
 
       - name: Upload Unix
-        run: gh release upload ${{ github.event.inputs.tag }} rookie-cli-${{ matrix.target }} --clobber
+        run: gh release upload "$RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }} --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         if: contains(matrix.platform, 'macos') || contains(matrix.platform, 'ubuntu')
 
       - name: Upload Windows
-        run: gh release upload ${{ github.event.inputs.tag }} rookie-cli-${{ matrix.target }}.exe --clobber
+        run: gh release upload "$env:RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }}.exe --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         if: contains(matrix.platform, 'windows')

@@ -1,3 +1,3 @@
-# `@rookie-rs/api-darwin-arm64`
+# `rookie-cookies-darwin-arm64`
 
-This is the **aarch64-apple-darwin** binary for `@rookie-rs/api`
+This is the **aarch64-apple-darwin** binary for `rookie-cookies`

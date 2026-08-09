@@ -1,11 +1,11 @@
-"""Assert that rookiepy can extract the `rookie_ci=bar` cookie from the
+"""Assert that rookie_cookies can extract the `rookie_ci=bar` cookie from the
 Chrome profile seeded earlier in the same CI job.
 
 Driven by env vars:
   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
   ROOKIE_E2E_DOMAIN         optional — domain filter (default: 127.0.0.1)
 
-Designed to be run on Linux/macOS/Windows (rookiepy's chromium_based
+Designed to be run on Linux/macOS/Windows (rookie_cookies's chromium_based
 binding handles the per-OS crypto). On Linux this runs inside the same
 dbus-run-session as the Rust test so libsecret is reachable.
 """
@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-import rookiepy
+import rookie_cookies
 
 
 def find_cookie_db(user_data_dir: Path) -> Path:
@@ -44,9 +44,9 @@ def main() -> int:
     if sys.platform == "win32":
         # Windows binding takes (key_path, db_path, domains)
         key_path = user_data_dir / "Local State"
-        cookies = rookiepy.chromium_based(str(key_path), str(db_path), [domain])
+        cookies = rookie_cookies.chromium_based(str(key_path), str(db_path), [domain])
     else:
-        cookies = rookiepy.chromium_based(str(db_path), [domain])
+        cookies = rookie_cookies.chromium_based(str(db_path), [domain])
 
     seeded = next((c for c in cookies if c["name"] == "rookie_ci"), None)
     if seeded is None:
@@ -65,7 +65,7 @@ def main() -> int:
         return 1
 
     print(
-        f"rookiepy ({sys.platform}): "
+        f"rookie_cookies ({sys.platform}): "
         f"rookie_ci=bar verified ({len(cookies)} cookies for {domain})"
     )
     return 0

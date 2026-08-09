@@ -1,12 +1,11 @@
-"""Unit tests for rookiepy's Python-level helpers."""
+"""Unit tests for rookie_cookies's Python-level helpers."""
 
 from __future__ import annotations
 
 import http.cookiejar
 import unittest
 
-import rookiepy
-
+import rookie_cookies
 
 COOKIE = {
     "domain": ".example.test",
@@ -19,20 +18,22 @@ COOKIE = {
 }
 
 
-class RookiepyHelpersTest(unittest.TestCase):
+class RookieCookiesHelpersTest(unittest.TestCase):
     def test_version_is_nonempty_semver_string(self) -> None:
-        self.assertRegex(rookiepy.version(), r"^\d+\.\d+\.\d+")
+        self.assertRegex(rookie_cookies.version(), r"^\d+\.\d+\.\d+")
 
     def test_all_exports_are_defined(self) -> None:
         self.assertTrue(
-            {"create_cookie", "to_cookiejar", "to_netscape"}.issubset(rookiepy.__all__)
+            {"create_cookie", "to_cookiejar", "to_netscape", "zen"}.issubset(
+                rookie_cookies.__all__
+            )
         )
-        self.assertNotIn("to_dict", rookiepy.__all__)
-        for name in rookiepy.__all__:
-            self.assertTrue(hasattr(rookiepy, name), name)
+        self.assertNotIn("to_dict", rookie_cookies.__all__)
+        for name in rookie_cookies.__all__:
+            self.assertTrue(hasattr(rookie_cookies, name), name)
 
     def test_create_cookie_maps_cookie_fields(self) -> None:
-        cookie = rookiepy.create_cookie(
+        cookie = rookie_cookies.create_cookie(
             host=COOKIE["domain"],
             path=COOKIE["path"],
             secure=COOKIE["secure"],
@@ -52,7 +53,7 @@ class RookiepyHelpersTest(unittest.TestCase):
         self.assertTrue(cookie.has_nonstandard_attr("HTTPOnly"))
 
     def test_to_cookiejar_returns_usable_cookiejar(self) -> None:
-        jar = rookiepy.to_cookiejar([COOKIE])
+        jar = rookie_cookies.to_cookiejar([COOKIE])
 
         self.assertIsInstance(jar, http.cookiejar.CookieJar)
         self.assertEqual(len(jar), 1)
@@ -61,13 +62,16 @@ class RookiepyHelpersTest(unittest.TestCase):
         self.assertEqual(cookie.value, "abc123")
 
     def test_to_netscape_serializes_cookie(self) -> None:
-        output = rookiepy.to_netscape([COOKIE])
+        output = rookie_cookies.to_netscape([COOKIE])
 
         self.assertIn("# Netscape HTTP Cookie File", output)
-        self.assertIn("#HttpOnly_.example.test\tTRUE\t/\tTRUE\t1700000000\tsession\tabc123", output)
+        self.assertIn(
+            "#HttpOnly_.example.test\tTRUE\t/\tTRUE\t1700000000\tsession\tabc123",
+            output,
+        )
 
     def test_to_netscape_handles_empty_cookie_list(self) -> None:
-        output = rookiepy.to_netscape([])
+        output = rookie_cookies.to_netscape([])
 
         self.assertRegex(output, r"^# Netscape HTTP Cookie File\n")
 

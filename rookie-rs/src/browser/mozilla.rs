@@ -248,7 +248,7 @@ mod tests {
   type CookieRow<'a> = (&'a str, &'a str, bool, u64, &'a str, &'a str, bool, i64);
 
   // Minimal moz_cookies fixture mirroring the columns firefox_based reads.
-  // Real Firefox schema has more columns but rookie only selects these.
+  // Real Firefox schema has more columns, but rookie-cookies only selects these.
   fn seed_moz_cookies(db: &Path, rows: &[CookieRow<'_>]) {
     let conn = rusqlite::Connection::open(db).expect("open writable sqlite");
     conn

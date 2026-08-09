@@ -50,7 +50,7 @@ jobs:
       - name: Pre-build the e2e test binary (avoid running cargo inside dbus session)
         run: cargo test --test e2e_chrome --no-run
 
-      - name: Build and install rookiepy into a venv
+      - name: Build and install rookie-cookies into a venv
         # `maturin develop` needs an active venv. We pre-build the abi3 wheel
         # outside the dbus session so cargo's network/cache layer doesn't
         # have to negotiate with the keyring scope.
@@ -59,8 +59,8 @@ jobs:
           .venv/bin/pip install --upgrade --quiet pip maturin
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
-      - name: Pre-build the rookie CLI
-        run: cargo build -p rookie-cli --release
+      - name: Pre-build the rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
 
       - name: Build the Node binding
         # napi-rs cross-compiles to a platform-specific .node alongside
@@ -76,7 +76,7 @@ jobs:
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
           dbus-run-session -- bash -euxo pipefail <<'SH'
             # Unlock + start a session-scoped secret service so Chrome's
-            # libsecret writes land somewhere `rookie` can read them back.
+            # libsecret writes land somewhere `rookie-cookies` can read them back.
             eval "$(printf '\n' | gnome-keyring-daemon --unlock || true)"
             eval "$(gnome-keyring-daemon --start --components=secrets || true)"
             export XDG_CURRENT_DESKTOP=GNOME
@@ -146,14 +146,14 @@ jobs:
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_firefox --no-run
 
-      - name: Build and install rookiepy into a venv
+      - name: Build and install rookie-cookies into a venv
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade --quiet pip maturin
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
-      - name: Pre-build the rookie CLI
-        run: cargo build -p rookie-cli --release
+      - name: Pre-build the rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
 
       - name: Build the Node binding
         run: |
@@ -197,7 +197,7 @@ jobs:
           DB="$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
           # Rust
-          cargo run --release --example from_path -p rookie -- "$DB" \
+          cargo run --release --example from_path -p rookie-cookies -- "$DB" \
             | tee /tmp/rookie-example-rust.out
           grep 'rookie_ci' /tmp/rookie-example-rust.out
           grep '"bar"' /tmp/rookie-example-rust.out
@@ -237,14 +237,14 @@ jobs:
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_firefox --no-run
 
-      - name: Build and install rookiepy into a venv
+      - name: Build and install rookie-cookies into a venv
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade --quiet pip maturin
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
-      - name: Pre-build the rookie CLI
-        run: cargo build -p rookie-cli --release
+      - name: Pre-build the rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
 
       - name: Build the Node binding
         run: |
@@ -283,7 +283,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 25
     # Playwright keeps Chromium's --use-mock-keychain default on macOS.
-    # Chromium's fake keychain uses `mock_password`, so rookie can exercise
+    # Chromium's fake keychain uses `mock_password`, so rookie-cookies can exercise
     # Chrome cookie decryption in hosted CI without touching the real Keychain.
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
@@ -410,14 +410,14 @@ jobs:
             # AppBound key requires Chrome's elevation service to register on
             # first launch; on a fresh CI profile it sometimes isn't there,
             # so Chrome falls back to legacy DPAPI. Note it but don't fail —
-            # rookie supports both paths and the extraction below is the real
+            # rookie-cookies supports both paths and the extraction below is the real
             # signal.
             if (-not $ls.os_crypt.app_bound_encrypted_key) {
               Write-Warning "Local State has no app_bound_encrypted_key — exercising only legacy DPAPI path"
             }
             Get-ChildItem $defaultDir | Format-Table
 
-            Write-Host "Identity before rookie extraction:"
+            Write-Host "Identity before rookie-cookies extraction:"
             whoami /user
             cargo test --test e2e_chrome -- --ignored --nocapture
           } finally {

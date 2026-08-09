@@ -1,4 +1,4 @@
-from rookiepy import brave, to_cookiejar
+from rookie_cookies import brave, to_cookiejar
 
 cookies = brave()
 cj = to_cookiejar(cookies)

@@ -1,4 +1,4 @@
-from rookiepy import load
+from rookie_cookies import load
 
 cookies = load()
 for cookie in cookies:

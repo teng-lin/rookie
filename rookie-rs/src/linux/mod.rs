@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use std::{collections::HashMap, sync::Arc};
 use zbus::{blocking::Connection, zvariant::ObjectPath, zvariant::Value, Message};
 
+// Keep the legacy KWallet caller ID so existing access grants continue to work.
 pub const APP_ID: &str = "rookie";
 
 /// Get password from either kdewallet or libsecret (ubuntu)

@@ -1,4 +1,4 @@
-# Build rookie
+# Build rookie-cookies
 
 ## Prerequisites
 
@@ -13,16 +13,16 @@ sudo apt-get install -y python3-dev
 ## rookie-rs
 
 ```console
-git clone https://github.com/thewh1teagle/rookie
-cd rookie-rs
+git clone https://github.com/teng-lin/rookie rookie-cookies
+cd rookie-cookies/rookie-rs
 cargo build
 ```
 
 ## cli
 
 ```console
-git clone https://github.com/thewh1teagle/rookie
-cd cli
+git clone https://github.com/teng-lin/rookie rookie-cookies
+cd rookie-cookies/cli
 cargo build --release
 ```
 
@@ -31,8 +31,8 @@ cargo build --release
 Using [maturin](https://pyo3.rs/main/#usage):
 
 ```console
-git clone https://github.com/thewh1teagle/rookie
-cd bindings/python
+git clone https://github.com/teng-lin/rookie rookie-cookies
+cd rookie-cookies/bindings/python
 python3 -m venv venv
 source venv/bin/activate
 # Install dependencies + build + install
@@ -72,15 +72,15 @@ cargo test --workspace --doc
 ```
 
 A real-browser end-to-end suite (Ubuntu + macOS + Windows × Chrome / Firefox)
-runs under `.github/workflows/e2e.yml` and exercises rookie's Rust API, the
-Python binding (`rookiepy`), the Node binding (`@rookie-rs/api`), and the
-`rookie` CLI against the same seeded browser profile. To run a single job
+runs under `.github/workflows/e2e.yml` and exercises rookie-cookies' Rust API, the
+Python binding (`rookie-cookies`), the Node binding (`rookie-cookies`), and the
+`rookie-cookies` CLI against the same seeded browser profile. To run a single job
 locally, follow the steps in that workflow file.
 
 Python bindings can be smoke-tested after `maturin develop`:
 
 ```console
-python -c "import rookiepy; print(dir(rookiepy))"
+python -c "import rookie_cookies; print(dir(rookie_cookies))"
 ```
 
 Node bindings can be smoke-tested after `npm run build`:

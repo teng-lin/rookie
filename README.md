@@ -1,148 +1,138 @@
-# rookie
+# rookie-cookies
 
-[![PyPi Downloads](https://img.shields.io/pypi/dm/rookiepy?logo=python)](https://pypi.org/project/rookiepy/)
-[![PyPi Version](https://img.shields.io/pypi/v/rookiepy?color=00aa00&logo=python)](https://pypi.org/project/rookiepy/)
-[![NPM Version](https://img.shields.io/npm/v/@rookie-rs/api?logo=npm&color=0076CE)](https://www.npmjs.com/package/@rookie-rs/api)
-[![Crates](https://img.shields.io/crates/v/rookie?logo=rust)](https://crates.io/crates/rookie/)
-[![License](https://img.shields.io/github/license/thewh1teagle/rookie?color=00aaaa&logo=license)](https://github.com/thewh1teagle/rookie/blob/main/rookie-rs/MIT-LICENSE.txt)
+`rookie-cookies` is a maintained fork of the original [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) project. It extracts browser cookies through Rust, Python, and Node.js bindings under one shared package name.
 
-Load cookies from any browser on any platform
+This fork exists because the original repository is archived. Its immediate downstream consumer is [`notebooklm-py`](https://github.com/teng-lin/notebooklm-py), which uses the Python binding for optional browser-cookie authentication.
 
-## Features 🚀
+[![Python](https://img.shields.io/pypi/pyversions/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
+[![PyPI](https://img.shields.io/pypi/v/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
+[![Rust](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
+[![License](https://img.shields.io/github/license/teng-lin/rookie?logo=license)](MIT-LICENSE.txt)
 
-- Available for `Rust`, `Python`, and `JavaScript`
-- Ensures type safety (e.g., `TypeScript`, `Python` with type hints)
-- Super Fast, Built with `Rust`
-- Bypass `Chrome` restriction of file locking and appbound encryption (requires admin rights on `Windows` from v130.x)
-- Read session cookies from `Chrome` based browsers! (requires admin rights on `Windows`)
-- Wide browsers support
-- Cross-platform support for `Windows`, `Linux`, and `macOS`
+## What is maintained here
 
-## Usage ⚙️
+- Python 3.11–3.14 compatibility and automated tests.
+- Rust, Python, Node.js, and CLI test coverage.
+- Browser extraction tests using seeded Chrome and Firefox profiles.
+- Chromium cookie formats including legacy `v10`/`v11` and newer `v20` values.
+- Windows Chrome App-Bound Encryption support when built with the default `appbound` feature.
+- Build and release documentation for downstream users.
 
-## Rust
+The API remains compatible with the original project wherever possible.
 
-```shell
-cargo add rookie
-```
+## Security and privacy
 
-Create `main.rs` with the following
+This project reads local browser cookie databases. Cookies are credentials: treat all output as secret, do not log it, and do not share extracted values.
 
-```rust
-use rookie::brave;
+On Windows, Chrome App-Bound Encryption requires an elevated process for the App-Bound key path. The implementation can decrypt the local cookie database, but it does not implement Device Bound Session Credentials (DBSC) or export browser private keys. A decrypted cookie may therefore be insufficient to reproduce a DBSC-protected browser session outside Chrome.
 
-fn main() {
-    let domains = vec!["google.com"];
-    let cookies = brave(Some(domains)).unwrap();
-    for cookie in cookies {
-        println!("{:?}", cookie);
-    }
-}
-```
+Only use this software with browser profiles and accounts you are authorized to access.
 
 ## Python
 
-```shell
-pip install rookiepy
-```
-
-And the usage it similar to Rust
-
-```python
-import rookiepy
-cookies = rookiepy.firefox(["google.com"])
-for cookie in cookies:
-    print(cookie['domain'], cookie['value'])
-```
-
-## JavaScript
+Install the Python binding:
 
 ```console
-npm install @rookie-rs/api
+pip install rookie-cookies
 ```
 
-```js
-import { brave } from "@rookie-rs/api";
-const cookies = brave();
-for (const cookie of cookies) {
-  console.log(cookie);
+Use it to load cookies from a browser:
+
+```python
+import rookie_cookies
+
+cookies = rookie_cookies.chrome(["example.com"])
+for cookie in cookies:
+    print(cookie["domain"], cookie["name"])
+```
+
+The binding is tested on CPython 3.11–3.14. The published wheel uses Python's stable `abi3` interface, so one wheel can serve multiple supported CPython versions on each platform.
+
+## Rust
+
+```console
+cargo add rookie-cookies anyhow
+```
+
+```rust
+use rookie_cookies::chrome;
+
+fn main() -> anyhow::Result<()> {
+    let cookies = chrome(Some(vec!["example.com".to_string()]))?;
+    for cookie in cookies {
+        println!("{} {}", cookie.domain, cookie.name);
+    }
+    Ok(())
 }
 ```
 
-## Examples 📋
+## Node.js
 
-`Rust` [examples/rust](examples/rust)
+```console
+npm install rookie-cookies
+```
 
-`Python` [examples/python](examples/python)
+```javascript
+import { chrome } from "rookie-cookies";
 
-`JavaScript` [examples/javascript](examples/javascript)
+const cookies = chrome(["example.com"]);
+console.log(cookies);
+```
 
-## Docs 📘
+## Supported browsers
 
-`Rust`
+| Browser | Linux | macOS | Windows |
+| --- | :---: | :---: | :---: |
+| Arc | ✓ | ✓ | ✓ |
+| Brave | ✓ | ✓ | ✓ |
+| Cachy | ✓ | — | — |
+| Chrome | ✓ | ✓ | ✓ |
+| Chromium | ✓ | ✓ | ✓ |
+| Edge | ✓ | ✓ | ✓ |
+| Firefox | ✓ | ✓ | ✓ |
+| Internet Explorer | — | — | ✓ |
+| LibreWolf | ✓ | ✓ | ✓ |
+| Opera | ✓ | ✓ | ✓ |
+| Opera GX | — | ✓ | ✓ |
+| Safari | — | ✓ | — |
+| Vivaldi | ✓ | ✓ | ✓ |
+| Zen | ✓ | ✓ | ✓ |
 
-- [docs/Rust.md](docs/Rust.md)
-- [docs.rs/rookie](https://docs.rs/rookie)
+Browser profile discovery is platform-specific. Every browser extractor also has a lower-level `*_based` or `from_path` form for explicit database/profile paths; see the language-specific documentation and examples.
 
-`Python`
+## Testing
 
-- [docs/Python.md](docs/Python.md)
+Run the Rust workspace tests:
 
-`JavaScript`
+```console
+cargo test --workspace --all-targets
+cargo test --workspace --doc
+```
 
-- [docs/JavaScript.md](docs/JavaScript.md)
+Run the Python unit tests after building the extension in a virtual environment:
 
-## CLI 💻
+```console
+python -m unittest discover -s tests/python -p 'test_*.py' -v
+```
 
-You can use rookie as a `CLI` tool which will decrypt the cookies and print it as `JSON`  
-See [cli](https://github.com/thewh1teagle/rookie/tree/main/cli) folder
+Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/workflows/e2e.yml). They seed disposable Chrome and Firefox profiles and verify Rust, Python, Node.js, and CLI extraction against the same cookie.
 
-## Contribute 🤝
+## Documentation and examples
 
-So far the following platforms are supported:
+- [Python documentation](docs/Python.md)
+- [Rust documentation](docs/Rust.md)
+- [JavaScript documentation](docs/JavaScript.md)
+- [Build instructions](docs/BUILDING.md)
+- [Python examples](examples/python)
+- [Rust examples](examples/rust)
+- [JavaScript examples](examples/javascript)
 
-- **Arc:** `Linux`, `macOS`, `Windows`
-- **Brave:** `Linux`, `macOS`, `Windows`
-- **Cachy:** `Linux`
-- **Chrome:** `Linux`, `macOS`, `Windows`
-- **Chromium:** `Linux`, `macOS`, `Windows`
-- **Edge:** `Linux`, `macOS`, `Windows`
-- **Firefox:** `Linux`, `macOS`, `Windows`
-- **Internet Explorer:** `Windows`
-- **LibreWolf:** `Linux`, `macOS`, `Windows`
-- **Opera:** `Linux`, `macOS`, `Windows`
-- **Opera GX:** `macOS`, `Windows`
-- **Safari:** `macOS`
-- **Vivaldi:** `Linux`, `macOS`, `Windows`
-- **Zen:** `Linux`, `macOS`, `Windows`
+## Contributing
 
-You are welcome to contribute support for other browsers, or other platforms.
+Please open issues and pull requests in [this maintained fork](https://github.com/teng-lin/rookie). Include the operating system, browser/version, language binding, and whether the browser was running when the failure occurred. Never include real cookie values or browser databases in an issue.
 
-## Support new browsers 🌐
+The project is released under the MIT license. See [MIT-LICENSE.txt](MIT-LICENSE.txt).
 
-If you have a browser with which the library isn't working with, it may not have been added to the list of supported browsers configs. You can create a pull request (PR) or an issue with the path to the cookies file on your computer, and I will add it.
+## Credits
 
-look at [rookie-rs/config.json](rookie-rs/config.json) to see what configurations is needed.
-
-## Testing Dates (DD/MM/YY) 📅
-
-| Browser   |   Linux    |   macOS    |  Windows   |
-| :-------- | :--------: | :--------: | :--------: |
-| Arc       | 2024/08/07 | 2024/08/07 | 2024/08/07 |
-| Brave     | 2024/10/26 | 2024/10/26 | 2024/10/26 |
-| Cachy     | 2024/06/04 |    N/A     |    N/A     |
-| Chromium  | 2024/10/26 | 2024/10/26 | 2024/03/16 |
-| Chrome    | 2024/10/26 | 2024/10/26 | 2024/03/16 |
-| Edge      | 2023/10/01 | 2024/08/07 | 2024/03/16 |
-| Firefox   | 2024/10/26 | 2023/11/25 | 2024/03/16 |
-| IE        |    N/A     |    N/A     | 2024/03/16 |
-| LibreWolf | 2023/10/01 | 2023/11/25 | 2023/10/01 |
-| Opera     | 2023/10/01 |     -      | 2023/10/01 |
-| Opera GX  |    N/A     |     -      | 2023/10/01 |
-| Safari    |    N/A     | 2024/10/26 |    N/A     |
-| Vivaldi   | 2023/10/01 | 2023/11/25 | 2023/10/01 |
-| Zen       |     -      | 2024/10/26 |     -      |
-
-## Credits 🙌
-
-[github.com/borisbabic/browser_cookie3](https://github.com/borisbabic/browser_cookie3)
+This fork preserves the original project’s history and license. It also builds on ideas from [`browser_cookie3`](https://github.com/borisbabic/browser_cookie3).

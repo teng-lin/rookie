@@ -1,18 +1,18 @@
-// Assert that @rookie-rs/api (Node binding) extracts the seeded
+// Assert that rookie-cookies (Node binding) extracts the seeded
 // `rookie_ci=bar` cookie from the Chrome profile that was just seeded.
 //
 // Env vars:
 //   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
 //   ROOKIE_E2E_DOMAIN         optional — domain filter (default: 127.0.0.1)
 //
-// Requires `npm run build` (or `yarn build`) to have produced the
+// Requires `npm run build` to have produced the
 // platform-specific .node binary alongside bindings/node/index.js.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
-import * as rookie from "../../bindings/node/index.js";
+import * as rookieCookies from "../../bindings/node/index.js";
 
 const userDataDir = process.env.ROOKIE_E2E_USER_DATA_DIR;
 if (!userDataDir) {
@@ -39,10 +39,10 @@ let cookies;
 if (process.platform === "win32") {
   // Windows binding takes (keyPath, dbPath, domains)
   const keyPath = join(userDataDir, "Local State");
-  cookies = rookie.chromiumBased(keyPath, dbPath, [domain]);
+  cookies = rookieCookies.chromiumBased(keyPath, dbPath, [domain]);
 } else {
   // Unix binding takes (dbPath, domains)
-  cookies = rookie.chromiumBased(dbPath, [domain]);
+  cookies = rookieCookies.chromiumBased(dbPath, [domain]);
 }
 
 const seeded = cookies.find((c) => c.name === "rookie_ci");
@@ -58,5 +58,5 @@ if (seeded.value !== "bar") {
 }
 
 console.log(
-  `@rookie-rs/api (${process.platform}): rookie_ci=bar verified (${cookies.length} cookies for ${domain})`,
+  `rookie-cookies (${process.platform}): rookie_ci=bar verified (${cookies.length} cookies for ${domain})`,
 );

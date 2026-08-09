@@ -27,8 +27,13 @@ fn extracts_seeded_cookie_from_firefox_profile() {
   let db_path = PathBuf::from(&profile_dir).join("cookies.sqlite");
   assert!(db_path.exists(), "no cookies.sqlite under {}", profile_dir);
 
-  let cookies = rookie::firefox_based(db_path.clone(), Some(vec![domain.clone()]))
-    .unwrap_or_else(|e| panic!("rookie::firefox_based({}) failed: {e}", db_path.display()));
+  let cookies = rookie_cookies::firefox_based(db_path.clone(), Some(vec![domain.clone()]))
+    .unwrap_or_else(|e| {
+      panic!(
+        "rookie_cookies::firefox_based({}) failed: {e}",
+        db_path.display()
+      )
+    });
 
   let seeded = cookies
     .iter()

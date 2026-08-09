@@ -1,4 +1,4 @@
-"""Assert that rookiepy can extract the `rookie_ci=bar` cookie from the
+"""Assert that rookie_cookies can extract the `rookie_ci=bar` cookie from the
 Firefox profile seeded earlier in the same CI job.
 
 Driven by env vars:
@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-import rookiepy
+import rookie_cookies
 
 
 def main() -> int:
@@ -29,7 +29,7 @@ def main() -> int:
         print(f"no cookies.sqlite under {profile_dir}", file=sys.stderr)
         return 1
 
-    cookies = rookiepy.firefox_based(str(db_path), [domain])
+    cookies = rookie_cookies.firefox_based(str(db_path), [domain])
 
     seeded = next((c for c in cookies if c["name"] == "rookie_ci"), None)
     if seeded is None:
@@ -48,7 +48,7 @@ def main() -> int:
         return 1
 
     print(
-        f"rookiepy ({sys.platform}, firefox): "
+        f"rookie_cookies ({sys.platform}, firefox): "
         f"rookie_ci=bar verified ({len(cookies)} cookies for {domain})"
     )
     return 0

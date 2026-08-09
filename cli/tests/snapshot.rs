@@ -1,7 +1,7 @@
 //! End-to-end CLI snapshot tests.
 //!
 //! Builds a synthetic Firefox-style `cookies.sqlite` (moz_cookies table),
-//! invokes the `rookie` binary with `--path <file> --format json`, and
+//! invokes the `rookie-cookies` binary with `--path <file> --format json`, and
 //! asserts the JSON output round-trips the seeded cookies. No real
 //! browser, no encryption — just exercises the CLI argument plumbing
 //! plus the firefox_based path through `any_browser`.
@@ -12,15 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// `CARGO_BIN_EXE_rookie` is set by Cargo for integration tests in the
-/// same crate that declares the `[[bin]] name = "rookie"`.
-const ROOKIE_BIN: &str = env!("CARGO_BIN_EXE_rookie");
+/// `CARGO_BIN_EXE_rookie-cookies` is set by Cargo for integration tests in the
+/// same crate that declares the `[[bin]] name = "rookie-cookies"`.
+const ROOKIE_BIN: &str = env!("CARGO_BIN_EXE_rookie-cookies");
 
 fn unique_tmpdir(tag: &str) -> PathBuf {
   static COUNTER: AtomicU64 = AtomicU64::new(0);
   let n = COUNTER.fetch_add(1, Ordering::SeqCst);
   let dir = std::env::temp_dir().join(format!(
-    "rookie-cli-test-{}-{}-{}",
+    "rookie-cookies-cli-test-{}-{}-{}",
     tag,
     std::process::id(),
     n
@@ -67,7 +67,7 @@ fn run_rookie(args: &[&str]) -> std::process::Output {
     .args(args)
     .env("RUST_LOG", "error")
     .output()
-    .expect("spawn rookie")
+    .expect("spawn rookie-cookies")
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn json_output_contains_seeded_cookie() {
   ]);
   assert!(
     out.status.success(),
-    "rookie exited non-zero: stderr={}",
+    "rookie-cookies exited non-zero: stderr={}",
     String::from_utf8_lossy(&out.stderr)
   );
 
@@ -145,7 +145,7 @@ fn netscape_output_includes_seeded_cookie() {
   let out = run_rookie(&["--path", db.to_str().unwrap(), "--format", "netscape"]);
   assert!(
     out.status.success(),
-    "rookie exited non-zero: stderr={}",
+    "rookie-cookies exited non-zero: stderr={}",
     String::from_utf8_lossy(&out.stderr)
   );
 

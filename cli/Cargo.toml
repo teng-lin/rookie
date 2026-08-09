@@ -1,5 +1,5 @@
 [package]
-name = "rookie-cli"
+name = "rookie-cookies-cli"
 version = "0.5.6"
 edition = "2021"
 
@@ -7,15 +7,15 @@ edition = "2021"
 clap = { version = "4.4.6", features = ["derive"] }
 tracing-subscriber = "0.3.18"
 lazy_static = "1.4.0"
-rookie = { path = "../rookie-rs", version = "0.5.6" }
+rookie-cookies = { path = "../rookie-rs", version = "0.5.6" }
 serde_json = "1.0.107"
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 [features]
-appbound = ["rookie/appbound"]
+appbound = ["rookie-cookies/appbound"]
 
 [[bin]]
-name = "rookie"
+name = "rookie-cookies"
 path = "src/main.rs"

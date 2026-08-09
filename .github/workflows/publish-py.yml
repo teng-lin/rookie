@@ -51,11 +51,6 @@ jobs:
           python-version: "3.10"
           architecture: ${{ matrix.target }}
 
-      - name: Prepare appbound binaries
-        run: |
-          C:\msys64\usr\bin\wget.exe https://github.com/thewh1teagle/rookie/releases/download/appbound-binaries/paexec.exe -O rookie-rs\paexec.bin
-          C:\msys64\usr\bin\wget.exe https://github.com/thewh1teagle/rookie/releases/download/appbound-binaries/unprotect.exe -O rookie-rs\unprotect.bin
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

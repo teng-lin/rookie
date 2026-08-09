@@ -1,11 +1,11 @@
 [package]
-name = "rookiepy"
+name = "rookie-cookies-python"
 version = "0.5.6"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "rookiepy"
+name = "rookie_cookies"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -13,7 +13,7 @@ pyo3 = { version = "0.23", features = ["abi3-py37", "anyhow"] }
 pyo3-log = "0.12"
 
 [target.'cfg(windows)'.dependencies]
-rookie = { path = "../../rookie-rs", version = "0.5.6", features = ["appbound"] }
+rookie-core = { package = "rookie-cookies", path = "../../rookie-rs", version = "0.5.6", features = ["appbound"] }
 
 [target.'cfg(unix)'.dependencies]
-rookie = { path = "../../rookie-rs", version = "0.5.6" }
+rookie-core = { package = "rookie-cookies", path = "../../rookie-rs", version = "0.5.6" }

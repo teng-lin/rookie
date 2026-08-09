@@ -6,9 +6,9 @@
 //
 // On CI this is invoked against the seeded Firefox profile that the
 // e2e workflow creates, so it doubles as a regression test for the
-// `@rookie-rs/api` `firefoxBased` public API drifting.
+// `rookie-cookies` `firefoxBased` public API drifting.
 
-import { firefoxBased } from "@rookie-rs/api";
+import { firefoxBased } from "rookie-cookies";
 
 const dbPath = process.argv[2];
 if (!dbPath) {

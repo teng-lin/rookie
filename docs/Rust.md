@@ -1,18 +1,18 @@
-# Rookie Rust Docs
+# rookie-cookies Rust Docs
 
 ## Install
 
 ```console
-cargo add rookie
+cargo add rookie-cookies
 ```
 
 ## Basic Usage
 
 ```rust
-use rookie;
+use rookie_cookies;
 
 fn main() {
-    let cookies = rookie::chrome(None).unwrap();
+    let cookies = rookie_cookies::chrome(None).unwrap();
     println!("{cookies:?}");
 }
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the rookie CLI against an explicit cookies path and assert that the
+# Run the rookie-cookies CLI against an explicit cookies path and assert that the
 # seeded `rookie_ci=bar` cookie is in the JSON output.
 #
 # Usage:
@@ -31,11 +31,11 @@ if [ -n "$KEY_PATH" ]; then
   CLI_ARGS+=("--key-path" "$KEY_PATH")
 fi
 
-# Suppress rookie's `log::info!` lines — they go through tracing-subscriber
+# Suppress rookie-cookies' `log::info!` lines — they go through tracing-subscriber
 # which (with RUST_LOG unset) writes INFO to the same place as the JSON
 # output, polluting jq's input. RUST_LOG=error silences everything below
 # error level. stderr is dropped for the same reason.
-OUT=$(RUST_LOG=error ./target/release/rookie "${CLI_ARGS[@]}" 2>/dev/null)
+OUT=$(RUST_LOG=error ./target/release/rookie-cookies "${CLI_ARGS[@]}" 2>/dev/null)
 
 if ! echo "$OUT" | jq -e '.[] | select(.name == "rookie_ci" and .value == "bar")' >/dev/null; then
   echo "CLI did not return rookie_ci=bar; output was:" >&2
@@ -44,4 +44,4 @@ if ! echo "$OUT" | jq -e '.[] | select(.name == "rookie_ci" and .value == "bar")
 fi
 
 COUNT=$(echo "$OUT" | jq 'length')
-echo "rookie CLI: rookie_ci=bar verified ($COUNT cookies for $DOMAIN)"
+echo "rookie-cookies CLI: rookie_ci=bar verified ($COUNT cookies for $DOMAIN)"

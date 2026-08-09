@@ -1,4 +1,4 @@
-name: Lint rookie-rs
+name: Lint rookie-cookies
 
 on:
   push:

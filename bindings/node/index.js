@@ -8,6 +8,7 @@ const { existsSync, readFileSync } = require('fs')
 const { join } = require('path')
 
 const { platform, arch } = process
+const { optionalDependencies = {} } = require('./package.json')
 
 let nativeBinding = null
 let localFileExisted = false
@@ -32,24 +33,24 @@ switch (platform) {
   case 'android':
     switch (arch) {
       case 'arm64':
-        localFileExisted = existsSync(join(__dirname, 'rookie.android-arm64.node'))
+        localFileExisted = existsSync(join(__dirname, 'rookie_cookies.android-arm64.node'))
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.android-arm64.node')
+            nativeBinding = require('./rookie_cookies.android-arm64.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-android-arm64')
+            nativeBinding = require('rookie-cookies-android-arm64')
           }
         } catch (e) {
           loadError = e
         }
         break
       case 'arm':
-        localFileExisted = existsSync(join(__dirname, 'rookie.android-arm-eabi.node'))
+        localFileExisted = existsSync(join(__dirname, 'rookie_cookies.android-arm-eabi.node'))
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.android-arm-eabi.node')
+            nativeBinding = require('./rookie_cookies.android-arm-eabi.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-android-arm-eabi')
+            nativeBinding = require('rookie-cookies-android-arm-eabi')
           }
         } catch (e) {
           loadError = e
@@ -63,13 +64,13 @@ switch (platform) {
     switch (arch) {
       case 'x64':
         localFileExisted = existsSync(
-          join(__dirname, 'rookie.win32-x64-msvc.node')
+          join(__dirname, 'rookie_cookies.win32-x64-msvc.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.win32-x64-msvc.node')
+            nativeBinding = require('./rookie_cookies.win32-x64-msvc.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-win32-x64-msvc')
+            nativeBinding = require('rookie-cookies-win32-x64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -77,13 +78,13 @@ switch (platform) {
         break
       case 'ia32':
         localFileExisted = existsSync(
-          join(__dirname, 'rookie.win32-ia32-msvc.node')
+          join(__dirname, 'rookie_cookies.win32-ia32-msvc.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.win32-ia32-msvc.node')
+            nativeBinding = require('./rookie_cookies.win32-ia32-msvc.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-win32-ia32-msvc')
+            nativeBinding = require('rookie-cookies-win32-ia32-msvc')
           }
         } catch (e) {
           loadError = e
@@ -91,13 +92,13 @@ switch (platform) {
         break
       case 'arm64':
         localFileExisted = existsSync(
-          join(__dirname, 'rookie.win32-arm64-msvc.node')
+          join(__dirname, 'rookie_cookies.win32-arm64-msvc.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.win32-arm64-msvc.node')
+            nativeBinding = require('./rookie_cookies.win32-arm64-msvc.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-win32-arm64-msvc')
+            nativeBinding = require('rookie-cookies-win32-arm64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -108,23 +109,23 @@ switch (platform) {
     }
     break
   case 'darwin':
-    localFileExisted = existsSync(join(__dirname, 'rookie.darwin-universal.node'))
+    localFileExisted = existsSync(join(__dirname, 'rookie_cookies.darwin-universal.node'))
     try {
       if (localFileExisted) {
-        nativeBinding = require('./rookie.darwin-universal.node')
+        nativeBinding = require('./rookie_cookies.darwin-universal.node')
       } else {
-        nativeBinding = require('@rookie-rs/api-darwin-universal')
+        nativeBinding = require('rookie-cookies-darwin-universal')
       }
       break
     } catch {}
     switch (arch) {
       case 'x64':
-        localFileExisted = existsSync(join(__dirname, 'rookie.darwin-x64.node'))
+        localFileExisted = existsSync(join(__dirname, 'rookie_cookies.darwin-x64.node'))
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.darwin-x64.node')
+            nativeBinding = require('./rookie_cookies.darwin-x64.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-darwin-x64')
+            nativeBinding = require('rookie-cookies-darwin-x64')
           }
         } catch (e) {
           loadError = e
@@ -132,13 +133,13 @@ switch (platform) {
         break
       case 'arm64':
         localFileExisted = existsSync(
-          join(__dirname, 'rookie.darwin-arm64.node')
+          join(__dirname, 'rookie_cookies.darwin-arm64.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.darwin-arm64.node')
+            nativeBinding = require('./rookie_cookies.darwin-arm64.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-darwin-arm64')
+            nativeBinding = require('rookie-cookies-darwin-arm64')
           }
         } catch (e) {
           loadError = e
@@ -152,12 +153,12 @@ switch (platform) {
     if (arch !== 'x64') {
       throw new Error(`Unsupported architecture on FreeBSD: ${arch}`)
     }
-    localFileExisted = existsSync(join(__dirname, 'rookie.freebsd-x64.node'))
+    localFileExisted = existsSync(join(__dirname, 'rookie_cookies.freebsd-x64.node'))
     try {
       if (localFileExisted) {
-        nativeBinding = require('./rookie.freebsd-x64.node')
+        nativeBinding = require('./rookie_cookies.freebsd-x64.node')
       } else {
-        nativeBinding = require('@rookie-rs/api-freebsd-x64')
+        nativeBinding = require('rookie-cookies-freebsd-x64')
       }
     } catch (e) {
       loadError = e
@@ -168,26 +169,26 @@ switch (platform) {
       case 'x64':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-x64-musl.node')
+            join(__dirname, 'rookie_cookies.linux-x64-musl.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-x64-musl.node')
+              nativeBinding = require('./rookie_cookies.linux-x64-musl.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-x64-musl')
+              nativeBinding = require('rookie-cookies-linux-x64-musl')
             }
           } catch (e) {
             loadError = e
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-x64-gnu.node')
+            join(__dirname, 'rookie_cookies.linux-x64-gnu.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-x64-gnu.node')
+              nativeBinding = require('./rookie_cookies.linux-x64-gnu.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-x64-gnu')
+              nativeBinding = require('rookie-cookies-linux-x64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -197,26 +198,26 @@ switch (platform) {
       case 'arm64':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-arm64-musl.node')
+            join(__dirname, 'rookie_cookies.linux-arm64-musl.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-arm64-musl.node')
+              nativeBinding = require('./rookie_cookies.linux-arm64-musl.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-arm64-musl')
+              nativeBinding = require('rookie-cookies-linux-arm64-musl')
             }
           } catch (e) {
             loadError = e
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-arm64-gnu.node')
+            join(__dirname, 'rookie_cookies.linux-arm64-gnu.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-arm64-gnu.node')
+              nativeBinding = require('./rookie_cookies.linux-arm64-gnu.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-arm64-gnu')
+              nativeBinding = require('rookie-cookies-linux-arm64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -226,26 +227,26 @@ switch (platform) {
       case 'arm':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-arm-musleabihf.node')
+            join(__dirname, 'rookie_cookies.linux-arm-musleabihf.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-arm-musleabihf.node')
+              nativeBinding = require('./rookie_cookies.linux-arm-musleabihf.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-arm-musleabihf')
+              nativeBinding = require('rookie-cookies-linux-arm-musleabihf')
             }
           } catch (e) {
             loadError = e
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-arm-gnueabihf.node')
+            join(__dirname, 'rookie_cookies.linux-arm-gnueabihf.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-arm-gnueabihf.node')
+              nativeBinding = require('./rookie_cookies.linux-arm-gnueabihf.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-arm-gnueabihf')
+              nativeBinding = require('rookie-cookies-linux-arm-gnueabihf')
             }
           } catch (e) {
             loadError = e
@@ -255,26 +256,26 @@ switch (platform) {
       case 'riscv64':
         if (isMusl()) {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-riscv64-musl.node')
+            join(__dirname, 'rookie_cookies.linux-riscv64-musl.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-riscv64-musl.node')
+              nativeBinding = require('./rookie_cookies.linux-riscv64-musl.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-riscv64-musl')
+              nativeBinding = require('rookie-cookies-linux-riscv64-musl')
             }
           } catch (e) {
             loadError = e
           }
         } else {
           localFileExisted = existsSync(
-            join(__dirname, 'rookie.linux-riscv64-gnu.node')
+            join(__dirname, 'rookie_cookies.linux-riscv64-gnu.node')
           )
           try {
             if (localFileExisted) {
-              nativeBinding = require('./rookie.linux-riscv64-gnu.node')
+              nativeBinding = require('./rookie_cookies.linux-riscv64-gnu.node')
             } else {
-              nativeBinding = require('@rookie-rs/api-linux-riscv64-gnu')
+              nativeBinding = require('rookie-cookies-linux-riscv64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -283,13 +284,13 @@ switch (platform) {
         break
       case 's390x':
         localFileExisted = existsSync(
-          join(__dirname, 'rookie.linux-s390x-gnu.node')
+          join(__dirname, 'rookie_cookies.linux-s390x-gnu.node')
         )
         try {
           if (localFileExisted) {
-            nativeBinding = require('./rookie.linux-s390x-gnu.node')
+            nativeBinding = require('./rookie_cookies.linux-s390x-gnu.node')
           } else {
-            nativeBinding = require('@rookie-rs/api-linux-s390x-gnu')
+            nativeBinding = require('rookie-cookies-linux-s390x-gnu')
           }
         } catch (e) {
           loadError = e
@@ -304,17 +305,39 @@ switch (platform) {
 }
 
 if (!nativeBinding) {
+  if (loadError && loadError.code === 'MODULE_NOT_FOUND') {
+    const missingPackage = loadError.message.match(
+      /['"](rookie-cookies-[^'"]+)['"]/
+    )
+    if (
+      missingPackage &&
+      !Object.prototype.hasOwnProperty.call(optionalDependencies, missingPackage[1])
+    ) {
+      throw new Error(
+        `No prebuilt rookie-cookies binding is published for ${platform}-${arch}; build the Node binding from source or use a supported platform`
+      )
+    }
+  }
   if (loadError) {
     throw loadError
   }
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, anyBrowser, firefox, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, chromiumBased } = nativeBinding
+const { version, anyBrowser, firefox, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding
+
+function unsupportedPlatform(name, supportedPlatform) {
+  return () => {
+    throw new Error(
+      `${name} is only available on ${supportedPlatform}; current platform is ${platform}`
+    )
+  }
+}
 
 module.exports.version = version
 module.exports.anyBrowser = anyBrowser
 module.exports.firefox = firefox
+module.exports.zen = zen
 module.exports.librewolf = librewolf
 module.exports.chrome = chrome
 module.exports.brave = brave
@@ -326,6 +349,7 @@ module.exports.chromium = chromium
 module.exports.vivaldi = vivaldi
 module.exports.firefoxBased = firefoxBased
 module.exports.load = load
-module.exports.octoBrowser = octoBrowser
-module.exports.internetExplorer = internetExplorer
+module.exports.octoBrowser = octoBrowser || unsupportedPlatform('octoBrowser', 'Windows')
+module.exports.internetExplorer = internetExplorer || unsupportedPlatform('internetExplorer', 'Windows')
+module.exports.safari = safari || unsupportedPlatform('safari', 'macOS')
 module.exports.chromiumBased = chromiumBased

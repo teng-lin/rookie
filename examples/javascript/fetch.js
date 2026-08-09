@@ -1,8 +1,8 @@
-import rookie from "@rookie-rs/api";
+import rookieCookies from "rookie-cookies";
 
 function createHeaders() {
-  // Get all Github cookies from all browsers
-  const cookies = rookie.load(["github.com"]);
+  // Get all GitHub cookies from all browsers
+  const cookies = rookieCookies.load(["github.com"]);
   // Create cookie header
   const cookie = cookies
     .map((c) => decodeURIComponent(`${c.name}=${c.value}`))
@@ -22,4 +22,4 @@ const html = await res.text();
 const username =
   html.match(/<a href="\/(.+)" class="btn.+>/)?.[1] ??
   `Not Logged In. Response URL: ${res.url}`;
-console.log(`Github username: ${username}`);
+console.log(`GitHub username: ${username}`);

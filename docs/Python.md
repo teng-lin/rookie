@@ -1,16 +1,16 @@
-# Rookie Python Docs
+# rookie-cookies Python Docs
 
 ## Install
 
-```typescript
-pip3 install -U rookiepy
+```console
+pip3 install -U rookie-cookies
 ```
 
 ## Basic Usage
 
 ```python
-import rookiepy
-cookies = rookiepy.chrome() # Load cookies from Chrome
+import rookie_cookies
+cookies = rookie_cookies.chrome() # Load cookies from Chrome
 ```
 
 ## Logging
@@ -23,7 +23,7 @@ logging.basicConfig()
 logging.getLogger().setLevel(logging.DEBUG)
 ```
 
-To fully disable `rookiepy` logging you can set the level to `CRITICAL`
+To fully disable `rookie_cookies` logging you can set the level to `CRITICAL`
 
 ```python
 import logging
