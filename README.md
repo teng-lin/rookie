@@ -88,11 +88,11 @@ console.log(cookies);
 | Cachy | ✓ | — | — |
 | Chrome | ✓ | ✓ | ✓ |
 | Chromium | ✓ | ✓ | ✓ |
-| Edge | ✓ | — | ✓ |
+| Edge | ✓ | ✓ | ✓ |
 | Firefox | ✓ | ✓ | ✓ |
 | Internet Explorer | — | — | ✓ |
 | LibreWolf | ✓ | ✓ | ✓ |
-| Opera | ✓ | — | ✓ |
+| Opera | ✓ | ✓ | ✓ |
 | Opera GX | — | ✓ | ✓ |
 | Safari | — | ✓ | — |
 | Vivaldi | ✓ | ✓ | ✓ |
