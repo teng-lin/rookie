@@ -7,7 +7,7 @@ include = [
     "Cargo.lock",
     "../MIT-LICENSE.txt",
     "../README.md",
-    "../examples/**/*",
+    "examples/**/*",
 ]
 name = "rookie-cookies"
 version = "0.5.7"
@@ -85,8 +85,8 @@ windows = { version = "0.51", features = [
 
 [[example]]
 name = "simple"
-path = "../examples/rust/simple.rs"
+
 
 [[example]]
 name = "from_path"
-path = "../examples/rust/from_path.rs"
+

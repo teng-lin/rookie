@@ -6,7 +6,6 @@ on:
       - main
   pull_request:
     paths:
-      - ".github/workflows/lint-cli.yml"
       - ".github/workflows/lint.yml"
       - "rookie-rs/**"
   workflow_dispatch:
@@ -62,4 +61,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Verify cargo package
-        run: cargo package -p rookie-cookies --allow-dirty --list
+        run: |
+          cargo package --manifest-path Cargo.toml -p rookie-cookies --list > package_files.txt
+          cat package_files.txt
+          grep -q "^examples/simple.rs$" package_files.txt
+          grep -q "^examples/from_path.rs$" package_files.txt
