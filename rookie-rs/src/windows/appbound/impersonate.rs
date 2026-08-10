@@ -1,4 +1,7 @@
-use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::Path};
+use std::{
+  ffi::OsString, marker::PhantomData, os::windows::ffi::OsStringExt, path::Path, rc::Rc,
+  sync::Mutex,
+};
 
 use anyhow::{bail, Result};
 use windows::Win32::System::Threading::OpenProcessToken;
@@ -21,15 +24,63 @@ extern "system" {
   ) -> NTSTATUS;
 }
 
-fn enable_privilege() -> Result<()> {
-  use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
-  let mut previous_value = BOOL(0);
-  let status =
-    unsafe { RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, BOOL(1), BOOL(0), &mut previous_value) };
-  if status.0 != 0 {
-    bail!("Invalid status from RtlAdjustPrivilege")
+// RtlAdjustPrivilege changes the process token, so serialize its temporary use.
+static DEBUG_PRIVILEGE_LOCK: Mutex<()> = Mutex::new(());
+
+struct DebugPrivilegeGuard {
+  previous_value: Option<BOOL>,
+}
+
+impl DebugPrivilegeGuard {
+  fn acquire() -> Result<Self> {
+    use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
+
+    let mut previous_value = BOOL(0);
+    let status =
+      unsafe { RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, BOOL(1), BOOL(0), &mut previous_value) };
+    if status.0 != 0 {
+      bail!("Failed to enable SeDebugPrivilege: {status:?}")
+    }
+    Ok(Self {
+      previous_value: Some(previous_value),
+    })
   }
-  Ok(())
+
+  fn restore(&mut self) -> Result<()> {
+    use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
+
+    let Some(previous_value) = self.previous_value else {
+      return Ok(());
+    };
+
+    let mut ignored_previous_value = BOOL(0);
+    let status = unsafe {
+      RtlAdjustPrivilege(
+        SE_DEBUG_PRIVILEGE,
+        previous_value,
+        BOOL(0),
+        &mut ignored_previous_value,
+      )
+    };
+    if status.0 != 0 {
+      bail!("Failed to restore SeDebugPrivilege: {status:?}")
+    }
+
+    self.previous_value = None;
+    Ok(())
+  }
+}
+
+impl Drop for DebugPrivilegeGuard {
+  fn drop(&mut self) {
+    if let Err(err) = self.restore() {
+      log::warn!("Failed to restore SeDebugPrivilege: {err}");
+    }
+  }
+}
+
+fn enable_privilege() -> Result<DebugPrivilegeGuard> {
+  DebugPrivilegeGuard::acquire()
 }
 
 fn get_process_pids() -> Result<Vec<u32>> {
@@ -114,50 +165,85 @@ fn get_process_handle(pid: u32) -> Result<HANDLE> {
   }
 }
 
-fn close_handle(handle: HANDLE) -> Result<()> {
-  unsafe { CloseHandle(handle)? };
-  Ok(())
+struct HandleGuard(HANDLE);
+
+impl HandleGuard {
+  fn into_inner(mut self) -> HANDLE {
+    let handle = self.0;
+    self.0 = HANDLE::default();
+    handle
+  }
+}
+
+impl Drop for HandleGuard {
+  fn drop(&mut self) {
+    if !self.0.is_invalid() {
+      unsafe {
+        let _ = CloseHandle(self.0);
+      }
+    }
+  }
 }
 
 fn get_system_token(lsass_handle: HANDLE) -> Result<HANDLE> {
-  let mut token_handle = HANDLE::default();
+  let mut token_handle = HandleGuard(HANDLE::default());
   unsafe {
     OpenProcessToken(
       lsass_handle,
       TOKEN_DUPLICATE | TOKEN_QUERY,
-      &mut token_handle,
+      &mut token_handle.0,
     )?;
   }
 
-  let mut duplicate_token = HANDLE::default();
+  let mut duplicate_token = HandleGuard(HANDLE::default());
   unsafe {
     DuplicateToken(
-      token_handle,
+      token_handle.0,
       windows::Win32::Security::SECURITY_IMPERSONATION_LEVEL(2), // win32security.SecurityImpersonation
-      &mut duplicate_token,
+      &mut duplicate_token.0,
     )?;
-    CloseHandle(token_handle)?;
   }
 
-  Ok(duplicate_token)
+  Ok(duplicate_token.into_inner())
 }
 
-pub fn start_impersonate() -> Result<HANDLE> {
-  enable_privilege()?;
-  let pid = get_system_process_pid()?;
-  let lsass_handle = get_process_handle(pid)?;
-  let duplicated_token = get_system_token(lsass_handle)?;
-  close_handle(lsass_handle)?;
-  unsafe {
-    ImpersonateLoggedOnUser(duplicated_token)?;
-  }
-  Ok(duplicated_token)
+pub struct ImpersonationGuard {
+  duplicated_token: HANDLE,
+  _thread_affinity: PhantomData<Rc<()>>,
 }
 
-pub fn stop_impersonate(duplicated_token: HANDLE) -> Result<()> {
-  unsafe {
-    CloseHandle(duplicated_token)?;
-    RevertToSelf()?;
+impl Drop for ImpersonationGuard {
+  fn drop(&mut self) {
+    unsafe {
+      let revert_result = RevertToSelf();
+      if let Err(err) = CloseHandle(self.duplicated_token) {
+        log::warn!("Failed to close SYSTEM impersonation token: {err}");
+      }
+      if let Err(err) = revert_result {
+        log::warn!("Failed to revert SYSTEM impersonation: {err}");
+        std::process::abort();
+      }
+    }
   }
-  Ok(())
+}
+
+pub fn start_impersonate() -> Result<ImpersonationGuard> {
+  let lsass_handle = {
+    let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut debug_privilege = enable_privilege()?;
+    let pid = get_system_process_pid()?;
+    let lsass_handle = HandleGuard(get_process_handle(pid)?);
+    debug_privilege.restore()?;
+    lsass_handle
+  };
+  let duplicated_token = HandleGuard(get_system_token(lsass_handle.0)?);
+  unsafe {
+    ImpersonateLoggedOnUser(duplicated_token.0)?;
+  }
+  Ok(ImpersonationGuard {
+    duplicated_token: duplicated_token.into_inner(),
+    _thread_affinity: PhantomData,
+  })
 }

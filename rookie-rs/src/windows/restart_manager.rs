@@ -13,7 +13,7 @@ use windows::{
 /// Release file locking by seamlessly restart the process which lock the file
 /// Most of the times the process will keep running smoothly after restart
 /// It might take some time up to a minute
-pub unsafe fn release_file_lock(file_path: &str) -> bool {
+pub unsafe fn release_file_lock(file_path: &str, force_kill: bool) -> bool {
   let file_path = HSTRING::from(file_path);
   let mut session: u32 = 0;
   let mut session_key_buffer = [0_u16; (CCH_RM_SESSION_KEY as usize) + 1];
@@ -37,13 +37,15 @@ pub unsafe fn release_file_lock(file_path: &str) -> bool {
       );
       if WIN32_ERROR(result) == ERROR_SUCCESS || WIN32_ERROR(result) == ERROR_MORE_DATA {
         if pnprocinfoneeded > 0 {
-          // If current process does not have enough privileges to close one of
-          // the "offending" processes, you'll get ERROR_FAIL_NOACTION_REBOOT
-          let result = RmShutdown(session, RmForceShutdown.0 as u32, None);
-          if WIN32_ERROR(result) == ERROR_SUCCESS {
-            // success
-            RmEndSession(session);
-            return true;
+          if force_kill {
+            // If current process does not have enough privileges to close one of
+            // the "offending" processes, you'll get ERROR_FAIL_NOACTION_REBOOT
+            let result = RmShutdown(session, RmForceShutdown.0 as u32, None);
+            if WIN32_ERROR(result) == ERROR_SUCCESS {
+              // success
+              RmEndSession(session);
+              return true;
+            }
           }
         } else {
           // success
