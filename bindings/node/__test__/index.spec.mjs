@@ -22,12 +22,12 @@ test("firefoxBased throws on a non-sqlite file", async (t) => {
   await t.throwsAsync(async () => firefoxBased(dbPath));
 });
 
-test("safari reports an unsupported platform outside macOS", (t) => {
+test("safari reports an unsupported platform outside macOS", async (t) => {
   if (process.platform === "darwin") {
     t.pass();
     return;
   }
 
-  const error = t.throws(() => safari());
+  const error = await t.throwsAsync(async () => safari());
   t.regex(error.message, /safari is only available on macOS/);
 });

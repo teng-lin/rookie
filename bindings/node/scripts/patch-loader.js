@@ -44,11 +44,9 @@ if (!loader.includes('function unsupportedPlatform(')) {
   loader = loader.replace(
     'module.exports.version = version',
     `function unsupportedPlatform(name, supportedPlatform) {
-  return () => {
-    throw new Error(
-      \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
-    )
-  }
+  return () => Promise.reject(new Error(
+    \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
+  ))
 }
 
 module.exports.version = version`
