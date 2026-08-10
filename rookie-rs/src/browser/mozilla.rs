@@ -405,6 +405,27 @@ mod tests {
   }
 
   #[test]
+  fn firefox_based_does_not_broaden_valid_domain_filter_with_sql_input() {
+    let dir = unique_tmpdir("ff-domain-filter-scope");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", false, 0),
+      ],
+    );
+
+    let cookies = firefox_based(
+      db,
+      Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
+    )
+    .expect("decode");
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
+
+  #[test]
   fn firefox_based_missing_db_errors() {
     let result = firefox_based(PathBuf::from("/nonexistent/rookie/cookies.sqlite"), None);
     assert!(
