@@ -1,4 +1,7 @@
-use std::{ffi::OsString, marker::PhantomData, os::windows::ffi::OsStringExt, path::Path, rc::Rc};
+use std::{
+  ffi::OsString, marker::PhantomData, os::windows::ffi::OsStringExt, path::Path, rc::Rc,
+  sync::Mutex,
+};
 
 use anyhow::{bail, Result};
 use windows::Win32::System::Threading::OpenProcessToken;
@@ -21,15 +24,63 @@ extern "system" {
   ) -> NTSTATUS;
 }
 
-fn enable_privilege() -> Result<()> {
-  use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
-  let mut previous_value = BOOL(0);
-  let status =
-    unsafe { RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, BOOL(1), BOOL(0), &mut previous_value) };
-  if status.0 != 0 {
-    bail!("Invalid status from RtlAdjustPrivilege")
+// RtlAdjustPrivilege changes the process token, so serialize its temporary use.
+static DEBUG_PRIVILEGE_LOCK: Mutex<()> = Mutex::new(());
+
+struct DebugPrivilegeGuard {
+  previous_value: Option<BOOL>,
+}
+
+impl DebugPrivilegeGuard {
+  fn acquire() -> Result<Self> {
+    use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
+
+    let mut previous_value = BOOL(0);
+    let status =
+      unsafe { RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, BOOL(1), BOOL(0), &mut previous_value) };
+    if status.0 != 0 {
+      bail!("Invalid status from RtlAdjustPrivilege")
+    }
+    Ok(Self {
+      previous_value: Some(previous_value),
+    })
   }
-  Ok(())
+
+  fn restore(&mut self) -> Result<()> {
+    use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
+
+    let Some(previous_value) = self.previous_value else {
+      return Ok(());
+    };
+
+    let mut ignored_previous_value = BOOL(0);
+    let status = unsafe {
+      RtlAdjustPrivilege(
+        SE_DEBUG_PRIVILEGE,
+        previous_value,
+        BOOL(0),
+        &mut ignored_previous_value,
+      )
+    };
+    if status.0 != 0 {
+      bail!("Invalid status from RtlAdjustPrivilege")
+    }
+
+    self.previous_value = None;
+    Ok(())
+  }
+}
+
+impl Drop for DebugPrivilegeGuard {
+  fn drop(&mut self) {
+    if let Err(err) = self.restore() {
+      log::warn!("Failed to restore SeDebugPrivilege: {err}");
+    }
+  }
+}
+
+fn enable_privilege() -> Result<DebugPrivilegeGuard> {
+  DebugPrivilegeGuard::acquire()
 }
 
 fn get_process_pids() -> Result<Vec<u32>> {
@@ -177,9 +228,13 @@ impl Drop for ImpersonationGuard {
 }
 
 pub fn start_impersonate() -> Result<ImpersonationGuard> {
-  enable_privilege()?;
+  let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let mut debug_privilege = enable_privilege()?;
   let pid = get_system_process_pid()?;
   let lsass_handle = HandleGuard(get_process_handle(pid)?);
+  debug_privilege.restore()?;
   let duplicated_token = HandleGuard(get_system_token(lsass_handle.0)?);
   unsafe {
     ImpersonateLoggedOnUser(duplicated_token.0)?;
