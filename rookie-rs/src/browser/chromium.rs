@@ -707,7 +707,7 @@ mod tests {
     let cookies = query_cookies(
       vec![],
       db,
-      Some(vec!["example.com".to_string(), "' OR 1=1 --".to_string()]),
+      Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
     )
     .expect("decode");
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
