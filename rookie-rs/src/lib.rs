@@ -389,6 +389,11 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// others). If you need to know which browsers failed, hook a logger
 /// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
 ///
+/// Returns `Err` only when **every** attempted browser extraction fails,
+/// containing an aggregate message listing each browser and its error.
+/// This lets callers distinguish between "no cookies found" and "all
+/// extractions failed".
+///
 /// # Arguments
 ///
 /// * `domains` - A optional list that for getting specific domains only
@@ -402,6 +407,7 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
   let mut cookies = Vec::new();
+  let mut errors: Vec<String> = Vec::new();
 
   let mut browser_types: Vec<(&'static str, LoadFn)> = vec![
     ("firefox", firefox),
@@ -433,11 +439,25 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     browser_types.push(("safari", safari));
   }
 
+  let mut total_browsers = 0;
   for (browser_name, browser_fn) in browser_types.iter() {
+    total_browsers += 1;
     match browser_fn(domains.clone()) {
       Ok(browser_cookies) => cookies.extend(browser_cookies),
-      Err(err) => log::warn!("rookie_cookies::load skipping {browser_name}: {err}"),
+      Err(err) => {
+        log::warn!("rookie_cookies::load skipping {browser_name}: {err}");
+        errors.push(format!("{browser_name}: {err}"));
+      }
     }
+  }
+
+  // If every attempted browser extraction failed, surface an aggregate error so that
+  // callers can distinguish total failure from legitimately finding no cookies.
+  if total_browsers > 0 && errors.len() == total_browsers {
+    bail!(
+      "all browser extractions failed:\n  {}",
+      errors.join("\n  ")
+    );
   }
 
   Ok(cookies)
@@ -533,4 +553,73 @@ pub fn any_browser(
     If you're using a Chromium-based browser, please specify the key file \
     and run this program with administrator privileges."
   );
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Mirrors the aggregate-error logic inside `load()` so we can exercise it
+  /// without needing real browser installations.
+  fn load_inner(browser_types: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)>, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    let mut cookies = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let total_browsers = browser_types.len();
+    for (browser_name, browser_fn) in browser_types.iter() {
+      match browser_fn(domains.clone()) {
+        Ok(browser_cookies) => cookies.extend(browser_cookies),
+        Err(err) => errors.push(format!("{browser_name}: {err}")),
+      }
+    }
+    if total_browsers > 0 && errors.len() == total_browsers {
+      bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
+    }
+    Ok(cookies)
+  }
+
+  fn always_err(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Err(anyhow::anyhow!("not installed"))
+  }
+
+  fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Ok(vec![])
+  }
+
+  #[test]
+  fn all_fail_returns_aggregate_error() {
+    let browsers: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)> = vec![
+      ("firefox", always_err),
+      ("chrome", always_err),
+    ];
+    let result = load_inner(browsers, None);
+    assert!(result.is_err(), "expected Err when all browsers fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+      msg.contains("all browser extractions failed"),
+      "error should mention aggregate failure, got: {msg}"
+    );
+    assert!(msg.contains("firefox"), "error should list firefox, got: {msg}");
+    assert!(msg.contains("chrome"), "error should list chrome, got: {msg}");
+  }
+
+  #[test]
+  fn partial_failure_returns_ok() {
+    let browsers: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)> = vec![
+      ("firefox", always_err),
+      ("chrome", always_ok),
+    ];
+    let result = load_inner(browsers, None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when at least one browser succeeds, got: {result:?}"
+    );
+  }
+
+  #[test]
+  fn empty_browser_list_returns_ok_empty() {
+    let browsers: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)> = vec![];
+    let result = load_inner(browsers, None);
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+  }
 }
