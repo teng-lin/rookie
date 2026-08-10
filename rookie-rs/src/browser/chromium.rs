@@ -694,6 +694,29 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn query_cookies_does_not_broaden_valid_domain_filter_with_sql_input() {
+    let dir = unique_tmpdir("chr-domain-filter-scope");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
+      ],
+    );
+
+    let cookies = query_cookies(
+      vec![],
+      db,
+      Some(vec!["example.com".to_string(), "' OR 1=1 --".to_string()]),
+    )
+    .expect("decode");
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn decrypt_encrypted_value_short_blob_returns_ok() {
     let res = decrypt_encrypted_value("orig".to_string(), b"v1", vec![]).expect("should not panic");
     assert_eq!(res, "orig");
