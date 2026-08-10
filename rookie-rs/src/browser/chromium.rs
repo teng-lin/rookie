@@ -17,7 +17,7 @@ use crate::macos;
 #[cfg(target_os = "windows")]
 use aes_gcm::{
   aead::{generic_array::GenericArray, Aead, KeyInit},
-  Aes256Gcm, Key,
+  Aes256Gcm,
 };
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose, Engine as _};
@@ -86,7 +86,7 @@ fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8>
 
 #[cfg(target_os = "windows")]
 fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
-  let mut keydpapi: Vec<u8> = general_purpose::STANDARD
+  let keydpapi: Vec<u8> = general_purpose::STANDARD
     .decode(key64)
     .context("Failed to decode Local State os_crypt.encrypted_key as base64")?;
   let decoded_len = keydpapi.len();
@@ -101,7 +101,7 @@ fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
   }
 
   let wrapped_len = decoded_len - 5;
-  let v10_key = crate::windows::dpapi::decrypt(&mut keydpapi[5..]).with_context(|| {
+  let v10_key = crate::windows::dpapi::decrypt(&keydpapi[5..]).with_context(|| {
     format!(
       "Failed to unwrap DPAPI encrypted key (decoded_length={}, wrapped_length={})",
       decoded_len, wrapped_len
@@ -203,7 +203,7 @@ fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<Stri
 fn decrypt_encrypted_value(
   value: String,
   encrypted_value: &[u8],
-  keys: Vec<Vec<u8>>,
+  keys: &[Vec<u8>],
 ) -> Result<String> {
   if encrypted_value.len() < 15 {
     return Ok(value);
@@ -223,8 +223,15 @@ fn decrypt_encrypted_value(
 
   // Create a new AES block cipher.
   for key in keys {
-    let key = Key::<Aes256Gcm>::from_slice(key.as_slice());
-    let cipher = Aes256Gcm::new(key);
+    // new_from_slice rejects wrong-length keys instead of panicking like
+    // Key::from_slice, so a malformed candidate key just gets skipped.
+    let cipher = match Aes256Gcm::new_from_slice(key) {
+      Ok(cipher) => cipher,
+      Err(_) => {
+        log::warn!("Skipping candidate key with invalid length {}", key.len());
+        continue;
+      }
+    };
     let nonce = GenericArray::from_slice(nonce); // 96-bits; unique per message
 
     match cipher.decrypt(nonce, ciphertext.as_ref()) {
@@ -247,7 +254,7 @@ fn decrypt_encrypted_value(
 fn decrypt_encrypted_value(
   value: String,
   encrypted_value: &[u8],
-  keys: Vec<Vec<u8>>,
+  keys: &[Vec<u8>],
 ) -> Result<String> {
   // cbc
   if !value.is_empty() {
@@ -275,7 +282,7 @@ fn decrypt_encrypted_value(
   let encrypted_value = &mut encrypted_value.to_owned()[3..];
   let iv: [u8; 16] = [b' '; 16];
 
-  for key in &keys {
+  for key in keys {
     let mut key_array: [u8; 16] = [0; 16];
     key_array.copy_from_slice(&key[..16]);
     let cipher = Aes128CbcDec::new(&key_array.into(), &iv.into());
@@ -421,7 +428,7 @@ pub(crate) fn query_cookies(
     if encrypted_value.is_empty() && value.is_empty() {
       continue;
     }
-    let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, keys.to_owned()) {
+    let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, &keys) {
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to decrypt cookie value: {err}");
@@ -616,7 +623,7 @@ mod tests {
     ];
 
     let decrypted =
-      decrypt_encrypted_value("".to_string(), &ciphertext, vec![key]).expect("decrypt vector");
+      decrypt_encrypted_value("".to_string(), &ciphertext, &[key]).expect("decrypt vector");
     assert_eq!(decrypted.as_bytes(), plaintext);
   }
 
@@ -689,7 +696,7 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn decrypt_encrypted_value_short_blob_returns_ok() {
-    let res = decrypt_encrypted_value("orig".to_string(), b"v1", vec![]).expect("should not panic");
+    let res = decrypt_encrypted_value("orig".to_string(), b"v1", &[]).expect("should not panic");
     assert_eq!(res, "orig");
   }
 
@@ -713,8 +720,8 @@ mod tests {
     let mut encrypted_value = b"v10".to_vec();
     encrypted_value.extend_from_slice(ct);
 
-    let res = decrypt_encrypted_value("".to_string(), &encrypted_value, vec![key])
-      .expect("should not panic");
+    let res =
+      decrypt_encrypted_value("".to_string(), &encrypted_value, &[key]).expect("should not panic");
     assert_eq!(res, "");
   }
 
@@ -724,10 +731,23 @@ mod tests {
     for len in 3..15 {
       let mut blob = b"v10".to_vec();
       blob.resize(len, 0);
-      let res =
-        decrypt_encrypted_value("orig".to_string(), &blob, vec![]).expect("should not panic");
+      let res = decrypt_encrypted_value("orig".to_string(), &blob, &[]).expect("should not panic");
       assert_eq!(res, "orig");
     }
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn decrypt_encrypted_value_skips_wrong_length_key() {
+    // A candidate key that isn't 32 bytes must be skipped, not panic the
+    // AES-256-GCM path (Key::from_slice would have panicked). Reaching the
+    // assertion at all proves there was no panic; with no usable key the
+    // function falls through to an error.
+    let mut blob = b"v10".to_vec();
+    blob.resize(31, 0); // "v10" + 12-byte nonce + 16-byte ciphertext region
+    let short_key = vec![0u8; 10];
+    let res = decrypt_encrypted_value("".to_string(), &blob, &[short_key]);
+    assert!(res.is_err());
   }
 
   #[cfg(unix)]
