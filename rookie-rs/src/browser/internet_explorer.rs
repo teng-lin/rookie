@@ -7,10 +7,11 @@ use std::path::PathBuf;
 pub fn internet_explorer_based(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   unsafe {
     if let Some(path) = db_path.to_str() {
-      crate::windows::restart_manager::release_file_lock(path);
+      crate::windows::restart_manager::release_file_lock(path, force_kill);
     }
   }
   let db = EseDb::open(db_path)?;

@@ -8,7 +8,7 @@ extern "system" {
   fn LocalFree(hmem: *mut c_void) -> *mut c_void;
 }
 
-pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
+pub fn decrypt(keydpapi: &[u8]) -> Result<Vec<u8>> {
   // https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
   // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-localfree
   // https://docs.rs/winapi/latest/winapi/um/dpapi/index.html
@@ -16,7 +16,9 @@ pub fn decrypt(keydpapi: &mut [u8]) -> Result<Vec<u8>> {
 
   let data_in = Cryptography::CRYPT_INTEGER_BLOB {
     cbData: keydpapi.len() as u32,
-    pbData: keydpapi.as_mut_ptr(),
+    // Safety: CryptUnprotectData does not mutate the input blob; the mutable
+    // pointer is only required by the Win32 signature.
+    pbData: keydpapi.as_ptr() as *mut u8,
   };
   let mut data_out = Cryptography::CRYPT_INTEGER_BLOB {
     cbData: 0,

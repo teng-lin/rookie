@@ -2,21 +2,39 @@ use anyhow::{bail, Context, Result};
 use privilege::user::privileged;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Create temp folder and return path
-pub fn temp_folder(prefix: &str, suffix: &str, rand_len: usize) -> Result<PathBuf> {
-  let random_string: String = thread_rng()
-    .sample_iter(&Alphanumeric)
-    .take(rand_len)
-    .map(char::from) // From link above, this is needed in later versions
-    .collect();
-  let name = format!("{}{}{}", prefix, random_string, suffix);
-  let tmp = std::env::temp_dir();
-  let temp_path = tmp.join(name);
-  std::fs::create_dir(temp_path.clone())?;
-  log::trace!("created dir {}", temp_path.clone().display());
-  Ok(temp_path)
+pub struct TempDir {
+  path: PathBuf,
+}
+
+impl TempDir {
+  pub fn new() -> Result<Self> {
+    let random_string: String = thread_rng()
+      .sample_iter(&Alphanumeric)
+      .take(10)
+      .map(char::from)
+      .collect();
+    let path = std::env::temp_dir().join(format!(".tmp{random_string}"));
+    std::fs::create_dir(&path)?;
+    log::trace!("created dir {}", path.display());
+    Ok(Self { path })
+  }
+
+  pub fn path(&self) -> &Path {
+    &self.path
+  }
+}
+
+impl Drop for TempDir {
+  fn drop(&mut self) {
+    if let Err(err) = std::fs::remove_dir_all(&self.path) {
+      log::warn!(
+        "failed to remove temporary shadow-copy directory {}: {err}",
+        self.path.display()
+      );
+    }
+  }
 }
 
 /// dst should be directory
@@ -41,4 +59,21 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
     ))?;
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::TempDir;
+
+  #[test]
+  fn temp_dir_is_removed_on_drop() {
+    let path = {
+      let temp_dir = TempDir::new().expect("create temp dir");
+      let path = temp_dir.path().to_path_buf();
+      assert!(path.exists());
+      path
+    };
+
+    assert!(!path.exists());
+  }
 }
