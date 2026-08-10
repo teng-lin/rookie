@@ -28,6 +28,7 @@ pub fn chromium_based(
   key: PathBuf,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   let content = std::fs::read_to_string(key)?;
   let key_dict: serde_json::Value =
@@ -52,13 +53,13 @@ pub fn chromium_based(
     } else {
       get_keys(legacy_key)?
     };
-    query_cookies(keys, db_path, domains)
+    query_cookies(keys, db_path, domains, force_kill)
   }
 
   #[cfg(not(feature = "appbound"))]
   {
     let keys = get_keys(legacy_key)?;
-    query_cookies(keys, db_path, domains)
+    query_cookies(keys, db_path, domains, force_kill)
   }
 }
 
@@ -68,11 +69,12 @@ pub fn chromium_based(
   config: &Browser,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   // Simple AES
 
   let keys = get_keys(config)?;
-  query_cookies(keys, db_path, domains)
+  query_cookies(keys, db_path, domains, force_kill)
 }
 
 #[cfg(unix)]
@@ -303,7 +305,10 @@ fn decrypt_encrypted_value(
 }
 
 #[cfg(target_os = "windows")]
-fn unlock_file(mut path: PathBuf) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
+fn unlock_file(
+  mut path: PathBuf,
+  force_kill: bool,
+) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
   // Shadow copy cookies file so we can read session cookies
   // Admin rights required
   if privilege::user::privileged() {
@@ -321,19 +326,21 @@ fn unlock_file(mut path: PathBuf) -> Result<(PathBuf, Option<windows::shadow_cop
   // Elegantly restart the process which lock the cookies file (And unlock it) using restart manager API
   log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
   unsafe {
-    crate::windows::restart_manager::release_file_lock(&path.to_string_lossy());
+    crate::windows::restart_manager::release_file_lock(&path.to_string_lossy(), force_kill);
   }
   Ok((path, None))
 }
 
+#[allow(unused_variables)]
 pub(crate) fn query_cookies(
   keys: Vec<Vec<u8>>,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   // In windows unlock file locking
   #[cfg(target_os = "windows")]
-  let (db_path, _temp_dir) = unlock_file(db_path)?;
+  let (db_path, _temp_dir) = unlock_file(db_path, force_kill)?;
 
   log::info!(
     "Creating SQLite connection to {}",
@@ -523,7 +530,12 @@ mod tests {
 
   #[test]
   fn query_cookies_missing_db_errors() {
-    let result = query_cookies(vec![], PathBuf::from("/nonexistent/cookies.db"), None);
+    let result = query_cookies(
+      vec![],
+      PathBuf::from("/nonexistent/cookies.db"),
+      None,
+      false,
+    );
     assert!(
       result.is_err(),
       "expected Err for missing db, got {:?}",
@@ -536,7 +548,7 @@ mod tests {
     let dir = unique_tmpdir("chr-bad-sqlite");
     let db = dir.join("Cookies");
     std::fs::write(&db, b"not a sqlite database at all").unwrap();
-    let result = query_cookies(vec![], db, None);
+    let result = query_cookies(vec![], db, None, false);
     assert!(
       result.is_err(),
       "expected Err for bogus sqlite, got {:?}",
@@ -549,7 +561,7 @@ mod tests {
     let dir = unique_tmpdir("chr-empty-table");
     let db = dir.join("Cookies");
     seed_chromium_cookies(&db, &[]);
-    let cookies = query_cookies(vec![], db, None).expect("decode");
+    let cookies = query_cookies(vec![], db, None, false).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
@@ -573,7 +585,7 @@ mod tests {
         1,
       )],
     );
-    let cookies = query_cookies(vec![], db, None).expect("decode");
+    let cookies = query_cookies(vec![], db, None, false).expect("decode");
     assert_eq!(cookies.len(), 1, "{:?}", cookies);
     let c = &cookies[0];
     assert_eq!(c.domain, ".example.com");
@@ -647,6 +659,7 @@ mod tests {
       vec![],
       db,
       Some(vec!["example.com".to_string(), "other.test".to_string()]),
+      false,
     )
     .expect("decode");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
@@ -677,7 +690,8 @@ mod tests {
       ],
     );
 
-    let cookies = query_cookies(vec![], db, Some(vec!["' OR 1=1 --".to_string()])).expect("decode");
+    let cookies =
+      query_cookies(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
@@ -885,8 +899,8 @@ mod tests {
       )
       .expect("insert row 4");
 
-    let mut cookies =
-      query_cookies(vec![], db, None).expect("query_cookies should succeed despite bad rows");
+    let mut cookies = query_cookies(vec![], db, None, false)
+      .expect("query_cookies should succeed despite bad rows");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);

@@ -114,12 +114,12 @@ pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -140,12 +140,12 @@ pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -166,12 +166,12 @@ pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -192,12 +192,12 @@ pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -236,12 +236,12 @@ pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -262,12 +262,12 @@ pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -288,12 +288,12 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -314,12 +314,12 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -339,7 +339,7 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let config = get_browser_config("octo_browser");
   let (key, db_path) = paths::find_chrome_based_paths(config)?;
-  chromium_based(key, db_path, domains)
+  chromium_based(key, db_path, domains, false)
 }
 
 /// Returns cookies from Safari (macOS only)
@@ -377,7 +377,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let config = get_browser_config("ie");
   let db_path = paths::find_ie_based_paths(config)?;
-  internet_explorer_based(db_path, domains)
+  internet_explorer_based(db_path, domains, false)
 }
 
 /// Returns cookies from all browsers
@@ -482,7 +482,7 @@ pub fn any_browser(
       ("vivaldi", get_browser_config("vivaldi")),
     ];
     for (name, browser_config) in chrome_configs {
-      match chromium_based(browser_config, cookies_path.into(), domains.clone()) {
+      match chromium_based(browser_config, cookies_path.into(), domains.clone(), false) {
         Ok(cookies) => return Ok(cookies),
         Err(err) => {
           log::warn!("any_browser: {name} (chromium) did not decode {cookies_path}: {err}")
@@ -497,6 +497,7 @@ pub fn any_browser(
         PathBuf::from(key_path),
         cookies_path.into(),
         domains.clone(),
+        false,
       ) {
         Ok(cookies) => return Ok(cookies),
         Err(err) => {
@@ -516,7 +517,7 @@ pub fn any_browser(
   #[cfg(target_os = "windows")]
   {
     // Internet Explorer
-    match internet_explorer_based(cookies_path.into(), domains.clone()) {
+    match internet_explorer_based(cookies_path.into(), domains.clone(), false) {
       Ok(cookies) => return Ok(cookies),
       Err(err) => log::warn!("any_browser: internet_explorer did not decode {cookies_path}: {err}"),
     }
