@@ -692,7 +692,6 @@ mod tests {
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
-  #[cfg(unix)]
   #[test]
   fn query_cookies_does_not_broaden_valid_domain_filter_with_sql_input() {
     let dir = unique_tmpdir("chr-domain-filter-scope");
