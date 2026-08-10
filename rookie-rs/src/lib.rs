@@ -569,6 +569,8 @@ pub fn any_browser(
 mod tests {
   use super::*;
 
+  type BrowserEntry = (&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>);
+
   fn always_err(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     Err(anyhow::anyhow!("not installed"))
   }
@@ -579,7 +581,7 @@ mod tests {
 
   #[test]
   fn all_fail_returns_aggregate_error() {
-    let browsers: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)> = vec![
+    let browsers: Vec<BrowserEntry> = vec![
       ("firefox", always_err),
       ("chrome", always_err),
     ];
@@ -596,7 +598,7 @@ mod tests {
 
   #[test]
   fn partial_failure_returns_ok() {
-    let browsers: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)> = vec![
+    let browsers: Vec<BrowserEntry> = vec![
       ("firefox", always_err),
       ("chrome", always_ok),
     ];
@@ -609,7 +611,7 @@ mod tests {
 
   #[test]
   fn empty_browser_list_returns_ok_empty() {
-    let browsers: Vec<(&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>)> = vec![];
+    let browsers: Vec<BrowserEntry> = vec![];
     let result = load_from_browsers(&browsers, None);
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
