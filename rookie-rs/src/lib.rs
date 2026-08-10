@@ -427,10 +427,7 @@ where
   // If every attempted browser extraction failed, surface an aggregate error so that
   // callers can distinguish total failure from legitimately finding no cookies.
   if !browser_types.is_empty() && errors.len() == browser_types.len() {
-    bail!(
-      "all browser extractions failed:\n  {}",
-      errors.join("\n  ")
-    );
+    bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
   }
 
   Ok(cookies)
@@ -581,10 +578,7 @@ mod tests {
 
   #[test]
   fn all_fail_returns_aggregate_error() {
-    let browsers: Vec<BrowserEntry> = vec![
-      ("firefox", always_err),
-      ("chrome", always_err),
-    ];
+    let browsers: Vec<BrowserEntry> = vec![("firefox", always_err), ("chrome", always_err)];
     let result = load_from_browsers(&browsers, None);
     assert!(result.is_err(), "expected Err when all browsers fail");
     let msg = result.unwrap_err().to_string();
@@ -592,16 +586,19 @@ mod tests {
       msg.contains("all browser extractions failed"),
       "error should mention aggregate failure, got: {msg}"
     );
-    assert!(msg.contains("firefox: not installed"), "error should list firefox error, got: {msg}");
-    assert!(msg.contains("chrome: not installed"), "error should list chrome error, got: {msg}");
+    assert!(
+      msg.contains("firefox: not installed"),
+      "error should list firefox error, got: {msg}"
+    );
+    assert!(
+      msg.contains("chrome: not installed"),
+      "error should list chrome error, got: {msg}"
+    );
   }
 
   #[test]
   fn partial_failure_returns_ok() {
-    let browsers: Vec<BrowserEntry> = vec![
-      ("firefox", always_err),
-      ("chrome", always_ok),
-    ];
+    let browsers: Vec<BrowserEntry> = vec![("firefox", always_err), ("chrome", always_ok)];
     let result = load_from_browsers(&browsers, None);
     assert!(
       result.is_ok(),
