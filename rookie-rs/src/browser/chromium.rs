@@ -17,7 +17,7 @@ use crate::macos;
 #[cfg(target_os = "windows")]
 use aes_gcm::{
   aead::{generic_array::GenericArray, Aead, KeyInit},
-  Aes256Gcm, Key,
+  Aes256Gcm,
 };
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose, Engine as _};
@@ -223,8 +223,15 @@ fn decrypt_encrypted_value(
 
   // Create a new AES block cipher.
   for key in keys {
-    let key = Key::<Aes256Gcm>::from_slice(key.as_slice());
-    let cipher = Aes256Gcm::new(key);
+    // new_from_slice rejects wrong-length keys instead of panicking like
+    // Key::from_slice, so a malformed candidate key just gets skipped.
+    let cipher = match Aes256Gcm::new_from_slice(key) {
+      Ok(cipher) => cipher,
+      Err(_) => {
+        log::warn!("Skipping candidate key with invalid length {}", key.len());
+        continue;
+      }
+    };
     let nonce = GenericArray::from_slice(nonce); // 96-bits; unique per message
 
     match cipher.decrypt(nonce, ciphertext.as_ref()) {
@@ -700,6 +707,20 @@ mod tests {
       let res = decrypt_encrypted_value("orig".to_string(), &blob, &[]).expect("should not panic");
       assert_eq!(res, "orig");
     }
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn decrypt_encrypted_value_skips_wrong_length_key() {
+    // A candidate key that isn't 32 bytes must be skipped, not panic the
+    // AES-256-GCM path (Key::from_slice would have panicked). Reaching the
+    // assertion at all proves there was no panic; with no usable key the
+    // function falls through to an error.
+    let mut blob = b"v10".to_vec();
+    blob.resize(31, 0); // "v10" + 12-byte nonce + 16-byte ciphertext region
+    let short_key = vec![0u8; 10];
+    let res = decrypt_encrypted_value("".to_string(), &blob, &[short_key]);
+    assert!(res.is_err());
   }
 
   #[cfg(unix)]
