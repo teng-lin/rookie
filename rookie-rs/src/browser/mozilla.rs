@@ -16,23 +16,24 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
     "
   .to_string();
 
-  if let Some(domains) = domains.clone() {
-    let domain_queries: Vec<String> = domains
-      .iter()
-      .map(|domain| format!("host LIKE '%{}%'", domain))
-      .collect();
+  let domain_filters: Vec<String> = domains
+    .as_ref()
+    .map(|domains| domains.iter().map(|domain| format!("%{domain}%")).collect())
+    .unwrap_or_default();
 
-    if !domain_queries.is_empty() {
-      let joined_queries = domain_queries.join(" OR ");
-      query += &format!("WHERE ({})", joined_queries);
-    }
+  if !domain_filters.is_empty() {
+    let predicates = (1..=domain_filters.len())
+      .map(|index| format!("host LIKE ?{index}"))
+      .collect::<Vec<_>>()
+      .join(" OR ");
+    query += &format!("WHERE ({predicates})");
   }
 
   query += ";";
 
   let mut cookies: Vec<Cookie> = vec![];
   let mut stmt = connection.prepare(query.as_str())?;
-  let mut rows = stmt.query([])?;
+  let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
     let host: String = match row.get(0) {
@@ -377,9 +378,30 @@ mod tests {
       ],
     );
 
-    let cookies = firefox_based(db, Some(vec!["example.com".to_string()])).expect("decode");
+    let mut cookies = firefox_based(
+      db,
+      Some(vec!["example.com".to_string(), "other.test".to_string()]),
+    )
+    .expect("decode");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, vec!["keep"], "{:?}", cookies);
+    assert_eq!(names, vec!["drop", "keep"], "{:?}", cookies);
+  }
+
+  #[test]
+  fn firefox_based_domain_filter_treats_sql_as_data() {
+    let dir = unique_tmpdir("ff-domain-filter-sql");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "first", "yes", false, 0),
+        ("other.test", "/", false, 0, "second", "no", false, 0),
+      ],
+    );
+
+    let cookies = firefox_based(db, Some(vec!["' OR 1=1 --".to_string()])).expect("decode");
+    assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
   #[test]
