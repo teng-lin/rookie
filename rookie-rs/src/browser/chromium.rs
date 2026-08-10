@@ -711,6 +711,7 @@ mod tests {
       vec![],
       db,
       Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
+      false,
     )
     .expect("decode");
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
@@ -830,8 +831,6 @@ mod tests {
     }
   }
 
-<<<<<<< HEAD
-=======
   #[cfg(windows)]
   #[test]
   fn decrypt_encrypted_value_skips_wrong_length_key() {
@@ -846,7 +845,6 @@ mod tests {
     assert!(res.is_err());
   }
 
->>>>>>> origin/main
   #[cfg(unix)]
   #[test]
   fn query_cookies_ignores_malformed_and_undecryptable_rows() {
@@ -902,13 +900,8 @@ mod tests {
       )
       .expect("insert row 4");
 
-<<<<<<< HEAD
-    let mut cookies =
-      query_cookies(vec![], db, None).expect("query_cookies should succeed despite bad rows");
-=======
     let mut cookies = query_cookies(vec![], db, None, false)
       .expect("query_cookies should succeed despite bad rows");
->>>>>>> origin/main
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
