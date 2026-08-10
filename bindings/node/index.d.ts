@@ -15,7 +15,6 @@ export interface CookieObject {
 }
 export declare function version(): string
 export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
-/** Common browsers */
 export declare function firefox(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function zen(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function librewolf(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
@@ -27,7 +26,6 @@ export declare function opera(domains?: Array<string> | undefined | null): Promi
 export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function chromium(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function vivaldi(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

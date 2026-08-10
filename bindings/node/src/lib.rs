@@ -64,7 +64,7 @@ impl Task for AnyBrowserTaskImpl {
   }
 }
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn any_browser(
   db_path: String,
   domains: Option<Vec<String>>,
@@ -100,7 +100,7 @@ macro_rules! async_browser_fn {
       }
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
     pub fn $name(domains: Option<Vec<String>>) -> AsyncTask<$task_name> {
       AsyncTask::new($task_name { domains })
     }
@@ -142,14 +142,14 @@ impl Task for FirefoxBasedTask {
   }
 }
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn firefox_based(db_path: String, domains: Option<Vec<String>>) -> AsyncTask<FirefoxBasedTask> {
   AsyncTask::new(FirefoxBasedTask { db_path, domains })
 }
 
 /// Windows only browsers
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn octo_browser(domains: Option<Vec<String>>) -> AsyncTask<OctoBrowserTask> {
   AsyncTask::new(OctoBrowserTask { domains })
@@ -175,7 +175,7 @@ impl Task for OctoBrowserTask {
   }
 }
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn internet_explorer(domains: Option<Vec<String>>) -> AsyncTask<InternetExplorerTask> {
   AsyncTask::new(InternetExplorerTask { domains })
@@ -228,7 +228,7 @@ impl Task for ChromiumBasedWinTask {
   }
 }
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn chromium_based(
   key_path: String,
@@ -244,7 +244,7 @@ pub fn chromium_based(
 
 /// MacOS browsers
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "macos")]
 pub fn safari(domains: Option<Vec<String>>) -> AsyncTask<SafariTask> {
   AsyncTask::new(SafariTask { domains })
@@ -303,7 +303,7 @@ impl Task for ChromiumBasedUnixTask {
   }
 }
 
-#[napi]
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(unix)]
 pub fn chromium_based(
   db_path: String,
