@@ -114,12 +114,12 @@ pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -140,12 +140,12 @@ pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -166,12 +166,12 @@ pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -192,12 +192,12 @@ pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -236,12 +236,12 @@ pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -262,12 +262,12 @@ pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -288,12 +288,12 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -314,12 +314,12 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains)
+    chromium_based(key, db_path, domains, false)
   }
   #[cfg(unix)]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains)
+    chromium_based(config, db_path, domains, false)
   }
 }
 
@@ -339,7 +339,7 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let config = get_browser_config("octo_browser");
   let (key, db_path) = paths::find_chrome_based_paths(config)?;
-  chromium_based(key, db_path, domains)
+  chromium_based(key, db_path, domains, false)
 }
 
 /// Returns cookies from Safari (macOS only)
@@ -377,7 +377,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let config = get_browser_config("ie");
   let db_path = paths::find_ie_based_paths(config)?;
-  internet_explorer_based(db_path, domains)
+  internet_explorer_based(db_path, domains, false)
 }
 
 /// Returns cookies from all browsers
@@ -482,7 +482,7 @@ pub fn any_browser(
       ("vivaldi", get_browser_config("vivaldi")),
     ];
     for (name, browser_config) in chrome_configs {
-      match chromium_based(browser_config, cookies_path.into(), domains.clone()) {
+      match chromium_based(browser_config, cookies_path.into(), domains.clone(), false) {
         Ok(cookies) => return Ok(cookies),
         Err(err) => {
           log::warn!("any_browser: {name} (chromium) did not decode {cookies_path}: {err}")
@@ -497,6 +497,7 @@ pub fn any_browser(
         PathBuf::from(key_path),
         cookies_path.into(),
         domains.clone(),
+        false,
       ) {
         Ok(cookies) => return Ok(cookies),
         Err(err) => {
@@ -516,7 +517,7 @@ pub fn any_browser(
   #[cfg(target_os = "windows")]
   {
     // Internet Explorer
-    match internet_explorer_based(cookies_path.into(), domains.clone()) {
+    match internet_explorer_based(cookies_path.into(), domains.clone(), false) {
       Ok(cookies) => return Ok(cookies),
       Err(err) => log::warn!("any_browser: internet_explorer did not decode {cookies_path}: {err}"),
     }
@@ -533,4 +534,131 @@ pub fn any_browser(
     If you're using a Chromium-based browser, please specify the key file \
     and run this program with administrator privileges."
   );
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::{Mutex, MutexGuard};
+
+  static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+  /// RAII guard that restores `HOME` to its prior value when dropped.
+  ///
+  /// Holds the `ENV_MUTEX` lock for its entire lifetime so that parallel
+  /// tests never observe an intermediate value for `HOME`. The temp
+  /// directory is also removed in `Drop`, guaranteeing cleanup even when
+  /// the test panics before reaching the end of the function.
+  struct HomeGuard<'a> {
+    old_home: Option<std::ffi::OsString>,
+    home_dir: std::path::PathBuf,
+    _lock: MutexGuard<'a, ()>,
+  }
+
+  impl<'a> HomeGuard<'a> {
+    /// Create a new guard: acquires `lock`, sets `HOME` to `home_dir`,
+    /// and arranges to restore the old value on drop.
+    fn new(lock: MutexGuard<'a, ()>, home_dir: std::path::PathBuf) -> Self {
+      let old_home = std::env::var_os("HOME");
+      // SAFETY: we hold ENV_MUTEX so no other test thread concurrently
+      // reads or writes HOME.
+      #[allow(deprecated)]
+      unsafe {
+        std::env::set_var("HOME", &home_dir);
+      }
+      HomeGuard {
+        old_home,
+        home_dir,
+        _lock: lock,
+      }
+    }
+  }
+
+  impl Drop for HomeGuard<'_> {
+    fn drop(&mut self) {
+      // Restore HOME before releasing the mutex lock.
+      #[allow(deprecated)]
+      unsafe {
+        match &self.old_home {
+          Some(old) => std::env::set_var("HOME", old),
+          None => std::env::remove_var("HOME"),
+        }
+      }
+      // Best-effort removal of the temporary home directory.
+      let _ = std::fs::remove_dir_all(&self.home_dir);
+    }
+  }
+
+  fn seed_test_cookies(db_path: &std::path::Path, cookie_name: &str, cookie_value: &str) {
+    let conn = rusqlite::Connection::open(db_path).expect("open sqlite db");
+    conn
+      .execute(
+        "CREATE TABLE cookies (
+          host_key TEXT NOT NULL,
+          path TEXT NOT NULL,
+          is_secure INTEGER NOT NULL,
+          expires_utc INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NOT NULL,
+          encrypted_value BLOB,
+          is_httponly INTEGER NOT NULL,
+          samesite INTEGER NOT NULL
+        )",
+        [],
+      )
+      .expect("create table cookies");
+    conn
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
+         VALUES ('.example.com', '/', 0, 0, ?1, ?2, ?3, 0, 0)",
+        rusqlite::params![cookie_name, cookie_value, &b"x"[..]],
+      )
+      .expect("insert row");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn test_chrome_resolves_network_cookies_on_unix() {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let home_dir =
+      std::env::temp_dir().join(format!("rookie-chrome-home-{}-{}", std::process::id(), n));
+
+    #[cfg(target_os = "macos")]
+    let chrome_dir = home_dir.join("Library/Application Support/Google/Chrome");
+
+    #[cfg(not(target_os = "macos"))]
+    let chrome_dir = home_dir.join(".config/google-chrome");
+
+    let network_dir = chrome_dir.join("Default/Network");
+    let default_dir = chrome_dir.join("Default");
+
+    std::fs::create_dir_all(&network_dir).expect("create network dir");
+    std::fs::create_dir_all(&default_dir).expect("create default dir");
+
+    let local_state = chrome_dir.join("Local State");
+    std::fs::write(&local_state, b"{}").expect("create local state");
+
+    let network_db = network_dir.join("Cookies");
+    let legacy_db = default_dir.join("Cookies");
+
+    seed_test_cookies(&network_db, "net_cookie", "net_val");
+    seed_test_cookies(&legacy_db, "legacy_cookie", "legacy_val");
+
+    // HomeGuard acquires ENV_MUTEX, sets HOME to `home_dir`, and restores
+    // the previous value (plus removes the temp dir) in its Drop impl
+    // — even if chrome() panics.
+    let _guard = HomeGuard::new(ENV_MUTEX.lock().unwrap(), home_dir);
+
+    let cookies = chrome(None).expect("chrome() should find and parse network cookies");
+    assert_eq!(
+      cookies.len(),
+      1,
+      "expected 1 cookie from Network/Cookies, got {:?}",
+      cookies
+    );
+    assert_eq!(cookies[0].name, "net_cookie");
+    assert_eq!(cookies[0].value, "net_val");
+  }
 }

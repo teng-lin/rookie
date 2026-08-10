@@ -8,7 +8,7 @@ use crate::config::Browser;
 #[cfg(target_os = "windows")]
 use crate::windows;
 
-#[cfg(any(windows, test))]
+#[cfg(any(unix, windows, test))]
 use anyhow::Context;
 
 #[cfg(target_os = "macos")]
@@ -17,7 +17,7 @@ use crate::macos;
 #[cfg(target_os = "windows")]
 use aes_gcm::{
   aead::{generic_array::GenericArray, Aead, KeyInit},
-  Aes256Gcm, Key,
+  Aes256Gcm,
 };
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose, Engine as _};
@@ -28,6 +28,7 @@ pub fn chromium_based(
   key: PathBuf,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   let content = std::fs::read_to_string(key)?;
   let key_dict: serde_json::Value =
@@ -52,13 +53,13 @@ pub fn chromium_based(
     } else {
       get_keys(legacy_key)?
     };
-    query_cookies(keys, db_path, domains)
+    query_cookies(keys, db_path, domains, force_kill)
   }
 
   #[cfg(not(feature = "appbound"))]
   {
     let keys = get_keys(legacy_key)?;
-    query_cookies(keys, db_path, domains)
+    query_cookies(keys, db_path, domains, force_kill)
   }
 }
 
@@ -68,11 +69,12 @@ pub fn chromium_based(
   config: &Browser,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   // Simple AES
 
   let keys = get_keys(config)?;
-  query_cookies(keys, db_path, domains)
+  query_cookies(keys, db_path, domains, force_kill)
 }
 
 #[cfg(unix)]
@@ -86,7 +88,7 @@ fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8>
 
 #[cfg(target_os = "windows")]
 fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
-  let mut keydpapi: Vec<u8> = general_purpose::STANDARD
+  let keydpapi: Vec<u8> = general_purpose::STANDARD
     .decode(key64)
     .context("Failed to decode Local State os_crypt.encrypted_key as base64")?;
   let decoded_len = keydpapi.len();
@@ -101,7 +103,7 @@ fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
   }
 
   let wrapped_len = decoded_len - 5;
-  let v10_key = crate::windows::dpapi::decrypt(&mut keydpapi[5..]).with_context(|| {
+  let v10_key = crate::windows::dpapi::decrypt(&keydpapi[5..]).with_context(|| {
     format!(
       "Failed to unwrap DPAPI encrypted key (decoded_length={}, wrapped_length={})",
       decoded_len, wrapped_len
@@ -177,7 +179,7 @@ fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
   )
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(unix, windows, test))]
 fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
   if plaintext.len() <= 32 {
     bail!("Can't decode encrypted value");
@@ -186,7 +188,7 @@ fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
   String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(unix, windows, test))]
 fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<String> {
   if key_type == b"v20" {
     return decode_after_host_hash_prefix(plaintext);
@@ -203,7 +205,7 @@ fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<Stri
 fn decrypt_encrypted_value(
   value: String,
   encrypted_value: &[u8],
-  keys: Vec<Vec<u8>>,
+  keys: &[Vec<u8>],
 ) -> Result<String> {
   if encrypted_value.len() < 15 {
     return Ok(value);
@@ -223,8 +225,15 @@ fn decrypt_encrypted_value(
 
   // Create a new AES block cipher.
   for key in keys {
-    let key = Key::<Aes256Gcm>::from_slice(key.as_slice());
-    let cipher = Aes256Gcm::new(key);
+    // new_from_slice rejects wrong-length keys instead of panicking like
+    // Key::from_slice, so a malformed candidate key just gets skipped.
+    let cipher = match Aes256Gcm::new_from_slice(key) {
+      Ok(cipher) => cipher,
+      Err(_) => {
+        log::warn!("Skipping candidate key with invalid length {}", key.len());
+        continue;
+      }
+    };
     let nonce = GenericArray::from_slice(nonce); // 96-bits; unique per message
 
     match cipher.decrypt(nonce, ciphertext.as_ref()) {
@@ -247,7 +256,7 @@ fn decrypt_encrypted_value(
 fn decrypt_encrypted_value(
   value: String,
   encrypted_value: &[u8],
-  keys: Vec<Vec<u8>>,
+  keys: &[Vec<u8>],
 ) -> Result<String> {
   // cbc
   if !value.is_empty() {
@@ -275,31 +284,19 @@ fn decrypt_encrypted_value(
   let encrypted_value = &mut encrypted_value.to_owned()[3..];
   let iv: [u8; 16] = [b' '; 16];
 
-  for key in &keys {
+  for key in keys {
     let mut key_array: [u8; 16] = [0; 16];
     key_array.copy_from_slice(&key[..16]);
     let cipher = Aes128CbcDec::new(&key_array.into(), &iv.into());
     let mut cloned_encrypted_value: Vec<u8> = encrypted_value.to_vec();
 
     if let Ok(plaintext) = cipher.decrypt_padded_mut::<Pkcs7>(&mut cloned_encrypted_value) {
-      let decoded = String::from_utf8(plaintext.to_vec());
-      match decoded {
-        Ok(decoded) => {
-          return Ok(decoded);
-        }
-        Err(_) => {
-          log::debug!("Error in decode decrypt value with utf8. trying from index 32");
-
-          let Some(slice) = plaintext.get(32..) else {
-            log::warn!("Plaintext too short to slice from index 32");
-            return Ok("".into());
-          };
-
-          let decoded = String::from_utf8(slice.to_vec()).unwrap_or_else(|_| {
-            log::warn!("Error decoding from index 32 with UTF-8");
-            "".into()
-          });
-          return Ok(decoded);
+      match decode_chromium_plaintext(key_type, plaintext.to_vec()) {
+        Ok(decoded) => return Ok(decoded),
+        Err(err) => {
+          // A wrong key can occasionally pass PKCS#7 validation. Do not accept
+          // its bytes as a cookie value; another key may decrypt valid UTF-8.
+          log::debug!("Failed to decode decrypted value as UTF-8: {err}");
         }
       }
     }
@@ -308,43 +305,42 @@ fn decrypt_encrypted_value(
 }
 
 #[cfg(target_os = "windows")]
-fn unlock_file(mut path: PathBuf) -> Result<PathBuf> {
-  let mut shadow_copy_success = false;
+fn unlock_file(
+  mut path: PathBuf,
+  force_kill: bool,
+) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
   // Shadow copy cookies file so we can read session cookies
   // Admin rights required
   if privilege::user::privileged() {
     log::debug!("Admin rights detected");
-    if let Ok(temp_dir) = windows::shadow_copy::temp_folder(".tmp", "", 10) {
-      let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.clone().to_path_buf());
+    if let Ok(temp_dir) = windows::shadow_copy::TempDir::new() {
+      let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.path().to_path_buf());
       log::debug!("shadow copy result: {:?}", result);
       if result.is_ok() {
-        shadow_copy_success = true;
-        path = temp_dir.join(path.file_name().unwrap());
+        path = temp_dir.path().join(path.file_name().unwrap());
+        return Ok((path, Some(temp_dir)));
       }
     }
   }
 
   // Elegantly restart the process which lock the cookies file (And unlock it) using restart manager API
-  if !shadow_copy_success {
-    log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
-    unsafe {
-      crate::windows::restart_manager::release_file_lock(path.to_str().unwrap());
-    }
+  log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
+  unsafe {
+    crate::windows::restart_manager::release_file_lock(&path.to_string_lossy(), force_kill);
   }
-  Ok(path)
+  Ok((path, None))
 }
 
-#[allow(unused_mut)]
+#[allow(unused_variables)]
 pub(crate) fn query_cookies(
   keys: Vec<Vec<u8>>,
-  mut db_path: PathBuf,
+  db_path: PathBuf,
   domains: Option<Vec<String>>,
+  force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   // In windows unlock file locking
   #[cfg(target_os = "windows")]
-  {
-    db_path = unlock_file(db_path)?;
-  }
+  let (db_path, _temp_dir) = unlock_file(db_path, force_kill)?;
 
   log::info!(
     "Creating SQLite connection to {}",
@@ -352,25 +348,25 @@ pub(crate) fn query_cookies(
   );
   let connection = sqlite::connect(db_path)?;
   let mut query =
-        "SELECT host_key, path, is_secure, expires_utc, name, value, CAST(encrypted_value AS BLOB), is_httponly, samesite FROM cookies ".to_string();
+    "SELECT host_key, path, is_secure, expires_utc, name, value, CAST(encrypted_value AS BLOB), is_httponly, samesite FROM cookies ".to_string();
+  let domain_filters: Vec<String> = domains
+    .as_ref()
+    .map(|domains| domains.iter().map(|domain| format!("%{domain}%")).collect())
+    .unwrap_or_default();
 
-  if let Some(domains) = domains {
-    let domain_queries: Vec<String> = domains
-      .iter()
-      .map(|domain| format!("host_key LIKE '%{}%'", domain))
-      .collect();
-
-    if !domain_queries.is_empty() {
-      let joined_queries = domain_queries.join(" OR ");
-      query += &format!("WHERE ({})", joined_queries);
-    }
+  if !domain_filters.is_empty() {
+    let predicates = (1..=domain_filters.len())
+      .map(|index| format!("host_key LIKE ?{index}"))
+      .collect::<Vec<_>>()
+      .join(" OR ");
+    query += &format!("WHERE ({predicates})");
   }
   query += ";";
 
   let mut cookies: Vec<Cookie> = vec![];
   let mut last_decrypt_error: Option<anyhow::Error> = None;
   let mut stmt = connection.prepare(query.as_str())?;
-  let mut rows = stmt.query([])?;
+  let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
     let host_key: String = match row.get(0) {
@@ -424,10 +420,10 @@ pub(crate) fn query_cookies(
         continue;
       }
     };
-    if encrypted_value.is_empty() {
+    if encrypted_value.is_empty() && value.is_empty() {
       continue;
     }
-    let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, keys.to_owned()) {
+    let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, &keys) {
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to decrypt cookie value: {err}");
@@ -534,7 +530,12 @@ mod tests {
 
   #[test]
   fn query_cookies_missing_db_errors() {
-    let result = query_cookies(vec![], PathBuf::from("/nonexistent/cookies.db"), None);
+    let result = query_cookies(
+      vec![],
+      PathBuf::from("/nonexistent/cookies.db"),
+      None,
+      false,
+    );
     assert!(
       result.is_err(),
       "expected Err for missing db, got {:?}",
@@ -547,7 +548,7 @@ mod tests {
     let dir = unique_tmpdir("chr-bad-sqlite");
     let db = dir.join("Cookies");
     std::fs::write(&db, b"not a sqlite database at all").unwrap();
-    let result = query_cookies(vec![], db, None);
+    let result = query_cookies(vec![], db, None, false);
     assert!(
       result.is_err(),
       "expected Err for bogus sqlite, got {:?}",
@@ -560,33 +561,40 @@ mod tests {
     let dir = unique_tmpdir("chr-empty-table");
     let db = dir.join("Cookies");
     seed_chromium_cookies(&db, &[]);
-    let cookies = query_cookies(vec![], db, None).expect("decode");
+    let cookies = query_cookies(vec![], db, None, false).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
   #[test]
-  fn query_cookies_skips_rows_with_empty_encrypted_value() {
-    let dir = unique_tmpdir("chr-skip-empty");
+  fn query_cookies_returns_plaintext_value_when_value_is_set() {
+    let dir = unique_tmpdir("chr-plaintext");
     let db = dir.join("Cookies");
-    // `query_cookies` short-circuits on empty encrypted_value via
-    // `if encrypted_value.is_empty() { continue }`, so this row is
-    // dropped even though every other column is valid.
     seed_chromium_cookies(
       &db,
       &[(
         ".example.com",
         "/",
-        false,
-        0,
-        "skip",
-        "ignored",
+        true,
+        // chromium_timestamp wants microseconds since 1601-01-01.
+        // 11_644_473_600_000_000 us == Unix epoch.
+        11_644_473_600_000_000 + 1_700_000_000 * 1_000_000,
+        "id",
+        "plain",
         b"",
-        false,
-        0,
+        true,
+        1,
       )],
     );
-    let cookies = query_cookies(vec![], db, None).expect("decode");
-    assert!(cookies.is_empty(), "{:?}", cookies);
+    let cookies = query_cookies(vec![], db, None, false).expect("decode");
+    assert_eq!(cookies.len(), 1, "{:?}", cookies);
+    let c = &cookies[0];
+    assert_eq!(c.domain, ".example.com");
+    assert_eq!(c.name, "id");
+    assert_eq!(c.value, "plain");
+    assert!(c.http_only);
+    assert!(c.secure);
+    assert_eq!(c.same_site, 1);
+    assert_eq!(c.expires, Some(1_700_000_000));
   }
 
   #[cfg(unix)]
@@ -615,7 +623,7 @@ mod tests {
     ];
 
     let decrypted =
-      decrypt_encrypted_value("".to_string(), &ciphertext, vec![key]).expect("decrypt vector");
+      decrypt_encrypted_value("".to_string(), &ciphertext, &[key]).expect("decrypt vector");
     assert_eq!(decrypted.as_bytes(), plaintext);
   }
 
@@ -635,43 +643,6 @@ mod tests {
     assert_eq!(v20, "bar");
   }
 
-  // Unix-only tests: on unix `decrypt_encrypted_value` short-circuits to
-  // the plain `value` field when it's non-empty OR when the encrypted
-  // prefix isn't a known v10/v11/v20 marker. That lets us exercise the
-  // SQL → Cookie struct mapping end-to-end without a real key.
-  #[cfg(unix)]
-  #[test]
-  fn query_cookies_returns_plaintext_value_when_value_is_set() {
-    let dir = unique_tmpdir("chr-plaintext");
-    let db = dir.join("Cookies");
-    seed_chromium_cookies(
-      &db,
-      &[(
-        ".example.com",
-        "/",
-        true,
-        // chromium_timestamp wants microseconds since 1601-01-01.
-        // 11_644_473_600_000_000 us == Unix epoch.
-        11_644_473_600_000_000 + 1_700_000_000 * 1_000_000,
-        "id",
-        "plain",
-        b"v10dummy", // non-empty so the row isn't skipped
-        true,
-        1,
-      )],
-    );
-    let cookies = query_cookies(vec![], db, None).expect("decode");
-    assert_eq!(cookies.len(), 1, "{:?}", cookies);
-    let c = &cookies[0];
-    assert_eq!(c.domain, ".example.com");
-    assert_eq!(c.name, "id");
-    assert_eq!(c.value, "plain");
-    assert!(c.http_only);
-    assert!(c.secure);
-    assert_eq!(c.same_site, 1);
-    assert_eq!(c.expires, Some(1_700_000_000));
-  }
-
   #[cfg(unix)]
   #[test]
   fn query_cookies_filters_by_domain() {
@@ -684,21 +655,78 @@ mod tests {
         ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
       ],
     );
-    let cookies = query_cookies(vec![], db, Some(vec!["example.com".to_string()])).expect("decode");
+    let mut cookies = query_cookies(
+      vec![],
+      db,
+      Some(vec!["example.com".to_string(), "other.test".to_string()]),
+      false,
+    )
+    .expect("decode");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["drop", "keep"], "{:?}", cookies);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn query_cookies_domain_filter_treats_sql_as_data() {
+    let dir = unique_tmpdir("chr-domain-filter-sql");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "first",
+          "yes",
+          b"x",
+          false,
+          0,
+        ),
+        ("other.test", "/", false, 0, "second", "no", b"x", false, 0),
+      ],
+    );
+
+    let cookies =
+      query_cookies(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false).expect("decode");
+    assert!(cookies.is_empty(), "{:?}", cookies);
+  }
+
+  #[test]
+  fn query_cookies_does_not_broaden_valid_domain_filter_with_sql_input() {
+    let dir = unique_tmpdir("chr-domain-filter-scope");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
+      ],
+    );
+
+    let cookies = query_cookies(
+      vec![],
+      db,
+      Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
+    )
+    .expect("decode");
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
     assert_eq!(names, vec!["keep"], "{:?}", cookies);
   }
 
   #[cfg(unix)]
   #[test]
   fn decrypt_encrypted_value_short_blob_returns_ok() {
-    let res = decrypt_encrypted_value("orig".to_string(), b"v1", vec![]).expect("should not panic");
+    let res = decrypt_encrypted_value("orig".to_string(), b"v1", &[]).expect("should not panic");
     assert_eq!(res, "orig");
   }
 
   #[cfg(unix)]
   #[test]
-  fn decrypt_encrypted_value_short_plaintext_returns_ok() {
+  fn decrypt_encrypted_value_invalid_utf8_returns_error() {
     use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -716,9 +744,79 @@ mod tests {
     let mut encrypted_value = b"v10".to_vec();
     encrypted_value.extend_from_slice(ct);
 
-    let res = decrypt_encrypted_value("".to_string(), &encrypted_value, vec![key])
-      .expect("should not panic");
-    assert_eq!(res, "");
+    assert!(decrypt_encrypted_value("".to_string(), &encrypted_value, &[key]).is_err());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn decrypt_encrypted_value_decodes_host_hash_prefixed_plaintext() {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let key = vec![0u8; 16];
+    let iv = [b' '; 16];
+    let mut plaintext = vec![0xff; 32];
+    plaintext.extend_from_slice(b"cookie value");
+    let mut ciphertext_buffer = vec![0u8; plaintext.len() + 16];
+    ciphertext_buffer[..plaintext.len()].copy_from_slice(&plaintext);
+    let cipher = Aes128CbcEnc::new((&key[..]).into(), &iv.into());
+    let ciphertext = cipher
+      .encrypt_padded_mut::<Pkcs7>(&mut ciphertext_buffer, plaintext.len())
+      .expect("encrypt fixture");
+
+    let mut encrypted_value = b"v10".to_vec();
+    encrypted_value.extend_from_slice(ciphertext);
+    let decrypted = decrypt_encrypted_value("".to_string(), &encrypted_value, &[key])
+      .expect("decrypt host-hash-prefixed value");
+
+    assert_eq!(decrypted, "cookie value");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn decrypt_encrypted_value_tries_next_key_after_invalid_utf8() {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let correct_key = vec![0u8; 16];
+    let iv = [b' '; 16];
+    let expected = b"valid cookie value";
+    let mut ciphertext_buffer = vec![0u8; expected.len() + 16];
+    ciphertext_buffer[..expected.len()].copy_from_slice(expected);
+    let cipher = Aes128CbcEnc::new((&correct_key[..]).into(), &iv.into());
+    let ciphertext = cipher
+      .encrypt_padded_mut::<Pkcs7>(&mut ciphertext_buffer, expected.len())
+      .expect("encrypt fixture")
+      .to_vec();
+
+    let invalid_utf8_key = (1u16..=u16::MAX)
+      .find_map(|candidate| {
+        let mut key = vec![0; 16];
+        key[..2].copy_from_slice(&candidate.to_le_bytes());
+        let cipher = Aes128CbcDec::new((&key[..]).into(), &iv.into());
+        let mut candidate_ciphertext = ciphertext.clone();
+        let plaintext = cipher
+          .decrypt_padded_mut::<Pkcs7>(&mut candidate_ciphertext)
+          .ok()?;
+        String::from_utf8(plaintext.to_vec())
+          .is_err()
+          .then_some(key)
+      })
+      .expect("fixture must include a wrong key with valid padding and invalid UTF-8");
+
+    let mut encrypted_value = b"v10".to_vec();
+    encrypted_value.extend_from_slice(&ciphertext);
+    let decrypted = decrypt_encrypted_value(
+      "".to_string(),
+      &encrypted_value,
+      &[invalid_utf8_key, correct_key],
+    )
+    .expect("second key should decrypt the cookie");
+
+    assert_eq!(decrypted, "valid cookie value");
   }
 
   #[cfg(windows)]
@@ -727,12 +825,24 @@ mod tests {
     for len in 3..15 {
       let mut blob = b"v10".to_vec();
       blob.resize(len, 0);
-      let res =
-        decrypt_encrypted_value("orig".to_string(), &blob, vec![]).expect("should not panic");
+      let res = decrypt_encrypted_value("orig".to_string(), &blob, &[]).expect("should not panic");
       assert_eq!(res, "orig");
     }
   }
 
+  #[cfg(windows)]
+  #[test]
+  fn decrypt_encrypted_value_skips_wrong_length_key() {
+    // A candidate key that isn't 32 bytes must be skipped, not panic the
+    // AES-256-GCM path (Key::from_slice would have panicked). Reaching the
+    // assertion at all proves there was no panic; with no usable key the
+    // function falls through to an error.
+    let mut blob = b"v10".to_vec();
+    blob.resize(31, 0); // "v10" + 12-byte nonce + 16-byte ciphertext region
+    let short_key = vec![0u8; 10];
+    let res = decrypt_encrypted_value("".to_string(), &blob, &[short_key]);
+    assert!(res.is_err());
+  }
   #[cfg(unix)]
   #[test]
   fn query_cookies_ignores_malformed_and_undecryptable_rows() {
@@ -788,8 +898,8 @@ mod tests {
       )
       .expect("insert row 4");
 
-    let mut cookies =
-      query_cookies(vec![], db, None).expect("query_cookies should succeed despite bad rows");
+    let mut cookies = query_cookies(vec![], db, None, false)
+      .expect("query_cookies should succeed despite bad rows");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
