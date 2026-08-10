@@ -79,7 +79,7 @@ fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
   };
 
   let cookies =
-    rookie_cookies::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]))
+    rookie_cookies::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]), false)
       .unwrap_or_else(|e| {
         panic!(
           "rookie_cookies::chromium_based({}) failed: {e}",
@@ -106,7 +106,7 @@ fn extracts_seeded_cookie_from_chrome_mock_keychain_profile() {
   };
 
   let cookies =
-    rookie_cookies::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]))
+    rookie_cookies::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]), false)
       .unwrap_or_else(|e| {
         panic!(
           "rookie_cookies::chromium_based({}) failed: {e}",
@@ -126,7 +126,7 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
   let domain = helpers::domain();
 
   let cookies =
-    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]))
+    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]), false)
       .unwrap_or_else(|e| {
         panic!(
           "rookie_cookies::chromium_based({}) failed: {e}",
