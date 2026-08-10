@@ -1,5 +1,7 @@
 #[cfg(feature = "appbound")]
 pub(crate) mod appbound;
 pub(crate) mod dpapi;
+#[cfg(feature = "appbound")]
+pub(crate) mod ncrypt;
 pub(crate) mod restart_manager;
 pub(crate) mod shadow_copy;
