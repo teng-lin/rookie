@@ -13,13 +13,19 @@ pub fn get_passwords(unix_crypt_name: &str) -> Result<Vec<String>> {
     "chrome_libsecret_os_crypt_password_v2",
     "chrome_libsecret_os_crypt_password_v1",
   ] {
-    if let Ok(libsecret_pass) = get_password_libsecret(schema, unix_crypt_name) {
-      passwords.push(libsecret_pass);
+    match get_password_libsecret(schema, unix_crypt_name) {
+      Ok(libsecret_pass) => passwords.push(libsecret_pass),
+      Err(err) => log::debug!(
+        "Failed to retrieve libsecret password for schema '{schema}', crypt_name '{unix_crypt_name}': {err}"
+      ),
     }
   }
   // Attempt to get the password from kdewallet
-  if let Ok(password) = get_password_kdewallet(unix_crypt_name) {
-    passwords.push(password);
+  match get_password_kdewallet(unix_crypt_name) {
+    Ok(password) => passwords.push(password),
+    Err(err) => log::debug!(
+      "Failed to retrieve KWallet password for crypt_name '{unix_crypt_name}': {err}"
+    ),
   }
 
   Ok(passwords)
