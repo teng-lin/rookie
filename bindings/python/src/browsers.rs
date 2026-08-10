@@ -205,8 +205,12 @@ pub fn chromium_based(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<PyObject>> {
-  let cookies =
-    rookie_core::chromium_based(PathBuf::from(key_path), PathBuf::from(db_path), domains, false)?;
+  let cookies = rookie_core::chromium_based(
+    PathBuf::from(key_path),
+    PathBuf::from(db_path),
+    domains,
+    false,
+  )?;
   to_dict(py, cookies)
 }
 

@@ -174,9 +174,13 @@ pub fn chromium_based(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> Result<Vec<CookieObject>> {
-  let cookies =
-    rookie_cookies::chromium_based(PathBuf::from(key_path), PathBuf::from(db_path), domains, false)
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))?;
+  let cookies = rookie_cookies::chromium_based(
+    PathBuf::from(key_path),
+    PathBuf::from(db_path),
+    domains,
+    false,
+  )
+  .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))?;
   cookies_to_js(cookies)
 }
 

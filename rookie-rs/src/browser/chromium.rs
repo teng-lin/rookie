@@ -317,7 +317,10 @@ fn decrypt_encrypted_value(
 }
 
 #[cfg(target_os = "windows")]
-fn unlock_file(mut path: PathBuf, force_kill: bool) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
+fn unlock_file(
+  mut path: PathBuf,
+  force_kill: bool,
+) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
   // Shadow copy cookies file so we can read session cookies
   // Admin rights required
   if privilege::user::privileged() {
@@ -539,7 +542,12 @@ mod tests {
 
   #[test]
   fn query_cookies_missing_db_errors() {
-    let result = query_cookies(vec![], PathBuf::from("/nonexistent/cookies.db"), None, false);
+    let result = query_cookies(
+      vec![],
+      PathBuf::from("/nonexistent/cookies.db"),
+      None,
+      false,
+    );
     assert!(
       result.is_err(),
       "expected Err for missing db, got {:?}",
@@ -694,7 +702,8 @@ mod tests {
       ],
     );
 
-    let cookies = query_cookies(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false).expect("decode");
+    let cookies =
+      query_cookies(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
@@ -810,8 +819,8 @@ mod tests {
       )
       .expect("insert row 4");
 
-    let mut cookies =
-      query_cookies(vec![], db, None, false).expect("query_cookies should succeed despite bad rows");
+    let mut cookies = query_cookies(vec![], db, None, false)
+      .expect("query_cookies should succeed despite bad rows");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
