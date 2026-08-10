@@ -711,6 +711,7 @@ mod tests {
       vec![],
       db,
       Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
+      false,
     )
     .expect("decode");
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
