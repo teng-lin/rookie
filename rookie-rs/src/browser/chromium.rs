@@ -308,43 +308,37 @@ fn decrypt_encrypted_value(
 }
 
 #[cfg(target_os = "windows")]
-fn unlock_file(mut path: PathBuf) -> Result<PathBuf> {
-  let mut shadow_copy_success = false;
+fn unlock_file(mut path: PathBuf) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
   // Shadow copy cookies file so we can read session cookies
   // Admin rights required
   if privilege::user::privileged() {
     log::debug!("Admin rights detected");
-    if let Ok(temp_dir) = windows::shadow_copy::temp_folder(".tmp", "", 10) {
-      let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.clone().to_path_buf());
+    if let Ok(temp_dir) = windows::shadow_copy::TempDir::new() {
+      let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.path().to_path_buf());
       log::debug!("shadow copy result: {:?}", result);
       if result.is_ok() {
-        shadow_copy_success = true;
-        path = temp_dir.join(path.file_name().unwrap());
+        path = temp_dir.path().join(path.file_name().unwrap());
+        return Ok((path, Some(temp_dir)));
       }
     }
   }
 
   // Elegantly restart the process which lock the cookies file (And unlock it) using restart manager API
-  if !shadow_copy_success {
-    log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
-    unsafe {
-      crate::windows::restart_manager::release_file_lock(path.to_str().unwrap());
-    }
+  log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
+  unsafe {
+    crate::windows::restart_manager::release_file_lock(&path.to_string_lossy());
   }
-  Ok(path)
+  Ok((path, None))
 }
 
-#[allow(unused_mut)]
 pub(crate) fn query_cookies(
   keys: Vec<Vec<u8>>,
-  mut db_path: PathBuf,
+  db_path: PathBuf,
   domains: Option<Vec<String>>,
 ) -> Result<Vec<Cookie>> {
   // In windows unlock file locking
   #[cfg(target_os = "windows")]
-  {
-    db_path = unlock_file(db_path)?;
-  }
+  let (db_path, _temp_dir) = unlock_file(db_path)?;
 
   log::info!(
     "Creating SQLite connection to {}",
