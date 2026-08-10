@@ -39,7 +39,7 @@ impl DebugPrivilegeGuard {
     let status =
       unsafe { RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, BOOL(1), BOOL(0), &mut previous_value) };
     if status.0 != 0 {
-      bail!("Invalid status from RtlAdjustPrivilege")
+      bail!("Failed to enable SeDebugPrivilege: {status:?}")
     }
     Ok(Self {
       previous_value: Some(previous_value),
@@ -63,7 +63,7 @@ impl DebugPrivilegeGuard {
       )
     };
     if status.0 != 0 {
-      bail!("Invalid status from RtlAdjustPrivilege")
+      bail!("Failed to restore SeDebugPrivilege: {status:?}")
     }
 
     self.previous_value = None;
@@ -228,13 +228,16 @@ impl Drop for ImpersonationGuard {
 }
 
 pub fn start_impersonate() -> Result<ImpersonationGuard> {
-  let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
-    .lock()
-    .unwrap_or_else(|poisoned| poisoned.into_inner());
-  let mut debug_privilege = enable_privilege()?;
-  let pid = get_system_process_pid()?;
-  let lsass_handle = HandleGuard(get_process_handle(pid)?);
-  debug_privilege.restore()?;
+  let lsass_handle = {
+    let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut debug_privilege = enable_privilege()?;
+    let pid = get_system_process_pid()?;
+    let lsass_handle = HandleGuard(get_process_handle(pid)?);
+    debug_privilege.restore()?;
+    lsass_handle
+  };
   let duplicated_token = HandleGuard(get_system_token(lsass_handle.0)?);
   unsafe {
     ImpersonateLoggedOnUser(duplicated_token.0)?;
