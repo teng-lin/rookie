@@ -24,7 +24,7 @@ if (!existsSync(dbPath)) {
   process.exit(1);
 }
 
-const cookies = rookieCookies.firefoxBased(dbPath, [domain]);
+const cookies = await rookieCookies.firefoxBased(dbPath, [domain]);
 
 const seeded = cookies.find((c) => c.name === "rookie_ci");
 if (!seeded) {

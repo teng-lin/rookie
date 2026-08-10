@@ -16,6 +16,6 @@ if (!dbPath) {
   process.exit(2);
 }
 
-for (const cookie of firefoxBased(dbPath, null)) {
+for (const cookie of await firefoxBased(dbPath, null)) {
   console.log(cookie);
 }

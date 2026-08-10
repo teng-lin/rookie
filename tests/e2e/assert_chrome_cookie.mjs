@@ -39,10 +39,10 @@ let cookies;
 if (process.platform === "win32") {
   // Windows binding takes (keyPath, dbPath, domains)
   const keyPath = join(userDataDir, "Local State");
-  cookies = rookieCookies.chromiumBased(keyPath, dbPath, [domain]);
+  cookies = await rookieCookies.chromiumBased(keyPath, dbPath, [domain]);
 } else {
   // Unix binding takes (dbPath, domains)
-  cookies = rookieCookies.chromiumBased(dbPath, [domain]);
+  cookies = await rookieCookies.chromiumBased(dbPath, [domain]);
 }
 
 const seeded = cookies.find((c) => c.name === "rookie_ci");

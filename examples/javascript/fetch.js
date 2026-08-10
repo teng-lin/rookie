@@ -1,8 +1,8 @@
 import rookieCookies from "rookie-cookies";
 
-function createHeaders() {
+async function createHeaders() {
   // Get all GitHub cookies from all browsers
-  const cookies = rookieCookies.load(["github.com"]);
+  const cookies = await rookieCookies.load(["github.com"]);
   // Create cookie header
   const cookie = cookies
     .map((c) => decodeURIComponent(`${c.name}=${c.value}`))
@@ -15,7 +15,7 @@ function createHeaders() {
   };
 }
 
-const headers = createHeaders();
+const headers = await createHeaders();
 const res = await fetch("https://github.com/settings/profile", { headers });
 const html = await res.text();
 // Parse username from HTML
