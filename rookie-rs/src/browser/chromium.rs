@@ -8,7 +8,7 @@ use crate::config::Browser;
 #[cfg(target_os = "windows")]
 use crate::windows;
 
-#[cfg(any(windows, test))]
+#[cfg(any(unix, windows, test))]
 use anyhow::Context;
 
 #[cfg(target_os = "macos")]
@@ -177,7 +177,7 @@ fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
   )
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(unix, windows, test))]
 fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
   if plaintext.len() <= 32 {
     bail!("Can't decode encrypted value");
@@ -186,7 +186,7 @@ fn decode_after_host_hash_prefix(plaintext: Vec<u8>) -> Result<String> {
   String::from_utf8(plaintext[32..].to_vec()).context("Can't decode encrypted value")
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(unix, windows, test))]
 fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<String> {
   if key_type == b"v20" {
     return decode_after_host_hash_prefix(plaintext);
@@ -289,24 +289,12 @@ fn decrypt_encrypted_value(
     let mut cloned_encrypted_value: Vec<u8> = encrypted_value.to_vec();
 
     if let Ok(plaintext) = cipher.decrypt_padded_mut::<Pkcs7>(&mut cloned_encrypted_value) {
-      let decoded = String::from_utf8(plaintext.to_vec());
-      match decoded {
-        Ok(decoded) => {
-          return Ok(decoded);
-        }
-        Err(_) => {
-          log::debug!("Error in decode decrypt value with utf8. trying from index 32");
-
-          let Some(slice) = plaintext.get(32..) else {
-            log::warn!("Plaintext too short to slice from index 32");
-            return Ok("".into());
-          };
-
-          let decoded = String::from_utf8(slice.to_vec()).unwrap_or_else(|_| {
-            log::warn!("Error decoding from index 32 with UTF-8");
-            "".into()
-          });
-          return Ok(decoded);
+      match decode_chromium_plaintext(key_type, plaintext.to_vec()) {
+        Ok(decoded) => return Ok(decoded),
+        Err(err) => {
+          // A wrong key can occasionally pass PKCS#7 validation. Do not accept
+          // its bytes as a cookie value; another key may decrypt valid UTF-8.
+          log::debug!("Failed to decode decrypted value as UTF-8: {err}");
         }
       }
     }
@@ -702,7 +690,7 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn decrypt_encrypted_value_short_plaintext_returns_ok() {
+  fn decrypt_encrypted_value_invalid_utf8_returns_error() {
     use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -720,9 +708,79 @@ mod tests {
     let mut encrypted_value = b"v10".to_vec();
     encrypted_value.extend_from_slice(ct);
 
-    let res =
-      decrypt_encrypted_value("".to_string(), &encrypted_value, &[key]).expect("should not panic");
-    assert_eq!(res, "");
+    assert!(decrypt_encrypted_value("".to_string(), &encrypted_value, &[key]).is_err());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn decrypt_encrypted_value_decodes_host_hash_prefixed_plaintext() {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let key = vec![0u8; 16];
+    let iv = [b' '; 16];
+    let mut plaintext = vec![0xff; 32];
+    plaintext.extend_from_slice(b"cookie value");
+    let mut ciphertext_buffer = vec![0u8; plaintext.len() + 16];
+    ciphertext_buffer[..plaintext.len()].copy_from_slice(&plaintext);
+    let cipher = Aes128CbcEnc::new((&key[..]).into(), &iv.into());
+    let ciphertext = cipher
+      .encrypt_padded_mut::<Pkcs7>(&mut ciphertext_buffer, plaintext.len())
+      .expect("encrypt fixture");
+
+    let mut encrypted_value = b"v10".to_vec();
+    encrypted_value.extend_from_slice(ciphertext);
+    let decrypted = decrypt_encrypted_value("".to_string(), &encrypted_value, &[key])
+      .expect("decrypt host-hash-prefixed value");
+
+    assert_eq!(decrypted, "cookie value");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn decrypt_encrypted_value_tries_next_key_after_invalid_utf8() {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let correct_key = vec![0u8; 16];
+    let iv = [b' '; 16];
+    let expected = b"valid cookie value";
+    let mut ciphertext_buffer = vec![0u8; expected.len() + 16];
+    ciphertext_buffer[..expected.len()].copy_from_slice(expected);
+    let cipher = Aes128CbcEnc::new((&correct_key[..]).into(), &iv.into());
+    let ciphertext = cipher
+      .encrypt_padded_mut::<Pkcs7>(&mut ciphertext_buffer, expected.len())
+      .expect("encrypt fixture")
+      .to_vec();
+
+    let invalid_utf8_key = (1u16..=u16::MAX)
+      .find_map(|candidate| {
+        let mut key = vec![0; 16];
+        key[..2].copy_from_slice(&candidate.to_le_bytes());
+        let cipher = Aes128CbcDec::new((&key[..]).into(), &iv.into());
+        let mut candidate_ciphertext = ciphertext.clone();
+        let plaintext = cipher
+          .decrypt_padded_mut::<Pkcs7>(&mut candidate_ciphertext)
+          .ok()?;
+        String::from_utf8(plaintext.to_vec())
+          .is_err()
+          .then_some(key)
+      })
+      .expect("fixture must include a wrong key with valid padding and invalid UTF-8");
+
+    let mut encrypted_value = b"v10".to_vec();
+    encrypted_value.extend_from_slice(&ciphertext);
+    let decrypted = decrypt_encrypted_value(
+      "".to_string(),
+      &encrypted_value,
+      &[invalid_utf8_key, correct_key],
+    )
+    .expect("second key should decrypt the cookie");
+
+    assert_eq!(decrypted, "valid cookie value");
   }
 
   #[cfg(windows)]
