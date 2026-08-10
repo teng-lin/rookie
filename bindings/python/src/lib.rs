@@ -1,4 +1,6 @@
+use log::LevelFilter;
 use pyo3::{prelude::*, types::PyDict};
+use pyo3_log::{Caching, Logger};
 use rookie_core::enums::Cookie;
 mod browsers;
 use browsers::*;
@@ -10,7 +12,15 @@ fn version() -> PyResult<String> {
 
 #[pymodule]
 fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
-  pyo3_log::init();
+  // Scope log forwarding to the "rookie_cookies" Python logger instead of
+  // attaching to the root logger, which would pollute host application log
+  // streams. See: https://github.com/teng-lin/rookie-cookies/issues/51
+  if let Ok(logger) = Logger::new(m.py(), Caching::LoggersAndLevels) {
+    let _ = logger
+      .filter(LevelFilter::Off)
+      .filter_target("rookie_cookies".to_owned(), LevelFilter::Debug)
+      .install();
+  }
   m.add_function(wrap_pyfunction!(firefox, m)?)?;
   m.add_function(wrap_pyfunction!(zen, m)?)?;
 
