@@ -9,13 +9,13 @@ pub struct TempDir {
 }
 
 impl TempDir {
-  pub fn new(prefix: &str, suffix: &str, rand_len: usize) -> Result<Self> {
+  pub fn new() -> Result<Self> {
     let random_string: String = thread_rng()
       .sample_iter(&Alphanumeric)
-      .take(rand_len)
+      .take(10)
       .map(char::from)
       .collect();
-    let path = std::env::temp_dir().join(format!("{prefix}{random_string}{suffix}"));
+    let path = std::env::temp_dir().join(format!(".tmp{random_string}"));
     std::fs::create_dir(&path)?;
     log::trace!("created dir {}", path.display());
     Ok(Self { path })
@@ -68,7 +68,7 @@ mod tests {
   #[test]
   fn temp_dir_is_removed_on_drop() {
     let path = {
-      let temp_dir = TempDir::new(".tmp", "", 10).expect("create temp dir");
+      let temp_dir = TempDir::new().expect("create temp dir");
       let path = temp_dir.path().to_path_buf();
       assert!(path.exists());
       path

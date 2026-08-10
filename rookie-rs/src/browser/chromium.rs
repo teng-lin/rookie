@@ -313,7 +313,7 @@ fn unlock_file(mut path: PathBuf) -> Result<(PathBuf, Option<windows::shadow_cop
   // Admin rights required
   if privilege::user::privileged() {
     log::debug!("Admin rights detected");
-    if let Ok(temp_dir) = windows::shadow_copy::TempDir::new(".tmp", "", 10) {
+    if let Ok(temp_dir) = windows::shadow_copy::TempDir::new() {
       let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.path().to_path_buf());
       log::debug!("shadow copy result: {:?}", result);
       if result.is_ok() {
@@ -326,7 +326,7 @@ fn unlock_file(mut path: PathBuf) -> Result<(PathBuf, Option<windows::shadow_cop
   // Elegantly restart the process which lock the cookies file (And unlock it) using restart manager API
   log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
   unsafe {
-    crate::windows::restart_manager::release_file_lock(path.to_str().unwrap());
+    crate::windows::restart_manager::release_file_lock(&path.to_string_lossy());
   }
   Ok((path, None))
 }
