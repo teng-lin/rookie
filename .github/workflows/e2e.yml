@@ -22,6 +22,11 @@ on:
     # Weekly drift canary for runner images and system-installed browsers.
     - cron: '27 6 * * 1'
   workflow_dispatch:
+    inputs:
+      appbound_only:
+        description: Run only the elevated Windows App-Bound canary
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,6 +34,7 @@ permissions:
 jobs:
   ubuntu-chrome:
     name: e2e ubuntu × chrome (libsecret)
+    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -128,6 +134,7 @@ jobs:
 
   ubuntu-firefox:
     name: e2e ubuntu × firefox
+    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -235,6 +242,7 @@ jobs:
 
   macos-firefox:
     name: e2e macos × firefox
+    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -304,6 +312,7 @@ jobs:
 
   macos-chrome:
     name: e2e macos × chrome (mock keychain)
+    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: macos-15
     timeout-minutes: 25
     # Playwright keeps Chromium's --use-mock-keychain default on macOS.
@@ -380,6 +389,7 @@ jobs:
 
   windows-firefox:
     name: e2e windows × firefox
+    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: windows-2025
     timeout-minutes: 25
     defaults:
@@ -610,6 +620,7 @@ jobs:
 
   windows-chrome:
     name: e2e windows × chrome (legacy DPAPI)
+    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: windows-2025
     timeout-minutes: 25
     # Hosted CI uses a workspace-scoped user-data-dir, so Chromium's AppBound
