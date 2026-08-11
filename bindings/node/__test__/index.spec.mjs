@@ -92,19 +92,16 @@ Path=Profiles/work
     t.true(profiles.every(({ path }) => typeof path === "string"));
 
     t.is(cookies.length, 1);
-    t.is(cookies[0].name, "selected");
-    t.is(cookies[0].value, "secondary");
-    t.is(cookies[0].expires, 1700000000);
-    t.deepEqual(Object.keys(cookies[0]).sort(), [
-      "domain",
-      "expires",
-      "httpOnly",
-      "name",
-      "path",
-      "sameSite",
-      "secure",
-      "value",
-    ]);
+    t.deepEqual(cookies[0], {
+      domain: ".example.test",
+      path: "/",
+      secure: false,
+      expires: 1700000000,
+      name: "selected",
+      value: "secondary",
+      httpOnly: false,
+      sameSite: 0,
+    });
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

@@ -131,19 +131,17 @@ Path=Profiles/work
         )
         self.assertTrue(all(isinstance(profile["path"], str) for profile in profiles))
         self.assertEqual(len(cookies), 1)
-        self.assertEqual(cookies[0]["name"], "selected")
-        self.assertEqual(cookies[0]["value"], "secondary")
         self.assertEqual(
-            set(cookies[0]),
+            cookies[0],
             {
-                "domain",
-                "path",
-                "secure",
-                "http_only",
-                "same_site",
-                "expires",
-                "name",
-                "value",
+                "domain": ".example.test",
+                "path": "/",
+                "secure": False,
+                "expires": 1_700_000_000,
+                "name": "selected",
+                "value": "secondary",
+                "http_only": False,
+                "same_site": 0,
             },
         )
 
@@ -184,7 +182,7 @@ def _seed_firefox_database(path: Path, rows) -> None:
             """
             INSERT INTO moz_cookies (
               host, path, isSecure, expiry, name, value, isHttpOnly, sameSite
-            ) VALUES (?, '/', 0, 0, ?, ?, 0, 0)
+            ) VALUES (?, '/', 0, 1700000000, ?, ?, 0, 0)
             """,
             rows,
         )
