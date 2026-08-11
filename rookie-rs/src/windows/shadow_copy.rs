@@ -25,17 +25,18 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   // Cookies committed to the write-ahead log are not in the main database yet,
   // so a copy without it silently omits the very cookies this path exists to
   // reach. Any failure to obtain it is therefore fatal rather than a warning,
-  // which lets `unlock_file` fall through to the restart-manager path and its
-  // checkpointed database. That includes a WAL that cannot be stat'd:
+  // which lets the Windows acquisition policy fall through to its explicit
+  // restart-manager path and a subsequently checkpointed database. That
+  // includes a WAL that cannot be stat'd:
   // `Path::exists` would report an ACL, sharing or transient error as "no WAL".
   let wal = sqlite::sidecar(&src, "-wal");
   if sqlite::has_nonempty_wal(&src)? {
     raw_copy(&wal, &dst)?;
   }
 
-  // These raw copies are not atomic, and `sqlite::connect` cannot cover for
-  // that: by the time it runs it is inspecting this static copy, not the live
-  // source, so a checkpoint that landed here is already baked in.
+  // These raw copies are not atomic, and the SQLite query boundary cannot
+  // cover for that: by the time it runs it is inspecting this static copy, not
+  // the live source, so a checkpoint that landed here is already baked in.
   //
   // Same invariant as `sqlite::snapshot_database` — the main file must not move
   // across the whole sequence — but verified differently, because this path
@@ -54,9 +55,9 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
 
   if !sqlite::files_are_identical(&dst.join(name), &probe.path().join(name))? {
     // Reported rather than retried: a raw copy rescans NTFS clusters, so
-    // retrying against a busy database is a poor trade. `unlock_file` falls
-    // through to the restart-manager path, which yields a checkpointed
-    // database instead of an incoherent pair.
+    // retrying against a busy database is a poor trade. The acquisition policy
+    // can fall through to its explicitly enabled restart-manager path, which
+    // yields a checkpointed database instead of an incoherent pair.
     bail!(
       "A checkpoint raced the shadow copy of {}; the copy is not coherent",
       src.display()
