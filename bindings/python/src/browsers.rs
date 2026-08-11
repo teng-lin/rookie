@@ -1,5 +1,6 @@
 use crate::to_dict;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::path::PathBuf;
 
 /// Extract Cookies from any browser
@@ -27,6 +28,40 @@ pub fn any_browser(
 #[pyo3(signature = (domains=None))]
 pub fn firefox(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
   let cookies = py.allow_threads(|| rookie_core::firefox(domains))?;
+  to_dict(py, cookies)
+}
+
+/// List every Firefox profile that contains a cookie database
+///
+/// :return: A list of profile dictionaries with name, path, and is_default fields
+#[pyfunction]
+pub fn firefox_profiles(py: Python<'_>) -> PyResult<Vec<PyObject>> {
+  let profiles = py.allow_threads(rookie_core::firefox_profiles)?;
+  profiles
+    .into_iter()
+    .map(|profile| {
+      let dict = PyDict::new(py);
+      dict.set_item("name", profile.name)?;
+      dict.set_item("path", profile.path.to_string_lossy().as_ref())?;
+      dict.set_item("is_default", profile.is_default)?;
+      Ok(dict.into())
+    })
+    .collect()
+}
+
+/// Extract Cookies from a selected Firefox profile
+///
+/// :param profile: Profile name, directory name, or full path from firefox_profiles
+/// :param domains: Optional list of domains to extract only from them
+/// :return: A list of dictionaries of cookies
+#[pyfunction]
+#[pyo3(signature = (profile, domains=None))]
+pub fn firefox_profile(
+  py: Python<'_>,
+  profile: String,
+  domains: Option<Vec<String>>,
+) -> PyResult<Vec<PyObject>> {
+  let cookies = py.allow_threads(|| rookie_core::firefox_profile(&profile, domains))?;
   to_dict(py, cookies)
 }
 

@@ -2,6 +2,8 @@ from sys import platform
 from typing import Any, Dict, List, Optional
 
 CookieList = List[Dict[str, Any]]
+FirefoxProfile = Dict[str, Any]
+FirefoxProfileList = List[FirefoxProfile]
 
 def version() -> str:
     """
@@ -15,6 +17,26 @@ def firefox(domains: Optional[List[str]] = None) -> CookieList:
     """
     Extract Cookies from Firefox
 
+    :param domains: Optional list of domains to extract only from them
+    :return: A list of dictionaries of cookies
+    """
+    ...
+
+def firefox_profiles() -> FirefoxProfileList:
+    """
+    List Firefox profiles that contain a cookie database.
+
+    Each dictionary contains ``name``, ``path``, and ``is_default``.
+    """
+    ...
+
+def firefox_profile(
+    profile: str, domains: Optional[List[str]] = None
+) -> CookieList:
+    """
+    Extract cookies from a selected Firefox profile.
+
+    :param profile: Profile name, directory name, or full path from firefox_profiles
     :param domains: Optional list of domains to extract only from them
     :return: A list of dictionaries of cookies
     """

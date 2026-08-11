@@ -3,6 +3,7 @@ extern crate napi_derive;
 
 use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
 use rookie_cookies::enums::Cookie;
+use rookie_cookies::MozillaProfile;
 use std::path::PathBuf;
 
 #[napi(object)]
@@ -15,6 +16,13 @@ pub struct CookieObject {
   pub value: String,
   pub http_only: bool,
   pub same_site: i64,
+}
+
+#[napi(object)]
+pub struct FirefoxProfileObject {
+  pub name: String,
+  pub path: String,
+  pub is_default: bool,
 }
 
 #[napi]
@@ -38,6 +46,17 @@ fn cookies_to_js(cookies: Vec<Cookie>) -> Result<Vec<CookieObject>> {
   }
 
   Ok(js_cookies)
+}
+
+fn profiles_to_js(profiles: Vec<MozillaProfile>) -> Vec<FirefoxProfileObject> {
+  profiles
+    .into_iter()
+    .map(|profile| FirefoxProfileObject {
+      name: profile.name,
+      path: profile.path.to_string_lossy().into_owned(),
+      is_default: profile.is_default,
+    })
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +141,54 @@ async_browser_fn!(chromium, ChromiumTask, rookie_cookies::chromium);
 async_browser_fn!(vivaldi, VivaldiTask, rookie_cookies::vivaldi);
 async_browser_fn!(load, LoadTask, rookie_cookies::load);
 
+pub struct FirefoxProfilesTask;
+
+impl Task for FirefoxProfilesTask {
+  type Output = Vec<MozillaProfile>;
+  type JsValue = Vec<FirefoxProfileObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    rookie_cookies::firefox_profiles()
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(profiles_to_js(output))
+  }
+}
+
+#[napi(ts_return_type = "Promise<Array<FirefoxProfileObject>>")]
+pub fn firefox_profiles() -> AsyncTask<FirefoxProfilesTask> {
+  AsyncTask::new(FirefoxProfilesTask)
+}
+
+pub struct FirefoxProfileTask {
+  profile: String,
+  domains: Option<Vec<String>>,
+}
+
+impl Task for FirefoxProfileTask {
+  type Output = Vec<Cookie>;
+  type JsValue = Vec<CookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    rookie_cookies::firefox_profile(&self.profile, self.domains.take())
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    cookies_to_js(output)
+  }
+}
+
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
+pub fn firefox_profile(
+  profile: String,
+  domains: Option<Vec<String>>,
+) -> AsyncTask<FirefoxProfileTask> {
+  AsyncTask::new(FirefoxProfileTask { profile, domains })
+}
+
 // firefox_based takes an extra db_path argument
 pub struct FirefoxBasedTask {
   db_path: String,
@@ -147,7 +214,7 @@ pub fn firefox_based(db_path: String, domains: Option<Vec<String>>) -> AsyncTask
   AsyncTask::new(FirefoxBasedTask { db_path, domains })
 }
 
-/// Windows only browsers
+// Windows only browsers
 
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
@@ -242,7 +309,7 @@ pub fn chromium_based(
   })
 }
 
-/// MacOS browsers
+// MacOS browsers
 
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "macos")]
@@ -270,7 +337,7 @@ impl Task for SafariTask {
   }
 }
 
-/// Unix browsers
+// Unix browsers
 
 #[cfg(unix)]
 pub struct ChromiumBasedUnixTask {

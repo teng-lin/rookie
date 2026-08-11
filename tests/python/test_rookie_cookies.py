@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import http.cookiejar
+import os
+import sqlite3
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import rookie_cookies
 
@@ -24,7 +30,14 @@ class RookieCookiesHelpersTest(unittest.TestCase):
 
     def test_all_exports_are_defined(self) -> None:
         self.assertTrue(
-            {"create_cookie", "to_cookiejar", "to_netscape", "zen"}.issubset(
+            {
+                "create_cookie",
+                "firefox_profile",
+                "firefox_profiles",
+                "to_cookiejar",
+                "to_netscape",
+                "zen",
+            }.issubset(
                 rookie_cookies.__all__
             )
         )
@@ -74,6 +87,110 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         output = rookie_cookies.to_netscape([])
 
         self.assertRegex(output, r"^# Netscape HTTP Cookie File\n")
+
+    def test_firefox_profiles_list_and_extract_secondary_profile(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rookie-python-firefox-") as temp:
+            root, environment = _firefox_root(Path(temp))
+            default = root / "Profiles" / "default-release"
+            work = root / "Profiles" / "work"
+            default.mkdir(parents=True)
+            work.mkdir(parents=True)
+            (root / "profiles.ini").write_text(
+                """\
+[InstallTest]
+Default=Profiles/default-release
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=Profiles/default-release
+Default=1
+
+[Profile1]
+Name=work
+IsRelative=1
+Path=Profiles/work
+""",
+                encoding="utf-8",
+            )
+            _seed_firefox_database(default / "cookies.sqlite", [])
+            _seed_firefox_database(
+                work / "cookies.sqlite",
+                [(".example.test", "selected", "secondary")],
+            )
+
+            with mock.patch.dict(os.environ, environment, clear=False):
+                profiles = rookie_cookies.firefox_profiles()
+                cookies = rookie_cookies.firefox_profile(
+                    "work", ["example.test"]
+                )
+
+        self.assertEqual(
+            [(profile["name"], profile["is_default"]) for profile in profiles],
+            [("default-release", True), ("work", False)],
+        )
+        self.assertTrue(all(isinstance(profile["path"], str) for profile in profiles))
+        self.assertEqual(len(cookies), 1)
+        self.assertEqual(cookies[0]["name"], "selected")
+        self.assertEqual(cookies[0]["value"], "secondary")
+        self.assertEqual(
+            set(cookies[0]),
+            {
+                "domain",
+                "path",
+                "secure",
+                "http_only",
+                "same_site",
+                "expires",
+                "name",
+                "value",
+            },
+        )
+
+
+def _firefox_root(temp: Path):
+    if sys.platform == "win32":
+        roaming = temp / "Roaming"
+        local = temp / "Local"
+        return roaming / "Mozilla" / "Firefox", {
+            "APPDATA": str(roaming),
+            "LOCALAPPDATA": str(local),
+        }
+    if sys.platform == "darwin":
+        return temp / "Library" / "Application Support" / "Firefox", {
+            "HOME": str(temp)
+        }
+    return temp / ".mozilla" / "firefox", {"HOME": str(temp)}
+
+
+def _seed_firefox_database(path: Path, rows) -> None:
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute(
+            """
+            CREATE TABLE moz_cookies (
+              host TEXT NOT NULL,
+              path TEXT NOT NULL,
+              isSecure INTEGER NOT NULL,
+              expiry INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              value TEXT NOT NULL,
+              isHttpOnly INTEGER NOT NULL,
+              sameSite INTEGER NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO moz_cookies (
+              host, path, isSecure, expiry, name, value, isHttpOnly, sameSite
+            ) VALUES (?, '/', 0, 0, ?, ?, 0, 0)
+            """,
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":
