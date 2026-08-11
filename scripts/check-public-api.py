@@ -24,6 +24,10 @@ FEATURE_SETS = {
 CHANGES = {"added", "removed", "missing-baseline"}
 
 
+class PublicApiCommandError(RuntimeError):
+    """A cargo-public-api command failed with a user-facing diagnostic."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--platform", choices=sorted(PLATFORMS), required=True)
@@ -59,12 +63,16 @@ def load_exceptions(path: Path) -> list[dict[str, str]]:
 
 
 def tool_version() -> str:
-    result = subprocess.run(
-        ["cargo", "public-api", "--version"],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["cargo", "public-api", "--version"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as error:
+        diagnostic = (error.stderr or error.stdout or str(error)).strip()
+        raise PublicApiCommandError(diagnostic) from None
     return result.stdout.strip().rsplit(" ", 1)[-1]
 
 
@@ -80,7 +88,11 @@ def render_public_api(repo: Path, feature_args: list[str]) -> str:
         "--color=never",
         *feature_args,
     ]
-    result = subprocess.run(command, check=True, text=True, capture_output=True)
+    try:
+        result = subprocess.run(command, check=True, text=True, capture_output=True)
+    except subprocess.CalledProcessError as error:
+        diagnostic = (error.stderr or error.stdout or str(error)).strip()
+        raise PublicApiCommandError(diagnostic) from None
     return result.stdout.rstrip("\n") + "\n"
 
 
@@ -148,7 +160,13 @@ def main() -> int:
     baseline_dir = repo / "rookie-rs" / "public-api"
     exception_file = baseline_dir / "temporary-exceptions.json"
 
-    if tool_version() != TOOL_VERSION:
+    try:
+        installed_tool_version = tool_version()
+    except PublicApiCommandError as error:
+        print(f"cargo-public-api failed: {error}", file=sys.stderr)
+        return 2
+
+    if installed_tool_version != TOOL_VERSION:
         print(
             f"cargo-public-api {TOOL_VERSION} is required; install with "
             f"`cargo install cargo-public-api --version {TOOL_VERSION} --locked`",
@@ -165,7 +183,11 @@ def main() -> int:
     success = True
     for feature_set, feature_args in FEATURE_SETS.items():
         filename = f"{args.platform}-{feature_set}.txt"
-        actual = render_public_api(repo, feature_args)
+        try:
+            actual = render_public_api(repo, feature_args)
+        except PublicApiCommandError as error:
+            print(f"cargo-public-api failed for {filename}: {error}", file=sys.stderr)
+            return 2
         if args.output_dir:
             args.output_dir.mkdir(parents=True, exist_ok=True)
             (args.output_dir / filename).write_text(actual, encoding="utf-8")
