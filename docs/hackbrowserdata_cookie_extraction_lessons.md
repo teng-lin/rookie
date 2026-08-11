@@ -82,12 +82,17 @@ struct BrowserProfile {
 struct ProfileCookies {
   browser: BrowserId,
   profile: ProfileIdentity,
-  cookies: Vec<Cookie>,
+  sources: Vec<SourceCookies>,
   warnings: Vec<ExtractionWarning>,
+}
+
+struct SourceCookies {
+  source: CookieSourceIdentity,
+  cookies: Vec<Cookie>,
 }
 ```
 
-Keep the existing `chrome()`, `firefox()`, and `load()` selectors unchanged. They must continue using their current first/default path priorities instead of flattening new discovery results. Add new profile/report APIs for callers that need all profiles, provenance, and partial-failure details.
+Keep the existing `chrome()`, `firefox()`, and `load()` selectors unchanged. They must continue using their current first/default path priorities instead of flattening new discovery results. Add new profile/report APIs for callers that need all profiles, provenance, and partial-failure details. Serialize cookies inside their source outcome rather than only in a combined profile vector, so persistent/session provenance remains recoverable even for exact duplicate cookies.
 
 New results should be grouped by profile. Duplicate `(domain, path, name)` cookies from different profiles remain separate; legacy functions keep their current output and ordering behavior.
 

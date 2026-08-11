@@ -257,7 +257,8 @@ Ordering is fixed:
 
 1. installations by registry priority, then normalized resolved path;
 2. profiles default-first, then locale-independent lowercase display name, raw display name, normalized path;
-3. new-report cookies by `(domain, path, name, expires, secure, http_only, same_site, value)`; exact duplicates retain extraction order.
+3. source outcomes by role and declared precedence;
+4. cookies within each source outcome by `(domain, path, name, expires, secure, http_only, same_site, value)`; exact duplicates retain extraction order.
 
 Legacy results are not sorted.
 
@@ -380,7 +381,6 @@ struct ExtractionReport {
 struct ProfileExtraction {
   profile: ProfileIdentity,
   sources: Vec<SourceExtraction>,
-  cookies: Vec<Cookie>,
   stats: ExtractionStats,
   issues: Vec<ExtractionIssue>,
 }
@@ -391,6 +391,7 @@ struct SourceExtraction {
   status: SourceStatusCode,
   selected: bool,
   acquisition_strategy: AcquisitionStrategyCode,
+  cookies: Vec<Cookie>,
   stats: ExtractionStats,
   issues: Vec<ExtractionIssue>,
 }
@@ -457,9 +458,11 @@ registry declaration. A row using a declared but unavailable tier produces a typ
 
 A source is `succeeded` when acquisition, parsing/schema validation, and its filtered query
 complete, even if zero rows match. `rows_skipped` is the number of relevant rows rejected after
-being seen because parsing, decryption, or decoding failed. Profile cookies are the deterministic
-concatenation of cookies emitted by successful selected sources; source outcomes retain the
-provenance, strategy, attempts, and failure details without adding fields to `Cookie`.
+being seen because parsing, decryption, or decoding failed. Cookies are serialized on their
+`SourceExtraction`, beside source identity, strategy, attempts, and failure details. A consumer
+forms a profile-wide stream by concatenating successful selected source outcomes in role/precedence
+order. Do not duplicate an aggregate cookie vector at profile level and do not add provenance
+fields to the legacy `Cookie` type.
 For a persistent source, `selected=true` means the first existing authoritative candidate even if
 that candidate later fails. For session sources, invalid attempted candidates have
 `selected=false` and the first valid candidate has `selected=true`.
@@ -468,8 +471,10 @@ Status definitions:
 
 - `complete`: at least one source succeeded and no error-severity issue occurred;
 - `partial`: at least one source succeeded and any relevant installation, profile, or source had an error-severity issue;
-- `failed`: known/detected sources were attempted but none succeeded;
-- `no_sources`: the known request had no detected cookie-bearing sources.
+- `failed`: no source succeeded and either a detected source was attempted or a detected
+  installation/root had an error-severity discovery failure that prevented source enumeration;
+- `no_sources`: discovery completed without an error-severity discovery failure and found no
+  cookie-bearing sources for the known request.
 
 Request/report semantics:
 
@@ -477,6 +482,8 @@ Request/report semantics:
 - unknown profile ID: top-level `Err`;
 - known explicitly requested browser with no installation: `Ok(report)` with `no_sources` and `browser_not_detected`;
 - `load_report()`: uninstalled registered browsers are summarized in counters, not emitted as warnings; installed-but-failing installations/profiles emit issues;
+- a detected installation whose every applicable root fails enumeration: `Ok(report)` with
+  `failed` and the root discovery issues; the bare `browser_profiles()` call still returns `Err`;
 - total extraction failure remains a report with `failed`, unless request/registry invariants prevented report creation.
 
 `browser_profiles()` semantics are also fixed:
@@ -748,7 +755,7 @@ Acceptance:
 
 #### 4E — Private cross-engine contract freeze
 
-- Freeze every field shown in Section 5.7, open identifier vocabulary, counter conversion,
+- Freeze every field shown in Section 5.7, per-source cookie provenance, open identifier vocabulary, counter conversion,
   candidate selection, status computation, and deterministic ordering.
 - Exercise Chrome, Firefox persisted+session, Safari default+named, and IE through crate-private
   reports.

@@ -110,7 +110,10 @@ Profiles hold ordered persistent and session source candidates.
 - Session candidates use the Firefox lifecycle policy below and fall through to the first valid candidate.
 - A profile may combine one authoritative persistent source and one selected session source, but never two persistent alternatives.
 
-Reports retain source role, format, path, precedence, selection state, acquisition strategy, statistics, and issues. Profile-level cookies are the deterministic concatenation from successful selected sources.
+Reports retain source role, format, path, precedence, selection state, acquisition strategy,
+cookies, statistics, and issues. Cookies are serialized on the source outcome that emitted them;
+there is no duplicate aggregate cookie vector at profile level. A profile-wide stream is the
+deterministic concatenation of successful selected source outcomes.
 
 ### 5. Report model and errors
 
@@ -124,7 +127,10 @@ ExtractionReport
        -> SourceExtraction
 ```
 
-Each profile includes its identity, source outcomes, combined cookies, statistics, and profile issues. Source-specific failures remain on the relevant source. Top-level issues are reserved for request-wide, registry, discovery, and installation problems.
+Each profile includes its identity, source outcomes, aggregate statistics, and profile issues.
+Each source outcome contains its own cookies, so persistent/session provenance remains recoverable
+even for duplicate rows. Source-specific failures remain on the relevant source. Top-level issues
+are reserved for request-wide, registry, discovery, and installation problems.
 
 Public counters are `u32`. Wider internal counts saturate at `u32::MAX` and set `counters_saturated`, which avoids implicit Node `u64`/BigInt contracts.
 
@@ -134,8 +140,10 @@ Report statuses are:
 
 - `complete`: at least one source succeeded and no relevant error-severity issue occurred.
 - `partial`: at least one source succeeded and a relevant installation, profile, or source has an error-severity issue.
-- `failed`: detected sources were attempted but none succeeded.
-- `no_sources`: a known request has no detected cookie-bearing source.
+- `failed`: no source succeeded and either a detected source was attempted or a detected
+  installation/root had an error-severity discovery failure that prevented source enumeration.
+- `no_sources`: discovery completed without an error-severity discovery failure and found no
+  cookie-bearing source for the known request.
 
 Request behavior is:
 
@@ -143,6 +151,8 @@ Request behavior is:
 - unknown profile ID: top-level `Err`;
 - known explicitly requested browser with no installation: `Ok` with `no_sources` and `browser_not_detected`;
 - `load_report()`: uninstalled registered browsers are counted, not warned; installed failures are reported;
+- every applicable root of a detected installation fails enumeration: `Ok` report with `failed`
+  and discovery issues; the bare `browser_profiles()` call returns `Err`;
 - total extraction failure: a `failed` report unless request or registry invariants prevented report creation.
 
 `browser_profiles()` returns `Err` for an unknown browser, `Ok([])` for a known but absent browser, partial discoveries when at least one root succeeds, and `Err` when every detected applicable root fails enumeration. Full partial-discovery diagnostics are available from `browser_report()`.
