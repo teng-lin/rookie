@@ -1,5 +1,5 @@
 const COOKIE_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
-const COOKIE_VALUE = /^[\u0021\u0023-\u002B\u002D-\u003A\u003C-\u005B\u005D-\u007E]*$/u;
+const COOKIE_VALUE = /^(?:[\u0021\u0023-\u002B\u002D-\u003A\u003C-\u005B\u005D-\u007E]*|"[\u0021\u0023-\u002B\u002D-\u003A\u003C-\u005B\u005D-\u007E]*")$/u;
 
 /**
  * Build an RFC 6265 Cookie header without changing the values stored by the

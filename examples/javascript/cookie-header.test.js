@@ -18,6 +18,16 @@ test("treats a missing browser cookie value as empty", () => {
   assert.equal(createCookieHeader([{ name: "missing", value: null }]), "missing=");
 });
 
+test("preserves RFC 6265 quoted cookie values", () => {
+  assert.equal(
+    createCookieHeader([
+      { name: "token", value: '"abc"' },
+      { name: "empty", value: '""' },
+    ]),
+    'token="abc"; empty=""',
+  );
+});
+
 test("rejects cookie names that could alter the header", () => {
   assert.throws(
     () => createCookieHeader([{ name: "safe\r\nInjected", value: "yes" }]),
@@ -26,7 +36,14 @@ test("rejects cookie names that could alter the header", () => {
 });
 
 test("rejects cookie values that could add another cookie or header", () => {
-  for (const value of ["one; injected=two", "safe\r\nInjected: yes"]) {
+  for (const value of [
+    "one; injected=two",
+    "safe\r\nInjected: yes",
+    '"unmatched',
+    'unmatched"',
+    'internal"quote',
+    '"closed"trailing',
+  ]) {
     assert.throws(
       () => createCookieHeader([{ name: "session", value }]),
       /Unsafe value/,
