@@ -308,18 +308,24 @@ fn decrypt_encrypted_value(
 fn unlock_file(
   mut path: PathBuf,
   force_kill: bool,
-) -> Result<(PathBuf, Option<windows::shadow_copy::TempDir>)> {
+) -> Result<(PathBuf, Option<crate::utils::TempDir>)> {
   // Shadow copy cookies file so we can read session cookies
   // Admin rights required
   if privilege::user::privileged() {
     log::debug!("Admin rights detected");
-    if let Ok(temp_dir) = windows::shadow_copy::TempDir::new() {
-      let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.path().to_path_buf());
-      log::debug!("shadow copy result: {:?}", result);
-      if result.is_ok() {
-        path = temp_dir.path().join(path.file_name().unwrap());
-        return Ok((path, Some(temp_dir)));
+    // The shadow copy brings the `-wal` along, so `sqlite::connect` will
+    // snapshot this copy a second time. The duplicate copy is intentional:
+    // keeping the WAL here is what makes the session cookies reachable at all.
+    match crate::utils::TempDir::new() {
+      Ok(temp_dir) => {
+        let result = windows::shadow_copy::shadow_copy(path.clone(), temp_dir.path().to_path_buf());
+        log::debug!("shadow copy result: {:?}", result);
+        if result.is_ok() {
+          path = temp_dir.path().join(path.file_name().unwrap());
+          return Ok((path, Some(temp_dir)));
+        }
       }
+      Err(err) => log::warn!("Can't create a directory for the shadow copy: {err}"),
     }
   }
 
@@ -568,6 +574,50 @@ mod tests {
       "expected Err for bogus sqlite, got {:?}",
       result
     );
+  }
+
+  #[test]
+  fn query_cookies_reads_cookies_committed_to_an_active_wal() {
+    let dir = unique_tmpdir("chr-wal");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "checkpointed",
+        "old",
+        b"",
+        false,
+        0,
+      )],
+    );
+
+    // Switch to WAL and keep the writer connected, so the second cookie stays
+    // in the -wal the way it does while Chrome is running.
+    let writer = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    let mode: String = writer
+      .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+      .expect("enable WAL");
+    assert_eq!(mode, "wal");
+    writer
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
+          encrypted_value, is_httponly, samesite) \
+          VALUES ('.example.com', '/', 0, 0, 'in-wal', 'fresh', X'', 0, 0)",
+        [],
+      )
+      .expect("insert WAL row");
+
+    let mut cookies = query_cookies(vec![], db, None, false).expect("decode");
+
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["checkpointed", "in-wal"], "{cookies:?}");
+    let in_wal = cookies.iter().find(|c| c.name == "in-wal").expect("in-wal");
+    assert_eq!(in_wal.value, "fresh");
   }
 
   #[test]

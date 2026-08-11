@@ -1,41 +1,7 @@
+use crate::common::sqlite;
 use anyhow::{bail, Context, Result};
 use privilege::user::privileged;
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
 use std::path::{Path, PathBuf};
-
-pub struct TempDir {
-  path: PathBuf,
-}
-
-impl TempDir {
-  pub fn new() -> Result<Self> {
-    let random_string: String = thread_rng()
-      .sample_iter(&Alphanumeric)
-      .take(10)
-      .map(char::from)
-      .collect();
-    let path = std::env::temp_dir().join(format!(".tmp{random_string}"));
-    std::fs::create_dir(&path)?;
-    log::trace!("created dir {}", path.display());
-    Ok(Self { path })
-  }
-
-  pub fn path(&self) -> &Path {
-    &self.path
-  }
-}
-
-impl Drop for TempDir {
-  fn drop(&mut self) {
-    if let Err(err) = std::fs::remove_dir_all(&self.path) {
-      log::warn!(
-        "failed to remove temporary shadow-copy directory {}: {err}",
-        self.path.display()
-      );
-    }
-  }
-}
 
 /// dst should be directory
 pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
@@ -50,30 +16,37 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
     src.display(),
     dst.display()
   );
-  rawcopy_rs_next::rawcopy(src.clone().to_str().unwrap(), dst.to_str().unwrap())
-    .map_err(|err| anyhow::anyhow!(Box::new(err)))
-    .context(format!(
-      "Can't shadow copy from {} to {}",
-      src.display(),
-      dst.display(),
-    ))?;
+  // Copy the write-ahead log first, then the main database: a checkpoint only
+  // moves pages out of the WAL, so an older WAL paired with a newer main file
+  // replays safely, while the reverse order can pair a stale main file with a
+  // rewound WAL. Same reasoning as `sqlite::copy_database`.
+  //
+  // A failure here is fatal rather than a warning. Cookies committed to the WAL
+  // are not in the main database yet, so a copy without it silently omits the
+  // very cookies this path exists to reach. Returning an error instead lets
+  // `unlock_file` fall through to the restart-manager path, which yields a
+  // checkpointed database.
+  let wal = sqlite::sidecar(&src, "-wal");
+  if wal.exists() {
+    raw_copy(&wal, &dst)?;
+  }
+
+  raw_copy(&src, &dst)?;
 
   Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-  use super::TempDir;
+fn raw_copy(src: &Path, dst: &Path) -> Result<()> {
+  let (src, dst) = (
+    src
+      .to_str()
+      .with_context(|| format!("Non UTF-8 source path: {}", src.display()))?,
+    dst
+      .to_str()
+      .with_context(|| format!("Non UTF-8 destination path: {}", dst.display()))?,
+  );
 
-  #[test]
-  fn temp_dir_is_removed_on_drop() {
-    let path = {
-      let temp_dir = TempDir::new().expect("create temp dir");
-      let path = temp_dir.path().to_path_buf();
-      assert!(path.exists());
-      path
-    };
-
-    assert!(!path.exists());
-  }
+  rawcopy_rs_next::rawcopy(src, dst)
+    .map_err(|err| anyhow::anyhow!(Box::new(err)))
+    .context(format!("Can't shadow copy from {src} to {dst}"))
 }
