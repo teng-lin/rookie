@@ -79,13 +79,15 @@ git push origin "v$VERSION"
 
 ## Publish
 
-Dispatch each workflow from the immutable tag and provide the version without
-the `v` prefix:
+Dispatch the crates.io and PyPI workflows from the immutable tag and provide
+the version without the `v` prefix. Dispatch the npm workflow from reviewed
+`main`; it explicitly checks out and verifies the matching immutable tag for
+every build and packaging job:
 
 ```console
 gh workflow run publish-crate.yml --ref "v$VERSION" -f version="$VERSION"
 gh workflow run publish-py.yml --ref "v$VERSION" -f version="$VERSION"
-gh workflow run publish-npm.yml --ref "v$VERSION" -f version="$VERSION"
+gh workflow run publish-npm.yml --ref main -f version="$VERSION"
 ```
 
 Do not start all three commands together. Wait for each workflow to finish and
