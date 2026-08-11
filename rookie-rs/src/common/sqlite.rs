@@ -220,7 +220,7 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
 /// Only a missing sidecar means "no WAL". Any other stat failure is reported,
 /// because answering `false` would route to the `immutable` read that ignores
 /// the WAL and returns a short cookie list as though it were complete.
-fn has_nonempty_wal(database: &Path) -> Result<bool> {
+pub(crate) fn has_nonempty_wal(database: &Path) -> Result<bool> {
   let wal = sidecar(database, "-wal");
   match fs::metadata(&wal) {
     Ok(metadata) => Ok(metadata.len() > 0),

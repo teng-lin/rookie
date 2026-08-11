@@ -17,18 +17,17 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
     src.display(),
     dst.display()
   );
-  // Copy the write-ahead log first, then the main database: a checkpoint only
-  // moves pages out of the WAL, so an older WAL paired with a newer main file
-  // replays safely, while the reverse order can pair a stale main file with a
-  // rewound WAL. Same reasoning as `sqlite::copy_database`.
+  // Cookies committed to the write-ahead log are not in the main database yet,
+  // so a copy without it silently omits the very cookies this path exists to
+  // reach. Any failure to obtain it is therefore fatal rather than a warning,
+  // which lets `unlock_file` fall through to the restart-manager path and its
+  // checkpointed database. That includes a WAL that cannot be stat'd:
+  // `Path::exists` would report an ACL, sharing or transient error as "no WAL".
   //
-  // A failure here is fatal rather than a warning. Cookies committed to the WAL
-  // are not in the main database yet, so a copy without it silently omits the
-  // very cookies this path exists to reach. Returning an error instead lets
-  // `unlock_file` fall through to the restart-manager path, which yields a
-  // checkpointed database.
+  // The WAL goes first here, unlike the portable path, so that the two copies
+  // can be bracketed by a second WAL image below.
   let wal = sqlite::sidecar(&src, "-wal");
-  let copied_wal = wal.exists();
+  let copied_wal = sqlite::has_nonempty_wal(&src)?;
   if copied_wal {
     raw_copy(&wal, &dst)?;
   }
