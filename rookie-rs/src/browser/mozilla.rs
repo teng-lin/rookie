@@ -414,10 +414,19 @@ pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>>
   let installs = install_defaults(&conf);
   let default_path = resolve_default_path(&sections, &installs);
 
+  // Exactly one entry carries the flag: two sections may declare the same
+  // `Path`, and "the default" must stay singular within one profiles.ini.
+  let mut default_taken = false;
+  let mut claim_default = |candidate: &str| {
+    let is_default = !default_taken && default_path.as_deref() == Some(candidate);
+    default_taken |= is_default;
+    is_default
+  };
+
   let mut profiles: Vec<MozillaProfile> = sections
     .iter()
     .map(|profile| MozillaProfile {
-      is_default: default_path.as_deref() == Some(profile.path.as_str()),
+      is_default: claim_default(&profile.path),
       // `IsRelative=0` sections store a full native path, which `join` passes
       // through. We trust the shape of `Path` rather than the `IsRelative`
       // flag, which browsers do not always keep in sync.
@@ -435,9 +444,9 @@ pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>>
     .filter(|default| !is_known_section(&sections, default))
   {
     profiles.push(MozillaProfile {
+      is_default: claim_default(orphan),
       path: base.join(orphan),
       name: String::new(),
-      is_default: default_path.as_deref() == Some(orphan.as_str()),
     });
   }
 
@@ -998,6 +1007,24 @@ mod tests {
       "declared profile is the heuristic default"
     );
     assert!(!profiles[1].is_default);
+  }
+
+  #[test]
+  fn list_profiles_flags_exactly_one_default_for_duplicate_paths() {
+    // A malformed ini can declare the same Path twice; "the default" must stay
+    // singular so selection does not become spuriously ambiguous.
+    let ini_path = write_ini(
+      "ff-duplicate-paths",
+      "[Profile0]\nName=first\nIsRelative=1\nPath=Profiles/same\nDefault=1\n\
+       [Profile1]\nName=second\nIsRelative=1\nPath=Profiles/same\nDefault=1\n",
+    );
+    let profiles = list_profiles(&ini_path).expect("should list");
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(
+      profiles.iter().filter(|p| p.is_default).count(),
+      1,
+      "{profiles:?}"
+    );
   }
 
   #[test]
