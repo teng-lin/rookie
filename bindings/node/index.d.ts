@@ -14,27 +14,26 @@ export interface CookieObject {
   sameSite: number
 }
 export declare function version(): string
-export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Array<CookieObject>
-/** Common browsers */
-export declare function firefox(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function zen(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function librewolf(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function chrome(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function brave(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function arc(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function edge(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function opera(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function operaGx(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function chromium(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function vivaldi(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function load(domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
+export declare function firefox(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function zen(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function librewolf(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function chrome(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function brave(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function arc(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function edge(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function opera(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function chromium(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function vivaldi(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows-only browsers */
-export declare function octoBrowser(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function internetExplorer(domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** macOS-only browsers */
-export declare function safari(domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
-export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows browsers */
-export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

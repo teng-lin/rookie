@@ -10,11 +10,12 @@ use std::path::PathBuf;
 #[pyo3(signature = (db_path, domains=None, key_path=None))]
 pub fn any_browser(
   py: Python<'_>,
-  db_path: &str,
+  db_path: String,
   domains: Option<Vec<String>>,
-  key_path: Option<&str>,
+  key_path: Option<String>,
 ) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::any_browser(db_path, domains, key_path)?;
+  let cookies =
+    py.allow_threads(|| rookie_core::any_browser(&db_path, domains, key_path.as_deref()))?;
   to_dict(py, cookies)
 }
 
@@ -25,7 +26,7 @@ pub fn any_browser(
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn firefox(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::firefox(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::firefox(domains))?;
   to_dict(py, cookies)
 }
 
@@ -36,7 +37,7 @@ pub fn firefox(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyO
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn zen(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::zen(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::zen(domains))?;
   to_dict(py, cookies)
 }
 
@@ -47,7 +48,7 @@ pub fn zen(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObjec
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn librewolf(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::librewolf(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::librewolf(domains))?;
   to_dict(py, cookies)
 }
 
@@ -58,7 +59,7 @@ pub fn librewolf(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<P
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn chrome(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::chrome(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::chrome(domains))?;
   to_dict(py, cookies)
 }
 
@@ -69,7 +70,7 @@ pub fn chrome(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyOb
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn arc(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::arc(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::arc(domains))?;
   to_dict(py, cookies)
 }
 
@@ -80,7 +81,7 @@ pub fn arc(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObjec
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn brave(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::brave(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::brave(domains))?;
   to_dict(py, cookies)
 }
 
@@ -91,7 +92,7 @@ pub fn brave(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObj
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn edge(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::edge(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::edge(domains))?;
   to_dict(py, cookies)
 }
 
@@ -102,7 +103,7 @@ pub fn edge(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObje
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn opera(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::opera(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::opera(domains))?;
   to_dict(py, cookies)
 }
 
@@ -113,7 +114,7 @@ pub fn opera(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObj
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn opera_gx(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::opera_gx(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::opera_gx(domains))?;
   to_dict(py, cookies)
 }
 
@@ -124,7 +125,7 @@ pub fn opera_gx(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn chromium(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::chromium(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::chromium(domains))?;
   to_dict(py, cookies)
 }
 
@@ -135,7 +136,7 @@ pub fn chromium(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn vivaldi(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::vivaldi(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::vivaldi(domains))?;
   to_dict(py, cookies)
 }
 
@@ -152,7 +153,8 @@ pub fn firefox_based(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::firefox_based(PathBuf::from(db_path), domains)?;
+  let cookies =
+    py.allow_threads(|| rookie_core::firefox_based(PathBuf::from(&db_path), domains))?;
   to_dict(py, cookies)
 }
 
@@ -163,7 +165,7 @@ pub fn firefox_based(
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn load(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::load(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::load(domains))?;
   to_dict(py, cookies)
 }
 
@@ -175,7 +177,7 @@ pub fn load(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObje
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "windows")]
 pub fn octo_browser(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::octo_browser(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::octo_browser(domains))?;
   to_dict(py, cookies)
 }
 
@@ -187,7 +189,7 @@ pub fn octo_browser(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Ve
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "windows")]
 pub fn internet_explorer(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::internet_explorer(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::internet_explorer(domains))?;
   to_dict(py, cookies)
 }
 
@@ -205,12 +207,14 @@ pub fn chromium_based(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::chromium_based(
-    PathBuf::from(key_path),
-    PathBuf::from(db_path),
-    domains,
-    false,
-  )?;
+  let cookies = py.allow_threads(|| {
+    rookie_core::chromium_based(
+      PathBuf::from(&key_path),
+      PathBuf::from(&db_path),
+      domains,
+      false,
+    )
+  })?;
   to_dict(py, cookies)
 }
 
@@ -222,7 +226,7 @@ pub fn chromium_based(
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "macos")]
 pub fn safari(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<PyObject>> {
-  let cookies = rookie_core::safari(domains)?;
+  let cookies = py.allow_threads(|| rookie_core::safari(domains))?;
   to_dict(py, cookies)
 }
 
@@ -241,14 +245,15 @@ pub fn chromium_based(
 ) -> PyResult<Vec<PyObject>> {
   use rookie_core::config::Browser;
 
-  let db_path = db_path.as_str();
   let config = Browser {
     channels: None,
-    paths: vec![db_path.to_string()],
+    paths: vec![db_path.clone()],
     unix_crypt_name: Some("chrome".to_string()),
     osx_key_service: None,
     osx_key_user: None,
   };
-  let cookies = rookie_core::chromium_based(&config, PathBuf::from(db_path), domains, false)?;
+  let cookies = py.allow_threads(|| {
+    rookie_core::chromium_based(&config, PathBuf::from(&db_path), domains, false)
+  })?;
   to_dict(py, cookies)
 }

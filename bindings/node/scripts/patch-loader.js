@@ -44,11 +44,9 @@ if (!loader.includes('function unsupportedPlatform(')) {
   loader = loader.replace(
     'module.exports.version = version',
     `function unsupportedPlatform(name, supportedPlatform) {
-  return () => {
-    throw new Error(
-      \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
-    )
-  }
+  return () => Promise.reject(new Error(
+    \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
+  ))
 }
 
 module.exports.version = version`
@@ -72,22 +70,23 @@ module.exports.chromiumBased = chromiumBased
 writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
-const loadDeclaration = 'export declare function load(domains?: Array<string> | undefined | null): Array<CookieObject>\n'
+const loadDeclaration = 'export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>\n'
 const loadIndex = types.indexOf(loadDeclaration)
 if (loadIndex === -1) {
   throw new Error(`Could not find the load declaration in ${typesPath}`)
 }
 
 types = types.slice(0, loadIndex + loadDeclaration.length)
-types += `/** Windows-only browsers */
-export declare function octoBrowser(domains?: Array<string> | undefined | null): Array<CookieObject>
-export declare function internetExplorer(domains?: Array<string> | undefined | null): Array<CookieObject>
+types += `export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** Windows-only browsers */
+export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** macOS-only browsers */
-export declare function safari(domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
-export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows browsers */
-export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Array<CookieObject>
+export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 `
 
 writeFileSync(typesPath, types)

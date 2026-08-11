@@ -844,6 +844,7 @@ mod tests {
     let res = decrypt_encrypted_value("".to_string(), &blob, &[short_key]);
     assert!(res.is_err());
   }
+
   #[cfg(unix)]
   #[test]
   fn query_cookies_ignores_malformed_and_undecryptable_rows() {

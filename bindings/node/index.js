@@ -327,11 +327,9 @@ if (!nativeBinding) {
 const { version, anyBrowser, firefox, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding
 
 function unsupportedPlatform(name, supportedPlatform) {
-  return () => {
-    throw new Error(
-      `${name} is only available on ${supportedPlatform}; current platform is ${platform}`
-    )
-  }
+  return () => Promise.reject(new Error(
+    `${name} is only available on ${supportedPlatform}; current platform is ${platform}`
+  ))
 }
 
 module.exports.version = version
@@ -347,9 +345,9 @@ module.exports.opera = opera
 module.exports.operaGx = operaGx
 module.exports.chromium = chromium
 module.exports.vivaldi = vivaldi
-module.exports.firefoxBased = firefoxBased
 module.exports.load = load
 module.exports.octoBrowser = octoBrowser || unsupportedPlatform('octoBrowser', 'Windows')
 module.exports.internetExplorer = internetExplorer || unsupportedPlatform('internetExplorer', 'Windows')
 module.exports.safari = safari || unsupportedPlatform('safari', 'macOS')
 module.exports.chromiumBased = chromiumBased
+module.exports.firefoxBased = firefoxBased
