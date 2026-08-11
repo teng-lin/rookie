@@ -17,41 +17,38 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
     src.display(),
     dst.display()
   );
+  let name = src
+    .file_name()
+    .ok_or_else(|| anyhow!("Database path has no file name: {}", src.display()))?;
+  raw_copy(&src, &dst)?;
+
   // Cookies committed to the write-ahead log are not in the main database yet,
   // so a copy without it silently omits the very cookies this path exists to
   // reach. Any failure to obtain it is therefore fatal rather than a warning,
   // which lets `unlock_file` fall through to the restart-manager path and its
   // checkpointed database. That includes a WAL that cannot be stat'd:
   // `Path::exists` would report an ACL, sharing or transient error as "no WAL".
-  //
-  // The WAL goes first here, unlike the portable path, so that the two copies
-  // can be bracketed by a second WAL image below.
   let wal = sqlite::sidecar(&src, "-wal");
   let copied_wal = sqlite::has_nonempty_wal(&src)?;
   if copied_wal {
     raw_copy(&wal, &dst)?;
   }
 
-  raw_copy(&src, &dst)?;
-
   // These two raw copies are not atomic either, and `sqlite::connect` cannot
   // cover for that: by the time it runs it is inspecting this static copy, not
   // the live source, so a checkpoint that landed here is already baked in.
   //
-  // The portable check does not port. It compares its copy against the live
-  // source, and this path exists precisely because the source cannot be opened
-  // normally. So the WAL is raw-copied a second time and the two images are
-  // compared instead: an unchanged WAL means no frames were appended during the
-  // window, so any checkpoint in it folded only frames the first copy already
-  // holds, and replaying them over the copied database rewrites identical
-  // bytes. The WAL is the smaller file, which keeps the extra raw copy cheap.
+  // Same invariant as `sqlite::snapshot_database` — the main file must not move
+  // across both copies — but verified differently, because this path exists
+  // precisely because the source cannot be opened normally and so cannot be
+  // compared against. A second raw copy of the main file stands in for reading
+  // the source. Comparing main images rather than WAL images matters: ordinary
+  // commits append to the WAL and leave the main file alone, so they must not
+  // be mistaken for a checkpoint and rejected.
   if copied_wal {
     let probe = TempDir::new()?;
-    raw_copy(&wal, probe.path())?;
+    raw_copy(&src, probe.path())?;
 
-    let name = wal
-      .file_name()
-      .ok_or_else(|| anyhow!("Write-ahead log path has no file name: {}", wal.display()))?;
     if !sqlite::files_are_identical(&dst.join(name), &probe.path().join(name))? {
       // Reported rather than retried: a raw copy rescans NTFS clusters, so
       // retrying against a busy database is a poor trade. `unlock_file` falls
