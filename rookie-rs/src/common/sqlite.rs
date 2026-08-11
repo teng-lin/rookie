@@ -23,6 +23,22 @@ pub struct SqliteReader {
   snapshot: Option<TempDir>,
 }
 
+/// An already-acquired, static single-file database that was verified as
+/// WAL-free across its acquisition window (or copied only after a checkpoint
+/// completely drained the WAL).
+///
+/// The fields deliberately stay private to this module. A path being in a
+/// temporary directory is not proof that `immutable=1` is safe: the
+/// acquisition operation must establish the invariant before it can construct
+/// this value. The first platform acquisition that can provide that proof will
+/// add the constructor alongside its verification, rather than accepting an
+/// arbitrary path here.
+#[allow(dead_code)]
+pub(crate) struct VerifiedStaticSingleFile {
+  path: PathBuf,
+  snapshot: TempDir,
+}
+
 impl SqliteReader {
   /// The private directory holding the snapshot, or `None` when the database
   /// was read in place.
@@ -54,8 +70,12 @@ impl Deref for SqliteReader {
 /// cannot starve the writer, at the cost of a copy that is not atomic and so
 /// has to be checked for a racing checkpoint (see [`snapshot_database`]).
 ///
-/// Databases with no `-wal` are read in place as `immutable`, which likewise
-/// takes no locks.
+/// A live database with no nonempty `-wal` is opened normally in read-only
+/// mode. Before this function returns, it begins a read transaction and reads
+/// the schema, pinning a coherent SQLite snapshot. An active rollback-journal
+/// writer therefore either permits that coherent read or returns SQLite's
+/// typed busy/locked error; this path never raw-copies or immutably opens the
+/// live database.
 pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   let path = path
     .canonicalize()
@@ -76,7 +96,7 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
     }
   } else {
     SqliteReader {
-      connection: open_read_only(&path, "mode=ro&immutable=1")?,
+      connection: open_live_read_only(&path)?,
       snapshot: None,
     }
   };
@@ -91,6 +111,71 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   }
 
   Ok(reader)
+}
+
+/// Opens an already-acquired static single-file copy as immutable.
+///
+/// Taking the opaque proof by value keeps ownership of the private snapshot
+/// directory with the returned reader. In particular, this function does not
+/// accept a bare path and cannot be used by [`connect`]'s live no-WAL branch.
+/// A DB+WAL snapshot is not eligible even when both files are static.
+#[allow(dead_code)]
+pub(crate) fn open_verified_static_single_file(
+  verified: VerifiedStaticSingleFile,
+) -> Result<SqliteReader> {
+  let VerifiedStaticSingleFile { path, snapshot } = verified;
+  ensure_single_file(&path)?;
+  Ok(SqliteReader {
+    connection: open_read_only(&path, "mode=ro&immutable=1")?,
+    snapshot: Some(snapshot),
+  })
+}
+
+/// Opens a live mutable database and establishes its read snapshot before the
+/// connection escapes this module.
+fn open_live_read_only(path: &Path) -> Result<Connection> {
+  let connection = open_read_only(path, "mode=ro")?;
+  pin_read_snapshot(&connection, path)?;
+  Ok(connection)
+}
+
+/// `BEGIN` alone is deferred and takes no read lock. Reading `sqlite_schema`
+/// is what establishes the snapshot and pins the schema for all later cookie
+/// queries on this connection.
+fn pin_read_snapshot(connection: &Connection, path: &Path) -> Result<()> {
+  connection
+    .execute_batch("BEGIN DEFERRED TRANSACTION;")
+    .with_context(|| format!("Can't begin read transaction for {}", path.display()))?;
+  let _: i64 = connection
+    .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+    .with_context(|| format!("Can't pin database schema for {}", path.display()))?;
+  Ok(())
+}
+
+/// Rejects sidecars at the immutable boundary even though the opaque proof is
+/// the primary eligibility check. This makes it impossible for a DB+WAL pair
+/// to start ignoring its WAL because of an acquisition wiring mistake.
+#[allow(dead_code)]
+fn ensure_single_file(database: &Path) -> Result<()> {
+  for suffix in ["-wal", "-shm", "-journal"] {
+    let sidecar = sidecar(database, suffix);
+    match fs::metadata(&sidecar) {
+      Ok(_) => {
+        return Err(anyhow!(
+          "Immutable database acquisition must contain one file; found {}",
+          sidecar.display()
+        ))
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+      Err(error) => {
+        return Err(anyhow::Error::new(error).context(format!(
+          "Can't verify static database sidecar {}",
+          sidecar.display()
+        )))
+      }
+    }
+  }
+  Ok(())
 }
 
 /// How many times a snapshot torn by a concurrent checkpoint is retaken.
@@ -287,6 +372,55 @@ fn open_read_only(path: &Path, query: &str) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn rollback_database(directory: &Path) -> (PathBuf, Connection) {
+    let path = directory.join("cookies.sqlite");
+    let writer = Connection::open(&path).expect("open rollback-journal database");
+    let mode: String = writer
+      .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+      .expect("enable rollback journal");
+    assert_eq!(mode, "delete");
+    writer
+      .execute("CREATE TABLE cookies (name TEXT NOT NULL)", [])
+      .expect("create table");
+    writer
+      .execute("INSERT INTO cookies (name) VALUES ('before')", [])
+      .expect("insert initial row");
+    (path, writer)
+  }
+
+  fn is_busy_or_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+      error,
+      rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+          code: rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked,
+          ..
+        },
+        _
+      )
+    )
+  }
+
+  fn assert_anyhow_busy_or_locked(error: &anyhow::Error) {
+    let sqlite_error = error
+      .chain()
+      .find_map(|cause| cause.downcast_ref::<rusqlite::Error>());
+    assert!(
+      sqlite_error.is_some_and(is_busy_or_locked),
+      "expected typed SQLITE_BUSY/SQLITE_LOCKED, got {error:#}"
+    );
+  }
+
+  /// Uses the production live-open sequence with a zero busy timeout so an
+  /// exclusive-lock fixture is deterministic and does not wait rusqlite's
+  /// default five seconds.
+  fn open_live_without_wait(path: &Path) -> Result<Connection> {
+    let connection = open_read_only(path, "mode=ro")?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    pin_read_snapshot(&connection, path)?;
+    Ok(connection)
+  }
 
   /// Creates a WAL-mode database holding one checkpointed row.
   fn checkpointed_database(directory: &Path) -> (PathBuf, Connection) {
@@ -559,6 +693,10 @@ mod tests {
       reader.snapshot_path().is_none(),
       "a database with no pending WAL is read in place"
     );
+    assert!(
+      !reader.is_autocommit(),
+      "a live no-WAL read must return with its read transaction pinned"
+    );
   }
 
   #[test]
@@ -580,6 +718,127 @@ mod tests {
     assert!(
       reader.snapshot_path().is_none(),
       "a database with no WAL is read in place"
+    );
+    assert!(
+      !reader.is_autocommit(),
+      "a live no-WAL read must return with its read transaction pinned"
+    );
+  }
+
+  #[test]
+  fn rollback_journal_reader_stays_on_one_coherent_snapshot() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, writer) = rollback_database(directory.path());
+
+    // Open the reader before the writer transaction and deliberately do not
+    // query `cookies` yet. The schema read inside `connect` must already have
+    // established the SHARED lock and the pre-write snapshot.
+    let reader = connect(path.clone()).expect("open live rollback-journal reader");
+    assert!(reader.snapshot_path().is_none(), "must not raw-copy");
+    assert!(!reader.is_autocommit(), "read transaction must be active");
+
+    // A RESERVED writer and SHARED reader can coexist, so the update can be
+    // staged. Its commit needs an EXCLUSIVE lock and must not move the already
+    // pinned reader to the post-write state.
+    writer
+      .execute_batch("BEGIN IMMEDIATE; UPDATE cookies SET name = 'after';")
+      .expect("stage update under a reserved rollback-journal lock");
+
+    writer
+      .busy_timeout(std::time::Duration::ZERO)
+      .expect("disable writer wait");
+    let error = writer
+      .execute_batch("COMMIT;")
+      .expect_err("the pinned reader must prevent the writer's exclusive commit lock");
+    assert!(
+      is_busy_or_locked(&error),
+      "expected typed SQLITE_BUSY/SQLITE_LOCKED, got {error}"
+    );
+    assert_eq!(
+      cookie_names(&reader),
+      vec!["before"],
+      "a failed concurrent commit must not move the reader's snapshot"
+    );
+
+    drop(reader);
+    writer
+      .execute_batch("COMMIT;")
+      .expect("commit after the reader releases its snapshot");
+    let reader = connect(path).expect("open post-commit reader");
+    assert_eq!(cookie_names(&reader), vec!["after"]);
+  }
+
+  #[test]
+  fn exclusive_rollback_writer_returns_typed_lock_instead_of_immutable_data() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, writer) = rollback_database(directory.path());
+    writer
+      .execute_batch("BEGIN EXCLUSIVE; UPDATE cookies SET name = 'uncommitted';")
+      .expect("take exclusive rollback-journal lock");
+
+    let canonical = path.canonicalize().expect("canonicalize");
+    let error = match open_live_without_wait(&canonical) {
+      Ok(_) => panic!("an exclusive rollback-journal writer must not be read through"),
+      Err(error) => error,
+    };
+    assert_anyhow_busy_or_locked(&error);
+    assert!(
+      !sidecar(&canonical, "-wal").exists(),
+      "fixture must exercise the no-WAL branch"
+    );
+
+    writer.execute_batch("ROLLBACK;").expect("release writer");
+    let reader = connect(path).expect("open after lock release");
+    assert_eq!(cookie_names(&reader), vec!["before"]);
+  }
+
+  #[test]
+  fn verified_static_single_file_is_the_only_immutable_entry_point() {
+    let source_directory = TempDir::new().expect("source dir");
+    let (source, writer) = rollback_database(source_directory.path());
+    drop(writer);
+
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let copy = snapshot.path().join("cookies.sqlite");
+    fs::copy(&source, &copy).expect("copy closed single-file database");
+    let verified = VerifiedStaticSingleFile {
+      path: copy,
+      snapshot,
+    };
+    let reader = open_verified_static_single_file(verified).expect("open verified static copy");
+
+    assert_eq!(cookie_names(&reader), vec!["before"]);
+    assert!(
+      reader.is_autocommit(),
+      "immutable copy needs no live read lock"
+    );
+    assert!(
+      reader.snapshot_path().is_some(),
+      "the reader must retain ownership of the acquired copy"
+    );
+  }
+
+  #[test]
+  fn immutable_entry_point_rejects_a_static_database_and_wal_pair() {
+    let source_directory = TempDir::new().expect("source dir");
+    let (source, writer) = checkpointed_database(source_directory.path());
+    writer
+      .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
+      .expect("insert WAL row");
+
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let copy = copy_database(&source, snapshot.path()).expect("copy DB+WAL pair");
+    let verified = VerifiedStaticSingleFile {
+      path: copy,
+      snapshot,
+    };
+    let error = match open_verified_static_single_file(verified) {
+      Ok(_) => panic!("a DB+WAL pair must never use immutable mode"),
+      Err(error) => error,
+    };
+    assert!(
+      error.to_string().contains("must contain one file"),
+      "unexpected error: {error:#}"
     );
   }
 
