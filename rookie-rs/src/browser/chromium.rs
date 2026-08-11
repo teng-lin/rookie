@@ -532,6 +532,16 @@ fn query_cookies_engine_outcome(
   Ok(database.into_value())
 }
 
+/// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
+/// character itself so a caller-supplied domain is matched as literal text,
+/// not interpreted as a wildcard pattern. Pair with an `ESCAPE '\'` clause.
+fn escape_like_pattern(input: &str) -> String {
+  input
+    .replace('\\', "\\\\")
+    .replace('%', "\\%")
+    .replace('_', "\\_")
+}
+
 fn query_cookies_from_connection(
   connection: &rusqlite::Connection,
   outcomes: &ChromiumKeyOutcomes,
@@ -540,12 +550,17 @@ fn query_cookies_from_connection(
   let mut query =
     "SELECT host_key, path, is_secure, expires_utc, name, value, CAST(encrypted_value AS BLOB), is_httponly, samesite FROM cookies ".to_string();
   let domain_filters: Vec<String> = domains
-    .map(|domains| domains.iter().map(|domain| format!("%{domain}%")).collect())
+    .map(|domains| {
+      domains
+        .iter()
+        .map(|domain| format!("%{}%", escape_like_pattern(domain)))
+        .collect()
+    })
     .unwrap_or_default();
 
   if !domain_filters.is_empty() {
     let predicates = (1..=domain_filters.len())
-      .map(|index| format!("host_key LIKE ?{index}"))
+      .map(|index| format!("host_key LIKE ?{index} ESCAPE '\\'"))
       .collect::<Vec<_>>()
       .join(" OR ");
     query += &format!("WHERE ({predicates})");
@@ -1342,6 +1357,48 @@ mod tests {
     .expect("decode");
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
     assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
+
+  #[test]
+  fn query_cookies_percent_domain_is_not_a_wildcard() {
+    let dir = unique_tmpdir("chr-domain-filter-percent");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
+      ],
+    );
+
+    let cookies = query_cookies_with_legacy_keys(vec![], db, Some(vec!["%".to_string()]), false)
+      .expect("decode");
+    assert!(
+      cookies.is_empty(),
+      "a literal '%' domain must not match every host: {:?}",
+      cookies
+    );
+  }
+
+  #[test]
+  fn query_cookies_underscore_domain_is_not_a_wildcard() {
+    let dir = unique_tmpdir("chr-domain-filter-underscore");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
+        ("a.test", "/", false, 0, "drop", "no", b"x", false, 0),
+      ],
+    );
+
+    let cookies = query_cookies_with_legacy_keys(vec![], db, Some(vec!["_".to_string()]), false)
+      .expect("decode");
+    assert!(
+      cookies.is_empty(),
+      "a literal '_' domain must not match every single-character host: {:?}",
+      cookies
+    );
   }
 
   #[cfg(unix)]

@@ -36,22 +36,37 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   Ok(cookies)
 }
 
+/// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
+/// character itself so a caller-supplied domain is matched as literal text,
+/// not interpreted as a wildcard pattern. Pair with an `ESCAPE '\'` clause.
+fn escape_like_pattern(input: &str) -> String {
+  input
+    .replace('\\', "\\\\")
+    .replace('%', "\\%")
+    .replace('_', "\\_")
+}
+
 fn query_persistent_cookies(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
 ) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
   let mut query = "
-        SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies 
+        SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies
     "
   .to_string();
 
   let domain_filters: Vec<String> = domains
-    .map(|domains| domains.iter().map(|domain| format!("%{domain}%")).collect())
+    .map(|domains| {
+      domains
+        .iter()
+        .map(|domain| format!("%{}%", escape_like_pattern(domain)))
+        .collect()
+    })
     .unwrap_or_default();
 
   if !domain_filters.is_empty() {
     let predicates = (1..=domain_filters.len())
-      .map(|index| format!("host LIKE ?{index}"))
+      .map(|index| format!("host LIKE ?{index} ESCAPE '\\'"))
       .collect::<Vec<_>>()
       .join(" OR ");
     query += &format!("WHERE ({predicates})");
@@ -780,6 +795,46 @@ mod tests {
     .expect("decode");
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
     assert_eq!(names, vec!["keep"], "{:?}", cookies);
+  }
+
+  #[test]
+  fn firefox_based_percent_domain_is_not_a_wildcard() {
+    let dir = unique_tmpdir("ff-domain-filter-percent");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", false, 0),
+      ],
+    );
+
+    let cookies = firefox_based(db, Some(vec!["%".to_string()])).expect("decode");
+    assert!(
+      cookies.is_empty(),
+      "a literal '%' domain must not match every host: {:?}",
+      cookies
+    );
+  }
+
+  #[test]
+  fn firefox_based_underscore_domain_is_not_a_wildcard() {
+    let dir = unique_tmpdir("ff-domain-filter-underscore");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "keep", "yes", false, 0),
+        ("a.test", "/", false, 0, "drop", "no", false, 0),
+      ],
+    );
+
+    let cookies = firefox_based(db, Some(vec!["_".to_string()])).expect("decode");
+    assert!(
+      cookies.is_empty(),
+      "a literal '_' domain must not match every single-character host: {:?}",
+      cookies
+    );
   }
 
   #[test]
