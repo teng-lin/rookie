@@ -8,8 +8,10 @@
 
 Registry releases are immutable and the npm publication is not atomic. The
 release workflows therefore run only by manual dispatch from an existing
-`v<version>` tag. Publish each registry in the order below and verify it before
-starting the next one.
+`v<version>` tag. The npm workflow definition is dispatched from reviewed
+`main` and explicitly checks out that tag for every source-consuming job.
+Publish each registry in the order below and verify it before starting the
+next one.
 
 ## One-time setup
 
@@ -32,12 +34,11 @@ issue, pull request, or workflow log:
    `rookie-cookies`, owner `teng-lin`, repository `rookie-cookies`, workflow
    `publish-py.yml`, and environment `release`. No PyPI token is needed by the
    workflow.
-3. Add a short-lived npm granular access token with bypass-2FA permission and
-   read/write access to all packages under the publishing account as the
-   `NPM_TOKEN` secret in the `release` environment. A token scoped only to
-   existing package names cannot bootstrap this release. The first npm release
-   creates five package names, so trusted publishing can only be configured
-   after this publication.
+3. Configure npm trusted publishing for `rookie-cookies` and all four native
+   platform packages. For each package, use owner `teng-lin`, repository
+   `rookie-cookies`, workflow `publish-npm.yml`, environment `release`, and
+   allow the `npm publish` operation. The workflow uses OIDC and does not need
+   an npm token.
 
 Local `~/.pypirc`, `~/.npmrc`, and Cargo credential files are not automatically
 available to GitHub Actions. Keep them owner-readable only and transfer tokens
@@ -118,13 +119,11 @@ npm view "rookie-cookies-win32-x64-msvc@$VERSION" version
 
 Create the GitHub release only after all three registry checks pass.
 
-## After the first release
+## After the first crates.io release
 
-Configure crates.io trusted publishing for `publish-crate.yml` and npm trusted
-publishing for all five npm packages. For npm, use owner `teng-lin`, repository
-`rookie-cookies`, workflow `publish-npm.yml`, environment `release`, and allow
-the `npm publish` operation. Then update the crate workflow to use crates.io's
-OIDC authentication action and delete both long-lived GitHub secrets.
+Configure crates.io trusted publishing for `publish-crate.yml`. Then update the
+crate workflow to use crates.io's OIDC authentication action and delete the
+long-lived `CARGO_REGISTRY_TOKEN` GitHub secret.
 
 The pending PyPI publisher becomes a normal trusted publisher automatically
 after its first successful run.
