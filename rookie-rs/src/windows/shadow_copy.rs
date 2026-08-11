@@ -26,12 +26,28 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   // very cookies this path exists to reach. Returning an error instead lets
   // `unlock_file` fall through to the restart-manager path, which yields a
   // checkpointed database.
+  let before = sqlite::main_file_fingerprint(&src)?;
+
   let wal = sqlite::sidecar(&src, "-wal");
   if wal.exists() {
     raw_copy(&wal, &dst)?;
   }
 
   raw_copy(&src, &dst)?;
+
+  // The two raw copies are not atomic either, so a checkpoint arriving between
+  // them pairs an older WAL with a newer database. `sqlite::connect` cannot
+  // catch that later: by then it is fingerprinting this static copy, not the
+  // live source. Unlike the portable path this cannot retry cheaply — a raw
+  // copy rescans NTFS clusters — and it cannot compare against the source,
+  // which is locked. So it reports the race and lets `unlock_file` fall through
+  // to the restart-manager path, which yields a checkpointed database.
+  if sqlite::main_file_fingerprint(&src)? != before {
+    bail!(
+      "A checkpoint raced the shadow copy of {}; the copy is not coherent",
+      src.display()
+    )
+  }
 
   Ok(())
 }

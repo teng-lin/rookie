@@ -4,7 +4,6 @@ use rusqlite::{Connection, OpenFlags};
 use std::ffi::OsString;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 use std::{fs, io};
 use url::Url;
 
@@ -106,16 +105,20 @@ const SNAPSHOT_ATTEMPTS: u32 = 3;
 /// `SQLITE_CORRUPT`. Copying the WAL first shrinks the window but does not
 /// close it, so the copy is validated rather than assumed.
 ///
-/// In WAL mode a checkpoint is the only thing that writes the main file, so an
-/// unchanged main file across the copy means the copied WAL is still the only
-/// thing standing between it and the browser's current state. Ordinary commits
-/// only append to the `-wal`, and frames appended after it was copied are
-/// simply unseen, which reads as an earlier instant rather than as loss.
+/// In WAL mode a checkpoint is the only thing that writes the main file, so a
+/// copy that still matches the source byte for byte means the copied WAL is
+/// still the only thing standing between it and the browser's current state.
+/// Ordinary commits only append to the `-wal`, and frames appended after it was
+/// copied are simply unseen, which reads as an earlier instant, not as loss.
+///
+/// The comparison is exact rather than a size and mtime check, because a
+/// checkpoint can rewrite same-sized pages inside one filesystem timestamp
+/// tick on coarse filesystems such as FAT. The source was just read, so it is
+/// in the page cache and the second read is cheap.
 fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   for attempt in 1..=SNAPSHOT_ATTEMPTS {
-    let before = main_file_fingerprint(database)?;
     let copy = copy_database(database, directory)?;
-    if main_file_fingerprint(database)? == before {
+    if files_are_identical(database, &copy)? {
       return Ok(copy);
     }
 
@@ -129,6 +132,30 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
     "Can't take a coherent snapshot of {}: it is being checkpointed repeatedly",
     database.display()
   ))
+}
+
+/// Compares two files byte for byte.
+fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
+  let open = |path: &Path| -> Result<io::BufReader<fs::File>> {
+    let file = fs::File::open(path)
+      .with_context(|| format!("Can't open {} to verify it", path.display()))?;
+    Ok(io::BufReader::new(file))
+  };
+  let (mut left, mut right) = (open(left)?, open(right)?);
+  let (mut left_chunk, mut right_chunk) = ([0u8; 8192], [0u8; 8192]);
+
+  loop {
+    let read = io::Read::read(&mut left, &mut left_chunk)?;
+    if read == 0 {
+      // Equal only if the other side is also exhausted.
+      return Ok(io::Read::read(&mut right, &mut right_chunk)? == 0);
+    }
+    if io::Read::read_exact(&mut right, &mut right_chunk[..read]).is_err()
+      || left_chunk[..read] != right_chunk[..read]
+    {
+      return Ok(false);
+    }
+  }
 }
 
 /// Copies `database` and its write-ahead log into `directory`, returning the
@@ -156,10 +183,16 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // WAL, absent entirely when the writer uses exclusive locking, and a copied
   // one could be believed as-is, pinning a stale frame count.
   let wal = sidecar(database, "-wal");
+  let wal_copy = sidecar(&copy, "-wal");
   if wal.exists() {
-    let wal_copy = sidecar(&copy, "-wal");
     fs::copy(&wal, &wal_copy)
       .with_context(|| format!("Can't copy write-ahead log {}", wal.display()))?;
+  } else if wal_copy.exists() {
+    // A retry reuses this directory, and the browser may have checkpointed and
+    // removed its WAL since the previous attempt. Leaving that attempt's WAL
+    // here would replay it over a newer main file and hide committed rows.
+    fs::remove_file(&wal_copy)
+      .with_context(|| format!("Can't discard the stale copy {}", wal_copy.display()))?;
   }
 
   fs::copy(database, &copy)
@@ -168,17 +201,27 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   Ok(copy)
 }
 
-/// Size and modification time of the main database file.
+/// Size and modification time of the main database file, for callers that
+/// cannot open it to compare its contents.
 ///
 /// Deliberately not the header's file change counter: SQLite documents that
 /// counter as unreliable in WAL mode, where the wal-index detects changes
 /// instead (<https://sqlite.org/fileformat2.html> section 1.3), and a
 /// checkpoint does leave it untouched in practice.
-fn main_file_fingerprint(database: &Path) -> Result<(u64, Option<SystemTime>)> {
+///
+/// Weaker than [`files_are_identical`]: a checkpoint that rewrites same-sized
+/// pages within one filesystem timestamp tick is invisible to it. An mtime the
+/// platform cannot report is an error rather than a silent downgrade to
+/// comparing sizes alone.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn main_file_fingerprint(database: &Path) -> Result<(u64, std::time::SystemTime)> {
   let metadata =
     fs::metadata(database).with_context(|| format!("Can't stat {}", database.display()))?;
+  let modified = metadata
+    .modified()
+    .with_context(|| format!("Can't read the modification time of {}", database.display()))?;
 
-  Ok((metadata.len(), metadata.modified().ok()))
+  Ok((metadata.len(), modified))
 }
 
 /// True when a non-empty `-wal` sidecar sits beside the database.
@@ -344,6 +387,58 @@ mod tests {
       before,
       "a checkpoint must be detectable"
     );
+  }
+
+  /// A retry reuses the snapshot directory. If the browser checkpointed and
+  /// removed its WAL in between, the previous attempt's WAL must not survive to
+  /// be replayed over the newer main file.
+  #[test]
+  fn a_retry_discards_the_previous_attempts_wal() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, writer) = checkpointed_database(directory.path());
+    writer
+      .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
+      .expect("insert WAL row");
+
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let copy = copy_database(&path, snapshot.path()).expect("first attempt");
+    assert!(
+      sidecar(&copy, "-wal").exists(),
+      "fixture needs a copied WAL"
+    );
+
+    // The browser closes: SQLite checkpoints and removes the WAL.
+    drop(writer);
+    assert!(!sidecar(&path, "-wal").exists(), "fixture needs no WAL");
+
+    copy_database(&path, snapshot.path()).expect("second attempt");
+
+    assert!(
+      !sidecar(&copy, "-wal").exists(),
+      "the stale WAL must not be left beside the newer database"
+    );
+    let reader = SqliteReader {
+      connection: open_read_only(&copy, "mode=ro").expect("open snapshot"),
+      snapshot: Some(snapshot),
+    };
+    assert_eq!(cookie_names(&reader), vec!["checkpointed", "in-wal"]);
+  }
+
+  #[test]
+  fn files_are_identical_distinguishes_content_and_length() {
+    let directory = TempDir::new().expect("temp dir");
+    let (a, b, c) = (
+      directory.path().join("a"),
+      directory.path().join("b"),
+      directory.path().join("c"),
+    );
+    fs::write(&a, b"cookie").expect("write a");
+    fs::write(&b, b"cookie").expect("write b");
+    fs::write(&c, b"cookies").expect("write c");
+
+    assert!(files_are_identical(&a, &b).expect("compare equal"));
+    assert!(!files_are_identical(&a, &c).expect("compare shorter"));
+    assert!(!files_are_identical(&c, &a).expect("compare longer"));
   }
 
   #[test]
