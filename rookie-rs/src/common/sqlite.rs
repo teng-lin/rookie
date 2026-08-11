@@ -61,7 +61,7 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
     .canonicalize()
     .with_context(|| format!("Can't resolve database path {}", path.display()))?;
 
-  let reader = if has_nonempty_wal(&path) {
+  let reader = if has_nonempty_wal(&path)? {
     // A snapshot failure is deliberately fatal rather than a fall back to the
     // `immutable` read: that read silently omits the WAL cookies, which is the
     // defect this function exists to fix. `load()` reports a per-browser error
@@ -102,14 +102,17 @@ const SNAPSHOT_ATTEMPTS: u32 = 3;
 /// The two files cannot be copied atomically, so a checkpoint landing in the
 /// window can leave the pair incoherent: it moves pages into the main file that
 /// the copied WAL cannot roll back, which surfaces as missing rows or
-/// `SQLITE_CORRUPT`. Copying the WAL first shrinks the window but does not
-/// close it, so the copy is validated rather than assumed.
+/// `SQLITE_CORRUPT`. No copy order avoids this, so the result is verified
+/// rather than assumed.
 ///
-/// In WAL mode a checkpoint is the only thing that writes the main file, so a
-/// copy that still matches the source byte for byte means the copied WAL is
-/// still the only thing standing between it and the browser's current state.
-/// Ordinary commits only append to the `-wal`, and frames appended after it was
-/// copied are simply unseen, which reads as an earlier instant, not as loss.
+/// The main file is copied first and compared against the live source only
+/// after the WAL copy, so the comparison brackets *both* copies: a checkpoint
+/// anywhere in the window leaves the source different from the image taken at
+/// the start, and the attempt is discarded. In WAL mode a checkpoint is the
+/// only thing that writes the main file, so a source that never moved means the
+/// copied WAL is still the only thing between it and the browser's current
+/// state. Ordinary commits only append to the `-wal`, and frames appended after
+/// it was copied are simply unseen, which reads as an earlier instant.
 ///
 /// The comparison is exact rather than a size and mtime check, because a
 /// checkpoint can rewrite same-sized pages inside one filesystem timestamp
@@ -135,7 +138,7 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
 }
 
 /// Compares two files byte for byte.
-fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
+pub(crate) fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
   let open = |path: &Path| -> Result<io::BufReader<fs::File>> {
     let file = fs::File::open(path)
       .with_context(|| format!("Can't open {} to verify it", path.display()))?;
@@ -171,57 +174,40 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
     .ok_or_else(|| anyhow!("Database path has no file name: {}", database.display()))?;
   let copy = directory.join(name);
 
-  // Copy the WAL before the main database, so that a checkpoint arriving in
-  // the window leaves an older WAL beside a newer main file. Replaying a frame
-  // whose page the checkpoint already wrote rewrites identical bytes, whereas
-  // the opposite order pairs a stale main file with a WAL the checkpoint has
-  // rewound to offset 0 (<https://sqlite.org/wal.html> section 2.1) and drops
-  // rows outright. Neither order is sufficient on its own, which is why
-  // `snapshot_database` verifies the result.
-  //
+  // The main file goes first so that `snapshot_database` can bracket this whole
+  // sequence by comparing it against the live source afterwards. On its own
+  // this order is the unsafe one — a checkpoint in between pairs a stale main
+  // file with a WAL rewound to offset 0 (<https://sqlite.org/wal.html> section
+  // 2.1) and drops rows, as `an_unverified_copy_loses_rows_when_a_checkpoint_intervenes`
+  // shows — so the verification is what makes it correct, not the order.
+  fs::copy(database, &copy)
+    .with_context(|| format!("Can't copy database {}", database.display()))?;
+
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
   // WAL, absent entirely when the writer uses exclusive locking, and a copied
   // one could be believed as-is, pinning a stale frame count.
   let wal = sidecar(database, "-wal");
   let wal_copy = sidecar(&copy, "-wal");
-  if wal.exists() {
-    fs::copy(&wal, &wal_copy)
-      .with_context(|| format!("Can't copy write-ahead log {}", wal.display()))?;
-  } else if wal_copy.exists() {
-    // A retry reuses this directory, and the browser may have checkpointed and
-    // removed its WAL since the previous attempt. Leaving that attempt's WAL
-    // here would replay it over a newer main file and hide committed rows.
-    fs::remove_file(&wal_copy)
-      .with_context(|| format!("Can't discard the stale copy {}", wal_copy.display()))?;
+  match fs::copy(&wal, &wal_copy) {
+    Ok(_) => {}
+    // The browser checkpointed and removed its WAL, either before this attempt
+    // or in the moment between. Discard any WAL an earlier attempt left here,
+    // which would otherwise replay over a newer main file and hide rows, and
+    // let the verification decide whether this attempt stands.
+    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+      if wal_copy.exists() {
+        fs::remove_file(&wal_copy)
+          .with_context(|| format!("Can't discard the stale copy {}", wal_copy.display()))?;
+      }
+    }
+    Err(err) => {
+      return Err(
+        anyhow::Error::new(err).context(format!("Can't copy write-ahead log {}", wal.display())),
+      )
+    }
   }
 
-  fs::copy(database, &copy)
-    .with_context(|| format!("Can't copy database {}", database.display()))?;
-
   Ok(copy)
-}
-
-/// Size and modification time of the main database file, for callers that
-/// cannot open it to compare its contents.
-///
-/// Deliberately not the header's file change counter: SQLite documents that
-/// counter as unreliable in WAL mode, where the wal-index detects changes
-/// instead (<https://sqlite.org/fileformat2.html> section 1.3), and a
-/// checkpoint does leave it untouched in practice.
-///
-/// Weaker than [`files_are_identical`]: a checkpoint that rewrites same-sized
-/// pages within one filesystem timestamp tick is invisible to it. An mtime the
-/// platform cannot report is an error rather than a silent downgrade to
-/// comparing sizes alone.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn main_file_fingerprint(database: &Path) -> Result<(u64, std::time::SystemTime)> {
-  let metadata =
-    fs::metadata(database).with_context(|| format!("Can't stat {}", database.display()))?;
-  let modified = metadata
-    .modified()
-    .with_context(|| format!("Can't read the modification time of {}", database.display()))?;
-
-  Ok((metadata.len(), modified))
 }
 
 /// True when a non-empty `-wal` sidecar sits beside the database.
@@ -230,19 +216,17 @@ pub(crate) fn main_file_fingerprint(database: &Path) -> Result<(u64, std::time::
 /// truncate the `-wal`, so this over-reports pending frames and takes the
 /// snapshot path for a WAL that is already fully checkpointed. Over-copying is
 /// harmless; under-copying would drop cookies.
-fn has_nonempty_wal(database: &Path) -> bool {
+///
+/// Only a missing sidecar means "no WAL". Any other stat failure is reported,
+/// because answering `false` would route to the `immutable` read that ignores
+/// the WAL and returns a short cookie list as though it were complete.
+fn has_nonempty_wal(database: &Path) -> Result<bool> {
   let wal = sidecar(database, "-wal");
   match fs::metadata(&wal) {
-    Ok(metadata) => metadata.len() > 0,
-    Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+    Ok(metadata) => Ok(metadata.len() > 0),
+    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
     Err(err) => {
-      // Treating this as "no WAL" would silently fall back to the `immutable`
-      // read that omits WAL cookies, so say so rather than swallowing it.
-      log::warn!(
-        "Can't stat {}: {err}; reading without its write-ahead log, which may omit recent cookies",
-        wal.display()
-      );
-      false
+      Err(anyhow::Error::new(err).context(format!("Can't stat write-ahead log {}", wal.display())))
     }
   }
 }
@@ -312,9 +296,7 @@ mod tests {
       .expect("insert WAL row");
     // The writer stays open and the fixture is far below the 1000-page
     // autocheckpoint threshold, so the row stays in the -wal.
-    assert!(has_nonempty_wal(
-      &path.canonicalize().expect("canonicalize")
-    ));
+    assert!(has_nonempty_wal(&path.canonicalize().expect("canonicalize")).expect("stat wal"));
 
     let reader = connect(path.clone()).expect("connect");
 
@@ -357,34 +339,33 @@ mod tests {
     assert_eq!(cookie_names(&reader), vec!["checkpointed", "in-wal"]);
   }
 
-  /// `snapshot_database` retries when the main file moves under it, so pin the
-  /// premise that makes the signal work: ordinary WAL commits leave the main
-  /// file alone, and only a checkpoint disturbs it.
+  /// `snapshot_database` accepts an attempt when the copied main file still
+  /// matches the source, so pin the premise that makes that signal mean
+  /// anything: ordinary WAL commits leave the main file alone, and a checkpoint
+  /// disturbs it.
   #[test]
   fn only_a_checkpoint_disturbs_the_main_file() {
     let directory = TempDir::new().expect("temp dir");
     let (path, writer) = checkpointed_database(directory.path());
 
-    let before = main_file_fingerprint(&path).expect("fingerprint");
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let copy = snapshot.path().join("Cookies");
+    fs::copy(&path, &copy).expect("copy database");
+
     writer
       .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
       .expect("insert WAL row");
-    assert_eq!(
-      main_file_fingerprint(&path).expect("fingerprint"),
-      before,
+    assert!(
+      files_are_identical(&path, &copy).expect("compare"),
       "a WAL commit must not touch the main file"
     );
 
-    // Filesystems with coarse timestamps would otherwise report the checkpoint
-    // as happening at the same instant as the fixture write.
-    std::thread::sleep(std::time::Duration::from_millis(10));
     writer
       .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
       .expect("checkpoint");
 
-    assert_ne!(
-      main_file_fingerprint(&path).expect("fingerprint"),
-      before,
+    assert!(
+      !files_are_identical(&path, &copy).expect("compare"),
       "a checkpoint must be detectable"
     );
   }
@@ -456,11 +437,12 @@ mod tests {
     assert!(sidecar(&copy, "-wal").exists(), "the WAL must come along");
   }
 
-  /// The counterpart to the test above: copying the main database first is the
-  /// ordering that loses data, which is why [`copy_database`] takes the `-wal`
-  /// first. Characterizes SQLite, so it cannot fail from a rookie regression.
+  /// Shows why [`snapshot_database`] verifies its copy rather than trusting a
+  /// copy order: taking the main file, letting a checkpoint land, then taking
+  /// the WAL silently loses rows. Characterizes SQLite, so it cannot fail from
+  /// a rookie regression.
   #[test]
-  fn copying_the_database_before_the_wal_loses_rows() {
+  fn an_unverified_copy_loses_rows_when_a_checkpoint_intervenes() {
     let directory = TempDir::new().expect("temp dir");
     let (path, writer) = checkpointed_database(directory.path());
     writer
@@ -485,48 +467,6 @@ mod tests {
     // WAL, but this pair holds the pre-checkpoint main file and the rewound
     // WAL, so the row is in neither.
     assert_eq!(cookie_names(&reader), vec!["checkpointed"]);
-  }
-
-  /// The two copies cannot be taken atomically. Copying the `-wal` first means
-  /// a checkpoint landing between them leaves an older WAL paired with a newer
-  /// main file, which replays without loss; the opposite order drops rows.
-  #[test]
-  fn snapshot_survives_a_checkpoint_between_the_two_copies() {
-    let directory = TempDir::new().expect("temp dir");
-    let (path, writer) = checkpointed_database(directory.path());
-    writer
-      .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
-      .expect("insert WAL row");
-
-    let snapshot = TempDir::new().expect("snapshot dir");
-    let copy = snapshot.path().join("Cookies");
-
-    // First half of `copy_database`.
-    fs::copy(sidecar(&path, "-wal"), sidecar(&copy, "-wal")).expect("copy wal");
-
-    // A checkpoint races in, folding the WAL into the main file and rewinding
-    // it, then the browser writes again.
-    writer
-      .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-      .expect("checkpoint");
-    writer
-      .execute("INSERT INTO cookies (name) VALUES ('after-checkpoint')", [])
-      .expect("insert post-checkpoint row");
-
-    // Second half of `copy_database`, now reading a main file the checkpoint
-    // has already advanced.
-    fs::copy(&path, &copy).expect("copy database");
-
-    let reader = SqliteReader {
-      connection: open_read_only(&copy, "mode=ro").expect("open snapshot"),
-      snapshot: Some(snapshot),
-    };
-
-    // Nothing committed before the WAL copy may go missing. Rows written after
-    // it may or may not appear, which is a read as of an earlier instant.
-    let names = cookie_names(&reader);
-    assert!(names.contains(&"checkpointed".to_string()), "{names:?}");
-    assert!(names.contains(&"in-wal".to_string()), "{names:?}");
   }
 
   /// Guards the regression this module exists to prevent: an `immutable`

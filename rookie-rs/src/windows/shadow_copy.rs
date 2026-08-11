@@ -1,5 +1,6 @@
 use crate::common::sqlite;
-use anyhow::{bail, Context, Result};
+use crate::utils::TempDir;
+use anyhow::{anyhow, bail, Context, Result};
 use privilege::user::privileged;
 use std::path::{Path, PathBuf};
 
@@ -26,27 +27,42 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   // very cookies this path exists to reach. Returning an error instead lets
   // `unlock_file` fall through to the restart-manager path, which yields a
   // checkpointed database.
-  let before = sqlite::main_file_fingerprint(&src)?;
-
   let wal = sqlite::sidecar(&src, "-wal");
-  if wal.exists() {
+  let copied_wal = wal.exists();
+  if copied_wal {
     raw_copy(&wal, &dst)?;
   }
 
   raw_copy(&src, &dst)?;
 
-  // The two raw copies are not atomic either, so a checkpoint arriving between
-  // them pairs an older WAL with a newer database. `sqlite::connect` cannot
-  // catch that later: by then it is fingerprinting this static copy, not the
-  // live source. Unlike the portable path this cannot retry cheaply — a raw
-  // copy rescans NTFS clusters — and it cannot compare against the source,
-  // which is locked. So it reports the race and lets `unlock_file` fall through
-  // to the restart-manager path, which yields a checkpointed database.
-  if sqlite::main_file_fingerprint(&src)? != before {
-    bail!(
-      "A checkpoint raced the shadow copy of {}; the copy is not coherent",
-      src.display()
-    )
+  // These two raw copies are not atomic either, and `sqlite::connect` cannot
+  // cover for that: by the time it runs it is inspecting this static copy, not
+  // the live source, so a checkpoint that landed here is already baked in.
+  //
+  // The portable check does not port. It compares its copy against the live
+  // source, and this path exists precisely because the source cannot be opened
+  // normally. So the WAL is raw-copied a second time and the two images are
+  // compared instead: an unchanged WAL means no frames were appended during the
+  // window, so any checkpoint in it folded only frames the first copy already
+  // holds, and replaying them over the copied database rewrites identical
+  // bytes. The WAL is the smaller file, which keeps the extra raw copy cheap.
+  if copied_wal {
+    let probe = TempDir::new()?;
+    raw_copy(&wal, probe.path())?;
+
+    let name = wal
+      .file_name()
+      .ok_or_else(|| anyhow!("Write-ahead log path has no file name: {}", wal.display()))?;
+    if !sqlite::files_are_identical(&dst.join(name), &probe.path().join(name))? {
+      // Reported rather than retried: a raw copy rescans NTFS clusters, so
+      // retrying against a busy database is a poor trade. `unlock_file` falls
+      // through to the restart-manager path, which yields a checkpointed
+      // database instead of an incoherent pair.
+      bail!(
+        "A checkpoint raced the shadow copy of {}; the copy is not coherent",
+        src.display()
+      )
+    }
   }
 
   Ok(())
