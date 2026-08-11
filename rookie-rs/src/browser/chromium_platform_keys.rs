@@ -334,6 +334,7 @@ mod tests {
   use super::*;
   use std::cell::Cell;
 
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   fn candidate_bytes(
     outcomes: &ChromiumKeyOutcomes,
     cipher: ChromiumCipherVersion,

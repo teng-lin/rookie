@@ -61,6 +61,12 @@ pub fn chromium_based(
     let provider = MacosPlatformKeyProvider::new(config);
     query_cookies(&provider, &(), db_path, domains, force_kill)
   }
+
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = (config, db_path, domains, force_kill);
+    bail!("Chromium cookie extraction is unsupported on this Unix platform")
+  }
 }
 
 #[cfg(any(unix, windows, test))]
