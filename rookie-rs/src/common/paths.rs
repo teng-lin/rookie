@@ -55,24 +55,36 @@ pub fn find_chrome_based_paths(config: &Browser) -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Expands every configured base path for `config` across its channels and glob
-/// patterns. A path that cannot be expanded is logged and skipped so one bad
-/// entry does not abort the whole search.
-fn expand_config_paths(config: &Browser) -> Vec<PathBuf> {
+/// patterns.
+///
+/// A path that cannot be expanded is logged and skipped so one bad entry does
+/// not abort the whole search — but if that leaves nothing at all, the first
+/// failure is returned rather than letting the caller report a misleading
+/// "can't find cookies file". On unix an unset `HOME` fails every entry.
+fn expand_config_paths(config: &Browser) -> Result<Vec<PathBuf>> {
   let channels = config
     .channels
     .clone()
     .unwrap_or_else(|| vec![String::new()]);
   let mut bases: Vec<PathBuf> = vec![];
+  let mut first_error: Option<anyhow::Error> = None;
   for path in &config.paths {
     for channel in &channels {
       let path = path.replace("{channel}", channel);
       match expand_path(path.as_str()).and_then(expand_glob_paths) {
         Ok(expanded) => bases.extend(expanded),
-        Err(err) => log::warn!("Skipping unusable path {path}: {err}"),
+        Err(err) => {
+          log::warn!("Skipping unusable path {path}: {err}");
+          first_error.get_or_insert(err);
+        }
       }
     }
   }
-  bases
+
+  match first_error {
+    Some(err) if bases.is_empty() => Err(err.context("no browser path could be expanded")),
+    _ => Ok(bases),
+  }
 }
 
 /// Profiles declared under `base`, default first, so callers probe the profile
@@ -82,7 +94,14 @@ fn mozilla_profiles_in(base: &Path) -> Vec<MozillaProfile> {
   let mut profiles = match list_profiles(profiles_path.as_path()) {
     Ok(profiles) => profiles,
     Err(err) => {
-      log::debug!("No profiles from {}: {err}", profiles_path.display());
+      // A profiles.ini that exists but will not parse is a real problem worth
+      // surfacing; one that is simply absent is the normal case for a base
+      // path this browser does not use.
+      if profiles_path.exists() {
+        log::warn!("Failed to read {}: {err}", profiles_path.display());
+      } else {
+        log::debug!("No profiles.ini at {}", profiles_path.display());
+      }
       return vec![];
     }
   };
@@ -91,12 +110,13 @@ fn mozilla_profiles_in(base: &Path) -> Vec<MozillaProfile> {
 }
 
 pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
-  for base in expand_config_paths(config) {
+  for base in expand_config_paths(config)? {
     let candidates = mozilla_profiles_in(&base)
       .into_iter()
       .map(|profile| profile.path)
-      // Some installs keep the database next to profiles.ini rather than in a
-      // profile directory; probe that last.
+      // Probing the base directory itself preserves the behaviour of the
+      // pre-enumeration resolver, which fell back to `<base>/cookies.sqlite`
+      // whenever profiles.ini was missing or unresolvable.
       .chain(std::iter::once(base));
     for candidate in candidates {
       let db_path = candidate.join("cookies.sqlite");
@@ -111,9 +131,13 @@ pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
 }
 
 /// Returns every Mozilla profile for `config` that holds a cookie database.
+///
+/// Profiles are gathered across every configured installation root, so the
+/// result can contain more than one entry with `is_default` set — see
+/// [`MozillaProfile::is_default`].
 pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfile>> {
   let mut found: Vec<MozillaProfile> = vec![];
-  for base in expand_config_paths(config) {
+  for base in expand_config_paths(config)? {
     for profile in mozilla_profiles_in(&base) {
       if profile.path.join("cookies.sqlite").exists()
         && !found.iter().any(|seen| seen.path == profile.path)
@@ -227,8 +251,15 @@ mod tests {
   }
 
   fn mozilla_config(base: &Path) -> Browser {
+    mozilla_config_multi(&[base])
+  }
+
+  fn mozilla_config_multi(bases: &[&Path]) -> Browser {
     Browser {
-      paths: vec![base.to_str().expect("utf-8 temp path").to_string()],
+      paths: bases
+        .iter()
+        .map(|base| base.to_str().expect("utf-8 temp path").to_string())
+        .collect(),
       channels: None,
       unix_crypt_name: None,
       osx_key_service: None,
@@ -315,6 +346,117 @@ mod tests {
     let profiles = find_mozilla_based_profiles(&mozilla_config(&base)).expect("should list");
     let names: Vec<_> = profiles.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["work"]);
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_prefers_the_earlier_base_path() {
+    let first = unique_tmpdir("ff-base-first");
+    let second = unique_tmpdir("ff-base-second");
+    seed_profiles(&first, TWO_PROFILES_INI, &["Profiles/main"]);
+    seed_profiles(&second, TWO_PROFILES_INI, &["Profiles/main"]);
+
+    let config = mozilla_config_multi(&[&first, &second]);
+    let db = find_mozilla_based_paths(&config).expect("should find");
+    assert_eq!(db, first.join("Profiles/main/cookies.sqlite"));
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_falls_through_to_a_later_base_path() {
+    // The first base declares profiles but holds no database at all, so the
+    // search must continue to the next configured root rather than give up.
+    let first = unique_tmpdir("ff-base-empty");
+    let second = unique_tmpdir("ff-base-populated");
+    seed_profiles(&first, TWO_PROFILES_INI, &[]);
+    seed_profiles(&second, TWO_PROFILES_INI, &["Profiles/work"]);
+
+    let config = mozilla_config_multi(&[&first, &second]);
+    let db = find_mozilla_based_paths(&config).expect("should find");
+    assert_eq!(db, second.join("Profiles/work/cookies.sqlite"));
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_survives_an_unusable_configured_path() {
+    // A malformed glob must not abort the search for the remaining paths.
+    let base = unique_tmpdir("ff-bad-glob");
+    seed_profiles(&base, TWO_PROFILES_INI, &["Profiles/main"]);
+
+    let mut config = mozilla_config(&base);
+    config.paths.insert(0, "/nonexistent/***/[".to_string());
+
+    let db = find_mozilla_based_paths(&config).expect("should find");
+    assert_eq!(db, base.join("Profiles/main/cookies.sqlite"));
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_reports_why_no_path_was_usable() {
+    // Every configured path is unusable, so the caller gets the real parse
+    // failure instead of a misleading "Can't find cookies file".
+    let config = mozilla_config_multi(&[]);
+    let config = Browser {
+      paths: vec!["/nonexistent/***/[".to_string()],
+      ..config
+    };
+
+    let err = find_mozilla_based_paths(&config).expect_err("should fail");
+    assert!(
+      err
+        .to_string()
+        .contains("no browser path could be expanded"),
+      "unexpected error: {err}"
+    );
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_dedups_repeated_base_paths() {
+    // Two config entries resolving to the same directory (snap and a symlinked
+    // equivalent, in the field) must not double every profile.
+    let base = unique_tmpdir("ff-dedup");
+    seed_profiles(&base, TWO_PROFILES_INI, &["Profiles/main", "Profiles/work"]);
+
+    let config = mozilla_config_multi(&[&base, &base]);
+    let profiles = find_mozilla_based_profiles(&config).expect("should list");
+    let names: Vec<_> = profiles.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["default", "work"]);
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_spans_multiple_base_paths() {
+    let first = unique_tmpdir("ff-span-first");
+    let second = unique_tmpdir("ff-span-second");
+    seed_profiles(&first, TWO_PROFILES_INI, &["Profiles/main"]);
+    seed_profiles(&second, TWO_PROFILES_INI, &["Profiles/work"]);
+
+    let config = mozilla_config_multi(&[&first, &second]);
+    let profiles = find_mozilla_based_profiles(&config).expect("should list");
+    let paths: Vec<_> = profiles.iter().map(|p| p.path.clone()).collect();
+    assert_eq!(
+      paths,
+      vec![first.join("Profiles/main"), second.join("Profiles/work")]
+    );
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_with_empty_profiles_ini_still_probes_base_dir() {
+    // An empty profiles.ini parses fine but declares nothing; the base-dir
+    // fallback is what keeps such an install discoverable.
+    let base = unique_tmpdir("ff-empty-ini-base");
+    std::fs::write(base.join("profiles.ini"), b"").expect("write ini");
+    std::fs::write(base.join("cookies.sqlite"), b"").expect("write db");
+
+    let db = find_mozilla_based_paths(&mozilla_config(&base)).expect("should find");
+    assert_eq!(db, base.join("cookies.sqlite"));
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_with_empty_profiles_ini_and_no_database_errors() {
+    let base = unique_tmpdir("ff-empty-ini-nodb");
+    std::fs::write(base.join("profiles.ini"), b"").expect("write ini");
+
+    let err = find_mozilla_based_paths(&mozilla_config(&base)).expect_err("should fail");
+    assert!(
+      err.to_string().contains("Can't find cookies file"),
+      "unexpected error: {err}"
+    );
   }
 
   #[test]

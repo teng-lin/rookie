@@ -65,8 +65,12 @@ pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 
 /// Returns every Firefox profile that holds a cookie database.
 ///
-/// [`firefox`] only reads the default profile; this lists the secondary ones
-/// too, so a caller can pick one and pass it to [`firefox_profile`].
+/// [`firefox`] returns whichever profile it finds first, preferring the default
+/// one; this lists them all so a caller can choose deliberately and pass the
+/// choice to [`firefox_profile`].
+///
+/// Defaults are per-installation, so more than one profile can report
+/// `is_default` when several Firefox installations are present.
 ///
 /// # Examples
 ///
