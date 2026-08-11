@@ -178,7 +178,7 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
     let message = libsecret_call(
       &self.connection,
       "GetSecrets",
-      &(vec![item_path.as_ref()], session),
+      &(vec![item_path.clone()], session),
     )
     .context("Secret Service GetSecrets failed")?;
     type Secret<'a> = (ObjectPath<'a>, Vec<u8>, Vec<u8>, String);
