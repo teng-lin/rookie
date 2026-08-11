@@ -2,17 +2,98 @@ use crate::utils::TempDir;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::ffi::OsString;
+use std::fmt;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 use url::Url;
+
+/// How the connection used for one complete browser query was acquired.
+///
+/// This stays private to the crate until the report DTOs are introduced. A
+/// retry can finish through a different strategy if, for example, a WAL is
+/// checkpointed between attempts, so outcomes record the successful attempt's
+/// strategy rather than assuming it from the first acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatabaseAcquisitionStrategy {
+  LiveReadOnly,
+  VerifiedWalSnapshot,
+  VerifiedStaticSingleFile,
+}
+
+/// Successful value plus the acquisition details needed by future source
+/// reports. Legacy browser functions project this back to their existing value.
+#[derive(Debug)]
+pub(crate) struct BrowserDatabaseOutcome<T> {
+  value: T,
+  strategy: DatabaseAcquisitionStrategy,
+  attempts: u32,
+}
+
+impl<T> BrowserDatabaseOutcome<T> {
+  pub(crate) fn strategy(&self) -> DatabaseAcquisitionStrategy {
+    self.strategy
+  }
+
+  pub(crate) fn attempts(&self) -> u32 {
+    self.attempts
+  }
+
+  pub(crate) fn into_value(self) -> T {
+    self.value
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserDatabaseFailureKind {
+  Acquisition,
+  Query,
+  RetryExhausted,
+}
+
+/// Typed context retained on failures without changing the public `anyhow`
+/// result aliases. Later report adapters can downcast this context to recover
+/// attempt metadata, while the original SQLite error remains in the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrowserDatabaseFailure {
+  pub(crate) kind: BrowserDatabaseFailureKind,
+  pub(crate) strategy: Option<DatabaseAcquisitionStrategy>,
+  pub(crate) attempts: u32,
+}
+
+impl fmt::Display for BrowserDatabaseFailure {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let stage = match self.kind {
+      BrowserDatabaseFailureKind::Acquisition => "acquisition failed",
+      BrowserDatabaseFailureKind::Query => "query failed",
+      BrowserDatabaseFailureKind::RetryExhausted => "snapshot query retry exhausted",
+    };
+    match self.strategy {
+      Some(strategy) => write!(
+        formatter,
+        "browser database {stage} after {} attempt(s) using {strategy:?}",
+        self.attempts
+      ),
+      None => write!(
+        formatter,
+        "browser database {stage} after {} attempt(s)",
+        self.attempts
+      ),
+    }
+  }
+}
+
+struct DatabaseAcquisitionFailure {
+  strategy: Option<DatabaseAcquisitionStrategy>,
+  error: anyhow::Error,
+}
 
 /// A read-only connection to a browser database.
 ///
 /// Dereferences to [`Connection`], so callers query it like any other
 /// `rusqlite` connection. When the database had a write-ahead log, the
 /// connection reads a point-in-time copy rather than the live file, so results
-/// are as of the moment [`connect`] was called.
+/// are as of the moment the query attempt acquired the reader.
 pub struct SqliteReader {
   // Declaration order is load-bearing: `connection` must drop before
   // `snapshot` so the database files are closed before the directory holding
@@ -21,6 +102,7 @@ pub struct SqliteReader {
   // cannot catch a reordering here — only the Windows CI job can.
   connection: Connection,
   snapshot: Option<TempDir>,
+  strategy: DatabaseAcquisitionStrategy,
 }
 
 /// An already-acquired, static single-file database that was verified as
@@ -45,6 +127,10 @@ impl SqliteReader {
   pub(crate) fn snapshot_path(&self) -> Option<&Path> {
     self.snapshot.as_ref().map(TempDir::path)
   }
+
+  fn strategy(&self) -> DatabaseAcquisitionStrategy {
+    self.strategy
+  }
 }
 
 impl Deref for SqliteReader {
@@ -55,7 +141,7 @@ impl Deref for SqliteReader {
   }
 }
 
-/// Opens a browser database for reading.
+/// Acquires a browser database for reading.
 ///
 /// Firefox keeps `cookies.sqlite` in WAL mode, so recently written cookies live
 /// in the `-wal` sidecar until a checkpoint folds them into the main file.
@@ -76,28 +162,60 @@ impl Deref for SqliteReader {
 /// writer therefore either permits that coherent read or returns SQLite's
 /// typed busy/locked error; this path never raw-copies or immutably opens the
 /// live database.
+#[allow(dead_code)]
 pub fn connect(path: PathBuf) -> Result<SqliteReader> {
+  acquire_browser_database(path).map_err(|failure| failure.error)
+}
+
+fn acquire_browser_database(
+  path: PathBuf,
+) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure> {
   let path = path
     .canonicalize()
-    .with_context(|| format!("Can't resolve database path {}", path.display()))?;
+    .with_context(|| format!("Can't resolve database path {}", path.display()))
+    .map_err(|error| DatabaseAcquisitionFailure {
+      strategy: None,
+      error,
+    })?;
 
-  let reader = if has_nonempty_wal(&path)? {
+  let has_wal = has_nonempty_wal(&path).map_err(|error| DatabaseAcquisitionFailure {
+    strategy: None,
+    error,
+  })?;
+  let reader = if has_wal {
+    let strategy = DatabaseAcquisitionStrategy::VerifiedWalSnapshot;
     // A snapshot failure is deliberately fatal rather than a fall back to the
     // `immutable` read: that read silently omits the WAL cookies, which is the
     // defect this function exists to fix. `load()` reports a per-browser error
     // and carries on, so a loud failure costs one browser, not the whole call.
-    let snapshot = TempDir::new()?;
-    let copy = snapshot_database(&path, snapshot.path())?;
+    let snapshot = TempDir::new().map_err(|error| DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error,
+    })?;
+    let copy =
+      snapshot_database(&path, snapshot.path()).map_err(|error| DatabaseAcquisitionFailure {
+        strategy: Some(strategy),
+        error,
+      })?;
     SqliteReader {
       // Deliberately not `immutable`: that flag tells SQLite to ignore the
       // `-wal`, which is the data this snapshot exists to recover.
-      connection: open_read_only(&copy, "mode=ro")?,
+      connection: open_read_only(&copy, "mode=ro").map_err(|error| DatabaseAcquisitionFailure {
+        strategy: Some(strategy),
+        error,
+      })?,
       snapshot: Some(snapshot),
+      strategy,
     }
   } else {
+    let strategy = DatabaseAcquisitionStrategy::LiveReadOnly;
     SqliteReader {
-      connection: open_live_read_only(&path)?,
+      connection: open_live_read_only(&path).map_err(|error| DatabaseAcquisitionFailure {
+        strategy: Some(strategy),
+        error,
+      })?,
       snapshot: None,
+      strategy,
     }
   };
 
@@ -111,6 +229,125 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   }
 
   Ok(reader)
+}
+
+/// Runs a complete browser query, reacquiring and rerunning it only when an
+/// error can plausibly originate from a torn/corrupt verified WAL snapshot.
+///
+/// The closure owns all statement preparation, iteration, and row conversion;
+/// retrying it therefore never resumes a partially consumed query or returns
+/// cookies from an earlier attempt.
+pub(crate) fn with_browser_database<T, Query>(
+  path: PathBuf,
+  query: Query,
+) -> Result<BrowserDatabaseOutcome<T>>
+where
+  Query: FnMut(&Connection) -> Result<T>,
+{
+  with_browser_database_using(|| acquire_browser_database(path.clone()), query)
+}
+
+/// Query-level attempts are separate from the lower-level copy verification
+/// attempts in `snapshot_database`: these rerun the complete SQLite query after
+/// a successfully copied image proves unusable.
+const BROWSER_DATABASE_ATTEMPTS: u32 = 3;
+
+fn with_browser_database_using<T, Acquire, Query>(
+  mut acquire: Acquire,
+  mut query: Query,
+) -> Result<BrowserDatabaseOutcome<T>>
+where
+  Acquire: FnMut() -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>,
+  Query: FnMut(&Connection) -> Result<T>,
+{
+  for attempt in 1..=BROWSER_DATABASE_ATTEMPTS {
+    let reader = match acquire() {
+      Ok(reader) => reader,
+      Err(failure) => {
+        let retryable = is_retryable_snapshot_error(failure.strategy, &failure.error);
+        if retryable && attempt < BROWSER_DATABASE_ATTEMPTS {
+          log::debug!(
+            "reacquiring browser database after snapshot acquisition attempt {attempt}: {}",
+            failure.error
+          );
+          continue;
+        }
+        let kind = if retryable {
+          BrowserDatabaseFailureKind::RetryExhausted
+        } else {
+          BrowserDatabaseFailureKind::Acquisition
+        };
+        return Err(failure.error.context(BrowserDatabaseFailure {
+          kind,
+          strategy: failure.strategy,
+          attempts: attempt,
+        }));
+      }
+    };
+
+    let strategy = reader.strategy();
+    match query(&reader) {
+      Ok(value) => {
+        // Drop the connection (then its snapshot directory) before returning a
+        // value that is independent of the database attempt.
+        drop(reader);
+        return Ok(BrowserDatabaseOutcome {
+          value,
+          strategy,
+          attempts: attempt,
+        });
+      }
+      Err(error) => {
+        let retryable = is_retryable_snapshot_error(Some(strategy), &error);
+        // Explicit drop makes cleanup-before-reacquisition part of this
+        // boundary rather than an incidental consequence of loop scoping.
+        drop(reader);
+        if retryable && attempt < BROWSER_DATABASE_ATTEMPTS {
+          log::debug!(
+            "reacquiring browser database after snapshot query attempt {attempt}: {error}"
+          );
+          continue;
+        }
+        let kind = if retryable {
+          BrowserDatabaseFailureKind::RetryExhausted
+        } else {
+          BrowserDatabaseFailureKind::Query
+        };
+        return Err(error.context(BrowserDatabaseFailure {
+          kind,
+          strategy: Some(strategy),
+          attempts: attempt,
+        }));
+      }
+    }
+  }
+
+  unreachable!("the bounded browser database loop always returns")
+}
+
+fn is_retryable_snapshot_error(
+  strategy: Option<DatabaseAcquisitionStrategy>,
+  error: &anyhow::Error,
+) -> bool {
+  if strategy != Some(DatabaseAcquisitionStrategy::VerifiedWalSnapshot) {
+    return false;
+  }
+  let sqlite_error = error.chain().find_map(|cause| {
+    let rusqlite::Error::SqliteFailure(error, _) = cause.downcast_ref::<rusqlite::Error>()? else {
+      return None;
+    };
+    Some(*error)
+  });
+  let Some(error) = sqlite_error else {
+    return false;
+  };
+  matches!(
+    error.code,
+    rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase
+  ) || matches!(
+    error.extended_code,
+    rusqlite::ffi::SQLITE_IOERR_READ | rusqlite::ffi::SQLITE_IOERR_SHORT_READ
+  )
 }
 
 /// Opens an already-acquired static single-file copy as immutable.
@@ -128,6 +365,7 @@ pub(crate) fn open_verified_static_single_file(
   Ok(SqliteReader {
     connection: open_read_only(&path, "mode=ro&immutable=1")?,
     snapshot: Some(snapshot),
+    strategy: DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
   })
 }
 
@@ -372,6 +610,7 @@ fn open_read_only(path: &Path, query: &str) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::cell::{Cell, RefCell};
 
   fn rollback_database(directory: &Path) -> (PathBuf, Connection) {
     let path = directory.join("cookies.sqlite");
@@ -422,6 +661,53 @@ mod tests {
     Ok(connection)
   }
 
+  fn sqlite_failure(result_code: i32) -> anyhow::Error {
+    anyhow::Error::new(rusqlite::Error::SqliteFailure(
+      rusqlite::ffi::Error::new(result_code),
+      None,
+    ))
+  }
+
+  fn test_reader(strategy: DatabaseAcquisitionStrategy) -> SqliteReader {
+    SqliteReader {
+      connection: Connection::open_in_memory().expect("open in-memory reader"),
+      snapshot: (strategy != DatabaseAcquisitionStrategy::LiveReadOnly)
+        .then(|| TempDir::new().expect("snapshot dir")),
+      strategy,
+    }
+  }
+
+  fn copied_snapshot_reader(name: &str) -> SqliteReader {
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let path = snapshot.path().join("Cookies");
+    let writer = Connection::open(&path).expect("open copied database");
+    writer
+      .execute("CREATE TABLE cookies (name TEXT NOT NULL)", [])
+      .expect("create copied table");
+    writer
+      .execute("INSERT INTO cookies (name) VALUES (?1)", [name])
+      .expect("insert copied row");
+    drop(writer);
+    SqliteReader {
+      connection: open_read_only(&path, "mode=ro").expect("open copied snapshot"),
+      snapshot: Some(snapshot),
+      strategy: DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+    }
+  }
+
+  fn corrupt_copied_snapshot_reader() -> SqliteReader {
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let path = snapshot.path().join("Cookies");
+    fs::write(&path, b"deterministically not a SQLite database")
+      .expect("write corrupt copied database");
+    SqliteReader {
+      // SQLite opens lazily; the first schema/query read classifies NOTADB.
+      connection: open_read_only(&path, "mode=ro").expect("open corrupt snapshot file"),
+      snapshot: Some(snapshot),
+      strategy: DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+    }
+  }
+
   /// Creates a WAL-mode database holding one checkpointed row.
   fn checkpointed_database(directory: &Path) -> (PathBuf, Connection) {
     let path = directory.join("Cookies");
@@ -454,6 +740,284 @@ mod tests {
       .expect("query")
       .collect::<rusqlite::Result<Vec<String>>>()
       .expect("collect")
+  }
+
+  #[test]
+  fn copied_snapshot_query_incoherence_reacquires_the_whole_query() {
+    let acquisitions = Cell::new(0);
+    let queries = Cell::new(0);
+    let snapshot_paths = RefCell::new(Vec::<PathBuf>::new());
+
+    let outcome = with_browser_database_using(
+      || {
+        let call = acquisitions.get() + 1;
+        acquisitions.set(call);
+        if let Some(previous) = snapshot_paths.borrow().last() {
+          assert!(
+            !previous.exists(),
+            "the failed reader must be dropped before reacquisition"
+          );
+        }
+        let reader = if call == 1 {
+          corrupt_copied_snapshot_reader()
+        } else {
+          copied_snapshot_reader("fresh")
+        };
+        snapshot_paths
+          .borrow_mut()
+          .push(reader.snapshot_path().expect("snapshot path").to_path_buf());
+        Ok(reader)
+      },
+      |connection| {
+        queries.set(queries.get() + 1);
+        connection
+          .query_row("SELECT name FROM cookies", [], |row| {
+            row.get::<_, String>(0)
+          })
+          .map_err(anyhow::Error::new)
+      },
+    )
+    .expect("second copied snapshot is coherent");
+
+    assert_eq!(
+      outcome.strategy(),
+      DatabaseAcquisitionStrategy::VerifiedWalSnapshot
+    );
+    assert_eq!(outcome.attempts(), 2);
+    assert_eq!(outcome.into_value(), "fresh");
+    assert_eq!(acquisitions.get(), 2);
+    assert_eq!(queries.get(), 2, "the complete query must rerun");
+    assert!(
+      snapshot_paths.borrow().iter().all(|path| !path.exists()),
+      "successful and failed attempt snapshots must be cleaned up"
+    );
+  }
+
+  #[test]
+  fn snapshot_open_incoherence_is_reacquired_before_querying() {
+    let acquisitions = Cell::new(0);
+    let queries = Cell::new(0);
+    let outcome = with_browser_database_using(
+      || {
+        let call = acquisitions.get() + 1;
+        acquisitions.set(call);
+        if call == 1 {
+          Err(DatabaseAcquisitionFailure {
+            strategy: Some(DatabaseAcquisitionStrategy::VerifiedWalSnapshot),
+            error: sqlite_failure(rusqlite::ffi::SQLITE_NOTADB),
+          })
+        } else {
+          Ok(test_reader(
+            DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+          ))
+        }
+      },
+      |_| {
+        queries.set(queries.get() + 1);
+        Ok("queried")
+      },
+    )
+    .expect("second acquisition succeeds");
+
+    assert_eq!(outcome.attempts(), 2);
+    assert_eq!(outcome.into_value(), "queried");
+    assert_eq!(acquisitions.get(), 2);
+    assert_eq!(queries.get(), 1, "failed open must not invoke the query");
+  }
+
+  #[test]
+  fn selected_snapshot_read_io_errors_are_retryable() {
+    for result_code in [
+      rusqlite::ffi::SQLITE_IOERR_READ,
+      rusqlite::ffi::SQLITE_IOERR_SHORT_READ,
+    ] {
+      let queries = Cell::new(0);
+      let outcome = with_browser_database_using(
+        || {
+          Ok(test_reader(
+            DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+          ))
+        },
+        |_| {
+          let call = queries.get() + 1;
+          queries.set(call);
+          if call == 1 {
+            Err(sqlite_failure(result_code))
+          } else {
+            Ok(call)
+          }
+        },
+      )
+      .expect("selected snapshot IO error retries");
+      assert_eq!(outcome.attempts(), 2);
+      assert_eq!(outcome.into_value(), 2);
+    }
+  }
+
+  #[test]
+  fn retry_exhaustion_is_typed_and_never_returns_stale_data() {
+    let acquisitions = Cell::new(0);
+    let queries = Cell::new(0);
+    let snapshot_paths = RefCell::new(Vec::<PathBuf>::new());
+    let error = with_browser_database_using(
+      || {
+        acquisitions.set(acquisitions.get() + 1);
+        let reader = copied_snapshot_reader("stale");
+        snapshot_paths
+          .borrow_mut()
+          .push(reader.snapshot_path().expect("snapshot path").to_path_buf());
+        Ok(reader)
+      },
+      |_| -> Result<String> {
+        queries.set(queries.get() + 1);
+        Err(sqlite_failure(rusqlite::ffi::SQLITE_CORRUPT))
+      },
+    )
+    .expect_err("bounded retry must exhaust");
+
+    let failure = error
+      .downcast_ref::<BrowserDatabaseFailure>()
+      .expect("typed browser database failure context");
+    assert_eq!(failure.kind, BrowserDatabaseFailureKind::RetryExhausted);
+    assert_eq!(
+      failure.strategy,
+      Some(DatabaseAcquisitionStrategy::VerifiedWalSnapshot)
+    );
+    assert_eq!(failure.attempts, BROWSER_DATABASE_ATTEMPTS);
+    assert_eq!(acquisitions.get(), BROWSER_DATABASE_ATTEMPTS);
+    assert_eq!(queries.get(), BROWSER_DATABASE_ATTEMPTS);
+    assert!(
+      snapshot_paths.borrow().iter().all(|path| !path.exists()),
+      "every exhausted attempt must be cleaned up before returning"
+    );
+    assert!(
+      error.downcast_ref::<rusqlite::Error>().is_some(),
+      "last typed SQLite failure must remain in the error chain"
+    );
+  }
+
+  #[test]
+  fn schema_sql_decode_and_provider_failures_are_not_retried() {
+    type TestQuery = dyn Fn(&Connection) -> Result<()>;
+    let cases: Vec<(&str, Box<TestQuery>)> = vec![
+      (
+        "schema/sql",
+        Box::new(|connection| {
+          connection.prepare("SELECT * FROM deliberately_absent_table")?;
+          Ok(())
+        }),
+      ),
+      (
+        "decode",
+        Box::new(|_| Err(anyhow!("synthetic decode failure"))),
+      ),
+      (
+        "provider",
+        Box::new(|_| Err(anyhow!("synthetic provider failure"))),
+      ),
+    ];
+
+    for (label, query) in cases {
+      let acquisitions = Cell::new(0);
+      let error = with_browser_database_using(
+        || {
+          acquisitions.set(acquisitions.get() + 1);
+          Ok(test_reader(
+            DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+          ))
+        },
+        |connection| query(connection),
+      )
+      .expect_err(label);
+      assert_eq!(acquisitions.get(), 1, "{label} unexpectedly retried");
+      let failure = error
+        .downcast_ref::<BrowserDatabaseFailure>()
+        .expect("typed non-retry failure context");
+      assert_eq!(failure.kind, BrowserDatabaseFailureKind::Query);
+      assert_eq!(failure.attempts, 1);
+    }
+  }
+
+  #[test]
+  fn live_lock_corruption_and_unselected_io_errors_are_not_retried() {
+    let cases = [
+      (
+        DatabaseAcquisitionStrategy::LiveReadOnly,
+        rusqlite::ffi::SQLITE_CORRUPT,
+      ),
+      (
+        DatabaseAcquisitionStrategy::LiveReadOnly,
+        rusqlite::ffi::SQLITE_BUSY,
+      ),
+      (
+        DatabaseAcquisitionStrategy::LiveReadOnly,
+        rusqlite::ffi::SQLITE_LOCKED,
+      ),
+      (
+        DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+        rusqlite::ffi::SQLITE_BUSY,
+      ),
+      (
+        DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
+        rusqlite::ffi::SQLITE_CORRUPT,
+      ),
+      (
+        DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+        rusqlite::ffi::SQLITE_IOERR_WRITE,
+      ),
+    ];
+
+    for (strategy, result_code) in cases {
+      let acquisitions = Cell::new(0);
+      let error = with_browser_database_using(
+        || {
+          acquisitions.set(acquisitions.get() + 1);
+          Ok(test_reader(strategy))
+        },
+        |_| -> Result<()> { Err(sqlite_failure(result_code)) },
+      )
+      .expect_err("error must remain non-retryable");
+      assert_eq!(acquisitions.get(), 1, "{result_code} unexpectedly retried");
+      let failure = error
+        .downcast_ref::<BrowserDatabaseFailure>()
+        .expect("typed non-retry failure context");
+      assert_eq!(failure.kind, BrowserDatabaseFailureKind::Query);
+      assert_eq!(failure.attempts, 1);
+    }
+  }
+
+  #[test]
+  fn live_acquisition_locks_are_not_retried() {
+    for result_code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+      let acquisitions = Cell::new(0);
+      let queries = Cell::new(0);
+      let error = with_browser_database_using(
+        || {
+          acquisitions.set(acquisitions.get() + 1);
+          Err(DatabaseAcquisitionFailure {
+            strategy: Some(DatabaseAcquisitionStrategy::LiveReadOnly),
+            error: sqlite_failure(result_code),
+          })
+        },
+        |_| {
+          queries.set(queries.get() + 1);
+          Ok(())
+        },
+      )
+      .expect_err("live acquisition lock must remain non-retryable");
+
+      assert_eq!(acquisitions.get(), 1);
+      assert_eq!(queries.get(), 0);
+      let failure = error
+        .downcast_ref::<BrowserDatabaseFailure>()
+        .expect("typed acquisition failure context");
+      assert_eq!(failure.kind, BrowserDatabaseFailureKind::Acquisition);
+      assert_eq!(
+        failure.strategy,
+        Some(DatabaseAcquisitionStrategy::LiveReadOnly)
+      );
+      assert_eq!(failure.attempts, 1);
+    }
   }
 
   #[test]
@@ -571,6 +1135,7 @@ mod tests {
     let reader = SqliteReader {
       connection: open_read_only(&copy, "mode=ro").expect("open snapshot"),
       snapshot: Some(snapshot),
+      strategy: DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
     };
     assert_eq!(cookie_names(&reader), vec!["checkpointed", "in-wal"]);
   }
@@ -650,6 +1215,7 @@ mod tests {
     let reader = SqliteReader {
       connection: open_read_only(&copy, "mode=ro").expect("open snapshot"),
       snapshot: Some(snapshot),
+      strategy: DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
     };
 
     // The checkpoint moved 'in-wal' into the real main file and rewound the
@@ -676,6 +1242,7 @@ mod tests {
       )
       .expect("open immutable"),
       snapshot: None,
+      strategy: DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
     };
 
     assert_eq!(cookie_names(&immutable), vec!["checkpointed"]);
