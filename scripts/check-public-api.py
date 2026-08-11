@@ -128,20 +128,32 @@ def compare_with_exceptions(
     expected_lines = expected.splitlines()
     actual_lines = actual.splitlines()
     active: set[tuple[str, str]] = set()
+    allowed = {(exception["change"], exception["item"]) for exception in exceptions}
+    filtered_expected: list[str] = []
+    filtered_actual: list[str] = []
 
-    for exception in exceptions:
-        change = exception["change"]
-        item = exception["item"]
-        expected_count = expected_lines.count(item)
-        actual_count = actual_lines.count(item)
-        if change == "added" and actual_count > expected_count:
-            for _ in range(actual_count - expected_count):
-                actual_lines.remove(item)
-            active.add((change, item))
-        elif change == "removed" and expected_count > actual_count:
-            for _ in range(expected_count - actual_count):
-                expected_lines.remove(item)
-            active.add((change, item))
+    matcher = difflib.SequenceMatcher(None, expected_lines, actual_lines, autojunk=False)
+    for tag, expected_start, expected_end, actual_start, actual_end in matcher.get_opcodes():
+        if tag == "equal":
+            filtered_expected.extend(expected_lines[expected_start:expected_end])
+            filtered_actual.extend(actual_lines[actual_start:actual_end])
+            continue
+
+        for item in expected_lines[expected_start:expected_end]:
+            key = ("removed", item)
+            if key in allowed:
+                active.add(key)
+            else:
+                filtered_expected.append(item)
+        for item in actual_lines[actual_start:actual_end]:
+            key = ("added", item)
+            if key in allowed:
+                active.add(key)
+            else:
+                filtered_actual.append(item)
+
+    expected_lines = filtered_expected
+    actual_lines = filtered_actual
 
     stale = [
         exception
