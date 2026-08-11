@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use rookie_cookies::{self, enums::Cookie, Result};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // The binary test harness does not invoke `main`, so the otherwise-live map
 // construction appears unused only when Cargo builds the bin as a test target.
@@ -8,46 +8,39 @@ use std::collections::HashMap;
 type BrowserFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 
 #[cfg_attr(test, allow(dead_code))]
-fn browsers_map() -> HashMap<String, BrowserFn> {
-  let mut map: HashMap<String, BrowserFn> = HashMap::default();
+fn browsers_map() -> BTreeMap<&'static str, BrowserFn> {
+  let mut map = BTreeMap::new();
 
-  map.insert("brave".into(), rookie_cookies::brave);
+  map.insert("brave", rookie_cookies::brave as BrowserFn);
 
   #[cfg(target_os = "linux")]
-  map.insert("cachy".into(), rookie_cookies::cachy);
+  map.insert("cachy", rookie_cookies::cachy as BrowserFn);
 
-  map.insert("chromium".into(), rookie_cookies::chromium);
-  map.insert("chrome".into(), rookie_cookies::chrome);
-  map.insert("edge".into(), rookie_cookies::edge);
-  map.insert("firefox".into(), rookie_cookies::firefox);
-  map.insert("zen".into(), rookie_cookies::zen);
+  map.insert("chromium", rookie_cookies::chromium as BrowserFn);
+  map.insert("chrome", rookie_cookies::chrome as BrowserFn);
+  map.insert("edge", rookie_cookies::edge as BrowserFn);
+  map.insert("firefox", rookie_cookies::firefox as BrowserFn);
+  map.insert("zen", rookie_cookies::zen as BrowserFn);
 
   #[cfg(target_os = "windows")]
   map.insert(
-    "internet_explorer".into(),
-    rookie_cookies::internet_explorer,
+    "internet_explorer",
+    rookie_cookies::internet_explorer as BrowserFn,
   );
-  map.insert("librewolf".into(), rookie_cookies::librewolf);
-  map.insert("opera".into(), rookie_cookies::opera);
-  map.insert("opera gx".into(), rookie_cookies::opera_gx);
+  map.insert("librewolf", rookie_cookies::librewolf as BrowserFn);
+  map.insert("opera", rookie_cookies::opera as BrowserFn);
+  map.insert("opera gx", rookie_cookies::opera_gx as BrowserFn);
 
   #[cfg(target_os = "macos")]
-  map.insert("safari".into(), rookie_cookies::safari);
+  map.insert("safari", rookie_cookies::safari as BrowserFn);
 
-  map.insert("vivaldi".into(), rookie_cookies::vivaldi);
+  map.insert("vivaldi", rookie_cookies::vivaldi as BrowserFn);
 
-  map.insert("arc".into(), rookie_cookies::arc);
+  map.insert("arc", rookie_cookies::arc as BrowserFn);
 
   map
 }
 
 lazy_static! {
-  pub static ref BROWSERS_MAP: HashMap<String, BrowserFn> = browsers_map();
-}
-
-lazy_static! {
-  pub static ref BROWSERS_MAP_KEYS: Vec<&'static str> = {
-    let keys = BROWSERS_MAP.keys();
-    keys.map(|s| s.as_str()).collect()
-  };
+  pub static ref BROWSERS_MAP: BTreeMap<&'static str, BrowserFn> = browsers_map();
 }

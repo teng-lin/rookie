@@ -240,8 +240,41 @@ fn json_stdout_stays_machine_readable_with_info_logging() {
   assert_eq!(parsed.as_array().map(Vec::len), Some(1));
 
   let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+  let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
   assert!(!stdout.contains(" INFO "), "log polluted stdout: {stdout}");
   assert!(!stdout.contains(" WARN "), "log polluted stdout: {stdout}");
+  assert!(!stderr.is_empty(), "INFO logging produced no stderr output");
+  assert!(stderr.contains(" INFO "), "missing INFO log: {stderr}");
+  assert!(
+    stderr.contains("extracting cookies"),
+    "unexpected INFO log: {stderr}"
+  );
+}
+
+#[test]
+fn conflicting_and_incomplete_source_arguments_are_parse_errors() {
+  for args in [
+    &["--browser", "firefox", "--load"][..],
+    &["--browser", "chrome", "--key-path", "Local State"][..],
+    &["--path", "cookies.sqlite", "--load"][..],
+    &["--key-path", "Local State"][..],
+  ] {
+    let out = run_rookie(args);
+    assert!(
+      !out.status.success(),
+      "invalid arguments succeeded: {args:?}"
+    );
+    assert!(
+      out.stdout.is_empty(),
+      "parse error wrote stdout for {args:?}: {}",
+      String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+      stderr.contains("error:"),
+      "parse error missing clap diagnostic for {args:?}: {stderr}"
+    );
+  }
 }
 
 #[test]
@@ -331,6 +364,77 @@ fn help_and_version_are_successful_stdout_contracts() {
       "help omitted {flag}: {help_stdout}"
     );
   }
+
+  #[cfg(target_os = "linux")]
+  let expected_browsers = [
+    "arc",
+    "brave",
+    "cachy",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "librewolf",
+    "opera",
+    "\"opera gx\"",
+    "vivaldi",
+    "zen",
+  ];
+  #[cfg(target_os = "macos")]
+  let expected_browsers = [
+    "arc",
+    "brave",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "librewolf",
+    "opera",
+    "\"opera gx\"",
+    "safari",
+    "vivaldi",
+    "zen",
+  ];
+  #[cfg(target_os = "windows")]
+  let expected_browsers = [
+    "arc",
+    "brave",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "internet_explorer",
+    "librewolf",
+    "opera",
+    "\"opera gx\"",
+    "vivaldi",
+    "zen",
+  ];
+  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+  let expected_browsers = [
+    "arc",
+    "brave",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "librewolf",
+    "opera",
+    "\"opera gx\"",
+    "vivaldi",
+    "zen",
+  ];
+  let browser_help = help_stdout
+    .lines()
+    .find(|line| line.contains("--browser"))
+    .expect("browser help line");
+  assert!(
+    browser_help.contains(&format!(
+      "[possible values: {}]",
+      expected_browsers.join(", ")
+    )),
+    "browser values are not in deterministic order: {browser_help}"
+  );
 
   let version = run_rookie(&["--version"]);
   assert_success(&version);
