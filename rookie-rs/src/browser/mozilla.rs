@@ -5,6 +5,7 @@ use lz4_flex::block::decompress_size_prepended;
 use serde_json::Value;
 use std::{
   fs,
+  io::Read,
   path::{Path, PathBuf},
 };
 
@@ -129,6 +130,8 @@ enum SessionStoreFormat {
   LegacyJson,
 }
 
+const SESSION_STORE_READ_ATTEMPTS: usize = 2;
+
 fn get_authoritative_session_cookies(
   domains: Option<Vec<String>>,
   cookies_dir: &Path,
@@ -136,6 +139,10 @@ fn get_authoritative_session_cookies(
   let candidates = [
     (
       cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
+      SessionStoreFormat::JsonLz4,
+    ),
+    (
+      cookies_dir.join("sessionstore-backups/recovery.baklz4"),
       SessionStoreFormat::JsonLz4,
     ),
     (
@@ -153,21 +160,67 @@ fn get_authoritative_session_cookies(
   ];
 
   for (path, format) in candidates {
-    if !path.is_file() {
-      continue;
-    }
-
-    let parsed = match format {
-      SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(&path, domains.as_deref()),
-      SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(&path, domains.as_deref()),
-    };
-    match parsed {
+    match parse_session_candidate(&path, &format, domains.as_deref()) {
       Ok(cookies) => return cookies,
-      Err(error) => log::debug!("Failed to parse Firefox session store {:?}: {error}", path),
+      Err(error) if is_missing_session_file(&error) => continue,
+      Err(error) => log::warn!("Failed to parse Firefox session store {:?}: {error}", path),
     }
   }
 
   Vec::new()
+}
+
+fn parse_session_candidate(
+  path: &Path,
+  format: &SessionStoreFormat,
+  domains: Option<&[String]>,
+) -> Result<Vec<Cookie>> {
+  let mut last_error = None;
+  for attempt in 1..=SESSION_STORE_READ_ATTEMPTS {
+    let parsed = match format {
+      SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(path, domains),
+      SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(path, domains),
+    };
+    match parsed {
+      Ok(cookies) => return Ok(cookies),
+      Err(error) if is_missing_session_file(&error) => return Err(error),
+      Err(error) => {
+        last_error = Some(error);
+        if attempt < SESSION_STORE_READ_ATTEMPTS {
+          log::debug!(
+            "Retrying Firefox session store {:?} after an acquisition or parse failure",
+            path
+          );
+        }
+      }
+    }
+  }
+
+  Err(last_error.expect("session store parser always attempts at least once"))
+}
+
+fn is_missing_session_file(error: &anyhow::Error) -> bool {
+  matches!(
+    error.downcast_ref::<std::io::Error>(),
+    Some(error) if error.kind() == std::io::ErrorKind::NotFound
+  )
+}
+
+fn read_stable_session_file(path: &Path) -> Result<Vec<u8>> {
+  let mut file = fs::File::open(path)?;
+  let before = file.metadata()?;
+  let mut bytes = Vec::new();
+  file.read_to_end(&mut bytes)?;
+  let after = file.metadata()?;
+
+  let length_changed =
+    before.len() != after.len() || u64::try_from(bytes.len()).unwrap_or(u64::MAX) != after.len();
+  let modified_changed = before.modified().ok() != after.modified().ok();
+  if length_changed || modified_changed {
+    bail!("Firefox session store changed while it was being read");
+  }
+
+  Ok(bytes)
 }
 
 #[cfg(test)]
@@ -180,7 +233,7 @@ pub fn get_session_cookies(
 
 fn parse_legacy_session_cookies(path: &Path, domains: Option<&[String]>) -> Result<Vec<Cookie>> {
   let mut cookies: Vec<Cookie> = vec![];
-  let plain = fs::read_to_string(path)?;
+  let plain = String::from_utf8(read_stable_session_file(path)?)?;
   let json: Value = serde_json::from_str(&plain)?;
   let windows = json
     .get("windows")
@@ -224,7 +277,7 @@ pub fn get_session_cookies_lz4(
 
 fn parse_session_cookies_lz4(path: &Path, domains: Option<&[String]>) -> Result<Vec<Cookie>> {
   let mut cookies: Vec<Cookie> = vec![];
-  let compressed = fs::read(path)?;
+  let compressed = read_stable_session_file(path)?;
   if !compressed.starts_with(b"mozLz40\0") {
     bail!("Invalid mozLz40 header");
   }
@@ -721,11 +774,16 @@ mod tests {
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(&db, &[]);
     let recovery = dir.join("sessionstore-backups/recovery.jsonlz4");
+    let recovery_backup = dir.join("sessionstore-backups/recovery.baklz4");
     let clean = dir.join("sessionstore.jsonlz4");
     let previous = dir.join("sessionstore-backups/previous.jsonlz4");
     write_session_jsonlz4(
       &recovery,
       serde_json::json!([session_cookie("live-recovery")]),
+    );
+    write_session_jsonlz4(
+      &recovery_backup,
+      serde_json::json!([session_cookie("live-recovery-backup")]),
     );
     write_session_jsonlz4(
       &clean,
@@ -741,6 +799,15 @@ mod tests {
     assert_eq!(cookies[0].name, "live-recovery");
 
     std::fs::write(&recovery, b"mozLz40\0invalid").expect("corrupt recovery fixture");
+    let cookies = firefox_based(db.clone(), None).expect("fall back to recovery backup");
+    assert_eq!(
+      cookies.len(),
+      1,
+      "older lifecycle tiers must remain unselected"
+    );
+    assert_eq!(cookies[0].name, "live-recovery-backup");
+
+    std::fs::write(&recovery_backup, b"mozLz40\0invalid").expect("corrupt recovery backup fixture");
     let cookies = firefox_based(db.clone(), None).expect("fall back to clean shutdown");
     assert_eq!(cookies.len(), 1, "stale state must remain unselected");
     assert_eq!(cookies[0].name, "clean-shutdown");

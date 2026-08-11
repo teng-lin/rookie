@@ -886,13 +886,13 @@ Native matrix:
 The project is complete when:
 
 - compatibility fixtures prove all legacy APIs and wire shapes remain intact;
-- shared row extraction/decryption/acquisition cores serve legacy and new pipelines without moving legacy source selection;
+- shared row extraction/decryption/acquisition cores serve legacy and new pipelines without changing legacy browser/profile resolution;
 - generic grouped report/profile APIs ship across Rust, Python, Node, and CLI;
 - mixed Chromium tier routing and verified host hashes pass;
 - existing browsers are represented in the canonical private registry;
 - each additional browser passes its declared per-OS capability gates;
 - active WAL, no-WAL/rollback, retry, and typed-lock behavior pass the defined matrix;
-- generic Mozilla report APIs use authoritative session semantics while every legacy `firefox_based` wrapper/direct path retains its merge;
+- generic Mozilla report APIs and every legacy `firefox_based` wrapper/direct path use authoritative session semantics;
 - Safari named profiles and parser fixtures pass plus documented real-host validation;
 - documentation distinguishes registry, detection, readability, and verified decryption.
 

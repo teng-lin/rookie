@@ -243,7 +243,7 @@ Positive consequences:
 Costs and constraints:
 
 - The legacy config/selectors and private registry coexist for this release line.
-- Legacy merged and generic authoritative Mozilla session semantics intentionally differ; the distinction is by API path, not merely by the `firefox()` function name.
+- Legacy and generic Mozilla paths share authoritative first-valid session semantics; generic reports additionally retain source-level diagnostics.
 - Every new public DTO must ship consistently across all bindings.
 - New browser support requires OS- and tier-specific evidence, not path recognition alone.
 
