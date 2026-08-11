@@ -5,7 +5,9 @@
 
 use once_cell::sync::Lazy;
 use rookie_cookies::common::format;
-use rookie_cookies::config::{get_browser_config, Browser, BrowsersMap, Config, CONFIG};
+use rookie_cookies::config::{
+  get_browser_config, try_get_browser_config, Browser, BrowsersMap, Config, CONFIG,
+};
 use rookie_cookies::enums::{Cookie, CookieToString, SAME_SITE_UNSPECIFIED};
 use rookie_cookies::MozillaProfile;
 use rookie_cookies::Result;
@@ -95,6 +97,8 @@ fn public_cookie_and_config_types_remain_constructible() {
   let embedded: &Lazy<Config> = &CONFIG;
   assert!(!embedded.version.is_empty());
   assert!(!get_browser_config("firefox").paths.is_empty());
+  assert!(try_get_browser_config("firefox").is_some());
+  assert!(try_get_browser_config("not-a-browser").is_none());
 }
 
 #[test]
@@ -118,6 +122,7 @@ fn public_function_signatures_remain_compatible() {
   let _: BrowserFn = rookie_cookies::load;
   let _: fn() -> String = rookie_cookies::version;
   let _: fn(&str) -> &Browser = get_browser_config;
+  let _: fn(&str) -> Option<&Browser> = try_get_browser_config;
   let _: fn(rookie_cookies::anyhow::Result<()>) -> Result<()> = result_reexport_identity;
 
   let _: FirefoxProfileFn = rookie_cookies::firefox_profile;

@@ -68,6 +68,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::config::Config
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::config::Config
 pub static rookie_cookies::config::CONFIG: once_cell::sync::Lazy<rookie_cookies::config::Config>
 pub fn rookie_cookies::config::get_browser_config(&str) -> &rookie_cookies::config::Browser
+pub fn rookie_cookies::config::try_get_browser_config(&str) -> core::option::Option<&rookie_cookies::config::Browser>
 pub type rookie_cookies::config::BrowsersMap = std::collections::hash::map::HashMap<alloc::string::String, rookie_cookies::config::Browser>
 pub mod rookie_cookies::enums
 pub struct rookie_cookies::enums::Cookie
