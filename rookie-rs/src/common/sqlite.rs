@@ -4,6 +4,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::ffi::OsString;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::{fs, io};
 use url::Url;
 
@@ -51,8 +52,8 @@ impl Deref for SqliteReader {
 /// process fail with `SQLITE_BUSY` for as long as the browser runs. So when a
 /// `-wal` is present the database is copied beside it into a private directory
 /// and the copy is read. Copying only reads bytes: it takes no SQLite locks and
-/// cannot starve the writer, at the cost of a snapshot that is best-effort
-/// rather than atomic (see [`copy_database`]).
+/// cannot starve the writer, at the cost of a copy that is not atomic and so
+/// has to be checked for a racing checkpoint (see [`snapshot_database`]).
 ///
 /// Databases with no `-wal` are read in place as `immutable`, which likewise
 /// takes no locks.
@@ -67,7 +68,7 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
     // defect this function exists to fix. `load()` reports a per-browser error
     // and carries on, so a loud failure costs one browser, not the whole call.
     let snapshot = TempDir::new()?;
-    let copy = copy_database(&path, snapshot.path())?;
+    let copy = snapshot_database(&path, snapshot.path())?;
     SqliteReader {
       // Deliberately not `immutable`: that flag tells SQLite to ignore the
       // `-wal`, which is the data this snapshot exists to recover.
@@ -93,6 +94,43 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   Ok(reader)
 }
 
+/// How many times a snapshot torn by a concurrent checkpoint is retaken.
+const SNAPSHOT_ATTEMPTS: u32 = 3;
+
+/// Copies `database` and its write-ahead log into `directory`, retaking the
+/// copy if a checkpoint raced it, and returns the path of the copy.
+///
+/// The two files cannot be copied atomically, so a checkpoint landing in the
+/// window can leave the pair incoherent: it moves pages into the main file that
+/// the copied WAL cannot roll back, which surfaces as missing rows or
+/// `SQLITE_CORRUPT`. Copying the WAL first shrinks the window but does not
+/// close it, so the copy is validated rather than assumed.
+///
+/// In WAL mode a checkpoint is the only thing that writes the main file, so an
+/// unchanged main file across the copy means the copied WAL is still the only
+/// thing standing between it and the browser's current state. Ordinary commits
+/// only append to the `-wal`, and frames appended after it was copied are
+/// simply unseen, which reads as an earlier instant rather than as loss.
+fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
+  for attempt in 1..=SNAPSHOT_ATTEMPTS {
+    let before = main_file_fingerprint(database)?;
+    let copy = copy_database(database, directory)?;
+    if main_file_fingerprint(database)? == before {
+      return Ok(copy);
+    }
+
+    log::debug!(
+      "a checkpoint raced the snapshot of {} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})",
+      database.display()
+    );
+  }
+
+  Err(anyhow!(
+    "Can't take a coherent snapshot of {}: it is being checkpointed repeatedly",
+    database.display()
+  ))
+}
+
 /// Copies `database` and its write-ahead log into `directory`, returning the
 /// path of the copy.
 ///
@@ -106,15 +144,13 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
     .ok_or_else(|| anyhow!("Database path has no file name: {}", database.display()))?;
   let copy = directory.join(name);
 
-  // Copy the WAL *before* the main database. The two copies cannot be taken
-  // atomically, and a checkpoint only ever moves pages out of the WAL and into
-  // the main file, so pairing an older WAL with a newer main file is safe:
-  // replaying a frame whose page the checkpoint already wrote just rewrites
-  // identical bytes. Frames appended after this copy are simply not seen, which
-  // reads as an earlier instant rather than as loss. The opposite order is not
-  // safe — a checkpoint landing between the copies rewinds the WAL to offset 0
-  // (<https://sqlite.org/wal.html> section 2.1), pairing a stale main file with
-  // frames it has never seen, which surfaces as missing rows or SQLITE_CORRUPT.
+  // Copy the WAL before the main database, so that a checkpoint arriving in
+  // the window leaves an older WAL beside a newer main file. Replaying a frame
+  // whose page the checkpoint already wrote rewrites identical bytes, whereas
+  // the opposite order pairs a stale main file with a WAL the checkpoint has
+  // rewound to offset 0 (<https://sqlite.org/wal.html> section 2.1) and drops
+  // rows outright. Neither order is sufficient on its own, which is why
+  // `snapshot_database` verifies the result.
   //
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
   // WAL, absent entirely when the writer uses exclusive locking, and a copied
@@ -130,6 +166,19 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
     .with_context(|| format!("Can't copy database {}", database.display()))?;
 
   Ok(copy)
+}
+
+/// Size and modification time of the main database file.
+///
+/// Deliberately not the header's file change counter: SQLite documents that
+/// counter as unreliable in WAL mode, where the wal-index detects changes
+/// instead (<https://sqlite.org/fileformat2.html> section 1.3), and a
+/// checkpoint does leave it untouched in practice.
+fn main_file_fingerprint(database: &Path) -> Result<(u64, Option<SystemTime>)> {
+  let metadata =
+    fs::metadata(database).with_context(|| format!("Can't stat {}", database.display()))?;
+
+  Ok((metadata.len(), metadata.modified().ok()))
 }
 
 /// True when a non-empty `-wal` sidecar sits beside the database.
@@ -263,6 +312,53 @@ mod tests {
     let reader = connect(path).expect("connect");
 
     assert_eq!(cookie_names(&reader), vec!["checkpointed", "in-wal"]);
+  }
+
+  /// `snapshot_database` retries when the main file moves under it, so pin the
+  /// premise that makes the signal work: ordinary WAL commits leave the main
+  /// file alone, and only a checkpoint disturbs it.
+  #[test]
+  fn only_a_checkpoint_disturbs_the_main_file() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, writer) = checkpointed_database(directory.path());
+
+    let before = main_file_fingerprint(&path).expect("fingerprint");
+    writer
+      .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
+      .expect("insert WAL row");
+    assert_eq!(
+      main_file_fingerprint(&path).expect("fingerprint"),
+      before,
+      "a WAL commit must not touch the main file"
+    );
+
+    // Filesystems with coarse timestamps would otherwise report the checkpoint
+    // as happening at the same instant as the fixture write.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    writer
+      .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+      .expect("checkpoint");
+
+    assert_ne!(
+      main_file_fingerprint(&path).expect("fingerprint"),
+      before,
+      "a checkpoint must be detectable"
+    );
+  }
+
+  #[test]
+  fn snapshot_of_an_idle_database_succeeds_on_the_first_attempt() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, writer) = checkpointed_database(directory.path());
+    writer
+      .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
+      .expect("insert WAL row");
+
+    let snapshot = TempDir::new().expect("snapshot dir");
+    let copy = snapshot_database(&path, snapshot.path()).expect("snapshot");
+
+    assert!(copy.exists());
+    assert!(sidecar(&copy, "-wal").exists(), "the WAL must come along");
   }
 
   /// The counterpart to the test above: copying the main database first is the
