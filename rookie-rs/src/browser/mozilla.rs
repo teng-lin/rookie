@@ -1,6 +1,6 @@
 use crate::common::{date, enums::*, sqlite, utils};
 use anyhow::{anyhow, bail, Result};
-use ini::Ini;
+use ini::{Ini, ParseOption};
 use lz4_flex::block::decompress_size_prepended;
 use serde_json::Value;
 use std::{
@@ -257,34 +257,250 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
   Ok(cookie)
 }
 
-pub fn get_default_profile(profiles_path: &Path) -> Result<String> {
-  let conf = Ini::load_from_file(profiles_path)?;
-  let installs: Vec<_> = conf
-    .iter()
-    .filter(|(name_option, _)| name_option.unwrap_or_default().starts_with("Install"))
-    .collect();
-  if !installs.is_empty() {
-    let (_, props) = installs.first().unwrap();
-    return Ok(props.get("Default").unwrap_or_default().into());
-  } else {
-    let profiles: Vec<_> = conf
-      .iter()
-      .filter(|(name_option, _)| name_option.unwrap_or_default().starts_with("Profile"))
-      .collect();
-    for (_, props) in &profiles {
-      if props.get("Default").unwrap_or_default() == "1" {
-        return Ok(props.get("Path").unwrap_or_default().into());
-      }
-    }
+/// A profile declared by a Mozilla-family browser's `profiles.ini`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MozillaProfile {
+  /// The profile's `Name=` value, or an empty string when the section omits it.
+  pub name: String,
+  /// Path to the profile directory, absolute whenever the caller supplied an
+  /// absolute `profiles.ini` path.
+  pub path: PathBuf,
+  /// Whether this is the profile that the installation owning this
+  /// `profiles.ini` would open.
+  ///
+  /// Defaults are per-installation, so a list gathered across several
+  /// installation roots (snap and distro Firefox, say) can contain more than
+  /// one default.
+  pub is_default: bool,
+}
 
-    // still not found? last time try to get any Profile with Path.
-    for (_, props) in &profiles {
-      if let Some(path) = props.get("Path") {
-        return Ok(path.into());
+/// A `[Profile...]` section, with its `Path` kept exactly as written in the ini.
+struct ProfileSection {
+  name: String,
+  path: String,
+  default_flag: bool,
+}
+
+/// Reads `profiles.ini` with escape processing disabled.
+///
+/// The default parser treats `\` as an escape introducer, which silently
+/// destroys the Windows paths that `IsRelative=0` sections store:
+/// `Path=C:\Users\me\Profiles\work` would parse as `C:UsersmeProfileswork`,
+/// with `\r` becoming a carriage return.
+fn load_profiles_ini(profiles_path: &Path) -> Result<Ini> {
+  Ini::load_from_file_opt(
+    profiles_path,
+    ParseOption {
+      enabled_escape: false,
+      ..Default::default()
+    },
+  )
+  .map_err(Into::into)
+}
+
+/// Every `[Profile...]` section that declares a `Path`.
+///
+/// Firefox itself walks `Profile0`, `Profile1`, ... and stops at the first gap,
+/// also requiring `Name` and `IsRelative`. We deliberately accept any
+/// `[Profile...]` section with a `Path` instead: reading cookies from a profile
+/// Firefox would skip is useful, whereas dropping a real profile is not.
+fn profile_sections(conf: &Ini) -> Vec<ProfileSection> {
+  conf
+    .iter()
+    .filter(|(section, _)| section.unwrap_or_default().starts_with("Profile"))
+    .filter_map(|(_, props)| {
+      let path = props.get("Path")?.trim();
+      if path.is_empty() {
+        return None;
       }
+      Some(ProfileSection {
+        name: props.get("Name").unwrap_or_default().to_string(),
+        path: path.to_string(),
+        default_flag: props.get("Default").unwrap_or_default().trim() == "1",
+      })
+    })
+    .collect()
+}
+
+/// Profile paths named by `[Install...] Default=`, deduplicated in file order.
+///
+/// Firefox keys each section by a hash of the installation directory. Several
+/// distinct entries therefore mean this file is shared — by a release and a
+/// nightly, or by one live install plus debris, since sections for moved or
+/// uninstalled builds are never removed.
+fn install_defaults(conf: &Ini) -> Vec<String> {
+  let mut defaults: Vec<String> = vec![];
+  for (_, props) in conf
+    .iter()
+    .filter(|(section, _)| section.unwrap_or_default().starts_with("Install"))
+  {
+    let Some(default) = props
+      .get("Default")
+      .map(str::trim)
+      .filter(|d| !d.is_empty())
+    else {
+      continue;
+    };
+    if !defaults.iter().any(|existing| existing == default) {
+      defaults.push(default.to_string());
     }
   }
-  bail!("Can't find any profile")
+  defaults
+}
+
+/// Resolves the default profile's `Path` value, or `None` when the ini declares
+/// nothing usable.
+///
+/// This is a heuristic, not Firefox's algorithm. Firefox picks the
+/// `[Install<hash>]` section matching a hash of the *running installation's*
+/// directory and honours it unconditionally; sections never compete. We cannot
+/// know which installation a caller means, so we degrade in this order:
+///
+/// 1. a single unambiguous install default — the dedicated profile that the one
+///    installation on record opens;
+/// 2. with competing installs, a default that the legacy `[ProfileN] Default=1`
+///    marker also names, else any profile some install claims — better a
+///    profile one installation opens than one none does;
+/// 3. the `Default=1` marker alone;
+/// 4. the first declared profile;
+/// 5. an install default naming a profile that has no section of its own.
+fn resolve_default_path(profiles: &[ProfileSection], installs: &[String]) -> Option<String> {
+  let is_known = |candidate: &str| profiles.iter().any(|profile| profile.path == candidate);
+
+  if let [only] = installs {
+    if is_known(only) {
+      return Some(only.clone());
+    }
+  }
+
+  if installs.len() > 1 {
+    log::warn!(
+      "profiles.ini declares {} competing [Install...] defaults; guessing which installation is meant",
+      installs.len()
+    );
+    if let Some(profile) = profiles
+      .iter()
+      .find(|profile| profile.default_flag && installs.contains(&profile.path))
+    {
+      return Some(profile.path.clone());
+    }
+    if let Some(default) = installs.iter().find(|default| is_known(default)) {
+      return Some(default.clone());
+    }
+  }
+
+  if let Some(profile) = profiles.iter().find(|profile| profile.default_flag) {
+    return Some(profile.path.clone());
+  }
+
+  profiles
+    .first()
+    .map(|profile| profile.path.clone())
+    // An install may name a profile that has no [Profile...] section of its
+    // own; trying it still beats giving up.
+    .or_else(|| installs.first().cloned())
+}
+
+/// Returns every profile declared by `profiles.ini`, in file order, resolved
+/// against the file's directory and with the default profile flagged.
+///
+/// Exposing the secondary profiles — not just the default — is what lets
+/// callers read cookies from a profile the browser does not open by default.
+pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>> {
+  let conf = load_profiles_ini(profiles_path)?;
+  let base = profiles_path.parent().unwrap_or_else(|| Path::new(""));
+  let sections = profile_sections(&conf);
+  let installs = install_defaults(&conf);
+  let default_path = resolve_default_path(&sections, &installs);
+
+  // Exactly one entry carries the flag: two sections may declare the same
+  // `Path`, and "the default" must stay singular within one profiles.ini.
+  let mut default_taken = false;
+  let mut claim_default = |candidate: &str| {
+    let is_default = !default_taken && default_path.as_deref() == Some(candidate);
+    default_taken |= is_default;
+    is_default
+  };
+
+  let mut profiles: Vec<MozillaProfile> = sections
+    .iter()
+    .map(|profile| MozillaProfile {
+      is_default: claim_default(&profile.path),
+      // `IsRelative=0` sections store a full native path, which `join` passes
+      // through. We trust the shape of `Path` rather than the `IsRelative`
+      // flag, which browsers do not always keep in sync.
+      path: base.join(&profile.path),
+      name: profile.name.clone(),
+    })
+    .collect();
+
+  // An [Install...] section can name a profile that has no [Profile...]
+  // section, e.g. after a hand-edited or partially migrated profiles.ini. The
+  // pre-enumeration resolver probed those directly, so surface every one of
+  // them — not just whichever the heuristic happened to choose.
+  for orphan in installs
+    .iter()
+    .filter(|default| !is_known_section(&sections, default))
+  {
+    profiles.push(MozillaProfile {
+      is_default: claim_default(orphan),
+      path: base.join(orphan),
+      name: String::new(),
+    });
+  }
+
+  Ok(profiles)
+}
+
+fn is_known_section(sections: &[ProfileSection], candidate: &str) -> bool {
+  sections.iter().any(|section| section.path == candidate)
+}
+
+/// Picks the profile a user asked for, matching its `Name`, its directory name,
+/// or its full path.
+///
+/// An ambiguous selector is an error rather than a silent first-match: picking
+/// the wrong profile is the failure this whole resolver exists to prevent.
+pub(crate) fn select_profile<'a>(
+  profiles: &'a [MozillaProfile],
+  selector: &str,
+) -> Result<&'a MozillaProfile> {
+  if selector.is_empty() {
+    bail!("Profile selector must not be empty");
+  }
+  // Comparing as a `Path` keeps selection separator-insensitive on Windows,
+  // where `base.join("Profiles/work")` yields mixed separators but a user
+  // naturally writes the all-backslash spelling.
+  let wanted = Path::new(selector);
+  let matches: Vec<&MozillaProfile> = profiles
+    .iter()
+    .filter(|profile| {
+      profile.name == selector
+        || profile.path.file_name().is_some_and(|dir| dir == selector)
+        || profile.path == wanted
+    })
+    .collect();
+
+  match matches[..] {
+    [only] => Ok(only),
+    [] => bail!(
+      "No profile matching {selector:?}. Available profiles: [{}]",
+      describe(profiles.iter())
+    ),
+    _ => bail!(
+      "{} profiles match {selector:?}; select one by full path instead: [{}]",
+      matches.len(),
+      describe(matches.iter().copied())
+    ),
+  }
+}
+
+fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
+  profiles
+    .map(|profile| format!("{} ({})", profile.name, profile.path.display()))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 #[cfg(test)]
@@ -541,55 +757,416 @@ mod tests {
   }
 
   #[test]
-  fn get_default_profile_missing_ini_errors() {
-    let result = get_default_profile(Path::new("/nonexistent/profiles.ini"));
+  fn list_profiles_missing_ini_errors() {
+    let result = list_profiles(Path::new("/nonexistent/profiles.ini"));
     assert!(result.is_err(), "expected Err for missing profiles.ini");
   }
 
   #[test]
-  fn get_default_profile_empty_ini_errors() {
+  fn list_profiles_empty_ini_yields_no_profiles() {
     let dir = unique_tmpdir("ff-empty-ini");
     let ini_path = dir.join("profiles.ini");
     std::fs::File::create(&ini_path)
       .unwrap()
       .write_all(b"")
       .unwrap();
-    let err = get_default_profile(&ini_path).expect_err("should fail");
-    assert!(
-      err.to_string().contains("Can't find any profile"),
-      "unexpected error: {}",
-      err
+    assert!(list_profiles(&ini_path).expect("should list").is_empty());
+  }
+
+  #[test]
+  fn default_profile_prefers_install_block() {
+    let ini_path = write_ini(
+      "ff-install-ini",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/abc.default-release\n\
+       [Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/abc.default-release".to_string())
     );
   }
 
   #[test]
-  fn get_default_profile_prefers_install_block() {
-    let dir = unique_tmpdir("ff-install-ini");
-    let ini_path = dir.join("profiles.ini");
-    std::fs::write(
-      &ini_path,
-      b"[Install4F96D1932A9F858E]\nDefault=Profiles/abc.default-release\n\
-        [Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
-    )
-    .unwrap();
-    let path = get_default_profile(&ini_path).expect("should resolve");
-    assert_eq!(path, "Profiles/abc.default-release");
+  fn default_profile_falls_back_to_default_flag() {
+    // No [Install...] block, so the resolver should walk Profiles and pick
+    // the one with Default=1.
+    let ini_path = write_ini(
+      "ff-default-flag-ini",
+      "[Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\nDefault=0\n\
+       [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/abc.default-release".to_string())
+    );
+  }
+
+  fn write_ini(tag: &str, body: &str) -> PathBuf {
+    let ini_path = unique_tmpdir(tag).join("profiles.ini");
+    std::fs::write(&ini_path, body).unwrap();
+    ini_path
+  }
+
+  /// The resolved default profile's path, relative to the ini's directory where
+  /// possible, so assertions read like the `Path=` values in the fixture. A
+  /// profile resolved outside that directory is reported in full rather than
+  /// panicking.
+  fn default_profile_path(ini_path: &Path) -> Option<String> {
+    let base = ini_path.parent().expect("ini has a parent");
+    list_profiles(ini_path)
+      .expect("should list")
+      .into_iter()
+      .find(|profile| profile.is_default)
+      .map(|profile| {
+        profile
+          .path
+          .strip_prefix(base)
+          .unwrap_or(&profile.path)
+          .to_string_lossy()
+          .replace('\\', "/")
+      })
   }
 
   #[test]
-  fn get_default_profile_falls_back_to_default_flag() {
-    let dir = unique_tmpdir("ff-default-flag-ini");
-    let ini_path = dir.join("profiles.ini");
-    // No [Install...] block, so the resolver should walk Profiles and pick
-    // the one with Default=1.
-    std::fs::write(
-      &ini_path,
-      b"[Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\nDefault=0\n\
-        [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
-    )
-    .unwrap();
-    let path = get_default_profile(&ini_path).expect("should resolve");
-    assert_eq!(path, "Profiles/abc.default-release");
+  fn default_profile_ignores_install_without_default_key() {
+    // The install section exists but names no profile, so the Default=1 marker
+    // must still decide instead of the resolver returning an empty path.
+    let ini_path = write_ini(
+      "ff-install-no-default",
+      "[Install4F96D1932A9F858E]\nLocked=1\n\
+       [Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/abc.default-release".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_breaks_install_ties_with_default_marker() {
+    // Release and nightly share this profiles.ini. Neither install is
+    // authoritative, so the Default=1 marker wins over file order.
+    let ini_path = write_ini(
+      "ff-two-installs",
+      "[Install0000000000000001]\nDefault=Profiles/nightly\n\
+       [Install0000000000000002]\nDefault=Profiles/release\n\
+       [Profile0]\nName=nightly\nIsRelative=1\nPath=Profiles/nightly\n\
+       [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/release\nDefault=1\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/release".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_single_install_outranks_default_marker() {
+    // One unambiguous install: it is the dedicated profile Firefox opens, so it
+    // takes precedence over the legacy marker on another profile.
+    let ini_path = write_ini(
+      "ff-install-wins",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/work\n\
+       [Profile0]\nName=personal\nIsRelative=1\nPath=Profiles/personal\nDefault=1\n\
+       [Profile1]\nName=work\nIsRelative=1\nPath=Profiles/work\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/work".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_prefers_an_install_claimed_profile_over_a_stale_marker() {
+    // Two installs and two Default=1 markers: the first marker names a profile
+    // no install claims (stale after an about:profiles switch), so the resolver
+    // must pick the marker that an install actually points at.
+    let ini_path = write_ini(
+      "ff-stale-marker",
+      "[Install0000000000000001]\nDefault=Profiles/release\n\
+       [Install0000000000000002]\nDefault=Profiles/nightly\n\
+       [Profile0]\nName=stale\nIsRelative=1\nPath=Profiles/stale\nDefault=1\n\
+       [Profile1]\nName=nightly\nIsRelative=1\nPath=Profiles/nightly\nDefault=1\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/nightly".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_prefers_a_claimed_profile_when_no_marker_agrees() {
+    // Competing installs, no Default=1 anywhere: a profile that some install
+    // opens beats the merely-first profile section.
+    let ini_path = write_ini(
+      "ff-no-marker-two-installs",
+      "[Install0000000000000001]\nDefault=Profiles/ghost\n\
+       [Install0000000000000002]\nDefault=Profiles/real\n\
+       [Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\n\
+       [Profile1]\nName=real\nIsRelative=1\nPath=Profiles/real\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/real".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_ignores_an_install_naming_an_undeclared_profile() {
+    // The lone install points at a profile with no section; the Default=1
+    // marker is the only trustworthy signal left.
+    let ini_path = write_ini(
+      "ff-install-ghost",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/ghost\n\
+       [Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\n\
+       [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/real\nDefault=1\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/real".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_treats_repeated_install_defaults_as_one() {
+    // Two installs naming the SAME profile are not in conflict, so that profile
+    // wins over a competing Default=1 marker just as a single install would.
+    let ini_path = write_ini(
+      "ff-duplicate-installs",
+      "[Install0000000000000001]\nDefault=Profiles/work\n\
+       [Install0000000000000002]\nDefault=Profiles/work\n\
+       [Profile0]\nName=personal\nIsRelative=1\nPath=Profiles/personal\nDefault=1\n\
+       [Profile1]\nName=work\nIsRelative=1\nPath=Profiles/work\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/work".to_string())
+    );
+  }
+
+  #[test]
+  fn default_profile_accepts_a_padded_default_marker() {
+    let ini_path = write_ini(
+      "ff-padded-marker",
+      "[Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\n\
+       [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/real\nDefault= 1 \n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/real".to_string())
+    );
+  }
+
+  #[test]
+  fn list_profiles_skips_sections_without_a_path() {
+    let ini_path = write_ini(
+      "ff-pathless-section",
+      "[Profile0]\nName=broken\nIsRelative=1\n\
+       [Profile1]\nName=ok\nIsRelative=1\nPath=Profiles/ok\nDefault=1\n",
+    );
+    let profiles = list_profiles(&ini_path).expect("should list");
+    let names: Vec<_> = profiles.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["ok"]);
+  }
+
+  #[test]
+  fn list_profiles_surfaces_an_install_default_with_no_section() {
+    // The pre-enumeration resolver returned the install's Default verbatim and
+    // discovery probed it, so it must stay reachable.
+    let ini_path = write_ini(
+      "ff-orphan-install",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/orphan\n",
+    );
+    let base = ini_path.parent().unwrap();
+
+    let profiles = list_profiles(&ini_path).expect("should list");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].path, base.join("Profiles/orphan"));
+    assert!(profiles[0].is_default);
+  }
+
+  #[test]
+  fn list_profiles_surfaces_an_orphan_install_alongside_declared_profiles() {
+    // The install names a profile with no section, another section exists, and
+    // no Default=1 marker decides. The heuristic default is the declared
+    // profile, but the orphan must still be listed so discovery can reach it.
+    let ini_path = write_ini(
+      "ff-orphan-plus-declared",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/orphan\n\
+       [Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\n",
+    );
+    let base = ini_path.parent().unwrap();
+
+    let profiles = list_profiles(&ini_path).expect("should list");
+    let paths: Vec<_> = profiles.iter().map(|p| p.path.clone()).collect();
+    assert_eq!(
+      paths,
+      vec![base.join("Profiles/other"), base.join("Profiles/orphan")]
+    );
+    assert!(
+      profiles[0].is_default,
+      "declared profile is the heuristic default"
+    );
+    assert!(!profiles[1].is_default);
+  }
+
+  #[test]
+  fn list_profiles_flags_exactly_one_default_for_duplicate_paths() {
+    // A malformed ini can declare the same Path twice; "the default" must stay
+    // singular so selection does not become spuriously ambiguous.
+    let ini_path = write_ini(
+      "ff-duplicate-paths",
+      "[Profile0]\nName=first\nIsRelative=1\nPath=Profiles/same\nDefault=1\n\
+       [Profile1]\nName=second\nIsRelative=1\nPath=Profiles/same\nDefault=1\n",
+    );
+    let profiles = list_profiles(&ini_path).expect("should list");
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(
+      profiles.iter().filter(|p| p.is_default).count(),
+      1,
+      "{profiles:?}"
+    );
+  }
+
+  #[test]
+  fn list_profiles_keeps_backslash_paths_verbatim() {
+    // rust-ini's default parser treats `\` as an escape introducer and would
+    // turn this into `C:UsersmeProfileswork`, with `\r` becoming a carriage
+    // return. Asserted on every platform so Linux CI catches a regression.
+    let ini_path = write_ini(
+      "ff-backslash",
+      "[Profile0]\nName=win\nIsRelative=0\nPath=C:\\Users\\me\\Profiles\\work\nDefault=1\n",
+    );
+    let base = ini_path.parent().unwrap();
+    let profiles = list_profiles(&ini_path).expect("should list");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(
+      profiles[0].path,
+      base.join("C:\\Users\\me\\Profiles\\work"),
+      "backslashes must survive ini parsing"
+    );
+  }
+
+  #[test]
+  fn select_profile_rejects_ambiguous_and_empty_selectors() {
+    let profiles = vec![
+      MozillaProfile {
+        name: "default-release".to_string(),
+        path: PathBuf::from("/snap/Profiles/abc.default-release"),
+        is_default: true,
+      },
+      MozillaProfile {
+        name: "default-release".to_string(),
+        path: PathBuf::from("/home/Profiles/xyz.default-release"),
+        is_default: true,
+      },
+    ];
+
+    let err = select_profile(&profiles, "default-release").expect_err("ambiguous");
+    assert!(
+      err.to_string().contains("2 profiles match"),
+      "unexpected error: {err}"
+    );
+    // A full path still disambiguates.
+    assert_eq!(
+      select_profile(&profiles, "/snap/Profiles/abc.default-release")
+        .unwrap()
+        .path,
+      PathBuf::from("/snap/Profiles/abc.default-release")
+    );
+
+    let err = select_profile(&profiles, "").expect_err("empty selector");
+    assert!(
+      err.to_string().contains("must not be empty"),
+      "unexpected error: {err}"
+    );
+  }
+
+  #[test]
+  fn default_profile_falls_back_to_first_profile() {
+    let ini_path = write_ini(
+      "ff-no-default-marker",
+      "[General]\nStartWithLastProfile=1\n\
+       [Profile0]\nName=first\nIsRelative=1\nPath=Profiles/first\n\
+       [Profile1]\nName=second\nIsRelative=1\nPath=Profiles/second\n",
+    );
+    assert_eq!(
+      default_profile_path(&ini_path),
+      Some("Profiles/first".to_string())
+    );
+  }
+
+  #[test]
+  fn list_profiles_returns_every_profile_with_absolute_paths() {
+    let ini_path = write_ini(
+      "ff-list",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/release\n\
+       [Profile0]\nName=nightly\nIsRelative=1\nPath=Profiles/nightly\n\
+       [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/release\nDefault=1\n",
+    );
+    let base = ini_path.parent().unwrap();
+
+    let profiles = list_profiles(&ini_path).expect("should list");
+    let names: Vec<_> = profiles.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["nightly", "default"]);
+    assert_eq!(profiles[0].path, base.join("Profiles/nightly"));
+    assert!(!profiles[0].is_default);
+    assert_eq!(profiles[1].path, base.join("Profiles/release"));
+    assert!(profiles[1].is_default);
+  }
+
+  #[test]
+  fn list_profiles_keeps_absolute_profile_paths() {
+    let absolute = unique_tmpdir("ff-absolute-target");
+    let ini_path = write_ini(
+      "ff-absolute",
+      &format!(
+        "[Profile0]\nName=external\nIsRelative=0\nPath={}\nDefault=1\n",
+        absolute.display()
+      ),
+    );
+
+    let profiles = list_profiles(&ini_path).expect("should list");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].path, absolute);
+  }
+
+  #[test]
+  fn list_profiles_without_profile_sections_is_empty() {
+    let ini_path = write_ini("ff-installs-only", "[Install4F96D1932A9F858E]\nLocked=1\n");
+    assert!(list_profiles(&ini_path).expect("should list").is_empty());
+  }
+
+  #[test]
+  fn select_profile_matches_name_directory_or_path() {
+    let profiles = vec![
+      MozillaProfile {
+        name: "default".to_string(),
+        path: PathBuf::from("/base/Profiles/abc.default-release"),
+        is_default: true,
+      },
+      MozillaProfile {
+        name: "work".to_string(),
+        path: PathBuf::from("/base/Profiles/xyz.work"),
+        is_default: false,
+      },
+    ];
+
+    assert_eq!(select_profile(&profiles, "work").unwrap().name, "work");
+    assert_eq!(
+      select_profile(&profiles, "abc.default-release")
+        .unwrap()
+        .name,
+      "default"
+    );
+    assert_eq!(
+      select_profile(&profiles, "/base/Profiles/xyz.work")
+        .unwrap()
+        .name,
+      "work"
+    );
+
+    let err = select_profile(&profiles, "missing").expect_err("should fail");
+    assert!(err.to_string().contains("work"), "unexpected error: {err}");
   }
 
   #[test]
