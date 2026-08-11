@@ -622,6 +622,52 @@ mod tests {
   }
 
   #[test]
+  fn firefox_based_reads_cookies_committed_to_an_active_wal() {
+    // Self-cleaning, unlike `unique_tmpdir`; held to the end of the test.
+    let dir = crate::utils::TempDir::new().expect("temp dir");
+    let db = dir.path().join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "checkpointed",
+        "old",
+        false,
+        0,
+      )],
+    );
+
+    // Switch the database to WAL and keep the writer connected, so the second
+    // cookie stays in the -wal the way it does while Firefox is running.
+    let writer = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    let mode: String = writer
+      .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+      .expect("enable WAL");
+    assert_eq!(mode, "wal");
+    writer
+      .execute(
+        "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
+          VALUES ('.example.com', '/', 0, 0, 'in-wal', 'fresh', 0, 0)",
+        [],
+      )
+      .expect("insert WAL row");
+
+    let mut cookies = firefox_based(db, None).expect("decode");
+
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["checkpointed", "in-wal"], "{cookies:?}");
+    let in_wal = cookies.iter().find(|c| c.name == "in-wal").expect("in-wal");
+    assert_eq!(
+      in_wal.value, "fresh",
+      "the WAL row must decode, not just appear"
+    );
+  }
+
+  #[test]
   fn firefox_based_filters_by_domain() {
     let dir = unique_tmpdir("ff-domain-filter");
     let db = dir.join("cookies.sqlite");
