@@ -8,6 +8,7 @@ import difflib
 import json
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 
@@ -55,6 +56,18 @@ def load_exceptions(path: Path) -> list[dict[str, str]]:
             raise ValueError(f"unknown exception feature set: {exception!r}")
         if exception["change"] not in CHANGES:
             raise ValueError(f"unknown exception change: {exception!r}")
+        try:
+            remove_by = date.fromisoformat(exception["remove_by"])
+        except ValueError as error:
+            raise ValueError(
+                f"exception remove_by must be an ISO date (YYYY-MM-DD): {exception!r}"
+            ) from error
+        if exception["remove_by"] != remove_by.isoformat():
+            raise ValueError(
+                f"exception remove_by must use canonical YYYY-MM-DD form: {exception!r}"
+            )
+        if remove_by < date.today():
+            raise ValueError(f"expired public API exception: {exception!r}")
         key = tuple(exception[field] for field in ("platform", "feature_set", "change", "item"))
         if key in seen:
             raise ValueError(f"duplicate exception: {exception!r}")
