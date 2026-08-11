@@ -18,6 +18,9 @@ pub use browser::{
 
 // Private
 mod browser;
+#[allow(dead_code)]
+// Staged for the private generic pipeline introduced after registry milestone 3A.
+mod registry;
 use anyhow::bail;
 pub use anyhow::{self, Result};
 use common::paths;

@@ -72,7 +72,13 @@ jobs:
 
       - name: Verify cargo package
         run: |
-          cargo package --manifest-path Cargo.toml -p rookie-cookies --list > package_files.txt
-          cat package_files.txt
-          grep -q "^examples/simple.rs$" package_files.txt
-          grep -q "^examples/from_path.rs$" package_files.txt
+          package_files="$(mktemp)"
+          trap 'rm -f "$package_files"' EXIT
+          cargo package --manifest-path Cargo.toml -p rookie-cookies --list > "$package_files"
+          cat "$package_files"
+          grep -q "^browser_registry.json$" "$package_files"
+          grep -q "^examples/simple.rs$" "$package_files"
+          grep -q "^examples/from_path.rs$" "$package_files"
+          cargo package --manifest-path Cargo.toml -p rookie-cookies
+          cargo test --manifest-path target/package/rookie-cookies-*/Cargo.toml \
+            --lib embedded_registry_smoke_loads_current_platform
