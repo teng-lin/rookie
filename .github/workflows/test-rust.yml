@@ -80,10 +80,10 @@ jobs:
             enforce: true
           - os: macos-latest
             platform: macos
-            enforce: false
+            enforce: true
           - os: windows-latest
             platform: windows
-            enforce: false
+            enforce: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

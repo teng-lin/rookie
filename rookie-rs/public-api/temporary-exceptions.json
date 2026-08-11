@@ -1,37 +1,4 @@
 {
   "schema_version": 1,
-  "exceptions": [
-    {
-      "platform": "macos",
-      "feature_set": "all-features",
-      "change": "missing-baseline",
-      "item": "macos-all-features.txt",
-      "reason": "The baseline must be generated on a native macOS runner and must not be fabricated from Linux output.",
-      "remove_by": "Before the Milestone 1A PR is marked ready"
-    },
-    {
-      "platform": "macos",
-      "feature_set": "no-default-features",
-      "change": "missing-baseline",
-      "item": "macos-no-default-features.txt",
-      "reason": "The baseline must be generated on a native macOS runner and must not be fabricated from Linux output.",
-      "remove_by": "Before the Milestone 1A PR is marked ready"
-    },
-    {
-      "platform": "windows",
-      "feature_set": "all-features",
-      "change": "missing-baseline",
-      "item": "windows-all-features.txt",
-      "reason": "The baseline must be generated on a native Windows runner and must not be fabricated from Linux output.",
-      "remove_by": "Before the Milestone 1A PR is marked ready"
-    },
-    {
-      "platform": "windows",
-      "feature_set": "no-default-features",
-      "change": "missing-baseline",
-      "item": "windows-no-default-features.txt",
-      "reason": "The baseline must be generated on a native Windows runner and must not be fabricated from Linux output.",
-      "remove_by": "Before the Milestone 1A PR is marked ready"
-    }
-  ]
+  "exceptions": []
 }
