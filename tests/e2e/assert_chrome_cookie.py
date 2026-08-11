@@ -4,6 +4,8 @@ Chrome profile seeded earlier in the same CI job.
 Driven by env vars:
   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
   ROOKIE_E2E_DOMAIN         optional — domain filter (default: 127.0.0.1)
+  ROOKIE_E2E_COOKIE_NAME    optional — expected name (default: rookie_ci)
+  ROOKIE_E2E_COOKIE_VALUE   optional — expected value (default: bar)
 
 Designed to be run on Linux/macOS/Windows (rookie_cookies's chromium_based
 binding handles the per-OS crypto). On Linux this runs inside the same
@@ -48,25 +50,34 @@ def main() -> int:
     else:
         cookies = rookie_cookies.chromium_based(str(db_path), [domain])
 
-    seeded = next((c for c in cookies if c["name"] == "rookie_ci"), None)
-    if seeded is None:
-        print(
-            f"seeded cookie `rookie_ci` not found among {len(cookies)} cookies "
-            f"for domain {domain}",
-            file=sys.stderr,
-        )
-        return 1
+    expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
+    expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
+    results = [("chromium_based", cookies)]
+    if os.environ.get("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY") == "1":
+        results.append(("chrome", rookie_cookies.chrome([domain])))
 
-    if seeded["value"] != "bar":
-        print(
-            f"cookie value mismatch: expected 'bar', got {seeded['value']!r}",
-            file=sys.stderr,
-        )
-        return 1
+    for surface, result in results:
+        seeded = next((c for c in result if c["name"] == expected_name), None)
+        if seeded is None:
+            print(
+                f"{surface}: seeded cookie {expected_name!r} not found among "
+                f"{len(result)} cookies for domain {domain}",
+                file=sys.stderr,
+            )
+            return 1
+        if seeded["value"] != expected_value:
+            print(
+                f"{surface}: cookie value mismatch: expected {expected_value!r}, "
+                f"got {seeded['value']!r}",
+                file=sys.stderr,
+            )
+            return 1
 
     print(
         f"rookie_cookies ({sys.platform}): "
-        f"rookie_ci=bar verified ({len(cookies)} cookies for {domain})"
+        f"{expected_name}={expected_value} verified "
+        f"({len(cookies)} cookies for {domain}; "
+        f"surfaces: {', '.join(surface for surface, _ in results)})"
     )
     return 0
 

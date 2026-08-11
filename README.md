@@ -115,7 +115,7 @@ Run the Python unit tests after building the extension in a virtual environment:
 python -m unittest discover -s tests/python -p 'test_*.py' -v
 ```
 
-Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/workflows/e2e.yml). They seed disposable Chrome and Firefox profiles and verify Rust, Python, Node.js, and CLI extraction against the same cookie.
+Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/workflows/e2e.yml). They seed disposable Chrome and Firefox profiles on Ubuntu, macOS, and Windows and verify Rust, Python, Node.js, and CLI extraction against the same cookie. A separate strict Windows canary verifies default-profile App-Bound `v20` extraction from a live WAL, while the artifact-smoke workflow installs and runs the shipped CLI, wheel, and npm tarballs in clean consumer environments. See [the testing guide](docs/TESTING.md) for the exact matrix and local commands.
 
 ## Documentation and examples
 
@@ -123,6 +123,7 @@ Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/work
 - [Rust documentation](docs/Rust.md)
 - [JavaScript documentation](docs/JavaScript.md)
 - [Build instructions](docs/BUILDING.md)
+- [Testing guide](docs/TESTING.md)
 - [Release instructions](docs/RELEASING.md)
 - [Changelog](CHANGELOG.md)
 - [Python examples](examples/python)

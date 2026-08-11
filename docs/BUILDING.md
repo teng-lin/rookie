@@ -71,11 +71,13 @@ cargo test --workspace --all-targets
 cargo test --workspace --doc
 ```
 
-A real-browser end-to-end suite (Ubuntu + macOS + Windows × Chrome / Firefox)
-runs under `.github/workflows/e2e.yml` and exercises rookie-cookies' Rust API, the
-Python binding (`rookie-cookies`), the Node binding (`rookie-cookies`), and the
-`rookie-cookies` CLI against the same seeded browser profile. To run a single job
-locally, follow the steps in that workflow file.
+A real-browser end-to-end suite runs under `.github/workflows/e2e.yml` and
+exercises rookie-cookies' Rust API, Python binding, Node binding, and CLI against
+the same seeded Chrome or Firefox profile on Ubuntu, macOS, and Windows. Windows
+has distinct legacy-DPAPI and strict default-profile App-Bound `v20` lanes.
+Installed CLI, wheel, and npm tarballs are independently exercised by
+`.github/workflows/artifact-smoke.yml`. See `docs/TESTING.md` for the exact
+required/scheduled matrix, security invariants, and local commands.
 
 Python bindings can be smoke-tested after `maturin develop`:
 

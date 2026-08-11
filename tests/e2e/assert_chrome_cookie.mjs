@@ -4,6 +4,8 @@
 // Env vars:
 //   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
 //   ROOKIE_E2E_DOMAIN         optional — domain filter (default: 127.0.0.1)
+//   ROOKIE_E2E_COOKIE_NAME    optional — expected name (default: rookie_ci)
+//   ROOKIE_E2E_COOKIE_VALUE   optional — expected value (default: bar)
 //
 // Requires `npm run build` to have produced the
 // platform-specific .node binary alongside bindings/node/index.js.
@@ -20,6 +22,8 @@ if (!userDataDir) {
   process.exit(2);
 }
 const domain = process.env.ROOKIE_E2E_DOMAIN ?? "127.0.0.1";
+const expectedName = process.env.ROOKIE_E2E_COOKIE_NAME ?? "rookie_ci";
+const expectedValue = process.env.ROOKIE_E2E_COOKIE_VALUE ?? "bar";
 
 const defaultDir = join(userDataDir, "Default");
 let dbPath;
@@ -45,18 +49,27 @@ if (process.platform === "win32") {
   cookies = await rookieCookies.chromiumBased(dbPath, [domain]);
 }
 
-const seeded = cookies.find((c) => c.name === "rookie_ci");
-if (!seeded) {
-  console.error(
-    `seeded cookie 'rookie_ci' not found among ${cookies.length} cookies for ${domain}`,
-  );
-  process.exit(1);
+const results = [["chromiumBased", cookies]];
+if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
+  results.push(["chrome", await rookieCookies.chrome([domain])]);
 }
-if (seeded.value !== "bar") {
-  console.error(`cookie value mismatch: expected 'bar', got '${seeded.value}'`);
-  process.exit(1);
+
+for (const [surface, result] of results) {
+  const seeded = result.find((c) => c.name === expectedName);
+  if (!seeded) {
+    console.error(
+      `${surface}: seeded cookie '${expectedName}' not found among ${result.length} cookies for ${domain}`,
+    );
+    process.exit(1);
+  }
+  if (seeded.value !== expectedValue) {
+    console.error(
+      `${surface}: cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
+    );
+    process.exit(1);
+  }
 }
 
 console.log(
-  `rookie-cookies (${process.platform}): rookie_ci=bar verified (${cookies.length} cookies for ${domain})`,
+  `rookie-cookies (${process.platform}): ${expectedName}=${expectedValue} verified (${cookies.length} cookies for ${domain}; surfaces: ${results.map(([surface]) => surface).join(", ")})`,
 );

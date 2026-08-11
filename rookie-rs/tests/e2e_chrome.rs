@@ -10,9 +10,15 @@
 //!                               via --user-data-dir
 //!   ROOKIE_E2E_DOMAIN         — optional; domain filter for extraction
 //!                               (default: "127.0.0.1")
+//!   ROOKIE_E2E_COOKIE_NAME    — optional; expected name (default: "rookie_ci")
+//!   ROOKIE_E2E_COOKIE_VALUE   — optional; expected value (default: "bar")
 //!
-//! Ignored by default; CI runs them via
+//! The real-browser tests are ignored by default; CI runs them via
 //! `cargo test --test e2e_chrome -- --ignored`.
+//!
+//! On Windows this target also has a non-ignored, deterministic legacy-DPAPI
+//! test. It creates Local State and Cookies fixtures for the current user, so
+//! it needs neither Chrome nor a pre-existing profile.
 
 mod helpers {
   use std::env;
@@ -49,17 +55,172 @@ mod helpers {
   }
 
   pub fn assert_seeded(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
+    let expected_name =
+      env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
+    let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_string());
     let seeded = cookies
       .iter()
-      .find(|c| c.name == "rookie_ci")
+      .find(|c| c.name == expected_name)
       .unwrap_or_else(|| {
         panic!(
-          "seeded cookie `rookie_ci` not found among {} cookies for domain {}",
+          "seeded cookie `{}` not found among {} cookies for domain {}",
+          expected_name,
           cookies.len(),
           domain
         )
       });
-    assert_eq!(seeded.value, "bar", "cookie value mismatch");
+    assert_eq!(seeded.value, expected_value, "cookie value mismatch");
+  }
+}
+
+#[cfg(target_os = "windows")]
+mod deterministic_dpapi {
+  use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+  };
+  use base64::{engine::general_purpose, Engine as _};
+  use rand::RngCore;
+  use std::ffi::c_void;
+  use std::path::{Path, PathBuf};
+  use std::ptr;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use windows::Win32::Security::Cryptography::{
+    CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+  };
+
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn LocalFree(hmem: *mut c_void) -> *mut c_void;
+  }
+
+  pub struct Fixture {
+    root: PathBuf,
+    pub local_state: PathBuf,
+    pub cookies_db: PathBuf,
+  }
+
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.root);
+    }
+  }
+
+  fn unique_tmpdir() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!(
+      "rookie DPAPI e2e ünicode-{}-{}",
+      std::process::id(),
+      n
+    ));
+    std::fs::create_dir_all(&dir).expect("create fixture directory");
+    dir
+  }
+
+  fn protect_for_current_user(plaintext: &[u8]) -> Vec<u8> {
+    let input = CRYPT_INTEGER_BLOB {
+      cbData: plaintext.len() as u32,
+      pbData: plaintext.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+      cbData: 0,
+      pbData: ptr::null_mut(),
+    };
+
+    unsafe {
+      CryptProtectData(
+        &input,
+        windows::core::PCWSTR::null(),
+        None,
+        None,
+        None,
+        CRYPTPROTECT_UI_FORBIDDEN,
+        &mut output,
+      )
+      .expect("CryptProtectData for the current user");
+    }
+    assert!(!output.pbData.is_null(), "CryptProtectData returned null");
+
+    let protected =
+      unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    let free_result = unsafe { LocalFree(output.pbData.cast()) };
+    assert!(free_result.is_null(), "LocalFree failed");
+    protected
+  }
+
+  fn write_local_state(path: &Path, aes_key: &[u8; 32]) {
+    let protected = protect_for_current_user(aes_key);
+    let mut chrome_key = b"DPAPI".to_vec();
+    chrome_key.extend_from_slice(&protected);
+    let state = serde_json::json!({
+      "os_crypt": {
+        "encrypted_key": general_purpose::STANDARD.encode(chrome_key)
+      },
+      "profile": { "last_used": "Default" }
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&state).unwrap()).expect("write Local State");
+  }
+
+  fn write_cookie_db(path: &Path, aes_key: &[u8; 32]) {
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let cipher = Aes256Gcm::new_from_slice(aes_key).expect("32-byte AES key");
+    let ciphertext = cipher
+      .encrypt(Nonce::from_slice(&nonce_bytes), b"bar".as_ref())
+      .expect("encrypt v10 cookie");
+    let mut encrypted_value = b"v10".to_vec();
+    encrypted_value.extend_from_slice(&nonce_bytes);
+    encrypted_value.extend_from_slice(&ciphertext);
+
+    let connection = rusqlite::Connection::open(path).expect("create Cookies db");
+    connection
+      .execute_batch(
+        "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);\
+         INSERT INTO meta (key, value) VALUES ('version', '23');\
+         CREATE TABLE cookies (\
+           host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,\
+           expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,\
+           encrypted_value BLOB, is_httponly INTEGER NOT NULL, samesite INTEGER NOT NULL\
+         );",
+      )
+      .expect("create Chromium schema");
+    connection
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value,\
+          encrypted_value, is_httponly, samesite)\
+         VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8)",
+        rusqlite::params![
+          ".example.test",
+          "/",
+          false,
+          11_644_473_600_000_000u64 + 1_900_000_000u64 * 1_000_000,
+          "rookie_ci",
+          encrypted_value,
+          true,
+          1i64,
+        ],
+      )
+      .expect("insert encrypted cookie");
+  }
+
+  pub fn create() -> Fixture {
+    let root = unique_tmpdir();
+    let network = root.join("Default/Network");
+    std::fs::create_dir_all(&network).expect("create Chromium profile layout");
+    let local_state = root.join("Local State");
+    let cookies_db = network.join("Cookies");
+
+    let mut aes_key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut aes_key);
+    write_local_state(&local_state, &aes_key);
+    write_cookie_db(&cookies_db, &aes_key);
+
+    Fixture {
+      root,
+      local_state,
+      cookies_db,
+    }
   }
 }
 
@@ -135,4 +296,48 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
       });
 
   helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore]
+fn extracts_seeded_cookie_through_default_chrome_discovery() {
+  if std::env::var("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY").as_deref() != Ok("1") {
+    eprintln!("default Chrome discovery check was not requested");
+    return;
+  }
+  let domain = helpers::domain();
+  let cookies = rookie_cookies::chrome(Some(vec![domain.clone()]))
+    .unwrap_or_else(|error| panic!("rookie_cookies::chrome failed: {error}"));
+  helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extracts_deterministic_legacy_v10_fixture_with_current_user_dpapi() {
+  let fixture = deterministic_dpapi::create();
+  let domain = "example.test";
+
+  let cookies = rookie_cookies::chromium_based(
+    fixture.local_state.clone(),
+    fixture.cookies_db.clone(),
+    Some(vec![domain.to_string()]),
+    false,
+  )
+  .unwrap_or_else(|error| {
+    panic!(
+      "chromium_based({}, {}) failed: {error}",
+      fixture.local_state.display(),
+      fixture.cookies_db.display()
+    )
+  });
+
+  let cookie = cookies
+    .iter()
+    .find(|cookie| cookie.name == "rookie_ci")
+    .expect("seeded cookie");
+  assert_eq!(cookie.value, "bar");
+  assert_eq!(cookie.domain, ".example.test");
+  assert!(cookie.http_only);
+  assert_eq!(cookie.same_site, 1);
 }
