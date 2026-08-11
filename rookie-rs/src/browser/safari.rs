@@ -1,4 +1,4 @@
-use crate::common::{date, enums::*};
+use crate::common::{date, enums::*, utils};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::{fs::File, io::Read, path::PathBuf, vec::Vec};
@@ -28,17 +28,10 @@ pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Ve
   let cookies = parse_content(&bs)?;
 
   // Filter cookies by domain if domains are specified
-  if let Some(domain_filters) = domains {
+  if let Some(domain_filters) = &domains {
     let filtered_cookies: Vec<Cookie> = cookies
       .into_iter()
-      .filter(|cookie| {
-        // Check if the cookie's domain matches any of the specified domains
-        domain_filters.iter().any(|domain| {
-          // Implement your domain matching logic here
-          // For example, you can use the `.ends_with` method to check if the cookie's domain ends with the specified domain.
-          cookie.domain.ends_with(domain)
-        })
-      })
+      .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
       .collect();
 
     Ok(filtered_cookies)

@@ -143,8 +143,7 @@ pub fn get_session_cookies(
             .get("host")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-          let should_add = domains.is_none() || // add every domain
-                        domains.is_some() && utils::some_domain_in_host(domains.to_owned(), domain); // only if some domain in host
+          let should_add = utils::some_domain_in_host(domains.as_deref(), domain);
           if !should_add {
             continue;
           }
@@ -183,8 +182,7 @@ pub fn get_session_cookies_lz4(
       .get("host")
       .and_then(|v| v.as_str())
       .unwrap_or("");
-    let should_add = domains.is_none() || // add every domain
-                        utils::some_domain_in_host(domains.to_owned(), domain); // only if some domain in host
+    let should_add = utils::some_domain_in_host(domains.as_deref(), domain);
     if !should_add {
       continue;
     }

@@ -1,4 +1,4 @@
-use crate::common::{date, enums::Cookie};
+use crate::common::{date, enums::Cookie, utils};
 use anyhow::Result;
 use libesedb::EseDb;
 use std::path::PathBuf;
@@ -44,8 +44,7 @@ pub fn internet_explorer_based(
         let expires = date::internet_explorer_timestamp(expires);
         let http_only = false;
 
-        let should_append =
-          domains.is_none() || domains.iter().any(|d| d.contains(&host.to_string()));
+        let should_append = utils::some_domain_in_host(domains.as_deref(), host);
         if should_append {
           cookies.push(Cookie {
             domain: host.to_string(),
