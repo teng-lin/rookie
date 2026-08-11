@@ -194,12 +194,17 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
     // or in the moment between. Discard any WAL an earlier attempt left here,
     // which would otherwise replay over a newer main file and hide rows, and
     // let the verification decide whether this attempt stands.
-    Err(err) if err.kind() == io::ErrorKind::NotFound => {
-      if wal_copy.exists() {
-        fs::remove_file(&wal_copy)
-          .with_context(|| format!("Can't discard the stale copy {}", wal_copy.display()))?;
+    Err(err) if err.kind() == io::ErrorKind::NotFound => match fs::remove_file(&wal_copy) {
+      Ok(()) => {}
+      // Nothing to discard, which is the usual case on a first attempt.
+      Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+      Err(err) => {
+        return Err(anyhow::Error::new(err).context(format!(
+          "Can't discard the stale copy {}",
+          wal_copy.display()
+        )))
       }
-    }
+    },
     Err(err) => {
       return Err(
         anyhow::Error::new(err).context(format!("Can't copy write-ahead log {}", wal.display())),
