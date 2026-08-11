@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import functools
 import json
 import subprocess
 import sys
@@ -127,44 +128,53 @@ def compare_with_exceptions(
 ) -> bool:
     expected_lines = expected.splitlines()
     actual_lines = actual.splitlines()
-    active: set[tuple[str, str]] = set()
     allowed = {(exception["change"], exception["item"]) for exception in exceptions}
-    filtered_expected: list[str] = []
-    filtered_actual: list[str] = []
-
-    matcher = difflib.SequenceMatcher(None, expected_lines, actual_lines, autojunk=False)
-    for tag, expected_start, expected_end, actual_start, actual_end in matcher.get_opcodes():
-        if tag == "equal":
-            filtered_expected.extend(expected_lines[expected_start:expected_end])
-            filtered_actual.extend(actual_lines[actual_start:actual_end])
-            continue
-
-        for item in expected_lines[expected_start:expected_end]:
-            key = ("removed", item)
-            if key in allowed:
-                active.add(key)
-            else:
-                filtered_expected.append(item)
-        for item in actual_lines[actual_start:actual_end]:
-            key = ("added", item)
-            if key in allowed:
-                active.add(key)
-            else:
-                filtered_actual.append(item)
-
-    expected_lines = filtered_expected
-    actual_lines = filtered_actual
 
     stale = [
         exception
         for exception in exceptions
         if exception["change"] != "missing-baseline"
-        and (exception["change"], exception["item"]) not in active
+        and (
+            (
+                exception["change"] == "added"
+                and actual_lines.count(exception["item"])
+                <= expected_lines.count(exception["item"])
+            )
+            or (
+                exception["change"] == "removed"
+                and expected_lines.count(exception["item"])
+                <= actual_lines.count(exception["item"])
+            )
+        )
     ]
     if stale:
         print(f"stale or mismatched public API exceptions for {label}: {stale!r}", file=sys.stderr)
         return False
-    if expected_lines == actual_lines:
+
+    @functools.cache
+    def matches(expected_index: int, actual_index: int) -> bool:
+        if expected_index == len(expected_lines) and actual_index == len(actual_lines):
+            return True
+        if (
+            expected_index < len(expected_lines)
+            and actual_index < len(actual_lines)
+            and expected_lines[expected_index] == actual_lines[actual_index]
+            and matches(expected_index + 1, actual_index + 1)
+        ):
+            return True
+        if (
+            expected_index < len(expected_lines)
+            and ("removed", expected_lines[expected_index]) in allowed
+            and matches(expected_index + 1, actual_index)
+        ):
+            return True
+        return (
+            actual_index < len(actual_lines)
+            and ("added", actual_lines[actual_index]) in allowed
+            and matches(expected_index, actual_index + 1)
+        )
+
+    if matches(0, 0):
         return True
 
     print(f"public API mismatch for {label}:", file=sys.stderr)
