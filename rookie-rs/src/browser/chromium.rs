@@ -151,32 +151,32 @@ impl From<anyhow::Error> for ChromiumCookieValueError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChromiumRowIssueCode {
+pub(crate) enum ChromiumRowIssueCode {
   ColumnRead(&'static str),
   Decrypt,
   Decode,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ChromiumRowIssue {
-  code: ChromiumRowIssueCode,
-  occurrences: usize,
-  samples: Vec<String>,
+pub(crate) struct ChromiumRowIssue {
+  pub(crate) code: ChromiumRowIssueCode,
+  pub(crate) occurrences: usize,
+  pub(crate) samples: Vec<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct ChromiumExtractionStats {
-  rows_seen: usize,
-  cookies_emitted: usize,
-  rows_skipped: usize,
+pub(crate) struct ChromiumExtractionStats {
+  pub(crate) rows_seen: usize,
+  pub(crate) cookies_emitted: usize,
+  pub(crate) rows_skipped: usize,
 }
 
 #[derive(Debug, Default)]
-struct ChromiumEngineExtractionOutcome {
-  cookies: Vec<Cookie>,
-  stats: ChromiumExtractionStats,
-  issues: Vec<ChromiumRowIssue>,
-  legacy_error: Option<anyhow::Error>,
+pub(crate) struct ChromiumEngineExtractionOutcome {
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) stats: ChromiumExtractionStats,
+  pub(crate) issues: Vec<ChromiumRowIssue>,
+  pub(crate) legacy_error: Option<anyhow::Error>,
 }
 
 impl ChromiumEngineExtractionOutcome {
@@ -859,7 +859,7 @@ pub(crate) fn query_cookies_with_key_outcomes(
 }
 
 #[allow(unused_variables)]
-fn query_cookies_engine_outcome(
+pub(crate) fn query_cookies_engine_outcome(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,

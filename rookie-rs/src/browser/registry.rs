@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use super::chromium::query_cookies_with_key_outcomes;
+use super::chromium::{query_cookies_engine_outcome, ChromiumExtractionStats, ChromiumRowIssue};
 use super::chromium_crypto::{
   retrieve_key_outcomes, ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider,
 };
@@ -378,6 +378,8 @@ pub(crate) struct DiscoveryIssue {
 struct ChromiumDiscovery {
   installations: Vec<BrowserInstallation>,
   issues: Vec<DiscoveryIssue>,
+  detected_roots: usize,
+  enumerated_roots: usize,
 }
 
 impl ChromiumDiscovery {
@@ -387,6 +389,10 @@ impl ChromiumDiscovery {
       .iter()
       .flat_map(|installation| installation.profiles.iter().cloned())
       .collect()
+  }
+
+  fn all_detected_roots_failed(&self) -> bool {
+    self.detected_roots > 0 && self.enumerated_roots == 0
   }
 }
 
@@ -532,8 +538,21 @@ fn discover_installation_profiles<F: DiscoveryFs>(
     }
   }
 
-  let profile_paths = if !marked.is_empty() {
-    marked
+  let mut source_bearing_marked = Vec::new();
+  for profile_path in marked {
+    if profile_has_source(context, &profile_path) {
+      source_bearing_marked.push(profile_path);
+    } else {
+      issues.push(DiscoveryIssue {
+        code: "profile_has_no_cookie_source",
+        path: profile_path,
+        message: "profile marker has no Chromium cookie source".to_owned(),
+      });
+    }
+  }
+
+  let profile_paths = if !source_bearing_marked.is_empty() {
+    source_bearing_marked
   } else if profile_has_source(context, &installation.path) {
     vec![installation.path.clone()]
   } else {
@@ -563,16 +582,6 @@ fn discover_installation_profiles<F: DiscoveryFs>(
         continue;
       }
     };
-    let canonical_key = normalized_path_bytes(&canonical_path);
-    if !seen_profiles.insert(canonical_key) {
-      issues.push(DiscoveryIssue {
-        code: "duplicate_profile",
-        path: canonical_path,
-        message: "profile is already owned by an earlier registry root".to_owned(),
-      });
-      continue;
-    }
-
     let lexical_relative_path = profile_path
       .strip_prefix(&installation.path)
       .unwrap_or(profile_path.as_path());
@@ -604,6 +613,33 @@ fn discover_installation_profiles<F: DiscoveryFs>(
     };
     let profile_id = profile_id(&installation.installation_id, locator);
     let persistent_candidates = persistent_candidates(context, &canonical_path);
+    let canonical_key = if directory_name == "." {
+      let selected_source = persistent_candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .expect("source-bearing profile has a selected persistent source");
+      match context.fs.canonicalize(&selected_source.path) {
+        Ok(path) => normalized_path_bytes(&path),
+        Err(error) => {
+          issues.push(DiscoveryIssue {
+            code: "profile_source_canonicalize_failed",
+            path: selected_source.path.clone(),
+            message: error.to_string(),
+          });
+          continue;
+        }
+      }
+    } else {
+      normalized_path_bytes(&canonical_path)
+    };
+    if !seen_profiles.insert(canonical_key) {
+      issues.push(DiscoveryIssue {
+        code: "duplicate_profile",
+        path: canonical_path,
+        message: "profile is already owned by an earlier registry root".to_owned(),
+      });
+      continue;
+    }
     installation.profiles.push(ChromiumProfile {
       profile_id,
       installation_id: installation.installation_id.clone(),
@@ -653,9 +689,6 @@ fn discover_browser_with_context<F: DiscoveryFs>(
   let mut discovery = ChromiumDiscovery::default();
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
-  let mut detected_roots = 0usize;
-  let mut enumerated_roots = 0usize;
-
   for root in roots {
     let Some(resolved) = context.resolve_template(&root.template) else {
       continue;
@@ -663,7 +696,7 @@ fn discover_browser_with_context<F: DiscoveryFs>(
     if !context.fs.is_dir(&resolved) {
       continue;
     }
-    detected_roots += 1;
+    discovery.detected_roots += 1;
     let canonical_path = match context.fs.canonicalize(&resolved) {
       Ok(path) => path,
       Err(error) => {
@@ -708,13 +741,14 @@ fn discover_browser_with_context<F: DiscoveryFs>(
           &mut seen_profiles,
           &mut discovery.issues,
         ) {
-          Ok(()) => enumerated_roots += 1,
+          Ok(()) => discovery.enumerated_roots += 1,
           Err(error) => {
             discovery.issues.push(DiscoveryIssue {
               code: "installation_enumeration_failed",
               path: installation.path.clone(),
               message: error.to_string(),
             });
+            discovery.installations.push(installation);
             continue;
           }
         }
@@ -729,9 +763,6 @@ fn discover_browser_with_context<F: DiscoveryFs>(
       .cmp(&right.priority)
       .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
   });
-  if detected_roots > 0 && enumerated_roots == 0 {
-    bail!("every detected Chrome installation failed profile enumeration")
-  }
   Ok(discovery)
 }
 
@@ -814,6 +845,8 @@ fn normalized_path_bytes(path: &Path) -> Vec<u8> {
 pub(crate) struct ChromiumProfileExtraction {
   pub(crate) profile: ChromiumProfile,
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) stats: ChromiumExtractionStats,
+  pub(crate) row_issues: Vec<ChromiumRowIssue>,
   pub(crate) error: Option<String>,
 }
 
@@ -879,6 +912,13 @@ where
       .cloned()
       .collect::<Vec<_>>();
     if selected_profiles.is_empty() {
+      if profile_id.is_none() {
+        report.installations.push(ChromiumInstallationExtraction {
+          installation_id: installation.installation_id,
+          channel: installation.channel,
+          profiles: Vec::new(),
+        });
+      }
       continue;
     }
     // The provider is installation-scoped, so Local State/keyring work happens
@@ -890,22 +930,28 @@ where
         profile_extractions.push(ChromiumProfileExtraction {
           profile,
           cookies: Vec::new(),
+          stats: ChromiumExtractionStats::default(),
+          row_issues: Vec::new(),
           error: Some("profile has no selected persistent source".to_owned()),
         });
         continue;
       };
-      match query_cookies_with_key_outcomes(key_outcomes.clone(), source, domains.clone(), false) {
-        Ok(mut cookies) => {
-          sort_cookies(&mut cookies);
+      match query_cookies_engine_outcome(key_outcomes.clone(), source, domains.clone(), false) {
+        Ok(mut outcome) => {
+          sort_cookies(&mut outcome.cookies);
           profile_extractions.push(ChromiumProfileExtraction {
             profile,
-            cookies,
-            error: None,
+            cookies: outcome.cookies,
+            stats: outcome.stats,
+            row_issues: outcome.issues,
+            error: outcome.legacy_error.map(|error| error.to_string()),
           });
         }
         Err(error) => profile_extractions.push(ChromiumProfileExtraction {
           profile,
           cookies: Vec::new(),
+          stats: ChromiumExtractionStats::default(),
+          row_issues: Vec::new(),
           error: Some(error.to_string()),
         }),
       }
@@ -972,7 +1018,14 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromeKeyProvider {
 /// re-exported from `lib.rs` before the coordinated public report release.
 pub(crate) fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
   let context = DiscoveryContext::system()?;
-  Ok(discover_browser_with_context(&context, "chrome")?.profiles())
+  profiles_for_listing(discover_browser_with_context(&context, "chrome")?)
+}
+
+fn profiles_for_listing(discovery: ChromiumDiscovery) -> Result<Vec<ChromiumProfile>> {
+  if discovery.all_detected_roots_failed() {
+    bail!("every detected Chrome installation failed profile enumeration")
+  }
+  Ok(discovery.profiles())
 }
 
 /// Private Milestone 3C ID-based selector/report seam.
@@ -1107,6 +1160,54 @@ mod tests {
         .entry(installation.installation_id.clone())
         .or_default() += 1;
       ChromiumKeyOutcomes::default()
+    }
+  }
+
+  #[derive(Default)]
+  struct TestDiscoveryFs {
+    denied_read_dir: Option<PathBuf>,
+    canonical_aliases: BTreeMap<PathBuf, PathBuf>,
+  }
+
+  impl DiscoveryFs for TestDiscoveryFs {
+    fn exists(&self, path: &Path) -> bool {
+      RealDiscoveryFs.exists(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+      RealDiscoveryFs.is_dir(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
+      if self.denied_read_dir.as_deref() == Some(path) {
+        bail!("injected profile enumeration failure")
+      }
+      RealDiscoveryFs.read_dir(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+      self
+        .canonical_aliases
+        .get(path)
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| RealDiscoveryFs.canonicalize(path))
+    }
+
+    fn read_to_string(&self, path: &Path) -> Result<String> {
+      RealDiscoveryFs.read_to_string(path)
+    }
+  }
+
+  fn with_test_fs(
+    context: DiscoveryContext<RealDiscoveryFs>,
+    fs: TestDiscoveryFs,
+  ) -> DiscoveryContext<TestDiscoveryFs> {
+    DiscoveryContext {
+      platform: context.platform,
+      home: context.home,
+      env: context.env,
+      fs,
     }
   }
 
@@ -1281,6 +1382,34 @@ mod tests {
   }
 
   #[test]
+  fn report_preserves_partial_row_stats_and_issues() {
+    let temp = TempDir::new("partial-rows");
+    let context = test_context(temp.path().to_path_buf());
+    let root = channel_root(&context, "stable");
+    let db = seed_cookie(&root.join("Default"), true, "readable", "value");
+    let connection = rusqlite::Connection::open(db).expect("reopen cookie db");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'skipped', '', ?1, 0, 0)",
+        params![b"v10ciphertext".as_slice()],
+      )
+      .expect("insert undecryptable row");
+    write_local_state(&root, serde_json::json!({}));
+
+    let report = extract_chrome_with_provider(&context, None, None, &CountingProvider::default())
+      .expect("partial report");
+    let extraction = &report.installations[0].profiles[0];
+    assert_eq!(extraction.cookies.len(), 1);
+    assert_eq!(extraction.cookies[0].name, "readable");
+    assert_eq!(extraction.stats.rows_seen, 2);
+    assert_eq!(extraction.stats.cookies_emitted, 1);
+    assert_eq!(extraction.stats.rows_skipped, 1);
+    assert_eq!(extraction.row_issues.len(), 1);
+    assert_eq!(extraction.row_issues[0].occurrences, 1);
+    assert!(extraction.error.is_none());
+  }
+
+  #[test]
   fn profile_selector_uses_opaque_id_and_limits_key_retrieval() {
     let temp = TempDir::new("select");
     let context = test_context(temp.path().to_path_buf());
@@ -1350,14 +1479,92 @@ mod tests {
     let temp = TempDir::new("fallbacks");
     let context = test_context(temp.path().to_path_buf());
     let root = channel_root(&context, "stable");
+    std::fs::create_dir_all(root.join("Default")).expect("create stale marker");
     seed_cookie(&root.join("Restored Account"), false, "restored", "one");
     let discovery = discover_browser_with_context(&context, "chrome").expect("markerless");
     assert_eq!(discovery.profiles()[0].directory_name, "Restored Account");
+    assert!(discovery
+      .issues
+      .iter()
+      .any(|issue| issue.code == "profile_has_no_cookie_source"));
 
     std::fs::remove_dir_all(&root).expect("remove markerless root");
     seed_cookie(&root, false, "flat", "two");
+    std::fs::create_dir_all(root.join("Default")).expect("create stale marker");
     let discovery = discover_browser_with_context(&context, "chrome").expect("flat");
     assert_eq!(discovery.profiles()[0].directory_name, ".");
     assert!(discovery.profiles()[0].is_default);
+    assert!(discovery
+      .issues
+      .iter()
+      .any(|issue| issue.code == "profile_has_no_cookie_source"));
+  }
+
+  #[test]
+  fn report_retains_total_enumeration_failures_while_listing_errors() {
+    let temp = TempDir::new("enumeration-failure");
+    let real_context = test_context(temp.path().to_path_buf());
+    let root = channel_root(&real_context, "stable");
+    std::fs::create_dir_all(&root).expect("create detected installation");
+    let canonical_root = root.canonicalize().expect("canonical installation root");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_read_dir: Some(canonical_root),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let listing_discovery =
+      discover_browser_with_context(&context, "chrome").expect("retain discovery failure");
+    let listing_error =
+      profiles_for_listing(listing_discovery).expect_err("bare listing must surface total failure");
+    assert!(listing_error
+      .to_string()
+      .contains("every detected Chrome installation failed"));
+
+    let provider = CountingProvider::default();
+    let report =
+      extract_chrome_with_provider(&context, None, None, &provider).expect("failed report outcome");
+    assert_eq!(report.installations.len(), 1);
+    assert!(report.installations[0].profiles.is_empty());
+    assert!(report
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "installation_enumeration_failed"));
+    assert!(provider.calls.borrow().is_empty());
+  }
+
+  #[test]
+  fn flat_profiles_are_deduplicated_by_selected_source() {
+    let temp = TempDir::new("flat-dedup");
+    let real_context = test_context(temp.path().to_path_buf());
+    let stable = channel_root(&real_context, "stable");
+    let beta = channel_root(&real_context, "beta");
+    let stable_source = seed_cookie(&stable, false, "same", "stable");
+    let beta_source = seed_cookie(&beta, false, "same", "beta");
+    let stable_source = stable_source
+      .canonicalize()
+      .expect("canonical stable source");
+    let beta_source = beta_source.canonicalize().expect("canonical beta source");
+    let shared_identity = temp.path().join("canonical-shared-cookie-store");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        canonical_aliases: BTreeMap::from([
+          (stable_source, shared_identity.clone()),
+          (beta_source, shared_identity),
+        ]),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover flats");
+    assert_eq!(discovery.profiles().len(), 1);
+    assert_eq!(discovery.profiles()[0].directory_name, ".");
+    assert!(discovery
+      .issues
+      .iter()
+      .any(|issue| issue.code == "duplicate_profile"));
   }
 }
