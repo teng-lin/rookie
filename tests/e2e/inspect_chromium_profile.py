@@ -20,6 +20,14 @@ def cookie_db(user_data_dir: Path) -> Path:
     raise FileNotFoundError(f"no Cookies database below {user_data_dir / 'Default'}")
 
 
+def configure_utf8_output() -> None:
+    """Keep diagnostics printable for Unicode Windows profile paths."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def decode_key(local_state: dict[str, object], name: str, prefix: bytes) -> bytes:
     os_crypt = local_state.get("os_crypt")
     if not isinstance(os_crypt, dict) or not isinstance(os_crypt.get(name), str):
@@ -48,6 +56,7 @@ def cookie_rows(db_path: Path, cookie_name: str) -> list[tuple[object, ...]]:
 
 
 def main() -> int:
+    configure_utf8_output()
     parser = argparse.ArgumentParser()
     parser.add_argument("user_data_dir", type=Path)
     parser.add_argument("--cookie-name", default="rookie_ci")

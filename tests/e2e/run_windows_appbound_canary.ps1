@@ -28,7 +28,8 @@ function Get-ChromeMainWindows {
 }
 
 function Close-ChromeGracefully {
-  $windows = Get-ChromeMainWindows
+  # PowerShell unwraps a single pipeline result unless the caller re-boxes it.
+  $windows = @(Get-ChromeMainWindows)
   if ($windows.Count -eq 0) {
     throw "Chrome has no main window to close"
   }

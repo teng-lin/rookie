@@ -90,6 +90,11 @@ def main() -> int:
         shutil.rmtree(napi_artifacts)
     napi_artifacts.mkdir(parents=True)
     shutil.copy2(built_binding, napi_artifacts / native_filename)
+    # Release packaging runs in a clean checkout, where `napi artifacts` also
+    # recreates this top-level binding. Remove the local build output after
+    # staging it to match that flow and avoid overwriting a root-owned file
+    # produced by the pinned Linux build container.
+    built_binding.unlink()
     # `napi artifacts` joins --dir to its cwd instead of resolving an absolute
     # path. Match the relative directory shape used after release downloads so
     # a clean runner actually discovers and moves the native binding.

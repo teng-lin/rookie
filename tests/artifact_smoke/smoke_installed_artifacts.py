@@ -17,6 +17,15 @@ import zipfile
 from pathlib import Path
 
 
+def configure_utf8_output() -> None:
+    """Keep parent and child diagnostics printable for Unicode Windows paths."""
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", type=Path, required=True)
@@ -38,6 +47,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> 
         env=env,
         check=True,
         text=True,
+        encoding="utf-8",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -380,6 +390,7 @@ def smoke_npm(
 
 
 def main() -> int:
+    configure_utf8_output()
     args = parse_args()
     artifact_dir = args.artifact_dir.resolve()
     consumer = args.consumer_dir.resolve()
