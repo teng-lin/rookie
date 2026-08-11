@@ -312,6 +312,64 @@ mod tests {
     }
   }
 
+  fn chromium_config(base: &Path) -> Browser {
+    Browser {
+      paths: vec![
+        base
+          .join("{channel}")
+          .join("Default/Network/Cookies")
+          .to_string_lossy()
+          .into_owned(),
+        base
+          .join("{channel}")
+          .join("Default/Cookies")
+          .to_string_lossy()
+          .into_owned(),
+      ],
+      channels: Some(vec!["stable".to_string(), "beta".to_string()]),
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    }
+  }
+
+  fn seed_chromium_source(base: &Path, channel: &str, network: bool) -> PathBuf {
+    let channel_root = base.join(channel);
+    let profile = channel_root.join("Default");
+    let db = if network {
+      profile.join("Network/Cookies")
+    } else {
+      profile.join("Cookies")
+    };
+    std::fs::create_dir_all(db.parent().expect("cookie DB parent")).expect("profile dir");
+    std::fs::write(&db, b"").expect("cookie DB");
+    std::fs::write(channel_root.join("Local State"), b"{}").expect("local state");
+    db
+  }
+
+  #[test]
+  fn find_chrome_based_paths_prefers_configured_source_before_channel() {
+    let base = unique_tmpdir("chromium-source-priority");
+    let beta_network = seed_chromium_source(&base, "beta", true);
+    let _stable_legacy = seed_chromium_source(&base, "stable", false);
+
+    let (_, selected) = find_chrome_based_paths(&chromium_config(&base)).expect("should find");
+    assert_eq!(
+      selected, beta_network,
+      "the first configured path is exhausted across channels before the next path"
+    );
+  }
+
+  #[test]
+  fn find_chrome_based_paths_uses_channel_order_within_one_source() {
+    let base = unique_tmpdir("chromium-channel-priority");
+    let stable_network = seed_chromium_source(&base, "stable", true);
+    let _beta_network = seed_chromium_source(&base, "beta", true);
+
+    let (_, selected) = find_chrome_based_paths(&chromium_config(&base)).expect("should find");
+    assert_eq!(selected, stable_network);
+  }
+
   /// Lays out `<base>/profiles.ini` plus a `cookies.sqlite` in each named
   /// profile directory listed in `with_db`.
   fn seed_profiles(base: &Path, ini: &str, with_db: &[&str]) {

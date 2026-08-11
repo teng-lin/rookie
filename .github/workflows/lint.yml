@@ -7,7 +7,17 @@ on:
   pull_request:
     paths:
       - ".github/workflows/lint.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rustfmt.toml"
       - "rookie-rs/**"
+      - "cli/**/*.rs"
+      - "cli/Cargo.toml"
+      - "bindings/python/src/**/*.rs"
+      - "bindings/python/Cargo.toml"
+      - "bindings/node/src/**/*.rs"
+      - "bindings/node/build.rs"
+      - "bindings/node/Cargo.toml"
   workflow_dispatch:
 
 env:
@@ -46,10 +56,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rookie-rs
+          workspaces: .
 
       - name: run Clippy
-        run: cargo clippy --manifest-path Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   package:
     runs-on: ubuntu-latest

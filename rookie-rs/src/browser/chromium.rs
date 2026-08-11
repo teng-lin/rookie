@@ -794,6 +794,71 @@ mod tests {
     assert_eq!(names, vec!["drop", "keep"], "{:?}", cookies);
   }
 
+  #[test]
+  fn query_cookies_preserves_legacy_substring_domain_filtering() {
+    let dir = unique_tmpdir("chr-domain-filter-substring");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "boundary",
+          "yes",
+          b"",
+          false,
+          0,
+        ),
+        (
+          "notexample.com",
+          "/",
+          false,
+          0,
+          "prefix",
+          "legacy",
+          b"",
+          false,
+          0,
+        ),
+        (
+          "example.com.evil",
+          "/",
+          false,
+          0,
+          "suffix",
+          "legacy",
+          b"",
+          false,
+          0,
+        ),
+        (
+          "other.test",
+          "/",
+          false,
+          0,
+          "unrelated",
+          "no",
+          b"",
+          false,
+          0,
+        ),
+      ],
+    );
+
+    let mut cookies =
+      query_cookies(vec![], db, Some(vec!["example.com".to_string()]), false).expect("decode");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    assert_eq!(
+      names,
+      vec!["boundary", "prefix", "suffix"],
+      "persistent Chromium filtering is the legacy SQL LIKE %domain% contract"
+    );
+  }
+
   #[cfg(unix)]
   #[test]
   fn query_cookies_domain_filter_treats_sql_as_data() {
