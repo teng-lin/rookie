@@ -434,10 +434,17 @@ where
 {
   let mut cookies = Vec::new();
   let mut errors: Vec<String> = Vec::new();
+  let mut successful_extractions = 0;
 
   for (browser_name, browser_fn) in browser_types.iter() {
     match browser_fn(domains.clone()) {
-      Ok(browser_cookies) => cookies.extend(browser_cookies),
+      Ok(browser_cookies) => {
+        successful_extractions += 1;
+        cookies.extend(browser_cookies);
+      }
+      Err(err) if paths::is_browser_not_installed(&err) => {
+        log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {err}");
+      }
       Err(err) => {
         log::warn!("rookie_cookies::load skipping {browser_name}: {err}");
         errors.push(format!("{browser_name}: {err}"));
@@ -445,9 +452,10 @@ where
     }
   }
 
-  // If every attempted browser extraction failed, surface an aggregate error so that
-  // callers can distinguish total failure from legitimately finding no cookies.
-  if !browser_types.is_empty() && errors.len() == browser_types.len() {
+  // Missing profiles were not extraction attempts. If at least one installed
+  // browser failed and none succeeded, surface the real failures; a machine
+  // with no supported browser installed legitimately has no cookies.
+  if successful_extractions == 0 && !errors.is_empty() {
     bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
   }
 
@@ -496,16 +504,16 @@ fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
 /// Returns cookies from all browsers
 ///
 /// This is a best-effort aggregator: each browser is probed in turn and
-/// individual failures are surfaced via [`log::warn!`] but do not abort
-/// the load (a browser not being installed, a locked profile, or a
-/// decrypt failure on one browser should not lose cookies from the
-/// others). If you need to know which browsers failed, hook a logger
+/// individual extraction failures are surfaced via [`log::warn!`] but do not
+/// abort the load (a locked profile or a decrypt failure on one browser should
+/// not lose cookies from the others). Browsers without a discoverable profile
+/// are skipped normally. If you need to know which browsers failed, hook a logger
 /// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
 ///
-/// Returns `Err` only when **every** attempted browser extraction fails,
-/// containing an aggregate message listing each browser and its error.
-/// This lets callers distinguish between "no cookies found" and "all
-/// extractions failed".
+/// Returns `Err` only when at least one installed browser is found, every
+/// attempted extraction fails, and none succeeds. The aggregate message lists
+/// only genuine extraction failures. If no supported browser is installed,
+/// returns an empty list.
 ///
 /// # Arguments
 ///
@@ -622,8 +630,12 @@ mod tests {
 
   type BrowserEntry = (&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>);
 
-  fn always_err(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-    Err(anyhow::anyhow!("not installed"))
+  fn not_installed(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Err(paths::BrowserNotInstalled::CookieDatabase.into())
+  }
+
+  fn extraction_fails(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Err(anyhow::anyhow!("cookie database is corrupt"))
   }
 
   fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
@@ -652,8 +664,16 @@ mod tests {
   }
 
   #[test]
-  fn all_fail_returns_aggregate_error() {
-    let browsers: Vec<BrowserEntry> = vec![("firefox", always_err), ("chrome", always_err)];
+  fn no_installed_browsers_returns_ok_empty() {
+    let browsers: Vec<BrowserEntry> = vec![("firefox", not_installed), ("chrome", not_installed)];
+    let result = load_from_browsers(&browsers, None).expect("absence is not an extraction failure");
+    assert!(result.is_empty());
+  }
+
+  #[test]
+  fn all_installed_browsers_failing_returns_aggregate_error() {
+    let browsers: Vec<BrowserEntry> =
+      vec![("firefox", extraction_fails), ("chrome", extraction_fails)];
     let result = load_from_browsers(&browsers, None);
     assert!(result.is_err(), "expected Err when all browsers fail");
     let msg = result.unwrap_err().to_string();
@@ -662,23 +682,34 @@ mod tests {
       "error should mention aggregate failure, got: {msg}"
     );
     assert!(
-      msg.contains("firefox: not installed"),
+      msg.contains("firefox: cookie database is corrupt"),
       "error should list firefox error, got: {msg}"
     );
     assert!(
-      msg.contains("chrome: not installed"),
+      msg.contains("chrome: cookie database is corrupt"),
       "error should list chrome error, got: {msg}"
     );
   }
 
   #[test]
   fn partial_failure_returns_ok() {
-    let browsers: Vec<BrowserEntry> = vec![("firefox", always_err), ("chrome", always_ok)];
+    let browsers: Vec<BrowserEntry> = vec![("firefox", extraction_fails), ("chrome", always_ok)];
     let result = load_from_browsers(&browsers, None);
     assert!(
       result.is_ok(),
       "expected Ok when at least one browser succeeds, got: {result:?}"
     );
+  }
+
+  #[test]
+  fn missing_browsers_do_not_hide_an_installed_browser_failure() {
+    let browsers: Vec<BrowserEntry> =
+      vec![("firefox", not_installed), ("chrome", extraction_fails)];
+    let message = load_from_browsers(&browsers, None)
+      .expect_err("the one installed browser failed")
+      .to_string();
+    assert!(message.contains("chrome: cookie database is corrupt"));
+    assert!(!message.contains("firefox"));
   }
 
   #[test]
@@ -693,7 +724,7 @@ mod tests {
   fn load_from_browsers_preserves_source_order() {
     let browsers: Vec<BrowserEntry> = vec![
       ("first", first_ok),
-      ("missing", always_err),
+      ("missing", not_installed),
       ("second", second_ok),
     ];
     let cookies = load_from_browsers(&browsers, None)

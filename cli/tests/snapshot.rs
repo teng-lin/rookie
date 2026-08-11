@@ -92,6 +92,19 @@ fn run_rookie_with_info_logs(args: &[&str]) -> std::process::Output {
     .expect("spawn rookie-cookies")
 }
 
+fn isolated_browser_command(root: &Path) -> Command {
+  let mut command = Command::new(ROOKIE_BIN);
+  command.env("RUST_LOG", "error");
+  #[cfg(unix)]
+  command.env("HOME", root);
+  #[cfg(target_os = "windows")]
+  command
+    .env("APPDATA", root)
+    .env("LOCALAPPDATA", root)
+    .env("USERPROFILE", root);
+  command
+}
+
 fn assert_success(out: &std::process::Output) {
   assert!(
     out.status.success(),
@@ -249,6 +262,60 @@ fn invalid_path_exits_nonzero_without_machine_output() {
   assert!(
     !out.stderr.is_empty(),
     "failed invocation should explain the error on stderr"
+  );
+}
+
+#[test]
+fn load_without_an_installed_browser_returns_an_empty_array() {
+  let root = unique_tmpdir("empty-browser-home");
+  let out = isolated_browser_command(root.path())
+    .args(["--load", "--format", "json"])
+    .output()
+    .expect("spawn rookie-cookies");
+
+  assert_success(&out);
+  assert_eq!(
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("valid JSON"),
+    serde_json::json!([])
+  );
+}
+
+#[test]
+fn load_errors_when_an_installed_browser_cannot_be_extracted() {
+  let root = unique_tmpdir("broken-installed-browser");
+
+  #[cfg(target_os = "linux")]
+  let firefox_root = root.path().join(".mozilla/firefox");
+  #[cfg(target_os = "macos")]
+  let firefox_root = root.path().join("Library/Application Support/Firefox");
+  #[cfg(target_os = "windows")]
+  let firefox_root = root.path().join("Mozilla/Firefox");
+
+  let profile = firefox_root.join("Profiles/broken.default-release");
+  std::fs::create_dir_all(&profile).expect("create Firefox profile");
+  std::fs::write(
+    firefox_root.join("profiles.ini"),
+    "[Profile0]\nName=broken\nIsRelative=1\n\
+     Path=Profiles/broken.default-release\nDefault=1\n",
+  )
+  .expect("write profiles.ini");
+  std::fs::write(profile.join("cookies.sqlite"), b"not a sqlite database")
+    .expect("write corrupt cookie database");
+
+  let out = isolated_browser_command(root.path())
+    .args(["--load", "--format", "json"])
+    .output()
+    .expect("spawn rookie-cookies");
+
+  assert!(
+    !out.status.success(),
+    "broken installed browser was ignored"
+  );
+  assert!(out.stdout.is_empty(), "failure emitted machine output");
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("all browser extractions failed") && stderr.contains("firefox:"),
+    "missing aggregate extraction error: {stderr}"
   );
 }
 

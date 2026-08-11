@@ -2,11 +2,44 @@ use crate::{
   browser::mozilla::{list_profiles, MozillaProfile},
   config::Browser,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use std::{
   env,
+  error::Error,
+  fmt,
   path::{Path, PathBuf},
 };
+
+/// Path resolution reached every configured location without finding an
+/// installed browser profile that contains a cookie database.
+///
+/// `load()` treats this as a normal "browser not installed" result. Keeping it
+/// typed prevents genuine expansion, I/O, and extraction failures from being
+/// mistaken for an absent browser based on their display text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserNotInstalled {
+  CookieDatabase,
+  ProfileWithCookieDatabase,
+}
+
+impl fmt::Display for BrowserNotInstalled {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::CookieDatabase => write!(formatter, "Can't find cookies file"),
+      Self::ProfileWithCookieDatabase => {
+        write!(formatter, "Can't find any profile with a cookie database")
+      }
+    }
+  }
+}
+
+impl Error for BrowserNotInstalled {}
+
+pub(crate) fn is_browser_not_installed(error: &anyhow::Error) -> bool {
+  error
+    .chain()
+    .any(|cause| cause.downcast_ref::<BrowserNotInstalled>().is_some())
+}
 
 fn expand_glob_paths(path: PathBuf) -> Result<Vec<PathBuf>> {
   let mut paths: Vec<PathBuf> = vec![];
@@ -51,7 +84,7 @@ pub fn find_chrome_based_paths(config: &Browser) -> Result<(PathBuf, PathBuf)> {
       }
     }
   }
-  Err(anyhow!("can't find cookies file"))
+  Err(BrowserNotInstalled::CookieDatabase.into())
 }
 
 /// Expands every configured base path for `config` across its channels and glob
@@ -132,7 +165,7 @@ pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
     }
   }
 
-  bail!("Can't find cookies file")
+  Err(BrowserNotInstalled::CookieDatabase.into())
 }
 
 /// Records `profile` unless an earlier root already yielded the same directory.
@@ -193,7 +226,7 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
   }
 
   if found.is_empty() {
-    bail!("Can't find any profile with a cookie database")
+    return Err(BrowserNotInstalled::ProfileWithCookieDatabase.into());
   }
   Ok(found)
 }
@@ -217,7 +250,7 @@ pub fn find_safari_based_paths(config: &Browser) -> Result<PathBuf> {
       }
     }
   }
-  bail!("Can't find cookies file")
+  Err(BrowserNotInstalled::CookieDatabase.into())
 }
 
 #[cfg(target_os = "windows")]
@@ -241,7 +274,7 @@ pub fn find_ie_based_paths(config: &Browser) -> Result<PathBuf> {
     }
   }
 
-  bail!("Can't find cookies file")
+  Err(BrowserNotInstalled::CookieDatabase.into())
 }
 #[cfg(target_os = "windows")]
 pub fn expand_path(path: &str) -> Result<PathBuf> {
