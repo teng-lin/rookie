@@ -31,6 +31,7 @@ fn print_version() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt()
     .with_writer(std::io::stderr)
+    .with_ansi(false)
     .with_env_filter(
       tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
