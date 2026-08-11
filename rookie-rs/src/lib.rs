@@ -18,15 +18,14 @@ pub use browser::{
 
 // Private
 mod browser;
-use anyhow::bail;
 pub use anyhow::{self, Result};
+use anyhow::{bail, Context};
 use common::paths;
-use config::get_browser_config;
+use config::{get_browser_config, Browser};
 use enums::Cookie;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "windows")]
-use std::path::PathBuf;
+use std::{io::Read, path::PathBuf};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -530,6 +529,144 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   load_from_browsers(&browser_types, domains)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnyBrowserSource {
+  ChromiumSqlite,
+  MozillaSqlite,
+  SafariBinaryCookies,
+  #[cfg(target_os = "windows")]
+  InternetExplorerEse,
+}
+
+/// Classifies an SQLite cookie database from its schema before any browser
+/// decoder (and, importantly, before any platform key provider) is invoked.
+fn sniff_sqlite_cookie_source(path: PathBuf) -> Result<AnyBrowserSource> {
+  let source = common::sqlite::with_browser_database(path, |connection| {
+    let table_exists = |name: &str| -> rusqlite::Result<bool> {
+      connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+        [name],
+        |row| row.get(0),
+      )
+    };
+    Ok((table_exists("cookies")?, table_exists("moz_cookies")?))
+  })?
+  .into_value();
+
+  match source {
+    (true, false) => Ok(AnyBrowserSource::ChromiumSqlite),
+    (false, true) => Ok(AnyBrowserSource::MozillaSqlite),
+    (true, true) => {
+      bail!("ambiguous SQLite cookie database: both `cookies` and `moz_cookies` tables are present")
+    }
+    (false, false) => bail!(
+      "unsupported SQLite database: expected a Chromium `cookies` or Mozilla `moz_cookies` table"
+    ),
+  }
+}
+
+/// Inspects the source's on-disk signature before choosing a decoder family.
+fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
+  let metadata = std::fs::metadata(path)
+    .with_context(|| format!("can't inspect cookie source {}", path.display()))?;
+  if !metadata.is_file() {
+    bail!("cookie source is not a file: {}", path.display());
+  }
+
+  let file = std::fs::File::open(path)
+    .with_context(|| format!("can't open cookie source {}", path.display()))?;
+  let mut header = Vec::with_capacity(16);
+  file
+    .take(16)
+    .read_to_end(&mut header)
+    .with_context(|| format!("can't read cookie source header {}", path.display()))?;
+
+  if header.starts_with(b"SQLite format 3\0") {
+    return sniff_sqlite_cookie_source(path.to_path_buf());
+  }
+  if header.starts_with(b"COOK") {
+    return Ok(AnyBrowserSource::SafariBinaryCookies);
+  }
+  #[cfg(target_os = "windows")]
+  if header.get(4..8) == Some(&[0xef, 0xcd, 0xab, 0x89]) {
+    return Ok(AnyBrowserSource::InternetExplorerEse);
+  }
+
+  bail!("unsupported cookie source format: {}", path.display())
+}
+
+#[cfg(unix)]
+fn any_browser_chromium_configs() -> Vec<(&'static str, &'static Browser)> {
+  let configs = vec![
+    ("chrome", get_browser_config("chrome")),
+    ("brave", get_browser_config("brave")),
+    ("chromium", get_browser_config("chromium")),
+    ("edge", get_browser_config("edge")),
+    ("opera", get_browser_config("opera")),
+    ("vivaldi", get_browser_config("vivaldi")),
+    ("arc", get_browser_config("arc")),
+  ];
+  #[cfg(target_os = "macos")]
+  let configs = configs
+    .into_iter()
+    .chain(std::iter::once((
+      "opera_gx",
+      get_browser_config("opera_gx"),
+    )))
+    .collect();
+  configs
+}
+
+/// Tries every applicable Chromium identity and selects the most complete
+/// result. A fallback-key cookie under the wrong identity is therefore not an
+/// early-success signal; a later identity that emits more rows, or skips fewer
+/// rows for an equal-size result, wins.
+#[cfg(unix)]
+fn best_chromium_probe<Probe>(
+  configs: &[(&'static str, &'static Browser)],
+  mut probe: Probe,
+) -> Result<Vec<Cookie>>
+where
+  Probe: FnMut(&'static str, &'static Browser) -> Result<browser::chromium::ChromiumProbeResult>,
+{
+  let mut best: Option<(&'static str, browser::chromium::ChromiumProbeResult)> = None;
+  let mut failures = Vec::new();
+
+  for &(name, config) in configs {
+    match probe(name, config) {
+      Ok(candidate) => {
+        let is_better = best.as_ref().is_none_or(|(_, current)| {
+          candidate.cookies.len() > current.cookies.len()
+            || (candidate.cookies.len() == current.cookies.len()
+              && candidate.rows_skipped < current.rows_skipped)
+        });
+        if is_better {
+          best = Some((name, candidate));
+        }
+      }
+      Err(error) => {
+        log::warn!("any_browser: {name} (chromium) did not decode: {error}");
+        failures.push(format!("{name}: {error}"));
+      }
+    }
+  }
+
+  match best {
+    Some((name, result)) => {
+      log::debug!(
+        "any_browser selected Chromium identity {name} (cookies={}, rows_skipped={})",
+        result.cookies.len(),
+        result.rows_skipped
+      );
+      Ok(result.cookies)
+    }
+    None => bail!(
+      "no Chromium configuration decoded the cookie database:\n  {}",
+      failures.join("\n  ")
+    ),
+  }
+}
+
 /// Returns cookies from specific browser
 /// Useful for CLI apps
 ///
@@ -553,74 +690,57 @@ pub fn any_browser(
   domains: Option<Vec<String>>,
   key_path: Option<&str>,
 ) -> Result<Vec<Cookie>> {
-  // Each parser is probed in turn; the first to succeed wins. Failed
-  // probes are logged at warn level so users can see which decoders
-  // were tried and why they rejected the file.
-  // chromium based
-  #[cfg(unix)]
-  {
-    let chrome_configs = &[
-      ("chrome", get_browser_config("chrome")),
-      ("brave", get_browser_config("brave")),
-      ("chromium", get_browser_config("chromium")),
-      ("edge", get_browser_config("edge")),
-      ("opera", get_browser_config("opera")),
-      ("opera_gx", get_browser_config("opera_gx")),
-      ("vivaldi", get_browser_config("vivaldi")),
-    ];
-    for (name, browser_config) in chrome_configs {
-      match chromium_based(browser_config, cookies_path.into(), domains.clone(), false) {
-        Ok(cookies) => return Ok(cookies),
-        Err(err) => {
-          log::warn!("any_browser: {name} (chromium) did not decode {cookies_path}: {err}")
-        }
+  let cookies_path = PathBuf::from(cookies_path);
+  match sniff_cookie_source(&cookies_path)? {
+    AnyBrowserSource::MozillaSqlite => firefox_based(cookies_path, domains),
+    AnyBrowserSource::ChromiumSqlite => {
+      #[cfg(target_os = "windows")]
+      {
+        let key_path = key_path.context(
+          "a Chromium Local State key file is required for a Chromium cookie database on Windows",
+        )?;
+        chromium_based(PathBuf::from(key_path), cookies_path, domains, false)
+      }
+      #[cfg(target_os = "linux")]
+      {
+        let configs = any_browser_chromium_configs();
+        let mut key_cache = browser::chromium_platform_keys::LinuxKeyOutcomeCache::new();
+        best_chromium_probe(&configs, |_name, config| {
+          let outcomes = key_cache.outcomes_for(config);
+          browser::chromium::chromium_based_probe_with_key_outcomes(
+            outcomes,
+            cookies_path.clone(),
+            domains.clone(),
+            false,
+          )
+        })
+      }
+      #[cfg(all(unix, not(target_os = "linux")))]
+      {
+        let configs = any_browser_chromium_configs();
+        best_chromium_probe(&configs, |_name, config| {
+          browser::chromium::chromium_based_probe(
+            config,
+            cookies_path.clone(),
+            domains.clone(),
+            false,
+          )
+        })
       }
     }
-  }
-  #[cfg(target_os = "windows")]
-  {
-    if let Some(key_path) = key_path {
-      match chromium_based(
-        PathBuf::from(key_path),
-        cookies_path.into(),
-        domains.clone(),
-        false,
-      ) {
-        Ok(cookies) => return Ok(cookies),
-        Err(err) => {
-          log::warn!("any_browser: chromium (windows) did not decode {cookies_path}: {err}")
-        }
+    AnyBrowserSource::SafariBinaryCookies => {
+      #[cfg(target_os = "macos")]
+      {
+        safari_based(cookies_path, domains)
+      }
+      #[cfg(not(target_os = "macos"))]
+      {
+        bail!("Safari binary cookie files are only supported on macOS")
       }
     }
+    #[cfg(target_os = "windows")]
+    AnyBrowserSource::InternetExplorerEse => internet_explorer_based(cookies_path, domains, false),
   }
-  // Windows chromium
-
-  // Firefox
-  match firefox_based(cookies_path.into(), domains.clone()) {
-    Ok(cookies) => return Ok(cookies),
-    Err(err) => log::warn!("any_browser: firefox did not decode {cookies_path}: {err}"),
-  }
-
-  #[cfg(target_os = "windows")]
-  {
-    // Internet Explorer
-    match internet_explorer_based(cookies_path.into(), domains.clone(), false) {
-      Ok(cookies) => return Ok(cookies),
-      Err(err) => log::warn!("any_browser: internet_explorer did not decode {cookies_path}: {err}"),
-    }
-  }
-  #[cfg(target_os = "macos")]
-  {
-    match safari_based(cookies_path.into(), domains) {
-      Ok(cookies) => return Ok(cookies),
-      Err(err) => log::warn!("any_browser: safari did not decode {cookies_path}: {err}"),
-    }
-  }
-  bail!(
-    "\nNo cookies found.\n\
-    If you're using a Chromium-based browser, please specify the key file \
-    and run this program with administrator privileges."
-  );
 }
 
 #[cfg(test)]
@@ -740,7 +860,7 @@ mod tests {
       .map(|(name, _)| name)
       .collect();
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     assert_eq!(
       names,
       vec![
@@ -811,6 +931,161 @@ mod tests {
         "arc",
       ]
     );
+  }
+
+  fn source_test_path(tag: &str) -> (crate::utils::TempDir, std::path::PathBuf) {
+    let dir = crate::utils::TempDir::new().expect("temporary source directory");
+    let path = dir.path().join(tag);
+    (dir, path)
+  }
+
+  #[test]
+  fn any_browser_sniffs_sqlite_decoder_family_from_schema() {
+    let (_chromium_dir, chromium_path) = source_test_path("chromium.sqlite");
+    let chromium = rusqlite::Connection::open(&chromium_path).expect("Chromium fixture");
+    chromium
+      .execute("CREATE TABLE cookies (name TEXT)", [])
+      .expect("Chromium table");
+    drop(chromium);
+
+    let (_mozilla_dir, mozilla_path) = source_test_path("mozilla.sqlite");
+    let mozilla = rusqlite::Connection::open(&mozilla_path).expect("Mozilla fixture");
+    mozilla
+      .execute("CREATE TABLE moz_cookies (name TEXT)", [])
+      .expect("Mozilla table");
+    drop(mozilla);
+
+    assert_eq!(
+      sniff_cookie_source(&chromium_path).expect("sniff Chromium"),
+      AnyBrowserSource::ChromiumSqlite
+    );
+    assert_eq!(
+      sniff_cookie_source(&mozilla_path).expect("sniff Mozilla"),
+      AnyBrowserSource::MozillaSqlite
+    );
+  }
+
+  #[test]
+  fn any_browser_rejects_ambiguous_or_unrelated_sqlite_schemas() {
+    let (_ambiguous_dir, ambiguous_path) = source_test_path("ambiguous.sqlite");
+    let ambiguous = rusqlite::Connection::open(&ambiguous_path).expect("ambiguous fixture");
+    ambiguous
+      .execute_batch("CREATE TABLE cookies (name TEXT); CREATE TABLE moz_cookies (name TEXT);")
+      .expect("ambiguous tables");
+    drop(ambiguous);
+    let error = sniff_cookie_source(&ambiguous_path).expect_err("ambiguous schema must fail");
+    assert!(error
+      .to_string()
+      .contains("both `cookies` and `moz_cookies`"));
+
+    let (_other_dir, other_path) = source_test_path("other.sqlite");
+    let other = rusqlite::Connection::open(&other_path).expect("other fixture");
+    other
+      .execute("CREATE TABLE unrelated (value TEXT)", [])
+      .expect("unrelated table");
+    drop(other);
+    let error = sniff_cookie_source(&other_path).expect_err("unrelated schema must fail");
+    assert!(error.to_string().contains("unsupported SQLite database"));
+  }
+
+  #[test]
+  fn any_browser_sniffs_binary_cookie_signature_without_decoder_probing() {
+    let (_dir, path) = source_test_path("Cookies.binarycookies");
+    std::fs::write(&path, b"COOKsynthetic").expect("Safari header fixture");
+    assert_eq!(
+      sniff_cookie_source(&path).expect("sniff Safari"),
+      AnyBrowserSource::SafariBinaryCookies
+    );
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn any_browser_sniffs_ese_signature() {
+    let (_dir, path) = source_test_path("WebCacheV01.dat");
+    std::fs::write(&path, [0, 0, 0, 0, 0xef, 0xcd, 0xab, 0x89]).expect("ESE header fixture");
+    assert_eq!(
+      sniff_cookie_source(&path).expect("sniff ESE"),
+      AnyBrowserSource::InternetExplorerEse
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn any_browser_does_not_accept_partial_wrong_chromium_identity_early() {
+    let configs = vec![
+      ("wrong", get_browser_config("chrome")),
+      ("correct", get_browser_config("brave")),
+    ];
+    let mut probed = Vec::new();
+    let cookies = best_chromium_probe(&configs, |name, _config| {
+      probed.push(name);
+      if name == "wrong" {
+        Ok(browser::chromium::ChromiumProbeResult {
+          cookies: vec![named_cookie("fallback")],
+          rows_skipped: 1,
+        })
+      } else {
+        Ok(browser::chromium::ChromiumProbeResult {
+          cookies: vec![named_cookie("fallback"), named_cookie("encrypted")],
+          rows_skipped: 0,
+        })
+      }
+    })
+    .expect("correct identity wins");
+
+    assert_eq!(probed, vec!["wrong", "correct"]);
+    assert_eq!(
+      cookies
+        .iter()
+        .map(|cookie| cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["fallback", "encrypted"]
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn any_browser_preserves_chromium_probe_diagnostics_when_all_identities_fail() {
+    let configs = vec![
+      ("chrome", get_browser_config("chrome")),
+      ("brave", get_browser_config("brave")),
+    ];
+    let error = best_chromium_probe(&configs, |name, _config| {
+      Err(anyhow::anyhow!("{name} keyring is locked"))
+    })
+    .expect_err("all failures must remain visible");
+    let message = error.to_string();
+    assert!(message.contains("chrome: chrome keyring is locked"));
+    assert!(message.contains("brave: brave keyring is locked"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn any_browser_chromium_configs_include_arc_with_its_own_identity() {
+    let configs = any_browser_chromium_configs();
+    let names = configs.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+      names,
+      vec!["chrome", "brave", "chromium", "edge", "opera", "vivaldi", "arc"]
+    );
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+      names,
+      vec!["chrome", "brave", "chromium", "edge", "opera", "vivaldi", "arc", "opera_gx"]
+    );
+
+    let (_, arc) = configs
+      .iter()
+      .find(|(name, _)| *name == "arc")
+      .expect("Arc configuration");
+    assert_eq!(arc.unix_crypt_name.as_deref(), Some("arc"));
+
+    #[cfg(target_os = "macos")]
+    {
+      assert_eq!(arc.osx_key_service.as_deref(), Some("Arc Safe Storage"));
+      assert_eq!(arc.osx_key_user.as_deref(), Some("Arc"));
+    }
   }
 
   use std::sync::atomic::{AtomicU64, Ordering};
