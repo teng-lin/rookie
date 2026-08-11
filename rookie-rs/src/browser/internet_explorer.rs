@@ -27,14 +27,24 @@ pub fn internet_explorer_based(
     let table_name: String = table.name()?;
 
     if table_name.starts_with("CookieEntry") {
-      let flags_column = find_flags_column(&table)?;
-      if flags_column.is_none() {
-        log::warn!("{table_name}: no `Flags` column; reporting secure/http_only as false");
-      }
+      let Some(flags_column) = find_flags_column(&table)? else {
+        anyhow::bail!("{table_name}: no `Flags` column; cannot read cookie security flags");
+      };
       let mut warned_undecodable_flags = false;
 
       for rec in table.iter_records()? {
         let rec = rec?;
+        // Read the security flags first: a cookie whose flags cannot be decoded is
+        // dropped rather than emitted with `secure` silently cleared.
+        let Some(flags) = flags_from_ese_value(&rec.value(flags_column)?) else {
+          if !warned_undecodable_flags {
+            warned_undecodable_flags = true;
+            log::warn!("{table_name}: skipping cookies whose `Flags` cell holds no integer");
+          }
+          continue;
+        };
+        let (secure, http_only) = security_flags(flags);
+
         let host = rec.value(8)?;
         let host = host.as_str().unwrap_or("");
         let path = rec.value(9)?;
@@ -51,20 +61,6 @@ pub fn internet_explorer_based(
           .to_string();
         let expires = rec.value(4)?.to_u64().unwrap_or(0);
         let expires = date::internet_explorer_timestamp(expires);
-        let flags = match flags_column {
-          Some(index) => match flags_from_ese_value(&rec.value(index)?) {
-            Some(flags) => flags,
-            None => {
-              if !warned_undecodable_flags {
-                warned_undecodable_flags = true;
-                log::warn!("{table_name}: `Flags` holds no integer; reporting it as unset");
-              }
-              0
-            }
-          },
-          None => 0,
-        };
-        let (secure, http_only) = security_flags(flags);
 
         let should_append = utils::some_domain_in_host(domains.as_deref(), host);
         if should_append {
@@ -87,10 +83,6 @@ pub fn internet_explorer_based(
 
 /// Locates the `Flags` column by name, since its position is not stable across
 /// WebCache schema versions. Returns the record entry index, if the column exists.
-///
-/// An unrecognised schema yields `None` rather than an error: losing every cookie
-/// is worse than losing the security flags, so extraction continues and the
-/// missing flags are reported through the log instead.
 fn find_flags_column(table: &Table<'_>) -> Result<Option<i32>> {
   for (index, column) in table.iter_columns()?.enumerate() {
     if column?.name()?.eq_ignore_ascii_case("Flags") {
@@ -102,8 +94,9 @@ fn find_flags_column(table: &Table<'_>) -> Result<Option<i32>> {
 
 /// Reads the WinInet bitfield out of a `Flags` cell, or `None` if it holds no integer.
 ///
-/// ESE stores the column as a signed 32-bit `Long`, so the value is read wide and
-/// cast back to preserve the bit pattern of flags with the high bit set.
+/// The column is a `JET_coltypLong`, which libesedb surfaces as a signed
+/// [`Value::I32`], so the value is read wide and cast back to preserve the bit
+/// pattern of flags with the high bit set.
 fn flags_from_ese_value(value: &Value) -> Option<u32> {
   value.to_i64().map(|raw| raw as u32)
 }
@@ -143,8 +136,8 @@ mod tests {
 
   #[test]
   fn flags_from_ese_value_recovers_signed_long_bit_pattern() {
-    // libesedb maps ESE `Long` to a signed i32, so a flags word with the high bit
-    // set arrives negative. `Value::to_u32` would reject it, dropping every flag.
+    // libesedb maps `JET_coltypLong` to a signed `I32`, so a flags word with the
+    // high bit set arrives negative. `to_u32` would reject it, dropping every flag.
     assert_eq!(flags_from_ese_value(&Value::I32(0x2001)), Some(0x0000_2001));
     assert_eq!(flags_from_ese_value(&Value::I32(-1)), Some(0xFFFF_FFFF));
     assert_eq!(
@@ -161,7 +154,8 @@ mod tests {
   fn flags_from_ese_value_rejects_non_integer_cells() {
     assert_eq!(flags_from_ese_value(&Value::Null(())), None);
     assert_eq!(flags_from_ese_value(&Value::Text("Flags".into())), None);
-    // Long values are fetched through a separate API, so they carry no payload here.
+    // `Value::Long` is libesedb's out-of-line placeholder (not `JET_coltypLong`);
+    // it carries no payload, so it must not decode to a flags word.
     assert_eq!(flags_from_ese_value(&Value::Long), None);
   }
 }
