@@ -13,6 +13,12 @@ use std::{
 /// extraction consume unbounded memory.
 const MAX_BINARY_COOKIES_FILE_SIZE: u64 = 64 * 1024 * 1024;
 
+/// A malformed page can use nearly the entire file-size allowance for its
+/// record-offset table. Stop recovery before millions of invalid offsets turn
+/// a corrupt file into an unbounded CPU/logging workload.
+const MAX_RECOVERABLE_RECORD_ERRORS_PER_PAGE: usize = 1024;
+const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
+
 /// 1. open cookies file
 /// 2. parse headers
 /// 3. parse pages (total from headers)
@@ -107,6 +113,7 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
 
   let mut cookies: Vec<Cookie> = vec![];
   let mut last_error = None;
+  let mut error_count = 0usize;
   for (index, raw_offset) in parsed_table.into_iter().enumerate() {
     let result = (|| {
       let offset = usize::try_from(raw_offset)
@@ -121,7 +128,22 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
     match result {
       Ok(cookie) => cookies.push(cookie),
       Err(error) => {
-        log::warn!("Skipping malformed Safari cookie record {index}: {error:#}");
+        error_count += 1;
+        if error_count <= MAX_LOGGED_RECORD_ERRORS_PER_PAGE {
+          log::warn!("Skipping malformed Safari cookie record {index}: {error:#}");
+        } else if error_count == MAX_LOGGED_RECORD_ERRORS_PER_PAGE + 1 {
+          log::warn!("Additional malformed Safari cookie records will be summarized for this page");
+        }
+
+        if error_count >= MAX_RECOVERABLE_RECORD_ERRORS_PER_PAGE {
+          let error = error.context(format!(
+            "Safari page recovery limit reached after {error_count} malformed records"
+          ));
+          log::warn!("Stopping malformed Safari page recovery: {error:#}");
+          last_error = Some(error);
+          break;
+        }
+
         last_error = Some(error);
       }
     }
@@ -513,6 +535,44 @@ mod tests {
     assert!(
       format!("{error:#}").contains("cookie record 1"),
       "expected final record error, got {error:#}"
+    );
+  }
+
+  #[test]
+  fn malformed_record_recovery_is_bounded_and_preserves_prior_cookies() {
+    let good = build_cookie_record(&FixtureCookie {
+      domain: ".good.test",
+      name: "good-before-limit",
+      path: "/",
+      value: "kept",
+      flags: 0,
+      expires: 0.0,
+    });
+    let count = MAX_RECOVERABLE_RECORD_ERRORS_PER_PAGE + 1;
+    let records_start = 8 + count * 4 + 4;
+    let mut page = vec![0; records_start];
+    page[0..4].copy_from_slice(&[0x00, 0x00, 0x01, 0x00]);
+    LittleEndian::write_u32(
+      &mut page[4..8],
+      u32::try_from(count).expect("fixture record count"),
+    );
+    LittleEndian::write_u32(
+      &mut page[8..12],
+      u32::try_from(records_start).expect("fixture record offset"),
+    );
+    for index in 1..count {
+      let table_offset = 8 + index * 4;
+      LittleEndian::write_u32(&mut page[table_offset..table_offset + 4], u32::MAX);
+    }
+    page.extend_from_slice(&good);
+
+    let (cookies, error) = parse_page(&page).expect("page framing remains valid");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "good-before-limit");
+    let error = error.expect("recovery limit should be reported");
+    assert!(
+      format!("{error:#}").contains("recovery limit reached after 1024 malformed records"),
+      "unexpected recovery error: {error:#}"
     );
   }
 
