@@ -10,14 +10,42 @@ use std::{
 
 /// Returns cookies from mozilla based browsers
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let connection = sqlite::connect(db_path.clone())?;
+  let database = sqlite::with_browser_database(db_path.clone(), |connection| {
+    query_persistent_cookies(connection, domains.as_deref())
+  })?;
+  log::debug!(
+    "Mozilla database query succeeded via {:?} after {} attempt(s)",
+    database.strategy(),
+    database.attempts()
+  );
+  let (mut cookies, last_row_error) = database.into_value();
+
+  let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
+  if let Ok(session_cookies) = get_session_cookies_lz4(domains.to_owned(), parent_path.to_owned()) {
+    cookies.extend(session_cookies);
+  }
+
+  if let Ok(session_cookies) = get_session_cookies(domains, parent_path) {
+    cookies.extend(session_cookies);
+  }
+  if cookies.is_empty() {
+    if let Some(error) = last_row_error {
+      return Err(error);
+    }
+  }
+  Ok(cookies)
+}
+
+fn query_persistent_cookies(
+  connection: &rusqlite::Connection,
+  domains: Option<&[String]>,
+) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
   let mut query = "
         SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies 
     "
   .to_string();
 
   let domain_filters: Vec<String> = domains
-    .as_ref()
     .map(|domains| domains.iter().map(|domain| format!("%{domain}%")).collect())
     .unwrap_or_default();
 
@@ -118,21 +146,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
     cookies.push(cookie);
   }
 
-  let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
-  if let Ok(session_cookies) = get_session_cookies_lz4(domains.to_owned(), parent_path.to_owned()) {
-    cookies.extend(session_cookies);
-  }
-
-  if let Ok(session_cookies) = get_session_cookies(domains, parent_path) {
-    cookies.extend(session_cookies);
-  }
-
-  if cookies.is_empty() {
-    if let Some(err) = last_row_error {
-      return Err(err);
-    }
-  }
-  Ok(cookies)
+  Ok((cookies, last_row_error))
 }
 
 pub fn get_session_cookies(

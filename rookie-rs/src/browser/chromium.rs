@@ -458,7 +458,7 @@ fn unlock_file(
   // Admin rights required
   if privilege::user::privileged() {
     log::debug!("Admin rights detected");
-    // The shadow copy brings the `-wal` along, so `sqlite::connect` will
+    // The shadow copy brings the `-wal` along, so the database query boundary will
     // snapshot this copy a second time. The duplicate copy is intentional:
     // keeping the WAL here is what makes the session cookies reachable at all.
     match crate::utils::TempDir::new() {
@@ -521,11 +521,25 @@ fn query_cookies_engine_outcome(
     "Creating SQLite connection to {}",
     db_path.to_str().unwrap_or("")
   );
-  let connection = sqlite::connect(db_path)?;
+  let database = sqlite::with_browser_database(db_path, |connection| {
+    query_cookies_from_connection(connection, &outcomes, domains.as_deref())
+  })?;
+  log::debug!(
+    "Chromium database query succeeded via {:?} after {} attempt(s)",
+    database.strategy(),
+    database.attempts()
+  );
+  Ok(database.into_value())
+}
+
+fn query_cookies_from_connection(
+  connection: &rusqlite::Connection,
+  outcomes: &ChromiumKeyOutcomes,
+  domains: Option<&[String]>,
+) -> Result<ChromiumEngineExtractionOutcome> {
   let mut query =
     "SELECT host_key, path, is_secure, expires_utc, name, value, CAST(encrypted_value AS BLOB), is_httponly, samesite FROM cookies ".to_string();
   let domain_filters: Vec<String> = domains
-    .as_ref()
     .map(|domains| domains.iter().map(|domain| format!("%{domain}%")).collect())
     .unwrap_or_default();
 
@@ -622,7 +636,7 @@ fn query_cookies_engine_outcome(
       continue;
     }
     let decrypted_value =
-      match decrypt_encrypted_value_with_outcomes(&host_key, value, &encrypted_value, &outcomes) {
+      match decrypt_encrypted_value_with_outcomes(&host_key, value, &encrypted_value, outcomes) {
         Ok(val) => val,
         Err(err) => {
           log::warn!("Failed to decrypt cookie value: {err}");
