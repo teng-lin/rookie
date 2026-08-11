@@ -561,43 +561,27 @@ fn query_cookies_from_connection(
   while let Some(row) = rows.next()? {
     extraction.stats.rows_seen += 1;
     let row_number = extraction.stats.rows_seen;
-    let host_key: String = match row.get(0) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read host_key from row: {err}");
-        last_row_error = Some(anyhow!("failed to read host_key from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("host_key"), row_number);
-        continue;
-      }
-    };
-    let path: String = match row.get(1) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read path from row: {err}");
-        last_row_error = Some(anyhow!("failed to read path from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("path"), row_number);
-        continue;
-      }
-    };
-    let is_secure: bool = match row.get(2) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read is_secure from row: {err}");
-        last_row_error = Some(anyhow!("failed to read is_secure from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("is_secure"), row_number);
-        continue;
-      }
-    };
-    let expires: u64 = match row.get(3) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read expires_utc from row: {err}");
-        last_row_error = Some(anyhow!("failed to read expires_utc from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("expires_utc"), row_number);
-        continue;
-      }
-    };
-    let expires = date::chromium_timestamp(expires);
+    let host_key = row
+      .get::<_, Option<String>>(0)
+      .ok()
+      .flatten()
+      .unwrap_or_default();
+    let path = row
+      .get::<_, Option<String>>(1)
+      .ok()
+      .flatten()
+      .unwrap_or_else(|| "/".to_string());
+    let is_secure = row
+      .get::<_, Option<bool>>(2)
+      .ok()
+      .flatten()
+      .unwrap_or(false);
+    let expires = row
+      .get::<_, Option<i64>>(3)
+      .ok()
+      .flatten()
+      .and_then(|value| u64::try_from(value).ok())
+      .and_then(date::chromium_timestamp);
     let name: String = match row.get(4) {
       Ok(val) => val,
       Err(err) => {
@@ -617,18 +601,11 @@ fn query_cookies_from_connection(
         continue;
       }
     };
-    let encrypted_value: Vec<u8> = match row.get(6) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read encrypted_value from row: {err}");
-        last_row_error = Some(anyhow!("failed to read encrypted_value from row: {err}"));
-        extraction.record_skipped_row(
-          ChromiumRowIssueCode::ColumnRead("encrypted_value"),
-          row_number,
-        );
-        continue;
-      }
-    };
+    let encrypted_value = row
+      .get::<_, Option<Vec<u8>>>(6)
+      .ok()
+      .flatten()
+      .unwrap_or_default();
     if encrypted_value.is_empty() && value.is_empty() {
       // A valueless row read cleanly, so the extraction is not a total failure
       // even though it contributes no cookie.
@@ -646,25 +623,16 @@ fn query_cookies_from_connection(
           continue;
         }
       };
-    let http_only: bool = match row.get(7) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read is_httponly from row: {err}");
-        last_row_error = Some(anyhow!("failed to read is_httponly from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("is_httponly"), row_number);
-        continue;
-      }
-    };
-
-    let same_site: i64 = match row.get(8) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read samesite from row: {err}");
-        last_row_error = Some(anyhow!("failed to read samesite from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("samesite"), row_number);
-        continue;
-      }
-    };
+    let http_only = row
+      .get::<_, Option<bool>>(7)
+      .ok()
+      .flatten()
+      .unwrap_or(false);
+    let same_site = row
+      .get::<_, Option<i64>>(8)
+      .ok()
+      .flatten()
+      .unwrap_or(SAME_SITE_UNSPECIFIED);
     let cookie = Cookie {
       domain: host_key.to_string(),
       path: path.to_string(),
@@ -1003,15 +971,14 @@ mod tests {
     let dir = unique_tmpdir("chr-all-rows-bad");
     let db = dir.join("Cookies");
     seed_chromium_cookies(&db, &[]);
-    // Negative expires_utc does not fit the u64 the reader asks for, so every
-    // row is skipped. A total decode failure must surface as Err, not as an
-    // empty-but-successful result that load() would count as a success.
+    // The name is required identity data, so a row whose name cannot decode
+    // must not turn a total extraction failure into an empty success.
     let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
     conn
       .execute(
         "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
           encrypted_value, is_httponly, samesite) \
-          VALUES ('.example.com', '/', 1, -1, 'id', 'plain', X'', 1, 0)",
+          VALUES ('.example.com', '/', 1, 0, X'DEADBEEF', 'plain', X'', 1, 0)",
         [],
       )
       .expect("insert bad row");
@@ -1024,7 +991,7 @@ mod tests {
     assert_eq!(outcome.issues.len(), 1);
     assert_eq!(
       outcome.issues[0].code,
-      ChromiumRowIssueCode::ColumnRead("expires_utc")
+      ChromiumRowIssueCode::ColumnRead("name")
     );
     assert!(outcome.legacy_error.is_some());
 
@@ -1052,7 +1019,7 @@ mod tests {
       .execute(
         "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
           encrypted_value, is_httponly, samesite) \
-          VALUES ('.other.com', '/', 1, -1, 'id', 'plain', X'', 1, 0)",
+          VALUES ('.other.com', '/', 1, 0, X'DEADBEEF', 'plain', X'', 1, 0)",
         [],
       )
       .expect("insert bad row");
@@ -1061,6 +1028,64 @@ mod tests {
     let cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
       .expect("valueless row is not a failure");
     assert!(cookies.is_empty(), "{:?}", cookies);
+  }
+
+  #[test]
+  fn query_cookies_defaults_null_and_out_of_range_metadata() {
+    let dir = unique_tmpdir("chr-null-metadata");
+    let db = dir.join("Cookies");
+    let connection = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    connection
+      .execute(
+        "CREATE TABLE cookies (
+          host_key TEXT,
+          path TEXT,
+          is_secure INTEGER,
+          expires_utc INTEGER,
+          name TEXT,
+          value TEXT,
+          encrypted_value BLOB,
+          is_httponly INTEGER,
+          samesite INTEGER
+        )",
+        [],
+      )
+      .expect("create table");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES (NULL, NULL, NULL, -1, 'kept', 'value', NULL, NULL, NULL)",
+        [],
+      )
+      .expect("insert cookie with missing metadata");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, NULL, 'value', X'', 0, 0)",
+        [],
+      )
+      .expect("insert cookie without name");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'missing-value', NULL, X'', 0, 0)",
+        [],
+      )
+      .expect("insert cookie without value");
+
+    let outcomes = ChromiumKeyOutcomes::from_legacy_shared(vec![]);
+    let extraction =
+      query_cookies_from_connection(&connection, &outcomes, None).expect("query cookies");
+    assert_eq!(extraction.cookies.len(), 1, "{:?}", extraction.cookies);
+    let cookie = &extraction.cookies[0];
+    assert_eq!(cookie.name, "kept");
+    assert_eq!(cookie.value, "value");
+    assert_eq!(cookie.domain, "");
+    assert_eq!(cookie.path, "/");
+    assert!(!cookie.secure);
+    assert!(!cookie.http_only);
+    assert_eq!(cookie.expires, None);
+    assert_eq!(cookie.same_site, SAME_SITE_UNSPECIFIED);
+    assert_eq!(extraction.stats.rows_seen, 3);
+    assert_eq!(extraction.stats.cookies_emitted, 1);
+    assert_eq!(extraction.stats.rows_skipped, 2);
   }
 
   #[test]
@@ -1535,7 +1560,7 @@ mod tests {
     let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
     conn
       .execute(
-        "INSERT INTO cookies VALUES ('.example.com', '/', 0, -1, 'bad-expiry', 'plain', X'', 0, 0)",
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, X'DEADBEEF', 'plain', X'', 0, 0)",
         [],
       )
       .expect("insert malformed row");
@@ -1561,7 +1586,7 @@ mod tests {
     assert_eq!(outcome.issues.len(), 2);
     assert_eq!(
       outcome.issues[0].code,
-      ChromiumRowIssueCode::ColumnRead("expires_utc")
+      ChromiumRowIssueCode::ColumnRead("name")
     );
     assert_eq!(outcome.issues[0].occurrences, 1);
     assert_eq!(outcome.issues[1].code, ChromiumRowIssueCode::Decrypt);
@@ -1673,10 +1698,10 @@ mod tests {
       )
       .expect("insert row 1");
 
-    // Row 2: Malformed row with negative expires_utc (fails u64 decoding)
+    // Row 2: Malformed required name column.
     conn
       .execute(
-        "INSERT INTO cookies VALUES ('.example.com', '/', 1, -100, 'bad_expiry', 'val', X'76313064756d6d79', 1, 1)",
+        "INSERT INTO cookies VALUES ('.example.com', '/', 1, -100, X'DEADBEEF', 'val', X'76313064756d6d79', 1, 1)",
         [],
       )
       .expect("insert row 2");

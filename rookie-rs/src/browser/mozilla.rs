@@ -21,13 +21,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   let (mut cookies, last_row_error) = database.into_value();
 
   let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
-  if let Ok(session_cookies) = get_session_cookies_lz4(domains.to_owned(), parent_path.to_owned()) {
-    cookies.extend(session_cookies);
-  }
-
-  if let Ok(session_cookies) = get_session_cookies(domains, parent_path) {
-    cookies.extend(session_cookies);
-  }
+  cookies.extend(get_authoritative_session_cookies(domains, &parent_path));
   if cookies.is_empty() {
     if let Some(error) = last_row_error {
       return Err(error);
@@ -65,39 +59,27 @@ fn query_persistent_cookies(
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
-    let host: String = match row.get(0) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read host from row: {err}");
-        last_row_error = Some(anyhow!("failed to read host from row: {err}"));
-        continue;
-      }
-    };
-    let path: String = match row.get(1) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read path from row: {err}");
-        last_row_error = Some(anyhow!("failed to read path from row: {err}"));
-        continue;
-      }
-    };
-    let is_secure: bool = match row.get(2) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read isSecure from row: {err}");
-        last_row_error = Some(anyhow!("failed to read isSecure from row: {err}"));
-        continue;
-      }
-    };
-    let expires: u64 = match row.get(3) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read expiry from row: {err}");
-        last_row_error = Some(anyhow!("failed to read expiry from row: {err}"));
-        continue;
-      }
-    };
-    let expires = date::mozilla_timestamp(expires);
+    let host = row
+      .get::<_, Option<String>>(0)
+      .ok()
+      .flatten()
+      .unwrap_or_default();
+    let path = row
+      .get::<_, Option<String>>(1)
+      .ok()
+      .flatten()
+      .unwrap_or_else(|| "/".to_string());
+    let is_secure = row
+      .get::<_, Option<bool>>(2)
+      .ok()
+      .flatten()
+      .unwrap_or(false);
+    let expires = row
+      .get::<_, Option<i64>>(3)
+      .ok()
+      .flatten()
+      .and_then(|value| u64::try_from(value).ok())
+      .and_then(date::mozilla_timestamp);
 
     let name: String = match row.get(4) {
       Ok(val) => val,
@@ -116,23 +98,16 @@ fn query_persistent_cookies(
         continue;
       }
     };
-    let http_only: bool = match row.get(6) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read isHttpOnly from row: {err}");
-        last_row_error = Some(anyhow!("failed to read isHttpOnly from row: {err}"));
-        continue;
-      }
-    };
-
-    let same_site: i64 = match row.get(7) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read sameSite from row: {err}");
-        last_row_error = Some(anyhow!("failed to read sameSite from row: {err}"));
-        continue;
-      }
-    };
+    let http_only = row
+      .get::<_, Option<bool>>(6)
+      .ok()
+      .flatten()
+      .unwrap_or(false);
+    let same_site = row
+      .get::<_, Option<i64>>(7)
+      .ok()
+      .flatten()
+      .unwrap_or(SAME_SITE_UNSPECIFIED);
     let cookie = Cookie {
       domain: host.to_string(),
       path: path.to_string(),
@@ -149,13 +124,63 @@ fn query_persistent_cookies(
   Ok((cookies, last_row_error))
 }
 
+enum SessionStoreFormat {
+  JsonLz4,
+  LegacyJson,
+}
+
+fn get_authoritative_session_cookies(
+  domains: Option<Vec<String>>,
+  cookies_dir: &Path,
+) -> Vec<Cookie> {
+  let candidates = [
+    (
+      cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
+      SessionStoreFormat::JsonLz4,
+    ),
+    (
+      cookies_dir.join("sessionstore.jsonlz4"),
+      SessionStoreFormat::JsonLz4,
+    ),
+    (
+      cookies_dir.join("sessionstore.js"),
+      SessionStoreFormat::LegacyJson,
+    ),
+    (
+      cookies_dir.join("sessionstore-backups/previous.jsonlz4"),
+      SessionStoreFormat::JsonLz4,
+    ),
+  ];
+
+  for (path, format) in candidates {
+    if !path.is_file() {
+      continue;
+    }
+
+    let parsed = match format {
+      SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(&path, domains.as_deref()),
+      SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(&path, domains.as_deref()),
+    };
+    match parsed {
+      Ok(cookies) => return cookies,
+      Err(error) => log::debug!("Failed to parse Firefox session store {:?}: {error}", path),
+    }
+  }
+
+  Vec::new()
+}
+
+#[cfg(test)]
 pub fn get_session_cookies(
   domains: Option<Vec<String>>,
   cookies_dir: PathBuf,
 ) -> Result<Vec<Cookie>> {
+  parse_legacy_session_cookies(&cookies_dir.join("sessionstore.js"), domains.as_deref())
+}
+
+fn parse_legacy_session_cookies(path: &Path, domains: Option<&[String]>) -> Result<Vec<Cookie>> {
   let mut cookies: Vec<Cookie> = vec![];
-  let session_file = cookies_dir.join("sessionstore.js");
-  let plain = fs::read_to_string(session_file)?;
+  let plain = fs::read_to_string(path)?;
   let json: Value = serde_json::from_str(&plain)?;
   let windows = json
     .get("windows")
@@ -172,7 +197,7 @@ pub fn get_session_cookies(
             .get("host")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-          let should_add = utils::some_domain_in_host(domains.as_deref(), domain);
+          let should_add = utils::some_domain_in_host(domains, domain);
           if !should_add {
             continue;
           }
@@ -186,13 +211,20 @@ pub fn get_session_cookies(
   Ok(cookies)
 }
 
+#[cfg(test)]
 pub fn get_session_cookies_lz4(
   domains: Option<Vec<String>>,
   cookies_dir: PathBuf,
 ) -> Result<Vec<Cookie>> {
+  parse_session_cookies_lz4(
+    &cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
+    domains.as_deref(),
+  )
+}
+
+fn parse_session_cookies_lz4(path: &Path, domains: Option<&[String]>) -> Result<Vec<Cookie>> {
   let mut cookies: Vec<Cookie> = vec![];
-  let session_file_lz4 = cookies_dir.join("sessionstore-backups/recovery.jsonlz4");
-  let compressed = fs::read(session_file_lz4)?;
+  let compressed = fs::read(path)?;
   if !compressed.starts_with(b"mozLz40\0") {
     bail!("Invalid mozLz40 header");
   }
@@ -202,7 +234,9 @@ pub fn get_session_cookies_lz4(
   let decompressed = decompress_size_prepended(compressed)?;
   let plain = String::from_utf8(decompressed)?;
   let json: Value = serde_json::from_str(&plain)?;
-  let cookies_json = json.get("cookies").ok_or(anyhow!("no cookies in json"))?;
+  let Some(cookies_json) = json.get("cookies") else {
+    return Ok(cookies);
+  };
   let cookies_json = cookies_json
     .as_array()
     .ok_or(anyhow!("cookies is not list"))?;
@@ -211,7 +245,7 @@ pub fn get_session_cookies_lz4(
       .get("host")
       .and_then(|v| v.as_str())
       .unwrap_or("");
-    let should_add = utils::some_domain_in_host(domains.as_deref(), domain);
+    let should_add = utils::some_domain_in_host(domains, domain);
     if !should_add {
       continue;
     }
@@ -230,7 +264,7 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
   let path = json_cookie
     .get("path")
     .and_then(|v| v.as_str())
-    .unwrap_or("");
+    .unwrap_or("/");
   let secure = json_cookie
     .get("secure")
     .and_then(|v| v.as_bool())
@@ -238,11 +272,11 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
   let name = json_cookie
     .get("name")
     .and_then(|v| v.as_str())
-    .unwrap_or("");
+    .ok_or_else(|| anyhow!("session cookie has no name"))?;
   let value = json_cookie
     .get("value")
     .and_then(|v| v.as_str())
-    .unwrap_or("");
+    .ok_or_else(|| anyhow!("session cookie has no value"))?;
   let http_only = json_cookie
     .get("httponly")
     .and_then(|v| v.as_bool())
@@ -256,7 +290,7 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
   let same_site = json_cookie
     .get("sameSite")
     .and_then(|v| v.as_i64())
-    .unwrap_or(0);
+    .unwrap_or(SAME_SITE_UNSPECIFIED);
 
   let cookie = Cookie {
     domain: host.to_string(),
@@ -520,6 +554,7 @@ fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use lz4_flex::block::compress_prepend_size;
   use std::io::Write;
   use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -568,19 +603,37 @@ mod tests {
     }
   }
 
+  fn write_session_jsonlz4(path: &Path, cookies: Value) {
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).expect("create sessionstore directory");
+    }
+    let json = serde_json::json!({ "cookies": cookies }).to_string();
+    let mut encoded = b"mozLz40\0".to_vec();
+    encoded.extend(compress_prepend_size(json.as_bytes()));
+    std::fs::write(path, encoded).expect("write sessionstore fixture");
+  }
+
+  fn session_cookie(name: &str) -> Value {
+    serde_json::json!({
+      "host": ".example.com",
+      "path": "/",
+      "name": name,
+      "value": "fixture"
+    })
+  }
+
   #[test]
   fn firefox_based_errors_when_every_row_fails_to_decode() {
     let dir = unique_tmpdir("ff-all-rows-bad");
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(&db, &[]);
-    // Negative expiry does not fit the u64 the reader asks for, so every row
-    // is skipped. With no usable row left, the caller must see an error rather
-    // than an empty-but-successful result.
+    // The name is required identity data, so a row whose name cannot decode
+    // must not turn a total extraction failure into an empty success.
     let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
     conn
       .execute(
         "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
-          VALUES ('.example.com', '/', 1, -1, 'id', 'v', 1, 0)",
+          VALUES ('.example.com', '/', 1, 0, X'DEADBEEF', 'v', 1, 0)",
         [],
       )
       .expect("insert bad row");
@@ -592,6 +645,128 @@ mod tests {
       "expected Err when no row decodes, got {:?}",
       result
     );
+  }
+
+  #[test]
+  fn firefox_based_defaults_null_and_out_of_range_metadata() {
+    let dir = unique_tmpdir("ff-null-metadata");
+    let db = dir.join("cookies.sqlite");
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "CREATE TABLE moz_cookies (
+          host TEXT,
+          path TEXT,
+          isSecure INTEGER,
+          expiry INTEGER,
+          name TEXT,
+          value TEXT,
+          isHttpOnly INTEGER,
+          sameSite INTEGER
+        )",
+        [],
+      )
+      .expect("create table");
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES (NULL, NULL, NULL, -1, 'kept', 'value', NULL, NULL)",
+        [],
+      )
+      .expect("insert cookie with missing metadata");
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 0, NULL, 'value', 0, 0)",
+        [],
+      )
+      .expect("insert cookie without name");
+    conn
+      .execute(
+        "INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 0, 'missing-value', NULL, 0, 0)",
+        [],
+      )
+      .expect("insert cookie without value");
+    drop(conn);
+
+    let cookies = firefox_based(db, None).expect("metadata defaults keep usable cookie");
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    let cookie = &cookies[0];
+    assert_eq!(cookie.name, "kept");
+    assert_eq!(cookie.value, "value");
+    assert_eq!(cookie.domain, "");
+    assert_eq!(cookie.path, "/");
+    assert!(!cookie.secure);
+    assert!(!cookie.http_only);
+    assert_eq!(cookie.expires, None);
+    assert_eq!(cookie.same_site, SAME_SITE_UNSPECIFIED);
+  }
+
+  #[test]
+  fn firefox_based_reads_clean_shutdown_sessionstore() {
+    let dir = unique_tmpdir("ff-clean-sessionstore");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    write_session_jsonlz4(
+      &dir.join("sessionstore.jsonlz4"),
+      serde_json::json!([session_cookie("clean-shutdown")]),
+    );
+
+    let cookies = firefox_based(db, None).expect("read clean-shutdown session state");
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    assert_eq!(cookies[0].name, "clean-shutdown");
+  }
+
+  #[test]
+  fn firefox_sessionstore_uses_first_valid_candidate_without_merging_stale_state() {
+    let dir = unique_tmpdir("ff-sessionstore-precedence");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let recovery = dir.join("sessionstore-backups/recovery.jsonlz4");
+    let clean = dir.join("sessionstore.jsonlz4");
+    let previous = dir.join("sessionstore-backups/previous.jsonlz4");
+    write_session_jsonlz4(
+      &recovery,
+      serde_json::json!([session_cookie("live-recovery")]),
+    );
+    write_session_jsonlz4(
+      &clean,
+      serde_json::json!([session_cookie("clean-shutdown")]),
+    );
+    write_session_jsonlz4(
+      &previous,
+      serde_json::json!([session_cookie("stale-previous")]),
+    );
+
+    let cookies = firefox_based(db.clone(), None).expect("read live recovery");
+    assert_eq!(cookies.len(), 1, "session candidates must not be merged");
+    assert_eq!(cookies[0].name, "live-recovery");
+
+    std::fs::write(&recovery, b"mozLz40\0invalid").expect("corrupt recovery fixture");
+    let cookies = firefox_based(db.clone(), None).expect("fall back to clean shutdown");
+    assert_eq!(cookies.len(), 1, "stale state must remain unselected");
+    assert_eq!(cookies[0].name, "clean-shutdown");
+
+    std::fs::write(&clean, b"mozLz40\0invalid").expect("corrupt clean fixture");
+    let cookies = firefox_based(db, None).expect("fall back to previous session");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "stale-previous");
+  }
+
+  #[test]
+  fn valid_empty_recovery_does_not_resurrect_stale_session_cookies() {
+    let dir = unique_tmpdir("ff-sessionstore-empty-current");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    write_session_jsonlz4(
+      &dir.join("sessionstore-backups/recovery.jsonlz4"),
+      serde_json::json!([]),
+    );
+    write_session_jsonlz4(
+      &dir.join("sessionstore.jsonlz4"),
+      serde_json::json!([session_cookie("stale-clean-copy")]),
+    );
+
+    let cookies = firefox_based(db, None).expect("valid empty state is authoritative");
+    assert!(cookies.is_empty(), "{cookies:?}");
   }
 
   #[test]
@@ -1340,7 +1515,7 @@ mod tests {
       )
       .expect("insert row 1");
 
-    // Row 2: Negative expiry (u64 decoding error)
+    // Row 2: Negative expiry is out-of-range metadata and defaults to None.
     conn
       .execute(
         "INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, -1, 'bad_expiry', 'abc', 1, 1)",
@@ -1368,6 +1543,12 @@ mod tests {
       firefox_based(db, None).expect("firefox_based should succeed despite bad rows");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
+    assert_eq!(
+      names,
+      vec!["bad_expiry", "valid1", "valid2"],
+      "{:?}",
+      cookies
+    );
+    assert_eq!(cookies[0].expires, None);
   }
 }

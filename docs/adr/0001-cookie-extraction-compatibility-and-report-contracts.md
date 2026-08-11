@@ -189,15 +189,15 @@ RAII attempts cleanup only after owned SQLite readers/connections are dropped on
 
 ### 8. Firefox session sources
 
-The current merge is frozen for every existing Mozilla-family entry point that reaches
-`firefox_based`: `firefox`, `librewolf`, `zen`, Linux `cachy`, `firefox_profile`, direct
-`firefox_based`, and the Mozilla-success path of `any_browser`, including `load`, CLI, Python, and
-Node calls routed through them. Generic Mozilla report adapters do not reuse that merge path; they
-select one authoritative session source:
+Every Mozilla-family entry point that reaches `firefox_based` selects one authoritative session
+source: `firefox`, `librewolf`, `zen`, Linux `cachy`, `firefox_profile`, direct `firefox_based`, and
+the Mozilla-success path of `any_browser`, including `load`, CLI, Python, and Node calls routed
+through them. Generic Mozilla report adapters reuse the same lifecycle order while preserving
+source-level diagnostics:
 
 1. running tier: `sessionstore-backups/recovery.jsonlz4`, then supported valid `recovery.baklz4`;
 2. clean-shutdown tier: `sessionstore.jsonlz4`, then legacy `sessionstore.js`;
-3. stale recovery files such as `previous.jsonlz4` and upgrade files are disabled by default.
+3. stale recovery fallback: `previous.jsonlz4`; upgrade files remain disabled.
 
 Lifecycle tier precedes modification time. Within a tier, the first valid source wins. Sources are not merged across tiers. Missing files are silent. An invalid higher-priority file produces a bounded warning and falls through; persisted cookies remain successful if all session sources are invalid.
 

@@ -568,15 +568,15 @@ a destructor. Process abort/crash makes no cleanup attempt and carries no cleanu
 
 ## 7. Firefox session policy
 
-Every existing Mozilla-family entry point that reaches `firefox_based` preserves the current merge
-in this release: `firefox`, `librewolf`, `zen`, Linux `cachy`, `firefox_profile`, direct
-`firefox_based`, and the Mozilla-success path of `any_browser`, including calls routed through
-`load`, CLI, Python, or Node. Generic Mozilla report adapters do not call that legacy merge path;
-they use this authoritative-source policy:
+Every existing Mozilla-family entry point that reaches `firefox_based` uses the
+authoritative-source policy below: `firefox`, `librewolf`, `zen`, Linux `cachy`, `firefox_profile`,
+direct `firefox_based`, and the Mozilla-success path of `any_browser`, including calls routed
+through `load`, CLI, Python, or Node. Generic Mozilla report adapters use the same policy while
+retaining source-level diagnostics:
 
 1. running tier: `sessionstore-backups/recovery.jsonlz4`, then `recovery.baklz4` if supported and valid;
 2. clean-shutdown tier: `sessionstore.jsonlz4`, then legacy `sessionstore.js`;
-3. stale tier (`previous.jsonlz4`, upgrade files): disabled by default and reserved for a future explicit recovery option.
+3. stale fallback tier: `previous.jsonlz4`; upgrade files remain disabled.
 
 Select lifecycle tier before mtime; within a tier use the declared order, taking the first valid source. Do not merge across tiers. Missing is silent. An existing invalid higher-priority source produces a bounded warning and falls through. If all session sources are invalid, persisted cookies remain successful.
 
@@ -724,7 +724,7 @@ Acceptance:
 - Implement Section 7 lifecycle order, first-valid fallback, stable read/retry, and bounded
   warnings.
 - Generic outcomes include session-only profiles and preserve duplicates.
-- Every legacy Mozilla-family wrapper/direct path through `firefox_based` retains legacy merge behavior; authoritative selection is generic-report-only.
+- Every legacy Mozilla-family wrapper/direct path through `firefox_based` uses authoritative selection.
 
 Acceptance:
 

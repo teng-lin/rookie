@@ -330,7 +330,9 @@ impl ChromiumKeyProvider<()> for MacosPlatformKeyProvider<'_> {
 
 #[cfg(test)]
 mod tests {
-  use super::super::chromium_crypto::{ChromiumCipherVersion, ChromiumKeyRoute, ChromiumKeyTier};
+  #[cfg(any(target_os = "linux", target_os = "windows"))]
+  use super::super::chromium_crypto::ChromiumKeyTier;
+  use super::super::chromium_crypto::{ChromiumCipherVersion, ChromiumKeyRoute};
   use super::*;
   use std::cell::Cell;
 
