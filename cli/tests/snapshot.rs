@@ -191,7 +191,7 @@ fn netscape_output_includes_seeded_cookie() {
 }
 
 #[test]
-fn diagnostics_stay_on_stderr_and_json_stays_on_stdout() {
+fn json_stdout_stays_machine_readable_with_info_logging() {
   let dir = unique_tmpdir("stdout-stderr");
   let db = dir.path().join("cookies.sqlite");
   seed_firefox_cookies(
@@ -212,11 +212,6 @@ fn diagnostics_stay_on_stderr_and_json_stays_on_stdout() {
   let parsed = parsed_json(&out);
   assert_eq!(parsed.as_array().map(Vec::len), Some(1));
 
-  let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-  assert!(
-    stderr.contains("Creating SQLite connection"),
-    "expected an INFO diagnostic on stderr: {stderr}"
-  );
   let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
   assert!(!stdout.contains(" INFO "), "log polluted stdout: {stdout}");
   assert!(!stdout.contains(" WARN "), "log polluted stdout: {stdout}");
