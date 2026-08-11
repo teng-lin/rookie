@@ -62,8 +62,9 @@ def protect_for_current_user(plaintext: bytes) -> bytes:
 def encrypt_v10(node: str, key: bytes, value: str) -> bytes:
     program = r"""
 const crypto = require("node:crypto");
-const key = Buffer.from(process.argv[1], "hex");
-const value = Buffer.from(process.argv[2], "utf8");
+const inputs = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+const key = Buffer.from(inputs.key, "hex");
+const value = Buffer.from(inputs.value, "utf8");
 const nonce = crypto.randomBytes(12);
 const cipher = crypto.createCipheriv("aes-256-gcm", key, nonce);
 const encrypted = Buffer.concat([cipher.update(value), cipher.final()]);
@@ -72,7 +73,8 @@ process.stdout.write(
 );
 """
     result = subprocess.run(
-        [node, "-e", program, key.hex(), value],
+        [node, "-e", program],
+        input=json.dumps({"key": key.hex(), "value": value}),
         check=True,
         capture_output=True,
         text=True,

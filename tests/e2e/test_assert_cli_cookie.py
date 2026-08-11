@@ -22,6 +22,14 @@ SPEC.loader.exec_module(HARNESS)
 
 class AssertCliCookieTests(unittest.TestCase):
     def setUp(self) -> None:
+        clean_env = {
+            key: value
+            for key, value in HARNESS.os.environ.items()
+            if key not in ("ROOKIE_E2E_COOKIE_NAME", "ROOKIE_E2E_COOKIE_VALUE")
+        }
+        environment = mock.patch.dict(HARNESS.os.environ, clean_env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.tempdir = tempfile.TemporaryDirectory(prefix="rookie e2e ünicode ")
         root = Path(self.tempdir.name)
         self.cookies = root / "Firefox Profile" / "cookies.sqlite"

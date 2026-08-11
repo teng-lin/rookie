@@ -63,7 +63,17 @@ jobs:
         with:
           shared-key: artifact-smoke-${{ inputs.rust-target }}
       - name: Build shipped CLI executable
-        run: cargo build --release --target ${{ inputs.rust-target }} --package rookie-cookies-cli --bin rookie-cookies ${{ inputs.cli-features }}
+        env:
+          RUST_TARGET: ${{ inputs.rust-target }}
+          CLI_FEATURES: ${{ inputs.cli-features }}
+        shell: bash
+        run: |
+          feature_args=()
+          if [[ -n "$CLI_FEATURES" ]]; then
+            read -r -a feature_args <<< "$CLI_FEATURES"
+          fi
+          cargo build --release --target "$RUST_TARGET" \
+            --package rookie-cookies-cli --bin rookie-cookies "${feature_args[@]}"
       - name: Build Python wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
@@ -83,11 +93,14 @@ jobs:
         run: npm run build -- --target ${{ inputs.rust-target }}
       - name: Build native Node binding in the pinned release container
         if: runner.os == 'Linux'
+        env:
+          RUST_TARGET: ${{ inputs.rust-target }}
         shell: bash
         working-directory: bindings/node
         run: |
           mkdir -p .cargo-cache/git/db .cargo-cache/registry/cache .cargo-cache/registry/index
           docker run --rm --user 0:0 \
+            -e ROOKIE_RUST_TARGET="$RUST_TARGET" \
             -v "$GITHUB_WORKSPACE/rookie-rs:/rookie-rs" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/git/db:/usr/local/cargo/git/db" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/cache:/usr/local/cargo/registry/cache" \
@@ -100,7 +113,7 @@ jobs:
               export RUSTUP_TOOLCHAIN=stable
               rustup set auto-self-update disable
               rustup toolchain install stable --profile minimal
-              npm run build -- --target x86_64-unknown-linux-gnu
+              npm run build -- --target "$ROOKIE_RUST_TARGET"
             '
       - name: Assemble release-shaped packages and provenance
         run: python tests/artifact_smoke/package_release_artifacts.py --target "${{ inputs.rust-target }}" --npm-platform "${{ inputs.npm-platform }}" --source-sha "${{ github.sha }}"

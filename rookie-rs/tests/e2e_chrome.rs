@@ -332,11 +332,11 @@ fn extracts_deterministic_legacy_v10_fixture_with_current_user_dpapi() {
     )
   });
 
-  helpers::assert_seeded(&cookies, domain);
   let cookie = cookies
     .iter()
     .find(|cookie| cookie.name == "rookie_ci")
     .expect("seeded cookie");
+  assert_eq!(cookie.value, "bar");
   assert_eq!(cookie.domain, ".example.test");
   assert!(cookie.http_only);
   assert_eq!(cookie.same_site, 1);

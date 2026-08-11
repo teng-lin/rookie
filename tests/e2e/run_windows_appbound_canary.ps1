@@ -22,11 +22,15 @@ function Wait-ForChrome {
   throw "Chrome did not start"
 }
 
-function Close-ChromeGracefully {
-  $windows = @(Get-Process chrome -ErrorAction SilentlyContinue |
+function Get-ChromeMainWindows {
+  return @(Get-Process chrome -ErrorAction SilentlyContinue |
     Where-Object { $_.MainWindowHandle -ne 0 })
+}
+
+function Close-ChromeGracefully {
+  $windows = Get-ChromeMainWindows
   if ($windows.Count -eq 0) {
-    throw "Chrome has no closeable main window"
+    throw "Chrome has no main window to close"
   }
   foreach ($window in $windows) {
     [void]$window.CloseMainWindow()
@@ -40,9 +44,7 @@ function Close-ChromeGracefully {
 
 function Wait-ForChromeMainWindow {
   for ($i = 1; $i -le 60; $i++) {
-    $window = Get-Process chrome -ErrorAction SilentlyContinue |
-      Where-Object { $_.MainWindowHandle -ne 0 } |
-      Select-Object -First 1
+    $window = Get-ChromeMainWindows | Select-Object -First 1
     if ($null -ne $window) { return $window }
     Start-Sleep -Milliseconds 500
   }
@@ -58,6 +60,19 @@ function Assert-ChromeAlive {
   Write-Host "Chrome browser remains alive (pid: $($script:liveBrowserPid))"
 }
 
+foreach ($requiredVariable in @(
+  "ROOKIE_E2E_REQUEST_LOG",
+  "ROOKIE_E2E_CHROME_PATH",
+  "ROOKIE_E2E_USER_DATA_DIR",
+  "ROOKIE_E2E_WINDOWS_SID"
+)) {
+  $requiredValue = [Environment]::GetEnvironmentVariable($requiredVariable)
+  if ([string]::IsNullOrWhiteSpace($requiredValue)) {
+    throw "required environment variable $requiredVariable is not set"
+  }
+}
+
+$server = $null
 Remove-Item $env:ROOKIE_E2E_REQUEST_LOG -Force -ErrorAction SilentlyContinue
 $server = Start-Process python `
   -ArgumentList "tests/e2e/cookie_server.py" -PassThru
@@ -197,5 +212,7 @@ try {
   # Profiles and Local State are never uploaded.
   Get-Process chrome -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
-  Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+  if ($null -ne $server) {
+    Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+  }
 }

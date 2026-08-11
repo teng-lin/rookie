@@ -33,7 +33,9 @@ def decode_key(local_state: dict[str, object], name: str, prefix: bytes) -> byte
 
 
 def cookie_rows(db_path: Path, cookie_name: str) -> list[tuple[object, ...]]:
-    with sqlite3.connect(db_path) as connection:
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
         return list(
             connection.execute(
                 "SELECT host_key, name, hex(substr(encrypted_value, 1, 3)), "
@@ -41,6 +43,8 @@ def cookie_rows(db_path: Path, cookie_name: str) -> list[tuple[object, ...]]:
                 (cookie_name,),
             )
         )
+    finally:
+        connection.close()
 
 
 def main() -> int:

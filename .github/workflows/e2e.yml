@@ -70,7 +70,7 @@ jobs:
         # have to negotiate with the keyring scope.
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --upgrade --quiet pip maturin
+          .venv/bin/pip install --upgrade --quiet pip maturin==1.14.1
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
@@ -168,7 +168,7 @@ jobs:
       - name: Build and install rookie-cookies into a venv
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --upgrade --quiet pip maturin
+          .venv/bin/pip install --upgrade --quiet pip maturin==1.14.1
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
@@ -266,7 +266,7 @@ jobs:
       - name: Build and install rookie-cookies into a venv
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --upgrade --quiet pip maturin
+          .venv/bin/pip install --upgrade --quiet pip maturin==1.14.1
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
@@ -339,7 +339,7 @@ jobs:
       - name: Build and install rookie-cookies into a venv
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --upgrade --quiet pip maturin
+          .venv/bin/pip install --upgrade --quiet pip maturin==1.14.1
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
@@ -407,6 +407,8 @@ jobs:
 
       - name: Install Playwright + bundled Firefox
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           npm install --no-save playwright
           npx playwright install firefox
           npx playwright --version
@@ -416,8 +418,10 @@ jobs:
 
       - name: Build and install rookie-cookies into a venv
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m venv .venv
-          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin
+          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin==1.14.1
           Push-Location bindings/python
           & ..\..\.venv\Scripts\python.exe -m maturin develop --release
           Pop-Location
@@ -427,6 +431,8 @@ jobs:
 
       - name: Build the Node binding
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           Push-Location bindings/node
           npm install
           npm run build
@@ -565,6 +571,8 @@ jobs:
 
       - name: Build and install rookie-cookies into a venv
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m venv .venv
           & .\.venv\Scripts\python.exe -m pip install --quiet maturin==1.14.1
           Push-Location bindings/python
@@ -576,6 +584,8 @@ jobs:
 
       - name: Build the App-Bound Node binding
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           Push-Location bindings/node
           npm install
           npm run build
@@ -584,9 +594,8 @@ jobs:
       - name: Verify v20 and extract a live WAL cookie on all four surfaces
         run: tests/e2e/run_windows_appbound_canary.ps1
 
-  # `e2e.yml` already exists on the default branch, so these calls bootstrap
-  # the new reusable workflow on the PR that introduces it. The standalone
-  # artifact-smoke workflow owns main, scheduled, and later manual runs.
+  # `e2e.yml` is the persistent PR entry point for the reusable artifact jobs.
+  # The standalone artifact-smoke workflow owns main, scheduled, and manual runs.
   artifact-pr-linux-x64:
     name: artifact smoke / Ubuntu x64 packages
     if: github.event_name == 'pull_request'
@@ -660,8 +669,10 @@ jobs:
 
       - name: Build and install rookie-cookies into a venv
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m venv .venv
-          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin
+          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin==1.14.1
           Push-Location bindings/python
           & ..\..\.venv\Scripts\python.exe -m maturin develop --release
           Pop-Location
@@ -671,6 +682,8 @@ jobs:
 
       - name: Build the Node binding
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           Push-Location bindings/node
           npm install
           npm run build
@@ -757,7 +770,6 @@ jobs:
             & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
               "$env:ROOKIE_E2E_USER_DATA_DIR" --cookie-name rookie_ci `
               --expected-prefix v10 --require-dpapi-key
-            if ($LASTEXITCODE -ne 0) { throw "strict v10 profile check failed" }
             Get-ChildItem $defaultDir | Format-Table
 
             Write-Host "Identity before rookie-cookies extraction:"
