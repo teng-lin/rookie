@@ -132,11 +132,15 @@ def compare_with_exceptions(
     for exception in exceptions:
         change = exception["change"]
         item = exception["item"]
-        if change == "added" and item in actual_lines and item not in expected_lines:
-            actual_lines.remove(item)
+        expected_count = expected_lines.count(item)
+        actual_count = actual_lines.count(item)
+        if change == "added" and actual_count > expected_count:
+            for _ in range(actual_count - expected_count):
+                actual_lines.remove(item)
             active.add((change, item))
-        elif change == "removed" and item in expected_lines and item not in actual_lines:
-            expected_lines.remove(item)
+        elif change == "removed" and expected_count > actual_count:
+            for _ in range(expected_count - actual_count):
+                expected_lines.remove(item)
             active.add((change, item))
 
     stale = [
