@@ -130,6 +130,23 @@ pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
   bail!("Can't find cookies file")
 }
 
+/// Records `profile` unless an earlier root already yielded the same directory.
+///
+/// Roots are compared canonically: snap and flatpak layouts reach one profile
+/// through several lexical or symlinked paths, and a duplicate would make
+/// selecting that profile by name ambiguous.
+fn push_unique(found: &mut Vec<MozillaProfile>, seen: &mut Vec<PathBuf>, profile: MozillaProfile) {
+  let key = profile
+    .path
+    .canonicalize()
+    .unwrap_or_else(|_| profile.path.clone());
+  if seen.contains(&key) {
+    return;
+  }
+  seen.push(key);
+  found.push(profile);
+}
+
 /// Returns every Mozilla profile for `config` that holds a cookie database.
 ///
 /// Profiles are gathered across every configured installation root, so the
@@ -137,13 +154,29 @@ pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
 /// [`MozillaProfile::is_default`].
 pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfile>> {
   let mut found: Vec<MozillaProfile> = vec![];
+  let mut seen: Vec<PathBuf> = vec![];
+
   for base in expand_config_paths(config)? {
+    let mut declared_any = false;
     for profile in mozilla_profiles_in(&base) {
-      if profile.path.join("cookies.sqlite").exists()
-        && !found.iter().any(|seen| seen.path == profile.path)
-      {
-        found.push(profile);
+      if profile.path.join("cookies.sqlite").exists() {
+        declared_any = true;
+        push_unique(&mut found, &mut seen, profile);
       }
+    }
+
+    // Mirror the base-directory fallback in `find_mozilla_based_paths`, so a
+    // layout that `firefox()` can read never looks profile-less here.
+    if !declared_any && base.join("cookies.sqlite").exists() {
+      push_unique(
+        &mut found,
+        &mut seen,
+        MozillaProfile {
+          name: String::new(),
+          path: base,
+          is_default: true,
+        },
+      );
     }
   }
 
@@ -457,6 +490,64 @@ mod tests {
       err.to_string().contains("Can't find cookies file"),
       "unexpected error: {err}"
     );
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_includes_a_flat_base_directory_database() {
+    // find_mozilla_based_paths reads this layout, so enumeration must see it
+    // too — otherwise firefox() works while firefox_profiles() reports none.
+    let base = unique_tmpdir("ff-flat-enumerate");
+    std::fs::write(base.join("cookies.sqlite"), b"").expect("write db");
+
+    let profiles = find_mozilla_based_profiles(&mozilla_config(&base)).expect("should list");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].path, base);
+    assert!(profiles[0].is_default);
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_ignores_a_flat_database_beside_real_profiles() {
+    let base = unique_tmpdir("ff-flat-and-declared");
+    seed_profiles(&base, TWO_PROFILES_INI, &["Profiles/main"]);
+    std::fs::write(base.join("cookies.sqlite"), b"").expect("write db");
+
+    let profiles = find_mozilla_based_profiles(&mozilla_config(&base)).expect("should list");
+    let paths: Vec<_> = profiles.iter().map(|p| p.path.clone()).collect();
+    assert_eq!(paths, vec![base.join("Profiles/main")]);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn find_mozilla_based_profiles_dedups_symlinked_roots() {
+    // A symlinked root reaches the same profile by a different lexical path;
+    // without canonical dedup both would be listed and selecting the profile
+    // by name would become ambiguous.
+    let base = unique_tmpdir("ff-symlink-real");
+    seed_profiles(&base, TWO_PROFILES_INI, &["Profiles/main"]);
+    let link = unique_tmpdir("ff-symlink-parent").join("link");
+    std::os::unix::fs::symlink(&base, &link).expect("symlink");
+
+    let config = mozilla_config_multi(&[&base, &link]);
+    let profiles = find_mozilla_based_profiles(&config).expect("should list");
+    assert_eq!(profiles.len(), 1, "{:?}", profiles);
+    assert_eq!(profiles[0].path, base.join("Profiles/main"));
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_reaches_an_orphan_install_profile() {
+    // A lone install names a profile with no [Profile...] section, and only
+    // that directory holds a database. The pre-enumeration resolver probed the
+    // install default directly, so discovery must still reach it.
+    let base = unique_tmpdir("ff-orphan-install");
+    seed_profiles(
+      &base,
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/orphan\n\
+       [Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\n",
+      &["Profiles/orphan"],
+    );
+
+    let db = find_mozilla_based_paths(&mozilla_config(&base)).expect("should find");
+    assert_eq!(db, base.join("Profiles/orphan/cookies.sqlite"));
   }
 
   #[test]

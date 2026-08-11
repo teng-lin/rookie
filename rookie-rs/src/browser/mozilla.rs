@@ -411,7 +411,8 @@ pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>>
   let conf = load_profiles_ini(profiles_path)?;
   let base = profiles_path.parent().unwrap_or_else(|| Path::new(""));
   let sections = profile_sections(&conf);
-  let default_path = resolve_default_path(&sections, &install_defaults(&conf));
+  let installs = install_defaults(&conf);
+  let default_path = resolve_default_path(&sections, &installs);
 
   let mut profiles: Vec<MozillaProfile> = sections
     .iter()
@@ -426,13 +427,17 @@ pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>>
     .collect();
 
   // An [Install...] section can name a profile that has no [Profile...]
-  // section, e.g. after a hand-edited or partially migrated profiles.ini.
-  // Keep it discoverable rather than dropping the only default on record.
-  if let Some(default) = default_path.filter(|default| !is_known_section(&sections, default)) {
+  // section, e.g. after a hand-edited or partially migrated profiles.ini. The
+  // pre-enumeration resolver probed those directly, so surface every one of
+  // them — not just whichever the heuristic happened to choose.
+  for orphan in installs
+    .iter()
+    .filter(|default| !is_known_section(&sections, default))
+  {
     profiles.push(MozillaProfile {
-      path: base.join(&default),
+      path: base.join(orphan),
       name: String::new(),
-      is_default: true,
+      is_default: default_path.as_deref() == Some(orphan.as_str()),
     });
   }
 
@@ -968,6 +973,31 @@ mod tests {
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].path, base.join("Profiles/orphan"));
     assert!(profiles[0].is_default);
+  }
+
+  #[test]
+  fn list_profiles_surfaces_an_orphan_install_alongside_declared_profiles() {
+    // The install names a profile with no section, another section exists, and
+    // no Default=1 marker decides. The heuristic default is the declared
+    // profile, but the orphan must still be listed so discovery can reach it.
+    let ini_path = write_ini(
+      "ff-orphan-plus-declared",
+      "[Install4F96D1932A9F858E]\nDefault=Profiles/orphan\n\
+       [Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\n",
+    );
+    let base = ini_path.parent().unwrap();
+
+    let profiles = list_profiles(&ini_path).expect("should list");
+    let paths: Vec<_> = profiles.iter().map(|p| p.path.clone()).collect();
+    assert_eq!(
+      paths,
+      vec![base.join("Profiles/other"), base.join("Profiles/orphan")]
+    );
+    assert!(
+      profiles[0].is_default,
+      "declared profile is the heuristic default"
+    );
+    assert!(!profiles[1].is_default);
   }
 
   #[test]
