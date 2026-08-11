@@ -22,6 +22,8 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
       .install();
   }
   m.add_function(wrap_pyfunction!(firefox, m)?)?;
+  m.add_function(wrap_pyfunction!(firefox_profiles, m)?)?;
+  m.add_function(wrap_pyfunction!(firefox_profile, m)?)?;
   m.add_function(wrap_pyfunction!(zen, m)?)?;
 
   m.add_function(wrap_pyfunction!(librewolf, m)?)?;

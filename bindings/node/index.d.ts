@@ -13,6 +13,11 @@ export interface CookieObject {
   httpOnly: boolean
   sameSite: number
 }
+export interface FirefoxProfileObject {
+  name: string
+  path: string
+  isDefault: boolean
+}
 export declare function version(): string
 export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
 export declare function firefox(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
@@ -27,7 +32,10 @@ export declare function operaGx(domains?: Array<string> | undefined | null): Pro
 export declare function chromium(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function vivaldi(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function firefoxProfiles(): Promise<Array<FirefoxProfileObject>>
+export declare function firefoxProfile(profile: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** rookie-cookies cross-platform facade */
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

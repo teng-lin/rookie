@@ -37,7 +37,7 @@ if (!loader.includes('No prebuilt rookie-cookies binding is published')) {
 
 loader = loader.replace(
   /^const \{ version,.* \} = nativeBinding$/m,
-  'const { version, anyBrowser, firefox, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding'
+  'const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding'
 )
 
 if (!loader.includes('function unsupportedPlatform(')) {
@@ -70,14 +70,30 @@ module.exports.chromiumBased = chromiumBased
 writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
-const loadDeclaration = 'export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>\n'
-const loadIndex = types.indexOf(loadDeclaration)
-if (loadIndex === -1) {
-  throw new Error(`Could not find the load declaration in ${typesPath}`)
+
+// NAPI-RS emits declarations for the platform doing the build. Remove only
+// those platform-specific functions and append the cross-platform facade.
+// Keeping the rest of the generated file intact is load-bearing: slicing at a
+// common declaration such as `load` silently discarded APIs generated after
+// it, including firefoxProfiles and firefoxProfile.
+const facadeMarker = '/** rookie-cookies cross-platform facade */'
+const facadeIndex = types.indexOf(facadeMarker)
+if (facadeIndex !== -1) {
+  types = types.slice(0, facadeIndex)
 }
 
-types = types.slice(0, loadIndex + loadDeclaration.length)
-types += `export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+types = types.replace(
+  /^export declare function (?:octoBrowser|internetExplorer|safari|chromiumBased)\([^\n]*\):[^\n]*\n?/gm,
+  ''
+)
+types = types.replace(
+  /^\/\*\* (?:Windows-only browsers|macOS-only browsers|Unix browsers|Windows browsers) \*\/\n?/gm,
+  ''
+)
+
+types = types.trimEnd()
+types += `
+${facadeMarker}
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
@@ -88,5 +104,14 @@ export declare function chromiumBased(dbPath: string, domains?: Array<string> | 
 /** Windows browsers */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 `
+
+for (const declaration of [
+  'export declare function firefoxProfiles(',
+  'export declare function firefoxProfile('
+]) {
+  if (!types.includes(declaration)) {
+    throw new Error(`Generated declarations were truncated: missing ${declaration}`)
+  }
+}
 
 writeFileSync(typesPath, types)

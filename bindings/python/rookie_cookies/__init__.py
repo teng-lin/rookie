@@ -12,6 +12,8 @@ from .rookie_cookies import (
     edge,
     firefox,
     firefox_based,
+    firefox_profile,
+    firefox_profiles,
     librewolf,
     load,
     opera,
@@ -32,6 +34,8 @@ __all__ = [
     "edge",
     "firefox",
     "firefox_based",
+    "firefox_profile",
+    "firefox_profiles",
     "librewolf",
     "load",
     "opera",
@@ -45,6 +49,8 @@ __all__ = [
 
 
 CookieList = List[Dict[str, Any]]
+FirefoxProfile = Dict[str, Any]
+FirefoxProfileList = List[FirefoxProfile]
 
 
 # Windows

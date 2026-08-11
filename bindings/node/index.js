@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, anyBrowser, firefox, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding
+const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding
 
 function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
@@ -350,4 +350,6 @@ module.exports.octoBrowser = octoBrowser || unsupportedPlatform('octoBrowser', '
 module.exports.internetExplorer = internetExplorer || unsupportedPlatform('internetExplorer', 'Windows')
 module.exports.safari = safari || unsupportedPlatform('safari', 'macOS')
 module.exports.chromiumBased = chromiumBased
+module.exports.firefoxProfiles = firefoxProfiles
+module.exports.firefoxProfile = firefoxProfile
 module.exports.firefoxBased = firefoxBased
