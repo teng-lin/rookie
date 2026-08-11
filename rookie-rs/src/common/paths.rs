@@ -2,7 +2,9 @@ use crate::{
   browser::mozilla::{list_profiles, MozillaProfile},
   config::Browser,
 };
-use anyhow::{Context, Result};
+#[cfg(target_os = "windows")]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use std::{
   env,
   error::Error,
@@ -45,8 +47,11 @@ fn expand_glob_paths(path: PathBuf) -> Result<Vec<PathBuf>> {
   let mut paths: Vec<PathBuf> = vec![];
   if let Some(path_str) = path.to_str() {
     for entry in glob::glob(path_str)? {
-      if entry.is_ok() {
-        paths.push(entry?);
+      match entry {
+        Ok(path) => paths.push(path),
+        Err(error) => {
+          log::warn!("Skipping inaccessible glob candidate: {error}");
+        }
       }
     }
   }
@@ -54,33 +59,38 @@ fn expand_glob_paths(path: PathBuf) -> Result<Vec<PathBuf>> {
 }
 
 pub fn find_chrome_based_paths(config: &Browser) -> Result<(PathBuf, PathBuf)> {
-  for path in &config.paths {
-    // base paths
-    let channels = config.channels.clone().unwrap_or(vec!["".to_string()]);
-    for channel in channels {
-      // channels
-      let path = path.replace("{channel}", &channel);
-      let db_path = expand_path(path.as_str())?;
-      let glob_db_paths = expand_glob_paths(db_path)?;
-      for db_path in glob_db_paths {
-        // glob expanded paths
-        if db_path.exists() {
-          if let Some(parent) = db_path.parent() {
-            let key_path = ["../../Local State", "../Local State", "Local State"]
-              .iter()
-              .map(|p| parent.join(p))
-              .find(|p| p.exists())
-              .unwrap_or_else(|| parent.join("Local State"))
-              .canonicalize()
-              .context("canonicalize")?;
-            log::debug!(
-              "Found chrome path {}, {}",
-              db_path.display(),
-              key_path.display()
-            );
-            return Ok((key_path, db_path));
-          }
-        }
+  for db_path in expand_config_paths(config)? {
+    if db_path.exists() {
+      if let Some(parent) = db_path.parent() {
+        let candidates = ["../../Local State", "../Local State", "Local State"]
+          .map(|candidate| parent.join(candidate));
+        let existing = candidates.iter().find(|candidate| candidate.exists());
+
+        #[cfg(target_os = "windows")]
+        let key_path = existing
+          .ok_or_else(|| {
+            anyhow!(
+              "can't find Local State for Chromium cookie database {}",
+              db_path.display()
+            )
+          })?
+          .canonicalize()
+          .context("canonicalize Local State")?;
+
+        // Unix key retrieval uses the browser/keyring metadata from `config`,
+        // not Local State. Preserve the tuple-shaped legacy selector while
+        // allowing copied or otherwise minimal profiles to be discovered.
+        #[cfg(unix)]
+        let key_path = existing
+          .and_then(|candidate| candidate.canonicalize().ok())
+          .unwrap_or_else(|| candidates[0].clone());
+
+        log::debug!(
+          "Found chrome path {}, {}",
+          db_path.display(),
+          key_path.display()
+        );
+        return Ok((key_path, db_path));
       }
     }
   }
@@ -93,19 +103,27 @@ pub fn find_chrome_based_paths(config: &Browser) -> Result<(PathBuf, PathBuf)> {
 /// A path that cannot be expanded is logged and skipped so one bad entry does
 /// not abort the whole search — but if that leaves nothing at all, the first
 /// failure is returned rather than letting the caller report a misleading
-/// "can't find cookies file". On unix an unset `HOME` fails every entry.
-fn expand_config_paths(config: &Browser) -> Result<Vec<PathBuf>> {
+/// "can't find cookies file". On Unix an unset `HOME` only invalidates entries
+/// that actually reference it.
+fn expand_config_paths_with(
+  config: &Browser,
+  mut expand: impl FnMut(&str) -> Result<PathBuf>,
+) -> Result<Vec<PathBuf>> {
   let channels = config
     .channels
     .clone()
     .unwrap_or_else(|| vec![String::new()]);
   let mut bases: Vec<PathBuf> = vec![];
   let mut first_error: Option<anyhow::Error> = None;
+  let mut usable_patterns = 0usize;
   for path in &config.paths {
     for channel in &channels {
       let path = path.replace("{channel}", channel);
-      match expand_path(path.as_str()).and_then(expand_glob_paths) {
-        Ok(expanded) => bases.extend(expanded),
+      match expand(path.as_str()).and_then(expand_glob_paths) {
+        Ok(expanded) => {
+          usable_patterns += 1;
+          bases.extend(expanded);
+        }
         Err(err) => {
           log::warn!("Skipping unusable path {path}: {err}");
           first_error.get_or_insert(err);
@@ -115,9 +133,13 @@ fn expand_config_paths(config: &Browser) -> Result<Vec<PathBuf>> {
   }
 
   match first_error {
-    Some(err) if bases.is_empty() => Err(err.context("no browser path could be expanded")),
+    Some(err) if usable_patterns == 0 => Err(err.context("no browser path could be expanded")),
     _ => Ok(bases),
   }
+}
+
+fn expand_config_paths(config: &Browser) -> Result<Vec<PathBuf>> {
+  expand_config_paths_with(config, |path| expand_path(path, true))
 }
 
 /// Profiles declared under `base`, default first, so callers probe the profile
@@ -254,21 +276,10 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
 
 #[cfg(target_os = "macos")]
 pub fn find_safari_based_paths(config: &Browser) -> Result<PathBuf> {
-  for path in &config.paths {
-    // base paths
-    let channels = config.channels.clone().unwrap_or(vec!["".to_string()]);
-    for channel in channels {
-      // channels
-      let path = path.replace("{channel}", &channel);
-      let safari_path = expand_path(path.as_str())?;
-      let glob_paths = expand_glob_paths(safari_path)?;
-      for path in glob_paths {
-        // expanded glob paths
-        if path.exists() {
-          log::debug!("Found safari path {}", path.display());
-          return Ok(path);
-        }
-      }
+  for path in expand_config_paths(config)? {
+    if path.exists() {
+      log::debug!("Found safari path {}", path.display());
+      return Ok(path);
     }
   }
   Err(BrowserNotInstalled::CookieDatabase.into())
@@ -276,64 +287,72 @@ pub fn find_safari_based_paths(config: &Browser) -> Result<PathBuf> {
 
 #[cfg(target_os = "windows")]
 pub fn find_ie_based_paths(config: &Browser) -> Result<PathBuf> {
-  for path in &config.paths {
-    // base paths
-    let channels = config.channels.clone().unwrap_or(vec!["".to_string()]);
-    for channel in channels {
-      // channels
-
-      let path = path.replace("{channel}", &channel);
-      let path = expand_path(path.as_str())?;
-      let glob_paths = expand_glob_paths(path)?;
-      for path in glob_paths {
-        // expanded glob paths
-        if path.exists() {
-          log::debug!("Found IE path {}", path.display());
-          return Ok(path);
-        }
-      }
+  for path in expand_config_paths(config)? {
+    if path.exists() {
+      log::debug!("Found IE path {}", path.display());
+      return Ok(path);
     }
   }
 
   Err(BrowserNotInstalled::CookieDatabase.into())
 }
+
 #[cfg(target_os = "windows")]
-pub fn expand_path(path: &str) -> Result<PathBuf> {
+fn expand_windows_path(path: &str, escape_glob_metacharacters: bool) -> Result<PathBuf> {
   use regex::Regex;
-  // Define a regex pattern to match placeholders like %SOMETHING%
   let re = Regex::new(r"%([^%]+)%")?;
-
-  // Clone the input path for modification
   let mut expanded_path = path.to_owned();
-
-  // Iterate over all matches of the regex pattern in the input path
   for capture in re.captures_iter(path) {
-    // Get the matched placeholder (e.g., "APPDATA" from "%APPDATA%")
     let placeholder = &capture[1];
-
-    // Try to get the corresponding environment variable value
     if let Ok(var_value) = env::var(placeholder) {
-      // Replace the placeholder with the environment variable value
-      expanded_path = expanded_path.replace(&capture[0], &var_value);
+      let replacement = if escape_glob_metacharacters {
+        glob::Pattern::escape(&var_value)
+      } else {
+        var_value
+      };
+      expanded_path = expanded_path.replace(&capture[0], &replacement);
     }
   }
-
-  // Convert the expanded path to a PathBuf
-  let path_buf = PathBuf::from(expanded_path);
-
-  Ok(path_buf)
+  Ok(PathBuf::from(expanded_path))
 }
 
 #[cfg(unix)]
-pub fn expand_path(path: &str) -> Result<PathBuf> {
-  // Get the value of the HOME environment variable
-  let home = env::var("HOME")?;
+fn expand_unix_path(
+  path: &str,
+  home: Option<&str>,
+  escape_glob_metacharacters: bool,
+) -> Result<PathBuf> {
+  let needs_home = path == "~" || path.starts_with("~/") || path.contains("$HOME");
+  if !needs_home {
+    return Ok(PathBuf::from(path));
+  }
 
-  // Replace ~ or $HOME with the actual home directory path
-  let expanded_path = path.replace('~', &home).replace("$HOME", &home);
+  let home = home.ok_or_else(|| anyhow!("HOME is not set"))?;
+  let replacement = if escape_glob_metacharacters {
+    glob::Pattern::escape(home)
+  } else {
+    home.to_owned()
+  };
 
-  // Convert the expanded path to a PathBuf
+  let expanded_path = if path == "~" {
+    replacement
+  } else if let Some(suffix) = path.strip_prefix("~/") {
+    format!("{replacement}/{suffix}")
+  } else {
+    path.replace("$HOME", &replacement)
+  };
   Ok(PathBuf::from(expanded_path))
+}
+
+#[cfg(target_os = "windows")]
+fn expand_path(path: &str, escape_glob_metacharacters: bool) -> Result<PathBuf> {
+  expand_windows_path(path, escape_glob_metacharacters)
+}
+
+#[cfg(unix)]
+fn expand_path(path: &str, escape_glob_metacharacters: bool) -> Result<PathBuf> {
+  let home = env::var("HOME").ok();
+  expand_unix_path(path, home.as_deref(), escape_glob_metacharacters)
 }
 
 #[cfg(test)]
@@ -407,10 +426,15 @@ mod tests {
     let beta_network = seed_chromium_source(&base, "beta", true);
     let _stable_legacy = seed_chromium_source(&base, "stable", false);
 
-    let (_, selected) = find_chrome_based_paths(&chromium_config(&base)).expect("should find");
+    let (key, selected) = find_chrome_based_paths(&chromium_config(&base)).expect("should find");
     assert_eq!(
       selected, beta_network,
       "the first configured path is exhausted across channels before the next path"
+    );
+    assert_eq!(
+      key,
+      base.join("beta/Local State").canonicalize().unwrap(),
+      "Network/Cookies must resolve Local State at the user-data root"
     );
   }
 
@@ -422,6 +446,135 @@ mod tests {
 
     let (_, selected) = find_chrome_based_paths(&chromium_config(&base)).expect("should find");
     assert_eq!(selected, stable_network);
+  }
+
+  #[test]
+  fn find_chrome_based_paths_survives_an_unusable_configured_path() {
+    let base = unique_tmpdir("chromium-bad-glob");
+    let selected = seed_chromium_source(&base, "stable", true);
+    let mut config = chromium_config(&base);
+    config.paths.insert(0, "/nonexistent/***/[".to_owned());
+
+    let (_, db) = find_chrome_based_paths(&config).expect("later candidate should be probed");
+    assert_eq!(db, selected);
+  }
+
+  #[test]
+  fn a_bad_pattern_does_not_replace_a_normal_not_found_result() {
+    let config = Browser {
+      paths: vec![
+        "/nonexistent/***/[".to_owned(),
+        "/also/nonexistent/Cookies".to_owned(),
+      ],
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+
+    let err = find_chrome_based_paths(&config).expect_err("no candidate exists");
+    assert!(is_browser_not_installed(&err));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn find_chrome_based_paths_allows_missing_unused_local_state() {
+    let base = unique_tmpdir("chromium-no-local-state");
+    let db = base.join("Default/Network/Cookies");
+    std::fs::create_dir_all(db.parent().unwrap()).expect("profile dir");
+    std::fs::write(&db, b"").expect("cookie DB");
+    let config = Browser {
+      paths: vec![db.to_string_lossy().into_owned()],
+      channels: None,
+      unix_crypt_name: Some("chrome".to_owned()),
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+
+    let (_, selected) = find_chrome_based_paths(&config).expect("Local State is unused on Unix");
+    assert_eq!(selected, db);
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn find_chrome_based_paths_requires_local_state_on_windows() {
+    let base = unique_tmpdir("chromium-no-local-state");
+    let db = base.join("Default/Network/Cookies");
+    std::fs::create_dir_all(db.parent().unwrap()).expect("profile dir");
+    std::fs::write(&db, b"").expect("cookie DB");
+    let config = Browser {
+      paths: vec![db.to_string_lossy().into_owned()],
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+
+    let err = find_chrome_based_paths(&config).expect_err("Windows needs Local State");
+    assert!(err.to_string().contains("can't find Local State"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn injected_home_glob_metacharacters_are_literal() {
+    let root = unique_tmpdir("home-glob");
+    let home = root.join("home[seed]*?");
+    let db = home.join(".config/google-chrome/Profile 1/Network/Cookies");
+    std::fs::create_dir_all(db.parent().unwrap()).expect("profile dir");
+    std::fs::write(&db, b"").expect("cookie DB");
+    let config = Browser {
+      paths: vec!["~/.config/google-chrome/Profile */Network/Cookies".to_owned()],
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+    let home = home.to_str().expect("UTF-8 temp path");
+
+    let expanded =
+      expand_config_paths_with(&config, |path| expand_unix_path(path, Some(home), true))
+        .expect("escaped expansion");
+    assert_eq!(expanded, vec![db]);
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn find_safari_based_paths_survives_an_unusable_configured_path() {
+    let root = unique_tmpdir("safari-bad-glob");
+    let db = root.join("Cookies.binarycookies");
+    std::fs::write(&db, b"").expect("cookie file");
+    let config = Browser {
+      paths: vec![
+        "/nonexistent/***/[".to_owned(),
+        db.to_string_lossy().into_owned(),
+      ],
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+
+    assert_eq!(find_safari_based_paths(&config).unwrap(), db);
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn find_ie_based_paths_survives_an_unusable_configured_path() {
+    let root = unique_tmpdir("ie-bad-glob");
+    let db = root.join("WebCacheV01.dat");
+    std::fs::write(&db, b"").expect("cookie file");
+    let config = Browser {
+      paths: vec![
+        "C:/nonexistent/***/[".to_owned(),
+        db.to_string_lossy().into_owned(),
+      ],
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+
+    assert_eq!(find_ie_based_paths(&config).unwrap(), db);
   }
 
   /// Lays out `<base>/profiles.ini` plus a `cookies.sqlite` in each named
@@ -800,7 +953,7 @@ mod tests {
   #[test]
   fn expand_path_unix_replaces_tilde_with_home() {
     let home = env::var("HOME").expect("HOME must be set on unix runners");
-    let expanded = expand_path("~/.config/google-chrome/Default/Cookies").unwrap();
+    let expanded = expand_path("~/.config/google-chrome/Default/Cookies", false).unwrap();
     assert_eq!(
       expanded,
       PathBuf::from(format!("{home}/.config/google-chrome/Default/Cookies"))
@@ -811,15 +964,22 @@ mod tests {
   #[test]
   fn expand_path_unix_replaces_dollar_home() {
     let home = env::var("HOME").expect("HOME must be set on unix runners");
-    let expanded = expand_path("$HOME/Library/Cookies").unwrap();
+    let expanded = expand_path("$HOME/Library/Cookies", false).unwrap();
     assert_eq!(expanded, PathBuf::from(format!("{home}/Library/Cookies")));
   }
 
   #[cfg(unix)]
   #[test]
   fn expand_path_unix_leaves_absolute_paths_alone() {
-    let expanded = expand_path("/etc/hosts").unwrap();
+    let expanded = expand_path("/etc/hosts", false).unwrap();
     assert_eq!(expanded, PathBuf::from("/etc/hosts"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn expand_path_unix_only_expands_a_leading_tilde() {
+    let expanded = expand_unix_path("/tmp/account~archive", None, false).unwrap();
+    assert_eq!(expanded, PathBuf::from("/tmp/account~archive"));
   }
 
   #[cfg(target_os = "windows")]
@@ -828,7 +988,7 @@ mod tests {
     // SAFETY: tests in the same process share env state; we use a unique key to avoid clashes.
     let key = "ROOKIE_TEST_EXPAND_PATH";
     env::set_var(key, "C:\\seeded");
-    let expanded = expand_path(&format!("%{key}%\\Cookies")).unwrap();
+    let expanded = expand_path(&format!("%{key}%\\Cookies"), false).unwrap();
     assert_eq!(expanded, PathBuf::from("C:\\seeded\\Cookies"));
     env::remove_var(key);
   }
@@ -837,10 +997,35 @@ mod tests {
   #[test]
   fn expand_path_windows_leaves_unknown_placeholders() {
     // Unknown placeholders are left literally — surface the failure to the caller instead of silently dropping.
-    let expanded = expand_path("%ROOKIE_TEST_DOES_NOT_EXIST%\\Cookies").unwrap();
+    let expanded = expand_path("%ROOKIE_TEST_DOES_NOT_EXIST%\\Cookies", false).unwrap();
     assert_eq!(
       expanded,
       PathBuf::from("%ROOKIE_TEST_DOES_NOT_EXIST%\\Cookies")
     );
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn injected_windows_env_glob_metacharacters_are_literal() {
+    let root = unique_tmpdir("windows-home-glob");
+    let home = root.join("home[seed]*?");
+    let db = home.join("Google/Chrome/User Data/Default/Network/Cookies");
+    std::fs::create_dir_all(db.parent().unwrap()).expect("profile dir");
+    std::fs::write(&db, b"").expect("cookie DB");
+    let key = "ROOKIE_TEST_GLOB_HOME";
+    env::set_var(key, &home);
+    let config = Browser {
+      paths: vec![format!(
+        "%{key}%/Google/Chrome/User Data/Default/Network/Cookies"
+      )],
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+
+    let expanded = expand_config_paths(&config).expect("escaped expansion");
+    env::remove_var(key);
+    assert_eq!(expanded, vec![db]);
   }
 }
