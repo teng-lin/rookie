@@ -296,12 +296,16 @@ jobs:
           path: ./bindings/node/release-packages
       - name: Install npm with trusted publishing support
         run: npm install --global npm@11.5.1
+      - name: Verify publish inputs
+        shell: bash
+        run: |
+          test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 5
+          for tarball in release-packages/*.tgz; do
+            npm publish "./$tarball" --dry-run --access public --ignore-scripts
+          done
       - name: Publish
         shell: bash
         run: |
-          if test -n "$NPM_TOKEN"; then
-            npm config set "//registry.npmjs.org/:_authToken" "$NPM_TOKEN" --location=user
-          fi
           native_packages=(
             rookie-cookies-darwin-arm64
             rookie-cookies-darwin-x64
@@ -311,6 +315,7 @@ jobs:
           publish_tarball() {
             package_name="$1"
             tarball="$2"
+            test -f "$tarball"
             if published_integrity=$(npm view "$package_name@$RELEASE_VERSION" dist.integrity 2>/dev/null); then
               local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
               if test "$published_integrity" != "$local_integrity"; then
@@ -320,11 +325,9 @@ jobs:
               echo "$package_name@$RELEASE_VERSION is already published with identical contents"
               return 0
             fi
-            npm publish "$tarball" --access public --ignore-scripts --provenance
+            npm publish "./$tarball" --access public --ignore-scripts --provenance
           }
           for package in "${native_packages[@]}"; do
             publish_tarball "$package" "release-packages/$package-$RELEASE_VERSION.tgz"
           done
           publish_tarball rookie-cookies "release-packages/rookie-cookies-$RELEASE_VERSION.tgz"
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
