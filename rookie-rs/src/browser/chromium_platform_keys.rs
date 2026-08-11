@@ -447,13 +447,12 @@ mod tests {
         ..
       }
     ));
-    assert!(matches!(
-      outcomes.route(ChromiumCipherVersion::V11),
-      ChromiumKeyRoute::Failure {
-        tier: ChromiumKeyTier::V11,
-        ..
-      }
-    ));
+    let ChromiumKeyRoute::Failure { tier, failure } = outcomes.route(ChromiumCipherVersion::V11)
+    else {
+      panic!("expected failed v11 keyring route");
+    };
+    assert_eq!(tier, ChromiumKeyTier::V11);
+    assert_eq!(failure.message(), "keyring unavailable");
   }
 
   #[cfg(target_os = "linux")]
