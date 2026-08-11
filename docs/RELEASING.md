@@ -52,7 +52,7 @@ run the checks below. The release metadata checker requires Python 3.11 or
 newer.
 
 ```console
-export VERSION=0.5.7
+export VERSION=0.5.8
 python3 scripts/check-release.py "$VERSION"
 cargo test --workspace --all-targets
 cargo test --workspace --doc

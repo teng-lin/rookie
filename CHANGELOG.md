@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-08-11
+
 ### Added
 
 - Windows App-Bound (v20) cookie decryption for Chrome 133+: the
@@ -15,8 +17,21 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every Firefox profile holding a cookie database and read cookies from a
   specific one selected by name, directory name, or path.
 
+### Changed
+
+- Python extraction releases the GIL, and Node.js extraction functions now run
+  as asynchronous tasks so cookie reads do not block their host runtimes.
+- Domain filtering now has consistent matching behavior across browser
+  backends, including mixed SQL filters.
+- Extraction now returns an aggregate error when every requested browser fails,
+  while retaining the individual browser failures for diagnosis. Linux keyring
+  and D-Bus failures are also surfaced instead of silently discarded.
+
 ### Fixed
 
+- SQLite-backed browsers now copy active `-wal` and `-shm` files with the main
+  database, preventing recently committed cookies from disappearing while the
+  browser is open.
 - Internet Explorer cookies now report `secure` and `http_only` from the ESE
   `Flags` column instead of always `false`, so a Secure cookie is no longer
   extracted as one safe to replay over plain HTTP. Flags that cannot be read
@@ -41,6 +56,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of slicing a fixed trailing window, so Chrome 133+'s 93-byte flag-3
   key layout is decoded correctly (its scheme flag was previously read from the
   middle of the blob, leaving flag 3 unsupported).
+- The CLI now sends tracing and log output to stderr so redirected stdout
+  remains a valid cookie export.
+- Chromium discovery includes the modern `Network/Cookies` location on macOS
+  and Linux, and valid unencrypted plaintext cookies are preserved.
+- Malformed cookie rows, truncated binary data, and out-of-range timestamps no
+  longer discard an entire database or panic. Safari expiry timestamps are
+  decoded as 64-bit floating-point values, and CBC decryption continues trying
+  candidate keys after an invalid UTF-8 result.
+- Source builds no longer fail when `git` is unavailable, watch the repository's
+  actual `HEAD` for rebuilds, and include the packaged Rust examples.
+
+### Security
+
+- SQLite domain filters are parameterized rather than interpolated into SQL.
+- Windows App-Bound extraction restores SYSTEM impersonation and
+  `SeDebugPrivilege` on every path, removes shadow-copy temporary directories,
+  and only force-closes a browser when explicitly enabled.
 
 ## [0.5.7] - 2026-08-09
 
