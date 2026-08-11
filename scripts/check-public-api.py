@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import functools
 import json
 import subprocess
 import sys
@@ -151,30 +150,25 @@ def compare_with_exceptions(
         print(f"stale or mismatched public API exceptions for {label}: {stale!r}", file=sys.stderr)
         return False
 
-    @functools.cache
-    def matches(expected_index: int, actual_index: int) -> bool:
-        if expected_index == len(expected_lines) and actual_index == len(actual_lines):
-            return True
-        if (
-            expected_index < len(expected_lines)
-            and actual_index < len(actual_lines)
-            and expected_lines[expected_index] == actual_lines[actual_index]
-            and matches(expected_index + 1, actual_index + 1)
-        ):
-            return True
-        if (
-            expected_index < len(expected_lines)
-            and ("removed", expected_lines[expected_index]) in allowed
-            and matches(expected_index + 1, actual_index)
-        ):
-            return True
-        return (
-            actual_index < len(actual_lines)
-            and ("added", actual_lines[actual_index]) in allowed
-            and matches(expected_index, actual_index + 1)
+    previous = [False] * (len(actual_lines) + 1)
+    previous[0] = True
+    for actual_index, actual_item in enumerate(actual_lines, start=1):
+        previous[actual_index] = (
+            previous[actual_index - 1] and ("added", actual_item) in allowed
         )
 
-    if matches(0, 0):
+    for expected_item in expected_lines:
+        current = [False] * (len(actual_lines) + 1)
+        current[0] = previous[0] and ("removed", expected_item) in allowed
+        for actual_index, actual_item in enumerate(actual_lines, start=1):
+            current[actual_index] = (
+                (previous[actual_index - 1] and expected_item == actual_item)
+                or (previous[actual_index] and ("removed", expected_item) in allowed)
+                or (current[actual_index - 1] and ("added", actual_item) in allowed)
+            )
+        previous = current
+
+    if previous[-1]:
         return True
 
     print(f"public API mismatch for {label}:", file=sys.stderr)
