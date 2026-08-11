@@ -123,33 +123,41 @@ fn expand_config_paths(config: &Browser) -> Result<Vec<PathBuf>> {
 /// Profiles declared under `base`, default first, so callers probe the profile
 /// the browser actually opens before any secondary one.
 ///
-/// Returns `None` when a `profiles.ini` is present but unreadable — that is not
-/// the same as a root declaring no profiles, and callers must not treat an
-/// unreadable file as evidence that nothing was declared.
-fn mozilla_profiles_in(base: &Path) -> Option<Vec<MozillaProfile>> {
+/// A missing `profiles.ini` is a valid empty declaration because legacy and
+/// portable layouts can store `cookies.sqlite` directly under `base`. A file
+/// that exists but cannot be parsed is a real discovery failure and remains
+/// typed separately from an absent browser.
+fn mozilla_profiles_in(base: &Path) -> Result<Vec<MozillaProfile>> {
   let profiles_path = base.join("profiles.ini");
   let mut profiles = match list_profiles(profiles_path.as_path()) {
     Ok(profiles) => profiles,
     Err(err) => {
-      // A profiles.ini that exists but will not parse is a real problem worth
-      // surfacing; one that is simply absent is the normal case for a base
-      // path this browser does not use.
       if profiles_path.exists() {
         log::warn!("Failed to read {}: {err}", profiles_path.display());
-        return None;
+        return Err(err.context(format!(
+          "Failed to read Mozilla profiles from {}",
+          profiles_path.display()
+        )));
       }
       log::debug!("No profiles.ini at {}", profiles_path.display());
-      return Some(vec![]);
+      return Ok(vec![]);
     }
   };
   profiles.sort_by_key(|profile| !profile.is_default);
-  Some(profiles)
+  Ok(profiles)
 }
 
 pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
+  let mut first_error: Option<anyhow::Error> = None;
   for base in expand_config_paths(config)? {
-    let candidates = mozilla_profiles_in(&base)
-      .unwrap_or_default()
+    let profiles = match mozilla_profiles_in(&base) {
+      Ok(profiles) => profiles,
+      Err(err) => {
+        first_error.get_or_insert(err);
+        vec![]
+      }
+    };
+    let candidates = profiles
       .into_iter()
       .map(|profile| profile.path)
       // Probing the base directory itself preserves the behaviour of the
@@ -165,7 +173,10 @@ pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
     }
   }
 
-  Err(BrowserNotInstalled::CookieDatabase.into())
+  match first_error {
+    Some(err) => Err(err),
+    None => Err(BrowserNotInstalled::CookieDatabase.into()),
+  }
 }
 
 /// Records `profile` unless an earlier root already yielded the same directory.
@@ -196,9 +207,16 @@ fn push_unique(found: &mut Vec<MozillaProfile>, seen: &mut Vec<PathBuf>, profile
 pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfile>> {
   let mut found: Vec<MozillaProfile> = vec![];
   let mut seen: Vec<PathBuf> = vec![];
+  let mut first_error: Option<anyhow::Error> = None;
 
   for base in expand_config_paths(config)? {
-    let declared = mozilla_profiles_in(&base);
+    let declared = match mozilla_profiles_in(&base) {
+      Ok(profiles) => Some(profiles),
+      Err(err) => {
+        first_error.get_or_insert(err);
+        None
+      }
+    };
     let mut usable = 0;
     for profile in declared.iter().flatten().cloned() {
       if profile.path.join("cookies.sqlite").exists() {
@@ -226,7 +244,10 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
   }
 
   if found.is_empty() {
-    return Err(BrowserNotInstalled::ProfileWithCookieDatabase.into());
+    return match first_error {
+      Some(err) => Err(err),
+      None => Err(BrowserNotInstalled::ProfileWithCookieDatabase.into()),
+    };
   }
   Ok(found)
 }
@@ -543,6 +564,31 @@ mod tests {
   }
 
   #[test]
+  fn find_mozilla_based_paths_preserves_an_unreadable_profiles_error() {
+    let base = unique_tmpdir("ff-unreadable-ini-no-db");
+    std::fs::create_dir_all(base.join("profiles.ini")).expect("dir where a file belongs");
+
+    let err = find_mozilla_based_paths(&mozilla_config(&base)).expect_err("should fail");
+    assert!(
+      err.to_string().contains("Failed to read Mozilla profiles"),
+      "unexpected error: {err:#}"
+    );
+    assert!(!is_browser_not_installed(&err));
+  }
+
+  #[test]
+  fn find_mozilla_based_paths_can_recover_after_an_unreadable_profiles_file() {
+    let unreadable = unique_tmpdir("ff-unreadable-ini-first");
+    std::fs::create_dir_all(unreadable.join("profiles.ini")).expect("dir where a file belongs");
+    let usable = unique_tmpdir("ff-readable-ini-second");
+    seed_profiles(&usable, TWO_PROFILES_INI, &["Profiles/main"]);
+
+    let db = find_mozilla_based_paths(&mozilla_config_multi(&[&unreadable, &usable]))
+      .expect("a later usable root should win");
+    assert_eq!(db, usable.join("Profiles/main/cookies.sqlite"));
+  }
+
+  #[test]
   fn find_mozilla_based_profiles_dedups_repeated_base_paths() {
     // Two config entries resolving to the same directory (snap and a symlinked
     // equivalent, in the field) must not double every profile.
@@ -735,6 +781,19 @@ mod tests {
       err.to_string().contains("Can't find any profile"),
       "unexpected error: {err}"
     );
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_preserves_an_unreadable_profiles_error() {
+    let base = unique_tmpdir("ff-unreadable-enumeration-no-db");
+    std::fs::create_dir_all(base.join("profiles.ini")).expect("dir where a file belongs");
+
+    let err = find_mozilla_based_profiles(&mozilla_config(&base)).expect_err("should fail");
+    assert!(
+      err.to_string().contains("Failed to read Mozilla profiles"),
+      "unexpected error: {err:#}"
+    );
+    assert!(!is_browser_not_installed(&err));
   }
 
   #[cfg(unix)]
