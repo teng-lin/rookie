@@ -13,6 +13,8 @@ pub struct CookieObject {
   pub domain: String,
   pub path: String,
   pub secure: bool,
+  /// Unix expiry time. Source values above `i64::MAX` are omitted rather than
+  /// wrapping into a negative JavaScript number.
   pub expires: Option<i64>,
   pub name: String,
   pub value: String,
@@ -41,13 +43,36 @@ fn cookies_to_js(cookies: Vec<Cookie>) -> Result<Vec<CookieObject>> {
       secure: cookie.secure,
       http_only: cookie.http_only,
       same_site: cookie.same_site,
-      expires: cookie.expires.map(|v| v as i64),
+      expires: cookie.expires.and_then(|value| i64::try_from(value).ok()),
       name: cookie.name,
       value: cookie.value,
     });
   }
 
   Ok(js_cookies)
+}
+
+/// Serialize cookies in Netscape cookie-file format.
+///
+/// Tabs, carriage returns, and line feeds in cookie-controlled fields are
+/// encoded as `%09`, `%0D`, and `%0A`, matching the Rust, CLI, and Python APIs.
+#[napi]
+pub fn to_netscape(cookies: Vec<CookieObject>) -> String {
+  let cookies = cookies
+    .into_iter()
+    .map(|cookie| Cookie {
+      domain: cookie.domain,
+      path: cookie.path,
+      secure: cookie.secure,
+      expires: cookie.expires.and_then(|value| u64::try_from(value).ok()),
+      name: cookie.name,
+      value: cookie.value,
+      http_only: cookie.http_only,
+      same_site: cookie.same_site,
+    })
+    .collect();
+
+  rookie_cookies::common::format::netscape(cookies)
 }
 
 fn profiles_to_js(profiles: Vec<MozillaProfile>) -> Vec<FirefoxProfileObject> {
@@ -465,5 +490,23 @@ mod tests {
       error.reason,
       "cookie extraction worker panicked: forced unit-test panic"
     );
+  }
+
+  #[test]
+  fn expiry_above_i64_max_is_omitted_instead_of_wrapping() {
+    let cookies = cookies_to_js(vec![Cookie {
+      domain: "example.test".to_string(),
+      path: "/".to_string(),
+      secure: false,
+      expires: Some(i64::MAX as u64 + 1),
+      name: "name".to_string(),
+      value: "value".to_string(),
+      http_only: false,
+      same_site: 0,
+    }])
+    .expect("cookie conversion should succeed");
+
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].expires, None);
   }
 }

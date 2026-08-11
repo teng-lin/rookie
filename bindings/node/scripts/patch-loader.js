@@ -43,7 +43,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
+  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
 )
 
 const exportStart = loader.search(
@@ -89,6 +89,7 @@ function platformNative(nativeFunction, name, nodePlatform, supportedPlatform) {
 }
 
 module.exports.version = requiredNative(version, 'version')
+module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
 module.exports.firefox = asyncNative(firefox, 'firefox')
 module.exports.zen = asyncNative(zen, 'zen')
@@ -154,6 +155,7 @@ export declare function chromiumBased(keyPath: string, dbPath: string, domains?:
 `
 
 for (const declaration of [
+  'export declare function toNetscape(',
   'export declare function firefoxProfiles(',
   'export declare function firefoxProfile('
 ]) {

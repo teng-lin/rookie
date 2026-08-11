@@ -29,3 +29,15 @@ for (const profile of await firefoxProfiles()) {
 
 const cookies = await firefoxProfile("work", ["example.com"]);
 ```
+
+## Netscape export
+
+```typescript
+import { chrome, toNetscape } from "rookie-cookies";
+
+const output = toNetscape(await chrome());
+```
+
+The serializer prevents extra columns or forged records by encoding tabs,
+carriage returns, and line feeds in cookie-controlled fields as `%09`, `%0D`,
+and `%0A`. Every other character is preserved.
