@@ -2,6 +2,7 @@ pub(crate) mod chromium;
 pub(crate) mod chromium_crypto;
 pub(crate) mod chromium_platform_keys;
 pub(crate) mod mozilla;
+pub(crate) mod registry;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod internet_explorer;

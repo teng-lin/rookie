@@ -849,7 +849,7 @@ where
 }
 
 #[allow(unused_variables)]
-fn query_cookies_with_key_outcomes(
+pub(crate) fn query_cookies_with_key_outcomes(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
