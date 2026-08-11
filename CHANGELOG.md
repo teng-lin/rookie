@@ -11,6 +11,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Windows App-Bound (v20) cookie decryption for Chrome 133+: the
   ChaCha20-Poly1305 (flag 2) and CNG-wrapped AES-256-GCM (flag 3) key-wrapping
   schemes, ported from the `runassu/chrome_v20_decryption` reference.
+- `firefox_profiles()` and `firefox_profile()` in the Rust API, which enumerate
+  every Firefox profile holding a cookie database and read cookies from a
+  specific one selected by name, directory name, or path.
 
 ### Fixed
 
@@ -22,6 +25,18 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   insecure. Their `same_site` is now `-1` (unspecified) rather than `0`, which
   had claimed `SameSite=None` for a store that records no SameSite attribute
   at all.
+- Firefox `profiles.ini` resolution no longer returns whichever `[Install...]`
+  section comes first in the file. A single unambiguous install still wins, but
+  competing installs (a release and a nightly sharing one `profiles.ini`) are
+  now broken by the `[ProfileN] Default=1` marker, and an install section
+  without a `Default=` key falls through to that marker instead of resolving to
+  an empty path.
+- Firefox cookie discovery now falls through to secondary profiles when the
+  default profile has no `cookies.sqlite`, instead of giving up.
+- Firefox `profiles.ini` is parsed with escape processing disabled, so an
+  `IsRelative=0` profile storing an absolute Windows path such as
+  `C:\Users\me\Profiles\work` is no longer mangled into
+  `C:UsersmeProfileswork`.
 - Windows App-Bound key derivation now parses the key-blob framing header
   instead of slicing a fixed trailing window, so Chrome 133+'s 93-byte flag-3
   key layout is decoded correctly (its scheme flag was previously read from the

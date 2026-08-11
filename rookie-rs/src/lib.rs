@@ -11,7 +11,10 @@ pub use common::enums;
 pub use browser::internet_explorer::internet_explorer_based;
 #[cfg(target_os = "macos")]
 pub use browser::safari::safari_based;
-pub use browser::{chromium::chromium_based, mozilla::firefox_based};
+pub use browser::{
+  chromium::chromium_based,
+  mozilla::{firefox_based, MozillaProfile},
+};
 
 // Private
 mod browser;
@@ -58,6 +61,44 @@ pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let config = get_browser_config("firefox");
   let db_path = paths::find_mozilla_based_paths(config)?;
   firefox_based(db_path, domains)
+}
+
+/// Returns every Firefox profile that holds a cookie database.
+///
+/// [`firefox`] only reads the default profile; this lists the secondary ones
+/// too, so a caller can pick one and pass it to [`firefox_profile`].
+///
+/// # Examples
+///
+/// ```no_run
+/// for profile in rookie_cookies::firefox_profiles()? {
+///   println!("{} {} default={}", profile.name, profile.path.display(), profile.is_default);
+/// }
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
+  let config = get_browser_config("firefox");
+  paths::find_mozilla_based_profiles(config)
+}
+
+/// Returns cookies from a specific Firefox profile.
+///
+/// # Arguments
+///
+/// * `profile` - The profile's name, directory name, or full path, as reported
+///   by [`firefox_profiles`]
+/// * `domains` - A optional list that for getting specific domains only
+///
+/// # Examples
+///
+/// ```no_run
+/// let domains = vec!["google.com".to_string()];
+/// let cookies = rookie_cookies::firefox_profile("default-release", Some(domains));
+/// ```
+pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  let profiles = firefox_profiles()?;
+  let selected = browser::mozilla::select_profile(&profiles, profile)?;
+  firefox_based(selected.path.join("cookies.sqlite"), domains)
 }
 
 /// Returns cookies from LibreWolf
