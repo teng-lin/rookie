@@ -77,7 +77,8 @@ if (loadIndex === -1) {
 }
 
 types = types.slice(0, loadIndex + loadDeclaration.length)
-types += `/** Windows-only browsers */
+types += `export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** macOS-only browsers */

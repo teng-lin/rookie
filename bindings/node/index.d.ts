@@ -27,6 +27,7 @@ export declare function operaGx(domains?: Array<string> | undefined | null): Pro
 export declare function chromium(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function vivaldi(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

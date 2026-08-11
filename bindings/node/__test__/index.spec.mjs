@@ -12,14 +12,14 @@ test("version returns a non-empty string", (t) => {
 });
 
 test("firefoxBased throws on a missing db path", async (t) => {
-  await t.throwsAsync(async () => firefoxBased("/nonexistent/rookie/cookies.sqlite"));
+  await t.throwsAsync(firefoxBased("/nonexistent/rookie/cookies.sqlite"));
 });
 
 test("firefoxBased throws on a non-sqlite file", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rookie-node-"));
   const dbPath = join(dir, "cookies.sqlite");
   writeFileSync(dbPath, "this is not a sqlite database");
-  await t.throwsAsync(async () => firefoxBased(dbPath));
+  await t.throwsAsync(firefoxBased(dbPath));
 });
 
 test("safari reports an unsupported platform outside macOS", async (t) => {
@@ -28,6 +28,6 @@ test("safari reports an unsupported platform outside macOS", async (t) => {
     return;
   }
 
-  const error = await t.throwsAsync(async () => safari());
+  const error = await t.throwsAsync(safari());
   t.regex(error.message, /safari is only available on macOS/);
 });
