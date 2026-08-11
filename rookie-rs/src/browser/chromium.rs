@@ -365,6 +365,7 @@ pub(crate) fn query_cookies(
 
   let mut cookies: Vec<Cookie> = vec![];
   let mut last_row_error: Option<anyhow::Error> = None;
+  let mut decoded_any_row = false;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
@@ -428,6 +429,9 @@ pub(crate) fn query_cookies(
       }
     };
     if encrypted_value.is_empty() && value.is_empty() {
+      // A valueless row read cleanly, so the extraction is not a total failure
+      // even though it contributes no cookie.
+      decoded_any_row = true;
       continue;
     }
     let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, &keys) {
@@ -466,8 +470,9 @@ pub(crate) fn query_cookies(
       same_site,
     };
     cookies.push(cookie);
+    decoded_any_row = true;
   }
-  if cookies.is_empty() {
+  if !decoded_any_row {
     if let Some(err) = last_row_error {
       return Err(err);
     }
@@ -599,6 +604,32 @@ mod tests {
       "expected Err when no row decodes, got {:?}",
       result
     );
+  }
+
+  #[test]
+  fn query_cookies_ok_when_a_valueless_row_reads_cleanly() {
+    let dir = unique_tmpdir("chr-valueless-plus-bad");
+    let db = dir.join("Cookies");
+    // A valueless row (both value columns empty) is skipped but read cleanly,
+    // so it must keep the whole extraction from being reported as a failure
+    // even when another row does fail to decode.
+    seed_chromium_cookies(
+      &db,
+      &[(".example.com", "/", true, 0, "empty", "", b"", false, 0)],
+    );
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
+          encrypted_value, is_httponly, samesite) \
+          VALUES ('.other.com', '/', 1, -1, 'id', 'plain', X'', 1, 0)",
+        [],
+      )
+      .expect("insert bad row");
+    drop(conn);
+
+    let cookies = query_cookies(vec![], db, None, false).expect("valueless row is not a failure");
+    assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
   #[test]

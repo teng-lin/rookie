@@ -380,30 +380,6 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   internet_explorer_based(db_path, domains, false)
 }
 
-/// Returns cookies from all browsers
-///
-/// This is a best-effort aggregator: each browser is probed in turn and
-/// individual failures are surfaced via [`log::warn!`] but do not abort
-/// the load (a browser not being installed, a locked profile, or a
-/// decrypt failure on one browser should not lose cookies from the
-/// others). If you need to know which browsers failed, hook a logger
-/// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
-///
-/// Returns `Err` only when **every** attempted browser extraction fails,
-/// containing an aggregate message listing each browser and its error.
-/// This lets callers distinguish between "no cookies found" and "all
-/// extractions failed".
-///
-/// # Arguments
-///
-/// * `domains` - A optional list that for getting specific domains only
-///
-/// # Examples
-///
-/// ```no_run
-/// let domains = vec!["google.com".to_string()];
-/// let cookies = rookie_cookies::load(Some(domains));
-/// ```
 fn load_from_browsers<F>(
   browser_types: &[(&'static str, F)],
   domains: Option<Vec<String>>,
@@ -433,6 +409,30 @@ where
   Ok(cookies)
 }
 
+/// Returns cookies from all browsers
+///
+/// This is a best-effort aggregator: each browser is probed in turn and
+/// individual failures are surfaced via [`log::warn!`] but do not abort
+/// the load (a browser not being installed, a locked profile, or a
+/// decrypt failure on one browser should not lose cookies from the
+/// others). If you need to know which browsers failed, hook a logger
+/// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
+///
+/// Returns `Err` only when **every** attempted browser extraction fails,
+/// containing an aggregate message listing each browser and its error.
+/// This lets callers distinguish between "no cookies found" and "all
+/// extractions failed".
+///
+/// # Arguments
+///
+/// * `domains` - A optional list that for getting specific domains only
+///
+/// # Examples
+///
+/// ```no_run
+/// let domains = vec!["google.com".to_string()];
+/// let cookies = rookie_cookies::load(Some(domains));
+/// ```
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 
