@@ -587,8 +587,9 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn query_cookies_reads_cookies_committed_to_an_active_wal() {
-    let dir = unique_tmpdir("chr-wal");
-    let db = dir.join("Cookies");
+    // Self-cleaning, unlike `unique_tmpdir`; held to the end of the test.
+    let dir = crate::utils::TempDir::new().expect("temp dir");
+    let db = dir.path().join("Cookies");
     seed_chromium_cookies(
       &db,
       &[(

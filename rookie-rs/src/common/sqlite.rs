@@ -96,6 +96,9 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
 /// How many times a snapshot torn by a concurrent checkpoint is retaken.
 const SNAPSHOT_ATTEMPTS: u32 = 3;
 
+/// Multiplied by the attempt number to space out those retakes.
+const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Copies `database` and its write-ahead log into `directory`, retaking the
 /// copy if a checkpoint raced it, and returns the path of the copy.
 ///
@@ -129,6 +132,10 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
       "a checkpoint raced the snapshot of {} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})",
       database.display()
     );
+    // Back off before retaking it. A browser that just checkpointed is likely
+    // mid-burst, and copying straight back into that loses the next attempt to
+    // the same race.
+    std::thread::sleep(RETRY_BACKOFF * attempt);
   }
 
   Err(anyhow!(

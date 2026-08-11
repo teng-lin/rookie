@@ -50,16 +50,21 @@ impl Drop for TempDir {
 
 #[cfg(unix)]
 fn create_private_dir(path: &Path) -> Result<()> {
+  use anyhow::Context;
   use std::os::unix::fs::DirBuilderExt;
 
-  fs::DirBuilder::new().mode(0o700).create(path)?;
-  Ok(())
+  fs::DirBuilder::new()
+    .mode(0o700)
+    .create(path)
+    .with_context(|| format!("Can't create temporary directory {}", path.display()))
 }
 
 #[cfg(not(unix))]
 fn create_private_dir(path: &Path) -> Result<()> {
-  fs::create_dir(path)?;
-  Ok(())
+  use anyhow::Context;
+
+  fs::create_dir(path)
+    .with_context(|| format!("Can't create temporary directory {}", path.display()))
 }
 
 #[cfg(test)]

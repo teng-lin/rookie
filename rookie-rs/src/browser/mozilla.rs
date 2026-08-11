@@ -407,8 +407,9 @@ mod tests {
 
   #[test]
   fn firefox_based_reads_cookies_committed_to_an_active_wal() {
-    let dir = unique_tmpdir("ff-wal");
-    let db = dir.join("cookies.sqlite");
+    // Self-cleaning, unlike `unique_tmpdir`; held to the end of the test.
+    let dir = crate::utils::TempDir::new().expect("temp dir");
+    let db = dir.path().join("cookies.sqlite");
     seed_moz_cookies(
       &db,
       &[(
