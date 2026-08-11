@@ -89,7 +89,11 @@ fn expand_config_paths(config: &Browser) -> Result<Vec<PathBuf>> {
 
 /// Profiles declared under `base`, default first, so callers probe the profile
 /// the browser actually opens before any secondary one.
-fn mozilla_profiles_in(base: &Path) -> Vec<MozillaProfile> {
+///
+/// Returns `None` when a `profiles.ini` is present but unreadable — that is not
+/// the same as a root declaring no profiles, and callers must not treat an
+/// unreadable file as evidence that nothing was declared.
+fn mozilla_profiles_in(base: &Path) -> Option<Vec<MozillaProfile>> {
   let profiles_path = base.join("profiles.ini");
   let mut profiles = match list_profiles(profiles_path.as_path()) {
     Ok(profiles) => profiles,
@@ -99,19 +103,20 @@ fn mozilla_profiles_in(base: &Path) -> Vec<MozillaProfile> {
       // path this browser does not use.
       if profiles_path.exists() {
         log::warn!("Failed to read {}: {err}", profiles_path.display());
-      } else {
-        log::debug!("No profiles.ini at {}", profiles_path.display());
+        return None;
       }
-      return vec![];
+      log::debug!("No profiles.ini at {}", profiles_path.display());
+      return Some(vec![]);
     }
   };
   profiles.sort_by_key(|profile| !profile.is_default);
-  profiles
+  Some(profiles)
 }
 
 pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
   for base in expand_config_paths(config)? {
     let candidates = mozilla_profiles_in(&base)
+      .unwrap_or_default()
       .into_iter()
       .map(|profile| profile.path)
       // Probing the base directory itself preserves the behaviour of the
@@ -162,7 +167,7 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
   for base in expand_config_paths(config)? {
     let declared = mozilla_profiles_in(&base);
     let mut usable = 0;
-    for profile in declared.iter().cloned() {
+    for profile in declared.iter().flatten().cloned() {
       if profile.path.join("cookies.sqlite").exists() {
         usable += 1;
         push_unique(&mut found, &mut seen, profile);
@@ -170,10 +175,10 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
     }
 
     // Mirror the base-directory fallback in `find_mozilla_based_paths`, so a
-    // layout that `firefox()` can read never looks profile-less here. It only
-    // counts as the default when profiles.ini named no profile at all —
-    // otherwise the browser would still open the profile it declared, and this
-    // database is merely where the cookies happen to be.
+    // layout that `firefox()` can read never looks profile-less here. It counts
+    // as the default only when a readable profiles.ini named no profile at all:
+    // if one was declared, the browser would still open it, and if the file
+    // could not be read we have no idea what it declares.
     if usable == 0 && base.join("cookies.sqlite").exists() {
       push_unique(
         &mut found,
@@ -181,7 +186,7 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
         MozillaProfile {
           name: String::new(),
           path: base,
-          is_default: declared.is_empty(),
+          is_default: declared.is_some_and(|declared| declared.is_empty()),
         },
       );
     }
@@ -527,6 +532,23 @@ mod tests {
     assert!(
       !profiles[0].is_default,
       "profiles.ini still declares its own default"
+    );
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_does_not_default_a_fallback_after_an_unreadable_ini() {
+    // A profiles.ini that cannot be read is not evidence that nothing was
+    // declared, so the fallback database must not claim to be the default.
+    let base = unique_tmpdir("ff-unreadable-ini");
+    std::fs::create_dir_all(base.join("profiles.ini")).expect("dir where a file belongs");
+    std::fs::write(base.join("cookies.sqlite"), b"").expect("write db");
+
+    let profiles = find_mozilla_based_profiles(&mozilla_config(&base)).expect("should list");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].path, base);
+    assert!(
+      !profiles[0].is_default,
+      "an unreadable ini may still declare a default"
     );
   }
 
