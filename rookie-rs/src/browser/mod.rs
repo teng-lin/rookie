@@ -1,4 +1,5 @@
 pub(crate) mod chromium;
+pub(crate) mod chromium_crypto;
 pub(crate) mod mozilla;
 
 #[cfg(target_os = "windows")]
