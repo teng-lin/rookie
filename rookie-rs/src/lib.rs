@@ -380,6 +380,35 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   internet_explorer_based(db_path, domains, false)
 }
 
+fn load_from_browsers<F>(
+  browser_types: &[(&'static str, F)],
+  domains: Option<Vec<String>>,
+) -> Result<Vec<Cookie>>
+where
+  F: Fn(Option<Vec<String>>) -> Result<Vec<Cookie>>,
+{
+  let mut cookies = Vec::new();
+  let mut errors: Vec<String> = Vec::new();
+
+  for (browser_name, browser_fn) in browser_types.iter() {
+    match browser_fn(domains.clone()) {
+      Ok(browser_cookies) => cookies.extend(browser_cookies),
+      Err(err) => {
+        log::warn!("rookie_cookies::load skipping {browser_name}: {err}");
+        errors.push(format!("{browser_name}: {err}"));
+      }
+    }
+  }
+
+  // If every attempted browser extraction failed, surface an aggregate error so that
+  // callers can distinguish total failure from legitimately finding no cookies.
+  if !browser_types.is_empty() && errors.len() == browser_types.len() {
+    bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
+  }
+
+  Ok(cookies)
+}
+
 /// Returns cookies from all browsers
 ///
 /// This is a best-effort aggregator: each browser is probed in turn and
@@ -388,6 +417,11 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// decrypt failure on one browser should not lose cookies from the
 /// others). If you need to know which browsers failed, hook a logger
 /// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
+///
+/// Returns `Err` only when **every** attempted browser extraction fails,
+/// containing an aggregate message listing each browser and its error.
+/// This lets callers distinguish between "no cookies found" and "all
+/// extractions failed".
 ///
 /// # Arguments
 ///
@@ -401,7 +435,6 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
-  let mut cookies = Vec::new();
 
   let mut browser_types: Vec<(&'static str, LoadFn)> = vec![
     ("firefox", firefox),
@@ -433,14 +466,7 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     browser_types.push(("safari", safari));
   }
 
-  for (browser_name, browser_fn) in browser_types.iter() {
-    match browser_fn(domains.clone()) {
-      Ok(browser_cookies) => cookies.extend(browser_cookies),
-      Err(err) => log::warn!("rookie_cookies::load skipping {browser_name}: {err}"),
-    }
-  }
-
-  Ok(cookies)
+  load_from_browsers(&browser_types, domains)
 }
 
 /// Returns cookies from specific browser
@@ -539,6 +565,55 @@ pub fn any_browser(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  type BrowserEntry = (&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>);
+
+  fn always_err(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Err(anyhow::anyhow!("not installed"))
+  }
+
+  fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Ok(vec![])
+  }
+
+  #[test]
+  fn all_fail_returns_aggregate_error() {
+    let browsers: Vec<BrowserEntry> = vec![("firefox", always_err), ("chrome", always_err)];
+    let result = load_from_browsers(&browsers, None);
+    assert!(result.is_err(), "expected Err when all browsers fail");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+      msg.contains("all browser extractions failed"),
+      "error should mention aggregate failure, got: {msg}"
+    );
+    assert!(
+      msg.contains("firefox: not installed"),
+      "error should list firefox error, got: {msg}"
+    );
+    assert!(
+      msg.contains("chrome: not installed"),
+      "error should list chrome error, got: {msg}"
+    );
+  }
+
+  #[test]
+  fn partial_failure_returns_ok() {
+    let browsers: Vec<BrowserEntry> = vec![("firefox", always_err), ("chrome", always_ok)];
+    let result = load_from_browsers(&browsers, None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when at least one browser succeeds, got: {result:?}"
+    );
+  }
+
+  #[test]
+  fn empty_browser_list_returns_ok_empty() {
+    let browsers: Vec<BrowserEntry> = vec![];
+    let result = load_from_browsers(&browsers, None);
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+  }
+
   use std::sync::atomic::{AtomicU64, Ordering};
   use std::sync::{Mutex, MutexGuard};
 
