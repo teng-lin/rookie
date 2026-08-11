@@ -90,6 +90,10 @@ def main() -> int:
         shutil.rmtree(napi_artifacts)
     napi_artifacts.mkdir(parents=True)
     shutil.copy2(built_binding, napi_artifacts / native_filename)
+    # `napi artifacts` joins --dir to its cwd instead of resolving an absolute
+    # path. Match the relative directory shape used after release downloads so
+    # a clean runner actually discovers and moves the native binding.
+    napi_source_dir = os.path.relpath(napi_artifacts, start=node_root)
     subprocess.run(
         [
             npm_command(),
@@ -97,7 +101,7 @@ def main() -> int:
             "artifacts",
             "--",
             "--dir",
-            str(napi_artifacts),
+            napi_source_dir,
             "--dist",
             "npm",
         ],
