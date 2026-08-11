@@ -1,0 +1,135 @@
+pub mod rookie_cookies
+pub use rookie_cookies::Result
+pub use rookie_cookies::anyhow
+pub mod rookie_cookies::common
+pub mod rookie_cookies::common::enums
+pub struct rookie_cookies::common::enums::Cookie
+pub rookie_cookies::common::enums::Cookie::domain: alloc::string::String
+pub rookie_cookies::common::enums::Cookie::expires: core::option::Option<u64>
+pub rookie_cookies::common::enums::Cookie::http_only: bool
+pub rookie_cookies::common::enums::Cookie::name: alloc::string::String
+pub rookie_cookies::common::enums::Cookie::path: alloc::string::String
+pub rookie_cookies::common::enums::Cookie::same_site: i64
+pub rookie_cookies::common::enums::Cookie::secure: bool
+pub rookie_cookies::common::enums::Cookie::value: alloc::string::String
+impl core::fmt::Debug for rookie_cookies::common::enums::Cookie
+pub fn rookie_cookies::common::enums::Cookie::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::common::enums::Cookie
+pub fn rookie_cookies::common::enums::Cookie::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::common::enums::Cookie
+pub fn rookie_cookies::common::enums::Cookie::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::common::enums::Cookie
+impl core::marker::Send for rookie_cookies::common::enums::Cookie
+impl core::marker::Sync for rookie_cookies::common::enums::Cookie
+impl core::marker::Unpin for rookie_cookies::common::enums::Cookie
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::common::enums::Cookie
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::common::enums::Cookie
+pub const rookie_cookies::common::enums::SAME_SITE_UNSPECIFIED: i64
+pub trait rookie_cookies::common::enums::CookieToString
+pub fn rookie_cookies::common::enums::CookieToString::to_string(&self) -> alloc::string::String
+impl rookie_cookies::common::enums::CookieToString for alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
+pub fn alloc::vec::Vec<rookie_cookies::common::enums::Cookie>::to_string(&self) -> alloc::string::String
+pub mod rookie_cookies::common::format
+pub fn rookie_cookies::common::format::json(alloc::vec::Vec<rookie_cookies::common::enums::Cookie>) -> alloc::string::String
+pub fn rookie_cookies::common::format::netscape(alloc::vec::Vec<rookie_cookies::common::enums::Cookie>) -> alloc::string::String
+pub mod rookie_cookies::config
+pub struct rookie_cookies::config::Browser
+pub rookie_cookies::config::Browser::channels: core::option::Option<alloc::vec::Vec<alloc::string::String>>
+pub rookie_cookies::config::Browser::osx_key_service: core::option::Option<alloc::string::String>
+pub rookie_cookies::config::Browser::osx_key_user: core::option::Option<alloc::string::String>
+pub rookie_cookies::config::Browser::paths: alloc::vec::Vec<alloc::string::String>
+pub rookie_cookies::config::Browser::unix_crypt_name: core::option::Option<alloc::string::String>
+impl core::fmt::Debug for rookie_cookies::config::Browser
+pub fn rookie_cookies::config::Browser::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::config::Browser
+pub fn rookie_cookies::config::Browser::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::config::Browser
+pub fn rookie_cookies::config::Browser::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::config::Browser
+impl core::marker::Send for rookie_cookies::config::Browser
+impl core::marker::Sync for rookie_cookies::config::Browser
+impl core::marker::Unpin for rookie_cookies::config::Browser
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::config::Browser
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::config::Browser
+pub struct rookie_cookies::config::Config
+pub rookie_cookies::config::Config::platforms: std::collections::hash::map::HashMap<alloc::string::String, rookie_cookies::config::BrowsersMap>
+pub rookie_cookies::config::Config::version: alloc::string::String
+impl core::fmt::Debug for rookie_cookies::config::Config
+pub fn rookie_cookies::config::Config::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::config::Config
+pub fn rookie_cookies::config::Config::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::config::Config
+pub fn rookie_cookies::config::Config::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::config::Config
+impl core::marker::Send for rookie_cookies::config::Config
+impl core::marker::Sync for rookie_cookies::config::Config
+impl core::marker::Unpin for rookie_cookies::config::Config
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::config::Config
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::config::Config
+pub static rookie_cookies::config::CONFIG: once_cell::sync::Lazy<rookie_cookies::config::Config>
+pub fn rookie_cookies::config::get_browser_config(&str) -> &rookie_cookies::config::Browser
+pub type rookie_cookies::config::BrowsersMap = std::collections::hash::map::HashMap<alloc::string::String, rookie_cookies::config::Browser>
+pub mod rookie_cookies::enums
+pub struct rookie_cookies::enums::Cookie
+pub rookie_cookies::enums::Cookie::domain: alloc::string::String
+pub rookie_cookies::enums::Cookie::expires: core::option::Option<u64>
+pub rookie_cookies::enums::Cookie::http_only: bool
+pub rookie_cookies::enums::Cookie::name: alloc::string::String
+pub rookie_cookies::enums::Cookie::path: alloc::string::String
+pub rookie_cookies::enums::Cookie::same_site: i64
+pub rookie_cookies::enums::Cookie::secure: bool
+pub rookie_cookies::enums::Cookie::value: alloc::string::String
+impl core::fmt::Debug for rookie_cookies::common::enums::Cookie
+pub fn rookie_cookies::common::enums::Cookie::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::common::enums::Cookie
+pub fn rookie_cookies::common::enums::Cookie::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::common::enums::Cookie
+pub fn rookie_cookies::common::enums::Cookie::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::common::enums::Cookie
+impl core::marker::Send for rookie_cookies::common::enums::Cookie
+impl core::marker::Sync for rookie_cookies::common::enums::Cookie
+impl core::marker::Unpin for rookie_cookies::common::enums::Cookie
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::common::enums::Cookie
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::common::enums::Cookie
+pub const rookie_cookies::enums::SAME_SITE_UNSPECIFIED: i64
+pub trait rookie_cookies::enums::CookieToString
+pub fn rookie_cookies::enums::CookieToString::to_string(&self) -> alloc::string::String
+impl rookie_cookies::common::enums::CookieToString for alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
+pub fn alloc::vec::Vec<rookie_cookies::common::enums::Cookie>::to_string(&self) -> alloc::string::String
+#[non_exhaustive] pub struct rookie_cookies::MozillaProfile
+pub rookie_cookies::MozillaProfile::is_default: bool
+pub rookie_cookies::MozillaProfile::name: alloc::string::String
+pub rookie_cookies::MozillaProfile::path: std::path::PathBuf
+impl core::clone::Clone for rookie_cookies::MozillaProfile
+pub fn rookie_cookies::MozillaProfile::clone(&self) -> rookie_cookies::MozillaProfile
+impl core::cmp::Eq for rookie_cookies::MozillaProfile
+impl core::cmp::PartialEq for rookie_cookies::MozillaProfile
+pub fn rookie_cookies::MozillaProfile::eq(&self, &rookie_cookies::MozillaProfile) -> bool
+impl core::fmt::Debug for rookie_cookies::MozillaProfile
+pub fn rookie_cookies::MozillaProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::MozillaProfile
+impl core::marker::Freeze for rookie_cookies::MozillaProfile
+impl core::marker::Send for rookie_cookies::MozillaProfile
+impl core::marker::Sync for rookie_cookies::MozillaProfile
+impl core::marker::Unpin for rookie_cookies::MozillaProfile
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::MozillaProfile
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MozillaProfile
+pub fn rookie_cookies::any_browser(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>, core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::arc(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::brave(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::cachy(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::chrome(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::chromium(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::chromium_based(&rookie_cookies::config::Browser, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::edge(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::firefox(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::firefox_based(std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::firefox_profile(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::firefox_profiles() -> anyhow::Result<alloc::vec::Vec<rookie_cookies::MozillaProfile>>
+pub fn rookie_cookies::librewolf(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::load(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::opera(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::opera_gx(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::version() -> alloc::string::String
+pub fn rookie_cookies::vivaldi(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::zen(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>

@@ -690,6 +690,48 @@ mod tests {
   }
 
   #[test]
+  fn firefox_based_preserves_legacy_substring_domain_filtering() {
+    let dir = unique_tmpdir("ff-domain-filter-substring");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[
+        (".example.com", "/", false, 0, "boundary", "yes", false, 0),
+        (
+          "notexample.com",
+          "/",
+          false,
+          0,
+          "prefix",
+          "legacy",
+          false,
+          0,
+        ),
+        (
+          "example.com.evil",
+          "/",
+          false,
+          0,
+          "suffix",
+          "legacy",
+          false,
+          0,
+        ),
+        ("other.test", "/", false, 0, "unrelated", "no", false, 0),
+      ],
+    );
+
+    let mut cookies = firefox_based(db, Some(vec!["example.com".to_string()])).expect("decode");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    assert_eq!(
+      names,
+      vec!["boundary", "prefix", "suffix"],
+      "persistent Firefox filtering is the legacy SQL LIKE %domain% contract"
+    );
+  }
+
+  #[test]
   fn firefox_based_domain_filter_treats_sql_as_data() {
     let dir = unique_tmpdir("ff-domain-filter-sql");
     let db = dir.join("cookies.sqlite");
@@ -776,6 +818,36 @@ mod tests {
       "unexpected error: {}",
       err
     );
+  }
+
+  #[test]
+  fn get_session_cookies_requires_a_domain_label_boundary() {
+    let dir = unique_tmpdir("ff-session-domain-boundary");
+    let cookie = |host: &str, name: &str| {
+      serde_json::json!({
+        "host": host,
+        "path": "/",
+        "name": name,
+        "value": "fixture"
+      })
+    };
+    let session = serde_json::json!({
+      "windows": [{
+        "cookies": [
+          cookie(".example.com", "boundary"),
+          cookie("sub.example.com", "subdomain"),
+          cookie("notexample.com", "prefix"),
+          cookie("example.com.evil", "suffix")
+        ]
+      }]
+    });
+    std::fs::write(dir.join("sessionstore.js"), session.to_string()).expect("session fixture");
+
+    let mut cookies =
+      get_session_cookies(Some(vec!["example.com".to_string()]), dir).expect("decode");
+    cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    assert_eq!(names, vec!["boundary", "subdomain"]);
   }
 
   #[test]

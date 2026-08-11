@@ -454,33 +454,12 @@ where
   Ok(cookies)
 }
 
-/// Returns cookies from all browsers
-///
-/// This is a best-effort aggregator: each browser is probed in turn and
-/// individual failures are surfaced via [`log::warn!`] but do not abort
-/// the load (a browser not being installed, a locked profile, or a
-/// decrypt failure on one browser should not lose cookies from the
-/// others). If you need to know which browsers failed, hook a logger
-/// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
-///
-/// Returns `Err` only when **every** attempted browser extraction fails,
-/// containing an aggregate message listing each browser and its error.
-/// This lets callers distinguish between "no cookies found" and "all
-/// extractions failed".
-///
-/// # Arguments
-///
-/// * `domains` - A optional list that for getting specific domains only
-///
-/// # Examples
-///
-/// ```no_run
-/// let domains = vec!["google.com".to_string()];
-/// let cookies = rookie_cookies::load(Some(domains));
-/// ```
-pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
+type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 
+/// The legacy `load` probe order is observable through cookie ordering and
+/// warning output. Keep construction separate from extraction so platform CI
+/// can pin the exact browser set without probing browsers installed on a host.
+fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
   let mut browser_types: Vec<(&'static str, LoadFn)> = vec![
     ("firefox", firefox),
     ("zen", zen),
@@ -511,6 +490,35 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     browser_types.push(("safari", safari));
   }
 
+  browser_types
+}
+
+/// Returns cookies from all browsers
+///
+/// This is a best-effort aggregator: each browser is probed in turn and
+/// individual failures are surfaced via [`log::warn!`] but do not abort
+/// the load (a browser not being installed, a locked profile, or a
+/// decrypt failure on one browser should not lose cookies from the
+/// others). If you need to know which browsers failed, hook a logger
+/// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
+///
+/// Returns `Err` only when **every** attempted browser extraction fails,
+/// containing an aggregate message listing each browser and its error.
+/// This lets callers distinguish between "no cookies found" and "all
+/// extractions failed".
+///
+/// # Arguments
+///
+/// * `domains` - A optional list that for getting specific domains only
+///
+/// # Examples
+///
+/// ```no_run
+/// let domains = vec!["google.com".to_string()];
+/// let cookies = rookie_cookies::load(Some(domains));
+/// ```
+pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  let browser_types = legacy_load_browsers();
   load_from_browsers(&browser_types, domains)
 }
 
@@ -610,6 +618,7 @@ pub fn any_browser(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::enums::SAME_SITE_UNSPECIFIED;
 
   type BrowserEntry = (&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>);
 
@@ -619,6 +628,27 @@ mod tests {
 
   fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     Ok(vec![])
+  }
+
+  fn named_cookie(name: &str) -> Cookie {
+    Cookie {
+      domain: "example.test".to_string(),
+      path: "/".to_string(),
+      secure: false,
+      expires: None,
+      name: name.to_string(),
+      value: String::new(),
+      http_only: false,
+      same_site: SAME_SITE_UNSPECIFIED,
+    }
+  }
+
+  fn first_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Ok(vec![named_cookie("first")])
+  }
+
+  fn second_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+    Ok(vec![named_cookie("second")])
   }
 
   #[test]
@@ -657,6 +687,99 @@ mod tests {
     let result = load_from_browsers(&browsers, None);
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
+  }
+
+  #[test]
+  fn load_from_browsers_preserves_source_order() {
+    let browsers: Vec<BrowserEntry> = vec![
+      ("first", first_ok),
+      ("missing", always_err),
+      ("second", second_ok),
+    ];
+    let cookies = load_from_browsers(&browsers, None)
+      .expect("successful sources survive an intervening extraction error");
+    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    assert_eq!(names, vec!["first", "second"]);
+  }
+
+  #[test]
+  fn legacy_load_browser_set_and_order_are_stable_for_this_platform() {
+    let names: Vec<_> = legacy_load_browsers()
+      .into_iter()
+      .map(|(name, _)| name)
+      .collect();
+
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+      names,
+      vec![
+        "firefox",
+        "zen",
+        "librewolf",
+        "opera",
+        "edge",
+        "chromium",
+        "brave",
+        "vivaldi",
+        "arc",
+        "chrome",
+        "cachy",
+      ]
+    );
+
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+      names,
+      vec![
+        "firefox",
+        "zen",
+        "librewolf",
+        "opera",
+        "edge",
+        "chromium",
+        "brave",
+        "vivaldi",
+        "arc",
+        "chrome",
+        "opera_gx",
+        "safari",
+      ]
+    );
+
+    #[cfg(target_os = "windows")]
+    assert_eq!(
+      names,
+      vec![
+        "firefox",
+        "zen",
+        "librewolf",
+        "opera",
+        "edge",
+        "chromium",
+        "brave",
+        "vivaldi",
+        "arc",
+        "chrome",
+        "internet_explorer",
+        "opera_gx",
+      ]
+    );
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    assert_eq!(
+      names,
+      vec![
+        "firefox",
+        "zen",
+        "librewolf",
+        "opera",
+        "edge",
+        "chromium",
+        "brave",
+        "vivaldi",
+        "arc",
+      ]
+    );
   }
 
   use std::sync::atomic::{AtomicU64, Ordering};
