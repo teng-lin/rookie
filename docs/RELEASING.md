@@ -119,6 +119,32 @@ npm view "rookie-cookies-win32-x64-msvc@$VERSION" version
 
 Create the GitHub release only after all three registry checks pass.
 
+## Publish CLI binaries
+
+After the GitHub release exists, dispatch `publish-cli.yml` from the matching
+tag to build and attach the `rookie-cookies` CLI binary for macOS (arm64 and
+x86_64), Linux x86_64, and Windows x86_64:
+
+```console
+gh workflow run publish-cli.yml --ref "v$VERSION" -f tag="v$VERSION"
+```
+
+Always dispatch with `--ref "v$VERSION"` so the run's ref is the immutable
+tag. The workflow's first step after checkout verifies that `GITHUB_REF_TYPE`
+is `tag` and `GITHUB_REF_NAME` matches the `tag` input, and fails fast before
+any build if the dispatch ref does not match the requested tag — this closes
+off dispatching from `main` (or any other ref) with an arbitrary `tag` value
+and having binaries built from unreviewed source silently overwrite that
+release's assets. Because that check makes it structurally impossible for the
+upload steps to run against anything other than the verified tag's commit,
+the existing `--clobber` on those uploads is safe: it only ever re-uploads a
+binary rebuilt from that same tag, e.g. to retry a single failed platform leg
+without regenerating the others.
+
+This workflow only triggers on `workflow_dispatch`, so it cannot be exercised
+by normal pull request CI. Review its YAML carefully and dispatch-test it
+against a real tag before relying on it for a release.
+
 ## After the first crates.io release
 
 Configure crates.io trusted publishing for `publish-crate.yml`. Then update the
