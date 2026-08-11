@@ -153,10 +153,29 @@ where
     LocalStateKey::Encoded(_) if !backend.privileged() => ChromiumKeyOutcome::failure(
       "Chromium v20 app-bound key retrieval requires administrator privileges",
     ),
-    LocalStateKey::Encoded(encoded) => outcome_from_result(
-      backend.retrieve_v20(encoded),
-      "Chromium v20 provider returned no key candidates",
-    ),
+    // The AES256/ChaCha20 elevation keys used to unwrap the app-bound master
+    // key are extracted specifically from Google Chrome's elevation_service.exe
+    // (see windows/appbound/mod.rs). Other Chromium-based vendors (Brave, Edge,
+    // Vivaldi, Opera, ...) can also write an app_bound_encrypted_key using their
+    // own vendor-specific elevation service with different keys, which will
+    // safely fail to unwrap here. We don't know which named browser produced
+    // this Local State at this layer, so we can't say definitively that's what
+    // happened - but surface it as a possibility rather than a bare decryption
+    // error, so it isn't mistaken for a generic bug.
+    LocalStateKey::Encoded(encoded) => match backend.retrieve_v20(encoded) {
+      Ok(candidates) => ChromiumKeyOutcome::success(candidates).unwrap_or_else(|| {
+        ChromiumKeyOutcome::failure(
+          "Chromium v20 provider returned no key candidates. This vendor may use \
+           app-bound elevation keys rookie doesn't have (only Google Chrome's are \
+           known); legacy v10/v11 cookies are unaffected.",
+        )
+      }),
+      Err(error) => ChromiumKeyOutcome::failure(format!(
+        "App-Bound v20 decryption failed: {error}. This vendor may use elevation \
+         keys rookie doesn't have (only Google Chrome's are known); legacy v10/v11 \
+         cookies are unaffected."
+      )),
+    },
   };
 
   ChromiumKeyOutcomes {
