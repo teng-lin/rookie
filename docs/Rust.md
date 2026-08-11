@@ -19,9 +19,14 @@ fn main() {
 
 ## Firefox profiles
 
-`firefox()` reads the profile Firefox itself would open, resolved from
-`profiles.ini`. To reach a secondary profile, list them and select one by its
-name, directory name, or full path:
+`firefox()` prefers the profile Firefox itself would open, resolved from
+`profiles.ini`. If that profile has no `cookies.sqlite` it falls through to the
+other profiles and finally to the profile root, so it returns cookies rather
+than an error — which means the cookies it returns are not guaranteed to come
+from the profile Firefox currently has open.
+
+To know which profile you are reading, or to reach a secondary one deliberately,
+list them and select by name, directory name, or full path:
 
 ```rust
 use rookie_cookies;

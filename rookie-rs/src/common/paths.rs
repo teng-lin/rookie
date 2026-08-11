@@ -134,13 +134,16 @@ pub fn find_mozilla_based_paths(config: &Browser) -> Result<PathBuf> {
 ///
 /// Roots are compared canonically: snap and flatpak layouts reach one profile
 /// through several lexical or symlinked paths, and a duplicate would make
-/// selecting that profile by name ambiguous.
+/// selecting that profile by name ambiguous. A duplicate still contributes its
+/// `is_default` flag, since the same directory can be a secondary profile for
+/// one installation and the default for another.
 fn push_unique(found: &mut Vec<MozillaProfile>, seen: &mut Vec<PathBuf>, profile: MozillaProfile) {
   let key = profile
     .path
     .canonicalize()
     .unwrap_or_else(|_| profile.path.clone());
-  if seen.contains(&key) {
+  if let Some(index) = seen.iter().position(|existing| *existing == key) {
+    found[index].is_default |= profile.is_default;
     return;
   }
   seen.push(key);
@@ -157,24 +160,28 @@ pub fn find_mozilla_based_profiles(config: &Browser) -> Result<Vec<MozillaProfil
   let mut seen: Vec<PathBuf> = vec![];
 
   for base in expand_config_paths(config)? {
-    let mut declared_any = false;
-    for profile in mozilla_profiles_in(&base) {
+    let declared = mozilla_profiles_in(&base);
+    let mut usable = 0;
+    for profile in declared.iter().cloned() {
       if profile.path.join("cookies.sqlite").exists() {
-        declared_any = true;
+        usable += 1;
         push_unique(&mut found, &mut seen, profile);
       }
     }
 
     // Mirror the base-directory fallback in `find_mozilla_based_paths`, so a
-    // layout that `firefox()` can read never looks profile-less here.
-    if !declared_any && base.join("cookies.sqlite").exists() {
+    // layout that `firefox()` can read never looks profile-less here. It only
+    // counts as the default when profiles.ini named no profile at all —
+    // otherwise the browser would still open the profile it declared, and this
+    // database is merely where the cookies happen to be.
+    if usable == 0 && base.join("cookies.sqlite").exists() {
       push_unique(
         &mut found,
         &mut seen,
         MozillaProfile {
           name: String::new(),
           path: base,
-          is_default: true,
+          is_default: declared.is_empty(),
         },
       );
     }
@@ -503,6 +510,61 @@ mod tests {
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].path, base);
     assert!(profiles[0].is_default);
+  }
+
+  #[test]
+  fn find_mozilla_based_profiles_does_not_call_a_fallback_database_the_default() {
+    // profiles.ini names a default, but no declared profile has a database yet.
+    // The legacy base-directory database is where the cookies are, not the
+    // profile Firefox would open, so it must not claim the default flag.
+    let base = unique_tmpdir("ff-flat-not-default");
+    seed_profiles(&base, TWO_PROFILES_INI, &[]);
+    std::fs::write(base.join("cookies.sqlite"), b"").expect("write db");
+
+    let profiles = find_mozilla_based_profiles(&mozilla_config(&base)).expect("should list");
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].path, base);
+    assert!(
+      !profiles[0].is_default,
+      "profiles.ini still declares its own default"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn find_mozilla_based_profiles_merges_default_flags_across_roots() {
+    // The same profile directory is secondary for the first root and the
+    // default for the second; deduplication must not discard that it is some
+    // installation's default.
+    let shared = unique_tmpdir("ff-merge-shared");
+    std::fs::create_dir_all(shared.join("Profiles/work")).expect("profile dir");
+    std::fs::write(shared.join("Profiles/work/cookies.sqlite"), b"").expect("write db");
+
+    let secondary_root = unique_tmpdir("ff-merge-secondary");
+    let primary_root = unique_tmpdir("ff-merge-primary");
+    for root in [&secondary_root, &primary_root] {
+      std::os::unix::fs::symlink(shared.join("Profiles"), root.join("Profiles")).expect("symlink");
+    }
+    // First root: work is secondary. Second root: work is the default.
+    std::fs::write(
+      secondary_root.join("profiles.ini"),
+      "[Profile0]\nName=main\nIsRelative=1\nPath=Profiles/main\nDefault=1\n\
+       [Profile1]\nName=work\nIsRelative=1\nPath=Profiles/work\n",
+    )
+    .expect("write ini");
+    std::fs::write(
+      primary_root.join("profiles.ini"),
+      "[Profile0]\nName=work\nIsRelative=1\nPath=Profiles/work\nDefault=1\n",
+    )
+    .expect("write ini");
+
+    let config = mozilla_config_multi(&[&secondary_root, &primary_root]);
+    let profiles = find_mozilla_based_profiles(&config).expect("should list");
+    assert_eq!(profiles.len(), 1, "{profiles:?}");
+    assert!(
+      profiles[0].is_default,
+      "the second root opens this profile by default"
+    );
   }
 
   #[test]
