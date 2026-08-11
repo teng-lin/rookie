@@ -2,6 +2,11 @@ use crate::common::{date, enums::*, sqlite};
 use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
+use super::chromium_crypto::{
+  detect_cipher_version, retrieve_key_outcomes, ChromiumCipherVersion, ChromiumKeyOutcomes,
+  ChromiumKeyProvider, ChromiumKeyRoute, LegacySharedKeyProvider,
+};
+
 #[allow(unused)]
 use crate::config::Browser;
 
@@ -201,36 +206,81 @@ fn decode_chromium_plaintext(key_type: &[u8], plaintext: Vec<u8>) -> Result<Stri
 }
 
 /// Decrypt cookie value using aes GCM
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn decrypt_encrypted_value(
   value: String,
   encrypted_value: &[u8],
   keys: &[Vec<u8>],
 ) -> Result<String> {
-  if encrypted_value.len() < 15 {
+  let outcomes = ChromiumKeyOutcomes::from_legacy_shared(keys.to_vec());
+  decrypt_encrypted_value_with_outcomes(value, encrypted_value, &outcomes)
+}
+
+#[cfg(windows)]
+fn decrypt_encrypted_value_with_outcomes(
+  value: String,
+  encrypted_value: &[u8],
+  outcomes: &ChromiumKeyOutcomes,
+) -> Result<String> {
+  if !value.is_empty() {
     return Ok(value);
   }
-  let Some(key_type) = encrypted_value.get(..3) else {
+  if encrypted_value.is_empty() {
     return Ok(value);
+  }
+
+  let cipher_version = detect_cipher_version(encrypted_value)?;
+  let (key_type, candidates) = match outcomes.route(cipher_version) {
+    ChromiumKeyRoute::Candidates { tier, candidates } => {
+      log::debug!("Chromium cipher tier: {tier}");
+      let prefix = match cipher_version {
+        ChromiumCipherVersion::V10 => b"v10",
+        ChromiumCipherVersion::V11 => b"v11",
+        ChromiumCipherVersion::V20 => b"v20",
+        _ => unreachable!("candidate routes are only emitted for keyed tiers"),
+      };
+      (prefix.as_slice(), candidates)
+    }
+    ChromiumKeyRoute::NotApplicable { tier } => {
+      bail!("Chromium {tier} key provider is not applicable")
+    }
+    ChromiumKeyRoute::Failure { tier, failure } => {
+      bail!("Chromium {tier} key provider failed: {}", failure.message())
+    }
+    ChromiumKeyRoute::LegacyDpapi => {
+      let plaintext = crate::windows::dpapi::decrypt(encrypted_value)
+        .context("Failed to decrypt legacy Chromium DPAPI cookie")?;
+      return String::from_utf8(plaintext).context("Can't decode legacy DPAPI cookie value");
+    }
+    ChromiumKeyRoute::V12SecretPortal => {
+      bail!("Chromium v12 SecretPortal encryption is recognized but unsupported")
+    }
+    ChromiumKeyRoute::Unknown(prefix) => {
+      bail!("Unknown Chromium cipher prefix: {prefix:?}")
+    }
   };
-  if !value.is_empty() || !(key_type == b"v11" || key_type == b"v10" || key_type == b"v20") {
-    // unknown key_type or value isn't encrypted
-    log::warn!("Unknown key type: {:?}", key_type);
-    return Ok(value);
+
+  if encrypted_value.len() < 15 {
+    bail!(
+      "Chromium encrypted value is {} bytes, shorter than the version and nonce header",
+      encrypted_value.len()
+    );
   }
-  log::debug!("key type: {:?}", key_type);
 
   let nonce = &encrypted_value[3..15]; // iv
   let ciphertext = &encrypted_value[15..];
 
   // Create a new AES block cipher.
-  for key in keys {
+  for key in candidates {
     // new_from_slice rejects wrong-length keys instead of panicking like
     // Key::from_slice, so a malformed candidate key just gets skipped.
-    let cipher = match Aes256Gcm::new_from_slice(key) {
+    let cipher = match Aes256Gcm::new_from_slice(key.as_bytes()) {
       Ok(cipher) => cipher,
       Err(_) => {
-        log::warn!("Skipping candidate key with invalid length {}", key.len());
+        log::warn!(
+          "Skipping {key_type:?} candidate key with invalid length {}",
+          key.as_bytes().len()
+        );
         continue;
       }
     };
@@ -252,28 +302,57 @@ fn decrypt_encrypted_value(
 }
 
 /// Decrypt cookie value using aes cbc
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn decrypt_encrypted_value(
   value: String,
   encrypted_value: &[u8],
   keys: &[Vec<u8>],
 ) -> Result<String> {
-  // cbc
+  let outcomes = ChromiumKeyOutcomes::from_legacy_shared(keys.to_vec());
+  decrypt_encrypted_value_with_outcomes(value, encrypted_value, &outcomes)
+}
+
+#[cfg(unix)]
+fn decrypt_encrypted_value_with_outcomes(
+  value: String,
+  encrypted_value: &[u8],
+  outcomes: &ChromiumKeyOutcomes,
+) -> Result<String> {
   if !value.is_empty() {
-    // unknown key_type or value isn't encrypted
     return Ok(value);
   }
   if encrypted_value.is_empty() {
     return Ok("".into());
   }
-  let Some(key_type) = encrypted_value.get(..3) else {
-    return Ok(value);
-  };
 
-  if !(key_type == b"v11" || key_type == b"v10" || key_type == b"v20") {
-    return Ok(value);
-  }
-  log::debug!("key type: {:?}", key_type);
+  let cipher_version = detect_cipher_version(encrypted_value)?;
+  let (key_type, candidates) = match outcomes.route(cipher_version) {
+    ChromiumKeyRoute::Candidates { tier, candidates } => {
+      log::debug!("Chromium cipher tier: {tier}");
+      let prefix = match cipher_version {
+        ChromiumCipherVersion::V10 => b"v10",
+        ChromiumCipherVersion::V11 => b"v11",
+        ChromiumCipherVersion::V20 => b"v20",
+        _ => unreachable!("candidate routes are only emitted for keyed tiers"),
+      };
+      (prefix.as_slice(), candidates)
+    }
+    ChromiumKeyRoute::NotApplicable { tier } => {
+      bail!("Chromium {tier} key provider is not applicable")
+    }
+    ChromiumKeyRoute::Failure { tier, failure } => {
+      bail!("Chromium {tier} key provider failed: {}", failure.message())
+    }
+    ChromiumKeyRoute::LegacyDpapi => {
+      bail!("Legacy Chromium DPAPI cookies are not decryptable on this platform")
+    }
+    ChromiumKeyRoute::V12SecretPortal => {
+      bail!("Chromium v12 SecretPortal encryption is recognized but unsupported")
+    }
+    ChromiumKeyRoute::Unknown(prefix) => {
+      bail!("Unknown Chromium cipher prefix: {prefix:?}")
+    }
+  };
 
   use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 
@@ -284,9 +363,14 @@ fn decrypt_encrypted_value(
   let encrypted_value = &mut encrypted_value.to_owned()[3..];
   let iv: [u8; 16] = [b' '; 16];
 
-  for key in keys {
-    let mut key_array: [u8; 16] = [0; 16];
-    key_array.copy_from_slice(&key[..16]);
+  for key in candidates {
+    let Ok(key_array): Result<[u8; 16], _> = key.as_bytes().try_into() else {
+      log::warn!(
+        "Skipping {key_type:?} candidate key with invalid length {}",
+        key.as_bytes().len()
+      );
+      continue;
+    };
     let cipher = Aes128CbcDec::new(&key_array.into(), &iv.into());
     let mut cloned_encrypted_value: Vec<u8> = encrypted_value.to_vec();
 
@@ -340,6 +424,31 @@ fn unlock_file(
 #[allow(unused_variables)]
 pub(crate) fn query_cookies(
   keys: Vec<Vec<u8>>,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<Vec<Cookie>> {
+  let provider = LegacySharedKeyProvider::new(keys);
+  query_cookies_with_key_provider(&provider, &(), db_path, domains, force_kill)
+}
+
+fn query_cookies_with_key_provider<Context: ?Sized, Provider>(
+  provider: &Provider,
+  context: &Context,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<Vec<Cookie>>
+where
+  Provider: ChromiumKeyProvider<Context>,
+{
+  let outcomes = retrieve_key_outcomes(provider, context);
+  query_cookies_with_key_outcomes(outcomes, db_path, domains, force_kill)
+}
+
+#[allow(unused_variables)]
+fn query_cookies_with_key_outcomes(
+  outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
@@ -440,14 +549,15 @@ pub(crate) fn query_cookies(
       decoded_any_row = true;
       continue;
     }
-    let decrypted_value = match decrypt_encrypted_value(value, &encrypted_value, &keys) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to decrypt cookie value: {err}");
-        last_row_error = Some(err);
-        continue;
-      }
-    };
+    let decrypted_value =
+      match decrypt_encrypted_value_with_outcomes(value, &encrypted_value, &outcomes) {
+        Ok(val) => val,
+        Err(err) => {
+          log::warn!("Failed to decrypt cookie value: {err}");
+          last_row_error = Some(err);
+          continue;
+        }
+      };
     let http_only: bool = match row.get(7) {
       Ok(val) => val,
       Err(err) => {
@@ -489,6 +599,8 @@ pub(crate) fn query_cookies(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[cfg(target_os = "linux")]
+  use std::cell::Cell;
   use std::path::Path;
   use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -546,6 +658,120 @@ mod tests {
         )
         .expect("insert row");
     }
+  }
+
+  #[cfg(target_os = "linux")]
+  fn encrypt_linux_cbc_cookie(version: &[u8; 3], key: &[u8; 16], plaintext: &[u8]) -> Vec<u8> {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let iv = [b' '; 16];
+    let cipher = Aes128CbcEnc::new((&key[..]).into(), &iv.into());
+    let mut buffer = vec![0; plaintext.len() + 16];
+    buffer[..plaintext.len()].copy_from_slice(plaintext);
+    let ciphertext = cipher
+      .encrypt_padded_mut::<Pkcs7>(&mut buffer, plaintext.len())
+      .expect("encrypt synthetic Chromium cookie");
+    let mut encrypted_value = version.to_vec();
+    encrypted_value.extend_from_slice(ciphertext);
+    encrypted_value
+  }
+
+  #[cfg(target_os = "linux")]
+  struct SyntheticTierProvider {
+    calls: Cell<usize>,
+    outcomes: ChromiumKeyOutcomes,
+  }
+
+  #[cfg(target_os = "linux")]
+  impl ChromiumKeyProvider<str> for SyntheticTierProvider {
+    fn retrieve(&self, _context: &str) -> ChromiumKeyOutcomes {
+      self.calls.set(self.calls.get() + 1);
+      self.outcomes.clone()
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn injected_provider_routes_mixed_tiers_once_and_isolates_a_failed_tier() {
+    let dir = unique_tmpdir("chr-injected-mixed-tiers");
+    let db = dir.join("Cookies");
+    let v10_key = [0x10; 16];
+    let v11_key = [0x11; 16];
+    let v10_value = encrypt_linux_cbc_cookie(b"v10", &v10_key, b"v10 value");
+    let failed_v20_value = b"v20synthetic-provider-failure".to_vec();
+    let v11_value = encrypt_linux_cbc_cookie(b"v11", &v11_key, b"v11 value");
+
+    // The rows deliberately run success/failure/success. A provider failure
+    // for one tier is row-scoped and must not discard either successful CBC
+    // tier or trigger another installation-scoped provider call.
+    seed_chromium_cookies(
+      &db,
+      &[
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "v10-good",
+          "",
+          &v10_value,
+          false,
+          0,
+        ),
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "v20-failed-tier",
+          "",
+          &failed_v20_value,
+          false,
+          0,
+        ),
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "v11-good",
+          "",
+          &v11_value,
+          false,
+          0,
+        ),
+      ],
+    );
+
+    let provider = SyntheticTierProvider {
+      calls: Cell::new(0),
+      outcomes: ChromiumKeyOutcomes {
+        v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![v10_key.to_vec()])
+          .expect("nonempty v10 fixture"),
+        v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![v11_key.to_vec()])
+          .expect("nonempty v11 fixture"),
+        v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::failure(
+          "synthetic v20 provider failure",
+        ),
+      },
+    };
+
+    let mut cookies =
+      query_cookies_with_key_provider(&provider, "linux-installation", db, None, false)
+        .expect("good tiers survive one failed tier");
+
+    assert_eq!(provider.calls.get(), 1);
+    cookies.sort_by(|left, right| left.name.cmp(&right.name));
+    let extracted: Vec<_> = cookies
+      .iter()
+      .map(|cookie| (cookie.name.as_str(), cookie.value.as_str()))
+      .collect();
+    assert_eq!(
+      extracted,
+      vec![("v10-good", "v10 value"), ("v11-good", "v11 value")]
+    );
   }
 
   #[test]
