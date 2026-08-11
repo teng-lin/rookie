@@ -75,7 +75,7 @@ npm install rookie-cookies
 ```javascript
 import { chrome } from "rookie-cookies";
 
-const cookies = chrome(["example.com"]);
+const cookies = await chrome(["example.com"]);
 console.log(cookies);
 ```
 

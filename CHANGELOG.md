@@ -6,6 +6,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Node extraction now converts native worker panics and invalid JavaScript
+  arguments into rejected Promises instead of aborting Node or throwing before
+  callers can attach Promise handlers. JavaScript examples now consistently
+  await the asynchronous extraction API.
+
 ## [0.5.8] - 2026-08-11
 
 ### Added

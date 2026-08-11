@@ -30,8 +30,11 @@
     "postbuild": "node scripts/patch-loader.js",
     "build:debug": "napi build --platform",
     "postbuild:debug": "node scripts/patch-loader.js",
+    "build:test": "napi build --platform --release --features test-support",
+    "postbuild:test": "node scripts/patch-loader.js",
     "prepack": "node scripts/patch-loader.js",
     "test": "ava",
+    "test:worker-panic": "ava __test__/worker-panic.test-support.mjs",
     "universal": "napi universal",
     "version": "napi version"
   },
