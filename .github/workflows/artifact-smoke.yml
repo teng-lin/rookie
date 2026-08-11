@@ -1,17 +1,6 @@
 name: Installed release artifact smoke
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/_artifact-smoke.yml'
-      - '.github/workflows/artifact-smoke.yml'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'rookie-rs/**'
-      - 'cli/**'
-      - 'bindings/python/**'
-      - 'bindings/node/**'
-      - 'tests/artifact_smoke/**'
   push:
     branches: [main]
   schedule:

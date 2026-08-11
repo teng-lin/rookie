@@ -47,31 +47,6 @@ def npm_command() -> str:
     return command
 
 
-def npm_pack(package: Path, destination: Path, *, cwd: Path) -> Path:
-    result = subprocess.run(
-        [
-            npm_command(),
-            "pack",
-            str(package),
-            "--pack-destination",
-            str(destination),
-            "--ignore-scripts",
-            "--json",
-        ],
-        cwd=cwd,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    payload = json.loads(result.stdout)
-    if len(payload) != 1 or not payload[0].get("filename"):
-        raise RuntimeError(f"unexpected npm pack output: {result.stdout}")
-    tarball = destination / payload[0]["filename"]
-    if not tarball.is_file():
-        raise RuntimeError(f"npm did not create {tarball}")
-    return tarball
-
-
 def main() -> int:
     args = parse_args()
     repository = Path(__file__).resolve().parents[2]
@@ -110,10 +85,46 @@ def main() -> int:
     built_binding = node_root / native_filename
     if not built_binding.is_file():
         raise RuntimeError(f"Node build output is missing: {built_binding}")
-    shutil.copy2(built_binding, native_package / native_filename)
-
-    native_tarball = npm_pack(native_package, npm_output, cwd=node_root)
-    root_tarball = npm_pack(node_root, npm_output, cwd=node_root)
+    napi_artifacts = repository / "target/artifact-smoke-napi"
+    if napi_artifacts.exists():
+        shutil.rmtree(napi_artifacts)
+    napi_artifacts.mkdir(parents=True)
+    shutil.copy2(built_binding, napi_artifacts / native_filename)
+    subprocess.run(
+        [
+            npm_command(),
+            "run",
+            "artifacts",
+            "--",
+            "--dir",
+            str(napi_artifacts),
+            "--dist",
+            "npm",
+        ],
+        cwd=node_root,
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            str(repository / "scripts/package-npm-tarballs.py"),
+            "--node-root",
+            str(node_root),
+            "--output",
+            str(npm_output),
+            "--platform",
+            args.npm_platform,
+        ],
+        cwd=repository,
+        check=True,
+    )
+    npm_tarballs = sorted(npm_output.glob("*.tgz"))
+    if len(npm_tarballs) != 2:
+        raise RuntimeError(f"expected native + root npm tarballs, found {npm_tarballs}")
+    native_tarball = next(
+        path for path in npm_tarballs if native_metadata["name"] in path.name
+    )
+    root_tarball = next(path for path in npm_tarballs if path != native_tarball)
 
     packaged = [cli, wheel, native_tarball, root_tarball]
     files = {

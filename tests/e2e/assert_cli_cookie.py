@@ -32,13 +32,14 @@ def default_cli_path() -> Path:
 
 
 def assert_cli_cookie(
-    cookies_path: Path,
+    cookies_path: Optional[Path],
     *,
     key_path: Optional[Path],
     domain: str,
     cli_path: Path,
     expected_name: Optional[str] = None,
     expected_value: Optional[str] = None,
+    browser: Optional[str] = None,
 ) -> int:
     """Run the CLI and return the number of cookies in its JSON response."""
     expected_name = expected_name or os.environ.get(
@@ -47,22 +48,21 @@ def assert_cli_cookie(
     expected_value = expected_value or os.environ.get(
         "ROOKIE_E2E_COOKIE_VALUE", COOKIE_VALUE
     )
-    if not cookies_path.is_file():
+    if (cookies_path is None) == (browser is None):
+        raise HarnessError("provide exactly one cookies path or --browser")
+    if cookies_path is not None and not cookies_path.is_file():
         raise HarnessError(f"no cookies db at {cookies_path}")
     if key_path is not None and not key_path.is_file():
         raise HarnessError(f"no browser key file at {key_path}")
     if not cli_path.is_file():
         raise HarnessError(f"no rookie-cookies CLI at {cli_path}")
 
-    command = [
-        str(cli_path),
-        "--path",
-        str(cookies_path),
-        "--domains",
-        domain,
-        "--format",
-        "json",
-    ]
+    command = [str(cli_path)]
+    if browser is not None:
+        command.extend(("--browser", browser))
+    else:
+        command.extend(("--path", str(cookies_path)))
+    command.extend(("--domains", domain, "--format", "json"))
     if key_path is not None:
         command.extend(("--key-path", str(key_path)))
 
@@ -113,7 +113,15 @@ def assert_cli_cookie(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("cookies_path", type=Path, help="Firefox or Chromium cookies DB")
+    parser.add_argument(
+        "cookies_path",
+        type=Path,
+        nargs="?",
+        help="Firefox or Chromium cookies DB (omit with --browser)",
+    )
+    parser.add_argument(
+        "--browser", help="discover the named browser instead of using an explicit path"
+    )
     parser.add_argument(
         "--key-path",
         type=Path,
@@ -148,6 +156,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cli_path=args.cli_path,
             expected_name=expected_name,
             expected_value=expected_value,
+            browser=args.browser,
         )
     except HarnessError as error:
         print(f"error: {error}", file=sys.stderr)

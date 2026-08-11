@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -30,6 +32,17 @@ def decode_key(local_state: dict[str, object], name: str, prefix: bytes) -> byte
     return decoded
 
 
+def cookie_rows(db_path: Path, cookie_name: str) -> list[tuple[object, ...]]:
+    with sqlite3.connect(db_path) as connection:
+        return list(
+            connection.execute(
+                "SELECT host_key, name, hex(substr(encrypted_value, 1, 3)), "
+                "length(encrypted_value) FROM cookies WHERE name = ?",
+                (cookie_name,),
+            )
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("user_data_dir", type=Path)
@@ -37,6 +50,11 @@ def main() -> int:
     parser.add_argument("--expected-prefix", choices=("v10", "v20"), required=True)
     parser.add_argument("--require-dpapi-key", action="store_true")
     parser.add_argument("--require-app-bound-key", action="store_true")
+    parser.add_argument(
+        "--require-wal-only",
+        action="store_true",
+        help="require the selected cookie to be absent from a copy of the main DB",
+    )
     args = parser.parse_args()
 
     try:
@@ -50,14 +68,24 @@ def main() -> int:
             print(f"App-Bound Local State key present (decoded length: {len(key)})")
 
         db_path = cookie_db(args.user_data_dir)
-        with sqlite3.connect(db_path) as connection:
-            rows = list(
-                connection.execute(
-                    "SELECT host_key, name, hex(substr(encrypted_value, 1, 3)), "
-                    "length(encrypted_value) FROM cookies WHERE name = ?",
-                    (args.cookie_name,),
+        if args.require_wal_only:
+            wal_path = Path(f"{db_path}-wal")
+            if not wal_path.is_file() or wal_path.stat().st_size == 0:
+                raise ValueError(f"Cookies WAL is missing or empty: {wal_path}")
+            with tempfile.TemporaryDirectory(prefix="rookie-main-db-") as temp_dir:
+                main_db_copy = Path(temp_dir) / "Cookies"
+                shutil.copyfile(db_path, main_db_copy)
+                main_rows = cookie_rows(main_db_copy, args.cookie_name)
+            if main_rows:
+                raise ValueError(
+                    f"{args.cookie_name!r} is already present in the main Cookies DB"
                 )
+            print(
+                f"{args.cookie_name} is absent from the main DB copy and must be read "
+                "through the live WAL"
             )
+
+        rows = cookie_rows(db_path, args.cookie_name)
         print(f"{args.cookie_name} encrypted_value diagnostics: {rows}")
         expected_hex = args.expected_prefix.encode("ascii").hex().upper()
         if not rows:

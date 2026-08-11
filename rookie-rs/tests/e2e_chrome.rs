@@ -300,6 +300,20 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
 
 #[cfg(target_os = "windows")]
 #[test]
+#[ignore]
+fn extracts_seeded_cookie_through_default_chrome_discovery() {
+  if std::env::var("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY").as_deref() != Ok("1") {
+    eprintln!("default Chrome discovery check was not requested");
+    return;
+  }
+  let domain = helpers::domain();
+  let cookies = rookie_cookies::chrome(Some(vec![domain.clone()]))
+    .unwrap_or_else(|error| panic!("rookie_cookies::chrome failed: {error}"));
+  helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn extracts_deterministic_legacy_v10_fixture_with_current_user_dpapi() {
   let fixture = deterministic_dpapi::create();
   let domain = "example.test";

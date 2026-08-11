@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 async function main() {
-  const [database, nativePackage] = process.argv.slice(2);
+  const [database, nativePackage, keyPath] = process.argv.slice(2);
   if (!database || !nativePackage) {
     throw new Error("usage: node_consumer.cjs <cookies.sqlite> <native-package>");
   }
@@ -25,14 +25,16 @@ async function main() {
   assert.equal(typeof rookieCookies.version, "function");
   assert.match(rookieCookies.version(), /^\d+\.\d+\.\d+/);
 
-  const cookies = await rookieCookies.firefoxBased(database, ["artifact.test"]);
+  const cookies = keyPath
+    ? await rookieCookies.chromiumBased(keyPath, database, ["example.test"])
+    : await rookieCookies.firefoxBased(database, ["artifact.test"]);
   assert.equal(cookies.length, 1, JSON.stringify(cookies));
-  assert.equal(cookies[0].name, "rookie_artifact");
-  assert.equal(cookies[0].value, "installed-ok");
-  assert.equal(cookies[0].domain, ".artifact.test");
+  assert.equal(cookies[0].name, keyPath ? "rookie_ci" : "rookie_artifact");
+  assert.equal(cookies[0].value, keyPath ? "bar" : "installed-ok");
+  assert.equal(cookies[0].domain, keyPath ? ".example.test" : ".artifact.test");
 
   console.log(
-    `npm tarballs: loaded ${rootEntry} with ${nativeEntry}; rookie_artifact=installed-ok`,
+    `npm tarballs: loaded ${rootEntry} with ${nativeEntry}; ${cookies[0].name}=${cookies[0].value}`,
   );
 }
 

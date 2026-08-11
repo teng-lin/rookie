@@ -49,20 +49,27 @@ if (process.platform === "win32") {
   cookies = await rookieCookies.chromiumBased(dbPath, [domain]);
 }
 
-const seeded = cookies.find((c) => c.name === expectedName);
-if (!seeded) {
-  console.error(
-    `seeded cookie '${expectedName}' not found among ${cookies.length} cookies for ${domain}`,
-  );
-  process.exit(1);
+const results = [["chromiumBased", cookies]];
+if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
+  results.push(["chrome", await rookieCookies.chrome([domain])]);
 }
-if (seeded.value !== expectedValue) {
-  console.error(
-    `cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
-  );
-  process.exit(1);
+
+for (const [surface, result] of results) {
+  const seeded = result.find((c) => c.name === expectedName);
+  if (!seeded) {
+    console.error(
+      `${surface}: seeded cookie '${expectedName}' not found among ${result.length} cookies for ${domain}`,
+    );
+    process.exit(1);
+  }
+  if (seeded.value !== expectedValue) {
+    console.error(
+      `${surface}: cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
+    );
+    process.exit(1);
+  }
 }
 
 console.log(
-  `rookie-cookies (${process.platform}): ${expectedName}=${expectedValue} verified (${cookies.length} cookies for ${domain})`,
+  `rookie-cookies (${process.platform}): ${expectedName}=${expectedValue} verified (${cookies.length} cookies for ${domain}; surfaces: ${results.map(([surface]) => surface).join(", ")})`,
 );

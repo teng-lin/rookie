@@ -36,6 +36,7 @@ jobs:
   build:
     name: Build release packages
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
     outputs:
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
@@ -52,7 +53,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: bindings/node/package-lock.json
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -73,10 +74,34 @@ jobs:
           working-directory: bindings/python
       - name: Install Node build dependencies
         working-directory: bindings/node
-        run: npm ci
-      - name: Build native Node binding
+        run: |
+          npm install --global npm@11.5.1
+          npm ci
+      - name: Build native Node binding outside Linux
+        if: runner.os != 'Linux'
         working-directory: bindings/node
         run: npm run build -- --target ${{ inputs.rust-target }}
+      - name: Build native Node binding in the pinned release container
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: bindings/node
+        run: |
+          mkdir -p .cargo-cache/git/db .cargo-cache/registry/cache .cargo-cache/registry/index
+          docker run --rm --user 0:0 \
+            -v "$GITHUB_WORKSPACE/rookie-rs:/rookie-rs" \
+            -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/git/db:/usr/local/cargo/git/db" \
+            -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/cache:/usr/local/cargo/registry/cache" \
+            -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/index:/usr/local/cargo/registry/index" \
+            -v "$GITHUB_WORKSPACE/bindings/node:/build" \
+            -w /build \
+            ghcr.io/napi-rs/napi-rs/nodejs-rust@sha256:6f910fc8a723a1eeab2483d2302e8c1fabe36e54c51eb0da27fafd5c3083e08c \
+            sh -lc '
+              export RUSTUP_HOME=/tmp/rookie-rustup
+              export RUSTUP_TOOLCHAIN=stable
+              rustup set auto-self-update disable
+              rustup toolchain install stable --profile minimal
+              npm run build -- --target x86_64-unknown-linux-gnu
+            '
       - name: Assemble release-shaped packages and provenance
         run: python tests/artifact_smoke/package_release_artifacts.py --target "${{ inputs.rust-target }}" --npm-platform "${{ inputs.npm-platform }}" --source-sha "${{ github.sha }}"
       - name: Upload immutable package set
@@ -92,6 +117,7 @@ jobs:
     name: Install and exercise downloaded packages
     needs: build
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -101,14 +127,22 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Download package set produced by the build job
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-artifacts-${{ inputs.rust-target }}-${{ github.sha }}
           path: ${{ runner.temp }}/rookie-release-artifacts
       - name: Verify provenance, contents, installation, and Firefox extraction
-        run: python tests/artifact_smoke/smoke_installed_artifacts.py --artifact-dir "${{ runner.temp }}/rookie-release-artifacts" --consumer-dir "${{ runner.temp }}/rookie artifact consumer 雪"
+        run: >-
+          python tests/artifact_smoke/smoke_installed_artifacts.py
+          --artifact-dir "${{ runner.temp }}/rookie-release-artifacts"
+          --consumer-dir "${{ runner.temp }}/rookie artifact consumer 雪"
+          --expected-source-sha "${{ github.sha }}"
+          --expected-rust-target "${{ inputs.rust-target }}"
+          --expected-npm-platform "${{ inputs.npm-platform }}"
+          --expected-runner-os "${{ runner.os }}"
+          --expected-runner-arch "${{ runner.arch }}"
       - name: Record artifact identity
         if: always()
         shell: bash

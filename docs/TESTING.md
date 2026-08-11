@@ -39,15 +39,17 @@ ordinary pull-request matrix is:
 | Windows 2025 | Chrome custom profile with legacy DPAPI `v10` | Rust, Python, Node, CLI |
 | Windows 2025 | Firefox | Rust, Python, Node, CLI |
 
-The Windows App-Bound canary is a separate trusted-main, scheduled, or manual
-job. It launches the machine-wide Chrome installation directly against the
+The Windows App-Bound canary is a separate main-push, scheduled, or explicitly
+dispatched trusted-ref job. It launches the machine-wide Chrome installation directly against the
 real default user-data directory without Playwright, CDP, or a custom profile.
 Before extraction it requires all of the following:
 
 - an elevated runner under the same user that launches Chrome;
 - `Local State.os_crypt.app_bound_encrypted_key` with the `APPB` prefix;
 - a seeded cookie whose encrypted value has the `v20` prefix;
-- a second fake cookie committed to a live, non-empty Cookies WAL;
+- a second `v20` fake cookie visible through the live WAL but absent from a
+  main-database-only copy;
+- both explicit-path extraction and default Chrome profile/key discovery;
 - Chrome remaining alive after each Rust, Python, Node, and CLI extraction.
 
 The canary fails when a prerequisite is absent. It never uploads the disposable
@@ -59,6 +61,7 @@ The cross-platform CLI checker can be run directly:
 python3 tests/e2e/assert_cli_cookie.py path/to/cookies.sqlite
 python3 tests/e2e/assert_cli_cookie.py path/to/Cookies \
   --key-path 'path/to/Local State'
+python3 tests/e2e/assert_cli_cookie.py --browser chrome
 ```
 
 Set `ROOKIE_E2E_CLI` to test a binary outside `target/release`. The expected
@@ -75,10 +78,16 @@ outside the checkout. Each native lane exercises:
 - a wheel installed into a fresh virtual environment with `pip --no-index`;
 - the packed npm root and native-platform tarballs installed offline.
 
-Pull requests cover Ubuntu x64, Windows x64, and macOS ARM64. The scheduled and
-manual matrix also runs the shipped macOS Intel artifacts on a native Intel
-runner. Provenance records the source commit, target, runner, byte length, and
-SHA-256 digest of every consumed artifact.
+The existing E2E workflow bootstraps the reusable artifact jobs on pull requests,
+covering Ubuntu x64, Windows x64, and macOS ARM64. The standalone workflow owns
+main-push, scheduled, and manual runs; its scheduled/manual matrix also runs the
+shipped macOS Intel artifacts on a native Intel runner. Provenance records and
+independently verifies the source commit, target, runner, exact package paths,
+byte length, and SHA-256 digest of every consumed artifact. The npm tarballs use
+the same artifact-movement and packaging commands as the publish workflow, and
+Linux uses the same digest-pinned build container. Windows additionally decrypts
+a generated current-user DPAPI fixture through the installed CLI, wheel, and npm
+packages.
 
 ## Diagnosing failures
 

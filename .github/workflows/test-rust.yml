@@ -10,6 +10,8 @@ on:
       - 'bindings/python/**'
       - 'bindings/node/**'
       - 'tests/python/**'
+      - 'tests/e2e/assert_cli_cookie.py'
+      - 'tests/e2e/test_assert_cli_cookie.py'
       - 'examples/javascript/package-lock.json'
       - 'examples/rust/http/Cargo.toml'
       - 'Cargo.toml'
@@ -40,6 +42,8 @@ jobs:
         run: |
           version=$(python -c 'import tomllib; print(tomllib.load(open("rookie-rs/Cargo.toml", "rb"))["package"]["version"])')
           python scripts/check-release.py "$version"
+      - name: Test portable CLI assertion helper
+        run: python -m unittest tests/e2e/test_assert_cli_cookie.py -v
 
   cargo-test:
     name: cargo test (${{ matrix.os }})

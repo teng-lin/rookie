@@ -38,14 +38,24 @@ function Close-ChromeGracefully {
   throw "Chrome did not exit after a graceful window close"
 }
 
-function Assert-ChromeAlive {
-  $running = @($script:livePids | Where-Object {
-    $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue)
-  })
-  if ($running.Count -eq 0) {
-    throw "rookie-cookies terminated the live Chrome process"
+function Wait-ForChromeMainWindow {
+  for ($i = 1; $i -le 60; $i++) {
+    $window = Get-Process chrome -ErrorAction SilentlyContinue |
+      Where-Object { $_.MainWindowHandle -ne 0 } |
+      Select-Object -First 1
+    if ($null -ne $window) { return $window }
+    Start-Sleep -Milliseconds 500
   }
-  Write-Host "Chrome remains alive (tracked pids: $($running -join ', '))"
+  throw "Chrome has no closeable main window"
+}
+
+function Assert-ChromeAlive {
+  $browser = Get-Process -Id $script:liveBrowserPid -ErrorAction SilentlyContinue
+  if (($null -eq $browser) -or
+      ($browser.StartTime -ne $script:liveBrowserStartTime)) {
+    throw "rookie-cookies terminated the live Chrome browser process"
+  }
+  Write-Host "Chrome browser remains alive (pid: $($script:liveBrowserPid))"
 }
 
 Remove-Item $env:ROOKIE_E2E_REQUEST_LOG -Force -ErrorAction SilentlyContinue
@@ -120,6 +130,10 @@ try {
   Wait-ForChrome
   Wait-ForRequest "/wal"
 
+  $liveBrowser = Wait-ForChromeMainWindow
+  $script:liveBrowserPid = $liveBrowser.Id
+  $script:liveBrowserStartTime = $liveBrowser.StartTime
+
   $walPath = "$cookiesDb-wal"
   $walReady = $false
   for ($i = 1; $i -le 60; $i++) {
@@ -134,11 +148,22 @@ try {
   }
   Write-Host "Live Cookies WAL length: $((Get-Item $walPath).Length)"
 
-  $script:livePids = @(Get-Process chrome -ErrorAction Stop |
-    ForEach-Object { $_.Id })
-  if ($script:livePids.Count -eq 0) { throw "no live Chrome pids" }
+  $walValidated = $false
+  for ($i = 1; $i -le 60; $i++) {
+    & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
+      "$env:ROOKIE_E2E_USER_DATA_DIR" --cookie-name rookie_wal `
+      --expected-prefix v20 --require-wal-only
+    if ($LASTEXITCODE -eq 0) {
+      $walValidated = $true
+      break
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $walValidated) { throw "strict WAL-only v20 profile check failed" }
+
   $env:ROOKIE_E2E_COOKIE_NAME = "rookie_wal"
   $env:ROOKIE_E2E_COOKIE_VALUE = "live"
+  $env:ROOKIE_E2E_CHECK_BROWSER_DISCOVERY = "1"
 
   Write-Host "Identity before elevated extraction:"
   whoami /user
@@ -162,6 +187,10 @@ try {
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
     "$cookiesDb" --key-path "$localState"
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound extraction failed" }
+  Assert-ChromeAlive
+
+  & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py --browser chrome
+  if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound Chrome discovery failed" }
   Assert-ChromeAlive
 } finally {
   # The canary uses only its fake-cookie profile on an ephemeral runner.

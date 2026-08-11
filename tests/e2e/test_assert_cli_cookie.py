@@ -30,14 +30,18 @@ class AssertCliCookieTests(unittest.TestCase):
         self.key = root / "Chromium Profile" / "Local State"
         self.key.parent.mkdir()
         self.key.touch()
-        self.cli = root / ("rookie-cookies.exe" if sys.platform == "win32" else "rookie-cookies")
+        self.cli = root / (
+            "rookie-cookies.exe" if sys.platform == "win32" else "rookie-cookies"
+        )
         self.cli.touch()
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
     @mock.patch.object(HARNESS.subprocess, "run")
-    def test_builds_chromium_command_and_accepts_seeded_cookie(self, run: mock.Mock) -> None:
+    def test_builds_chromium_command_and_accepts_seeded_cookie(
+        self, run: mock.Mock
+    ) -> None:
         run.return_value = subprocess.CompletedProcess(
             [], 0, json.dumps([{"name": "rookie_ci", "value": "bar"}]), "diagnostic"
         )
@@ -73,7 +77,37 @@ class AssertCliCookieTests(unittest.TestCase):
         self.assertNotIn("--key-path", run.call_args.args[0])
 
     @mock.patch.object(HARNESS.subprocess, "run")
-    def test_expected_cookie_can_be_selected_by_environment(self, run: mock.Mock) -> None:
+    def test_browser_command_uses_profile_discovery(self, run: mock.Mock) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '[{"name":"rookie_ci","value":"bar"}]', ""
+        )
+
+        HARNESS.assert_cli_cookie(
+            None,
+            key_path=None,
+            domain="127.0.0.1",
+            cli_path=self.cli,
+            browser="chrome",
+        )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--browser") + 1], "chrome")
+        self.assertNotIn("--path", command)
+
+    def test_rejects_path_and_browser_together(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "exactly one"):
+            HARNESS.assert_cli_cookie(
+                self.cookies,
+                key_path=None,
+                domain="127.0.0.1",
+                cli_path=self.cli,
+                browser="chrome",
+            )
+
+    @mock.patch.object(HARNESS.subprocess, "run")
+    def test_expected_cookie_can_be_selected_by_environment(
+        self, run: mock.Mock
+    ) -> None:
         run.return_value = subprocess.CompletedProcess(
             [], 0, '[{"name":"rookie_wal","value":"live"}]', ""
         )
@@ -96,7 +130,9 @@ class AssertCliCookieTests(unittest.TestCase):
 
     @mock.patch.object(HARNESS.subprocess, "run")
     def test_rejects_nonzero_exit_and_reports_stderr(self, run: mock.Mock) -> None:
-        run.return_value = subprocess.CompletedProcess([], 7, "", "could not read database")
+        run.return_value = subprocess.CompletedProcess(
+            [], 7, "", "could not read database"
+        )
 
         with self.assertRaisesRegex(HARNESS.HarnessError, "status 7.*could not read"):
             HARNESS.assert_cli_cookie(
@@ -107,7 +143,9 @@ class AssertCliCookieTests(unittest.TestCase):
             )
 
     @mock.patch.object(HARNESS.subprocess, "run")
-    def test_rejects_invalid_json_or_missing_seeded_cookie(self, run: mock.Mock) -> None:
+    def test_rejects_invalid_json_or_missing_seeded_cookie(
+        self, run: mock.Mock
+    ) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, "not-json", "log line")
         with self.assertRaisesRegex(HARNESS.HarnessError, "not valid JSON"):
             HARNESS.assert_cli_cookie(
@@ -120,7 +158,9 @@ class AssertCliCookieTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess(
             [], 0, '[{"name":"something_else","value":"bar"}]', ""
         )
-        with self.assertRaisesRegex(HARNESS.HarnessError, "did not return rookie_ci=bar"):
+        with self.assertRaisesRegex(
+            HARNESS.HarnessError, "did not return rookie_ci=bar"
+        ):
             HARNESS.assert_cli_cookie(
                 self.cookies,
                 key_path=None,

@@ -16,7 +16,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// same crate that declares the `[[bin]] name = "rookie-cookies"`.
 const ROOKIE_BIN: &str = env!("CARGO_BIN_EXE_rookie-cookies");
 
-fn unique_tmpdir(tag: &str) -> PathBuf {
+struct TestDir(PathBuf);
+
+impl TestDir {
+  fn path(&self) -> &Path {
+    &self.0
+  }
+}
+
+impl Drop for TestDir {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.0);
+  }
+}
+
+fn unique_tmpdir(tag: &str) -> TestDir {
   static COUNTER: AtomicU64 = AtomicU64::new(0);
   let n = COUNTER.fetch_add(1, Ordering::SeqCst);
   let dir = std::env::temp_dir().join(format!(
@@ -26,7 +40,7 @@ fn unique_tmpdir(tag: &str) -> PathBuf {
     n
   ));
   std::fs::create_dir_all(&dir).expect("temp dir");
-  dir
+  TestDir(dir)
 }
 
 // (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
@@ -101,7 +115,7 @@ fn parsed_json(out: &std::process::Output) -> serde_json::Value {
 #[test]
 fn json_output_contains_seeded_cookie() {
   let dir = unique_tmpdir("cli json with spaces ünicode");
-  let db = dir.join("cookies.sqlite");
+  let db = dir.path().join("cookies.sqlite");
   seed_firefox_cookies(
     &db,
     &[
@@ -148,7 +162,7 @@ fn json_output_contains_seeded_cookie() {
 #[test]
 fn netscape_output_includes_seeded_cookie() {
   let dir = unique_tmpdir("cli-netscape");
-  let db = dir.join("cookies.sqlite");
+  let db = dir.path().join("cookies.sqlite");
   seed_firefox_cookies(
     &db,
     &[(
@@ -179,7 +193,7 @@ fn netscape_output_includes_seeded_cookie() {
 #[test]
 fn diagnostics_stay_on_stderr_and_json_stays_on_stdout() {
   let dir = unique_tmpdir("stdout-stderr");
-  let db = dir.join("cookies.sqlite");
+  let db = dir.path().join("cookies.sqlite");
   seed_firefox_cookies(
     &db,
     &[(
@@ -210,7 +224,8 @@ fn diagnostics_stay_on_stderr_and_json_stays_on_stdout() {
 
 #[test]
 fn invalid_path_exits_nonzero_without_machine_output() {
-  let missing = unique_tmpdir("missing-db").join("does not exist.sqlite");
+  let dir = unique_tmpdir("missing-db");
+  let missing = dir.path().join("does not exist.sqlite");
   let out = run_rookie(&["--path", missing.to_str().unwrap(), "--format", "json"]);
 
   assert!(
@@ -257,11 +272,11 @@ fn firefox_browser_flag_discovers_a_seeded_profile() {
   let root = unique_tmpdir("discovery with spaces ünicode");
 
   #[cfg(target_os = "linux")]
-  let firefox_root = root.join(".mozilla/firefox");
+  let firefox_root = root.path().join(".mozilla/firefox");
   #[cfg(target_os = "macos")]
-  let firefox_root = root.join("Library/Application Support/Firefox");
+  let firefox_root = root.path().join("Library/Application Support/Firefox");
   #[cfg(target_os = "windows")]
-  let firefox_root = root.join("Mozilla/Firefox");
+  let firefox_root = root.path().join("Mozilla/Firefox");
 
   let profile = firefox_root.join("Profiles/rookie-ci.default-release");
   std::fs::create_dir_all(&profile).expect("create Firefox profile");
@@ -297,9 +312,11 @@ fn firefox_browser_flag_discovers_a_seeded_profile() {
     ])
     .env("RUST_LOG", "error");
   #[cfg(unix)]
-  command.env("HOME", &root);
+  command.env("HOME", root.path());
   #[cfg(target_os = "windows")]
-  command.env("APPDATA", &root).env("LOCALAPPDATA", &root);
+  command
+    .env("APPDATA", root.path())
+    .env("LOCALAPPDATA", root.path());
 
   let out = command.output().expect("spawn rookie-cookies");
   let parsed = parsed_json(&out);
