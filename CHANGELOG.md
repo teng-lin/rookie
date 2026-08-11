@@ -14,6 +14,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Internet Explorer cookies now report `secure` and `http_only` from the ESE
+  `Flags` column instead of always `false`, so a Secure cookie is no longer
+  extracted as one safe to replay over plain HTTP. Flags that cannot be read
+  fail closed: an unrecognised cookie table is an error, and an individual
+  cookie whose flags do not decode is skipped rather than reported as
+  insecure. Their `same_site` is now `-1` (unspecified) rather than `0`, which
+  had claimed `SameSite=None` for a store that records no SameSite attribute
+  at all.
 - Windows App-Bound key derivation now parses the key-blob framing header
   instead of slicing a fixed trailing window, so Chrome 133+'s 93-byte flag-3
   key layout is decoded correctly (its scheme flag was previously read from the
