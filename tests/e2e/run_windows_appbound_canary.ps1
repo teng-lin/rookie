@@ -101,6 +101,7 @@ try {
   # machine install opening its real default profile directly.
   Start-Process -FilePath $env:ROOKIE_E2E_CHROME_PATH -ArgumentList @(
     "--no-first-run",
+    "--new-window",
     "--disable-background-mode",
     "--disable-background-networking",
     "--disable-component-update",
@@ -137,6 +138,7 @@ try {
   # unique cookie that every extraction surface must recover.
   Start-Process -FilePath $env:ROOKIE_E2E_CHROME_PATH -ArgumentList @(
     "--no-first-run",
+    "--new-window",
     "--disable-background-mode",
     "--disable-background-networking",
     "--disable-component-update",

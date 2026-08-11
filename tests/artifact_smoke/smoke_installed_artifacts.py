@@ -45,7 +45,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> 
         command,
         cwd=cwd,
         env=env,
-        check=True,
+        check=False,
         text=True,
         encoding="utf-8",
         stdout=subprocess.PIPE,
@@ -55,6 +55,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> 
         print(result.stdout.rstrip())
     if result.stderr:
         print(result.stderr.rstrip(), file=sys.stderr)
+    result.check_returncode()
     return result.stdout
 
 
@@ -300,7 +301,7 @@ if len(cookies) != 1 or cookies[0]["name"] != "rookie_artifact" or cookies[0]["v
 print(f"wheel: loaded {module}; rookie_artifact=installed-ok")
 """
     run(
-        [str(python), "-I", "-c", verifier],
+        [str(python), "-I", "-X", "utf8", "-c", verifier],
         cwd=consumer,
         env={
             **os.environ,
@@ -329,7 +330,7 @@ if len(cookies) != 1 or cookies[0]["name"] != "rookie_ci" or cookies[0]["value"]
 print("wheel: rookie_ci=bar decrypted through current-user DPAPI")
 """
     run(
-        [str(python), "-I", "-c", verifier],
+        [str(python), "-I", "-X", "utf8", "-c", verifier],
         cwd=consumer,
         env={
             **os.environ,
