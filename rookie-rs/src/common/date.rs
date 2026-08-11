@@ -29,7 +29,7 @@ pub fn safari_timestamp(timestamp: f64) -> Option<u64> {
   }
   Some(unix_timestamp as u64)
 }
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 pub fn internet_explorer_timestamp(timestamp: u64) -> Option<u64> {
   if timestamp == 0 {
     return None;
@@ -84,13 +84,11 @@ mod tests {
     assert_eq!(safari_timestamp(750_000_000.0), Some(1_728_307_200));
   }
 
-  #[cfg(target_os = "windows")]
   #[test]
   fn internet_explorer_timestamp_zero_is_none() {
     assert_eq!(internet_explorer_timestamp(0), None);
   }
 
-  #[cfg(target_os = "windows")]
   #[test]
   fn internet_explorer_timestamp_converts_filetime_to_unix() {
     // FILETIME ticks at Unix epoch == 116_444_736_000_000_000; one second later is +10_000_000 ticks.
@@ -104,7 +102,6 @@ mod tests {
     assert_eq!(chromium_timestamp(100), None);
   }
 
-  #[cfg(target_os = "windows")]
   #[test]
   fn internet_explorer_timestamp_underflow_is_none() {
     assert_eq!(internet_explorer_timestamp(100), None);

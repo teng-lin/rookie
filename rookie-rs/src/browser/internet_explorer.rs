@@ -1,161 +1,215 @@
-use crate::common::enums::{Cookie, SAME_SITE_UNSPECIFIED};
-use crate::common::{date, utils};
-use anyhow::Result;
-use libesedb::{EseDb, Table, Value};
-use std::path::PathBuf;
+use crate::browser::internet_explorer_model::{CookieColumnLayout, RawCookieRecord};
+use crate::common::enums::Cookie;
+use crate::windows::restart_manager::FileLockStatus;
+use anyhow::{bail, Context, Result};
+use libesedb::{EseDb, Record, Table, Value};
+use std::path::{Path, PathBuf};
 
-// WinInet cookie flag bits (`wininet.h`) as stored in the ESE `Flags` column.
-const INTERNET_COOKIE_IS_SECURE: u32 = 0x0000_0001;
-const INTERNET_COOKIE_HTTPONLY: u32 = 0x0000_2000;
-
-/// Returns cookies from IE based browsers
+/// Returns cookies from IE based browsers.
 pub fn internet_explorer_based(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  unsafe {
-    if let Some(path) = db_path.to_str() {
-      crate::windows::restart_manager::release_file_lock(path, force_kill);
+  let db = open_database(&db_path, force_kill)?;
+  let mut cookies = Vec::new();
+
+  for table in db
+    .iter_tables()
+    .context("Unable to enumerate WebCache tables")?
+  {
+    let table = table.context("Unable to read a WebCache table")?;
+    let table_name = table
+      .name()
+      .context("Unable to read a WebCache table name")?;
+
+    if !table_name.starts_with("CookieEntry") {
+      continue;
     }
-  }
-  let db = EseDb::open(db_path)?;
-  let mut cookies: Vec<Cookie> = vec![];
 
-  for table in db.iter_tables()? {
-    let table = table?;
-    let table_name: String = table.name()?;
+    let columns = cookie_column_layout(&table)
+      .with_context(|| format!("{table_name}: unsupported WebCache cookie schema"))?;
+    let records = table
+      .iter_records()
+      .with_context(|| format!("{table_name}: unable to enumerate cookie records"))?;
+    let mut skipped_records = 0_usize;
 
-    if table_name.starts_with("CookieEntry") {
-      let Some(flags_column) = find_flags_column(&table)? else {
-        anyhow::bail!("{table_name}: no `Flags` column; cannot read cookie security flags");
-      };
-      let mut warned_undecodable_flags = false;
+    for (record_index, record) in records.enumerate() {
+      let cookie = record
+        .map_err(anyhow::Error::from)
+        .and_then(|record| read_cookie_record(&record, columns))
+        .and_then(|record| record.into_cookie(domains.as_deref()));
 
-      for rec in table.iter_records()? {
-        let rec = rec?;
-        // Read the security flags first: a cookie whose flags cannot be decoded is
-        // dropped rather than emitted with `secure` silently cleared.
-        let Some(flags) = flags_from_ese_value(&rec.value(flags_column)?) else {
-          if !warned_undecodable_flags {
-            warned_undecodable_flags = true;
-            log::warn!("{table_name}: skipping cookies whose `Flags` cell holds no integer");
-          }
-          continue;
-        };
-        let (secure, http_only) = security_flags(flags);
-
-        let host = rec.value(8)?;
-        let host = host.as_str().unwrap_or("");
-        let path = rec.value(9)?;
-        let path = path.as_str().unwrap_or("");
-        let name: Vec<u8> = rec.value(10)?.as_bytes().unwrap_or(&[]).to_vec();
-        let name = String::from_utf8(name)
-          .unwrap_or("".to_string())
-          .trim_matches('\0')
-          .to_string();
-        let value = rec.value(11)?;
-        let value = String::from_utf8(value.as_bytes().unwrap_or(&[]).to_vec())
-          .unwrap_or("".to_string())
-          .trim_matches('\0')
-          .to_string();
-        let expires = rec.value(4)?.to_u64().unwrap_or(0);
-        let expires = date::internet_explorer_timestamp(expires);
-
-        let should_append = utils::some_domain_in_host(domains.as_deref(), host);
-        if should_append {
-          cookies.push(Cookie {
-            domain: host.to_string(),
-            path: path.to_string(),
-            secure,
-            expires,
-            name,
-            value,
-            http_only,
-            same_site: SAME_SITE_UNSPECIFIED,
-          })
+      match cookie {
+        Ok(Some(cookie)) => cookies.push(cookie),
+        Ok(None) => {}
+        Err(error) => {
+          skipped_records += 1;
+          log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
         }
       }
     }
+
+    if skipped_records > 0 {
+      log::warn!("{table_name}: skipped {skipped_records} unreadable cookie record(s)");
+    }
   }
+
   Ok(cookies)
 }
 
-/// Locates the `Flags` column by name, since its position is not stable across
-/// WebCache schema versions. Returns the record entry index, if the column exists.
-fn find_flags_column(table: &Table<'_>) -> Result<Option<i32>> {
-  for (index, column) in table.iter_columns()?.enumerate() {
-    if column?.name()?.eq_ignore_ascii_case("Flags") {
-      return Ok(Some(index as i32));
-    }
+fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {
+  let display_path = db_path.display();
+  let path = db_path
+    .to_str()
+    .with_context(|| format!("WebCache database path is not valid UTF-8: {display_path}"))?;
+
+  let lock_status = unsafe {
+    // `force_kill` comes from the explicitly opted-in public extraction API.
+    crate::windows::restart_manager::release_file_lock(path, force_kill)
   }
-  Ok(None)
+  .with_context(|| format!("Unable to inspect locks on WebCache database {display_path}"))?;
+  let released_processes = require_unlocked_database(db_path, lock_status)?;
+
+  match released_processes {
+    Some(process_count) => {
+      EseDb::open(db_path).with_context(|| {
+        format!(
+          "WebCache database {display_path} still cannot be opened after Restart Manager released {process_count} locking process(es)"
+        )
+      })
+    }
+    None => EseDb::open(db_path)
+      .with_context(|| format!("Unable to open unlocked WebCache database {display_path}")),
+  }
 }
 
-/// Reads the WinInet bitfield out of a `Flags` cell, or `None` if it holds no integer.
-///
-/// The column is a `JET_coltypLong`, which libesedb surfaces as a signed
-/// [`Value::I32`], so the value is read wide and cast back to preserve the bit
-/// pattern of flags with the high bit set.
-fn flags_from_ese_value(value: &Value) -> Option<u32> {
-  value.to_i64().map(|raw| raw as u32)
+fn require_unlocked_database(db_path: &Path, lock_status: FileLockStatus) -> Result<Option<u32>> {
+  match lock_status {
+    FileLockStatus::Unlocked => Ok(None),
+    FileLockStatus::Released { process_count } => Ok(Some(process_count)),
+    FileLockStatus::Locked { process_count } => bail!(
+      "WebCache database {} is locked by {process_count} process(es). Close Internet Explorer and applications using WinINet, then retry; destructive lock release requires force_kill=true",
+      db_path.display()
+    ),
+  }
 }
 
-/// Decodes the `(secure, http_only)` pair from a WinInet cookie flags bitfield.
-fn security_flags(flags: u32) -> (bool, bool) {
-  (
-    flags & INTERNET_COOKIE_IS_SECURE != 0,
-    flags & INTERNET_COOKIE_HTTPONLY != 0,
-  )
+fn cookie_column_layout(table: &Table<'_>) -> Result<CookieColumnLayout> {
+  let column_names = table
+    .iter_columns()
+    .context("Unable to enumerate columns")?
+    .map(|column| {
+      column
+        .context("Unable to read column metadata")?
+        .name()
+        .context("Unable to read column name")
+    })
+    .collect::<Result<Vec<_>>>()?;
+
+  CookieColumnLayout::resolve(&column_names)
+}
+
+fn read_cookie_record(record: &Record<'_>, columns: CookieColumnLayout) -> Result<RawCookieRecord> {
+  Ok(RawCookieRecord {
+    domain: text_value(record, columns.domain, "RDomain")?,
+    path: text_value(record, columns.path, "Path")?,
+    name: bytes_value(record, columns.name, "Name")?,
+    value: bytes_value(record, columns.value, "Value")?,
+    expires: unsigned_value(record, columns.expires, "Expires")?,
+    flags: integer_value(record, columns.flags, "Flags")?,
+  })
+}
+
+fn record_value(record: &Record<'_>, index: i32, field: &str) -> Result<Value> {
+  record
+    .value(index)
+    .with_context(|| format!("Unable to read `{field}`"))
+}
+
+fn text_value(record: &Record<'_>, index: i32, field: &str) -> Result<String> {
+  match record_value(record, index, field)? {
+    Value::Text(value) | Value::LargeText(value) => Ok(value),
+    Value::Binary(value) | Value::LargeBinary(value) | Value::SuperLarge(value) => {
+      String::from_utf8(value).with_context(|| format!("`{field}` is not valid UTF-8"))
+    }
+    Value::Long => record
+      .long(index)
+      .with_context(|| format!("Unable to open long `{field}` value"))?
+      .utf8()
+      .with_context(|| format!("Unable to decode long `{field}` value")),
+    value => bail!("`{field}` has incompatible ESE value {value:?}"),
+  }
+}
+
+fn bytes_value(record: &Record<'_>, index: i32, field: &str) -> Result<Vec<u8>> {
+  match record_value(record, index, field)? {
+    Value::Binary(value) | Value::LargeBinary(value) | Value::SuperLarge(value) => Ok(value),
+    Value::Text(value) | Value::LargeText(value) => Ok(value.into_bytes()),
+    Value::Long => record
+      .long(index)
+      .with_context(|| format!("Unable to open long `{field}` value"))?
+      .vec()
+      .with_context(|| format!("Unable to read long `{field}` value")),
+    value => bail!("`{field}` has incompatible ESE value {value:?}"),
+  }
+}
+
+fn unsigned_value(record: &Record<'_>, index: i32, field: &str) -> Result<u64> {
+  let value = record_value(record, index, field)?;
+  value
+    .to_u64()
+    .with_context(|| format!("`{field}` has incompatible ESE value {value:?}"))
+}
+
+fn integer_value(record: &Record<'_>, index: i32, field: &str) -> Result<i64> {
+  let value = record_value(record, index, field)?;
+  value
+    .to_i64()
+    .with_context(|| format!("`{field}` has incompatible ESE value {value:?}"))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  // Literal masks, so that a regression in the constants themselves is caught
-  // rather than cancelling out on both sides of the assertion.
   #[test]
-  fn security_flags_decodes_wininet_bits() {
-    assert_eq!(INTERNET_COOKIE_IS_SECURE, 0x0000_0001);
-    assert_eq!(INTERNET_COOKIE_HTTPONLY, 0x0000_2000);
-    assert_eq!(security_flags(0x0000_0000), (false, false));
-    assert_eq!(security_flags(0x0000_0001), (true, false));
-    assert_eq!(security_flags(0x0000_2000), (false, true));
-    assert_eq!(security_flags(0x0000_2001), (true, true));
+  fn value_conversions_accept_known_webcache_representations() {
+    assert_eq!(Value::DateTime(42).to_u64(), Some(42));
+    assert_eq!(Value::I32(-1).to_i64(), Some(-1));
+    assert_eq!(Value::U32(0x8000_0001).to_i64(), Some(0x8000_0001));
   }
 
   #[test]
-  fn security_flags_ignores_unrelated_bits() {
-    // INTERNET_COOKIE_IS_SESSION (0x2) and INTERNET_COOKIE_IS_LEGACY (0x800)
-    // must not be mistaken for secure or http_only.
-    assert_eq!(security_flags(0x0000_0002), (false, false));
-    assert_eq!(security_flags(0x0000_0800), (false, false));
-    assert_eq!(security_flags(0xFFFF_FFFF), (true, true));
+  fn signed_flags_preserve_the_underlying_bit_pattern() {
+    let flags = -1_i64 as u32;
+    assert_eq!(flags, 0xffff_ffff);
   }
 
   #[test]
-  fn flags_from_ese_value_recovers_signed_long_bit_pattern() {
-    // libesedb maps `JET_coltypLong` to a signed `I32`, so a flags word with the
-    // high bit set arrives negative. `to_u32` would reject it, dropping every flag.
-    assert_eq!(flags_from_ese_value(&Value::I32(0x2001)), Some(0x0000_2001));
-    assert_eq!(flags_from_ese_value(&Value::I32(-1)), Some(0xFFFF_FFFF));
+  fn locked_database_error_is_specific_and_actionable() {
+    let error = require_unlocked_database(
+      Path::new(r"C:\Users\rookie\WebCacheV01.dat"),
+      FileLockStatus::Locked { process_count: 2 },
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains(r"C:\Users\rookie\WebCacheV01.dat"));
+    assert!(error.contains("locked by 2 process(es)"));
+    assert!(error.contains("Close Internet Explorer"));
+    assert!(error.contains("force_kill=true"));
+  }
+
+  #[test]
+  fn released_database_status_preserves_process_count_for_retry_context() {
     assert_eq!(
-      flags_from_ese_value(&Value::I32(i32::MIN)),
-      Some(0x8000_0000)
+      require_unlocked_database(
+        Path::new(r"C:\Users\rookie\WebCacheV01.dat"),
+        FileLockStatus::Released { process_count: 3 },
+      )
+      .unwrap(),
+      Some(3)
     );
-    assert_eq!(
-      flags_from_ese_value(&Value::U32(0x8000_0001)),
-      Some(0x8000_0001)
-    );
-  }
-
-  #[test]
-  fn flags_from_ese_value_rejects_non_integer_cells() {
-    assert_eq!(flags_from_ese_value(&Value::Null(())), None);
-    assert_eq!(flags_from_ese_value(&Value::Text("Flags".into())), None);
-    // `Value::Long` is libesedb's out-of-line placeholder (not `JET_coltypLong`);
-    // it carries no payload, so it must not decode to a flags word.
-    assert_eq!(flags_from_ese_value(&Value::Long), None);
   }
 }

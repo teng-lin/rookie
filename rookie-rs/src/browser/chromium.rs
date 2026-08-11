@@ -868,7 +868,7 @@ fn query_cookies_engine_outcome(
   #[cfg(target_os = "windows")]
   {
     let policy = WindowsLockedDatabasePolicy::from_force_kill(force_kill);
-    return with_windows_locked_database_policy(
+    with_windows_locked_database_policy(
       &db_path,
       policy,
       |path| query_cookies_from_database(&outcomes, path.to_path_buf(), domains.as_deref()),
@@ -876,9 +876,22 @@ fn query_cookies_engine_outcome(
       privilege::user::privileged,
       create_windows_shadow_source,
       |locked_path| unsafe {
-        crate::windows::restart_manager::release_file_lock(&locked_path.to_string_lossy(), true)
+        match crate::windows::restart_manager::release_file_lock(
+          &locked_path.to_string_lossy(),
+          true,
+        ) {
+          Ok(
+            crate::windows::restart_manager::FileLockStatus::Unlocked
+            | crate::windows::restart_manager::FileLockStatus::Released { .. },
+          ) => true,
+          Ok(crate::windows::restart_manager::FileLockStatus::Locked { .. }) => false,
+          Err(error) => {
+            log::warn!("Restart Manager could not release the Windows database lock: {error}");
+            false
+          }
+        }
       },
-    );
+    )
   }
 
   #[cfg(not(target_os = "windows"))]
