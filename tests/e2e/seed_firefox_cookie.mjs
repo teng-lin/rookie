@@ -23,4 +23,12 @@ const context = await firefox.launchPersistentContext(userDataDir, {
 
 const page = await context.newPage();
 await page.goto(url, { waitUntil: "networkidle" });
+const userAgent = await page.evaluate(() => navigator.userAgent);
+const seeded = (await context.cookies(url)).find(
+  (cookie) => cookie.name === "rookie_ci",
+);
+if (!seeded || seeded.value !== "bar") {
+  throw new Error("Firefox did not accept the expected rookie_ci=bar cookie");
+}
+console.log(`seeded Firefox cookie; user agent: ${userAgent}`);
 await context.close();

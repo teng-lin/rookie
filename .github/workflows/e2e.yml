@@ -13,6 +13,9 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Weekly drift canary for runner images and system-installed browsers.
+    - cron: '27 6 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -86,11 +89,15 @@ jobs:
             SERVER_PID=$!
             trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
-            # Give the server a moment to bind.
-            for _ in 1 2 3 4 5; do
-              curl -fs http://127.0.0.1:8765/ >/dev/null && break
-              sleep 0.3
+            SERVER_READY=0
+            for _ in $(seq 1 30); do
+              if curl -fs http://127.0.0.1:8765/ >/dev/null; then
+                SERVER_READY=1
+                break
+              fi
+              sleep 0.5
             done
+            test "$SERVER_READY" = 1
 
             # Launch Chrome under Xvfb so the persistent profile is created on
             # disk with libsecret-encrypted cookies. Using a NON-default
@@ -111,7 +118,7 @@ jobs:
 
             COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
             [ -f "$COOKIES_DB" ] || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
-            tests/e2e/assert_cli_cookie.sh "$COOKIES_DB"
+            .venv/bin/python tests/e2e/assert_cli_cookie.py "$COOKIES_DB"
           SH
 
   ubuntu-firefox:
@@ -170,10 +177,15 @@ jobs:
           SERVER_PID=$!
           trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
-          for _ in 1 2 3 4 5; do
-            curl -fs http://127.0.0.1:8765/ >/dev/null && break
-            sleep 0.3
+          SERVER_READY=0
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:8765/ >/dev/null; then
+              SERVER_READY=1
+              break
+            fi
+            sleep 0.5
           done
+          test "$SERVER_READY" = 1
 
           xvfb-run -a node tests/e2e/seed_firefox_cookie.mjs \
             "$ROOKIE_E2E_FIREFOX_PROFILE" "http://127.0.0.1:8765/set"
@@ -184,7 +196,8 @@ jobs:
           cargo test --test e2e_firefox -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_firefox_cookie.py
           node tests/e2e/assert_firefox_cookie.mjs
-          tests/e2e/assert_cli_cookie.sh "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
+          .venv/bin/python tests/e2e/assert_cli_cookie.py \
+            "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
       - name: Run docs/examples against the seeded profile
         # Doubles as a smoke gate for examples drifting away from the
@@ -261,10 +274,15 @@ jobs:
           SERVER_PID=$!
           trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
-          for _ in 1 2 3 4 5; do
-            curl -fs http://127.0.0.1:8765/ >/dev/null && break
-            sleep 0.3
+          SERVER_READY=0
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:8765/ >/dev/null; then
+              SERVER_READY=1
+              break
+            fi
+            sleep 0.5
           done
+          test "$SERVER_READY" = 1
 
           # macOS runners have a real WindowServer; no Xvfb needed.
           node tests/e2e/seed_firefox_cookie.mjs \
@@ -276,7 +294,8 @@ jobs:
           cargo test --test e2e_firefox -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_firefox_cookie.py
           node tests/e2e/assert_firefox_cookie.mjs
-          tests/e2e/assert_cli_cookie.sh "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
+          .venv/bin/python tests/e2e/assert_cli_cookie.py \
+            "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
   macos-chrome:
     name: e2e macos × chrome (mock keychain)
@@ -303,7 +322,22 @@ jobs:
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run
 
-      - name: Seed Chrome profile and run extraction
+      - name: Build and install rookie-cookies into a venv
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade --quiet pip maturin
+          cd bindings/python && ../../.venv/bin/maturin develop --release
+
+      - name: Pre-build the rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
+
+      - name: Build the Node binding
+        run: |
+          cd bindings/node
+          npm install
+          npm run build
+
+      - name: Seed Chrome profile and run extraction (rust + python + cli + node)
         run: |
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
@@ -312,10 +346,15 @@ jobs:
           SERVER_PID=$!
           trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
-          for _ in 1 2 3 4 5; do
-            curl -fs http://127.0.0.1:8765/ >/dev/null && break
-            sleep 0.3
+          SERVER_READY=0
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:8765/ >/dev/null; then
+              SERVER_READY=1
+              break
+            fi
+            sleep 0.5
           done
+          test "$SERVER_READY" = 1
 
           # macos-15 has a real WindowServer; no Xvfb wrapper.
           node tests/e2e/seed_chromium_cookie.mjs \
@@ -326,6 +365,207 @@ jobs:
             || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
           cargo test --test e2e_chrome -- --ignored --nocapture
+          .venv/bin/python tests/e2e/assert_chrome_cookie.py
+          node tests/e2e/assert_chrome_cookie.mjs
+
+          COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
+          [ -f "$COOKIES_DB" ] \
+            || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
+          .venv/bin/python tests/e2e/assert_cli_cookie.py "$COOKIES_DB"
+
+  windows-firefox:
+    name: e2e windows × firefox
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ROOKIE_E2E_FIREFOX_PROFILE: ${{ github.workspace }}\.rookie-ci\firefox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright + bundled Firefox
+        run: |
+          npm install --no-save playwright
+          npx playwright install firefox
+          npx playwright --version
+
+      - name: Pre-build the e2e test binary
+        run: cargo test --test e2e_firefox --no-run
+
+      - name: Build and install rookie-cookies into a venv
+        run: |
+          python -m venv .venv
+          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin
+          Push-Location bindings/python
+          & ..\..\.venv\Scripts\python.exe -m maturin develop --release
+          Pop-Location
+
+      - name: Pre-build the rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
+
+      - name: Build the Node binding
+        run: |
+          Push-Location bindings/node
+          npm install
+          npm run build
+          Pop-Location
+
+      - name: Seed Firefox profile and run extraction (rust + python + cli + node)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Force -Path "$env:ROOKIE_E2E_FIREFOX_PROFILE" | Out-Null
+
+          $server = Start-Process python -ArgumentList "tests/e2e/cookie_server.py" -PassThru
+          try {
+            $serverReady = $false
+            for ($i = 1; $i -le 30; $i++) {
+              try {
+                Invoke-WebRequest -Uri http://127.0.0.1:8765/ -UseBasicParsing | Out-Null
+                $serverReady = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (-not $serverReady) { throw "cookie server did not become ready" }
+
+            node tests/e2e/seed_firefox_cookie.mjs `
+              "$env:ROOKIE_E2E_FIREFOX_PROFILE" "http://127.0.0.1:8765/set"
+
+            $cookiesDb = Join-Path $env:ROOKIE_E2E_FIREFOX_PROFILE "cookies.sqlite"
+            if (-not (Test-Path $cookiesDb)) {
+              throw "missing Firefox Cookies database at $cookiesDb"
+            }
+            Get-ChildItem "$env:ROOKIE_E2E_FIREFOX_PROFILE" | Format-Table
+
+            cargo test --test e2e_firefox -- --ignored --nocapture
+            & .\.venv\Scripts\python.exe tests/e2e/assert_firefox_cookie.py
+            node tests/e2e/assert_firefox_cookie.mjs
+            & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py "$cookiesDb"
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+  windows-chrome-appbound:
+    name: e2e windows × chrome (App-Bound v20 canary)
+    # Default-profile App-Bound extraction is elevated and intentionally only
+    # runs code from the trusted main branch. Scheduled runs use the default
+    # branch; manual runs are also restricted to main.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: windows-2025
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enforce App-Bound host and identity preconditions
+        run: |
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+          $isAdmin = $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+          )
+          whoami /user
+          Write-Host "Administrator: $isAdmin"
+          if (-not $isAdmin) {
+            throw "App-Bound canary requires the runner process to be elevated"
+          }
+
+          $chromeCandidates = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+          )
+          $chromePath = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chromePath) {
+            throw "machine-wide Chrome was not found below Program Files"
+          }
+          $chromePath = (Resolve-Path $chromePath).Path
+          $chromeVersion = (Get-Item $chromePath).VersionInfo.FileVersion
+          Write-Host "System Chrome: $chromePath ($chromeVersion)"
+
+          $userDataDir = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
+          $expectedDir = [IO.Path]::GetFullPath(
+            (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) `
+              "Google\Chrome\User Data")
+          )
+          if ([IO.Path]::GetFullPath($userDataDir) -ne $expectedDir) {
+            throw "Chrome user-data dir is not the current user's real default"
+          }
+          if (Get-Process chrome -ErrorAction SilentlyContinue) {
+            throw "Chrome was already running; refusing to reuse an unknown profile session"
+          }
+          $existingCookieDbs = @(
+            (Join-Path $userDataDir "Default\Network\Cookies"),
+            (Join-Path $userDataDir "Default\Cookies")
+          ) | Where-Object { Test-Path $_ }
+          if ($existingCookieDbs.Count -gt 0) {
+            throw "default profile already contains a Cookies database; refusing to inspect it"
+          }
+
+          foreach ($policyPath in @(
+            "HKLM:\Software\Policies\Google\Chrome",
+            "HKCU:\Software\Policies\Google\Chrome"
+          )) {
+            $policy = Get-ItemProperty $policyPath `
+              -Name ApplicationBoundEncryptionEnabled -ErrorAction SilentlyContinue
+            if ($null -ne $policy) {
+              $value = $policy.ApplicationBoundEncryptionEnabled
+              Write-Host "$policyPath ApplicationBoundEncryptionEnabled=$value"
+              if ($value -eq 0) {
+                throw "App-Bound encryption is disabled by policy"
+              }
+            }
+          }
+
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, BuildNumber | Format-List
+          Write-Host "Default Chrome user-data dir: $userDataDir"
+          $requestLog = Join-Path $env:RUNNER_TEMP "rookie-e2e-browser-requests.log"
+          "ROOKIE_E2E_CHROME_PATH=$chromePath" | Out-File $env:GITHUB_ENV -Append
+          "ROOKIE_E2E_USER_DATA_DIR=$userDataDir" | Out-File $env:GITHUB_ENV -Append
+          "ROOKIE_E2E_WINDOWS_SID=$($identity.User.Value)" | Out-File $env:GITHUB_ENV -Append
+          "ROOKIE_E2E_REQUEST_LOG=$requestLog" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Pre-build the App-Bound e2e test binary
+        run: cargo test --test e2e_chrome --no-run
+
+      - name: Build and install rookie-cookies into a venv
+        run: |
+          python -m venv .venv
+          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin
+          Push-Location bindings/python
+          & ..\..\.venv\Scripts\python.exe -m maturin develop --release
+          Pop-Location
+
+      - name: Pre-build the App-Bound rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
+
+      - name: Build the App-Bound Node binding
+        run: |
+          Push-Location bindings/node
+          npm install
+          npm run build
+          Pop-Location
+
+      - name: Verify v20 and extract a live WAL cookie on all four surfaces
+        run: tests/e2e/run_windows_appbound_canary.ps1
 
   windows-chrome:
     name: e2e windows × chrome (legacy DPAPI)
@@ -366,15 +606,51 @@ jobs:
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run
 
-      - name: Seed Chrome profile and run extraction
+      - name: Build and install rookie-cookies into a venv
         run: |
+          python -m venv .venv
+          & .\.venv\Scripts\python.exe -m pip install --upgrade --quiet pip maturin
+          Push-Location bindings/python
+          & ..\..\.venv\Scripts\python.exe -m maturin develop --release
+          Pop-Location
+
+      - name: Pre-build the rookie-cookies CLI
+        run: cargo build -p rookie-cookies-cli --release
+
+      - name: Build the Node binding
+        run: |
+          Push-Location bindings/node
+          npm install
+          npm run build
+          Pop-Location
+
+      - name: Seed Chrome profile and run extraction (rust + python + cli + node)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force -Path "$env:ROOKIE_E2E_USER_DATA_DIR" | Out-Null
+
+          $chromeCandidates = @(
+            (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe")
+          )
+          $chromePath = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $chromePath) { throw "system Chrome executable was not found" }
+          $chromeVersion = (Get-Item $chromePath).VersionInfo.FileVersion
+          Write-Host "System Chrome: $chromePath ($chromeVersion)"
 
           $server = Start-Process python -ArgumentList "tests/e2e/cookie_server.py" -PassThru
           try {
-            for ($i = 1; $i -le 5; $i++) {
-              try { Invoke-WebRequest -Uri http://127.0.0.1:8765/ -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 300 }
+            $serverReady = $false
+            for ($i = 1; $i -le 30; $i++) {
+              try {
+                Invoke-WebRequest -Uri http://127.0.0.1:8765/ -UseBasicParsing | Out-Null
+                $serverReady = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
             }
+            if (-not $serverReady) { throw "cookie server did not become ready" }
 
             Write-Host "Identity before Chrome seed:"
             whoami /user
@@ -384,8 +660,6 @@ jobs:
             $cookiesDb = Join-Path $defaultDir "Network\Cookies"
             if (-not (Test-Path $cookiesDb)) { $cookiesDb = Join-Path $defaultDir "Cookies" }
             if (-not (Test-Path $cookiesDb)) { throw "missing Cookies database at $cookiesDb" }
-            $py = 'import sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); rows = list(conn.execute("SELECT host_key, name, hex(substr(encrypted_value, 1, 3)), length(encrypted_value) FROM cookies WHERE name = ''rookie_ci''")); print("rookie_ci encrypted_value diagnostics:", rows)'
-            python -c $py "$cookiesDb"
 
             $localState = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Local State"
             if (-not (Test-Path $localState)) { throw "missing Local State at $localState" }
@@ -407,19 +681,20 @@ jobs:
             )
             Write-Host "DPAPI encrypted_key diagnostics: wrapped_length=$($wrapped.Length) unwrapped_length=$($unwrapped.Length)"
             if ($unwrapped.Length -ne 32) { throw "DPAPI unwrapped key length was $($unwrapped.Length), expected 32" }
-            # AppBound key requires Chrome's elevation service to register on
-            # first launch; on a fresh CI profile it sometimes isn't there,
-            # so Chrome falls back to legacy DPAPI. Note it but don't fail —
-            # rookie-cookies supports both paths and the extraction below is the real
-            # signal.
-            if (-not $ls.os_crypt.app_bound_encrypted_key) {
-              Write-Warning "Local State has no app_bound_encrypted_key — exercising only legacy DPAPI path"
-            }
+            Write-Host "app_bound_encrypted_key present in custom profile: $([bool]$ls.os_crypt.app_bound_encrypted_key)"
+            & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
+              "$env:ROOKIE_E2E_USER_DATA_DIR" --cookie-name rookie_ci `
+              --expected-prefix v10 --require-dpapi-key
+            if ($LASTEXITCODE -ne 0) { throw "strict v10 profile check failed" }
             Get-ChildItem $defaultDir | Format-Table
 
             Write-Host "Identity before rookie-cookies extraction:"
             whoami /user
             cargo test --test e2e_chrome -- --ignored --nocapture
+            & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
+            node tests/e2e/assert_chrome_cookie.mjs
+            & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
+              "$cookiesDb" --key-path "$localState"
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }

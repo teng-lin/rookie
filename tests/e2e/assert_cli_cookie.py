@@ -37,8 +37,16 @@ def assert_cli_cookie(
     key_path: Optional[Path],
     domain: str,
     cli_path: Path,
+    expected_name: Optional[str] = None,
+    expected_value: Optional[str] = None,
 ) -> int:
     """Run the CLI and return the number of cookies in its JSON response."""
+    expected_name = expected_name or os.environ.get(
+        "ROOKIE_E2E_COOKIE_NAME", COOKIE_NAME
+    )
+    expected_value = expected_value or os.environ.get(
+        "ROOKIE_E2E_COOKIE_VALUE", COOKIE_VALUE
+    )
     if not cookies_path.is_file():
         raise HarnessError(f"no cookies db at {cookies_path}")
     if key_path is not None and not key_path.is_file():
@@ -92,12 +100,12 @@ def assert_cli_cookie(
 
     if not any(
         isinstance(cookie, dict)
-        and cookie.get("name") == COOKIE_NAME
-        and cookie.get("value") == COOKIE_VALUE
+        and cookie.get("name") == expected_name
+        and cookie.get("value") == expected_value
         for cookie in cookies
     ):
         raise HarnessError(
-            f"CLI did not return {COOKIE_NAME}={COOKIE_VALUE}; output was: "
+            f"CLI did not return {expected_name}={expected_value}; output was: "
             f"{completed.stdout.strip()}"
         )
     return len(cookies)
@@ -131,18 +139,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", COOKIE_NAME)
+        expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", COOKIE_VALUE)
         count = assert_cli_cookie(
             args.cookies_path,
             key_path=args.key_path,
             domain=args.domain,
             cli_path=args.cli_path,
+            expected_name=expected_name,
+            expected_value=expected_value,
         )
     except HarnessError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
     print(
-        f"rookie-cookies CLI: {COOKIE_NAME}={COOKIE_VALUE} verified "
+        f"rookie-cookies CLI: {expected_name}={expected_value} verified "
         f"({count} cookies for {args.domain})"
     )
     return 0

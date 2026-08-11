@@ -6,16 +6,31 @@ that the e2e tests grep for after extracting cookies via rookie-cookies.
 Run from the workspace root: `python3 tests/e2e/cookie_server.py`.
 """
 
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        request_log = os.environ.get("ROOKIE_E2E_REQUEST_LOG")
+        if request_log:
+            with Path(request_log).open("a", encoding="utf-8") as log:
+                log.write(f"{self.path}\n")
+
         self.send_response(200)
         self.send_header(
             "Set-Cookie",
             "rookie_ci=bar; Path=/; Max-Age=3600; SameSite=Lax",
         )
+        # The App-Bound canary requests this route while Chrome stays open.
+        # Its second cookie should therefore be visible through Chrome's live
+        # write-ahead log, rather than only after a browser shutdown/checkpoint.
+        if self.path.startswith("/wal"):
+            self.send_header(
+                "Set-Cookie",
+                "rookie_wal=live; Path=/; Max-Age=3600; SameSite=Lax",
+            )
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ok")

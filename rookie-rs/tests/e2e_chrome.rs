@@ -10,6 +10,8 @@
 //!                               via --user-data-dir
 //!   ROOKIE_E2E_DOMAIN         — optional; domain filter for extraction
 //!                               (default: "127.0.0.1")
+//!   ROOKIE_E2E_COOKIE_NAME    — optional; expected name (default: "rookie_ci")
+//!   ROOKIE_E2E_COOKIE_VALUE   — optional; expected value (default: "bar")
 //!
 //! The real-browser tests are ignored by default; CI runs them via
 //! `cargo test --test e2e_chrome -- --ignored`.
@@ -53,17 +55,21 @@ mod helpers {
   }
 
   pub fn assert_seeded(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
+    let expected_name =
+      env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
+    let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_string());
     let seeded = cookies
       .iter()
-      .find(|c| c.name == "rookie_ci")
+      .find(|c| c.name == expected_name)
       .unwrap_or_else(|| {
         panic!(
-          "seeded cookie `rookie_ci` not found among {} cookies for domain {}",
+          "seeded cookie `{}` not found among {} cookies for domain {}",
+          expected_name,
           cookies.len(),
           domain
         )
       });
-    assert_eq!(seeded.value, "bar", "cookie value mismatch");
+    assert_eq!(seeded.value, expected_value, "cookie value mismatch");
   }
 }
 

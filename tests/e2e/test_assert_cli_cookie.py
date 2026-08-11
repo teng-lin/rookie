@@ -73,6 +73,28 @@ class AssertCliCookieTests(unittest.TestCase):
         self.assertNotIn("--key-path", run.call_args.args[0])
 
     @mock.patch.object(HARNESS.subprocess, "run")
+    def test_expected_cookie_can_be_selected_by_environment(self, run: mock.Mock) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '[{"name":"rookie_wal","value":"live"}]', ""
+        )
+
+        with mock.patch.dict(
+            HARNESS.os.environ,
+            {
+                "ROOKIE_E2E_COOKIE_NAME": "rookie_wal",
+                "ROOKIE_E2E_COOKIE_VALUE": "live",
+            },
+        ):
+            count = HARNESS.assert_cli_cookie(
+                self.cookies,
+                key_path=self.key,
+                domain="127.0.0.1",
+                cli_path=self.cli,
+            )
+
+        self.assertEqual(count, 1)
+
+    @mock.patch.object(HARNESS.subprocess, "run")
     def test_rejects_nonzero_exit_and_reports_stderr(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess([], 7, "", "could not read database")
 
