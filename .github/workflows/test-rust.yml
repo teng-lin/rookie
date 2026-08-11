@@ -12,7 +12,9 @@ on:
       - 'tests/python/**'
       - 'tests/e2e/assert_cli_cookie.py'
       - 'tests/e2e/test_assert_cli_cookie.py'
+      - 'examples/javascript/*.js'
       - 'examples/javascript/package-lock.json'
+      - 'examples/javascript/package.json'
       - 'examples/rust/http/Cargo.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -155,6 +157,9 @@ jobs:
         run: npm run test:worker-panic
       - name: Run ava
         working-directory: bindings/node
+        run: npm test
+      - name: Test JavaScript examples
+        working-directory: examples/javascript
         run: npm test
 
   linux:

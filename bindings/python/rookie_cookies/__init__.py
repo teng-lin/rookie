@@ -108,7 +108,7 @@ def create_cookie(
         path_specified=True,
         secure=secure,
         expires=expires,
-        discard=False,
+        discard=expires is None,
         comment=None,
         comment_url=None,
         rest={"HTTPOnly": ""} if http_only else {},
