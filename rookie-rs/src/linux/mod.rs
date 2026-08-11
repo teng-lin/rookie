@@ -23,9 +23,9 @@ pub fn get_passwords(unix_crypt_name: &str) -> Result<Vec<String>> {
   // Attempt to get the password from kdewallet
   match get_password_kdewallet(unix_crypt_name) {
     Ok(password) => passwords.push(password),
-    Err(err) => log::debug!(
-      "Failed to retrieve KWallet password for crypt_name '{unix_crypt_name}': {err}"
-    ),
+    Err(err) => {
+      log::debug!("Failed to retrieve KWallet password for crypt_name '{unix_crypt_name}': {err}")
+    }
   }
 
   Ok(passwords)
