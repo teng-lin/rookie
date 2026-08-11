@@ -4,9 +4,14 @@ use std::path::PathBuf;
 
 use super::chromium_crypto::{
   detect_cipher_version, retrieve_key_outcomes, ChromiumCipherVersion, ChromiumKeyOutcomes,
-  ChromiumKeyProvider, ChromiumKeyRoute, LegacySharedKeyProvider,
+  ChromiumKeyProvider, ChromiumKeyRoute,
 };
-
+#[cfg(target_os = "linux")]
+use super::chromium_platform_keys::LinuxPlatformKeyProvider;
+#[cfg(target_os = "macos")]
+use super::chromium_platform_keys::MacosPlatformKeyProvider;
+#[cfg(target_os = "windows")]
+use super::chromium_platform_keys::WindowsPlatformKeyProvider;
 #[allow(unused)]
 use crate::config::Browser;
 
@@ -16,16 +21,11 @@ use crate::windows;
 #[cfg(any(unix, windows, test))]
 use anyhow::Context;
 
-#[cfg(target_os = "macos")]
-use crate::macos;
-
 #[cfg(target_os = "windows")]
 use aes_gcm::{
   aead::{generic_array::GenericArray, Aead, KeyInit},
   Aes256Gcm,
 };
-#[cfg(target_os = "windows")]
-use base64::{engine::general_purpose, Engine as _};
 
 /// Returns cookies from chromium based browser
 #[cfg(target_os = "windows")]
@@ -38,34 +38,8 @@ pub fn chromium_based(
   let content = std::fs::read_to_string(key)?;
   let key_dict: serde_json::Value =
     serde_json::from_str(content.as_str()).context("Can't read json file")?;
-
-  let legacy_key = key_dict["os_crypt"]["encrypted_key"]
-    .as_str()
-    .unwrap_or_default();
-
-  #[allow(unused)]
-  let appbound_key = key_dict["os_crypt"]["app_bound_encrypted_key"]
-    .as_str()
-    .unwrap_or_default();
-
-  #[cfg(feature = "appbound")]
-  {
-    let keys = if !appbound_key.is_empty() {
-      if !privilege::user::privileged() {
-        bail!("Chrome cookies from version v130 can be decrypted only when running as admin due to appbound encryption!")
-      }
-      crate::windows::appbound::get_keys(appbound_key)?
-    } else {
-      get_keys(legacy_key)?
-    };
-    query_cookies(keys, db_path, domains, force_kill)
-  }
-
-  #[cfg(not(feature = "appbound"))]
-  {
-    let keys = get_keys(legacy_key)?;
-    query_cookies(keys, db_path, domains, force_kill)
-  }
+  let provider = WindowsPlatformKeyProvider::new(&key_dict);
+  query_cookies(&provider, &(), db_path, domains, force_kill)
 }
 
 /// Returns cookies from chromium based browser
@@ -76,112 +50,23 @@ pub fn chromium_based(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  // Simple AES
-
-  let keys = get_keys(config)?;
-  query_cookies(keys, db_path, domains, force_kill)
-}
-
-#[cfg(unix)]
-fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8> {
-  use pbkdf2::pbkdf2_hmac;
-  use sha1::Sha1;
-  let mut output = [0u8; 16];
-  pbkdf2_hmac::<Sha1>(password.as_bytes(), salt, iterations, &mut output);
-  output.to_vec()
-}
-
-#[cfg(target_os = "windows")]
-fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
-  let keydpapi: Vec<u8> = general_purpose::STANDARD
-    .decode(key64)
-    .context("Failed to decode Local State os_crypt.encrypted_key as base64")?;
-  let decoded_len = keydpapi.len();
-  if decoded_len <= 5 {
-    bail!(
-      "Local State os_crypt.encrypted_key decoded to {} bytes, expected DPAPI prefix plus payload",
-      decoded_len
-    );
-  }
-  if &keydpapi[..5] != b"DPAPI" {
-    bail!("Local State os_crypt.encrypted_key is missing DPAPI prefix");
-  }
-
-  let wrapped_len = decoded_len - 5;
-  let v10_key = crate::windows::dpapi::decrypt(&keydpapi[5..]).with_context(|| {
-    format!(
-      "Failed to unwrap DPAPI encrypted key (decoded_length={}, wrapped_length={})",
-      decoded_len, wrapped_len
-    )
-  })?;
-  if v10_key.len() != 32 {
-    bail!(
-      "DPAPI unwrapped key length was {}, expected 32 (decoded_length={}, wrapped_length={})",
-      v10_key.len(),
-      decoded_len,
-      wrapped_len
-    );
-  }
-
-  let keys: Vec<Vec<u8>> = vec![v10_key];
-  Ok(keys)
-}
-
-#[cfg(target_os = "linux")]
-fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
-  // AES CBC key
-
-  let salt = b"saltysalt";
-
-  let iterations = 1;
-
-  let mut keys: Vec<Vec<u8>> = vec![];
-  if let Ok(passwords) =
-    crate::linux::get_passwords(&config.unix_crypt_name.clone().unwrap_or("".to_owned()))
+  #[cfg(target_os = "linux")]
   {
-    for password in passwords {
-      let key = create_pbkdf2_key(password.as_str(), salt, iterations);
-      keys.push(key);
-    }
-  }
-  // default keys
-  let key = create_pbkdf2_key("peanuts", salt, iterations);
-  keys.push(key);
-  let key = create_pbkdf2_key("", salt, iterations);
-  keys.push(key);
-
-  Ok(keys)
-}
-
-#[cfg(target_os = "macos")]
-fn get_keys(config: &Browser) -> Result<Vec<Vec<u8>>> {
-  let salt = b"saltysalt";
-  let iterations = 1003;
-  let mut passwords: Vec<String> = vec![];
-
-  let mut push_password = |password: String| {
-    if !passwords.iter().any(|existing| existing == &password) {
-      passwords.push(password);
-    }
-  };
-
-  if let (Some(key_service), Some(key_user)) = (&config.osx_key_service, &config.osx_key_user) {
-    match macos::get_osx_keychain_password(key_service, key_user) {
-      Ok(password) => push_password(password),
-      Err(err) => log::debug!("Failed to retrieve password from OSX Keychain: {}", err),
-    }
+    let provider = LinuxPlatformKeyProvider::new(config);
+    query_cookies(&provider, &(), db_path, domains, force_kill)
   }
 
-  for password in ["mock_password", "peanuts", ""] {
-    push_password(password.to_string());
+  #[cfg(target_os = "macos")]
+  {
+    let provider = MacosPlatformKeyProvider::new(config);
+    query_cookies(&provider, &(), db_path, domains, force_kill)
   }
 
-  Ok(
-    passwords
-      .iter()
-      .map(|password| create_pbkdf2_key(password.as_str(), salt, iterations))
-      .collect(),
-  )
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = (config, db_path, domains, force_kill);
+    bail!("Chromium cookie extraction is unsupported on this Unix platform")
+  }
 }
 
 #[cfg(any(unix, windows, test))]
@@ -421,18 +306,7 @@ fn unlock_file(
   Ok((path, None))
 }
 
-#[allow(unused_variables)]
-pub(crate) fn query_cookies(
-  keys: Vec<Vec<u8>>,
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  force_kill: bool,
-) -> Result<Vec<Cookie>> {
-  let provider = LegacySharedKeyProvider::new(keys);
-  query_cookies_with_key_provider(&provider, &(), db_path, domains, force_kill)
-}
-
-fn query_cookies_with_key_provider<Context: ?Sized, Provider>(
+fn query_cookies<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
   db_path: PathBuf,
@@ -599,6 +473,9 @@ fn query_cookies_with_key_outcomes(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::browser::chromium_crypto::LegacySharedKeyProvider;
+  #[cfg(unix)]
+  use crate::browser::chromium_platform_keys::create_pbkdf2_key;
   #[cfg(target_os = "linux")]
   use std::cell::Cell;
   use std::path::Path;
@@ -612,6 +489,16 @@ mod tests {
       std::env::temp_dir().join(format!("rookie-test-{}-{}-{}", tag, std::process::id(), n));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
+  }
+
+  fn query_cookies_with_legacy_keys(
+    keys: Vec<Vec<u8>>,
+    db_path: PathBuf,
+    domains: Option<Vec<String>>,
+    force_kill: bool,
+  ) -> Result<Vec<Cookie>> {
+    let provider = LegacySharedKeyProvider::new(keys);
+    query_cookies(&provider, &(), db_path, domains, force_kill)
   }
 
   // (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
@@ -758,9 +645,8 @@ mod tests {
       },
     };
 
-    let mut cookies =
-      query_cookies_with_key_provider(&provider, "linux-installation", db, None, false)
-        .expect("good tiers survive one failed tier");
+    let mut cookies = query_cookies(&provider, "linux-installation", db, None, false)
+      .expect("good tiers survive one failed tier");
 
     assert_eq!(provider.calls.get(), 1);
     cookies.sort_by(|left, right| left.name.cmp(&right.name));
@@ -776,7 +662,7 @@ mod tests {
 
   #[test]
   fn query_cookies_missing_db_errors() {
-    let result = query_cookies(
+    let result = query_cookies_with_legacy_keys(
       vec![],
       PathBuf::from("/nonexistent/cookies.db"),
       None,
@@ -794,7 +680,7 @@ mod tests {
     let dir = unique_tmpdir("chr-bad-sqlite");
     let db = dir.join("Cookies");
     std::fs::write(&db, b"not a sqlite database at all").unwrap();
-    let result = query_cookies(vec![], db, None, false);
+    let result = query_cookies_with_legacy_keys(vec![], db, None, false);
     assert!(
       result.is_err(),
       "expected Err for bogus sqlite, got {:?}",
@@ -847,7 +733,7 @@ mod tests {
       )
       .expect("insert WAL row");
 
-    let mut cookies = query_cookies(vec![], db, None, false).expect("decode");
+    let mut cookies = query_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
 
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
@@ -861,7 +747,7 @@ mod tests {
     let dir = unique_tmpdir("chr-empty-table");
     let db = dir.join("Cookies");
     seed_chromium_cookies(&db, &[]);
-    let cookies = query_cookies(vec![], db, None, false).expect("decode");
+    let cookies = query_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
@@ -884,7 +770,7 @@ mod tests {
       .expect("insert bad row");
     drop(conn);
 
-    let result = query_cookies(vec![], db, None, false);
+    let result = query_cookies_with_legacy_keys(vec![], db, None, false);
     assert!(
       result.is_err(),
       "expected Err when no row decodes, got {:?}",
@@ -914,7 +800,8 @@ mod tests {
       .expect("insert bad row");
     drop(conn);
 
-    let cookies = query_cookies(vec![], db, None, false).expect("valueless row is not a failure");
+    let cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
+      .expect("valueless row is not a failure");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
@@ -938,7 +825,7 @@ mod tests {
         1,
       )],
     );
-    let cookies = query_cookies(vec![], db, None, false).expect("decode");
+    let cookies = query_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
     assert_eq!(cookies.len(), 1, "{:?}", cookies);
     let c = &cookies[0];
     assert_eq!(c.domain, ".example.com");
@@ -1008,7 +895,7 @@ mod tests {
         ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
       ],
     );
-    let mut cookies = query_cookies(
+    let mut cookies = query_cookies_with_legacy_keys(
       vec![],
       db,
       Some(vec!["example.com".to_string(), "other.test".to_string()]),
@@ -1075,7 +962,8 @@ mod tests {
     );
 
     let mut cookies =
-      query_cookies(vec![], db, Some(vec!["example.com".to_string()]), false).expect("decode");
+      query_cookies_with_legacy_keys(vec![], db, Some(vec!["example.com".to_string()]), false)
+        .expect("decode");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
     assert_eq!(
@@ -1109,7 +997,8 @@ mod tests {
     );
 
     let cookies =
-      query_cookies(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false).expect("decode");
+      query_cookies_with_legacy_keys(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false)
+        .expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
   }
 
@@ -1125,7 +1014,7 @@ mod tests {
       ],
     );
 
-    let cookies = query_cookies(
+    let cookies = query_cookies_with_legacy_keys(
       vec![],
       db,
       Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
@@ -1318,7 +1207,7 @@ mod tests {
       )
       .expect("insert row 4");
 
-    let mut cookies = query_cookies(vec![], db, None, false)
+    let mut cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
       .expect("query_cookies should succeed despite bad rows");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();

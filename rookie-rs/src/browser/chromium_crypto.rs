@@ -190,13 +190,8 @@ impl Default for ChromiumKeyOutcomes {
 }
 
 impl ChromiumKeyOutcomes {
-  /// Migration adapter for the current platform retrievers.
-  ///
-  /// Before Milestone 1B, `get_keys` returns one untyped candidate list and
-  /// the legacy extractor tries it for every recognized prefix. Assigning the
-  /// same candidates to each bucket preserves that behavior while all row
-  /// routing becomes tier-aware. Milestone 1B replaces this adapter with
-  /// independent platform outcomes.
+  /// Test adapter preserving the pre-1B shared-candidate behavior.
+  #[cfg(test)]
   pub(crate) fn from_legacy_shared(candidates: Vec<Vec<u8>>) -> Self {
     // This is the only compatibility boundary where an empty historical
     // shared list maps implicitly to `NotApplicable`. New providers choose an
@@ -276,10 +271,12 @@ where
 }
 
 /// Provider used only to bridge the current untyped platform retrievers.
+#[cfg(test)]
 pub(crate) struct LegacySharedKeyProvider {
   outcomes: ChromiumKeyOutcomes,
 }
 
+#[cfg(test)]
 impl LegacySharedKeyProvider {
   pub(crate) fn new(candidates: Vec<Vec<u8>>) -> Self {
     Self {
@@ -288,6 +285,7 @@ impl LegacySharedKeyProvider {
   }
 }
 
+#[cfg(test)]
 impl ChromiumKeyProvider<()> for LegacySharedKeyProvider {
   fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
     self.outcomes.clone()
