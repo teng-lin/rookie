@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "rookie-cookies-node"
-version = "0.5.7"
+version = "0.5.8"
 
 [lib]
 crate-type = ["cdylib"]
@@ -14,12 +14,12 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 
 [target.'cfg(windows)'.dependencies]
-rookie-cookies = { path = "../../rookie-rs", version = "0.5.7", features = [
+rookie-cookies = { path = "../../rookie-rs", version = "0.5.8", features = [
   "appbound",
 ] }
 
 [target.'cfg(unix)'.dependencies]
-rookie-cookies = { path = "../../rookie-rs", version = "0.5.7" }
+rookie-cookies = { path = "../../rookie-rs", version = "0.5.8" }
 
 [build-dependencies]
 napi-build = "2.0.1"

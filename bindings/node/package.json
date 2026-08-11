@@ -1,6 +1,6 @@
 {
   "name": "rookie-cookies",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "readme": "README.md",
   "main": "index.js",
   "types": "index.d.ts",
@@ -36,10 +36,10 @@
     "version": "napi version"
   },
   "optionalDependencies": {
-    "rookie-cookies-darwin-arm64": "0.5.7",
-    "rookie-cookies-darwin-x64": "0.5.7",
-    "rookie-cookies-linux-x64-gnu": "0.5.7",
-    "rookie-cookies-win32-x64-msvc": "0.5.7"
+    "rookie-cookies-darwin-arm64": "0.5.8",
+    "rookie-cookies-darwin-x64": "0.5.8",
+    "rookie-cookies-linux-x64-gnu": "0.5.8",
+    "rookie-cookies-win32-x64-msvc": "0.5.8"
   },
   "repository": "https://github.com/teng-lin/rookie-cookies",
   "description": "Load cookies from any browser on any platform"
