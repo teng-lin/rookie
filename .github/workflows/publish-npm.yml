@@ -35,14 +35,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/v${{ inputs.version }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Verify release tag and metadata
         run: |
-          test "$GITHUB_REF_TYPE" = "tag"
-          test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION"
+          test "$GITHUB_REF_TYPE" = "branch"
+          test "$GITHUB_REF_NAME" = "main"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "v$RELEASE_VERSION^{}")"
           python scripts/check-release.py "$RELEASE_VERSION"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -79,6 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/v${{ inputs.version }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -119,7 +123,13 @@ jobs:
             -v "$GITHUB_WORKSPACE/bindings/node:/build" \
             -w /build \
             "${{ matrix.settings.docker }}" \
-            sh -lc "${{ matrix.settings.build }}"
+            sh -lc '
+              export RUSTUP_HOME=/tmp/rookie-rustup
+              export RUSTUP_TOOLCHAIN=stable
+              rustup set auto-self-update disable
+              rustup toolchain install stable --profile minimal
+              ${{ matrix.settings.build }}
+            '
       - name: Build
         run: ${{ matrix.settings.build }}
         if: ${{ !matrix.settings.docker }}
@@ -149,6 +159,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/v${{ inputs.version }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -182,6 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/v${{ inputs.version }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -213,6 +225,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/v${{ inputs.version }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
