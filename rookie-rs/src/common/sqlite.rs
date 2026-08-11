@@ -138,27 +138,51 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
 }
 
 /// Compares two files byte for byte.
+///
+/// Only a genuine difference in length or content answers `false`. An I/O fault
+/// is returned, so that `snapshot_database` reports it rather than retrying
+/// three times and blaming a checkpoint.
 pub(crate) fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
   let open = |path: &Path| -> Result<io::BufReader<fs::File>> {
     let file = fs::File::open(path)
       .with_context(|| format!("Can't open {} to verify it", path.display()))?;
     Ok(io::BufReader::new(file))
   };
-  let (mut left, mut right) = (open(left)?, open(right)?);
+  let (mut left_file, mut right_file) = (open(left)?, open(right)?);
   let (mut left_chunk, mut right_chunk) = ([0u8; 8192], [0u8; 8192]);
 
   loop {
-    let read = io::Read::read(&mut left, &mut left_chunk)?;
-    if read == 0 {
-      // Equal only if the other side is also exhausted.
-      return Ok(io::Read::read(&mut right, &mut right_chunk)? == 0);
-    }
-    if io::Read::read_exact(&mut right, &mut right_chunk[..read]).is_err()
-      || left_chunk[..read] != right_chunk[..read]
-    {
+    let filled = fill(&mut left_file, &mut left_chunk)
+      .with_context(|| format!("Can't read {}", left.display()))?;
+    let other = fill(&mut right_file, &mut right_chunk)
+      .with_context(|| format!("Can't read {}", right.display()))?;
+
+    // `fill` stops short only at end of file, so unequal counts mean unequal
+    // lengths.
+    if filled != other || left_chunk[..filled] != right_chunk[..other] {
       return Ok(false);
     }
+    if filled == 0 {
+      return Ok(true);
+    }
   }
+}
+
+/// Reads until `buffer` is full or the file ends, retrying interrupted reads
+/// the way [`io::Read::read_exact`] does.
+fn fill(source: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
+  let mut filled = 0;
+
+  while filled < buffer.len() {
+    match source.read(&mut buffer[filled..]) {
+      Ok(0) => break,
+      Ok(read) => filled += read,
+      Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+      Err(err) => return Err(err),
+    }
+  }
+
+  Ok(filled)
 }
 
 /// Copies `database` and its write-ahead log into `directory`, returning the
@@ -425,6 +449,25 @@ mod tests {
     assert!(files_are_identical(&a, &b).expect("compare equal"));
     assert!(!files_are_identical(&a, &c).expect("compare shorter"));
     assert!(!files_are_identical(&c, &a).expect("compare longer"));
+  }
+
+  /// Cookie databases are far larger than the read buffer, so the comparison
+  /// has to be right across chunk boundaries, not just within the first one.
+  #[test]
+  fn files_are_identical_spans_multiple_chunks() {
+    let directory = TempDir::new().expect("temp dir");
+    let (a, b) = (directory.path().join("a"), directory.path().join("b"));
+    let bulk = vec![b'c'; 8192 * 3 + 17];
+    fs::write(&a, &bulk).expect("write a");
+    fs::write(&b, &bulk).expect("write b");
+    assert!(files_are_identical(&a, &b).expect("compare equal"));
+
+    // Differ only in the final chunk, past several identical ones.
+    let mut tail = bulk.clone();
+    *tail.last_mut().expect("non-empty") = b'x';
+    fs::write(&b, &tail).expect("rewrite b");
+
+    assert!(!files_are_identical(&a, &b).expect("compare differing tail"));
   }
 
   #[test]

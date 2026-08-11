@@ -576,6 +576,15 @@ mod tests {
     );
   }
 
+  // Unix only, like `query_cookies_filters_by_domain`. On Windows
+  // `query_cookies` calls `unlock_file`, which without privileges asks the
+  // restart manager to release the lock on the database — and the process
+  // holding it here is the test harness. The writer cannot simply be closed
+  // either, since keeping it open is what holds the row in the -wal. The
+  // cross-platform half of this behaviour is covered by the `common::sqlite`
+  // tests and by the Firefox equivalent, neither of which goes through
+  // `unlock_file`.
+  #[cfg(unix)]
   #[test]
   fn query_cookies_reads_cookies_committed_to_an_active_wal() {
     let dir = unique_tmpdir("chr-wal");
