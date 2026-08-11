@@ -32,6 +32,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   query += ";";
 
   let mut cookies: Vec<Cookie> = vec![];
+  let mut last_row_error: Option<anyhow::Error> = None;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
@@ -40,6 +41,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read host from row: {err}");
+        last_row_error = Some(anyhow!("failed to read host from row: {err}"));
         continue;
       }
     };
@@ -47,6 +49,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read path from row: {err}");
+        last_row_error = Some(anyhow!("failed to read path from row: {err}"));
         continue;
       }
     };
@@ -54,6 +57,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read isSecure from row: {err}");
+        last_row_error = Some(anyhow!("failed to read isSecure from row: {err}"));
         continue;
       }
     };
@@ -61,6 +65,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read expiry from row: {err}");
+        last_row_error = Some(anyhow!("failed to read expiry from row: {err}"));
         continue;
       }
     };
@@ -70,6 +75,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read name from row: {err}");
+        last_row_error = Some(anyhow!("failed to read name from row: {err}"));
         continue;
       }
     };
@@ -78,6 +84,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read value from row: {err}");
+        last_row_error = Some(anyhow!("failed to read value from row: {err}"));
         continue;
       }
     };
@@ -85,6 +92,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read isHttpOnly from row: {err}");
+        last_row_error = Some(anyhow!("failed to read isHttpOnly from row: {err}"));
         continue;
       }
     };
@@ -93,6 +101,7 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read sameSite from row: {err}");
+        last_row_error = Some(anyhow!("failed to read sameSite from row: {err}"));
         continue;
       }
     };
@@ -116,6 +125,12 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
 
   if let Ok(session_cookies) = get_session_cookies(domains, parent_path) {
     cookies.extend(session_cookies);
+  }
+
+  if cookies.is_empty() {
+    if let Some(err) = last_row_error {
+      return Err(err);
+    }
   }
   Ok(cookies)
 }
@@ -321,6 +336,32 @@ mod tests {
         )
         .expect("insert row");
     }
+  }
+
+  #[test]
+  fn firefox_based_errors_when_every_row_fails_to_decode() {
+    let dir = unique_tmpdir("ff-all-rows-bad");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    // Negative expiry does not fit the u64 the reader asks for, so every row
+    // is skipped. With no usable row left, the caller must see an error rather
+    // than an empty-but-successful result.
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
+          VALUES ('.example.com', '/', 1, -1, 'id', 'v', 1, 0)",
+        [],
+      )
+      .expect("insert bad row");
+    drop(conn);
+
+    let result = firefox_based(db, None);
+    assert!(
+      result.is_err(),
+      "expected Err when no row decodes, got {:?}",
+      result
+    );
   }
 
   #[test]

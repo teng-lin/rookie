@@ -1,5 +1,5 @@
 use crate::common::{date, enums::*, sqlite};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
 #[allow(unused)]
@@ -364,7 +364,7 @@ pub(crate) fn query_cookies(
   query += ";";
 
   let mut cookies: Vec<Cookie> = vec![];
-  let mut last_decrypt_error: Option<anyhow::Error> = None;
+  let mut last_row_error: Option<anyhow::Error> = None;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
@@ -373,6 +373,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read host_key from row: {err}");
+        last_row_error = Some(anyhow!("failed to read host_key from row: {err}"));
         continue;
       }
     };
@@ -380,6 +381,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read path from row: {err}");
+        last_row_error = Some(anyhow!("failed to read path from row: {err}"));
         continue;
       }
     };
@@ -387,6 +389,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read is_secure from row: {err}");
+        last_row_error = Some(anyhow!("failed to read is_secure from row: {err}"));
         continue;
       }
     };
@@ -394,6 +397,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read expires_utc from row: {err}");
+        last_row_error = Some(anyhow!("failed to read expires_utc from row: {err}"));
         continue;
       }
     };
@@ -402,6 +406,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read name from row: {err}");
+        last_row_error = Some(anyhow!("failed to read name from row: {err}"));
         continue;
       }
     };
@@ -410,6 +415,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read value from row: {err}");
+        last_row_error = Some(anyhow!("failed to read value from row: {err}"));
         continue;
       }
     };
@@ -417,6 +423,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read encrypted_value from row: {err}");
+        last_row_error = Some(anyhow!("failed to read encrypted_value from row: {err}"));
         continue;
       }
     };
@@ -427,7 +434,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to decrypt cookie value: {err}");
-        last_decrypt_error = Some(err);
+        last_row_error = Some(err);
         continue;
       }
     };
@@ -435,6 +442,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read is_httponly from row: {err}");
+        last_row_error = Some(anyhow!("failed to read is_httponly from row: {err}"));
         continue;
       }
     };
@@ -443,6 +451,7 @@ pub(crate) fn query_cookies(
       Ok(val) => val,
       Err(err) => {
         log::warn!("Failed to read samesite from row: {err}");
+        last_row_error = Some(anyhow!("failed to read samesite from row: {err}"));
         continue;
       }
     };
@@ -459,7 +468,7 @@ pub(crate) fn query_cookies(
     cookies.push(cookie);
   }
   if cookies.is_empty() {
-    if let Some(err) = last_decrypt_error {
+    if let Some(err) = last_row_error {
       return Err(err);
     }
   }
@@ -563,6 +572,33 @@ mod tests {
     seed_chromium_cookies(&db, &[]);
     let cookies = query_cookies(vec![], db, None, false).expect("decode");
     assert!(cookies.is_empty(), "{:?}", cookies);
+  }
+
+  #[test]
+  fn query_cookies_errors_when_every_row_fails_to_decode() {
+    let dir = unique_tmpdir("chr-all-rows-bad");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(&db, &[]);
+    // Negative expires_utc does not fit the u64 the reader asks for, so every
+    // row is skipped. A total decode failure must surface as Err, not as an
+    // empty-but-successful result that load() would count as a success.
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
+          encrypted_value, is_httponly, samesite) \
+          VALUES ('.example.com', '/', 1, -1, 'id', 'plain', X'', 1, 0)",
+        [],
+      )
+      .expect("insert bad row");
+    drop(conn);
+
+    let result = query_cookies(vec![], db, None, false);
+    assert!(
+      result.is_err(),
+      "expected Err when no row decodes, got {:?}",
+      result
+    );
   }
 
   #[test]
