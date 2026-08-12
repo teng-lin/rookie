@@ -43,10 +43,10 @@ jobs:
       # step uses a dedicated dir. The test reads it back via env var.
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
@@ -59,7 +59,7 @@ jobs:
       - name: Install Playwright (API only — Chrome comes from the runner image)
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
-        run: npm install --no-save playwright
+        run: npm install --no-save playwright@1.62.1
 
       - name: Pre-build the e2e test binary (avoid running cargo inside dbus session)
         run: cargo test --test e2e_chrome --no-run --locked
@@ -143,10 +143,10 @@ jobs:
       # path is unambiguous and inspectable after the run.
       ROOKIE_E2E_FIREFOX_PROFILE: ${{ github.workspace }}/.rookie-ci/firefox
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
@@ -159,7 +159,7 @@ jobs:
         # Playwright bundles a patched Firefox for DevTools/CDP; system Firefox
         # cannot drive Playwright. We only download Firefox, not all browsers.
         run: |
-          npm install --no-save playwright
+          npm install --no-save playwright@1.62.1
           npx playwright install firefox
 
       - name: Pre-build the e2e test binary
@@ -248,16 +248,16 @@ jobs:
     env:
       ROOKIE_E2E_FIREFOX_PROFILE: ${{ github.workspace }}/.rookie-ci/firefox
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       - name: Install Playwright + bundled Firefox
         run: |
-          npm install --no-save playwright
+          npm install --no-save playwright@1.62.1
           npx playwright install firefox
 
       - name: Pre-build the e2e test binary
@@ -321,17 +321,17 @@ jobs:
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       - name: Install Playwright (system Chrome via channel)
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
-        run: npm install --no-save playwright
+        run: npm install --no-save playwright@1.62.1
 
       - name: Pre-build the e2e test binary
         run: cargo test --test e2e_chrome --no-run --locked
@@ -398,10 +398,10 @@ jobs:
     env:
       ROOKIE_E2E_FIREFOX_PROFILE: ${{ github.workspace }}\.rookie-ci\firefox
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
@@ -409,7 +409,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          npm install --no-save playwright
+          npm install --no-save playwright@1.62.1
           npx playwright install firefox
           npx playwright --version
 
@@ -641,17 +641,17 @@ jobs:
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}\.rookie-ci\google-chrome
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       - name: Install Playwright (system Chrome via channel)
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
-        run: npm install --no-save playwright
+        run: npm install --no-save playwright@1.62.1
 
       - name: Record Windows identity/admin status
         run: |

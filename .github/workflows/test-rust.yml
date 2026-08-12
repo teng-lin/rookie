@@ -174,6 +174,18 @@ jobs:
       - name: Test native worker panic rejection
         working-directory: bindings/node
         run: npm run test:worker-panic
+      - name: Verify committed loader matches freshly patched output
+        # `npm run build:test` re-runs scripts/patch-loader.js (via the
+        # `postbuild:test` hook) against the napi-generated index.js/index.d.ts.
+        # Both files are committed to the repo, so if patch-loader.js's
+        # regex-based replacements ever stop matching napi-rs's generated
+        # shape, this diff catches the resulting stale/broken loader instead
+        # of letting CI stay green.
+        working-directory: bindings/node
+        run: git diff --exit-code index.js index.d.ts
+      - name: Typecheck index.d.ts
+        working-directory: bindings/node
+        run: npm run typecheck
       - name: Run ava
         working-directory: bindings/node
         run: npm test

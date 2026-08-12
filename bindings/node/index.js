@@ -326,7 +326,15 @@ if (!nativeBinding) {
 
 const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
 
-function asyncNative(nativeFunction) {
+function requiredNative(nativeFunction, name) {
+  if (typeof nativeFunction !== 'function') {
+    throw new TypeError(`Expected a native binding function: ${name}`)
+  }
+  return nativeFunction
+}
+
+function asyncNative(nativeFunction, name) {
+  requiredNative(nativeFunction, name)
   return (...args) => {
     try {
       return Promise.resolve(nativeFunction(...args))
@@ -342,28 +350,38 @@ function unsupportedPlatform(name, supportedPlatform) {
   ))
 }
 
-module.exports.version = version
-module.exports.anyBrowser = asyncNative(anyBrowser)
-module.exports.firefox = asyncNative(firefox)
-module.exports.zen = asyncNative(zen)
-module.exports.librewolf = asyncNative(librewolf)
-module.exports.chrome = asyncNative(chrome)
-module.exports.brave = asyncNative(brave)
-module.exports.arc = asyncNative(arc)
-module.exports.edge = asyncNative(edge)
-module.exports.opera = asyncNative(opera)
-module.exports.operaGx = asyncNative(operaGx)
-module.exports.chromium = asyncNative(chromium)
-module.exports.vivaldi = asyncNative(vivaldi)
-module.exports.load = asyncNative(load)
-module.exports.octoBrowser = asyncNative(octoBrowser || unsupportedPlatform('octoBrowser', 'Windows'))
-module.exports.internetExplorer = asyncNative(internetExplorer || unsupportedPlatform('internetExplorer', 'Windows'))
-module.exports.safari = asyncNative(safari || unsupportedPlatform('safari', 'macOS'))
-module.exports.chromiumBased = asyncNative(chromiumBased)
-module.exports.firefoxProfiles = asyncNative(firefoxProfiles)
-module.exports.firefoxProfile = asyncNative(firefoxProfile)
-module.exports.firefoxBased = asyncNative(firefoxBased)
+function platformNative(nativeFunction, name, nodePlatform, supportedPlatform) {
+  if (typeof nativeFunction === 'function') {
+    return asyncNative(nativeFunction, name)
+  }
+  if (platform === nodePlatform) {
+    requiredNative(nativeFunction, name)
+  }
+  return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
+}
+
+module.exports.version = requiredNative(version, 'version')
+module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
+module.exports.firefox = asyncNative(firefox, 'firefox')
+module.exports.zen = asyncNative(zen, 'zen')
+module.exports.librewolf = asyncNative(librewolf, 'librewolf')
+module.exports.chrome = asyncNative(chrome, 'chrome')
+module.exports.brave = asyncNative(brave, 'brave')
+module.exports.arc = asyncNative(arc, 'arc')
+module.exports.edge = asyncNative(edge, 'edge')
+module.exports.opera = asyncNative(opera, 'opera')
+module.exports.operaGx = asyncNative(operaGx, 'operaGx')
+module.exports.chromium = asyncNative(chromium, 'chromium')
+module.exports.vivaldi = asyncNative(vivaldi, 'vivaldi')
+module.exports.load = asyncNative(load, 'load')
+module.exports.octoBrowser = platformNative(octoBrowser, 'octoBrowser', 'win32', 'Windows')
+module.exports.internetExplorer = platformNative(internetExplorer, 'internetExplorer', 'win32', 'Windows')
+module.exports.safari = platformNative(safari, 'safari', 'darwin', 'macOS')
+module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
+module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
+module.exports.firefoxProfile = asyncNative(firefoxProfile, 'firefoxProfile')
+module.exports.firefoxBased = asyncNative(firefoxBased, 'firefoxBased')
 
 if (testWorkerPanic) {
-  module.exports.__testWorkerPanic = asyncNative(testWorkerPanic)
+  module.exports.__testWorkerPanic = asyncNative(testWorkerPanic, 'testWorkerPanic')
 }
