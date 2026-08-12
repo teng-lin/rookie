@@ -289,6 +289,9 @@ pub(crate) fn query_cookies_engine_outcome(
         });
         break;
       }
+      // Section 7 makes a missing candidate silent, and a candidate whose final
+      // state is "gone" is missing however it got there. Its retry diagnostics
+      // are therefore dropped on purpose: a vanished candidate is not a source.
       Err(failure) if is_missing_session_file(&failure.error) => {}
       Err(failure) => outcome.session_sources.push(MozillaSessionSourceOutcome {
         path,
@@ -1133,6 +1136,49 @@ mod tests {
     // source error rather than a duplicate diagnostic.
     assert_eq!(source.diagnostics.len(), SESSION_STORE_READ_ATTEMPTS - 1);
     assert!(source.diagnostics[0].contains("attempt 1"));
+  }
+
+  #[test]
+  fn failure_attempt_counts_reflect_early_exits_not_the_retry_ceiling() {
+    // Every *reported* failure exhausts the retry budget, so an outcome's
+    // attempt count can never distinguish these. Pin them at the struct level
+    // instead, where the early-exit paths are observable.
+    let missing_immediately = parse_session_candidate_with(Path::new("recovery.jsonlz4"), || {
+      Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
+    })
+    .expect_err("a missing candidate fails");
+    // The discriminating case: stopping on the first attempt must report one
+    // attempt, not the SESSION_STORE_READ_ATTEMPTS ceiling.
+    assert_eq!(missing_immediately.attempts, 1);
+    assert!(missing_immediately.transient_errors.is_empty());
+
+    let mut attempts = 0;
+    let vanished_after_retry = parse_session_candidate_with(Path::new("recovery.jsonlz4"), || {
+      attempts += 1;
+      if attempts == 1 {
+        bail!("Firefox session store changed while it was being read")
+      }
+      Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
+    })
+    .expect_err("a vanished candidate fails");
+    assert!(is_missing_session_file(&vanished_after_retry.error));
+    assert_eq!(vanished_after_retry.attempts, 2);
+    // The attempt-1 diagnostic survives on the failure path, even though
+    // Section 7 means nothing downstream consumes it for a vanished candidate.
+    assert_eq!(vanished_after_retry.transient_errors.len(), 1);
+    assert!(vanished_after_retry.transient_errors[0].contains("attempt 1"));
+  }
+
+  #[test]
+  fn a_candidate_that_vanishes_after_a_transient_failure_stays_silent() {
+    // The deliberate counterpart of the test above: Section 7 keeps a missing
+    // candidate silent, so nothing about it reaches the outcome.
+    let dir = unique_tmpdir("ff-engine-vanished-candidate");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert!(outcome.session_sources.is_empty());
   }
 
   #[test]

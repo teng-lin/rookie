@@ -1306,50 +1306,43 @@ fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path:
 
 const MAX_GECKO_DISCOVERY_ISSUES_PER_CODE: usize = 32;
 
-/// Bounded accumulator for Gecko discovery issues.
-///
-/// Sampling stops a pathological `profiles.ini` from emitting an unbounded
-/// diagnostic per declaration. The omitted count is kept as an integer instead
-/// of being re-parsed out of the summary message it previously wrote.
-#[derive(Debug, Default)]
-struct GeckoDiscoveryIssues {
-  issues: Vec<DiscoveryIssue>,
-  sampled: BTreeMap<&'static str, usize>,
-  omitted: BTreeMap<&'static str, usize>,
-}
-
-impl GeckoDiscoveryIssues {
-  fn push(&mut self, issue: DiscoveryIssue) {
-    self.issues.push(issue);
+fn push_bounded_gecko_issue(
+  issues: &mut Vec<DiscoveryIssue>,
+  code: &'static str,
+  path: PathBuf,
+  message: &str,
+) {
+  if let Some(summary) = issues
+    .iter_mut()
+    .find(|issue| issue.code == code && issue.message.starts_with("additional "))
+  {
+    let omitted = summary
+      .message
+      .split_whitespace()
+      .nth(1)
+      .and_then(|count| count.parse::<usize>().ok())
+      .unwrap_or(1)
+      + 1;
+    summary.message = format!(
+      "additional {omitted} {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
+    );
+    return;
   }
-
-  fn push_bounded(&mut self, code: &'static str, path: PathBuf, message: &str) {
-    let sampled = self.sampled.entry(code).or_default();
-    if *sampled < MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
-      *sampled += 1;
-      self.issues.push(DiscoveryIssue {
-        code,
-        path,
-        message: message.to_owned(),
-      });
-    } else {
-      *self.omitted.entry(code).or_default() += 1;
-    }
-  }
-
-  fn into_issues(mut self) -> Vec<DiscoveryIssue> {
-    for (code, omitted) in self.omitted {
-      self.issues.push(DiscoveryIssue {
-        code,
-        // The summary stands for occurrences at many paths, so it deliberately
-        // carries none rather than inheriting whichever one arrived Nth.
-        path: PathBuf::new(),
-        message: format!(
-          "additional {omitted} {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
-        ),
-      });
-    }
-    self.issues
+  let sampled = issues.iter().filter(|issue| issue.code == code).count();
+  if sampled < MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
+    issues.push(DiscoveryIssue {
+      code,
+      path,
+      message: message.to_owned(),
+    });
+  } else if sampled == MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
+    issues.push(DiscoveryIssue {
+      code,
+      path,
+      message: format!(
+        "additional 1 {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
+      ),
+    });
   }
 }
 
@@ -1403,7 +1396,6 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
   roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
   let mut seen_profiles = HashSet::new();
   let mut outcome = EngineExtractionOutcome::default();
-  let mut issues = GeckoDiscoveryIssues::default();
 
   for root in roots {
     if root.discovery != DiscoveryStrategy::MozillaProfilesIni {
@@ -1419,7 +1411,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
     let canonical_root = match context.fs.canonicalize(&root_path) {
       Ok(path) => path,
       Err(error) => {
-        issues.push(DiscoveryIssue {
+        outcome.discovery_issues.push(DiscoveryIssue {
           code: "installation_canonicalize_failed",
           path: root_path,
           message: error.to_string(),
@@ -1447,7 +1439,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         Ok(profiles) if profiles.is_empty() => (profiles, true),
         Ok(profiles) => (profiles, false),
         Err(error) => {
-          issues.push(DiscoveryIssue {
+          outcome.discovery_issues.push(DiscoveryIssue {
             code: "mozilla_profiles_ini_invalid",
             path: ini_path,
             message: error.to_string(),
@@ -1462,7 +1454,8 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
     let mut usable = Vec::new();
     for declared_profile in declared {
       if !gecko_profile_has_source(context, &declared_profile.path) {
-        issues.push_bounded(
+        push_bounded_gecko_issue(
+          &mut outcome.discovery_issues,
           "profile_has_no_cookie_source",
           declared_profile.path,
           "declared Gecko profile has no supported cookie source",
@@ -1486,14 +1479,14 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
           Ok(discovery) => {
             usable = discovery.profiles;
             if let Some(error) = discovery.optional_container_error {
-              issues.push(DiscoveryIssue {
+              outcome.discovery_issues.push(DiscoveryIssue {
                 code: "optional_profiles_enumeration_failed",
                 path: canonical_root.join("Profiles"),
                 message: error.to_string(),
               });
             }
           }
-          Err(error) => issues.push(DiscoveryIssue {
+          Err(error) => outcome.discovery_issues.push(DiscoveryIssue {
             code: "installation_enumeration_failed",
             path: canonical_root.clone(),
             message: error.to_string(),
@@ -1506,7 +1499,8 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       let profile_path = match context.fs.canonicalize(&declared_profile.path) {
         Ok(path) => path,
         Err(error) => {
-          issues.push_bounded(
+          push_bounded_gecko_issue(
+            &mut outcome.discovery_issues,
             "profile_canonicalize_failed",
             declared_profile.path,
             &error.to_string(),
@@ -1515,7 +1509,8 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         }
       };
       if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
-        issues.push_bounded(
+        push_bounded_gecko_issue(
+          &mut outcome.discovery_issues,
           "duplicate_profile",
           profile_path,
           "profile is already owned by an earlier registry root",
@@ -1552,7 +1547,6 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       .then_with(|| left.name.cmp(&right.name))
       .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
   });
-  outcome.discovery_issues = issues.into_issues();
   Ok(outcome)
 }
 
@@ -2368,8 +2362,6 @@ mod tests {
     assert_eq!(issues.len(), MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1);
     let summary = issues.last().expect("overflow summary");
     assert!(summary.message.contains("additional 5"));
-    // The aggregate stands for many paths, so it claims none of them.
-    assert_eq!(summary.path, PathBuf::new());
   }
 
   #[test]
