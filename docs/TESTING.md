@@ -12,7 +12,7 @@ Run the Rust workspace and CLI contract tests with:
 ```console
 cargo test --workspace --all-targets
 cargo test --workspace --doc
-python3 -m unittest tests/e2e/test_assert_cli_cookie.py -v
+python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
 ```
 
 The CLI integration suite uses a generated Firefox database and covers JSON and
@@ -48,7 +48,8 @@ Before extraction it requires all of the following:
 - `Local State.os_crypt.app_bound_encrypted_key` with the `APPB` prefix;
 - a seeded cookie whose encrypted value has the `v20` prefix;
 - a second `v20` fake cookie visible through the live WAL but absent from a
-  main-database-only copy;
+  main-database-only copy, with a pinned SQLite reader preventing Chrome from
+  checkpointing that cookie before extraction;
 - both explicit-path extraction and default Chrome profile/key discovery;
 - Chrome remaining alive after each Rust, Python, Node, and CLI extraction.
 
