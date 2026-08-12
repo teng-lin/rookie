@@ -2,26 +2,6 @@ name: Test rookie-cookies
 
 on:
   pull_request:
-    paths:
-      - '.github/workflows/publish-*.yml'
-      - '.github/workflows/test-rust.yml'
-      - 'rookie-rs/**'
-      - 'cli/**'
-      - 'bindings/python/**'
-      - 'bindings/node/**'
-      - 'tests/python/**'
-      - 'tests/e2e/assert_cli_cookie.py'
-      - 'tests/e2e/test_assert_cli_cookie.py'
-      - 'examples/javascript/*.js'
-      - 'examples/javascript/package-lock.json'
-      - 'examples/javascript/package.json'
-      - 'examples/rust/http/Cargo.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'CHANGELOG.md'
-      - 'docs/RELEASING.md'
-      - 'scripts/check-public-api.py'
-      - 'scripts/check-release.py'
   push:
     branches:
       - main
