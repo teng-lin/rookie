@@ -163,6 +163,7 @@ struct BrowserDefinition {
   engine: BrowserEngine,
   roots: Vec<InstallationRoot>,
   capabilities: BrowserCapabilities,
+  key_credentials: Option<KeyCredentials>,
 }
 
 struct BrowserCapabilities {
@@ -181,6 +182,10 @@ struct InstallationRoot {
 ```
 
 `BrowserEngine` and `DiscoveryStrategy` are separate. Safari and IE are engines, not Chromium profile layouts. Registry fields use `String`/`Vec`, not static references.
+
+`key_credentials` is the optional per-browser platform key-lookup metadata defined in Section 5.9.
+Roots and capability tiers alone do not tell a key provider *which* OS credential to read, so a
+generic-only browser would otherwise have no source of truth for it.
 
 Only the current platform's ordered definitions are loaded. Platform IDs, format IDs, and
 cipher-tier IDs are validated open string identifiers. A declared format/tier is a capability
@@ -590,6 +595,59 @@ CLI grammar is fixed:
   selection and output; combinations rejected by PR #125 are intentionally invalid rather than
   silently resolved by the old precedence chain.
 
+### 5.9 Per-browser key credential metadata
+
+Today every Chromium installation-scoped key provider resolves its platform credential through
+`config::try_get_browser_config(browser_id)`, which reads the frozen `config.json`: macOS uses
+`osx_key_service`/`osx_key_user` for the Keychain lookup, and Linux uses `unix_crypt_name` for the
+v11 keyring lookup. Section 5.1 keeps `config.json` frozen and adds generic-only browsers—Yandex,
+CocCoc, and the rest of Milestone 6—to the registry only. Without a registry-side field those
+browsers reach the key provider with no credential source at all, so the registry owns this
+metadata:
+
+```rust
+struct KeyCredentials {
+  macos_keychain: Option<MacosKeychainCredential>,
+  linux_crypt_name: Option<String>,
+}
+
+struct MacosKeychainCredential {
+  service: String,
+  account: String,
+}
+```
+
+`service` is the Keychain generic-password service (legacy `osx_key_service`, for example
+`"Chrome Safe Storage"`); `account` is its account name (legacy `osx_key_user`, for example
+`"Chrome"`). `linux_crypt_name` is the legacy `unix_crypt_name` keyring entry. Windows definitions
+carry no credential metadata: its v10/v20 material comes from the installation's own `Local State`.
+
+Resolution and validation are fixed:
+
+- the registry is the single source of truth for generic/report key retrieval. Installation-scoped
+  key providers resolve credentials from the running platform's `BrowserDefinition`, not from
+  `config.json`;
+- definitions are already platform-grouped, so only the current platform's applicable subfields are
+  meaningful. Registry validation rejects a definition that carries a credential subfield for a
+  platform that cannot use it;
+- a macOS definition declaring the `v10` tier must supply `macos_keychain`; a Linux definition
+  declaring the `v11` tier must supply `linux_crypt_name`. A declared-but-uncredentialed tier is a
+  registry validation error, not a runtime surprise;
+- browsers represented in both files extend the Section 5.1 parity invariant: registry
+  `macos_keychain.service`/`account` and `linux_crypt_name` must equal the corresponding
+  `config.json` values, pinned by a parity test. `config.json` gains no new browsers and no new
+  fields;
+- legacy named wrappers keep reading `config.json`. This is registry-side metadata for the generic
+  pipeline only, so it cannot change legacy key resolution;
+- values are lookup identifiers, not secrets. Key material is never stored in the registry, and
+  credential metadata is not exposed on public descriptors or reports.
+
+Failure semantics reuse the Section 5.7 vocabulary. A credentialed lookup that the OS denies or that
+returns nothing is a typed `provider_failed` source issue with its tier outcome preserved
+independently of the other tiers; a tier with no compiled/enabled provider stays
+`provider_unavailable`. The existing fixed macOS fallback key candidates are unchanged, so a
+Keychain miss still degrades to those candidates rather than failing the source.
+
 ## 6. Acquisition decisions
 
 ### 6.1 Live database policy
@@ -775,7 +833,8 @@ Before the 4E freeze, retain only these residuals from the retired alternate imp
 - source-level outcome/provenance/status, acquisition strategy and attempts, profile/report
   aggregates, `u32` saturation, and typed open issue code/stage/severity/context;
 - distinct `provider_unavailable` and `provider_failed` row outcomes;
-- schema/open-identifier/alias invariants needed by additional engines, including `opera gx`;
+- schema/open-identifier/alias invariants needed by additional engines, including `opera gx`, plus
+  the Section 5.9 `key_credentials` field the generic-only Milestone 6 browsers depend on;
 - typed filesystem/glob/canonicalization failures and the broader all-roots-failed rule;
 - golden ID vectors, preferred-source-no-fallback, markers/skipped directories, Unicode,
   duplicate-root ordering, and packaged-crate smoke fixtures.
@@ -789,6 +848,10 @@ reacquisition, domain-filter escaping, and Windows acquisition behavior.
 
 - Add every existing browser/root/channel to the private registry without changing named wrappers.
 - Corrected generic roots are allowed to differ from legacy selectors and are tested independently.
+- Add the Section 5.9 `key_credentials` field, its per-platform validation rules, and backfilled
+  macOS Keychain service/account plus Linux crypt-name values for the existing Chromium family.
+- Move generic Chromium key retrieval onto the registry credential metadata and add the
+  registry/`config.json` parity test; legacy wrappers keep their `config.json` lookup.
 
 #### 4B — Gecko/IE registry and outcome adapters
 
@@ -920,9 +983,11 @@ New browsers use generic APIs first and never enter legacy `load()`. Convenience
 #### 6B — Packaging and platform variants
 
 - Windows DuckDuckGo dynamic MSIX/EBWebView roots.
-- Windows CocCoc discovery and plaintext/v10 claim only.
-- macOS Yandex after keychain account/service validation.
-- macOS CocCoc after keychain account/service validation.
+- Windows CocCoc discovery and plaintext/v10 claim only; Windows needs no credential metadata.
+- macOS Yandex after keychain account/service validation. The validated service/account ship as the
+  definition's Section 5.9 `macos_keychain` credential, since Yandex is registry-only and cannot be
+  added to frozen `config.json`.
+- macOS CocCoc on the same basis.
 - Corrected roots/channels for existing browsers land in separate PRs.
 
 #### 6C — Vendor-specific tier upgrades
@@ -933,6 +998,8 @@ Per-browser gates:
 
 - registry/alias/root/profile invariants;
 - applicable discovery fixture and correct Local State/key metadata;
+- Section 5.9 credential metadata present and validated for every claimed macOS `v10` and Linux
+  `v11` tier;
 - plaintext cookie fixture on each claimed OS;
 - engine-level encrypted fixture for each shared tier;
 - per-browser live evidence only where its credential provider differs;
@@ -940,7 +1007,7 @@ Per-browser gates:
 - absent install does not fail unrelated extraction;
 - support matrix names exact readable/decryptable tiers.
 
-A validation record includes OS/browser versions, root/layout, observed cipher prefixes, APIs exercised, and pass/fail result.
+A validation record includes OS/browser versions, root/layout, observed cipher prefixes, APIs exercised, and pass/fail result. When the browser uses a Keychain or keyring lookup, it also records the observed service/account or crypt name that becomes its Section 5.9 credential metadata.
 
 ## 9. Cross-cutting CI and release matrix
 
