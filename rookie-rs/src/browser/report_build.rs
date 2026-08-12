@@ -27,12 +27,21 @@ use anyhow::{bail, Result};
 
 /// Discovery problems that do not prevent source enumeration. Everything else
 /// is an error, because it stopped an installation or profile from being read.
+///
+/// Severity drives status computation, so a code only earns `error` when it
+/// actually cost the report a source. Codes that a fallback recovers from, or
+/// that describe an optional lookup, stay warnings: promoting them would report
+/// `partial` for a run that lost nothing.
 fn discovery_severity(code: &str) -> IssueSeverityCode {
   match code {
     "duplicate_installation" | "duplicate_profile" | "profile_has_no_cookie_source" => {
       IssueSeverityCode::info()
     }
-    "local_state_invalid" | "safari_profile_discovery_degraded" => IssueSeverityCode::warning(),
+    "local_state_invalid"
+    | "safari_profile_discovery_degraded"
+    // Both fall back to flat or markerless profile discovery.
+    | "mozilla_profiles_ini_invalid"
+    | "optional_profiles_enumeration_failed" => IssueSeverityCode::warning(),
     _ => IssueSeverityCode::error(),
   }
 }
@@ -45,6 +54,10 @@ fn discovery_issue(browser_id: &BrowserId, discovery: &DiscoveryIssue) -> Extrac
     discovery_severity(discovery.code),
     format!("{path}: {}", discovery.message),
   )
+  .with_occurrences(discovery.occurrences)
+  // Aggregation keeps one message per code, so the path travels as a sample
+  // and the offending locations survive the merge.
+  .with_samples(vec![path])
   .with_context(Some(browser_id), None, None)
 }
 
@@ -276,6 +289,10 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
 struct BrowserOutcome {
   detected: bool,
   installations_discovered: usize,
+  /// Every detected root failed enumeration, so an empty profile list means
+  /// "could not look", not "nothing installed". Section 5.7 makes this the
+  /// difference between a `failed` report and a `no_sources` one.
+  discovery_failed: bool,
   profiles: Vec<EngineExtractionOutcome>,
   issues: Vec<ExtractionIssue>,
 }
@@ -287,6 +304,7 @@ fn chromium_browser_outcome(
   let mut outcome = BrowserOutcome {
     detected: !report.installations.is_empty(),
     installations_discovered: report.installations.len(),
+    discovery_failed: report.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
   };
@@ -312,6 +330,7 @@ fn engine_browser_outcome(
   let mut outcome = BrowserOutcome {
     detected: engine.installations_discovered > 0,
     installations_discovered: engine.installations_discovered,
+    discovery_failed: engine.all_detected_roots_failed(),
     profiles: Vec::new(),
     issues: Vec::new(),
   };
@@ -407,6 +426,7 @@ fn collect_report(
     _ => Ok(BrowserOutcome {
       detected: false,
       installations_discovered: 0,
+      discovery_failed: false,
       profiles: Vec::new(),
       issues: Vec::new(),
     }),
@@ -414,18 +434,18 @@ fn collect_report(
 }
 
 fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Result<BrowserOutcome> {
-  let profiles = registry::chromium_profiles(canonical_id)?;
+  let listing = registry::chromium_listing(canonical_id)?;
   let mut outcome = BrowserOutcome {
-    detected: !profiles.is_empty(),
-    installations_discovered: profiles
-      .iter()
-      .map(|profile| profile.installation_id.as_str())
-      .collect::<std::collections::BTreeSet<_>>()
-      .len(),
+    detected: listing.installations_discovered > 0,
+    installations_discovered: listing.installations_discovered,
+    discovery_failed: listing.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
   };
-  for profile in profiles {
+  for discovery in &listing.discovery_issues {
+    push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
+  }
+  for profile in listing.profiles {
     let identity = profile_identity(
       browser_id,
       &profile.installation_id,
@@ -490,8 +510,10 @@ fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> Extrac
   let mut top_level = Vec::new();
   let mut profiles = Vec::new();
   let mut counters = StatsAccumulator::default();
+  let mut discovery_failed = false;
 
   for outcome in outcomes {
+    discovery_failed |= outcome.discovery_failed;
     if outcome.detected {
       summary.browsers_detected += 1;
     } else {
@@ -524,7 +546,6 @@ fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> Extrac
   summary.rows_skipped = totals.rows_skipped;
   summary.counters_saturated = totals.counters_saturated;
 
-  let discovery_failed = top_level.iter().any(ExtractionIssue::is_error);
   let status = report_status(&profiles, &top_level, discovery_failed);
   ExtractionReport {
     status,
@@ -542,6 +563,7 @@ pub(crate) fn browser_extraction_report(
   domains: Option<Vec<String>>,
 ) -> Result<ExtractionReport> {
   let browser = registry::resolve_registered_browser(browser_id)?;
+  let canonical_id = &browser.canonical_id;
   let mut outcome = collect_report(&browser, profile_id, true, domains)?;
   if let Some(profile_id) = profile_id {
     if !outcome
@@ -549,21 +571,21 @@ pub(crate) fn browser_extraction_report(
       .iter()
       .any(|profile| profile.profile.profile_id.as_str() == profile_id)
     {
-      bail!("unknown {browser_id} profile id {profile_id:?}")
+      bail!("unknown {canonical_id} profile id {profile_id:?}")
     }
     outcome
       .profiles
       .retain(|profile| profile.profile.profile_id.as_str() == profile_id);
   }
   if !outcome.detected {
-    let id: BrowserId = browser.canonical_id.parse()?;
+    let id: BrowserId = canonical_id.parse()?;
     push_aggregated(
       &mut outcome.issues,
       issue(
         "browser_not_detected",
         ExtractionStageCode::discovery(),
         IssueSeverityCode::info(),
-        format!("no {} installation was detected", browser.canonical_id),
+        format!("no {canonical_id} installation was detected"),
       )
       .with_context(Some(&id), None, None),
     );
@@ -586,6 +608,7 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
         outcomes.push(BrowserOutcome {
           detected: false,
           installations_discovered: 0,
+          discovery_failed: true,
           profiles: Vec::new(),
           issues: vec![issue(
             "browser_discovery_failed",
@@ -608,10 +631,7 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
 pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<ProfileDescriptor>> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let outcome = collect_report(&browser, None, false, None)?;
-  if outcome.profiles.is_empty()
-    && outcome.installations_discovered > 0
-    && outcome.issues.iter().any(ExtractionIssue::is_error)
-  {
+  if outcome.discovery_failed {
     bail!("every detected {browser_id} installation failed profile enumeration")
   }
   Ok(
@@ -641,4 +661,157 @@ pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<Profil
       })
       .collect(),
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::browser::report_core::{ReportStatusCode, SourceExtractionOutcome};
+  use std::path::PathBuf;
+
+  fn identity() -> ProfileIdentity {
+    ProfileIdentity {
+      browser_id: BrowserId::known("firefox"),
+      installation_id: InstallationId::known(&"a".repeat(64)),
+      profile_id: ProfileId::known(&"b".repeat(64)),
+      display_name: "default".to_owned(),
+      path: "/profiles/default".to_owned(),
+      path_lossy: false,
+    }
+  }
+
+  fn source(failed: bool) -> SourceExtractionOutcome {
+    let mut source = SourceExtractionOutcome::new(
+      source_identity(
+        &PathBuf::from("/profiles/default/cookies.sqlite"),
+        SOURCE_ROLE_PERSISTENT,
+        "mozilla_sqlite",
+        registry::PERSISTENT_SOURCE_PRECEDENCE,
+      ),
+      true,
+      AcquisitionStrategyCode::live_read_only(),
+    );
+    source.failed = failed;
+    source
+  }
+
+  fn outcome(profiles: Vec<EngineExtractionOutcome>, discovery_failed: bool) -> BrowserOutcome {
+    BrowserOutcome {
+      detected: true,
+      installations_discovered: 1,
+      discovery_failed,
+      profiles,
+      issues: Vec::new(),
+    }
+  }
+
+  fn status(outcome: BrowserOutcome) -> ReportStatusCode {
+    assemble(1, vec![outcome]).status
+  }
+
+  #[test]
+  fn a_profile_without_sources_is_no_sources_rather_than_failed() {
+    let profile = EngineExtractionOutcome::new(identity(), true);
+    assert_eq!(
+      status(outcome(vec![profile], false)),
+      ReportStatusCode::no_sources()
+    );
+  }
+
+  #[test]
+  fn a_root_that_could_not_be_enumerated_is_failed_not_no_sources() {
+    // Identical profile shape to the case above; only the discovery signal
+    // separates "nothing to read" from "could not look".
+    let profile = EngineExtractionOutcome::new(identity(), true);
+    assert_eq!(
+      status(outcome(vec![profile], true)),
+      ReportStatusCode::failed()
+    );
+    assert_eq!(
+      status(outcome(Vec::new(), true)),
+      ReportStatusCode::failed()
+    );
+  }
+
+  #[test]
+  fn an_attempted_source_that_failed_is_failed() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.sources.push(source(true));
+    assert_eq!(
+      status(outcome(vec![profile], false)),
+      ReportStatusCode::failed()
+    );
+  }
+
+  #[test]
+  fn a_zero_row_source_still_succeeds_and_completes() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.sources.push(source(false));
+    let report = assemble(1, vec![outcome(vec![profile], false)]);
+    assert_eq!(report.status, ReportStatusCode::complete());
+    assert_eq!(report.summary.sources_succeeded, 1);
+    assert_eq!(report.summary.cookies_emitted, 0);
+  }
+
+  #[test]
+  fn an_error_issue_beside_a_succeeding_source_is_partial() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.sources.push(source(false));
+    let mut browser = outcome(vec![profile], false);
+    browser.issues.push(issue(
+      "installation_enumeration_failed",
+      ExtractionStageCode::discovery(),
+      IssueSeverityCode::error(),
+      "a sibling root failed",
+    ));
+    assert_eq!(status(browser), ReportStatusCode::partial());
+  }
+
+  #[test]
+  fn a_recovered_discovery_problem_does_not_downgrade_a_complete_report() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.sources.push(source(false));
+    let mut browser = outcome(vec![profile], false);
+    // Both codes fall back to another discovery strategy, so the report lost
+    // nothing and must not be reported as partial.
+    for code in [
+      "mozilla_profiles_ini_invalid",
+      "optional_profiles_enumeration_failed",
+    ] {
+      browser.issues.push(discovery_issue(
+        &BrowserId::known("firefox"),
+        &registry::DiscoveryIssue {
+          code,
+          path: PathBuf::from("/profiles/profiles.ini"),
+          message: "unreadable".to_owned(),
+          occurrences: 1,
+        },
+      ));
+    }
+    assert_eq!(status(browser), ReportStatusCode::complete());
+  }
+
+  #[test]
+  fn bounded_discovery_occurrences_survive_as_a_typed_count_with_sampled_paths() {
+    let mut browser = outcome(Vec::new(), false);
+    for (index, occurrences) in [(0, 4u32), (1, 1)] {
+      browser.issues.push(discovery_issue(
+        &BrowserId::known("firefox"),
+        &registry::DiscoveryIssue {
+          code: "duplicate_profile",
+          path: PathBuf::from(format!("/profiles/{index}")),
+          message: "already owned".to_owned(),
+          occurrences,
+        },
+      ));
+    }
+    let report = assemble(1, vec![browser]);
+    let issue = report
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "duplicate_profile")
+      .expect("aggregated duplicate issue");
+    assert_eq!(issue.occurrences, 5);
+    assert_eq!(issue.samples, vec!["/profiles/0", "/profiles/1"]);
+  }
 }

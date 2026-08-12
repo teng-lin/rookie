@@ -159,7 +159,7 @@ fn query_persistent_cookies(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionStoreFormat {
+pub(crate) enum SessionStoreFormat {
   JsonLz4,
   LegacyJson,
 }
@@ -172,12 +172,40 @@ pub(crate) const SESSION_JSONLZ4_FORMAT_ID: &str = "firefox_session_jsonlz4";
 pub(crate) const SESSION_JSON_FORMAT_ID: &str = "firefox_session_json";
 
 impl SessionStoreFormat {
-  fn format_id(self) -> &'static str {
+  pub(crate) fn format_id(self) -> &'static str {
     match self {
       Self::JsonLz4 => SESSION_JSONLZ4_FORMAT_ID,
       Self::LegacyJson => SESSION_JSON_FORMAT_ID,
     }
   }
+}
+
+/// Section 7 session candidates in authoritative order, as profile-relative
+/// paths. This is the single source of truth: extraction attempts them in this
+/// order and registry discovery lists them in this order, so a candidate can
+/// never be added to one and missed by the other.
+pub(crate) const SESSION_CANDIDATES: [(&str, SessionStoreFormat); 5] = [
+  (
+    "sessionstore-backups/recovery.jsonlz4",
+    SessionStoreFormat::JsonLz4,
+  ),
+  (
+    "sessionstore-backups/recovery.baklz4",
+    SessionStoreFormat::JsonLz4,
+  ),
+  ("sessionstore.jsonlz4", SessionStoreFormat::JsonLz4),
+  ("sessionstore.js", SessionStoreFormat::LegacyJson),
+  (
+    "sessionstore-backups/previous.jsonlz4",
+    SessionStoreFormat::JsonLz4,
+  ),
+];
+
+/// Declared precedence of a session candidate at `index` in
+/// [`SESSION_CANDIDATES`], so reports order attempted candidates by declaration
+/// rather than by which ones happened to exist.
+pub(crate) fn session_candidate_precedence(index: usize) -> u16 {
+  SESSION_CANDIDATE_PRECEDENCE_STEP.saturating_mul(index as u16 + 1)
 }
 
 const SESSION_STORE_READ_ATTEMPTS: usize = 2;
@@ -277,7 +305,7 @@ pub(crate) fn query_cookies_engine_outcome(
 
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
   for (index, (path, format)) in session_candidates(cookies_dir).into_iter().enumerate() {
-    let precedence = SESSION_CANDIDATE_PRECEDENCE_STEP * (index as u16 + 1);
+    let precedence = session_candidate_precedence(index);
     match parse_session_candidate(&path, &format, domains) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
@@ -318,28 +346,7 @@ pub(crate) fn query_cookies_engine_outcome(
 }
 
 fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
-  [
-    (
-      cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-    (
-      cookies_dir.join("sessionstore-backups/recovery.baklz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-    (
-      cookies_dir.join("sessionstore.jsonlz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-    (
-      cookies_dir.join("sessionstore.js"),
-      SessionStoreFormat::LegacyJson,
-    ),
-    (
-      cookies_dir.join("sessionstore-backups/previous.jsonlz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-  ]
+  SESSION_CANDIDATES.map(|(relative, format)| (cookies_dir.join(relative), format))
 }
 
 fn get_authoritative_session_cookies(

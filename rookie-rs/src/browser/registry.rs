@@ -71,6 +71,23 @@ pub(crate) struct BrowserCapabilityDescriptor {
   pub(crate) available_decryption_tiers: Vec<String>,
 }
 
+/// Narrows declared tiers to the ones this build can actually attempt.
+///
+/// Section 5.1 makes a declared tier a capability claim rather than evidence,
+/// and the registry states that claim as "a tier rookie can attempt for this
+/// browser", not "a format this browser writes". The two differ for v20:
+/// Edge, Brave, Vivaldi, and Opera all write `app_bound_encrypted_key`, but
+/// rookie only holds Google Chrome's app-bound elevation keys, so only Chrome
+/// declares v20.
+///
+/// That distinction is load-bearing. The filter below is keyed on platform and
+/// compiled features alone, so it would happily call v20 available for any
+/// browser whose declaration listed it. Restating a declaration as
+/// browser-truth therefore needs a per-browser key-provider axis added here
+/// first, otherwise `available_decryption_tiers` starts overclaiming — and
+/// `decryptable` is defined against that effective set.
+/// `only_browsers_with_known_elevation_keys_declare_v20` pins the invariant so
+/// the change cannot land silently.
 fn capability_descriptor(
   definition: &BrowserDefinition,
   platform: PlatformId,
@@ -567,6 +584,21 @@ pub(crate) struct DiscoveryIssue {
   pub(crate) code: &'static str,
   pub(crate) path: PathBuf,
   pub(crate) message: String,
+  /// How many times this code occurred at or after `path`. Retained samples
+  /// carry 1; a bounded code folds its unsampled remainder into the first
+  /// retained sample, so the per-code total is the sum across entries.
+  pub(crate) occurrences: u32,
+}
+
+impl DiscoveryIssue {
+  fn new(code: &'static str, path: PathBuf, message: impl Into<String>) -> Self {
+    Self {
+      code,
+      path,
+      message: message.into(),
+      occurrences: 1,
+    }
+  }
 }
 
 #[derive(Debug, Default)]
@@ -703,11 +735,11 @@ fn discover_installation_profiles<F: DiscoveryFs>(
     {
       Ok(metadata) => metadata,
       Err(error) => {
-        issues.push(DiscoveryIssue {
-          code: "local_state_invalid",
-          path: installation.local_state_path.clone(),
-          message: error.to_string(),
-        });
+        issues.push(DiscoveryIssue::new(
+          "local_state_invalid",
+          installation.local_state_path.clone(),
+          error.to_string(),
+        ));
         LocalStateMetadata::default()
       }
     }
@@ -738,11 +770,11 @@ fn discover_installation_profiles<F: DiscoveryFs>(
     if profile_has_source(context, &profile_path) {
       source_bearing_marked.push(profile_path);
     } else {
-      issues.push(DiscoveryIssue {
-        code: "profile_has_no_cookie_source",
-        path: profile_path,
-        message: "profile marker has no Chromium cookie source".to_owned(),
-      });
+      issues.push(DiscoveryIssue::new(
+        "profile_has_no_cookie_source",
+        profile_path,
+        "profile marker has no Chromium cookie source".to_owned(),
+      ));
     }
   }
 
@@ -759,21 +791,21 @@ fn discover_installation_profiles<F: DiscoveryFs>(
 
   for profile_path in profile_paths {
     if !profile_has_source(context, &profile_path) {
-      issues.push(DiscoveryIssue {
-        code: "profile_has_no_cookie_source",
-        path: profile_path,
-        message: "profile marker has no Chromium cookie source".to_owned(),
-      });
+      issues.push(DiscoveryIssue::new(
+        "profile_has_no_cookie_source",
+        profile_path,
+        "profile marker has no Chromium cookie source".to_owned(),
+      ));
       continue;
     }
     let canonical_path = match context.fs.canonicalize(&profile_path) {
       Ok(path) => path,
       Err(error) => {
-        issues.push(DiscoveryIssue {
-          code: "profile_canonicalize_failed",
-          path: profile_path,
-          message: error.to_string(),
-        });
+        issues.push(DiscoveryIssue::new(
+          "profile_canonicalize_failed",
+          profile_path,
+          error.to_string(),
+        ));
         continue;
       }
     };
@@ -816,11 +848,11 @@ fn discover_installation_profiles<F: DiscoveryFs>(
       match context.fs.canonicalize(&selected_source.path) {
         Ok(path) => normalized_path_bytes(&path),
         Err(error) => {
-          issues.push(DiscoveryIssue {
-            code: "profile_source_canonicalize_failed",
-            path: selected_source.path.clone(),
-            message: error.to_string(),
-          });
+          issues.push(DiscoveryIssue::new(
+            "profile_source_canonicalize_failed",
+            selected_source.path.clone(),
+            error.to_string(),
+          ));
           continue;
         }
       }
@@ -828,11 +860,11 @@ fn discover_installation_profiles<F: DiscoveryFs>(
       normalized_path_bytes(&canonical_path)
     };
     if !seen_profiles.insert(canonical_key) {
-      issues.push(DiscoveryIssue {
-        code: "duplicate_profile",
-        path: canonical_path,
-        message: "profile is already owned by an earlier registry root".to_owned(),
-      });
+      issues.push(DiscoveryIssue::new(
+        "duplicate_profile",
+        canonical_path,
+        "profile is already owned by an earlier registry root".to_owned(),
+      ));
       continue;
     }
     installation.profiles.push(ChromiumProfile {
@@ -894,21 +926,21 @@ fn discover_browser_with_context<F: DiscoveryFs>(
     {
       Ok(expansion) => expansion,
       Err(error) => {
-        discovery.issues.push(DiscoveryIssue {
-          code: "installation_glob_failed",
-          path: resolved_root.base.join(&resolved_root.suffix),
-          message: error.to_string(),
-        });
+        discovery.issues.push(DiscoveryIssue::new(
+          "installation_glob_failed",
+          resolved_root.base.join(&resolved_root.suffix),
+          error.to_string(),
+        ));
         continue;
       }
     };
     let expansion_had_issues = !expansion.issues.is_empty();
     for issue in expansion.issues.drain(..) {
-      discovery.issues.push(DiscoveryIssue {
-        code: "installation_glob_expand_failed",
-        path: issue.path,
-        message: issue.message,
-      });
+      discovery.issues.push(DiscoveryIssue::new(
+        "installation_glob_expand_failed",
+        issue.path,
+        issue.message,
+      ));
     }
     expansion
       .paths
@@ -921,11 +953,11 @@ fn discover_browser_with_context<F: DiscoveryFs>(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
         Err(error) => {
           discovery.detected_roots += 1;
-          discovery.issues.push(DiscoveryIssue {
-            code: "installation_metadata_failed",
-            path: resolved,
-            message: error.to_string(),
-          });
+          discovery.issues.push(DiscoveryIssue::new(
+            "installation_metadata_failed",
+            resolved,
+            error.to_string(),
+          ));
           continue;
         }
       }
@@ -933,21 +965,21 @@ fn discover_browser_with_context<F: DiscoveryFs>(
       let canonical_path = match context.fs.canonicalize(&resolved) {
         Ok(path) => path,
         Err(error) => {
-          discovery.issues.push(DiscoveryIssue {
-            code: "installation_canonicalize_failed",
-            path: resolved,
-            message: error.to_string(),
-          });
+          discovery.issues.push(DiscoveryIssue::new(
+            "installation_canonicalize_failed",
+            resolved,
+            error.to_string(),
+          ));
           continue;
         }
       };
       let installation_key = normalized_path_bytes(&canonical_path);
       if !seen_installations.insert(installation_key.clone()) {
-        discovery.issues.push(DiscoveryIssue {
-          code: "duplicate_installation",
-          path: canonical_path,
-          message: "installation is already owned by an earlier registry root".to_owned(),
-        });
+        discovery.issues.push(DiscoveryIssue::new(
+          "duplicate_installation",
+          canonical_path,
+          "installation is already owned by an earlier registry root".to_owned(),
+        ));
         continue;
       }
       let id = installation_id(
@@ -976,11 +1008,11 @@ fn discover_browser_with_context<F: DiscoveryFs>(
           ) {
             Ok(()) => discovery.enumerated_roots += 1,
             Err(error) => {
-              discovery.issues.push(DiscoveryIssue {
-                code: "installation_enumeration_failed",
-                path: installation.path.clone(),
-                message: error.to_string(),
-              });
+              discovery.issues.push(DiscoveryIssue::new(
+                "installation_enumeration_failed",
+                installation.path.clone(),
+                error.to_string(),
+              ));
               discovery.installations.push(installation);
               continue;
             }
@@ -1112,6 +1144,9 @@ pub(crate) struct ChromiumInstallationExtraction {
 pub(crate) struct ChromiumRegistryReport {
   pub(crate) installations: Vec<ChromiumInstallationExtraction>,
   pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+  /// Every detected root failed enumeration, so an empty installation list is a
+  /// failure rather than an absent browser.
+  pub(crate) all_detected_roots_failed: bool,
 }
 
 fn sort_cookies(cookies: &mut [Cookie]) {
@@ -1153,6 +1188,7 @@ where
   }
 
   let mut report = ChromiumRegistryReport {
+    all_detected_roots_failed: discovery.all_detected_roots_failed(),
     discovery_issues: discovery.issues,
     ..ChromiumRegistryReport::default()
   };
@@ -1323,6 +1359,30 @@ fn profiles_for_listing(
   Ok(discovery.profiles())
 }
 
+/// Chromium listing that keeps its discovery diagnostics.
+///
+/// [`chromium_profiles`] answers only "which profiles exist", so a root that
+/// failed while a sibling root succeeded leaves no trace in its result. The
+/// report layer needs those partial failures and the detected/enumerated root
+/// state, so it takes this seam instead.
+pub(crate) struct ChromiumListing {
+  pub(crate) profiles: Vec<ChromiumProfile>,
+  pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+  pub(crate) installations_discovered: usize,
+  pub(crate) all_detected_roots_failed: bool,
+}
+
+pub(crate) fn chromium_listing(browser_id: &str) -> Result<ChromiumListing> {
+  let context = DiscoveryContext::system()?;
+  let discovery = discover_browser_with_context(&context, browser_id)?;
+  Ok(ChromiumListing {
+    profiles: discovery.profiles(),
+    installations_discovered: discovery.installations.len(),
+    all_detected_roots_failed: discovery.all_detected_roots_failed(),
+    discovery_issues: discovery.issues,
+  })
+}
+
 /// Private generic Chromium report seam covering every registered
 /// Chromium-family browser. Legacy named wrappers keep their frozen selectors.
 pub(crate) fn chromium_registry_report(
@@ -1413,34 +1473,31 @@ pub(crate) struct EngineProfileExtraction {
 pub(crate) struct EngineExtractionOutcome {
   pub(crate) profiles: Vec<EngineProfileExtraction>,
   pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+  /// Distinct installations that were resolved and owned by this browser.
+  /// Duplicates and roots that failed to canonicalize are excluded, matching
+  /// what the Chromium adapter reports.
   pub(crate) installations_discovered: usize,
+  /// Roots that existed on disk, including ones that then failed to
+  /// canonicalize or were owned by an earlier root.
+  pub(crate) installations_detected: usize,
+  /// Roots whose profile enumeration completed, even when it found nothing.
+  pub(crate) installations_enumerated: usize,
+}
+
+impl EngineExtractionOutcome {
+  /// Section 5.7: when every applicable detected root fails enumeration the
+  /// result is `failed`/`Err`, never an empty list indistinguishable from a
+  /// browser that is simply not installed.
+  pub(crate) fn all_detected_roots_failed(&self) -> bool {
+    self.installations_detected > 0 && self.installations_enumerated == 0
+  }
 }
 
 pub(crate) const GECKO_PERSISTENT_SOURCE: &str = "cookies.sqlite";
 
-/// Section 7 session candidates in authoritative order. Their declared
-/// precedence is their position here, which is the same order
-/// [`mozilla::query_cookies_engine_outcome`] attempts them in.
-pub(crate) const GECKO_SESSION_CANDIDATES: [(&str, &str); 5] = [
-  (
-    "sessionstore-backups/recovery.jsonlz4",
-    "firefox_session_jsonlz4",
-  ),
-  (
-    "sessionstore-backups/recovery.baklz4",
-    "firefox_session_jsonlz4",
-  ),
-  ("sessionstore.jsonlz4", "firefox_session_jsonlz4"),
-  ("sessionstore.js", "firefox_session_json"),
-  (
-    "sessionstore-backups/previous.jsonlz4",
-    "firefox_session_jsonlz4",
-  ),
-];
-
 fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
   context.fs.exists(&path.join(GECKO_PERSISTENT_SOURCE))
-    || GECKO_SESSION_CANDIDATES
+    || mozilla::SESSION_CANDIDATES
       .iter()
       .any(|(relative, _)| context.fs.exists(&path.join(relative)))
 }
@@ -1483,14 +1540,14 @@ fn gecko_profiles_with_context<F: DiscoveryFs>(
         PERSISTENT_SOURCE_PRECEDENCE,
       ));
     }
-    for (index, (relative, format)) in GECKO_SESSION_CANDIDATES.into_iter().enumerate() {
+    for (index, (relative, format)) in mozilla::SESSION_CANDIDATES.into_iter().enumerate() {
       let path = profile.path.join(relative);
       if context.fs.exists(&path) {
         profile.sources.push(source_candidate(
           path,
           SOURCE_ROLE_SESSION,
-          format,
-          PERSISTENT_SOURCE_PRECEDENCE * (index as u16 + 1),
+          format.format_id(),
+          mozilla::session_candidate_precedence(index),
         ));
       }
     }
@@ -1503,45 +1560,25 @@ pub(crate) fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionOutcome
   gecko_profiles_with_context(&context, browser_id)
 }
 
-const MAX_GECKO_DISCOVERY_ISSUES_PER_CODE: usize = 32;
+const MAX_DISCOVERY_ISSUE_SAMPLES: usize = 32;
 
-fn push_bounded_gecko_issue(
+/// Retains at most [`MAX_DISCOVERY_ISSUE_SAMPLES`] paths per code so a profile
+/// tree full of the same defect cannot dictate report size. Occurrences beyond
+/// the sample bound are counted on the first retained sample, so the per-code
+/// total survives even though its paths do not.
+fn push_bounded_discovery_issue(
   issues: &mut Vec<DiscoveryIssue>,
   code: &'static str,
   path: PathBuf,
   message: &str,
 ) {
-  if let Some(summary) = issues
-    .iter_mut()
-    .find(|issue| issue.code == code && issue.message.starts_with("additional "))
-  {
-    let omitted = summary
-      .message
-      .split_whitespace()
-      .nth(1)
-      .and_then(|count| count.parse::<usize>().ok())
-      .unwrap_or(1)
-      + 1;
-    summary.message = format!(
-      "additional {omitted} {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
-    );
+  let sampled = issues.iter().filter(|issue| issue.code == code).count();
+  if sampled < MAX_DISCOVERY_ISSUE_SAMPLES {
+    issues.push(DiscoveryIssue::new(code, path, message));
     return;
   }
-  let sampled = issues.iter().filter(|issue| issue.code == code).count();
-  if sampled < MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
-    issues.push(DiscoveryIssue {
-      code,
-      path,
-      message: message.to_owned(),
-    });
-  } else if sampled == MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
-    issues.push(DiscoveryIssue {
-      code,
-      path,
-      message: format!(
-        "additional 1 {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
-      ),
-    });
+  if let Some(first) = issues.iter_mut().find(|issue| issue.code == code) {
+    first.occurrences = first.occurrences.saturating_add(1);
   }
 }
 
@@ -1582,6 +1619,44 @@ fn markerless_gecko_profiles<F: DiscoveryFs>(
   })
 }
 
+/// Resolves a registry root to the canonical directory that identifies its
+/// installation.
+///
+/// Section 5.5 gives the first installation in deterministic registry order
+/// ownership of everything under it, so a later root resolving to the same
+/// directory is one `duplicate_installation` signal rather than a second
+/// installation whose every profile then looks like a `duplicate_profile`.
+fn canonical_installation_root<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  root_path: PathBuf,
+  seen_installations: &mut HashSet<Vec<u8>>,
+  outcome: &mut EngineExtractionOutcome,
+) -> Option<PathBuf> {
+  outcome.installations_detected += 1;
+  let canonical_root = match context.fs.canonicalize(&root_path) {
+    Ok(path) => path,
+    Err(error) => {
+      outcome.discovery_issues.push(DiscoveryIssue::new(
+        "installation_canonicalize_failed",
+        root_path,
+        error.to_string(),
+      ));
+      return None;
+    }
+  };
+  if !seen_installations.insert(normalized_path_bytes(&canonical_root)) {
+    push_bounded_discovery_issue(
+      &mut outcome.discovery_issues,
+      "duplicate_installation",
+      canonical_root,
+      "installation is already owned by an earlier registry root",
+    );
+    return None;
+  }
+  outcome.installations_discovered += 1;
+  Some(canonical_root)
+}
+
 fn discover_gecko_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
@@ -1593,6 +1668,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
   }
   let mut roots: Vec<&InstallationRoot> = definition.roots.iter().collect();
   roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
+  let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
   let mut outcome = EngineExtractionOutcome::default();
 
@@ -1607,18 +1683,11 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
     if !context.fs.is_dir(&root_path) {
       continue;
     }
-    let canonical_root = match context.fs.canonicalize(&root_path) {
-      Ok(path) => path,
-      Err(error) => {
-        outcome.discovery_issues.push(DiscoveryIssue {
-          code: "installation_canonicalize_failed",
-          path: root_path,
-          message: error.to_string(),
-        });
-        continue;
-      }
+    let Some(canonical_root) =
+      canonical_installation_root(context, root_path, &mut seen_installations, &mut outcome)
+    else {
+      continue;
     };
-    outcome.installations_discovered += 1;
     let installation_id = installation_id(
       &definition.canonical_id,
       &root.root_id,
@@ -1639,11 +1708,11 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         Ok(profiles) if profiles.is_empty() => (profiles, true),
         Ok(profiles) => (profiles, false),
         Err(error) => {
-          outcome.discovery_issues.push(DiscoveryIssue {
-            code: "mozilla_profiles_ini_invalid",
-            path: ini_path,
-            message: error.to_string(),
-          });
+          outcome.discovery_issues.push(DiscoveryIssue::new(
+            "mozilla_profiles_ini_invalid",
+            ini_path,
+            error.to_string(),
+          ));
           (Vec::new(), false)
         }
       }
@@ -1651,10 +1720,13 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       (Vec::new(), true)
     };
 
+    // An unreadable profiles.ini is recovered from below, so enumeration only
+    // fails when no strategy could list the root at all.
+    let mut enumerated = true;
     let mut usable = Vec::new();
     for declared_profile in declared {
       if !gecko_profile_has_source(context, &declared_profile.path) {
-        push_bounded_gecko_issue(
+        push_bounded_discovery_issue(
           &mut outcome.discovery_issues,
           "profile_has_no_cookie_source",
           declared_profile.path,
@@ -1679,27 +1751,33 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
           Ok(discovery) => {
             usable = discovery.profiles;
             if let Some(error) = discovery.optional_container_error {
-              outcome.discovery_issues.push(DiscoveryIssue {
-                code: "optional_profiles_enumeration_failed",
-                path: canonical_root.join("Profiles"),
-                message: error.to_string(),
-              });
+              outcome.discovery_issues.push(DiscoveryIssue::new(
+                "optional_profiles_enumeration_failed",
+                canonical_root.join("Profiles"),
+                error.to_string(),
+              ));
             }
           }
-          Err(error) => outcome.discovery_issues.push(DiscoveryIssue {
-            code: "installation_enumeration_failed",
-            path: canonical_root.clone(),
-            message: error.to_string(),
-          }),
+          Err(error) => {
+            enumerated = false;
+            outcome.discovery_issues.push(DiscoveryIssue::new(
+              "installation_enumeration_failed",
+              canonical_root.clone(),
+              error.to_string(),
+            ));
+          }
         }
       }
+    }
+    if enumerated {
+      outcome.installations_enumerated += 1;
     }
 
     for declared_profile in usable {
       let profile_path = match context.fs.canonicalize(&declared_profile.path) {
         Ok(path) => path,
         Err(error) => {
-          push_bounded_gecko_issue(
+          push_bounded_discovery_issue(
             &mut outcome.discovery_issues,
             "profile_canonicalize_failed",
             declared_profile.path,
@@ -1709,7 +1787,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         }
       };
       if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
-        push_bounded_gecko_issue(
+        push_bounded_discovery_issue(
           &mut outcome.discovery_issues,
           "duplicate_profile",
           profile_path,
@@ -1883,6 +1961,7 @@ fn discover_safari_with_context<F: DiscoveryFs>(
     browser_id,
     BrowserEngine::Safari,
   )?;
+  let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
   let mut outcome = EngineExtractionOutcome::default();
 
@@ -1898,18 +1977,11 @@ fn discover_safari_with_context<F: DiscoveryFs>(
     if !context.fs.is_dir(&root_path) {
       continue;
     }
-    let canonical_root = match context.fs.canonicalize(&root_path) {
-      Ok(path) => path,
-      Err(error) => {
-        outcome.discovery_issues.push(DiscoveryIssue {
-          code: "installation_canonicalize_failed",
-          path: root_path,
-          message: error.to_string(),
-        });
-        continue;
-      }
+    let Some(canonical_root) =
+      canonical_installation_root(context, root_path, &mut seen_installations, &mut outcome)
+    else {
+      continue;
     };
-    outcome.installations_discovered += 1;
     let installation_id = installation_id(
       &definition.canonical_id,
       &root.root_id,
@@ -1917,13 +1989,16 @@ fn discover_safari_with_context<F: DiscoveryFs>(
       &normalized_path_bytes(&canonical_root),
     );
 
+    // Safari profile discovery degrades to the default profile instead of
+    // failing, so a canonicalized root is always enumerated.
+    outcome.installations_enumerated += 1;
     let (profiles, discovery_warning) = safari::discover_safari_profiles(&canonical_root);
     if let Some(message) = discovery_warning {
-      outcome.discovery_issues.push(DiscoveryIssue {
-        code: "safari_profile_discovery_degraded",
-        path: canonical_root.clone(),
+      outcome.discovery_issues.push(DiscoveryIssue::new(
+        "safari_profile_discovery_degraded",
+        canonical_root.clone(),
         message,
-      });
+      ));
     }
 
     for profile in profiles {
@@ -1932,19 +2007,19 @@ fn discover_safari_with_context<F: DiscoveryFs>(
         // A discovered profile with no cookie source is normal absence, not an
         // extraction failure, so it is not listed as a report profile.
         Ok(None) => {
-          outcome.discovery_issues.push(DiscoveryIssue {
-            code: "profile_has_no_cookie_source",
-            path: canonical_root.join(&profile.name),
-            message: "Safari profile has no cookie source".to_owned(),
-          });
+          outcome.discovery_issues.push(DiscoveryIssue::new(
+            "profile_has_no_cookie_source",
+            canonical_root.join(&profile.name),
+            "Safari profile has no cookie source".to_owned(),
+          ));
           continue;
         }
         Err(error) => {
-          outcome.discovery_issues.push(DiscoveryIssue {
-            code: "profile_source_inspection_failed",
-            path: canonical_root.join(&profile.name),
-            message: format!("{error:#}"),
-          });
+          outcome.discovery_issues.push(DiscoveryIssue::new(
+            "profile_source_inspection_failed",
+            canonical_root.join(&profile.name),
+            format!("{error:#}"),
+          ));
           continue;
         }
       };
@@ -1962,20 +2037,20 @@ fn discover_safari_with_context<F: DiscoveryFs>(
       let profile_path = match context.fs.canonicalize(&source_directory) {
         Ok(path) => path,
         Err(error) => {
-          outcome.discovery_issues.push(DiscoveryIssue {
-            code: "profile_canonicalize_failed",
-            path: source_directory,
-            message: error.to_string(),
-          });
+          outcome.discovery_issues.push(DiscoveryIssue::new(
+            "profile_canonicalize_failed",
+            source_directory,
+            error.to_string(),
+          ));
           continue;
         }
       };
       if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
-        outcome.discovery_issues.push(DiscoveryIssue {
-          code: "duplicate_profile",
-          path: profile_path,
-          message: "profile is already owned by an earlier registry root".to_owned(),
-        });
+        outcome.discovery_issues.push(DiscoveryIssue::new(
+          "duplicate_profile",
+          profile_path,
+          "profile is already owned by an earlier registry root".to_owned(),
+        ));
         continue;
       }
       let locator = profile_path
@@ -2080,6 +2155,7 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
     browser_id,
     BrowserEngine::InternetExplorer,
   )?;
+  let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
   let mut outcome = EngineExtractionOutcome::default();
 
@@ -2095,33 +2171,29 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
     if !context.fs.is_dir(&root_path) {
       continue;
     }
-    let canonical_root = match context.fs.canonicalize(&root_path) {
-      Ok(path) => path,
-      Err(error) => {
-        outcome.discovery_issues.push(DiscoveryIssue {
-          code: "installation_canonicalize_failed",
-          path: root_path,
-          message: error.to_string(),
-        });
-        continue;
-      }
+    let Some(canonical_root) =
+      canonical_installation_root(context, root_path, &mut seen_installations, &mut outcome)
+    else {
+      continue;
     };
-    outcome.installations_discovered += 1;
+    // A WebCache root is its own profile, so there is no enumeration step that
+    // could fail once the root canonicalized.
+    outcome.installations_enumerated += 1;
     let source_path = canonical_root.join(INTERNET_EXPLORER_COOKIE_FILE);
     if !context.fs.exists(&source_path) {
-      outcome.discovery_issues.push(DiscoveryIssue {
-        code: "profile_has_no_cookie_source",
-        path: canonical_root,
-        message: "WebCache root has no cookie database".to_owned(),
-      });
+      outcome.discovery_issues.push(DiscoveryIssue::new(
+        "profile_has_no_cookie_source",
+        canonical_root,
+        "WebCache root has no cookie database".to_owned(),
+      ));
       continue;
     }
     if !seen_profiles.insert(normalized_path_bytes(&canonical_root)) {
-      outcome.discovery_issues.push(DiscoveryIssue {
-        code: "duplicate_profile",
-        path: canonical_root,
-        message: "profile is already owned by an earlier registry root".to_owned(),
-      });
+      outcome.discovery_issues.push(DiscoveryIssue::new(
+        "duplicate_profile",
+        canonical_root,
+        "profile is already owned by an earlier registry root".to_owned(),
+      ));
       continue;
     }
     let installation_id = installation_id(
@@ -2713,36 +2785,41 @@ mod tests {
     let context = test_context(temp.path().to_path_buf());
     let root = gecko_test_root(&context);
     seed_empty_gecko_database(&root.join("Profiles/shared"));
-    let ini = (0..MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 5)
+    let ini = (0..MAX_DISCOVERY_ISSUE_SAMPLES + 5)
       .map(|index| format!("[Profile{index}]\nName=duplicate-{index}\nPath=Profiles/shared\n"))
       .collect::<String>();
     std::fs::write(root.join("profiles.ini"), ini).expect("write duplicate declarations");
 
     let report = discover_gecko_with_context(&context, "firefox").expect("discover duplicates");
     assert_eq!(report.profiles.len(), 1);
-    assert_eq!(
-      report
-        .discovery_issues
-        .iter()
-        .filter(|issue| issue.code == "duplicate_profile")
-        .count(),
-      MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1
-    );
-    let summary = report
+    let duplicates = report
       .discovery_issues
       .iter()
-      .find(|issue| issue.code == "duplicate_profile" && issue.message.starts_with("additional "))
-      .expect("duplicate overflow summary");
-    assert!(summary.message.contains("additional 4 duplicate_profile"));
+      .filter(|issue| issue.code == "duplicate_profile")
+      .collect::<Vec<_>>();
+    // One declaration owns the profile; every later one is a bounded duplicate,
+    // and the unsampled remainder survives as a typed count rather than a
+    // number formatted into the message.
+    assert_eq!(duplicates.len(), MAX_DISCOVERY_ISSUE_SAMPLES);
+    assert_eq!(
+      duplicates
+        .iter()
+        .map(|issue| issue.occurrences)
+        .sum::<u32>(),
+      MAX_DISCOVERY_ISSUE_SAMPLES as u32 + 4
+    );
+    assert!(duplicates
+      .iter()
+      .all(|issue| !issue.message.contains("additional")));
   }
 
   #[test]
-  fn missing_source_gecko_issues_are_bounded_with_an_overflow_summary() {
+  fn missing_source_gecko_issues_are_bounded_with_a_typed_occurrence_count() {
     let temp = TempDir::new("gecko-missing-source-bound");
     let context = test_context(temp.path().to_path_buf());
     let root = gecko_test_root(&context);
     std::fs::create_dir_all(&root).expect("create Firefox root");
-    let ini = (0..MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 5)
+    let ini = (0..MAX_DISCOVERY_ISSUE_SAMPLES + 5)
       .map(|index| format!("[Profile{index}]\nName=stale-{index}\nPath=Profiles/stale-{index}\n"))
       .collect::<String>();
     std::fs::write(root.join("profiles.ini"), ini).expect("write stale declarations");
@@ -2753,12 +2830,15 @@ mod tests {
       .iter()
       .filter(|issue| issue.code == "profile_has_no_cookie_source")
       .collect::<Vec<_>>();
-    assert_eq!(issues.len(), MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1);
-    assert!(issues
-      .last()
-      .expect("overflow summary")
-      .message
-      .contains("additional 5 profile_has_no_cookie_source"));
+    assert_eq!(issues.len(), MAX_DISCOVERY_ISSUE_SAMPLES);
+    assert_eq!(
+      issues.iter().map(|issue| issue.occurrences).sum::<u32>(),
+      MAX_DISCOVERY_ISSUE_SAMPLES as u32 + 5
+    );
+    // Sampled paths keep one occurrence each; only the first carries the
+    // remainder, so no sample misrepresents its own path.
+    assert_eq!(issues[0].occurrences, 6);
+    assert!(issues[1..].iter().all(|issue| issue.occurrences == 1));
   }
 
   #[test]
@@ -2786,6 +2866,112 @@ mod tests {
     assert!(report.discovery_issues.iter().any(|issue| {
       issue.code == "optional_profiles_enumeration_failed" && issue.path == profiles_container
     }));
+  }
+
+  #[test]
+  fn gecko_root_whose_enumeration_fails_is_a_failure_not_an_empty_installation() {
+    let temp = TempDir::new("gecko-total-enumeration-failure");
+    let real_context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&real_context);
+    std::fs::create_dir_all(&root).expect("create Firefox root");
+    let canonical_root = root.canonicalize().expect("canonical installation root");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_read_dir: Some(canonical_root.clone()),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discovery completes");
+    assert!(report.profiles.is_empty());
+    assert!(report
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "installation_enumeration_failed"));
+    // Without this the caller cannot tell "Firefox is not installed" from
+    // "Firefox is installed and we could not read it".
+    assert!(report.all_detected_roots_failed());
+  }
+
+  #[test]
+  fn gecko_root_that_enumerates_nothing_is_not_a_discovery_failure() {
+    let temp = TempDir::new("gecko-empty-root");
+    let context = test_context(temp.path().to_path_buf());
+    std::fs::create_dir_all(gecko_test_root(&context)).expect("create Firefox root");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discovery completes");
+    assert!(report.profiles.is_empty());
+    assert!(!report.all_detected_roots_failed());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn gecko_roots_resolving_to_one_directory_report_a_single_duplicate_installation() {
+    let temp = TempDir::new("gecko-duplicate-installation");
+    let context = test_context_for(PlatformId::Linux, temp.path().to_path_buf(), []);
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, PlatformId::Linux, "firefox").expect("Firefox");
+    let root_path = |root_id: &str| {
+      let root = definition
+        .roots
+        .iter()
+        .find(|root| root.root_id == root_id)
+        .expect("Firefox registry root");
+      let resolved = context.resolve_template(&root.template).expect("root path");
+      resolved.base.join(resolved.suffix)
+    };
+
+    let native = root_path("firefox-native");
+    seed_empty_gecko_database(&native.join("Profiles/profile"));
+    std::fs::write(
+      native.join("profiles.ini"),
+      "[Profile0]\nName=Shared\nPath=Profiles/profile\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let snap = root_path("firefox-snap");
+    std::fs::create_dir_all(snap.parent().expect("snap parent")).expect("create snap parent");
+    std::os::unix::fs::symlink(&native, &snap).expect("alias the snap root onto the native one");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover Firefox");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(report.installations_discovered, 1);
+    // The aliased root is one clear signal, not a second installation whose
+    // every profile then looks like a duplicate.
+    assert_eq!(
+      report
+        .discovery_issues
+        .iter()
+        .filter(|issue| issue.code == "duplicate_installation")
+        .count(),
+      1
+    );
+    assert!(!report
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "duplicate_profile"));
+  }
+
+  #[test]
+  fn only_browsers_with_known_elevation_keys_declare_v20() {
+    let registry = embedded_registry().expect("registry");
+    // rookie holds Google Chrome's app-bound elevation keys and no other
+    // vendor's, so v20 stays a Chrome-only declaration. Other Chromium
+    // browsers do write `app_bound_encrypted_key`; restating declarations as
+    // browser-truth means teaching `capability_descriptor` a per-browser key
+    // axis first, or `available_decryption_tiers` will overclaim.
+    for definitions in registry.platforms.values() {
+      for definition in definitions {
+        if definition
+          .capabilities
+          .declared_decryption_tiers
+          .iter()
+          .any(|tier| tier == "v20")
+        {
+          assert_eq!(definition.canonical_id, "chrome");
+        }
+      }
+    }
   }
 
   #[test]
