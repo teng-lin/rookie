@@ -2937,6 +2937,15 @@ mod tests {
     // resolve exactly what the legacy path resolves. A future credential
     // change lands in both files and this still holds, where an assertion on
     // literal values would have to be rewritten.
+    //
+    // Only the field(s) the current platform actually uses are compared.
+    // legacy config.json's per-platform sections carry all three credential
+    // fields on every entry regardless of relevance (e.g. macOS `arc` still
+    // lists a `unix_crypt_name`, a Linux-only concept, as cruft from the old
+    // flat schema); the registry's `key_credentials` correctly omits fields
+    // that don't apply to a given platform, so comparing an inapplicable
+    // field would fail on a difference that reflects the registry being
+    // *more* correct than the legacy data, not a resolution mismatch.
     let platform = PlatformId::current().expect("platform");
     let registry = embedded_registry().expect("registry");
     let mut compared = 0;
@@ -2950,21 +2959,28 @@ mod tests {
       };
       let generic =
         registry_key_credentials(&definition.canonical_id).expect("registry credentials");
-      assert_eq!(
-        generic.osx_key_service, legacy.osx_key_service,
-        "{} keychain service",
-        definition.canonical_id
-      );
-      assert_eq!(
-        generic.osx_key_user, legacy.osx_key_user,
-        "{} keychain account",
-        definition.canonical_id
-      );
-      assert_eq!(
-        generic.unix_crypt_name, legacy.unix_crypt_name,
-        "{} crypt name",
-        definition.canonical_id
-      );
+      match platform {
+        PlatformId::Macos => {
+          assert_eq!(
+            generic.osx_key_service, legacy.osx_key_service,
+            "{} keychain service",
+            definition.canonical_id
+          );
+          assert_eq!(
+            generic.osx_key_user, legacy.osx_key_user,
+            "{} keychain account",
+            definition.canonical_id
+          );
+        }
+        PlatformId::Linux => {
+          assert_eq!(
+            generic.unix_crypt_name, legacy.unix_crypt_name,
+            "{} crypt name",
+            definition.canonical_id
+          );
+        }
+        PlatformId::Windows => unreachable!("cfg-gated to linux and macos only"),
+      }
       compared += 1;
     }
     assert!(compared > 0, "no shared browsers were compared");
