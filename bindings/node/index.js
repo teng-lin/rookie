@@ -327,6 +327,9 @@ if (!nativeBinding) {
 const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
 
 function asyncNative(nativeFunction) {
+  if (typeof nativeFunction !== 'function') {
+    throw new TypeError('Expected a native binding function')
+  }
   return (...args) => {
     try {
       return Promise.resolve(nativeFunction(...args))

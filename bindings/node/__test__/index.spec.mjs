@@ -21,9 +21,9 @@ import rookieCookies, {
 const execFileAsync = promisify(execFile);
 
 // Every function the loader (bindings/node/index.js) is expected to export
-// after patch-loader.js runs, per bindings/node/index.d.ts. This guards
-// against a napi-rs output-format shift silently dropping an export (e.g.
-// `String.replace()` no-op in patch-loader.js) without anything failing.
+// after patch-loader.js runs, per bindings/node/index.d.ts. Required native
+// functions are validated while the facade is constructed; this list also
+// guards against the documented facade and its smoke test drifting apart.
 const EXPECTED_EXPORTS = [
   "version",
   "anyBrowser",
@@ -62,6 +62,22 @@ test("version returns a non-empty string", (t) => {
   const v = version();
   t.is(typeof v, "string");
   t.true(v.length > 0);
+});
+
+test("all packages advertise the exact Node-API v4 engine range", (t) => {
+  const expected = "^10.16.0 || ^11.8.0 || >=12.0.0";
+  const manifests = [
+    ["root", new URL("../package.json", import.meta.url)],
+    ["darwin-arm64", new URL("../npm/darwin-arm64/package.json", import.meta.url)],
+    ["darwin-x64", new URL("../npm/darwin-x64/package.json", import.meta.url)],
+    ["linux-x64-gnu", new URL("../npm/linux-x64-gnu/package.json", import.meta.url)],
+    ["win32-x64-msvc", new URL("../npm/win32-x64-msvc/package.json", import.meta.url)],
+  ];
+
+  for (const [name, url] of manifests) {
+    const manifest = JSON.parse(readFileSync(url, "utf8"));
+    t.is(manifest.engines.node, expected, `${name} engine range`);
+  }
 });
 
 test("firefoxBased throws on a missing db path", async (t) => {

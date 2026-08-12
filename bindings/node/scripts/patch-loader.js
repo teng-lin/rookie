@@ -55,6 +55,9 @@ if (exportStart === -1) {
 
 loader = loader.slice(0, exportStart)
 loader += `function asyncNative(nativeFunction) {
+  if (typeof nativeFunction !== 'function') {
+    throw new TypeError('Expected a native binding function')
+  }
   return (...args) => {
     try {
       return Promise.resolve(nativeFunction(...args))
