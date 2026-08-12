@@ -513,9 +513,30 @@ fn finish_profile(mut engine: EngineExtractionOutcome) -> ProfileExtraction {
   }
 }
 
+/// Adds to a wire counter, recording any clamp. Every `ReportStats` counter is
+/// `u32` for exact Node/TypeScript representation, so a count that hits the
+/// ceiling must set `counters_saturated` rather than quietly read as exact.
+fn add_saturating(counter: &mut u32, amount: u32, saturated: &mut bool) {
+  match counter.checked_add(amount) {
+    Some(value) => *counter = value,
+    None => {
+      *counter = u32::MAX;
+      *saturated = true;
+    }
+  }
+}
+
+fn narrow(value: usize, saturated: &mut bool) -> u32 {
+  u32::try_from(value).unwrap_or_else(|_| {
+    *saturated = true;
+    u32::MAX
+  })
+}
+
 fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> ExtractionReport {
+  let mut saturated = false;
   let mut summary = ReportStats {
-    registered_browsers: u32::try_from(registered_browsers).unwrap_or(u32::MAX),
+    registered_browsers: narrow(registered_browsers, &mut saturated),
     ..ReportStats::default()
   };
   let mut top_level = Vec::new();
@@ -526,24 +547,27 @@ fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> Extrac
   for outcome in outcomes {
     discovery_failed |= outcome.discovery_failed;
     if outcome.detected {
-      summary.browsers_detected += 1;
+      add_saturating(&mut summary.browsers_detected, 1, &mut saturated);
     } else {
-      summary.browsers_not_detected += 1;
+      add_saturating(&mut summary.browsers_not_detected, 1, &mut saturated);
     }
-    summary.installations_discovered = summary
-      .installations_discovered
-      .saturating_add(u32::try_from(outcome.installations_discovered).unwrap_or(u32::MAX));
+    let discovered = narrow(outcome.installations_discovered, &mut saturated);
+    add_saturating(
+      &mut summary.installations_discovered,
+      discovered,
+      &mut saturated,
+    );
     for issue in outcome.issues {
       push_aggregated(&mut top_level, issue);
     }
     for engine in outcome.profiles {
       let profile = finish_profile(engine);
-      summary.profiles_discovered = summary.profiles_discovered.saturating_add(1);
+      add_saturating(&mut summary.profiles_discovered, 1, &mut saturated);
       for source in &profile.sources {
         if source.status == SourceStatusCode::succeeded() {
-          summary.sources_succeeded = summary.sources_succeeded.saturating_add(1);
+          add_saturating(&mut summary.sources_succeeded, 1, &mut saturated);
         } else {
-          summary.sources_failed = summary.sources_failed.saturating_add(1);
+          add_saturating(&mut summary.sources_failed, 1, &mut saturated);
         }
       }
       counters.add(&profile.stats);
@@ -555,7 +579,7 @@ fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> Extrac
   summary.rows_seen = totals.rows_seen;
   summary.cookies_emitted = totals.cookies_emitted;
   summary.rows_skipped = totals.rows_skipped;
-  summary.counters_saturated = totals.counters_saturated;
+  summary.counters_saturated = totals.counters_saturated || saturated;
 
   let status = report_status(&profiles, &top_level, discovery_failed);
   ExtractionReport {
@@ -642,8 +666,29 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
 pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<ProfileDescriptor>> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let outcome = collect_report(&browser, None, false, None)?;
+  // An empty list must mean "looked, found nothing". Roots that all failed to
+  // enumerate are one way to lose everything; profiles that were all found and
+  // then all failed (canonicalization, source inspection) are another, and both
+  // would otherwise be indistinguishable from an uninstalled browser. The
+  // listing type cannot carry issues, so the ones that caused the loss are
+  // reported in the error rather than dropped at this boundary.
+  let errors = outcome
+    .issues
+    .iter()
+    .filter(|issue| issue.is_error())
+    .map(|issue| issue.message.as_str())
+    .collect::<Vec<_>>();
   if outcome.discovery_failed {
-    bail!("every detected {browser_id} installation failed profile enumeration")
+    bail!(
+      "every detected {browser_id} installation failed profile enumeration: {}",
+      errors.join("; ")
+    )
+  }
+  if outcome.profiles.is_empty() && !errors.is_empty() {
+    bail!(
+      "every discovered {browser_id} profile failed discovery: {}",
+      errors.join("; ")
+    )
   }
   Ok(
     outcome
@@ -718,6 +763,248 @@ mod tests {
 
   fn status(outcome: BrowserOutcome) -> ReportStatusCode {
     assemble(1, vec![outcome]).status
+  }
+
+  fn chromium_profile(
+    selected_candidate: bool,
+    error: Option<&str>,
+  ) -> registry::ChromiumProfileExtraction {
+    let path = PathBuf::from("/chrome/Default");
+    registry::ChromiumProfileExtraction {
+      profile: registry::ChromiumProfile {
+        profile_id: "c".repeat(64),
+        installation_id: "d".repeat(64),
+        directory_name: "Default".to_owned(),
+        display_name: "Person 1".to_owned(),
+        path: path.clone(),
+        is_default: true,
+        is_active: true,
+        active_order: Some(0),
+        is_last_used: true,
+        persistent_candidates: vec![registry::CookieSourceCandidate {
+          path: path.join("Network/Cookies"),
+          precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+          exists: selected_candidate,
+          selected: selected_candidate,
+        }],
+      },
+      cookies: Vec::new(),
+      stats: crate::browser::chromium::ChromiumExtractionStats {
+        rows_seen: 0,
+        cookies_emitted: 0,
+        rows_skipped: 0,
+      },
+      row_issues: Vec::new(),
+      acquisition: registry::SourceAcquisition::NotAttempted,
+      acquisition_attempts: 1,
+      error: error.map(str::to_owned),
+    }
+  }
+
+  /// The real Chromium adapter, not a hand-built outcome. A profile whose
+  /// source discovery failed must not be reported as ordinary absence -- this
+  /// is the path on which that bug shipped.
+  #[test]
+  fn chromium_profile_that_failed_discovery_reaches_the_report_as_failed() {
+    let browser = BrowserId::known("chrome");
+    let engine = chromium_profile_outcome(
+      &browser,
+      &"d".repeat(64),
+      chromium_profile(false, Some("Local State is unreadable")),
+    )
+    .expect("adapt the profile");
+    assert!(engine.sources.is_empty());
+    let issue = engine.issues.first().expect("an issue for the failure");
+    assert_eq!(issue.code.as_str(), "profile_extraction_failed");
+    assert!(issue.is_error());
+    assert_eq!(issue.message, "Local State is unreadable");
+    assert_eq!(
+      status(outcome(vec![engine], false)),
+      ReportStatusCode::failed()
+    );
+  }
+
+  #[test]
+  fn chromium_profile_without_a_source_is_ordinary_absence() {
+    let browser = BrowserId::known("chrome");
+    let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(false, None))
+      .expect("adapt the profile");
+    let issue = engine.issues.first().expect("an absence signal");
+    assert_eq!(issue.code.as_str(), "profile_has_no_cookie_source");
+    assert!(!issue.is_error());
+    assert_eq!(
+      status(outcome(vec![engine], false)),
+      ReportStatusCode::no_sources()
+    );
+  }
+
+  #[test]
+  fn chromium_adapter_projects_a_selected_candidate_as_a_succeeding_source() {
+    let browser = BrowserId::known("chrome");
+    let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(true, None))
+      .expect("adapt the profile");
+    let report = assemble(1, vec![outcome(vec![engine], false)]);
+    assert_eq!(report.status, ReportStatusCode::complete());
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.source.format.as_str(), "chromium_sqlite");
+    assert_eq!(source.source.role.as_str(), "persistent");
+    assert!(source.selected);
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+  }
+
+  /// The real Gecko/Safari/IE adapter. Persistent sorts before session, and a
+  /// rejected session candidate keeps `selected = false` per Section 5.7.
+  #[test]
+  fn engine_adapter_orders_sources_and_preserves_session_selection() {
+    let profile = registry::EngineProfileExtraction {
+      profile_id: "c".repeat(64),
+      installation_id: "d".repeat(64),
+      installation_priority: 0,
+      installation_path: PathBuf::from("/firefox"),
+      name: "default".to_owned(),
+      path: PathBuf::from("/firefox/Profiles/default"),
+      is_default: true,
+      persistent_source_discovered: true,
+      sources: vec![
+        engine_source(
+          "sessionstore.jsonlz4",
+          "session",
+          20,
+          false,
+          Some("corrupt"),
+        ),
+        engine_source("cookies.sqlite", "persistent", 10, true, None),
+        engine_source("recovery.baklz4", "session", 30, true, None),
+      ],
+    };
+    let engine =
+      engine_profile_outcome(&BrowserId::known("firefox"), profile).expect("adapt the profile");
+    let report = assemble(1, vec![outcome(vec![engine], false)]);
+    let ordered = report.profiles[0]
+      .sources
+      .iter()
+      .map(|source| {
+        (
+          source.source.role.to_string(),
+          source.source.precedence,
+          source.selected,
+          source.status.to_string(),
+        )
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(
+      ordered,
+      vec![
+        ("persistent".to_owned(), 10, true, "succeeded".to_owned()),
+        ("session".to_owned(), 20, false, "failed".to_owned()),
+        ("session".to_owned(), 30, true, "succeeded".to_owned()),
+      ]
+    );
+    // A failed candidate beside a succeeding one is exactly the `partial` case.
+    assert_eq!(report.status, ReportStatusCode::partial());
+  }
+
+  fn engine_source(
+    name: &str,
+    role: &'static str,
+    precedence: u16,
+    selected: bool,
+    error: Option<&str>,
+  ) -> registry::EngineSourceExtraction {
+    registry::EngineSourceExtraction {
+      path: PathBuf::from("/firefox/Profiles/default").join(name),
+      role,
+      format: "mozilla_sqlite",
+      precedence,
+      selected,
+      cookies: Vec::new(),
+      rows_seen: 0,
+      rows_skipped: 0,
+      acquisition: registry::SourceAcquisition::StableFileImage,
+      acquisition_attempts: 1,
+      diagnostics: Vec::new(),
+      error: error.map(str::to_owned),
+    }
+  }
+
+  /// Two browsers failing the same way are two failures. Merging on code alone
+  /// kept the first browser's id and message and silently dropped the second's.
+  #[test]
+  fn distinct_browsers_failing_alike_stay_distinct_in_the_report() {
+    let browsers = ["chrome", "firefox"];
+    let outcomes = browsers
+      .iter()
+      .map(|id| {
+        let browser = BrowserId::known(id);
+        let mut browser_outcome = outcome(Vec::new(), true);
+        browser_outcome.detected = false;
+        browser_outcome.issues.push(
+          issue(
+            "browser_discovery_failed",
+            ExtractionStageCode::discovery(),
+            IssueSeverityCode::error(),
+            format!("{id} could not be read"),
+          )
+          .with_context(Some(&browser), None, None),
+        );
+        browser_outcome
+      })
+      .collect::<Vec<_>>();
+
+    let report = assemble(2, outcomes);
+    let failures = report
+      .issues
+      .iter()
+      .filter(|issue| issue.code.as_str() == "browser_discovery_failed")
+      .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 2);
+    for (issue, id) in failures.iter().zip(browsers) {
+      assert_eq!(issue.browser_id.as_ref().map(BrowserId::as_str), Some(id));
+      assert_eq!(issue.message, format!("{id} could not be read"));
+      assert_eq!(issue.occurrences, 1);
+    }
+    assert_eq!(report.status, ReportStatusCode::failed());
+  }
+
+  #[test]
+  fn same_browser_repeating_an_issue_still_aggregates() {
+    let browser = BrowserId::known("chrome");
+    let mut browser_outcome = outcome(Vec::new(), false);
+    for index in 0..3 {
+      browser_outcome.issues.push(
+        issue(
+          "duplicate_profile",
+          ExtractionStageCode::discovery(),
+          IssueSeverityCode::info(),
+          "already owned",
+        )
+        .with_samples(vec![format!("/chrome/Profile {index}")])
+        .with_context(Some(&browser), None, None),
+      );
+    }
+    let report = assemble(1, vec![browser_outcome]);
+    let issue = report
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "duplicate_profile")
+      .expect("aggregated issue");
+    assert_eq!(issue.occurrences, 3);
+    assert_eq!(issue.samples.len(), 3);
+  }
+
+  #[test]
+  fn an_unknown_browser_id_is_a_request_error_not_a_report() {
+    assert!(browser_extraction_report("definitely_not_a_browser", None, None).is_err());
+    assert!(browser_profile_descriptors("definitely_not_a_browser").is_err());
+    // An alias-shaped but unregistered id must fail the same way.
+    assert!(browser_extraction_report("", None, None).is_err());
+  }
+
+  #[test]
+  fn summary_counters_record_saturation_instead_of_reading_as_exact() {
+    let report = assemble(usize::MAX, Vec::new());
+    assert_eq!(report.summary.registered_browsers, u32::MAX);
+    assert!(report.summary.counters_saturated);
   }
 
   #[test]
@@ -857,5 +1144,210 @@ mod tests {
       .expect("aggregated duplicate issue");
     assert_eq!(issue.occurrences, 5);
     assert_eq!(issue.samples, vec!["/profiles/0", "/profiles/1"]);
+  }
+}
+
+/// End-to-end coverage of the real engine chain: registry discovery and
+/// extraction on a fixture tree, through each engine's adapter, into the frozen
+/// report. Constructing outcomes by hand cannot prove an engine reaches the
+/// contract at all, which is how a Chromium profile whose discovery failed came
+/// to be reported as ordinary absence.
+#[cfg(test)]
+mod engine_chain_tests {
+  use super::*;
+  use crate::browser::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes};
+  use crate::browser::registry::test_seams;
+  use crate::browser::report_core::ReportStatusCode;
+  use std::path::PathBuf;
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  struct TempDir(PathBuf);
+
+  impl TempDir {
+    fn new(tag: &str) -> Self {
+      static COUNTER: AtomicU64 = AtomicU64::new(0);
+      let count = COUNTER.fetch_add(1, Ordering::SeqCst);
+      let path = std::env::temp_dir().join(format!(
+        "rookie-report-chain-{tag}-{}-{count}",
+        std::process::id()
+      ));
+      std::fs::create_dir_all(&path).expect("create temporary directory");
+      Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+      &self.0
+    }
+  }
+
+  impl Drop for TempDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn no_keys() -> ChromiumKeyOutcomes {
+    ChromiumKeyOutcomes {
+      v10: ChromiumKeyOutcome::NotApplicable,
+      v11: ChromiumKeyOutcome::NotApplicable,
+      v20: ChromiumKeyOutcome::NotApplicable,
+    }
+  }
+
+  #[test]
+  fn a_real_gecko_profile_reaches_the_frozen_report() {
+    let temp = TempDir::new("gecko");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "firefox");
+    test_seams::seed_gecko_profile(&root.join("Profiles/default"));
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let engine = test_seams::gecko_report(&context, "firefox", None).expect("gecko report");
+    let browser = BrowserId::known("firefox");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.status, ReportStatusCode::complete());
+    assert_eq!(report.summary.profiles_discovered, 1);
+    assert_eq!(report.summary.installations_discovered, 1);
+    assert_eq!(report.summary.sources_succeeded, 1);
+    let profile = &report.profiles[0];
+    assert_eq!(profile.profile.browser_id.as_str(), "firefox");
+    assert_eq!(profile.profile.display_name, "default");
+    // Opaque ids, not display paths, are the selection keys.
+    assert_eq!(profile.profile.profile_id.as_str().len(), 64);
+    assert_eq!(profile.profile.installation_id.as_str().len(), 64);
+    let source = &profile.sources[0];
+    assert_eq!(source.source.format.as_str(), "mozilla_sqlite");
+    assert_eq!(source.source.role.as_str(), "persistent");
+    assert!(source.selected);
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+  }
+
+  #[test]
+  fn a_real_chromium_profile_reaches_the_frozen_report() {
+    let temp = TempDir::new("chromium");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "chrome");
+    test_seams::seed_chromium_profile(&root, "Default", "Person 1");
+
+    let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
+      .expect("chromium report");
+    let browser = BrowserId::known("chrome");
+    let outcome =
+      chromium_browser_outcome(&browser, registry_report).expect("adapt the chromium report");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.status, ReportStatusCode::complete());
+    assert_eq!(report.summary.profiles_discovered, 1);
+    assert_eq!(report.summary.sources_succeeded, 1);
+    assert_eq!(report.summary.cookies_emitted, 1);
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.source.format.as_str(), "chromium_sqlite");
+    assert!(source.selected);
+    assert_eq!(source.cookies[0].name, "seeded");
+  }
+
+  /// A registered browser with nothing on disk is `no_sources`, never `failed`.
+  #[test]
+  fn an_absent_installation_reaches_the_report_as_no_sources() {
+    let temp = TempDir::new("absent");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+
+    let engine = test_seams::gecko_report(&context, "firefox", None).expect("gecko report");
+    assert!(engine.profiles.is_empty());
+    let browser = BrowserId::known("firefox");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.status, ReportStatusCode::no_sources());
+    assert_eq!(report.summary.installations_discovered, 0);
+  }
+
+  /// Safari and Internet Explorer are OS-gated in `collect_report`, so their
+  /// adapters cannot be reached through the dispatch on a Linux CI host. These
+  /// drive the same engine chain with an overridden platform context, so both
+  /// engines are still proven to reach the frozen contract.
+  #[test]
+  fn a_real_safari_profile_reaches_the_frozen_report() {
+    use crate::browser::registry::PlatformId;
+
+    let temp = TempDir::new("safari");
+    let context = test_seams::context(PlatformId::Macos, temp.path().to_path_buf());
+    let library = test_seams::primary_root_path(&context, "safari");
+    let cookies = library.join("Containers/com.apple.Safari/Data/Library/Cookies");
+    std::fs::create_dir_all(&cookies).expect("create Safari cookie directory");
+    std::fs::write(
+      cookies.join("Cookies.binarycookies"),
+      b"cook\x00\x00\x00\x00",
+    )
+    .expect("seed Safari cookie file");
+
+    let engine = test_seams::safari_report(&context, "safari", None).expect("safari report");
+    let browser = BrowserId::known("safari");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.summary.installations_discovered, 1);
+    assert_eq!(report.summary.profiles_discovered, 1);
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.source.format.as_str(), "safari_binarycookies");
+    assert_eq!(source.source.role.as_str(), "persistent");
+    assert!(source.selected);
+    assert_eq!(
+      source.acquisition_strategy,
+      AcquisitionStrategyCode::stable_file_image()
+    );
+    assert_eq!(report.profiles[0].profile.browser_id.as_str(), "safari");
+  }
+
+  #[test]
+  fn a_real_internet_explorer_profile_reaches_the_frozen_report() {
+    use crate::browser::registry::{InternetExplorerRows, PlatformId};
+
+    let temp = TempDir::new("ie");
+    let context = test_seams::context(PlatformId::Windows, temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "internet_explorer");
+    std::fs::create_dir_all(&root).expect("create WebCache root");
+    std::fs::write(root.join("WebCacheV01.dat"), b"ese").expect("seed WebCache database");
+
+    // The ESE reader is injected, so this exercises the adapter chain without
+    // needing a real ESE database on a non-Windows host.
+    let engine =
+      test_seams::internet_explorer_report(&context, "internet_explorer", None, |_, _| {
+        Ok(InternetExplorerRows {
+          cookies: vec![crate::common::enums::Cookie {
+            domain: ".example.com".to_owned(),
+            path: "/".to_owned(),
+            secure: false,
+            expires: None,
+            name: "ie-cookie".to_owned(),
+            value: "value".to_owned(),
+            http_only: false,
+            same_site: 0,
+          }],
+          records_seen: 1,
+          records_skipped: 0,
+        })
+      })
+      .expect("internet explorer report");
+
+    let browser = BrowserId::known("internet_explorer");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.status, ReportStatusCode::complete());
+    assert_eq!(report.summary.cookies_emitted, 1);
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.source.format.as_str(), "internet_explorer_ese");
+    assert_eq!(
+      source.acquisition_strategy,
+      AcquisitionStrategyCode::ese_database()
+    );
+    assert_eq!(source.cookies[0].name, "ie-cookie");
   }
 }

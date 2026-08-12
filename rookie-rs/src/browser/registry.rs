@@ -17,6 +17,7 @@ use super::chromium_platform_keys::MacosPlatformKeyProvider;
 #[cfg(target_os = "windows")]
 use super::chromium_platform_keys::WindowsPlatformKeyProvider;
 use super::mozilla;
+use super::report_core::sort_cookies;
 use crate::common::enums::Cookie;
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{anyhow, bail, Context, Result};
@@ -1149,21 +1150,6 @@ pub(crate) struct ChromiumRegistryReport {
   pub(crate) all_detected_roots_failed: bool,
 }
 
-fn sort_cookies(cookies: &mut [Cookie]) {
-  cookies.sort_by(|left, right| {
-    left
-      .domain
-      .cmp(&right.domain)
-      .then_with(|| left.path.cmp(&right.path))
-      .then_with(|| left.name.cmp(&right.name))
-      .then_with(|| left.expires.cmp(&right.expires))
-      .then_with(|| left.secure.cmp(&right.secure))
-      .then_with(|| left.http_only.cmp(&right.http_only))
-      .then_with(|| left.same_site.cmp(&right.same_site))
-      .then_with(|| left.value.cmp(&right.value))
-  });
-}
-
 fn extract_chromium_with_provider<F, P>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
@@ -1847,6 +1833,7 @@ fn gecko_report_with_context<F: DiscoveryFs>(
   Ok(populate_gecko_sources(
     outcome,
     domains,
+    |path| context.fs.exists(path),
     mozilla::query_cookies_engine_outcome,
     |path| context.fs.exists(path),
   ))
@@ -1867,15 +1854,13 @@ where
     // The Mozilla outcome also owns session fallback. A missing persistent DB
     // is normal for a session-only profile and is not projected as a source.
     //
-    // Discovery's snapshot goes stale in both directions, so the query is the
-    // authority on existence: a database created since discovery is projected
-    // because the query succeeded, and one deleted since discovery is still
-    // projected so its failure is reported rather than silently dropped.
+    // Discovery's snapshot goes stale in both directions, so existence is
+    // rechecked after the query rather than inferred from it: a database that
+    // appeared since discovery is projected even when reading it then failed,
+    // and one deleted since discovery is still projected so its failure is
+    // reported instead of vanishing. Inferring from the query alone would
+    // silence a database that appeared and was corrupt or locked.
     let mut extraction = query(&persistent, domains);
-    // A database created between discovery and query is as real as one that
-    // vanished, so the cached discovery flag alone would drop it. Re-checking
-    // here narrows the window rather than closing it: only the query itself
-    // observes the source at the instant it is read.
     if profile.persistent_source_discovered || persistent_exists(&persistent) {
       sort_cookies(&mut extraction.persistent_cookies);
       profile.sources.push(EngineSourceExtraction {
@@ -2345,6 +2330,77 @@ pub(crate) mod test_seams {
       .resolve_template(&root.template)
       .expect("resolved root");
     resolved.base.join(resolved.suffix)
+  }
+
+  /// Resolves the highest-priority installation root for a browser on the
+  /// running platform, so a fixture does not have to name a platform-specific
+  /// root id.
+  pub(crate) fn primary_root_path(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+  ) -> PathBuf {
+    let registry = embedded_registry().expect("registry");
+    let definition =
+      browser_definition(registry, context.platform, browser_id).expect("registered browser");
+    let mut roots: Vec<&InstallationRoot> = definition.roots.iter().collect();
+    roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
+    let root = roots
+      .iter()
+      .find(|root| context.resolve_template(&root.template).is_some())
+      .expect("a resolvable installation root");
+    let resolved = context
+      .resolve_template(&root.template)
+      .expect("resolved root");
+    resolved.base.join(resolved.suffix)
+  }
+
+  /// Seeds a Gecko profile with an empty but well-formed cookie database.
+  pub(crate) fn seed_gecko_profile(profile: &Path) {
+    std::fs::create_dir_all(profile).expect("create Gecko profile");
+    let connection =
+      rusqlite::Connection::open(profile.join("cookies.sqlite")).expect("open Gecko database");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+          name TEXT, value TEXT, isHttpOnly INTEGER, sameSite INTEGER
+        );",
+      )
+      .expect("create Gecko cookie table");
+  }
+
+  /// Seeds a Chromium installation root with a `Local State` and one profile
+  /// holding a single plaintext cookie.
+  pub(crate) fn seed_chromium_profile(root: &Path, directory: &str, name: &str) {
+    std::fs::create_dir_all(root).expect("create installation root");
+    std::fs::write(
+      root.join("Local State"),
+      serde_json::to_vec(&serde_json::json!({
+        "profile": { "info_cache": { directory: { "name": name } } }
+      }))
+      .expect("serialize Local State"),
+    )
+    .expect("write Local State");
+    let database = root.join(directory).join("Cookies");
+    std::fs::create_dir_all(database.parent().expect("profile directory"))
+      .expect("create profile directory");
+    let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+          host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,
+          expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+          encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+          samesite INTEGER NOT NULL
+        );",
+      )
+      .expect("create cookies table");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'seeded', 'value', ?1, 0, 0)",
+        [Vec::<u8>::new()],
+      )
+      .expect("insert cookie");
   }
 
   pub(crate) fn chromium_report(
@@ -2997,13 +3053,18 @@ mod tests {
     assert!(!discovery.profiles[0].persistent_source_discovered);
 
     let mut created = false;
-    let report = populate_gecko_sources(discovery, None, |persistent, domains| {
-      if !created {
-        created = true;
-        seed_empty_gecko_database(persistent.parent().expect("profile directory"));
-      }
-      mozilla::query_cookies_engine_outcome(persistent, domains)
-    });
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |path| path.exists(),
+      |persistent, domains| {
+        if !created {
+          created = true;
+          seed_empty_gecko_database(persistent.parent().expect("profile directory"));
+        }
+        mozilla::query_cookies_engine_outcome(persistent, domains)
+      },
+    );
     let persistent = report.profiles[0]
       .sources
       .iter()
@@ -3012,6 +3073,46 @@ mod tests {
     assert_eq!(persistent.format, "mozilla_sqlite");
     assert!(persistent.selected);
     assert!(persistent.error.is_none());
+  }
+
+  #[test]
+  fn a_corrupt_database_appearing_before_query_is_reported_not_silently_dropped() {
+    let temp = TempDir::new("gecko-persistent-appears-corrupt");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    std::fs::create_dir_all(&profile).expect("create profile");
+    std::fs::write(profile.join("sessionstore.js"), "{}").expect("seed session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    // Appears between discovery and query, but unreadable. Inferring existence
+    // from query success alone would drop this failure entirely.
+    let mut created = false;
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |path| path.exists(),
+      |persistent, domains| {
+        if !created {
+          created = true;
+          std::fs::write(persistent, b"not a sqlite database").expect("seed corrupt database");
+        }
+        mozilla::query_cookies_engine_outcome(persistent, domains)
+      },
+    );
+    let persistent = report.profiles[0]
+      .sources
+      .iter()
+      .find(|source| source.role == SOURCE_ROLE_PERSISTENT)
+      .expect("corrupt persistent source is still reported");
+    assert!(persistent.selected);
+    assert!(persistent.error.is_some());
   }
 
   #[test]
@@ -3029,7 +3130,12 @@ mod tests {
     .expect("write profiles.ini");
 
     let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-    let report = populate_gecko_sources(discovery, None, mozilla::query_cookies_engine_outcome);
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |path| path.exists(),
+      mozilla::query_cookies_engine_outcome,
+    );
     assert!(!report.profiles[0]
       .sources
       .iter()

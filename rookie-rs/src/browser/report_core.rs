@@ -458,15 +458,22 @@ pub(crate) fn issue(
   }
 }
 
-/// Merges an issue into a bounded aggregate list, keyed by code and stage.
+/// Merges an issue into a bounded aggregate list, keyed by code, stage, and
+/// the browser/installation/profile it is attributed to.
 ///
 /// Row-level engine issues repeat per row; retaining every one would let a
-/// corrupt database dictate report size.
+/// corrupt database dictate report size. Context is part of the key because
+/// this list is also the report-wide one: two browsers that fail discovery the
+/// same way are two distinct failures, and merging them on code alone would
+/// keep one browser's id and message while discarding the other's entirely.
 pub(crate) fn push_aggregated(issues: &mut Vec<ExtractionIssue>, incoming: ExtractionIssue) {
-  let Some(existing) = issues
-    .iter_mut()
-    .find(|issue| issue.code == incoming.code && issue.stage == incoming.stage)
-  else {
+  let Some(existing) = issues.iter_mut().find(|issue| {
+    issue.code == incoming.code
+      && issue.stage == incoming.stage
+      && issue.browser_id == incoming.browser_id
+      && issue.installation_id == incoming.installation_id
+      && issue.profile_id == incoming.profile_id
+  }) else {
     issues.push(incoming);
     return;
   };
@@ -751,5 +758,89 @@ mod tests {
       true,
       AcquisitionStrategyCode::live_read_only(),
     )
+  }
+
+  fn cookie(domain: &str, path: &str, name: &str, value: &str) -> Cookie {
+    Cookie {
+      domain: domain.to_owned(),
+      path: path.to_owned(),
+      secure: false,
+      expires: None,
+      name: name.to_owned(),
+      value: value.to_owned(),
+      http_only: false,
+      same_site: 0,
+    }
+  }
+
+  /// Report ordering must be stable across runs, so the cookie sort is total
+  /// over every field rather than stopping at the domain.
+  #[test]
+  fn cookies_sort_by_domain_then_path_then_name_then_remaining_fields() {
+    let mut cookies = vec![
+      cookie(".b.test", "/", "a", "2"),
+      cookie(".a.test", "/deep", "a", "1"),
+      cookie(".a.test", "/", "z", "1"),
+      cookie(".a.test", "/", "a", "2"),
+      cookie(".a.test", "/", "a", "1"),
+    ];
+    let order = |cookies: &[Cookie]| {
+      cookies
+        .iter()
+        .map(|cookie| {
+          format!(
+            "{} {} {} {}",
+            cookie.domain, cookie.path, cookie.name, cookie.value
+          )
+        })
+        .collect::<Vec<_>>()
+    };
+    sort_cookies(&mut cookies);
+    let sorted = order(&cookies);
+    assert_eq!(
+      sorted,
+      vec![
+        ".a.test / a 1",
+        ".a.test / a 2",
+        ".a.test / z 1",
+        ".a.test /deep a 1",
+        ".b.test / a 2",
+      ]
+    );
+
+    // Sorting an already-sorted list must not move anything.
+    sort_cookies(&mut cookies);
+    assert_eq!(sorted, order(&cookies));
+  }
+
+  #[test]
+  fn source_descriptors_sort_persistent_before_session_then_by_precedence() {
+    let descriptor = |role: CookieSourceRoleId, precedence: u16| CookieSourceDescriptor {
+      role,
+      format: CookieSourceFormatId::known("mozilla_sqlite"),
+      path: "/profile/source".to_owned(),
+      path_lossy: false,
+      precedence,
+    };
+    let mut sources = vec![
+      descriptor(CookieSourceRoleId::session(), 20),
+      descriptor(CookieSourceRoleId::known("future_role"), 1),
+      descriptor(CookieSourceRoleId::persistent(), 10),
+      descriptor(CookieSourceRoleId::session(), 10),
+    ];
+    sort_source_descriptors(&mut sources);
+    assert_eq!(
+      sources
+        .iter()
+        .map(|source| (source.role.to_string(), source.precedence))
+        .collect::<Vec<_>>(),
+      vec![
+        ("persistent".to_owned(), 10),
+        ("session".to_owned(), 10),
+        ("session".to_owned(), 20),
+        // An unknown future role sorts after the frozen ones, never between.
+        ("future_role".to_owned(), 1),
+      ]
+    );
   }
 }
