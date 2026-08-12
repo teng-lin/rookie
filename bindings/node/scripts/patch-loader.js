@@ -47,7 +47,7 @@ loader = loader.replace(
 )
 
 const exportStart = loader.search(
-  /^(?:function (?:asyncNative|unsupportedPlatform)\(|module\.exports\.version = version)/m
+  /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.version = version)/m
 )
 if (exportStart === -1) {
   throw new Error('Generated loader has no export facade')

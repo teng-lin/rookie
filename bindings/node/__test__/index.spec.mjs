@@ -244,7 +244,10 @@ Path=Profiles/work
 });
 
 test("generated Firefox profile exports and declarations survive patching", (t) => {
+  const loader = readFileSync(new URL("../index.js", import.meta.url), "utf8");
   const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
+  t.is((loader.match(/function requiredNative\(/g) || []).length, 1);
+  t.is((loader.match(/function platformNative\(/g) || []).length, 1);
   t.regex(types, /export interface FirefoxProfileObject/);
   t.regex(types, /export declare function firefoxProfiles\(/);
   t.regex(types, /export declare function firefoxProfile\(/);
