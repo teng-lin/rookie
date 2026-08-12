@@ -79,6 +79,48 @@ impl SyntheticHome<'_> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     return self.home.join(".config/google-chrome");
   }
+
+  /// Chrome's real beta-channel root, a second installation root of the same
+  /// browser, used to prove one failing root does not hide another.
+  #[cfg(unix)]
+  fn chrome_beta_root(&self) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return self
+      .home
+      .join("Library/Application Support/Google/Chrome Beta");
+    #[cfg(not(target_os = "macos"))]
+    return self.home.join(".config/google-chrome-beta");
+  }
+}
+
+/// A directory that exists but cannot be enumerated, so discovery detects the
+/// root and then fails to read it — the difference between "not installed" and
+/// "installed and unreadable".
+///
+/// Restores the mode on drop, including on unwind, so the enclosing
+/// [`SyntheticHome`] can still delete itself. Declare it *after* the
+/// `SyntheticHome` it lives in: locals drop in reverse, so the mode is restored
+/// before the removal runs.
+#[cfg(unix)]
+struct UnreadableDir(PathBuf);
+
+#[cfg(unix)]
+impl UnreadableDir {
+  fn new(path: PathBuf) -> Self {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(&path).expect("create unreadable root");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+      .expect("deny access to the root");
+    UnreadableDir(path)
+  }
+}
+
+#[cfg(unix)]
+impl Drop for UnreadableDir {
+  fn drop(&mut self) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+  }
 }
 
 impl Drop for SyntheticHome<'_> {
@@ -486,4 +528,65 @@ fn the_wire_format_validates_identifiers_on_the_way_in() {
   let decoded =
     serde_json::from_value::<ExtractionReport>(extended).expect("unknown codes stay representable");
   assert_eq!(decoded.status.as_str(), "future_status");
+}
+
+/// A root that exists but denies enumeration is only reproducible through real
+/// filesystem permissions, which Windows does not model the same way. The
+/// engine-level equivalents are covered by `registry.rs` on every platform.
+#[cfg(unix)]
+#[test]
+fn one_failing_root_does_not_hide_the_profiles_another_root_yields() {
+  let home = SyntheticHome::new("chrome-partial-roots");
+  seed_chromium_profile(&home.chrome_beta_root(), "Default", "session", "beta-value");
+  let _denied = UnreadableDir::new(home.chrome_root());
+
+  let profiles =
+    rookie_cookies::browser_profiles("chrome").expect("a readable root still yields its profiles");
+  assert_eq!(profiles.len(), 1);
+  assert!(is_opaque_id(profiles[0].profile.profile_id.as_str()));
+
+  // The same run through the report keeps the surviving cookie *and* names the
+  // root that failed, which is the diagnostic `browser_profiles` cannot carry.
+  let report = rookie_cookies::browser_report("chrome", None, None).expect("chrome report");
+  assert_eq!(report.status, ReportStatusCode::partial());
+  assert_eq!(report.summary.cookies_emitted, 1);
+  assert_eq!(report.profiles.len(), 1);
+  assert_eq!(report.profiles[0].sources[0].cookies[0].value, "beta-value");
+  assert!(
+    !error_issues(&report).is_empty(),
+    "the unreadable root must surface as an error-severity issue"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_root_failing_enumeration_is_an_error_not_an_empty_profile_list() {
+  let home = SyntheticHome::new("chrome-all-roots-fail");
+  let _denied = UnreadableDir::new(home.chrome_root());
+
+  let error = rookie_cookies::browser_profiles("chrome")
+    .expect_err("an unreadable installation must not look like an absent one");
+  assert!(
+    error.to_string().contains("failed profile enumeration"),
+    "unexpected message: {error:#}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_detected_installation_whose_roots_all_fail_reports_failed() {
+  let home = SyntheticHome::new("chrome-failed-status");
+  let _denied = UnreadableDir::new(home.chrome_root());
+
+  // The bare listing errors, but the report is still a report: a discovery
+  // failure is not a bad request.
+  let report = rookie_cookies::browser_report("chrome", None, None)
+    .expect("a discovery failure is reported, not returned as a request error");
+  assert_eq!(report.status, ReportStatusCode::failed());
+  assert!(report.profiles.is_empty());
+  assert_eq!(report.summary.sources_succeeded, 0);
+  assert!(
+    !error_issues(&report).is_empty(),
+    "a failed report must say why"
+  );
 }
