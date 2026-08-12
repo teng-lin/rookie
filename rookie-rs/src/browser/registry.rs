@@ -4279,7 +4279,10 @@ mod tests {
         .flat_map(|installation| &installation.profiles)
         .collect::<Vec<_>>();
       assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
-      assert_eq!(profiles[0].error, None, "{browser_id} extraction succeeds");
+      assert_eq!(
+        profiles[0].failure, None,
+        "{browser_id} extraction succeeds"
+      );
       assert_eq!(
         profiles[0]
           .cookies
