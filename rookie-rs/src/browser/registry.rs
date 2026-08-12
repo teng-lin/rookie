@@ -243,7 +243,19 @@ trait DiscoveryFs {
   fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>>;
   fn canonicalize(&self, path: &Path) -> Result<PathBuf>;
   fn read_to_string(&self, path: &Path) -> Result<String>;
-  fn glob(&self, pattern: &Path) -> Result<Vec<PathBuf>>;
+  fn expand_registry_glob(&self, base: &Path, suffix: &str) -> Result<GlobExpansion>;
+}
+
+#[derive(Debug, Clone, Default)]
+struct GlobExpansion {
+  paths: Vec<PathBuf>,
+  issues: Vec<GlobExpansionIssue>,
+}
+
+#[derive(Debug, Clone)]
+struct GlobExpansionIssue {
+  path: PathBuf,
+  message: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,14 +289,56 @@ impl DiscoveryFs for RealDiscoveryFs {
     std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
   }
 
-  fn glob(&self, pattern: &Path) -> Result<Vec<PathBuf>> {
-    let pattern = pattern
-      .to_str()
-      .ok_or_else(|| anyhow!("glob pattern is not valid Unicode: {}", pattern.display()))?;
-    glob::glob(pattern)
-      .with_context(|| format!("parse glob {pattern}"))?
-      .map(|entry| entry.with_context(|| format!("expand glob {pattern}")))
-      .collect()
+  fn expand_registry_glob(&self, base: &Path, suffix: &str) -> Result<GlobExpansion> {
+    let mut paths = vec![base.to_path_buf()];
+    let mut issues = Vec::new();
+    for component in suffix
+      .split(['/', '\\'])
+      .filter(|component| !component.is_empty())
+    {
+      let pattern = glob::Pattern::new(component)
+        .with_context(|| format!("parse registry glob component {component:?}"))?;
+      if !component
+        .bytes()
+        .any(|byte| matches!(byte, b'*' | b'?' | b'['))
+      {
+        paths = paths.into_iter().map(|path| path.join(component)).collect();
+        continue;
+      }
+
+      let mut expanded = Vec::new();
+      for parent in paths {
+        match std::fs::read_dir(&parent) {
+          Ok(entries) => {
+            for entry in entries {
+              match entry {
+                Ok(entry) => {
+                  let path = entry.path();
+                  if path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| pattern.matches(name))
+                  {
+                    expanded.push(path);
+                  }
+                }
+                Err(error) => issues.push(GlobExpansionIssue {
+                  path: parent.clone(),
+                  message: format!("read registry glob entry: {error}"),
+                }),
+              }
+            }
+          }
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+          Err(error) => issues.push(GlobExpansionIssue {
+            path: parent,
+            message: format!("expand registry glob: {error}"),
+          }),
+        }
+      }
+      paths = expanded;
+    }
+    Ok(GlobExpansion { paths, issues })
   }
 }
 
@@ -293,6 +347,12 @@ struct DiscoveryContext<F> {
   home: PathBuf,
   env: BTreeMap<OsString, OsString>,
   fs: F,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRoot {
+  base: PathBuf,
+  suffix: String,
 }
 
 impl DiscoveryContext<RealDiscoveryFs> {
@@ -326,33 +386,39 @@ impl<F> DiscoveryContext<F> {
       .map(PathBuf::from)
   }
 
-  fn config_home(&self) -> PathBuf {
+  fn xdg_config_home(&self) -> PathBuf {
     self
-      .env_path("CHROME_CONFIG_HOME")
-      .or_else(|| self.env_path("XDG_CONFIG_HOME"))
+      .env_path("XDG_CONFIG_HOME")
       .unwrap_or_else(|| self.home.join(".config"))
   }
 
-  fn resolve_template(&self, template: &str) -> Option<PathBuf> {
+  fn chrome_config_home(&self) -> PathBuf {
+    self
+      .env_path("CHROME_CONFIG_HOME")
+      .unwrap_or_else(|| self.xdg_config_home())
+  }
+
+  fn resolve_template(&self, template: &str) -> Option<ResolvedRoot> {
     let replacements = [
       ("{home}", Some(self.home.clone())),
-      ("{config_home}", Some(self.config_home())),
+      ("{config_home}", Some(self.chrome_config_home())),
+      ("{xdg_config_home}", Some(self.xdg_config_home())),
       ("{local_app_data}", self.env_path("LOCALAPPDATA")),
       ("{roaming_app_data}", self.env_path("APPDATA")),
     ];
     for (token, replacement) in replacements {
       if let Some(suffix) = template.strip_prefix(token) {
         let replacement = replacement?;
-        // Registry templates may intentionally contain glob syntax (for
-        // container-managed roots), but environment-derived base directories
-        // are literal filesystem locations. Escape the latter before joining
-        // the registry-authored suffix so a metacharacter in HOME, APPDATA,
-        // or an override cannot widen the discovery pattern.
-        let escaped = glob::Pattern::escape(&replacement.to_string_lossy());
-        return Some(PathBuf::from(escaped).join(suffix.trim_start_matches(['/', '\\'])));
+        return Some(ResolvedRoot {
+          base: replacement,
+          suffix: suffix.trim_start_matches(['/', '\\']).to_owned(),
+        });
       }
     }
-    (!template.contains('{')).then(|| PathBuf::from(template))
+    (!template.contains('{')).then(|| ResolvedRoot {
+      base: PathBuf::from(template),
+      suffix: String::new(),
+    })
   }
 }
 
@@ -723,22 +789,34 @@ fn discover_browser_with_context<F: DiscoveryFs>(
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
   for root in roots {
-    let Some(pattern) = context.resolve_template(&root.template) else {
+    let Some(resolved_root) = context.resolve_template(&root.template) else {
       continue;
     };
-    let mut resolved_roots = match context.fs.glob(&pattern) {
-      Ok(roots) => roots,
+    let mut expansion = match context
+      .fs
+      .expand_registry_glob(&resolved_root.base, &resolved_root.suffix)
+    {
+      Ok(expansion) => expansion,
       Err(error) => {
         discovery.issues.push(DiscoveryIssue {
           code: "installation_glob_failed",
-          path: pattern,
+          path: resolved_root.base.join(&resolved_root.suffix),
           message: error.to_string(),
         });
         continue;
       }
     };
-    resolved_roots.sort_by_key(|path| normalized_path_bytes(path));
-    for resolved in resolved_roots {
+    for issue in expansion.issues.drain(..) {
+      discovery.issues.push(DiscoveryIssue {
+        code: "installation_glob_expand_failed",
+        path: issue.path,
+        message: issue.message,
+      });
+    }
+    expansion
+      .paths
+      .sort_by_key(|path| normalized_path_bytes(path));
+    for resolved in expansion.paths {
       if !context.fs.is_dir(&resolved) {
         continue;
       }
@@ -1202,7 +1280,8 @@ mod tests {
       .iter()
       .find(|root| root.channel == channel)
       .expect("channel root");
-    context.resolve_template(&root.template).expect("root path")
+    let root = context.resolve_template(&root.template).expect("root path");
+    root.base.join(root.suffix)
   }
 
   fn browser_root(
@@ -1218,7 +1297,8 @@ mod tests {
       .iter()
       .find(|root| root.root_id == root_id)
       .expect("root definition");
-    context.resolve_template(&root.template).expect("root path")
+    let root = context.resolve_template(&root.template).expect("root path");
+    root.base.join(root.suffix)
   }
 
   fn write_local_state(root: &Path, value: serde_json::Value) {
@@ -1282,6 +1362,7 @@ mod tests {
   struct TestDiscoveryFs {
     denied_read_dir: Option<PathBuf>,
     canonical_aliases: BTreeMap<PathBuf, PathBuf>,
+    glob_expansions: BTreeMap<(PathBuf, String), GlobExpansion>,
   }
 
   impl DiscoveryFs for TestDiscoveryFs {
@@ -1313,8 +1394,13 @@ mod tests {
       RealDiscoveryFs.read_to_string(path)
     }
 
-    fn glob(&self, pattern: &Path) -> Result<Vec<PathBuf>> {
-      RealDiscoveryFs.glob(pattern)
+    fn expand_registry_glob(&self, base: &Path, suffix: &str) -> Result<GlobExpansion> {
+      self
+        .glob_expansions
+        .get(&(base.to_path_buf(), suffix.to_owned()))
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| RealDiscoveryFs.expand_registry_glob(base, suffix))
     }
   }
 
@@ -1374,7 +1460,7 @@ mod tests {
       (
         PlatformId::Linux,
         [
-          "arc", "brave", "chrome", "chromium", "edge", "opera", "opera_gx", "vivaldi",
+          "arc", "brave", "chrome", "chromium", "edge", "opera", "vivaldi",
         ]
         .as_slice(),
       ),
@@ -1399,7 +1485,7 @@ mod tests {
       }
     }
 
-    for platform in [PlatformId::Windows, PlatformId::Macos, PlatformId::Linux] {
+    for platform in [PlatformId::Windows, PlatformId::Macos] {
       let opera_gx = browser_definition(registry, platform, "opera-gx").expect("Opera GX alias");
       assert_eq!(opera_gx.canonical_id, "opera_gx");
       assert_eq!(
@@ -1409,6 +1495,8 @@ mod tests {
         "opera_gx"
       );
     }
+    assert!(browser_definition(registry, PlatformId::Linux, "opera_gx").is_err());
+    assert!(browser_definition(registry, PlatformId::Linux, "opera-gx").is_err());
   }
 
   #[test]
@@ -1453,11 +1541,15 @@ mod tests {
         PlatformId::Linux,
         "vivaldi",
         [
-          ("vivaldi-stable-native", "stable", "{config_home}/vivaldi"),
+          (
+            "vivaldi-stable-native",
+            "stable",
+            "{xdg_config_home}/vivaldi",
+          ),
           (
             "vivaldi-snapshot-native",
             "snapshot",
-            "{config_home}/vivaldi-snapshot",
+            "{xdg_config_home}/vivaldi-snapshot",
           ),
         ]
         .as_slice(),
@@ -1479,7 +1571,7 @@ mod tests {
   }
 
   #[test]
-  fn injected_path_components_are_escaped_but_registry_wildcards_are_preserved() {
+  fn injected_path_components_remain_literal_while_registry_wildcards_are_preserved() {
     let temp = TempDir::new("escaped-glob-components");
     let home = temp.path().join("home[meta]*?");
     let config_home = temp.path().join("config[meta]*?");
@@ -1493,8 +1585,8 @@ mod tests {
       .resolve_template(template)
       .expect("resolved Chrome root");
     assert_eq!(
-      resolved,
-      PathBuf::from(glob::Pattern::escape(&config_home.to_string_lossy())).join("google-chrome")
+      resolved.base.join(resolved.suffix),
+      config_home.join("google-chrome")
     );
     seed_cookie(
       &config_home.join("google-chrome/Default"),
@@ -1531,14 +1623,11 @@ mod tests {
       home,
       [("LOCALAPPDATA", local_app_data.clone())],
     );
-    let octo_pattern = windows_context
+    let octo_root = windows_context
       .resolve_template("{local_app_data}/Octo Browser/tmp/*")
       .expect("resolved Octo root");
-    assert_eq!(
-      octo_pattern,
-      PathBuf::from(glob::Pattern::escape(&local_app_data.to_string_lossy()))
-        .join("Octo Browser/tmp/*")
-    );
+    assert_eq!(octo_root.base, local_app_data);
+    assert_eq!(octo_root.suffix, "Octo Browser/tmp/*");
     seed_cookie(
       &local_app_data.join("Octo Browser/tmp/literal-profile/Default"),
       true,
@@ -1784,6 +1873,127 @@ mod tests {
       channel_root(&empty_override_context, "stable"),
       xdg_config.join("google-chrome")
     );
+  }
+
+  #[test]
+  fn chrome_config_override_does_not_relocate_other_chromium_browsers() {
+    let temp = TempDir::new("chrome-config-isolation");
+    let home = temp.path().join("home");
+    let chrome_config = temp.path().join("chrome-config");
+    let xdg_config = temp.path().join("xdg-config");
+    let context = test_context_for(
+      PlatformId::Linux,
+      home,
+      [
+        ("CHROME_CONFIG_HOME", chrome_config.clone()),
+        ("XDG_CONFIG_HOME", xdg_config.clone()),
+      ],
+    );
+    assert_eq!(
+      browser_root(&context, "chrome", "chrome-stable"),
+      chrome_config.join("google-chrome")
+    );
+    for (browser_id, root_id, relative) in [
+      (
+        "brave",
+        "brave-stable-native",
+        "BraveSoftware/Brave-Browser",
+      ),
+      ("chromium", "chromium-native", "chromium"),
+      ("edge", "edge-stable-native", "microsoft-edge"),
+      ("opera", "opera-stable-native", "opera"),
+      ("vivaldi", "vivaldi-stable-native", "vivaldi"),
+    ] {
+      assert_eq!(
+        browser_root(&context, browser_id, root_id),
+        xdg_config.join(relative),
+        "{browser_id} must use XDG_CONFIG_HOME rather than CHROME_CONFIG_HOME"
+      );
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn non_unicode_injected_base_path_is_discovered_without_glob_string_conversion() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = TempDir::new("non-unicode-base");
+    let config_home = temp
+      .path()
+      .join(OsString::from_vec(b"config-\xff".to_vec()));
+    let context = test_context_for(
+      PlatformId::Linux,
+      temp.path().join("home"),
+      [("XDG_CONFIG_HOME", config_home.clone())],
+    );
+    seed_cookie(
+      &config_home.join("google-chrome/Default"),
+      true,
+      "non-unicode",
+      "value",
+    );
+    assert_eq!(
+      discover_browser_with_context(&context, "chrome")
+        .expect("discover Chrome beneath non-Unicode XDG_CONFIG_HOME")
+        .profiles()
+        .len(),
+      1
+    );
+  }
+
+  #[test]
+  fn glob_expansion_keeps_valid_candidates_when_another_candidate_errors() {
+    let temp = TempDir::new("glob-expansion-issues");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let real_context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let valid = local_app_data.join("Octo Browser/tmp/valid");
+    seed_cookie(&valid.join("Default"), true, "valid", "value");
+    let injected_issue_path = local_app_data.join("Octo Browser/tmp/inaccessible");
+    let mut fs = TestDiscoveryFs::default();
+    fs.glob_expansions.insert(
+      (local_app_data, "Octo Browser/tmp/*".to_owned()),
+      GlobExpansion {
+        paths: vec![valid],
+        issues: vec![GlobExpansionIssue {
+          path: injected_issue_path,
+          message: "injected wildcard candidate failure".to_owned(),
+        }],
+      },
+    );
+    let context = with_test_fs(real_context, fs);
+    let discovery =
+      discover_browser_with_context(&context, "octo_browser").expect("retain valid candidate");
+    assert_eq!(discovery.profiles().len(), 1);
+    assert!(discovery
+      .issues
+      .iter()
+      .any(|issue| issue.code == "installation_glob_expand_failed"));
+  }
+
+  #[test]
+  fn missing_optional_wildcard_roots_are_silent() {
+    let temp = TempDir::new("missing-wildcard-roots");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data)],
+    );
+    for browser_id in ["arc", "octo_browser"] {
+      let discovery =
+        discover_browser_with_context(&context, browser_id).expect("missing root is not an error");
+      assert!(discovery.installations.is_empty());
+      assert!(
+        discovery.issues.is_empty(),
+        "{browser_id} missing root is silent"
+      );
+    }
   }
 
   #[test]

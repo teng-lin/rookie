@@ -725,7 +725,7 @@
         "roots": [
           {
             "root_id": "arc-native",
-            "template": "{config_home}/arc",
+            "template": "{xdg_config_home}/arc",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
@@ -764,28 +764,28 @@
         "roots": [
           {
             "root_id": "brave-stable-native",
-            "template": "{config_home}/BraveSoftware/Brave-Browser",
+            "template": "{xdg_config_home}/BraveSoftware/Brave-Browser",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
           },
           {
             "root_id": "brave-beta-native",
-            "template": "{config_home}/BraveSoftware/Brave-Browser-Beta",
+            "template": "{xdg_config_home}/BraveSoftware/Brave-Browser-Beta",
             "channel": "beta",
             "discovery": "chromium_user_data",
             "priority": 20
           },
           {
             "root_id": "brave-dev-native",
-            "template": "{config_home}/BraveSoftware/Brave-Browser-Dev",
+            "template": "{xdg_config_home}/BraveSoftware/Brave-Browser-Dev",
             "channel": "dev",
             "discovery": "chromium_user_data",
             "priority": 30
           },
           {
             "root_id": "brave-nightly-native",
-            "template": "{config_home}/BraveSoftware/Brave-Browser-Nightly",
+            "template": "{xdg_config_home}/BraveSoftware/Brave-Browser-Nightly",
             "channel": "nightly",
             "discovery": "chromium_user_data",
             "priority": 40
@@ -870,7 +870,7 @@
         "roots": [
           {
             "root_id": "chromium-native",
-            "template": "{config_home}/chromium",
+            "template": "{xdg_config_home}/chromium",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
@@ -909,28 +909,28 @@
         "roots": [
           {
             "root_id": "edge-stable-native",
-            "template": "{config_home}/microsoft-edge",
+            "template": "{xdg_config_home}/microsoft-edge",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
           },
           {
             "root_id": "edge-beta-native",
-            "template": "{config_home}/microsoft-edge-beta",
+            "template": "{xdg_config_home}/microsoft-edge-beta",
             "channel": "beta",
             "discovery": "chromium_user_data",
             "priority": 20
           },
           {
             "root_id": "edge-dev-native",
-            "template": "{config_home}/microsoft-edge-dev",
+            "template": "{xdg_config_home}/microsoft-edge-dev",
             "channel": "dev",
             "discovery": "chromium_user_data",
             "priority": 30
           },
           {
             "root_id": "edge-nightly-native",
-            "template": "{config_home}/microsoft-edge-nightly",
+            "template": "{xdg_config_home}/microsoft-edge-nightly",
             "channel": "nightly",
             "discovery": "chromium_user_data",
             "priority": 40
@@ -962,21 +962,21 @@
         "roots": [
           {
             "root_id": "opera-stable-native",
-            "template": "{config_home}/opera",
+            "template": "{xdg_config_home}/opera",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
           },
           {
             "root_id": "opera-beta-native",
-            "template": "{config_home}/opera-beta",
+            "template": "{xdg_config_home}/opera-beta",
             "channel": "beta",
             "discovery": "chromium_user_data",
             "priority": 20
           },
           {
             "root_id": "opera-developer-native",
-            "template": "{config_home}/opera-developer",
+            "template": "{xdg_config_home}/opera-developer",
             "channel": "developer",
             "discovery": "chromium_user_data",
             "priority": 30
@@ -1036,26 +1036,6 @@
         }
       },
       {
-        "canonical_id": "opera_gx",
-        "aliases": [
-          "opera-gx",
-          "opera gx"
-        ],
-        "display_name": "Opera GX",
-        "engine": "chromium",
-        "roots": [],
-        "capabilities": {
-          "declared_persistent_formats": [
-            "chromium_sqlite"
-          ],
-          "declared_session_formats": [],
-          "declared_decryption_tiers": [
-            "v10",
-            "v11"
-          ]
-        }
-      },
-      {
         "canonical_id": "vivaldi",
         "aliases": [],
         "display_name": "Vivaldi",
@@ -1063,14 +1043,14 @@
         "roots": [
           {
             "root_id": "vivaldi-stable-native",
-            "template": "{config_home}/vivaldi",
+            "template": "{xdg_config_home}/vivaldi",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
           },
           {
             "root_id": "vivaldi-snapshot-native",
-            "template": "{config_home}/vivaldi-snapshot",
+            "template": "{xdg_config_home}/vivaldi-snapshot",
             "channel": "snapshot",
             "discovery": "chromium_user_data",
             "priority": 20
