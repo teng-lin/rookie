@@ -38,10 +38,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # Pin to the commit the dispatch ref already resolved to. Checking
-          # out `refs/tags/...` by name re-fetches the tag at checkout time, so
-          # a tag force-moved after dispatch would swap the source out from
-          # under this run.
+          # The commit the dispatch ref already resolved to. This is what
+          # `actions/checkout` uses when given no `ref:` — it fetches
+          # `github.sha` itself rather than re-resolving the ref name — so
+          # stating it makes the existing pinning explicit and auditable here
+          # rather than changing it.
           #
           # NOTE: this is deliberately NOT `ref: refs/tags/${{ inputs.tag }}`.
           # Overriding with the *input* would make the verification step below
@@ -82,11 +83,44 @@ jobs:
       # `gh release upload` addresses a release by tag name, not by commit, so
       # the verified-tag binding only holds while the tag still resolves to the
       # commit this run built. Re-resolve it here and fail closed if it moved.
+      #
+      # Resolve through `git/ref/tags/...`, not `commits/<tag>`: the latter
+      # takes an ambiguous ref, so a branch sharing the tag's name could answer
+      # in its place — and a branch is not covered by the `v*` tag ruleset this
+      # check leans on. An annotated tag resolves to a tag object, which has to
+      # be peeled to reach the commit.
       - name: Re-verify release tag still points at the built commit
         shell: bash
         run: |
           set -euo pipefail
-          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+
+          resolve_tag_commit() {
+            local object
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '"\(.object.type) \(.object.sha)"')" || return 1
+            if test "${object% *}" = "tag"; then
+              gh api "repos/$GITHUB_REPOSITORY/git/tags/${object#* }" --jq .object.sha || return 1
+            else
+              printf '%s\n' "${object#* }"
+            fi
+          }
+
+          # Retry only the lookup: a transient API failure here would otherwise
+          # discard an already-finished cross-platform build. A tag that is
+          # genuinely gone still fails closed, just three attempts later.
+          tag_sha=""
+          for attempt in 1 2 3; do
+            if tag_sha="$(resolve_tag_commit)"; then
+              break
+            fi
+            tag_sha=""
+            test "$attempt" -eq 3 || sleep $((attempt * 5))
+          done
+
+          if test -z "$tag_sha"; then
+            echo "::error::could not resolve $RELEASE_TAG after 3 attempts"
+            exit 1
+          fi
           if test "$tag_sha" != "$GITHUB_SHA"; then
             echo "::error::$RELEASE_TAG now resolves to $tag_sha, but this run built $GITHUB_SHA"
             exit 1

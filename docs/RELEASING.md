@@ -139,28 +139,38 @@ x86_64), Linux x86_64, and Windows x86_64.
 
 `workflow_dispatch` runs the copy of the workflow file stored *at the dispatched
 ref*. Dispatching from `v$VERSION` therefore runs that tag's own copy of
-`publish-cli.yml`, not the copy on `main`. Confirm the two are identical before
-dispatching:
+`publish-cli.yml`, not the copy on `main`. Confirm the tag's copy is a hardened
+one before dispatching, by looking for the re-verification step that only the
+hardened definition carries:
 
 ```console
-git fetch origin main "+refs/tags/v$VERSION:refs/tags/v$VERSION"
-git diff "v$VERSION" origin/main -- .github/workflows/publish-cli.yml
+git fetch origin "+refs/tags/v$VERSION:refs/tags/v$VERSION"
+git grep "Re-verify release tag" "v$VERSION" -- .github/workflows/publish-cli.yml
 ```
 
 The explicit `refs/tags/...:refs/tags/...` destination is what creates the local
-tag; a source-only refspec leaves it in `FETCH_HEAD` only, so `git diff
-"v$VERSION"` would fail in a fresh clone. The leading `+` forces the local tag to
-match the remote, so a stale local tag cannot make this check compare the wrong
-workflow copy against the tag `gh workflow run --ref` will actually dispatch.
+tag; a source-only refspec leaves it in `FETCH_HEAD` only, so the `git grep`
+against `v$VERSION` would fail in a fresh clone. The leading `+` forces the
+local tag to match the remote, so a stale local tag cannot make this check read
+the wrong workflow copy for the tag `gh workflow run --ref` will actually
+dispatch.
 
-If that diff is empty, dispatch the run:
+Check for that marker rather than diffing the tag's copy against `main`'s. CLI
+publishing is the last step of a release, often days after the tag was cut, so
+any unrelated later commit to `publish-cli.yml` on `main` makes such a diff
+non-empty even for a fully hardened tag — a byte-identity check would route
+operators to the manual path for no reason. The marker is the newest piece of
+hardening, so a tag that carries it also carries the tag verification step, the
+`release` environment gate, and the SHA-pinned action references.
+
+If the grep prints a match, dispatch the run:
 
 ```console
 gh workflow run publish-cli.yml --ref "v$VERSION" -f tag="v$VERSION"
 ```
 
-If the diff is *not* empty, do not dispatch — follow "Retrying a tag that
-predates the hardened workflow" below.
+If it prints nothing, do not dispatch — follow "Retrying a tag that predates
+the hardened workflow" below.
 
 Always dispatch with `--ref "v$VERSION"` so the run's ref is the immutable
 tag. The workflow's first step after checkout verifies that `GITHUB_REF_TYPE`
@@ -170,18 +180,28 @@ off dispatching from `main` (or any other ref) with an arbitrary `tag` value
 and having binaries built from unreviewed source silently overwrite that
 release's assets.
 
-The checkout is pinned to `github.sha`, the commit the dispatch ref resolved to,
-rather than to the tag name, so a tag force-moved after dispatch cannot swap the
-source out mid-run. A step immediately before the uploads re-resolves
-`v$VERSION` through the API and fails the job if it no longer points at that
-same commit.
+The checkout states `ref: ${{ github.sha }}`, the commit the dispatch ref
+resolved to. That is what `actions/checkout` already uses when given no `ref:`
+— it fetches the run's `github.sha` directly rather than re-resolving the ref
+name — so the line closes no gap; it makes the existing pinning explicit and
+auditable in the workflow file. What it must *not* become is `refs/tags/${{
+inputs.tag }}`: checking out the input would make the verification step that
+follows a tautology.
 
-Residual limitation: `gh release upload` addresses a release by tag name, not by
-commit, so nothing in the upload itself carries the verified commit. The binding
-rests on that re-check, which cannot see a tag moved in the window between the
-re-check and the upload. The `v*` tag ruleset from "One-time setup" — block
-updates, block deletion — is what actually keeps that window closed. Do not
-relax it.
+Pinning the source is not the same as pinning the upload target. A step
+immediately before the uploads re-resolves `v$VERSION` through the API and fails
+the job if it no longer points at that same commit.
+
+Residual limitations: `gh release upload` addresses a release by tag name, not
+by commit, so nothing in the upload itself carries the verified commit. The
+binding rests on that re-check, which cannot see a tag moved in the window
+between the re-check and the upload. The `v*` tag ruleset from "One-time setup"
+— block updates, block deletion — is what actually keeps that window closed. Do
+not relax it. The re-check also binds the tag to a commit, not the *release* to
+the tag: a release's `tag_name` is separately editable through the API, so a
+release retargeted to a different tag would still receive these binaries. Both
+gaps need repository write access, the access the tag ruleset already assumes is
+limited to release maintainers.
 
 ### `--clobber` deletes the existing asset before uploading
 
@@ -200,9 +220,13 @@ the current ones so a failed re-upload stays recoverable:
 gh release download "v$VERSION" --dir "release-assets-v$VERSION"
 ```
 
+`gh release download` fails rather than overwriting when a target file already
+exists, so download into a fresh directory; add `--clobber` only when you mean
+to replace an earlier copy of that backup.
+
 ### Retrying a tag that predates the hardened workflow
 
-If the workflow diff above is not empty, the tag stores an older definition of
+If the marker grep above found nothing, the tag stores an older definition of
 `publish-cli.yml`. Dispatching from that tag runs the *old* definition: its tag
 verification step, the `release` environment approval gate, and the SHA-pinned
 action references now on `main` do not apply to that run, whatever `main`
