@@ -2685,6 +2685,97 @@ mod tests {
     assert_eq!(yandex_profiles[0].directory_name, "Default");
   }
 
+  /// Registry-only macOS browsers have no legacy `config.json` entry, so the
+  /// keychain identity needed for v10 is unavailable until the schema carries
+  /// one. 6B is the first change that makes this branch reachable for real
+  /// users, so both its typed shape and its user-visible surface are pinned.
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn macos_browsers_without_legacy_key_configuration_fail_typed_per_tier() {
+    for browser_id in ["coccoc", "yandex"] {
+      let installation = BrowserInstallation {
+        installation_id: format!("{browser_id}-installation"),
+        browser_id: browser_id.to_owned(),
+        root_id: format!("{browser_id}-stable"),
+        channel: "stable".to_owned(),
+        path: PathBuf::from("/nonexistent"),
+        local_state_path: PathBuf::from("/nonexistent/Local State"),
+        priority: 10,
+        profiles: Vec::new(),
+      };
+
+      let outcomes = SystemChromiumKeyProvider.retrieve(&installation);
+      let ChromiumKeyOutcome::Failure(failure) = &outcomes.v10 else {
+        panic!("{browser_id} v10 must fail typed, got {:?}", outcomes.v10);
+      };
+      assert!(
+        failure.message().contains(browser_id),
+        "{browser_id} v10 failure must name the browser, got {:?}",
+        failure.message()
+      );
+      assert!(failure.message().contains("no legacy key configuration"));
+      assert_eq!(outcomes.v11, ChromiumKeyOutcome::NotApplicable);
+      assert_eq!(outcomes.v20, ChromiumKeyOutcome::NotApplicable);
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn macos_missing_key_configuration_surfaces_as_profile_error_not_silent_empty() {
+    let temp = TempDir::new("macos-missing-key-config");
+    let home = temp.path().join("home");
+    let context = test_context_for(PlatformId::Macos, home, []);
+
+    for (browser_id, root_id, profile) in [
+      ("coccoc", "coccoc-stable", None),
+      ("yandex", "yandex-stable", Some("Default")),
+    ] {
+      let root = browser_root(&context, browser_id, root_id);
+      let profile_path = profile.map_or_else(|| root.clone(), |name| root.join(name));
+      let db = seed_cookie(&profile_path, true, browser_id, "");
+      let connection = rusqlite::Connection::open(&db).expect("open cookie db");
+      let mut encrypted = b"v10".to_vec();
+      encrypted.extend_from_slice(&[0u8; 28]);
+      connection
+        .execute(
+          "UPDATE cookies SET encrypted_value = ?1 WHERE name = ?2",
+          params![encrypted, browser_id],
+        )
+        .expect("store an encrypted cookie value");
+      drop(connection);
+
+      let report = extract_chromium_with_provider(
+        &context,
+        browser_id,
+        None,
+        None,
+        &SystemChromiumKeyProvider,
+      )
+      .expect("a missing keychain identity is a per-profile error, not a discovery failure");
+
+      let profiles = report
+        .installations
+        .iter()
+        .flat_map(|installation| &installation.profiles)
+        .collect::<Vec<_>>();
+      assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
+      let extraction = profiles[0];
+      assert!(
+        extraction.cookies.is_empty(),
+        "{browser_id} must not report undecryptable rows as cookies"
+      );
+      let error = extraction
+        .error
+        .as_deref()
+        .unwrap_or_else(|| panic!("{browser_id} must surface an error, not silently empty output"));
+      assert!(
+        error.contains(browser_id) && error.contains("no legacy key configuration"),
+        "{browser_id} error must name the browser and its cause, got {error:?}"
+      );
+      assert!(error.contains("v10 key provider failed"));
+    }
+  }
+
   #[test]
   fn injected_path_components_remain_literal_while_registry_wildcards_are_preserved() {
     let temp = TempDir::new("escaped-glob-components");
