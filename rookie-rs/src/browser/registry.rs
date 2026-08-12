@@ -1866,6 +1866,11 @@ where
     let persistent = profile.path.join("cookies.sqlite");
     // The Mozilla outcome also owns session fallback. A missing persistent DB
     // is normal for a session-only profile and is not projected as a source.
+    //
+    // Discovery's snapshot goes stale in both directions, so the query is the
+    // authority on existence: a database created since discovery is projected
+    // because the query succeeded, and one deleted since discovery is still
+    // projected so its failure is reported rather than silently dropped.
     let mut extraction = query(&persistent, domains);
     // A database created between discovery and query is as real as one that
     // vanished, so the cached discovery flag alone would drop it. Re-checking
@@ -2972,6 +2977,63 @@ mod tests {
         }
       }
     }
+  }
+
+  #[test]
+  fn undiscovered_persistent_source_is_projected_if_it_appears_before_query() {
+    let temp = TempDir::new("gecko-persistent-appears");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    // A session-only profile at discovery time: no cookies.sqlite yet.
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(profile.join("sessionstore.js"), "{}").expect("seed session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    let mut created = false;
+    let report = populate_gecko_sources(discovery, None, |persistent, domains| {
+      if !created {
+        created = true;
+        seed_empty_gecko_database(persistent.parent().expect("profile directory"));
+      }
+      mozilla::query_cookies_engine_outcome(persistent, domains)
+    });
+    let persistent = report.profiles[0]
+      .sources
+      .iter()
+      .find(|source| source.role == SOURCE_ROLE_PERSISTENT)
+      .expect("persistent source created between discovery and query");
+    assert_eq!(persistent.format, "mozilla_sqlite");
+    assert!(persistent.selected);
+    assert!(persistent.error.is_none());
+  }
+
+  #[test]
+  fn session_only_profile_still_projects_no_persistent_source() {
+    let temp = TempDir::new("gecko-session-only-no-persistent");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    std::fs::create_dir_all(&profile).expect("create profile");
+    std::fs::write(profile.join("sessionstore.js"), "{}").expect("seed session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    let report = populate_gecko_sources(discovery, None, mozilla::query_cookies_engine_outcome);
+    assert!(!report.profiles[0]
+      .sources
+      .iter()
+      .any(|source| source.role == SOURCE_ROLE_PERSISTENT));
   }
 
   #[test]
