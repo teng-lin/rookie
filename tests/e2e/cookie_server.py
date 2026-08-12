@@ -7,15 +7,23 @@ Run from the workspace root: `python3 tests/e2e/cookie_server.py`.
 """
 
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+_LOG_LOCK = threading.Lock()
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Browsers preconnect to origins they have already visited, so they open
+    # TCP sockets they may never send a request on. Reap those sockets instead
+    # of parking a worker thread on them until the browser exits.
+    timeout = 10
+
     def do_GET(self) -> None:
         request_log = os.environ.get("ROOKIE_E2E_REQUEST_LOG")
         if request_log:
-            with Path(request_log).open("a", encoding="utf-8") as log:
+            with _LOG_LOCK, Path(request_log).open("a", encoding="utf-8") as log:
                 log.write(f"{self.path}\n")
 
         self.send_response(200)
@@ -41,4 +49,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+    # Threaded: a single-threaded server is wedged permanently by one idle
+    # preconnected socket, which silently drops every later request.
+    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
+    server.daemon_threads = True
+    server.serve_forever()

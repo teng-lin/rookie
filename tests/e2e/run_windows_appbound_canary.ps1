@@ -1,6 +1,13 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Get-RequestLogSnapshot {
+  if (-not (Test-Path $env:ROOKIE_E2E_REQUEST_LOG)) { return "<no request log>" }
+  $entries = @(Get-Content $env:ROOKIE_E2E_REQUEST_LOG)
+  if ($entries.Count -eq 0) { return "<empty>" }
+  return ($entries -join ", ")
+}
+
 function Wait-ForRequest([string]$requestPath) {
   for ($i = 1; $i -le 120; $i++) {
     if ((Test-Path $env:ROOKIE_E2E_REQUEST_LOG) -and
@@ -10,7 +17,8 @@ function Wait-ForRequest([string]$requestPath) {
     }
     Start-Sleep -Milliseconds 500
   }
-  throw "Chrome did not request $requestPath within 60 seconds"
+  throw ("Chrome did not request $requestPath within 60 seconds " +
+    "(requests seen: $(Get-RequestLogSnapshot))")
 }
 
 function Wait-ForChrome {
