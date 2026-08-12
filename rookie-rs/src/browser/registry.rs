@@ -82,13 +82,27 @@ pub(crate) struct BrowserCapabilityDescriptor {
 /// declares v20.
 ///
 /// That distinction is load-bearing. The filter below is keyed on platform and
-/// compiled features alone, so it would happily call v20 available for any
+/// compiled features alone, so it would happily call a tier available for any
 /// browser whose declaration listed it. Restating a declaration as
-/// browser-truth therefore needs a per-browser key-provider axis added here
-/// first, otherwise `available_decryption_tiers` starts overclaiming — and
+/// browser-truth therefore needs a per-browser key axis added here first,
+/// otherwise `available_decryption_tiers` starts overclaiming — and
 /// `decryptable` is defined against that effective set.
-/// `only_browsers_with_known_elevation_keys_declare_v20` pins the invariant so
+/// `only_browsers_with_known_elevation_keys_declare_v20` pins the v20 half so
 /// the change cannot land silently.
+///
+/// That axis is not one thing. What actually gates a tier differs by platform,
+/// and a design that treats them alike will get at least one wrong:
+///
+/// - Windows v20 is a property of *rookie*, not of the browser: which vendors'
+///   app-bound elevation keys we hold. A browser cannot declare us into having
+///   its keys, so this stays embedded knowledge rather than registry data.
+/// - macOS v10 and Linux v10/v11 are properties of the *browser* — its keychain
+///   service and account, or its crypt name. Today those live only in the
+///   legacy `config.json`, so `SystemChromiumKeyProvider` fails the tier
+///   outright for a registry-only browser. Linux fails both v10 and v11 that
+///   way, not just v10.
+/// - Windows v10 and `legacy_dpapi` are gated by neither: that arm reads the
+///   installation's `Local State` directly and never consults `config.json`.
 fn capability_descriptor(
   definition: &BrowserDefinition,
   platform: PlatformId,
