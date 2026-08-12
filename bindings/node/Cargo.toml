@@ -26,7 +26,3 @@ rookie-cookies = { path = "../../rookie-rs", version = "0.5.8" }
 
 [build-dependencies]
 napi-build = "2.0.1"
-
-[profile.release]
-lto = true
-strip = "symbols"

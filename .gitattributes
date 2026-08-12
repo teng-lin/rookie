@@ -1,1 +1,3 @@
+* text=auto eol=lf
+
 rookie-rs/public-api/*.txt text eol=lf

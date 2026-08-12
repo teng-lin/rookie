@@ -218,6 +218,7 @@ pub(crate) struct ChromiumExtractionStats {
 ///
 /// `any_browser` compares all applicable identities instead of returning the
 /// first configuration that happens to decrypt one fallback-key row.
+#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct ChromiumProbeResult {
   pub(crate) cookies: Vec<Cookie>,
@@ -263,6 +264,7 @@ impl ChromiumEngineExtractionOutcome {
     }
   }
 
+  #[cfg(unix)]
   fn into_probe_result(self) -> Result<ChromiumProbeResult> {
     match self.legacy_error {
       Some(error) => Err(error),
