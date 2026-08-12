@@ -37,35 +37,59 @@ if (!loader.includes('No prebuilt rookie-cookies binding is published')) {
 
 loader = loader.replace(
   /^const \{ version,.* \} = nativeBinding$/m,
-  'const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding'
+  'const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
 )
 
-if (!loader.includes('function unsupportedPlatform(')) {
-  loader = loader.replace(
-    'module.exports.version = version',
-    `function unsupportedPlatform(name, supportedPlatform) {
+const exportStart = loader.search(
+  /^(?:function (?:asyncNative|unsupportedPlatform)\(|module\.exports\.version = version)/m
+)
+if (exportStart === -1) {
+  throw new Error('Generated loader has no export facade')
+}
+
+loader = loader.slice(0, exportStart)
+loader += `function asyncNative(nativeFunction) {
+  return (...args) => {
+    try {
+      return Promise.resolve(nativeFunction(...args))
+    } catch (error) {
+      return Promise.reject(error)
+    }
+  }
+}
+
+function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
     \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
   ))
 }
 
-module.exports.version = version`
-  )
-}
+module.exports.version = version
+module.exports.anyBrowser = asyncNative(anyBrowser)
+module.exports.firefox = asyncNative(firefox)
+module.exports.zen = asyncNative(zen)
+module.exports.librewolf = asyncNative(librewolf)
+module.exports.chrome = asyncNative(chrome)
+module.exports.brave = asyncNative(brave)
+module.exports.arc = asyncNative(arc)
+module.exports.edge = asyncNative(edge)
+module.exports.opera = asyncNative(opera)
+module.exports.operaGx = asyncNative(operaGx)
+module.exports.chromium = asyncNative(chromium)
+module.exports.vivaldi = asyncNative(vivaldi)
+module.exports.load = asyncNative(load)
+module.exports.octoBrowser = asyncNative(octoBrowser || unsupportedPlatform('octoBrowser', 'Windows'))
+module.exports.internetExplorer = asyncNative(internetExplorer || unsupportedPlatform('internetExplorer', 'Windows'))
+module.exports.safari = asyncNative(safari || unsupportedPlatform('safari', 'macOS'))
+module.exports.chromiumBased = asyncNative(chromiumBased)
+module.exports.firefoxProfiles = asyncNative(firefoxProfiles)
+module.exports.firefoxProfile = asyncNative(firefoxProfile)
+module.exports.firefoxBased = asyncNative(firefoxBased)
 
-loader = loader.replace(
-  /^module\.exports\.(?:octoBrowser|internetExplorer|safari|chromiumBased) = .*\n?/gm,
-  ''
-)
-loader = loader.replace(
-  'module.exports.load = load\n',
-  `module.exports.load = load
-module.exports.octoBrowser = octoBrowser || unsupportedPlatform('octoBrowser', 'Windows')
-module.exports.internetExplorer = internetExplorer || unsupportedPlatform('internetExplorer', 'Windows')
-module.exports.safari = safari || unsupportedPlatform('safari', 'macOS')
-module.exports.chromiumBased = chromiumBased
+if (testWorkerPanic) {
+  module.exports.__testWorkerPanic = asyncNative(testWorkerPanic)
+}
 `
-)
 
 writeFileSync(loaderPath, loader)
 
@@ -83,7 +107,7 @@ if (facadeIndex !== -1) {
 }
 
 types = types.replace(
-  /^export declare function (?:octoBrowser|internetExplorer|safari|chromiumBased)\([^\n]*\):[^\n]*\n?/gm,
+  /^export declare function (?:octoBrowser|internetExplorer|safari|chromiumBased|testWorkerPanic)\([^\n]*\):[^\n]*\n?/gm,
   ''
 )
 types = types.replace(

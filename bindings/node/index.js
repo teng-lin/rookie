@@ -324,7 +324,17 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased } = nativeBinding
+const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
+
+function asyncNative(nativeFunction) {
+  return (...args) => {
+    try {
+      return Promise.resolve(nativeFunction(...args))
+    } catch (error) {
+      return Promise.reject(error)
+    }
+  }
+}
 
 function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
@@ -333,23 +343,27 @@ function unsupportedPlatform(name, supportedPlatform) {
 }
 
 module.exports.version = version
-module.exports.anyBrowser = anyBrowser
-module.exports.firefox = firefox
-module.exports.zen = zen
-module.exports.librewolf = librewolf
-module.exports.chrome = chrome
-module.exports.brave = brave
-module.exports.arc = arc
-module.exports.edge = edge
-module.exports.opera = opera
-module.exports.operaGx = operaGx
-module.exports.chromium = chromium
-module.exports.vivaldi = vivaldi
-module.exports.load = load
-module.exports.octoBrowser = octoBrowser || unsupportedPlatform('octoBrowser', 'Windows')
-module.exports.internetExplorer = internetExplorer || unsupportedPlatform('internetExplorer', 'Windows')
-module.exports.safari = safari || unsupportedPlatform('safari', 'macOS')
-module.exports.chromiumBased = chromiumBased
-module.exports.firefoxProfiles = firefoxProfiles
-module.exports.firefoxProfile = firefoxProfile
-module.exports.firefoxBased = firefoxBased
+module.exports.anyBrowser = asyncNative(anyBrowser)
+module.exports.firefox = asyncNative(firefox)
+module.exports.zen = asyncNative(zen)
+module.exports.librewolf = asyncNative(librewolf)
+module.exports.chrome = asyncNative(chrome)
+module.exports.brave = asyncNative(brave)
+module.exports.arc = asyncNative(arc)
+module.exports.edge = asyncNative(edge)
+module.exports.opera = asyncNative(opera)
+module.exports.operaGx = asyncNative(operaGx)
+module.exports.chromium = asyncNative(chromium)
+module.exports.vivaldi = asyncNative(vivaldi)
+module.exports.load = asyncNative(load)
+module.exports.octoBrowser = asyncNative(octoBrowser || unsupportedPlatform('octoBrowser', 'Windows'))
+module.exports.internetExplorer = asyncNative(internetExplorer || unsupportedPlatform('internetExplorer', 'Windows'))
+module.exports.safari = asyncNative(safari || unsupportedPlatform('safari', 'macOS'))
+module.exports.chromiumBased = asyncNative(chromiumBased)
+module.exports.firefoxProfiles = asyncNative(firefoxProfiles)
+module.exports.firefoxProfile = asyncNative(firefoxProfile)
+module.exports.firefoxBased = asyncNative(firefoxBased)
+
+if (testWorkerPanic) {
+  module.exports.__testWorkerPanic = asyncNative(testWorkerPanic)
+}

@@ -4,6 +4,8 @@ extern crate napi_derive;
 use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
 use rookie_cookies::enums::Cookie;
 use rookie_cookies::MozillaProfile;
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 #[napi(object)]
@@ -59,6 +61,32 @@ fn profiles_to_js(profiles: Vec<MozillaProfile>) -> Vec<FirefoxProfileObject> {
     .collect()
 }
 
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+  if let Some(message) = payload.downcast_ref::<&str>() {
+    message
+  } else if let Some(message) = payload.downcast_ref::<String>() {
+    message.as_str()
+  } else {
+    "unknown panic payload"
+  }
+}
+
+/// Keep Rust unwinds inside the worker boundary. napi-rs executes `Task::compute`
+/// from an `extern "C"` callback, where an escaping panic would abort Node instead
+/// of rejecting the task's Promise.
+fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
+  match catch_unwind(AssertUnwindSafe(worker)) {
+    Ok(result) => result,
+    Err(payload) => Err(napi::Error::new(
+      Status::GenericFailure,
+      format!(
+        "cookie extraction worker panicked: {}",
+        panic_message(payload.as_ref())
+      ),
+    )),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // AnyBrowser needs special handling (db_path, domains, key_path)
 // ---------------------------------------------------------------------------
@@ -74,8 +102,10 @@ impl Task for AnyBrowserTaskImpl {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::any_browser(&self.db_path, self.domains.take(), self.key_path.as_deref())
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::any_browser(&self.db_path, self.domains.take(), self.key_path.as_deref())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -110,8 +140,10 @@ macro_rules! async_browser_fn {
       type JsValue = Vec<CookieObject>;
 
       fn compute(&mut self) -> Result<Self::Output> {
-        $core_fn(self.domains.take())
-          .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+        run_worker(|| {
+          $core_fn(self.domains.take())
+            .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+        })
       }
 
       fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -148,8 +180,10 @@ impl Task for FirefoxProfilesTask {
   type JsValue = Vec<FirefoxProfileObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::firefox_profiles()
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::firefox_profiles()
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -172,8 +206,10 @@ impl Task for FirefoxProfileTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::firefox_profile(&self.profile, self.domains.take())
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::firefox_profile(&self.profile, self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -200,8 +236,10 @@ impl Task for FirefoxBasedTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::firefox_based(PathBuf::from(&self.db_path), self.domains.take())
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::firefox_based(PathBuf::from(&self.db_path), self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -233,8 +271,10 @@ impl Task for OctoBrowserTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::octo_browser(self.domains.take())
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::octo_browser(self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -259,8 +299,10 @@ impl Task for InternetExplorerTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::internet_explorer(self.domains.take())
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::internet_explorer(self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -281,13 +323,15 @@ impl Task for ChromiumBasedWinTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::chromium_based(
-      PathBuf::from(&self.key_path),
-      PathBuf::from(&self.db_path),
-      self.domains.take(),
-      false,
-    )
-    .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::chromium_based(
+        PathBuf::from(&self.key_path),
+        PathBuf::from(&self.db_path),
+        self.domains.take(),
+        false,
+      )
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -328,8 +372,10 @@ impl Task for SafariTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    rookie_cookies::safari(self.domains.take())
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    run_worker(|| {
+      rookie_cookies::safari(self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -351,18 +397,20 @@ impl Task for ChromiumBasedUnixTask {
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    use rookie_cookies::config::Browser;
+    run_worker(|| {
+      use rookie_cookies::config::Browser;
 
-    let db_path = self.db_path.as_str();
-    let config = Browser {
-      channels: None,
-      paths: vec![db_path.to_string()],
-      unix_crypt_name: Some("chrome".to_string()),
-      osx_key_service: None,
-      osx_key_user: None,
-    };
-    rookie_cookies::chromium_based(&config, PathBuf::from(db_path), self.domains.take(), false)
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      let db_path = self.db_path.as_str();
+      let config = Browser {
+        channels: None,
+        paths: vec![db_path.to_string()],
+        unix_crypt_name: Some("chrome".to_string()),
+        osx_key_service: None,
+        osx_key_user: None,
+      };
+      rookie_cookies::chromium_based(&config, PathBuf::from(db_path), self.domains.take(), false)
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -377,4 +425,45 @@ pub fn chromium_based(
   domains: Option<Vec<String>>,
 ) -> AsyncTask<ChromiumBasedUnixTask> {
   AsyncTask::new(ChromiumBasedUnixTask { db_path, domains })
+}
+
+// Compiled only by the Node regression-test build. Keeping this out of normal
+// artifacts avoids adding a deliberate panic trigger to the package API.
+#[cfg(feature = "test-support")]
+pub struct TestWorkerPanicTask;
+
+#[cfg(feature = "test-support")]
+impl Task for TestWorkerPanicTask {
+  type Output = ();
+  type JsValue = ();
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| panic!("forced Node worker panic"))
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output)
+  }
+}
+
+#[cfg(feature = "test-support")]
+#[napi(ts_return_type = "Promise<void>")]
+pub fn test_worker_panic() -> AsyncTask<TestWorkerPanicTask> {
+  AsyncTask::new(TestWorkerPanicTask)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn worker_panics_become_napi_errors() {
+    let error = run_worker::<()>(|| panic!("forced unit-test panic")).unwrap_err();
+
+    assert_eq!(error.status, Status::GenericFailure);
+    assert_eq!(
+      error.reason,
+      "cookie extraction worker panicked: forced unit-test panic"
+    );
+  }
 }

@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import {
+import rookieCookies, {
   firefoxBased,
   safari,
   version,
@@ -35,6 +35,39 @@ test("firefoxBased throws on a non-sqlite file", async (t) => {
   const dbPath = join(dir, "cookies.sqlite");
   writeFileSync(dbPath, "this is not a sqlite database");
   await t.throwsAsync(firefoxBased(dbPath));
+});
+
+test("bad async API arguments reject instead of throwing synchronously", async (t) => {
+  const invalidCalls = [
+    ["anyBrowser", () => rookieCookies.anyBrowser(42)],
+    ["firefox", () => rookieCookies.firefox(42)],
+    ["firefoxProfile", () => rookieCookies.firefoxProfile(42)],
+    ["firefoxBased", () => rookieCookies.firefoxBased(42)],
+    ["zen", () => rookieCookies.zen(42)],
+    ["librewolf", () => rookieCookies.librewolf(42)],
+    ["chrome", () => rookieCookies.chrome(42)],
+    ["brave", () => rookieCookies.brave(42)],
+    ["arc", () => rookieCookies.arc(42)],
+    ["edge", () => rookieCookies.edge(42)],
+    ["opera", () => rookieCookies.opera(42)],
+    ["operaGx", () => rookieCookies.operaGx(42)],
+    ["chromium", () => rookieCookies.chromium(42)],
+    ["vivaldi", () => rookieCookies.vivaldi(42)],
+    ["load", () => rookieCookies.load(42)],
+    ["octoBrowser", () => rookieCookies.octoBrowser(42)],
+    ["internetExplorer", () => rookieCookies.internetExplorer(42)],
+    ["safari", () => rookieCookies.safari(42)],
+    ["chromiumBased", () => rookieCookies.chromiumBased(42)],
+  ];
+
+  for (const [name, call] of invalidCalls) {
+    let promise;
+    t.notThrows(() => {
+      promise = call();
+    }, `${name} must not throw before returning`);
+    t.true(promise instanceof Promise, `${name} must return a Promise`);
+    await t.throwsAsync(promise, undefined, `${name} must reject`);
+  }
 });
 
 test.serial("Firefox profiles can be listed and selected asynchronously", async (t) => {
@@ -114,6 +147,82 @@ test("generated Firefox profile exports and declarations survive patching", (t) 
   t.regex(types, /export declare function firefoxProfile\(/);
   t.is((types.match(/firefoxProfiles\(/g) || []).length, 1);
   t.is((types.match(/firefoxProfile\(/g) || []).length, 1);
+  t.false(types.includes("testWorkerPanic"));
+});
+
+test("public JavaScript examples await async extraction APIs", (t) => {
+  const documents = [
+    ["README.md", new URL("../../../README.md", import.meta.url), true],
+    [
+      "docs/JavaScript.md",
+      new URL("../../../docs/JavaScript.md", import.meta.url),
+      true,
+    ],
+    ["bindings/node/README.md", new URL("../README.md", import.meta.url), true],
+    [
+      "examples/javascript/simple.js",
+      new URL("../../../examples/javascript/simple.js", import.meta.url),
+      false,
+    ],
+    [
+      "examples/javascript/fetch.js",
+      new URL("../../../examples/javascript/fetch.js", import.meta.url),
+      false,
+    ],
+    [
+      "examples/javascript/from_path.mjs",
+      new URL("../../../examples/javascript/from_path.mjs", import.meta.url),
+      false,
+    ],
+  ];
+  const asyncApis = [
+    "anyBrowser",
+    "firefox",
+    "firefoxProfiles",
+    "firefoxProfile",
+    "zen",
+    "librewolf",
+    "chrome",
+    "brave",
+    "arc",
+    "edge",
+    "opera",
+    "operaGx",
+    "chromium",
+    "vivaldi",
+    "firefoxBased",
+    "load",
+    "octoBrowser",
+    "internetExplorer",
+    "safari",
+    "chromiumBased",
+  ];
+  const callPattern = new RegExp(`\\b(?:${asyncApis.join("|")})\\s*\\(`, "g");
+  let checkedCalls = 0;
+
+  for (const [name, url, markdown] of documents) {
+    const source = readFileSync(url, "utf8");
+    const examples = markdown
+      ? [...source.matchAll(/```(?:js|javascript|typescript)\s*\n([\s\S]*?)```/g)].map(
+          (match) => match[1],
+        )
+      : [source];
+
+    for (const example of examples) {
+      for (const line of example.split("\n")) {
+        const calls = [...line.matchAll(callPattern)];
+        checkedCalls += calls.length;
+        for (const call of calls) {
+          t.true(
+            line.slice(0, call.index).includes("await"),
+            `${name} must await this async API call: ${line.trim()}`,
+          );
+        }
+      }
+    }
+  }
+
+  t.true(checkedCalls >= 8, "the doc test must cover the public examples");
 });
 
 test("safari reports an unsupported platform outside macOS", async (t) => {

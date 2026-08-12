@@ -144,7 +144,10 @@ jobs:
         run: npm install
       - name: Build node binding
         working-directory: bindings/node
-        run: npm run build
+        run: npm run build:test
+      - name: Test native worker panic rejection
+        working-directory: bindings/node
+        run: npm run test:worker-panic
       - name: Run ava
         working-directory: bindings/node
         run: npm test
