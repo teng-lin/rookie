@@ -27,12 +27,11 @@ class HoldSqliteSnapshotTests(unittest.TestCase):
 
         connection = sqlite3.connect(self.database)
         try:
-            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
-            self.assertEqual(mode, ("wal",))
+            mode = connection.execute("PRAGMA journal_mode").fetchone()
+            self.assertEqual(mode, ("delete",))
             connection.execute("CREATE TABLE cookies (name TEXT NOT NULL)")
             connection.execute("INSERT INTO cookies VALUES ('baseline')")
             connection.commit()
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             connection.close()
 
@@ -96,9 +95,11 @@ class HoldSqliteSnapshotTests(unittest.TestCase):
 
         live = sqlite3.connect(self.database)
         try:
+            mode = live.execute("PRAGMA journal_mode").fetchone()
             live_rows = live.execute("SELECT name FROM cookies").fetchall()
         finally:
             live.close()
+        self.assertEqual(mode, ("wal",))
         self.assertEqual(live_rows, [("baseline",), ("wal-only",)])
 
         self.stop_file.write_text("stop\n", encoding="utf-8")

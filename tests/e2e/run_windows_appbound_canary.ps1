@@ -145,10 +145,10 @@ try {
     --expected-prefix v20 --require-app-bound-key
   if ($LASTEXITCODE -ne 0) { throw "strict v20 profile check failed" }
 
-  # Pin a read snapshot before Chrome writes rookie_wal. Chrome may close or
-  # checkpoint its cookie-store connection immediately after a small write;
-  # the pinned reader prevents that checkpoint from moving rookie_wal into the
-  # main database, making the WAL-only invariant deterministic.
+  # Enable WAL and pin a read snapshot before Chrome writes rookie_wal. Chrome
+  # may close or checkpoint its cookie-store connection immediately after a
+  # small write; the pinned reader prevents that checkpoint from moving
+  # rookie_wal into the main database, making the invariant deterministic.
   $walGuardReady = Join-Path $env:RUNNER_TEMP "rookie-wal-$PID.ready"
   $walGuardStop = Join-Path $env:RUNNER_TEMP "rookie-wal-$PID.stop"
   Remove-Item $walGuardReady, $walGuardStop -Force -ErrorAction SilentlyContinue
