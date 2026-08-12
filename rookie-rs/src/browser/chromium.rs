@@ -2435,6 +2435,31 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn linux_keyring_failure_diagnostic_reaches_v11_decryption() {
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::failure(
+        "all Linux keyring backends failed: Secret Service locked; KWallet denied",
+      ),
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+    };
+
+    let error = decrypt_encrypted_value_with_outcomes(
+      ".example.com",
+      String::new(),
+      b"v11encrypted",
+      &outcomes,
+    )
+    .expect_err("v11 must preserve the provider diagnostic")
+    .to_string();
+    assert!(error.contains("Chromium v11 key provider failed"));
+    assert!(error.contains("all Linux keyring backends failed"));
+    assert!(error.contains("Secret Service locked"));
+    assert!(error.contains("KWallet denied"));
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn decrypt_encrypted_value_invalid_utf8_returns_error() {
     use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 
