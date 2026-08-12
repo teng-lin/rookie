@@ -1,12 +1,9 @@
-//! Cross-engine private report assembly (Milestone 4E).
+//! Cross-engine report assembly.
 //!
 //! Every registered engine reaches the frozen [`super::report_core`] contract
-//! through this module. Nothing here is exported from `lib.rs`: the coordinated
-//! Rust/Python/Node/CLI release gate owns publication.
-
-// The report contract is complete before its public surface ships in
-// Milestone 5, so unused-until-then items are expected here.
-#![allow(dead_code)]
+//! through this module. The four entry points at the bottom back the public
+//! [`crate::supported_browsers`], [`crate::browser_profiles`],
+//! [`crate::browser_report`], and [`crate::load_report`].
 
 use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
 use super::registry::{
