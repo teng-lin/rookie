@@ -9,12 +9,13 @@
   ],
   "main": "rookie_cookies.darwin-x64.node",
   "files": [
-    "rookie_cookies.darwin-x64.node"
+    "rookie_cookies.darwin-x64.node",
+    "MIT-LICENSE.txt"
   ],
   "description": "Load cookies from any browser on any platform",
   "license": "MIT",
   "engines": {
-    "node": ">= 10"
+    "node": ">=10.16.0"
   },
   "repository": "https://github.com/teng-lin/rookie-cookies"
 }

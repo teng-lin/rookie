@@ -35,8 +35,14 @@ if (!loader.includes('No prebuilt rookie-cookies binding is published')) {
   )
 }
 
+const nativeBindingDestructurePattern = /^const \{ version,.* \} = nativeBinding$/m
+if (!nativeBindingDestructurePattern.test(loader)) {
+  throw new Error(
+    "patch-loader.js: could not find the napi-generated `const { version, ... } = nativeBinding` line; napi-rs output format may have changed"
+  )
+}
 loader = loader.replace(
-  /^const \{ version,.* \} = nativeBinding$/m,
+  nativeBindingDestructurePattern,
   'const { version, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
 )
 

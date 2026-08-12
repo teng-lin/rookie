@@ -43,9 +43,20 @@ jobs:
           python-version: "3.12"
       - name: Verify release tag and metadata
         run: |
+          # $GITHUB_REF_TYPE/$GITHUB_REF_NAME reflect the ref that triggered
+          # this workflow_dispatch (i.e. the branch selected in the Actions
+          # UI), not the `ref:` override passed to actions/checkout above —
+          # this guards against dispatching from anything but `main`.
           test "$GITHUB_REF_TYPE" = "branch"
           test "$GITHUB_REF_NAME" = "main"
-          test "$(git rev-parse HEAD)" = "$(git rev-parse "v$RELEASE_VERSION^{}")"
+          # NOTE: the checkout step above already checks out
+          # `refs/tags/v$RELEASE_VERSION`, so comparing `HEAD` to that same
+          # tag (`git rev-parse HEAD` vs `git rev-parse "v$RELEASE_VERSION^{}"`)
+          # would be a tautology that can never fail and proves nothing about
+          # whether the tag was actually reviewed and merged into `main`.
+          # `fetch-depth: 0` above fetches full history for all branches, so
+          # `origin/main` is available here; assert real ancestry instead.
+          git merge-base --is-ancestor "v$RELEASE_VERSION^{}" origin/main
           python scripts/check-release.py "$RELEASE_VERSION"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -56,7 +67,14 @@ jobs:
         working-directory: ./bindings/node
         run: |
           npm ci --ignore-scripts
-          npm pack --dry-run --ignore-scripts
+          npm pack --dry-run --ignore-scripts --json | tee /tmp/npm-pack-root.json
+          node -e "
+            const packed = require('/tmp/npm-pack-root.json');
+            const files = packed[0].files.map((entry) => entry.path);
+            if (!files.includes('MIT-LICENSE.txt')) {
+              throw new Error('MIT-LICENSE.txt is missing from the root npm package: ' + files.join(', '));
+            }
+          "
 
   build:
     needs: preflight
@@ -268,6 +286,17 @@ jobs:
           python ../../scripts/package-npm-tarballs.py \
             --node-root . \
             --output ../../release-packages/npm
+      - name: Verify license file is packaged in release tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tarball in \
+            "../../release-packages/npm/rookie-cookies-$RELEASE_VERSION.tgz" \
+            "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz"
+          do
+            tar -tzf "$tarball" | grep -qx "package/MIT-LICENSE.txt" \
+              || { echo "MIT-LICENSE.txt missing from $tarball" >&2; exit 1; }
+          done
       - name: Upload release tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

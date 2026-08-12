@@ -20,6 +20,44 @@ import rookieCookies, {
 
 const execFileAsync = promisify(execFile);
 
+// Every function the loader (bindings/node/index.js) is expected to export
+// after patch-loader.js runs, per bindings/node/index.d.ts. This guards
+// against a napi-rs output-format shift silently dropping an export (e.g.
+// `String.replace()` no-op in patch-loader.js) without anything failing.
+const EXPECTED_EXPORTS = [
+  "version",
+  "anyBrowser",
+  "firefox",
+  "zen",
+  "librewolf",
+  "chrome",
+  "brave",
+  "arc",
+  "edge",
+  "opera",
+  "operaGx",
+  "chromium",
+  "vivaldi",
+  "load",
+  "firefoxProfiles",
+  "firefoxProfile",
+  "firefoxBased",
+  "octoBrowser",
+  "internetExplorer",
+  "safari",
+  "chromiumBased",
+];
+
+test("index.js exports every documented function", (t) => {
+  for (const name of EXPECTED_EXPORTS) {
+    t.is(
+      typeof rookieCookies[name],
+      "function",
+      `expected module.exports.${name} to be a function`,
+    );
+  }
+});
+
 test("version returns a non-empty string", (t) => {
   const v = version();
   t.is(typeof v, "string");
