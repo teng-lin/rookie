@@ -1854,8 +1854,11 @@ mod tests {
     let real_context = test_context(temp.path().to_path_buf());
     let root = gecko_test_root(&real_context);
     seed_empty_gecko_database(&root.join("Restored Direct"));
-    let profiles_container = root.join("Profiles");
-    std::fs::create_dir_all(&profiles_container).expect("create Profiles container");
+    std::fs::create_dir_all(root.join("Profiles")).expect("create Profiles container");
+    let profiles_container = root
+      .canonicalize()
+      .expect("canonical installation root")
+      .join("Profiles");
     let context = with_test_fs(
       real_context,
       TestDiscoveryFs {
