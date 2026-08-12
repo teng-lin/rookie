@@ -46,6 +46,28 @@ struct BrowserDefinition {
   engine: BrowserEngine,
   roots: Vec<InstallationRoot>,
   capabilities: BrowserCapabilities,
+  /// Platform key-lookup metadata for the generic pipeline. Roots and tiers say
+  /// nothing about *which* OS credential a key provider should read, so a
+  /// registry-only browser has no other source of truth for it. Values are
+  /// lookup identifiers, never key material.
+  #[serde(default)]
+  key_credentials: Option<KeyCredentials>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct KeyCredentials {
+  #[serde(default)]
+  macos_keychain: Option<MacosKeychainCredential>,
+  #[serde(default)]
+  linux_crypt_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MacosKeychainCredential {
+  /// Keychain generic-password service, e.g. `"Chrome Safe Storage"`.
+  service: String,
+  /// Its account name, e.g. `"Chrome"`.
+  account: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -303,7 +325,78 @@ fn validate_registry(registry: &Registry) -> std::result::Result<(), String> {
       {
         validate_identifier("capability", identifier)?;
       }
+      validate_key_credentials(platform, definition)?;
     }
+  }
+  Ok(())
+}
+
+/// Enforces the Section 5.9 credential rules.
+///
+/// A registry-only browser has no `config.json` parity check to catch a missing
+/// or blank credential, and a blank one fails exactly like an absent one at
+/// runtime: Linux filters an empty crypt name to `NotApplicable`, and macOS
+/// would issue a Keychain query with an empty service or account. Both are
+/// therefore rejected at load rather than surfacing as a runtime surprise.
+fn validate_key_credentials(
+  platform: &str,
+  definition: &BrowserDefinition,
+) -> std::result::Result<(), String> {
+  let browser = &definition.canonical_id;
+  let credentials = definition.key_credentials.as_ref();
+  let keychain = credentials.and_then(|credentials| credentials.macos_keychain.as_ref());
+  let crypt_name = credentials.and_then(|credentials| credentials.linux_crypt_name.as_deref());
+  let declares = |tier: &str| -> bool {
+    definition
+      .capabilities
+      .declared_decryption_tiers
+      .iter()
+      .any(|declared| declared == tier)
+  };
+
+  // Only the running platform's subfields are meaningful, and definitions are
+  // already platform-grouped, so a subfield the platform cannot use is a
+  // registry authoring mistake rather than harmless extra data.
+  if platform != "macos" && keychain.is_some() {
+    return Err(format!(
+      "browser {browser:?} on {platform} declares macos_keychain, which only macOS can use"
+    ));
+  }
+  if platform != "linux" && crypt_name.is_some() {
+    return Err(format!(
+      "browser {browser:?} on {platform} declares linux_crypt_name, which only Linux can use"
+    ));
+  }
+
+  if let Some(keychain) = keychain {
+    for (field, value) in [
+      ("service", &keychain.service),
+      ("account", &keychain.account),
+    ] {
+      if value.trim().is_empty() {
+        return Err(format!(
+          "browser {browser:?} on {platform} has a blank macos_keychain {field}"
+        ));
+      }
+    }
+  }
+  if let Some(crypt_name) = crypt_name {
+    if crypt_name.trim().is_empty() {
+      return Err(format!(
+        "browser {browser:?} on {platform} has a blank linux_crypt_name"
+      ));
+    }
+  }
+
+  if platform == "macos" && declares("v10") && keychain.is_none() {
+    return Err(format!(
+      "browser {browser:?} declares the macOS v10 tier without macos_keychain credentials"
+    ));
+  }
+  if platform == "linux" && declares("v11") && crypt_name.is_none() {
+    return Err(format!(
+      "browser {browser:?} declares the Linux v11 tier without a linux_crypt_name"
+    ));
   }
   Ok(())
 }
@@ -1294,6 +1387,34 @@ where
   Ok(report)
 }
 
+/// Resolves a browser's platform key credentials from the registry.
+///
+/// Section 5.9 makes the registry the single source of truth for the generic
+/// pipeline, because a registry-only browser has no `config.json` entry to fall
+/// back to. Legacy named wrappers keep their own `config.json` lookup, so this
+/// cannot change legacy key resolution.
+///
+/// The credentials are carried in a `config::Browser` because that is what the
+/// platform providers already consume; only its credential fields are read.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn registry_key_credentials(browser_id: &str) -> Result<crate::config::Browser> {
+  let registry = embedded_registry()?;
+  let platform = PlatformId::current()?;
+  let definition = browser_definition(registry, platform, browser_id)?;
+  let credentials = definition.key_credentials.as_ref();
+  Ok(crate::config::Browser {
+    paths: Vec::new(),
+    channels: None,
+    unix_crypt_name: credentials.and_then(|credentials| credentials.linux_crypt_name.clone()),
+    osx_key_service: credentials
+      .and_then(|credentials| credentials.macos_keychain.as_ref())
+      .map(|keychain| keychain.service.clone()),
+    osx_key_user: credentials
+      .and_then(|credentials| credentials.macos_keychain.as_ref())
+      .map(|keychain| keychain.account.clone()),
+  })
+}
+
 struct SystemChromiumKeyProvider;
 
 impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
@@ -1322,36 +1443,34 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
 
     #[cfg(target_os = "linux")]
     {
-      let Some(config) = crate::config::try_get_browser_config(&installation.browser_id) else {
-        return ChromiumKeyOutcomes {
-          v10: ChromiumKeyOutcome::failure(format!(
-            "no legacy key configuration for browser {:?}",
-            installation.browser_id
-          )),
-          v11: ChromiumKeyOutcome::failure(format!(
-            "no legacy key configuration for browser {:?}",
-            installation.browser_id
-          )),
-          v20: ChromiumKeyOutcome::NotApplicable,
-        };
+      let credentials = match registry_key_credentials(&installation.browser_id) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+          let message = error.to_string();
+          return ChromiumKeyOutcomes {
+            v10: ChromiumKeyOutcome::failure(message.clone()),
+            v11: ChromiumKeyOutcome::failure(message),
+            v20: ChromiumKeyOutcome::NotApplicable,
+          };
+        }
       };
-      let provider = LinuxPlatformKeyProvider::new(config);
+      let provider = LinuxPlatformKeyProvider::new(&credentials);
       return retrieve_key_outcomes(&provider, &());
     }
 
     #[cfg(target_os = "macos")]
     {
-      let Some(config) = crate::config::try_get_browser_config(&installation.browser_id) else {
-        return ChromiumKeyOutcomes {
-          v10: ChromiumKeyOutcome::failure(format!(
-            "no legacy key configuration for browser {:?}",
-            installation.browser_id
-          )),
-          v11: ChromiumKeyOutcome::NotApplicable,
-          v20: ChromiumKeyOutcome::NotApplicable,
-        };
+      let credentials = match registry_key_credentials(&installation.browser_id) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+          return ChromiumKeyOutcomes {
+            v10: ChromiumKeyOutcome::failure(error.to_string()),
+            v11: ChromiumKeyOutcome::NotApplicable,
+            v20: ChromiumKeyOutcome::NotApplicable,
+          };
+        }
       };
-      let provider = MacosPlatformKeyProvider::new(config);
+      let provider = MacosPlatformKeyProvider::new(&credentials);
       return retrieve_key_outcomes(&provider, &());
     }
 
@@ -2748,6 +2867,142 @@ mod tests {
         ),
       ]
     );
+  }
+
+  #[test]
+  fn key_credentials_match_legacy_config_for_browsers_in_both_files() {
+    let registry = embedded_registry().expect("registry");
+    let mut compared = 0;
+    for (platform, definitions) in &registry.platforms {
+      for definition in definitions {
+        let Some(legacy) = crate::config::CONFIG
+          .platforms
+          .get(platform)
+          .and_then(|browsers| browsers.get(&definition.canonical_id))
+        else {
+          // Registry-only browsers have no parity obligation; the registry is
+          // their only source of truth.
+          continue;
+        };
+        let credentials = definition.key_credentials.as_ref();
+        let keychain = credentials.and_then(|credentials| credentials.macos_keychain.as_ref());
+        let crypt_name =
+          credentials.and_then(|credentials| credentials.linux_crypt_name.as_deref());
+        match platform.as_str() {
+          "macos" => {
+            assert_eq!(
+              keychain.map(|keychain| keychain.service.as_str()),
+              legacy.osx_key_service.as_deref(),
+              "{}/{} keychain service",
+              platform,
+              definition.canonical_id
+            );
+            assert_eq!(
+              keychain.map(|keychain| keychain.account.as_str()),
+              legacy.osx_key_user.as_deref(),
+              "{}/{} keychain account",
+              platform,
+              definition.canonical_id
+            );
+            compared += 1;
+          }
+          "linux" => {
+            assert_eq!(
+              crypt_name,
+              legacy.unix_crypt_name.as_deref(),
+              "{}/{} crypt name",
+              platform,
+              definition.canonical_id
+            );
+            compared += 1;
+          }
+          // Windows key material comes from the installation's own Local State,
+          // so its definitions carry no credentials to compare.
+          _ => assert!(credentials.is_none()),
+        }
+      }
+    }
+    assert!(compared > 0, "no shared browsers were compared");
+  }
+
+  fn registry_with_credentials(platform: &str, tiers: &str, credentials: &str) -> String {
+    format!(
+      r#"{{
+        "schema_version": 1,
+        "platforms": {{
+          "{platform}": [
+            {{
+              "canonical_id": "probe",
+              "aliases": [],
+              "display_name": "Probe",
+              "engine": "chromium",
+              "roots": [
+                {{
+                  "root_id": "probe-root",
+                  "template": "{{home}}/probe",
+                  "channel": "stable",
+                  "discovery": "chromium_user_data",
+                  "priority": 10
+                }}
+              ],
+              "capabilities": {{
+                "declared_persistent_formats": ["chromium_sqlite"],
+                "declared_session_formats": [],
+                "declared_decryption_tiers": [{tiers}]
+              }}{credentials}
+            }}
+          ]
+        }}
+      }}"#
+    )
+  }
+
+  fn credential_validation_error(platform: &str, tiers: &str, credentials: &str) -> String {
+    let registry: Registry =
+      serde_json::from_str(&registry_with_credentials(platform, tiers, credentials))
+        .expect("deserialize probe registry");
+    validate_registry(&registry).expect_err("probe registry must be rejected")
+  }
+
+  #[test]
+  fn key_credentials_are_rejected_on_platforms_that_cannot_use_them() {
+    let keychain = r#", "key_credentials": {"macos_keychain": {"service": "S", "account": "A"}}"#;
+    let crypt = r#", "key_credentials": {"linux_crypt_name": "probe"}"#;
+    for platform in ["windows", "linux"] {
+      assert!(credential_validation_error(platform, "", keychain).contains("macos_keychain"));
+    }
+    for platform in ["windows", "macos"] {
+      assert!(credential_validation_error(platform, "", crypt).contains("linux_crypt_name"));
+    }
+  }
+
+  #[test]
+  fn declared_tiers_require_non_blank_credentials() {
+    // A declared-but-uncredentialed tier is a registry error rather than a
+    // runtime surprise, and a blank value fails exactly like an absent one.
+    assert!(credential_validation_error("macos", r#""v10""#, "")
+      .contains("without macos_keychain credentials"));
+    assert!(
+      credential_validation_error("linux", r#""v11""#, "").contains("without a linux_crypt_name")
+    );
+    assert!(credential_validation_error(
+      "macos",
+      r#""v10""#,
+      r#", "key_credentials": {"macos_keychain": {"service": "  ", "account": "A"}}"#
+    )
+    .contains("blank macos_keychain service"));
+    assert!(credential_validation_error(
+      "macos",
+      r#""v10""#,
+      r#", "key_credentials": {"macos_keychain": {"service": "S", "account": ""}}"#
+    )
+    .contains("blank macos_keychain account"));
+    assert!(credential_validation_error(
+      "linux",
+      r#""v11""#,
+      r#", "key_credentials": {"linux_crypt_name": " "}"#
+    )
+    .contains("blank linux_crypt_name"));
   }
 
   #[test]
