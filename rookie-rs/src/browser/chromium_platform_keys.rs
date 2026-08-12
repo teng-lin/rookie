@@ -584,7 +584,7 @@ mod tests {
   fn linux_any_browser_cache_reuses_success_per_crypt_name() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
-      result: Ok(vec!["shared secret".to_string()]),
+      result: Ok(vec![Zeroizing::new("shared secret".to_string())]),
     };
     let mut cache = LinuxKeyOutcomeCache::new();
 
@@ -599,7 +599,7 @@ mod tests {
     );
     assert_eq!(
       candidate_bytes(&brave, ChromiumCipherVersion::V11),
-      vec![create_pbkdf2_key("shared secret", b"saltysalt", 1)]
+      vec![create_pbkdf2_key("shared secret", b"saltysalt", 1).to_vec()]
     );
   }
 

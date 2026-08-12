@@ -1913,6 +1913,7 @@ dependencies = [
  "url",
  "windows",
  "zbus",
+ "zeroize",
  "zvariant",
 ]
 

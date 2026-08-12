@@ -75,7 +75,10 @@ where
 }
 
 fn push_unique(values: &mut Vec<Zeroizing<String>>, value: Zeroizing<String>) {
-  if !values.iter().any(|existing| existing.as_str() == value.as_str()) {
+  if !values
+    .iter()
+    .any(|existing| existing.as_str() == value.as_str())
+  {
     values.push(value);
   }
 }
