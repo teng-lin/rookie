@@ -268,6 +268,9 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   /// through this field, so a caller can tell total failure from partial
   /// success.
   pub(crate) persistent_error: Option<String>,
+  /// Which of those it was, taken from the SQLite layer's typed failure rather
+  /// than assumed.
+  pub(crate) persistent_failure_kind: Option<sqlite::BrowserDatabaseFailureKind>,
   /// A row was seen and rejected while the source itself stayed readable.
   /// Section 5.7 counts this in `rows_skipped` and reports it as a row issue
   /// against a source that still succeeded, which is why it is deliberately
@@ -300,6 +303,7 @@ pub(crate) fn query_cookies_engine_outcome(
       if let Some(failure) = error.downcast_ref::<sqlite::BrowserDatabaseFailure>() {
         outcome.persistent_acquisition_strategy = failure.strategy;
         outcome.persistent_acquisition_attempts = failure.attempts;
+        outcome.persistent_failure_kind = Some(failure.kind);
       } else {
         outcome.persistent_acquisition_attempts = 1;
       }

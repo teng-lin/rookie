@@ -41,10 +41,24 @@ pub(crate) struct SafariExtractionStats {
   pub(crate) records_skipped: usize,
 }
 
+/// Marker attached to failures raised after acquisition succeeded, so the
+/// report layer can distinguish a corrupt file from an unreadable one.
+#[derive(Debug)]
+pub(crate) struct SafariParseFailure;
+
+impl std::fmt::Display for SafariParseFailure {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("Safari cookie parsing failed")
+  }
+}
+
 #[derive(Debug)]
 pub(crate) struct SafariFileExtraction {
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) stats: SafariExtractionStats,
+  /// Stable-read attempts actually spent. The reader retries when the file
+  /// changes mid-acquisition, so this is not always one.
+  pub(crate) acquisition_attempts: u32,
 }
 
 pub(crate) fn safari_based_outcome(
@@ -64,8 +78,10 @@ pub(crate) fn safari_based_outcome(
       ",
     db_path.display()
   ))?;
-  let bs = read_stable_cookie_file(&mut file, &db_path)?;
-  let (cookies, stats) = parse_content(&bs)?;
+  let (bs, acquisition_attempts) = read_stable_cookie_file(&mut file, &db_path)?;
+  // Tagged so the report can name the stage that actually failed instead of
+  // flattening every Safari failure into acquisition.
+  let (cookies, stats) = parse_content(&bs).map_err(|error| error.context(SafariParseFailure))?;
 
   // Filter cookies by domain if domains are specified
   let cookies = match &domains {
@@ -75,10 +91,14 @@ pub(crate) fn safari_based_outcome(
       .collect(),
     None => cookies,
   };
-  Ok(SafariFileExtraction { cookies, stats })
+  Ok(SafariFileExtraction {
+    cookies,
+    stats,
+    acquisition_attempts,
+  })
 }
 
-const STABLE_READ_ATTEMPTS: usize = 3;
+pub(crate) const STABLE_READ_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileImageMetadata {
@@ -120,7 +140,9 @@ fn file_image_metadata(metadata: std::fs::Metadata) -> FileImageMetadata {
 /// not replaced or modified while its bytes were copied. Safari updates this
 /// file atomically in practice, but a bounded retry prevents a half-old image
 /// from silently becoming the extraction result when it does not.
-fn read_stable_cookie_file(file: &mut File, db_path: &Path) -> Result<Vec<u8>> {
+/// Returns the stable image and how many acquisition attempts it took, so a
+/// report can state the real attempt count instead of assuming one.
+fn read_stable_cookie_file(file: &mut File, db_path: &Path) -> Result<(Vec<u8>, u32)> {
   read_stable_cookie_file_with(file, db_path, || {})
 }
 
@@ -128,12 +150,12 @@ fn read_stable_cookie_file_with<F>(
   file: &mut File,
   db_path: &Path,
   mut after_read: F,
-) -> Result<Vec<u8>>
+) -> Result<(Vec<u8>, u32)>
 where
   F: FnMut(),
 {
   let mut last_change = None;
-  for _ in 0..STABLE_READ_ATTEMPTS {
+  for attempt in 1..=STABLE_READ_ATTEMPTS {
     let fd_before = image_metadata(file, db_path)?;
     let path_before = path_image_metadata(db_path)?;
     let first_bytes = read_cookie_file(file, db_path, fd_before.len)?;
@@ -166,7 +188,7 @@ where
         && first_bytes == verification_bytes
       {
         *file = verification;
-        return Ok(first_bytes);
+        return Ok((first_bytes, attempt as u32));
       }
       last_change = Some((
         fd_before,
@@ -595,21 +617,41 @@ fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>
 /// Default profile is always first. A readable zero-row database is
 /// authoritative; only absent, unreadable, or schema-incompatible databases
 /// activate the deterministic directory fallback.
-pub(crate) fn discover_safari_profiles(library: &Path) -> (Vec<SafariProfile>, Option<String>) {
+/// How named-profile discovery went when the profile database could not be
+/// used. The distinction is load-bearing: a fallback that enumerated profiles
+/// degraded gracefully, while one that also failed means named profiles were
+/// never enumerated at all and the report must not call that success.
+#[derive(Debug)]
+pub(crate) enum SafariProfileDiscoveryIssue {
+  Degraded(String),
+  EnumerationFailed(String),
+}
+
+impl SafariProfileDiscoveryIssue {
+  pub(crate) fn message(self) -> String {
+    match self {
+      Self::Degraded(message) | Self::EnumerationFailed(message) => message,
+    }
+  }
+}
+
+pub(crate) fn discover_safari_profiles(
+  library: &Path,
+) -> (Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>) {
   let mut profiles = vec![default_profile(library)];
   let (named, warning) = match named_profiles_from_database(library) {
     Ok(profiles) => (profiles, None),
     Err(error) => {
       let database = safari_tabs_database_path(library);
       match named_profiles_from_directory(library) {
-        Ok(profiles) => (profiles, Some(format!(
+        Ok(profiles) => (profiles, Some(SafariProfileDiscoveryIssue::Degraded(format!(
           "Safari profile database acquisition/query failed at {}; using directory fallback (Full Disk Access may be required): {error:#}",
           database.display()
-        ))),
-        Err(directory_error) => (Vec::new(), Some(format!(
+        )))),
+        Err(directory_error) => (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
           "Safari profile database acquisition/query failed at {}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}",
           database.display()
-        ))),
+        )))),
       }
     }
   };
@@ -1043,7 +1085,11 @@ mod tests {
       }
     })
     .expect("reopen and acquire replacement image");
+    let (image, attempts) = image;
     assert_eq!(image, new);
+    // The first attempt saw the file change underneath it, so the stable image
+    // came from the retry -- the count the report must show.
+    assert_eq!(attempts, 2);
     fs::remove_dir_all(&directory).expect("remove fixture directory");
   }
 
@@ -1081,7 +1127,9 @@ mod tests {
       }
     })
     .expect("retry and acquire rewritten image");
+    let (image, attempts) = image;
     assert_eq!(image, new);
+    assert_eq!(attempts, 2);
     fs::remove_file(&path).expect("remove fixture");
   }
 
@@ -1189,12 +1237,46 @@ mod tests {
     }
 
     let (profiles, warning) = discover_safari_profiles(&library);
-    assert!(warning
-      .as_deref()
-      .is_some_and(|message| message.contains("directory fallback")));
+    // The fallback enumerated profiles, so this is a degradation, not a loss.
+    assert!(matches!(
+      warning,
+      Some(SafariProfileDiscoveryIssue::Degraded(ref message))
+        if message.contains("directory fallback")
+    ));
     assert_eq!(profiles[0].name, "default");
     assert_eq!(profiles[1].uuid.as_deref(), Some(second));
     assert_eq!(profiles[2].uuid.as_deref(), Some(first));
     fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  /// When the database *and* the directory fallback both fail, named profiles
+  /// were never enumerated. Reporting that at the same severity as a working
+  /// fallback let the report claim success while profiles were missing.
+  #[cfg(unix)]
+  #[test]
+  fn failing_database_and_directory_fallback_is_an_enumeration_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = temp_library("directory-fallback-denied");
+    let profiles_directory =
+      library.join("Containers/com.apple.Safari/Data/Library/Safari/Profiles");
+    fs::create_dir_all(&profiles_directory).expect("create profile directory");
+    fs::set_permissions(&profiles_directory, fs::Permissions::from_mode(0o000))
+      .expect("deny profile directory");
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    let failed = matches!(
+      warning,
+      Some(SafariProfileDiscoveryIssue::EnumerationFailed(_))
+    );
+
+    fs::set_permissions(&profiles_directory, fs::Permissions::from_mode(0o700))
+      .expect("restore permissions");
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+
+    assert!(failed, "both paths failed, so enumeration failed");
+    // The default profile still stands; only the named ones were lost.
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].name, "default");
   }
 }

@@ -12,7 +12,7 @@ use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
 use super::registry::{
   self, ChromiumProfileExtraction, ChromiumProfileFailure, ChromiumRegistryReport, DiscoveryIssue,
   EngineProfileExtraction, EngineSourceExtraction, RegisteredBrowser, SourceAcquisition,
-  SOURCE_ROLE_PERSISTENT,
+  SourceFailureStage, SOURCE_ROLE_PERSISTENT,
 };
 use super::report_core::{
   display_path, issue, push_aggregated, report_status, sort_cookies, sort_source_descriptors,
@@ -117,9 +117,20 @@ fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
     }
     _ => format!("{} row(s) rejected as {code}", issue_code.occurrences),
   };
+  // Name-column and value-column failures share one code, so aggregation merges
+  // them and the retained message names only whichever came first. Qualifying
+  // each sample keeps the failing column recoverable from the merged issue.
+  let samples = match issue_code.code {
+    ChromiumRowIssueCode::ColumnRead(column) => issue_code
+      .samples
+      .iter()
+      .map(|sample| format!("{column} column, {sample}"))
+      .collect(),
+    _ => issue_code.samples.clone(),
+  };
   issue(code, stage, IssueSeverityCode::error(), message)
     .with_occurrences(u32::try_from(issue_code.occurrences).unwrap_or(u32::MAX))
-    .with_samples(issue_code.samples.clone())
+    .with_samples(samples)
 }
 
 fn profile_identity(
@@ -259,6 +270,7 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
     acquisition_attempts,
     diagnostics,
     error,
+    error_stage,
     row_error,
   } = source;
   let mut outcome = SourceExtractionOutcome::new(
@@ -289,14 +301,19 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
   // the report `partial` -- but acquisition, parsing, and the query completed,
   // so the source itself still succeeded. This mirrors how the Chromium adapter
   // treats its row issues.
-  if let Some(row_error) = row_error {
+  //
+  // Keyed on the count, not on whether an engine happened to keep the error:
+  // Safari and Internet Explorer report skipped rows without one, and deriving
+  // the issue from the error alone let a report claim `complete` while cookies
+  // had been dropped.
+  if rows_skipped > 0 {
     push_aggregated(
       &mut outcome.issues,
       issue(
         "row_read_failed",
         ExtractionStageCode::parse(),
         IssueSeverityCode::error(),
-        row_error,
+        row_error.unwrap_or_else(|| format!("{rows_skipped} row(s) could not be read")),
       )
       .with_occurrences(u32::try_from(rows_skipped).unwrap_or(u32::MAX)),
     );
@@ -306,7 +323,11 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
       &mut outcome.issues,
       issue(
         "source_extraction_failed",
-        ExtractionStageCode::acquisition(),
+        match error_stage {
+          SourceFailureStage::Acquisition => ExtractionStageCode::acquisition(),
+          SourceFailureStage::Parse => ExtractionStageCode::parse(),
+          SourceFailureStage::Query => ExtractionStageCode::query(),
+        },
         IssueSeverityCode::error(),
         error,
       ),
@@ -334,8 +355,10 @@ fn chromium_browser_outcome(
 ) -> Result<BrowserOutcome> {
   let mut outcome = BrowserOutcome {
     // Discovery counts, not the post-selection list: a profile-selected report
-    // must not claim the installations it filtered out were never there.
-    detected: report.installations_discovered > 0,
+    // must not claim the installations it filtered out were never there. A root
+    // that existed but could not be read also counts as detected -- otherwise
+    // the report says `failed` and "not detected" about the same browser.
+    detected: report.installations_discovered > 0 || report.installations_detected > 0,
     installations_discovered: report.installations_discovered,
     discovery_failed: report.all_detected_roots_failed,
     profiles: Vec::new(),
@@ -361,7 +384,7 @@ fn engine_browser_outcome(
   engine: registry::EngineExtractionOutcome,
 ) -> Result<BrowserOutcome> {
   let mut outcome = BrowserOutcome {
-    detected: engine.installations_discovered > 0,
+    detected: engine.installations_discovered > 0 || engine.installations_detected > 0,
     installations_discovered: engine.installations_discovered,
     discovery_failed: engine.all_detected_roots_failed(),
     profiles: Vec::new(),
@@ -951,6 +974,7 @@ mod tests {
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
       error: error.map(str::to_owned),
+      error_stage: SourceFailureStage::Acquisition,
       row_error: None,
     }
   }
@@ -1172,6 +1196,93 @@ mod tests {
       .expect("aggregated duplicate issue");
     assert_eq!(issue.occurrences, 5);
     assert_eq!(issue.samples, vec!["/profiles/0", "/profiles/1"]);
+  }
+  /// Safari and Internet Explorer report skipped rows without keeping the
+  /// underlying error. Deriving the row issue from that error alone let a
+  /// report claim `complete` while cookies had been dropped.
+  #[test]
+  fn skipped_rows_without_a_row_error_still_degrade_the_report() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut source = engine_source("Cookies.binarycookies", "persistent", 10, true, None);
+    source.rows_seen = 3;
+    source.rows_skipped = 2;
+    source.row_error = None;
+    profile.sources.push(engine_source_outcome(source));
+
+    let report = assemble(1, vec![outcome(vec![profile], false)]);
+    let source = &report.profiles[0].sources[0];
+    // The source itself still succeeded: acquisition and parsing completed.
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+    let row_issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "row_read_failed")
+      .expect("skipped rows must be reported");
+    assert!(row_issue.is_error());
+    assert_eq!(row_issue.occurrences, 2);
+    assert_eq!(report.status, ReportStatusCode::partial());
+  }
+
+  #[test]
+  fn a_source_that_skipped_nothing_reports_no_row_issue() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.sources.push(engine_source_outcome(engine_source(
+      "cookies.sqlite",
+      "persistent",
+      10,
+      true,
+      None,
+    )));
+    let report = assemble(1, vec![outcome(vec![profile], false)]);
+    assert!(report.profiles[0].sources[0].issues.is_empty());
+    assert_eq!(report.status, ReportStatusCode::complete());
+  }
+
+  /// The frozen `stage` field must name where the failure happened. Flattening
+  /// parse and query failures into `acquisition` misdescribes them and denies
+  /// consumers the signal they need to choose a remedy.
+  #[test]
+  fn a_source_failure_reports_the_stage_it_actually_failed_at() {
+    for (stage, expected) in [
+      (SourceFailureStage::Acquisition, "acquisition"),
+      (SourceFailureStage::Parse, "parse"),
+      (SourceFailureStage::Query, "query"),
+    ] {
+      let mut source = engine_source("cookies.sqlite", "persistent", 10, true, Some("boom"));
+      source.error_stage = stage;
+      let outcome = engine_source_outcome(source);
+      let issue = outcome
+        .issues
+        .iter()
+        .find(|issue| issue.code.as_str() == "source_extraction_failed")
+        .expect("a failure issue");
+      assert_eq!(issue.stage.as_str(), expected);
+    }
+  }
+
+  /// Name-column and value-column failures share a code, so aggregation merges
+  /// them; the sample must still say which column was lost.
+  #[test]
+  fn merged_column_failures_keep_the_column_in_their_samples() {
+    use crate::browser::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
+
+    let mut issues = Vec::new();
+    for (column, row) in [("name", 1usize), ("value", 7)] {
+      push_aggregated(
+        &mut issues,
+        row_issue(&ChromiumRowIssue {
+          code: ChromiumRowIssueCode::ColumnRead(column),
+          occurrences: 1,
+          samples: vec![format!("row {row}")],
+        }),
+      );
+    }
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].occurrences, 2);
+    assert_eq!(
+      issues[0].samples,
+      vec!["name column, row 1", "value column, row 7"]
+    );
   }
 }
 

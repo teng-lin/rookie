@@ -1174,6 +1174,10 @@ pub(crate) struct ChromiumInstallationExtraction {
 #[derive(Debug, Default)]
 pub(crate) struct ChromiumRegistryReport {
   pub(crate) installations: Vec<ChromiumInstallationExtraction>,
+  /// Roots that existed on disk, including ones that then failed to read.
+  /// A root that was found and could not be opened is detected-but-unreadable,
+  /// never absent.
+  pub(crate) installations_detected: usize,
   /// Installations discovered before profile selection narrowed the list.
   /// Selecting a profile must not make the other installations look absent, and
   /// the other engines discover everything and filter afterwards, so this is
@@ -1210,6 +1214,7 @@ where
 
   let mut report = ChromiumRegistryReport {
     all_detected_roots_failed: discovery.all_detected_roots_failed(),
+    installations_detected: discovery.detected_roots,
     installations_discovered: discovery.installations.len(),
     discovery_issues: discovery.issues,
     ..ChromiumRegistryReport::default()
@@ -1465,9 +1470,22 @@ pub(crate) struct EngineSourceExtraction {
   pub(crate) diagnostics: Vec<String>,
   /// The source could not be acquired, parsed, or queried, so it failed.
   pub(crate) error: Option<String>,
+  /// Where `error` happened. The report's `stage` is a frozen field, so
+  /// flattening a parse or query failure into `acquisition` would misdescribe
+  /// it and rob consumers of the signal they need to choose a remedy.
+  pub(crate) error_stage: SourceFailureStage,
   /// A row was seen and rejected. Reported as a row issue against a source
   /// that still succeeded, never as a source failure.
   pub(crate) row_error: Option<String>,
+}
+
+/// The stage at which a source failed, mapped onto the frozen report vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SourceFailureStage {
+  #[default]
+  Acquisition,
+  Parse,
+  Query,
 }
 
 /// How a source was made readable. Non-SQLite engines never acquire through the
@@ -1552,6 +1570,7 @@ fn source_candidate(
     acquisition_attempts: 0,
     diagnostics: Vec::new(),
     error: None,
+    error_stage: SourceFailureStage::Acquisition,
     row_error: None,
   }
 }
@@ -1783,8 +1802,18 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
           Ok(discovery) => {
             usable = discovery.profiles;
             if let Some(error) = discovery.optional_container_error {
+              // The container is only "optional" while something else was
+              // found. If it was the last place left to look and it could not
+              // be read, this installation enumerated nothing and saying so at
+              // warning severity would let the report claim success.
+              let code = if usable.is_empty() {
+                enumerated = false;
+                "installation_enumeration_failed"
+              } else {
+                "optional_profiles_enumeration_failed"
+              };
               outcome.discovery_issues.push(DiscoveryIssue::new(
-                "optional_profiles_enumeration_failed",
+                code,
                 canonical_root.join("Profiles"),
                 error.to_string(),
               ));
@@ -1927,6 +1956,12 @@ where
         // report layer to raise as an error-severity row failure instead.
         diagnostics: Vec::new(),
         error: extraction.persistent_error,
+        error_stage: match extraction.persistent_failure_kind {
+          Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => {
+            SourceFailureStage::Query
+          }
+          _ => SourceFailureStage::Acquisition,
+        },
         row_error: extraction.persistent_row_error,
       });
     }
@@ -1950,6 +1985,9 @@ where
           // be parsed, which is a real source failure. Rows it rejected are
           // already counted in `rows_skipped` and described by `diagnostics`.
           error: source.error,
+          // A session candidate fails by being unreadable as JSON/LZ4, which is
+          // a parse failure, not an acquisition one.
+          error_stage: SourceFailureStage::Parse,
           row_error: None,
         }
       }));
@@ -2034,11 +2072,20 @@ fn discover_safari_with_context<F: DiscoveryFs>(
     // failing, so a canonicalized root is always enumerated.
     outcome.installations_enumerated += 1;
     let (profiles, discovery_warning) = safari::discover_safari_profiles(&canonical_root);
-    if let Some(message) = discovery_warning {
+    if let Some(warning) = discovery_warning {
+      // A fallback that still enumerated named profiles is a degradation; one
+      // that failed too means they were never enumerated, which is a loss and
+      // must not be reported at warning severity.
+      let code = match warning {
+        safari::SafariProfileDiscoveryIssue::Degraded(_) => "safari_profile_discovery_degraded",
+        safari::SafariProfileDiscoveryIssue::EnumerationFailed(_) => {
+          "safari_profile_enumeration_failed"
+        }
+      };
       outcome.discovery_issues.push(DiscoveryIssue::new(
-        "safari_profile_discovery_degraded",
+        code,
         canonical_root.clone(),
-        message,
+        warning.message(),
       ));
     }
 
@@ -2109,9 +2156,12 @@ fn discover_safari_with_context<F: DiscoveryFs>(
         rows_seen: 0,
         rows_skipped: 0,
         acquisition: SourceAcquisition::StableFileImage,
-        acquisition_attempts: 1,
+        // Replaced with the real count once acquisition runs; discovery-only
+        // listings never attempt a read.
+        acquisition_attempts: 0,
         diagnostics: Vec::new(),
         error: None,
+        error_stage: SourceFailureStage::Acquisition,
         row_error: None,
       };
       outcome.profiles.push(EngineProfileExtraction {
@@ -2147,9 +2197,23 @@ fn safari_report_with_context<F: DiscoveryFs>(
         Ok(extraction) => {
           source.rows_seen = extraction.stats.records_seen;
           source.rows_skipped = extraction.stats.records_skipped;
+          source.acquisition_attempts = extraction.acquisition_attempts;
           source.cookies = extraction.cookies;
         }
-        Err(error) => source.error = Some(format!("{error:#}")),
+        Err(error) => {
+          // Exhausting the retries is itself the failure, so report the
+          // attempts spent rather than the placeholder.
+          source.acquisition_attempts = super::safari::STABLE_READ_ATTEMPTS as u32;
+          source.error_stage = if error
+            .downcast_ref::<super::safari::SafariParseFailure>()
+            .is_some()
+          {
+            SourceFailureStage::Parse
+          } else {
+            SourceFailureStage::Acquisition
+          };
+          source.error = Some(format!("{error:#}"));
+        }
       }
     }
   }
@@ -2257,6 +2321,7 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
       error: None,
+      error_stage: SourceFailureStage::Acquisition,
       row_error: None,
     };
     outcome.profiles.push(EngineProfileExtraction {
@@ -2295,7 +2360,12 @@ where
           source.rows_skipped = rows.records_skipped;
           source.cookies = rows.cookies;
         }
-        Err(error) => source.error = Some(format!("{error:#}")),
+        Err(error) => {
+          // WebCache failures are schema or record-enumeration problems, which
+          // the ESE reader reaches only after opening the database.
+          source.error_stage = SourceFailureStage::Parse;
+          source.error = Some(format!("{error:#}"));
+        }
       }
     }
   }
