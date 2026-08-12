@@ -1194,7 +1194,7 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
       let Some(config) = crate::config::try_get_browser_config(&installation.browser_id) else {
         return ChromiumKeyOutcomes {
           v10: ChromiumKeyOutcome::failure(format!(
-            "no legacy key configuration for browser {:?}",
+            "no macOS keychain identity is known for browser {:?}, so its encrypted cookies cannot be decrypted",
             installation.browser_id
           )),
           v11: ChromiumKeyOutcome::NotApplicable,
@@ -2598,6 +2598,114 @@ mod tests {
     );
   }
 
+  /// macOS key retrieval resolves a keychain identity through the legacy
+  /// configuration, so a browser missing from it can never satisfy a declared
+  /// tier on any host. Such an entry must declare none rather than publish a
+  /// claim that is structurally false. Tiers return once the identity does.
+  #[test]
+  fn macos_chromium_browsers_without_a_keychain_identity_declare_no_decryption_tier() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let legacy = crate::config::CONFIG
+      .platforms
+      .get(PlatformId::Macos.as_str())
+      .expect("macOS legacy configuration");
+    let mut without_identity = BTreeSet::new();
+    for definition in registry
+      .platforms
+      .get(PlatformId::Macos.as_str())
+      .expect("macOS definitions")
+      .iter()
+      .filter(|definition| definition.engine == BrowserEngine::Chromium)
+    {
+      if legacy.contains_key(&definition.canonical_id) {
+        continue;
+      }
+      let descriptor = capability_descriptor(definition, PlatformId::Macos);
+      assert!(
+        descriptor.declared_decryption_tiers.is_empty(),
+        "{} has no macOS keychain identity and must not declare {:?}",
+        definition.canonical_id,
+        descriptor.declared_decryption_tiers
+      );
+      assert!(descriptor.available_decryption_tiers.is_empty());
+      assert_eq!(descriptor.declared_persistent_formats, ["chromium_sqlite"]);
+      without_identity.insert(definition.canonical_id.as_str());
+    }
+    assert_eq!(
+      without_identity,
+      ["coccoc", "yandex"].into_iter().collect::<BTreeSet<_>>(),
+      "a new keychain-less macOS browser must decide its tier claim deliberately"
+    );
+  }
+
+  /// Plaintext rows never consult a key, so every claimed OS must yield them
+  /// even where no decryption tier is declared.
+  #[test]
+  fn packaging_variants_extract_plaintext_cookies_on_each_claimed_os() {
+    fn assert_plaintext_cookie<F: DiscoveryFs>(
+      context: &DiscoveryContext<F>,
+      browser_id: &str,
+      profile: &Path,
+    ) {
+      seed_cookie(profile, true, browser_id, "plaintext-value");
+      let report = extract_chromium_with_provider(
+        context,
+        browser_id,
+        None,
+        None,
+        &CountingProvider::default(),
+      )
+      .expect("plaintext extraction needs no key material");
+      let profiles = report
+        .installations
+        .iter()
+        .flat_map(|installation| &installation.profiles)
+        .collect::<Vec<_>>();
+      assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
+      assert_eq!(profiles[0].error, None, "{browser_id} extraction succeeds");
+      assert_eq!(
+        profiles[0]
+          .cookies
+          .iter()
+          .map(|cookie| (cookie.name.as_str(), cookie.value.as_str()))
+          .collect::<Vec<_>>(),
+        [(browser_id, "plaintext-value")]
+      );
+    }
+
+    let temp = TempDir::new("packaging-plaintext");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let windows = test_context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let macos = test_context_for(PlatformId::Macos, home, []);
+
+    assert_plaintext_cookie(
+      &windows,
+      "duckduckgo",
+      &local_app_data
+        .join("Packages/DuckDuckGo.DesktopBrowser_ya2fgkz3nks94/LocalState/EBWebView/Default"),
+    );
+    assert_plaintext_cookie(
+      &windows,
+      "coccoc",
+      &browser_root(&windows, "coccoc", "coccoc-local").join("Default"),
+    );
+    assert_plaintext_cookie(
+      &macos,
+      "coccoc",
+      &browser_root(&macos, "coccoc", "coccoc-stable").join("Default"),
+    );
+    assert_plaintext_cookie(
+      &macos,
+      "yandex",
+      &browser_root(&macos, "yandex", "yandex-stable").join("Default"),
+    );
+  }
+
   #[test]
   fn windows_duckduckgo_wildcard_package_root_ignores_unrelated_msix_packages() {
     let temp = TempDir::new("duckduckgo-msix");
@@ -2713,7 +2821,7 @@ mod tests {
         "{browser_id} v10 failure must name the browser, got {:?}",
         failure.message()
       );
-      assert!(failure.message().contains("no legacy key configuration"));
+      assert!(failure.message().contains("no macOS keychain identity"));
       assert_eq!(outcomes.v11, ChromiumKeyOutcome::NotApplicable);
       assert_eq!(outcomes.v20, ChromiumKeyOutcome::NotApplicable);
     }
@@ -2769,7 +2877,7 @@ mod tests {
         .as_deref()
         .unwrap_or_else(|| panic!("{browser_id} must surface an error, not silently empty output"));
       assert!(
-        error.contains(browser_id) && error.contains("no legacy key configuration"),
+        error.contains(browser_id) && error.contains("no macOS keychain identity"),
         "{browser_id} error must name the browser and its cause, got {error:?}"
       );
       assert!(error.contains("v10 key provider failed"));

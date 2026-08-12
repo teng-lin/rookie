@@ -777,9 +777,7 @@
             "chromium_sqlite"
           ],
           "declared_session_formats": [],
-          "declared_decryption_tiers": [
-            "v10"
-          ]
+          "declared_decryption_tiers": []
         }
       },
       {
@@ -935,9 +933,7 @@
             "chromium_sqlite"
           ],
           "declared_session_formats": [],
-          "declared_decryption_tiers": [
-            "v10"
-          ]
+          "declared_decryption_tiers": []
         }
       },
       {
