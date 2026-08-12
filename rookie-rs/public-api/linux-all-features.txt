@@ -97,6 +97,775 @@ pub trait rookie_cookies::enums::CookieToString
 pub fn rookie_cookies::enums::CookieToString::to_string(&self) -> alloc::string::String
 impl rookie_cookies::common::enums::CookieToString for alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
 pub fn alloc::vec::Vec<rookie_cookies::common::enums::Cookie>::to_string(&self) -> alloc::string::String
+pub mod rookie_cookies::report
+pub struct rookie_cookies::report::AcquisitionStrategyCode(_)
+impl rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::as_str(&self) -> &str
+impl rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::ese_database() -> Self
+pub fn rookie_cookies::report::AcquisitionStrategyCode::live_read_only() -> Self
+pub fn rookie_cookies::report::AcquisitionStrategyCode::not_attempted() -> Self
+pub fn rookie_cookies::report::AcquisitionStrategyCode::stable_file_image() -> Self
+pub fn rookie_cookies::report::AcquisitionStrategyCode::verified_static_single_file() -> Self
+pub fn rookie_cookies::report::AcquisitionStrategyCode::verified_wal_snapshot() -> Self
+impl core::clone::Clone for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::clone(&self) -> rookie_cookies::report::AcquisitionStrategyCode
+impl core::cmp::Eq for rookie_cookies::report::AcquisitionStrategyCode
+impl core::cmp::Ord for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::cmp(&self, &rookie_cookies::report::AcquisitionStrategyCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::eq(&self, &rookie_cookies::report::AcquisitionStrategyCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::partial_cmp(&self, &rookie_cookies::report::AcquisitionStrategyCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::AcquisitionStrategyCode
+impl core::str::traits::FromStr for rookie_cookies::report::AcquisitionStrategyCode
+pub type rookie_cookies::report::AcquisitionStrategyCode::Err = anyhow::Error
+pub fn rookie_cookies::report::AcquisitionStrategyCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::AcquisitionStrategyCode
+pub fn rookie_cookies::report::AcquisitionStrategyCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::AcquisitionStrategyCode
+impl core::marker::Send for rookie_cookies::report::AcquisitionStrategyCode
+impl core::marker::Sync for rookie_cookies::report::AcquisitionStrategyCode
+impl core::marker::Unpin for rookie_cookies::report::AcquisitionStrategyCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::AcquisitionStrategyCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::AcquisitionStrategyCode
+#[non_exhaustive] pub struct rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub rookie_cookies::report::BrowserCapabilitiesDescriptor::available_decryption_tiers: alloc::vec::Vec<rookie_cookies::report::CipherTierId>
+pub rookie_cookies::report::BrowserCapabilitiesDescriptor::declared_decryption_tiers: alloc::vec::Vec<rookie_cookies::report::CipherTierId>
+pub rookie_cookies::report::BrowserCapabilitiesDescriptor::persistent_formats: alloc::vec::Vec<rookie_cookies::report::CookieSourceFormatId>
+pub rookie_cookies::report::BrowserCapabilitiesDescriptor::session_formats: alloc::vec::Vec<rookie_cookies::report::CookieSourceFormatId>
+impl core::clone::Clone for rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub fn rookie_cookies::report::BrowserCapabilitiesDescriptor::clone(&self) -> rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::cmp::Eq for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::cmp::PartialEq for rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub fn rookie_cookies::report::BrowserCapabilitiesDescriptor::eq(&self, &rookie_cookies::report::BrowserCapabilitiesDescriptor) -> bool
+impl core::fmt::Debug for rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub fn rookie_cookies::report::BrowserCapabilitiesDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl serde_core::ser::Serialize for rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub fn rookie_cookies::report::BrowserCapabilitiesDescriptor::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub fn rookie_cookies::report::BrowserCapabilitiesDescriptor::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::marker::Send for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::marker::Sync for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::marker::Unpin for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::BrowserCapabilitiesDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::BrowserCapabilitiesDescriptor
+#[non_exhaustive] pub struct rookie_cookies::report::BrowserDescriptor
+pub rookie_cookies::report::BrowserDescriptor::aliases: alloc::vec::Vec<alloc::string::String>
+pub rookie_cookies::report::BrowserDescriptor::capabilities: rookie_cookies::report::BrowserCapabilitiesDescriptor
+pub rookie_cookies::report::BrowserDescriptor::display_name: alloc::string::String
+pub rookie_cookies::report::BrowserDescriptor::engine: rookie_cookies::report::EngineId
+pub rookie_cookies::report::BrowserDescriptor::id: rookie_cookies::report::BrowserId
+impl core::clone::Clone for rookie_cookies::report::BrowserDescriptor
+pub fn rookie_cookies::report::BrowserDescriptor::clone(&self) -> rookie_cookies::report::BrowserDescriptor
+impl core::cmp::Eq for rookie_cookies::report::BrowserDescriptor
+impl core::cmp::PartialEq for rookie_cookies::report::BrowserDescriptor
+pub fn rookie_cookies::report::BrowserDescriptor::eq(&self, &rookie_cookies::report::BrowserDescriptor) -> bool
+impl core::fmt::Debug for rookie_cookies::report::BrowserDescriptor
+pub fn rookie_cookies::report::BrowserDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::BrowserDescriptor
+impl serde_core::ser::Serialize for rookie_cookies::report::BrowserDescriptor
+pub fn rookie_cookies::report::BrowserDescriptor::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::BrowserDescriptor
+pub fn rookie_cookies::report::BrowserDescriptor::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::BrowserDescriptor
+impl core::marker::Send for rookie_cookies::report::BrowserDescriptor
+impl core::marker::Sync for rookie_cookies::report::BrowserDescriptor
+impl core::marker::Unpin for rookie_cookies::report::BrowserDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::BrowserDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::BrowserDescriptor
+pub struct rookie_cookies::report::BrowserId(_)
+impl rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::clone(&self) -> rookie_cookies::report::BrowserId
+impl core::cmp::Eq for rookie_cookies::report::BrowserId
+impl core::cmp::Ord for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::cmp(&self, &rookie_cookies::report::BrowserId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::eq(&self, &rookie_cookies::report::BrowserId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::partial_cmp(&self, &rookie_cookies::report::BrowserId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::BrowserId
+impl core::str::traits::FromStr for rookie_cookies::report::BrowserId
+pub type rookie_cookies::report::BrowserId::Err = anyhow::Error
+pub fn rookie_cookies::report::BrowserId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::BrowserId
+pub fn rookie_cookies::report::BrowserId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::BrowserId
+impl core::marker::Send for rookie_cookies::report::BrowserId
+impl core::marker::Sync for rookie_cookies::report::BrowserId
+impl core::marker::Unpin for rookie_cookies::report::BrowserId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::BrowserId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::BrowserId
+pub struct rookie_cookies::report::CipherTierId(_)
+impl rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::clone(&self) -> rookie_cookies::report::CipherTierId
+impl core::cmp::Eq for rookie_cookies::report::CipherTierId
+impl core::cmp::Ord for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::cmp(&self, &rookie_cookies::report::CipherTierId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::eq(&self, &rookie_cookies::report::CipherTierId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::partial_cmp(&self, &rookie_cookies::report::CipherTierId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::CipherTierId
+impl core::str::traits::FromStr for rookie_cookies::report::CipherTierId
+pub type rookie_cookies::report::CipherTierId::Err = anyhow::Error
+pub fn rookie_cookies::report::CipherTierId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::CipherTierId
+pub fn rookie_cookies::report::CipherTierId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::CipherTierId
+impl core::marker::Send for rookie_cookies::report::CipherTierId
+impl core::marker::Sync for rookie_cookies::report::CipherTierId
+impl core::marker::Unpin for rookie_cookies::report::CipherTierId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::CipherTierId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::CipherTierId
+#[non_exhaustive] pub struct rookie_cookies::report::CookieSourceDescriptor
+pub rookie_cookies::report::CookieSourceDescriptor::format: rookie_cookies::report::CookieSourceFormatId
+pub rookie_cookies::report::CookieSourceDescriptor::path: alloc::string::String
+pub rookie_cookies::report::CookieSourceDescriptor::path_lossy: bool
+pub rookie_cookies::report::CookieSourceDescriptor::precedence: u16
+pub rookie_cookies::report::CookieSourceDescriptor::role: rookie_cookies::report::CookieSourceRoleId
+impl core::clone::Clone for rookie_cookies::report::CookieSourceDescriptor
+pub fn rookie_cookies::report::CookieSourceDescriptor::clone(&self) -> rookie_cookies::report::CookieSourceDescriptor
+impl core::cmp::Eq for rookie_cookies::report::CookieSourceDescriptor
+impl core::cmp::PartialEq for rookie_cookies::report::CookieSourceDescriptor
+pub fn rookie_cookies::report::CookieSourceDescriptor::eq(&self, &rookie_cookies::report::CookieSourceDescriptor) -> bool
+impl core::fmt::Debug for rookie_cookies::report::CookieSourceDescriptor
+pub fn rookie_cookies::report::CookieSourceDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::CookieSourceDescriptor
+impl serde_core::ser::Serialize for rookie_cookies::report::CookieSourceDescriptor
+pub fn rookie_cookies::report::CookieSourceDescriptor::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::CookieSourceDescriptor
+pub fn rookie_cookies::report::CookieSourceDescriptor::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::CookieSourceDescriptor
+impl core::marker::Send for rookie_cookies::report::CookieSourceDescriptor
+impl core::marker::Sync for rookie_cookies::report::CookieSourceDescriptor
+impl core::marker::Unpin for rookie_cookies::report::CookieSourceDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::CookieSourceDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::CookieSourceDescriptor
+pub struct rookie_cookies::report::CookieSourceFormatId(_)
+impl rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::clone(&self) -> rookie_cookies::report::CookieSourceFormatId
+impl core::cmp::Eq for rookie_cookies::report::CookieSourceFormatId
+impl core::cmp::Ord for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::cmp(&self, &rookie_cookies::report::CookieSourceFormatId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::eq(&self, &rookie_cookies::report::CookieSourceFormatId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::partial_cmp(&self, &rookie_cookies::report::CookieSourceFormatId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::CookieSourceFormatId
+impl core::str::traits::FromStr for rookie_cookies::report::CookieSourceFormatId
+pub type rookie_cookies::report::CookieSourceFormatId::Err = anyhow::Error
+pub fn rookie_cookies::report::CookieSourceFormatId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::CookieSourceFormatId
+pub fn rookie_cookies::report::CookieSourceFormatId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::CookieSourceFormatId
+impl core::marker::Send for rookie_cookies::report::CookieSourceFormatId
+impl core::marker::Sync for rookie_cookies::report::CookieSourceFormatId
+impl core::marker::Unpin for rookie_cookies::report::CookieSourceFormatId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::CookieSourceFormatId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::CookieSourceFormatId
+#[non_exhaustive] pub struct rookie_cookies::report::CookieSourceIdentity
+pub rookie_cookies::report::CookieSourceIdentity::format: rookie_cookies::report::CookieSourceFormatId
+pub rookie_cookies::report::CookieSourceIdentity::path: alloc::string::String
+pub rookie_cookies::report::CookieSourceIdentity::path_lossy: bool
+pub rookie_cookies::report::CookieSourceIdentity::precedence: u16
+pub rookie_cookies::report::CookieSourceIdentity::role: rookie_cookies::report::CookieSourceRoleId
+impl core::clone::Clone for rookie_cookies::report::CookieSourceIdentity
+pub fn rookie_cookies::report::CookieSourceIdentity::clone(&self) -> rookie_cookies::report::CookieSourceIdentity
+impl core::cmp::Eq for rookie_cookies::report::CookieSourceIdentity
+impl core::cmp::PartialEq for rookie_cookies::report::CookieSourceIdentity
+pub fn rookie_cookies::report::CookieSourceIdentity::eq(&self, &rookie_cookies::report::CookieSourceIdentity) -> bool
+impl core::fmt::Debug for rookie_cookies::report::CookieSourceIdentity
+pub fn rookie_cookies::report::CookieSourceIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::CookieSourceIdentity
+impl serde_core::ser::Serialize for rookie_cookies::report::CookieSourceIdentity
+pub fn rookie_cookies::report::CookieSourceIdentity::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::CookieSourceIdentity
+pub fn rookie_cookies::report::CookieSourceIdentity::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::CookieSourceIdentity
+impl core::marker::Send for rookie_cookies::report::CookieSourceIdentity
+impl core::marker::Sync for rookie_cookies::report::CookieSourceIdentity
+impl core::marker::Unpin for rookie_cookies::report::CookieSourceIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::CookieSourceIdentity
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::CookieSourceIdentity
+pub struct rookie_cookies::report::CookieSourceRoleId(_)
+impl rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::as_str(&self) -> &str
+impl rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::persistent() -> Self
+pub fn rookie_cookies::report::CookieSourceRoleId::session() -> Self
+impl core::clone::Clone for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::clone(&self) -> rookie_cookies::report::CookieSourceRoleId
+impl core::cmp::Eq for rookie_cookies::report::CookieSourceRoleId
+impl core::cmp::Ord for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::cmp(&self, &rookie_cookies::report::CookieSourceRoleId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::eq(&self, &rookie_cookies::report::CookieSourceRoleId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::partial_cmp(&self, &rookie_cookies::report::CookieSourceRoleId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::CookieSourceRoleId
+impl core::str::traits::FromStr for rookie_cookies::report::CookieSourceRoleId
+pub type rookie_cookies::report::CookieSourceRoleId::Err = anyhow::Error
+pub fn rookie_cookies::report::CookieSourceRoleId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::CookieSourceRoleId
+pub fn rookie_cookies::report::CookieSourceRoleId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::CookieSourceRoleId
+impl core::marker::Send for rookie_cookies::report::CookieSourceRoleId
+impl core::marker::Sync for rookie_cookies::report::CookieSourceRoleId
+impl core::marker::Unpin for rookie_cookies::report::CookieSourceRoleId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::CookieSourceRoleId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::CookieSourceRoleId
+pub struct rookie_cookies::report::EngineId(_)
+impl rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::clone(&self) -> rookie_cookies::report::EngineId
+impl core::cmp::Eq for rookie_cookies::report::EngineId
+impl core::cmp::Ord for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::cmp(&self, &rookie_cookies::report::EngineId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::eq(&self, &rookie_cookies::report::EngineId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::partial_cmp(&self, &rookie_cookies::report::EngineId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::EngineId
+impl core::str::traits::FromStr for rookie_cookies::report::EngineId
+pub type rookie_cookies::report::EngineId::Err = anyhow::Error
+pub fn rookie_cookies::report::EngineId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::EngineId
+pub fn rookie_cookies::report::EngineId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::EngineId
+impl core::marker::Send for rookie_cookies::report::EngineId
+impl core::marker::Sync for rookie_cookies::report::EngineId
+impl core::marker::Unpin for rookie_cookies::report::EngineId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::EngineId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::EngineId
+#[non_exhaustive] pub struct rookie_cookies::report::ExtractionIssue
+pub rookie_cookies::report::ExtractionIssue::browser_id: core::option::Option<rookie_cookies::report::BrowserId>
+pub rookie_cookies::report::ExtractionIssue::code: rookie_cookies::report::IssueCode
+pub rookie_cookies::report::ExtractionIssue::installation_id: core::option::Option<rookie_cookies::report::InstallationId>
+pub rookie_cookies::report::ExtractionIssue::message: alloc::string::String
+pub rookie_cookies::report::ExtractionIssue::occurrences: u32
+pub rookie_cookies::report::ExtractionIssue::profile_id: core::option::Option<rookie_cookies::report::ProfileId>
+pub rookie_cookies::report::ExtractionIssue::samples: alloc::vec::Vec<alloc::string::String>
+pub rookie_cookies::report::ExtractionIssue::severity: rookie_cookies::report::IssueSeverityCode
+pub rookie_cookies::report::ExtractionIssue::stage: rookie_cookies::report::ExtractionStageCode
+impl core::clone::Clone for rookie_cookies::report::ExtractionIssue
+pub fn rookie_cookies::report::ExtractionIssue::clone(&self) -> rookie_cookies::report::ExtractionIssue
+impl core::cmp::Eq for rookie_cookies::report::ExtractionIssue
+impl core::cmp::PartialEq for rookie_cookies::report::ExtractionIssue
+pub fn rookie_cookies::report::ExtractionIssue::eq(&self, &rookie_cookies::report::ExtractionIssue) -> bool
+impl core::fmt::Debug for rookie_cookies::report::ExtractionIssue
+pub fn rookie_cookies::report::ExtractionIssue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ExtractionIssue
+impl serde_core::ser::Serialize for rookie_cookies::report::ExtractionIssue
+pub fn rookie_cookies::report::ExtractionIssue::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ExtractionIssue
+pub fn rookie_cookies::report::ExtractionIssue::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ExtractionIssue
+impl core::marker::Send for rookie_cookies::report::ExtractionIssue
+impl core::marker::Sync for rookie_cookies::report::ExtractionIssue
+impl core::marker::Unpin for rookie_cookies::report::ExtractionIssue
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ExtractionIssue
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ExtractionIssue
+#[non_exhaustive] pub struct rookie_cookies::report::ExtractionReport
+pub rookie_cookies::report::ExtractionReport::issues: alloc::vec::Vec<rookie_cookies::report::ExtractionIssue>
+pub rookie_cookies::report::ExtractionReport::profiles: alloc::vec::Vec<rookie_cookies::report::ProfileExtraction>
+pub rookie_cookies::report::ExtractionReport::status: rookie_cookies::report::ReportStatusCode
+pub rookie_cookies::report::ExtractionReport::summary: rookie_cookies::report::ReportStats
+impl core::fmt::Debug for rookie_cookies::report::ExtractionReport
+pub fn rookie_cookies::report::ExtractionReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::report::ExtractionReport
+pub fn rookie_cookies::report::ExtractionReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ExtractionReport
+pub fn rookie_cookies::report::ExtractionReport::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ExtractionReport
+impl core::marker::Send for rookie_cookies::report::ExtractionReport
+impl core::marker::Sync for rookie_cookies::report::ExtractionReport
+impl core::marker::Unpin for rookie_cookies::report::ExtractionReport
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ExtractionReport
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ExtractionReport
+pub struct rookie_cookies::report::ExtractionStageCode(_)
+impl rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::acquisition() -> Self
+pub fn rookie_cookies::report::ExtractionStageCode::decode() -> Self
+pub fn rookie_cookies::report::ExtractionStageCode::decrypt() -> Self
+pub fn rookie_cookies::report::ExtractionStageCode::discovery() -> Self
+pub fn rookie_cookies::report::ExtractionStageCode::parse() -> Self
+pub fn rookie_cookies::report::ExtractionStageCode::query() -> Self
+pub fn rookie_cookies::report::ExtractionStageCode::registry() -> Self
+impl rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::clone(&self) -> rookie_cookies::report::ExtractionStageCode
+impl core::cmp::Eq for rookie_cookies::report::ExtractionStageCode
+impl core::cmp::Ord for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::cmp(&self, &rookie_cookies::report::ExtractionStageCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::eq(&self, &rookie_cookies::report::ExtractionStageCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::partial_cmp(&self, &rookie_cookies::report::ExtractionStageCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ExtractionStageCode
+impl core::str::traits::FromStr for rookie_cookies::report::ExtractionStageCode
+pub type rookie_cookies::report::ExtractionStageCode::Err = anyhow::Error
+pub fn rookie_cookies::report::ExtractionStageCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ExtractionStageCode
+pub fn rookie_cookies::report::ExtractionStageCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::ExtractionStageCode
+impl core::marker::Send for rookie_cookies::report::ExtractionStageCode
+impl core::marker::Sync for rookie_cookies::report::ExtractionStageCode
+impl core::marker::Unpin for rookie_cookies::report::ExtractionStageCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ExtractionStageCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ExtractionStageCode
+#[non_exhaustive] pub struct rookie_cookies::report::ExtractionStats
+pub rookie_cookies::report::ExtractionStats::acquisition_attempts: u32
+pub rookie_cookies::report::ExtractionStats::cookies_emitted: u32
+pub rookie_cookies::report::ExtractionStats::counters_saturated: bool
+pub rookie_cookies::report::ExtractionStats::rows_seen: u32
+pub rookie_cookies::report::ExtractionStats::rows_skipped: u32
+impl core::clone::Clone for rookie_cookies::report::ExtractionStats
+pub fn rookie_cookies::report::ExtractionStats::clone(&self) -> rookie_cookies::report::ExtractionStats
+impl core::cmp::Eq for rookie_cookies::report::ExtractionStats
+impl core::cmp::PartialEq for rookie_cookies::report::ExtractionStats
+pub fn rookie_cookies::report::ExtractionStats::eq(&self, &rookie_cookies::report::ExtractionStats) -> bool
+impl core::default::Default for rookie_cookies::report::ExtractionStats
+pub fn rookie_cookies::report::ExtractionStats::default() -> rookie_cookies::report::ExtractionStats
+impl core::fmt::Debug for rookie_cookies::report::ExtractionStats
+pub fn rookie_cookies::report::ExtractionStats::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::report::ExtractionStats
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ExtractionStats
+impl serde_core::ser::Serialize for rookie_cookies::report::ExtractionStats
+pub fn rookie_cookies::report::ExtractionStats::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ExtractionStats
+pub fn rookie_cookies::report::ExtractionStats::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ExtractionStats
+impl core::marker::Send for rookie_cookies::report::ExtractionStats
+impl core::marker::Sync for rookie_cookies::report::ExtractionStats
+impl core::marker::Unpin for rookie_cookies::report::ExtractionStats
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ExtractionStats
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ExtractionStats
+pub struct rookie_cookies::report::InstallationId(_)
+impl rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::clone(&self) -> rookie_cookies::report::InstallationId
+impl core::cmp::Eq for rookie_cookies::report::InstallationId
+impl core::cmp::Ord for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::cmp(&self, &rookie_cookies::report::InstallationId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::eq(&self, &rookie_cookies::report::InstallationId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::partial_cmp(&self, &rookie_cookies::report::InstallationId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::InstallationId
+impl core::str::traits::FromStr for rookie_cookies::report::InstallationId
+pub type rookie_cookies::report::InstallationId::Err = anyhow::Error
+pub fn rookie_cookies::report::InstallationId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::InstallationId
+pub fn rookie_cookies::report::InstallationId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::InstallationId
+impl core::marker::Send for rookie_cookies::report::InstallationId
+impl core::marker::Sync for rookie_cookies::report::InstallationId
+impl core::marker::Unpin for rookie_cookies::report::InstallationId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::InstallationId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::InstallationId
+pub struct rookie_cookies::report::IssueCode(_)
+impl rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::as_str(&self) -> &str
+impl rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::browser_discovery_failed() -> Self
+pub fn rookie_cookies::report::IssueCode::browser_not_detected() -> Self
+pub fn rookie_cookies::report::IssueCode::column_read_failed() -> Self
+pub fn rookie_cookies::report::IssueCode::decode_failed() -> Self
+pub fn rookie_cookies::report::IssueCode::decrypt_failed() -> Self
+pub fn rookie_cookies::report::IssueCode::profile_has_no_cookie_source() -> Self
+pub fn rookie_cookies::report::IssueCode::provider_failed() -> Self
+pub fn rookie_cookies::report::IssueCode::provider_unavailable() -> Self
+pub fn rookie_cookies::report::IssueCode::source_extraction_failed() -> Self
+pub fn rookie_cookies::report::IssueCode::source_read_retried() -> Self
+impl core::clone::Clone for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::clone(&self) -> rookie_cookies::report::IssueCode
+impl core::cmp::Eq for rookie_cookies::report::IssueCode
+impl core::cmp::Ord for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::cmp(&self, &rookie_cookies::report::IssueCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::eq(&self, &rookie_cookies::report::IssueCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::partial_cmp(&self, &rookie_cookies::report::IssueCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::IssueCode
+impl core::str::traits::FromStr for rookie_cookies::report::IssueCode
+pub type rookie_cookies::report::IssueCode::Err = anyhow::Error
+pub fn rookie_cookies::report::IssueCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::IssueCode
+pub fn rookie_cookies::report::IssueCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::IssueCode
+impl core::marker::Send for rookie_cookies::report::IssueCode
+impl core::marker::Sync for rookie_cookies::report::IssueCode
+impl core::marker::Unpin for rookie_cookies::report::IssueCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::IssueCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::IssueCode
+pub struct rookie_cookies::report::IssueSeverityCode(_)
+impl rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::as_str(&self) -> &str
+impl rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::error() -> Self
+pub fn rookie_cookies::report::IssueSeverityCode::info() -> Self
+pub fn rookie_cookies::report::IssueSeverityCode::warning() -> Self
+impl core::clone::Clone for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::clone(&self) -> rookie_cookies::report::IssueSeverityCode
+impl core::cmp::Eq for rookie_cookies::report::IssueSeverityCode
+impl core::cmp::Ord for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::cmp(&self, &rookie_cookies::report::IssueSeverityCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::eq(&self, &rookie_cookies::report::IssueSeverityCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::partial_cmp(&self, &rookie_cookies::report::IssueSeverityCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::IssueSeverityCode
+impl core::str::traits::FromStr for rookie_cookies::report::IssueSeverityCode
+pub type rookie_cookies::report::IssueSeverityCode::Err = anyhow::Error
+pub fn rookie_cookies::report::IssueSeverityCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::IssueSeverityCode
+pub fn rookie_cookies::report::IssueSeverityCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::IssueSeverityCode
+impl core::marker::Send for rookie_cookies::report::IssueSeverityCode
+impl core::marker::Sync for rookie_cookies::report::IssueSeverityCode
+impl core::marker::Unpin for rookie_cookies::report::IssueSeverityCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::IssueSeverityCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::IssueSeverityCode
+#[non_exhaustive] pub struct rookie_cookies::report::ProfileDescriptor
+pub rookie_cookies::report::ProfileDescriptor::is_default: bool
+pub rookie_cookies::report::ProfileDescriptor::profile: rookie_cookies::report::ProfileIdentity
+pub rookie_cookies::report::ProfileDescriptor::sources: alloc::vec::Vec<rookie_cookies::report::CookieSourceDescriptor>
+impl core::clone::Clone for rookie_cookies::report::ProfileDescriptor
+pub fn rookie_cookies::report::ProfileDescriptor::clone(&self) -> rookie_cookies::report::ProfileDescriptor
+impl core::cmp::Eq for rookie_cookies::report::ProfileDescriptor
+impl core::cmp::PartialEq for rookie_cookies::report::ProfileDescriptor
+pub fn rookie_cookies::report::ProfileDescriptor::eq(&self, &rookie_cookies::report::ProfileDescriptor) -> bool
+impl core::fmt::Debug for rookie_cookies::report::ProfileDescriptor
+pub fn rookie_cookies::report::ProfileDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ProfileDescriptor
+impl serde_core::ser::Serialize for rookie_cookies::report::ProfileDescriptor
+pub fn rookie_cookies::report::ProfileDescriptor::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ProfileDescriptor
+pub fn rookie_cookies::report::ProfileDescriptor::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ProfileDescriptor
+impl core::marker::Send for rookie_cookies::report::ProfileDescriptor
+impl core::marker::Sync for rookie_cookies::report::ProfileDescriptor
+impl core::marker::Unpin for rookie_cookies::report::ProfileDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ProfileDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ProfileDescriptor
+#[non_exhaustive] pub struct rookie_cookies::report::ProfileExtraction
+pub rookie_cookies::report::ProfileExtraction::issues: alloc::vec::Vec<rookie_cookies::report::ExtractionIssue>
+pub rookie_cookies::report::ProfileExtraction::profile: rookie_cookies::report::ProfileIdentity
+pub rookie_cookies::report::ProfileExtraction::sources: alloc::vec::Vec<rookie_cookies::report::SourceExtraction>
+pub rookie_cookies::report::ProfileExtraction::stats: rookie_cookies::report::ExtractionStats
+impl core::fmt::Debug for rookie_cookies::report::ProfileExtraction
+pub fn rookie_cookies::report::ProfileExtraction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::report::ProfileExtraction
+pub fn rookie_cookies::report::ProfileExtraction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ProfileExtraction
+pub fn rookie_cookies::report::ProfileExtraction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ProfileExtraction
+impl core::marker::Send for rookie_cookies::report::ProfileExtraction
+impl core::marker::Sync for rookie_cookies::report::ProfileExtraction
+impl core::marker::Unpin for rookie_cookies::report::ProfileExtraction
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ProfileExtraction
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ProfileExtraction
+pub struct rookie_cookies::report::ProfileId(_)
+impl rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::as_str(&self) -> &str
+impl core::clone::Clone for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::clone(&self) -> rookie_cookies::report::ProfileId
+impl core::cmp::Eq for rookie_cookies::report::ProfileId
+impl core::cmp::Ord for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::cmp(&self, &rookie_cookies::report::ProfileId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::eq(&self, &rookie_cookies::report::ProfileId) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::partial_cmp(&self, &rookie_cookies::report::ProfileId) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ProfileId
+impl core::str::traits::FromStr for rookie_cookies::report::ProfileId
+pub type rookie_cookies::report::ProfileId::Err = anyhow::Error
+pub fn rookie_cookies::report::ProfileId::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ProfileId
+pub fn rookie_cookies::report::ProfileId::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::ProfileId
+impl core::marker::Send for rookie_cookies::report::ProfileId
+impl core::marker::Sync for rookie_cookies::report::ProfileId
+impl core::marker::Unpin for rookie_cookies::report::ProfileId
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ProfileId
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ProfileId
+#[non_exhaustive] pub struct rookie_cookies::report::ProfileIdentity
+pub rookie_cookies::report::ProfileIdentity::browser_id: rookie_cookies::report::BrowserId
+pub rookie_cookies::report::ProfileIdentity::display_name: alloc::string::String
+pub rookie_cookies::report::ProfileIdentity::installation_id: rookie_cookies::report::InstallationId
+pub rookie_cookies::report::ProfileIdentity::path: alloc::string::String
+pub rookie_cookies::report::ProfileIdentity::path_lossy: bool
+pub rookie_cookies::report::ProfileIdentity::profile_id: rookie_cookies::report::ProfileId
+impl core::clone::Clone for rookie_cookies::report::ProfileIdentity
+pub fn rookie_cookies::report::ProfileIdentity::clone(&self) -> rookie_cookies::report::ProfileIdentity
+impl core::cmp::Eq for rookie_cookies::report::ProfileIdentity
+impl core::cmp::PartialEq for rookie_cookies::report::ProfileIdentity
+pub fn rookie_cookies::report::ProfileIdentity::eq(&self, &rookie_cookies::report::ProfileIdentity) -> bool
+impl core::fmt::Debug for rookie_cookies::report::ProfileIdentity
+pub fn rookie_cookies::report::ProfileIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ProfileIdentity
+impl serde_core::ser::Serialize for rookie_cookies::report::ProfileIdentity
+pub fn rookie_cookies::report::ProfileIdentity::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ProfileIdentity
+pub fn rookie_cookies::report::ProfileIdentity::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ProfileIdentity
+impl core::marker::Send for rookie_cookies::report::ProfileIdentity
+impl core::marker::Sync for rookie_cookies::report::ProfileIdentity
+impl core::marker::Unpin for rookie_cookies::report::ProfileIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ProfileIdentity
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ProfileIdentity
+#[non_exhaustive] pub struct rookie_cookies::report::ReportStats
+pub rookie_cookies::report::ReportStats::browsers_detected: u32
+pub rookie_cookies::report::ReportStats::browsers_not_detected: u32
+pub rookie_cookies::report::ReportStats::cookies_emitted: u32
+pub rookie_cookies::report::ReportStats::counters_saturated: bool
+pub rookie_cookies::report::ReportStats::installations_discovered: u32
+pub rookie_cookies::report::ReportStats::profiles_discovered: u32
+pub rookie_cookies::report::ReportStats::registered_browsers: u32
+pub rookie_cookies::report::ReportStats::rows_seen: u32
+pub rookie_cookies::report::ReportStats::rows_skipped: u32
+pub rookie_cookies::report::ReportStats::sources_failed: u32
+pub rookie_cookies::report::ReportStats::sources_succeeded: u32
+impl core::clone::Clone for rookie_cookies::report::ReportStats
+pub fn rookie_cookies::report::ReportStats::clone(&self) -> rookie_cookies::report::ReportStats
+impl core::cmp::Eq for rookie_cookies::report::ReportStats
+impl core::cmp::PartialEq for rookie_cookies::report::ReportStats
+pub fn rookie_cookies::report::ReportStats::eq(&self, &rookie_cookies::report::ReportStats) -> bool
+impl core::default::Default for rookie_cookies::report::ReportStats
+pub fn rookie_cookies::report::ReportStats::default() -> rookie_cookies::report::ReportStats
+impl core::fmt::Debug for rookie_cookies::report::ReportStats
+pub fn rookie_cookies::report::ReportStats::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::report::ReportStats
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ReportStats
+impl serde_core::ser::Serialize for rookie_cookies::report::ReportStats
+pub fn rookie_cookies::report::ReportStats::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ReportStats
+pub fn rookie_cookies::report::ReportStats::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::ReportStats
+impl core::marker::Send for rookie_cookies::report::ReportStats
+impl core::marker::Sync for rookie_cookies::report::ReportStats
+impl core::marker::Unpin for rookie_cookies::report::ReportStats
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ReportStats
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ReportStats
+pub struct rookie_cookies::report::ReportStatusCode(_)
+impl rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::as_str(&self) -> &str
+impl rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::complete() -> Self
+pub fn rookie_cookies::report::ReportStatusCode::failed() -> Self
+pub fn rookie_cookies::report::ReportStatusCode::no_sources() -> Self
+pub fn rookie_cookies::report::ReportStatusCode::partial() -> Self
+impl core::clone::Clone for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::clone(&self) -> rookie_cookies::report::ReportStatusCode
+impl core::cmp::Eq for rookie_cookies::report::ReportStatusCode
+impl core::cmp::Ord for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::cmp(&self, &rookie_cookies::report::ReportStatusCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::eq(&self, &rookie_cookies::report::ReportStatusCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::partial_cmp(&self, &rookie_cookies::report::ReportStatusCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::ReportStatusCode
+impl core::str::traits::FromStr for rookie_cookies::report::ReportStatusCode
+pub type rookie_cookies::report::ReportStatusCode::Err = anyhow::Error
+pub fn rookie_cookies::report::ReportStatusCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::ReportStatusCode
+pub fn rookie_cookies::report::ReportStatusCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::ReportStatusCode
+impl core::marker::Send for rookie_cookies::report::ReportStatusCode
+impl core::marker::Sync for rookie_cookies::report::ReportStatusCode
+impl core::marker::Unpin for rookie_cookies::report::ReportStatusCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::ReportStatusCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::ReportStatusCode
+#[non_exhaustive] pub struct rookie_cookies::report::SourceExtraction
+pub rookie_cookies::report::SourceExtraction::acquisition_strategy: rookie_cookies::report::AcquisitionStrategyCode
+pub rookie_cookies::report::SourceExtraction::cookies: alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
+pub rookie_cookies::report::SourceExtraction::issues: alloc::vec::Vec<rookie_cookies::report::ExtractionIssue>
+pub rookie_cookies::report::SourceExtraction::selected: bool
+pub rookie_cookies::report::SourceExtraction::source: rookie_cookies::report::CookieSourceIdentity
+pub rookie_cookies::report::SourceExtraction::stats: rookie_cookies::report::ExtractionStats
+pub rookie_cookies::report::SourceExtraction::status: rookie_cookies::report::SourceStatusCode
+impl core::fmt::Debug for rookie_cookies::report::SourceExtraction
+pub fn rookie_cookies::report::SourceExtraction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for rookie_cookies::report::SourceExtraction
+pub fn rookie_cookies::report::SourceExtraction::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::SourceExtraction
+pub fn rookie_cookies::report::SourceExtraction::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for rookie_cookies::report::SourceExtraction
+impl core::marker::Send for rookie_cookies::report::SourceExtraction
+impl core::marker::Sync for rookie_cookies::report::SourceExtraction
+impl core::marker::Unpin for rookie_cookies::report::SourceExtraction
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::SourceExtraction
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::SourceExtraction
+pub struct rookie_cookies::report::SourceStatusCode(_)
+impl rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::as_str(&self) -> &str
+impl rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::failed() -> Self
+pub fn rookie_cookies::report::SourceStatusCode::succeeded() -> Self
+impl core::clone::Clone for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::clone(&self) -> rookie_cookies::report::SourceStatusCode
+impl core::cmp::Eq for rookie_cookies::report::SourceStatusCode
+impl core::cmp::Ord for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::cmp(&self, &rookie_cookies::report::SourceStatusCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::eq(&self, &rookie_cookies::report::SourceStatusCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::partial_cmp(&self, &rookie_cookies::report::SourceStatusCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::SourceStatusCode
+impl core::str::traits::FromStr for rookie_cookies::report::SourceStatusCode
+pub type rookie_cookies::report::SourceStatusCode::Err = anyhow::Error
+pub fn rookie_cookies::report::SourceStatusCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::SourceStatusCode
+pub fn rookie_cookies::report::SourceStatusCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::SourceStatusCode
+impl core::marker::Send for rookie_cookies::report::SourceStatusCode
+impl core::marker::Sync for rookie_cookies::report::SourceStatusCode
+impl core::marker::Unpin for rookie_cookies::report::SourceStatusCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::SourceStatusCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::SourceStatusCode
+pub const rookie_cookies::report::MAX_ISSUE_SAMPLES: usize
 #[non_exhaustive] pub struct rookie_cookies::MozillaProfile
 pub rookie_cookies::MozillaProfile::is_default: bool
 pub rookie_cookies::MozillaProfile::name: alloc::string::String
@@ -118,6 +887,8 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MozillaProfile
 pub fn rookie_cookies::any_browser(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>, core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::arc(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::brave(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::browser_profiles(&str) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
+pub fn rookie_cookies::browser_report(&str, core::option::Option<&str>, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<rookie_cookies::report::ExtractionReport>
 pub fn rookie_cookies::cachy(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::chrome(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::chromium(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
@@ -129,8 +900,10 @@ pub fn rookie_cookies::firefox_profile(&str, core::option::Option<alloc::vec::Ve
 pub fn rookie_cookies::firefox_profiles() -> anyhow::Result<alloc::vec::Vec<rookie_cookies::MozillaProfile>>
 pub fn rookie_cookies::librewolf(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::load(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::load_report(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<rookie_cookies::report::ExtractionReport>
 pub fn rookie_cookies::opera(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::opera_gx(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::supported_browsers() -> alloc::vec::Vec<rookie_cookies::report::BrowserDescriptor>
 pub fn rookie_cookies::version() -> alloc::string::String
 pub fn rookie_cookies::vivaldi(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::zen(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>

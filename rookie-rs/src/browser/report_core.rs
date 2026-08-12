@@ -1,16 +1,13 @@
 //! Frozen cross-engine report contract (Milestone 4E).
 //!
-//! Every field here is the final private shape of the Section 5.7 wire model.
-//! The Milestone 5 public surface republishes these structures unchanged; until
-//! that release gate, nothing in this module is exported from `lib.rs`.
+//! Every field here is the final shape of the Section 5.7 wire model. The
+//! descriptor and report types are republished unchanged by [`crate::report`];
+//! the engine adaptation layer and the counter/aggregation helpers around them
+//! stay crate-private.
 //!
 //! Identifier vocabularies are deliberately open: each one is a validated
 //! string newtype serialized as a snake_case string, never a closed enum, so a
 //! new engine, cipher tier, or issue code cannot break a downstream consumer.
-
-// The report contract is complete before its public surface ships in
-// Milestone 5, so unused-until-then items are expected here.
-#![allow(dead_code)]
 
 use crate::common::enums::Cookie;
 use anyhow::{bail, Result};
@@ -19,7 +16,12 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Upper bound on retained samples per aggregated issue.
-pub(crate) const MAX_ISSUE_SAMPLES: usize = 8;
+///
+/// [`ExtractionIssue::occurrences`] counts every occurrence, but
+/// [`ExtractionIssue::samples`] keeps at most this many, so a corrupt database
+/// cannot dictate report size. A caller comparing the two lengths needs this
+/// value to tell "all samples retained" from "truncated".
+pub const MAX_ISSUE_SAMPLES: usize = 8;
 
 fn validate_open_identifier(kind: &str, value: &str) -> Result<()> {
   let mut bytes = value.bytes();
@@ -48,15 +50,24 @@ fn validate_opaque_identifier(kind: &str, value: &str) -> Result<()> {
 
 macro_rules! string_identifier {
   ($name:ident, $kind:literal, $validate:ident) => {
+    #[doc = concat!("Open ", $kind, " identifier.")]
+    ///
+    /// The vocabulary is deliberately not a closed enum: a value this build
+    /// does not know is still representable, so a new engine, cipher tier, or
+    /// issue code cannot break a downstream match. Compare with
+    /// [`Self::as_str`] and parse untrusted input with [`FromStr`].
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
     #[serde(transparent)]
-    pub(crate) struct $name(String);
+    pub struct $name(String);
 
     impl $name {
       /// Constructs an identifier the crate itself produces.
       ///
       /// Vocabulary values are compile-time constants, so an invalid one is a
-      /// crate bug rather than a runtime condition a caller can act on.
+      /// crate bug rather than a runtime condition a caller can act on. Some
+      /// identifiers only ever come from registry data through `FromStr`, so
+      /// this stays unused for them.
+      #[allow(dead_code)]
       pub(crate) fn known(value: &str) -> Self {
         debug_assert!(
           $validate($kind, value).is_ok(),
@@ -66,7 +77,8 @@ macro_rules! string_identifier {
         Self(value.to_owned())
       }
 
-      pub(crate) fn as_str(&self) -> &str {
+      /// Borrows the underlying identifier.
+      pub fn as_str(&self) -> &str {
         &self.0
       }
     }
@@ -136,11 +148,17 @@ string_identifier!(
 string_identifier!(InstallationId, "installation", validate_opaque_identifier);
 string_identifier!(ProfileId, "profile", validate_opaque_identifier);
 
+/// Constructors for the vocabulary values Section 5.7 freezes.
+///
+/// They exist so downstream code can compare against a known value without
+/// spelling the string, and never imply the vocabulary is closed: a report may
+/// still carry a value this build has no constructor for.
 macro_rules! vocabulary {
   ($name:ident { $($function:ident => $value:literal),+ $(,)? }) => {
     impl $name {
       $(
-        pub(crate) fn $function() -> Self {
+        #[doc = concat!("The `", $value, "` ", stringify!($name), " value.")]
+        pub fn $function() -> Self {
           Self::known($value)
         }
       )+
@@ -190,6 +208,23 @@ vocabulary!(AcquisitionStrategyCode {
   not_attempted => "not_attempted",
 });
 
+// The codes the report layer itself raises. Discovery-stage codes are supplied
+// by each engine's registry and are deliberately not enumerated here: they
+// change as engines are added, so a caller matches those with `as_str` or
+// `FromStr` instead.
+vocabulary!(IssueCode {
+  browser_not_detected => "browser_not_detected",
+  browser_discovery_failed => "browser_discovery_failed",
+  profile_has_no_cookie_source => "profile_has_no_cookie_source",
+  source_extraction_failed => "source_extraction_failed",
+  source_read_retried => "source_read_retried",
+  column_read_failed => "column_read_failed",
+  decrypt_failed => "decrypt_failed",
+  decode_failed => "decode_failed",
+  provider_unavailable => "provider_unavailable",
+  provider_failed => "provider_failed",
+});
+
 impl CookieSourceRoleId {
   /// Report ordering rank. Unknown future roles sort after the frozen ones and
   /// then lexicographically, so an added vocabulary value stays deterministic.
@@ -202,67 +237,85 @@ impl CookieSourceRoleId {
   }
 }
 
+/// What a registered browser claims it can do on this platform.
+///
+/// Declared tiers come from the registry; `available_decryption_tiers` narrows
+/// them to the key providers actually compiled and enabled in this build, so it
+/// is the set a `decryptable` claim refers to.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BrowserCapabilitiesDescriptor {
-  pub(crate) persistent_formats: Vec<CookieSourceFormatId>,
-  pub(crate) session_formats: Vec<CookieSourceFormatId>,
-  pub(crate) declared_decryption_tiers: Vec<CipherTierId>,
-  pub(crate) available_decryption_tiers: Vec<CipherTierId>,
+pub struct BrowserCapabilitiesDescriptor {
+  pub persistent_formats: Vec<CookieSourceFormatId>,
+  pub session_formats: Vec<CookieSourceFormatId>,
+  pub declared_decryption_tiers: Vec<CipherTierId>,
+  pub available_decryption_tiers: Vec<CipherTierId>,
 }
 
+/// A browser registered for the running OS. Registration is not detection.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BrowserDescriptor {
-  pub(crate) id: BrowserId,
-  pub(crate) aliases: Vec<String>,
-  pub(crate) display_name: String,
-  pub(crate) engine: EngineId,
-  pub(crate) capabilities: BrowserCapabilitiesDescriptor,
+pub struct BrowserDescriptor {
+  pub id: BrowserId,
+  pub aliases: Vec<String>,
+  pub display_name: String,
+  pub engine: EngineId,
+  pub capabilities: BrowserCapabilitiesDescriptor,
 }
 
+/// Stable identity of one discovered profile.
+///
+/// `profile_id` is the selection key; `path` is a display value that may be
+/// lossy on a non-UTF-8 filesystem, which `path_lossy` reports.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ProfileIdentity {
-  pub(crate) browser_id: BrowserId,
-  pub(crate) installation_id: InstallationId,
-  pub(crate) profile_id: ProfileId,
-  pub(crate) display_name: String,
-  pub(crate) path: String,
-  pub(crate) path_lossy: bool,
+pub struct ProfileIdentity {
+  pub browser_id: BrowserId,
+  pub installation_id: InstallationId,
+  pub profile_id: ProfileId,
+  pub display_name: String,
+  pub path: String,
+  pub path_lossy: bool,
 }
 
+/// A cookie source a profile exposes, before any extraction is attempted.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CookieSourceDescriptor {
-  pub(crate) role: CookieSourceRoleId,
-  pub(crate) format: CookieSourceFormatId,
-  pub(crate) path: String,
-  pub(crate) path_lossy: bool,
-  pub(crate) precedence: u16,
+pub struct CookieSourceDescriptor {
+  pub role: CookieSourceRoleId,
+  pub format: CookieSourceFormatId,
+  pub path: String,
+  pub path_lossy: bool,
+  pub precedence: u16,
 }
 
+/// One discovered profile and its cookie sources.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ProfileDescriptor {
-  pub(crate) profile: ProfileIdentity,
-  pub(crate) is_default: bool,
-  pub(crate) sources: Vec<CookieSourceDescriptor>,
+pub struct ProfileDescriptor {
+  pub profile: ProfileIdentity,
+  pub is_default: bool,
+  pub sources: Vec<CookieSourceDescriptor>,
 }
 
+/// Identity of the source an extraction attempted.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CookieSourceIdentity {
-  pub(crate) role: CookieSourceRoleId,
-  pub(crate) format: CookieSourceFormatId,
-  pub(crate) path: String,
-  pub(crate) path_lossy: bool,
-  pub(crate) precedence: u16,
+pub struct CookieSourceIdentity {
+  pub role: CookieSourceRoleId,
+  pub format: CookieSourceFormatId,
+  pub path: String,
+  pub path_lossy: bool,
+  pub precedence: u16,
 }
 
+/// Row accounting for one source or profile.
+///
+/// `rows_skipped` counts relevant rows rejected after being seen because
+/// parsing, decryption, or decoding failed. Every counter is `u32`; a count
+/// that exceeded that range is clamped and sets `counters_saturated`.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExtractionStats {
+pub struct ExtractionStats {
   /// Rows *relevant to the request*: those matching the domain filter, plus
   /// any that failed before relevance could be determined. Rows the filter
   /// excluded are not counted, so `rows_seen - rows_skipped == cookies_emitted`
@@ -273,71 +326,86 @@ pub(crate) struct ExtractionStats {
   /// it still counts every record. Correcting that means moving the filter into
   /// the record loop, which is low-level Safari parsing that Milestone 4E
   /// explicitly does not reimplement.
-  pub(crate) rows_seen: u32,
-  pub(crate) cookies_emitted: u32,
-  pub(crate) rows_skipped: u32,
-  pub(crate) acquisition_attempts: u32,
-  pub(crate) counters_saturated: bool,
+  pub rows_seen: u32,
+  pub cookies_emitted: u32,
+  pub rows_skipped: u32,
+  pub acquisition_attempts: u32,
+  pub counters_saturated: bool,
 }
 
+/// Request-wide totals, including browsers that were registered but absent.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ReportStats {
-  pub(crate) registered_browsers: u32,
-  pub(crate) browsers_detected: u32,
-  pub(crate) browsers_not_detected: u32,
-  pub(crate) installations_discovered: u32,
-  pub(crate) profiles_discovered: u32,
-  pub(crate) sources_succeeded: u32,
-  pub(crate) sources_failed: u32,
-  pub(crate) rows_seen: u32,
-  pub(crate) cookies_emitted: u32,
-  pub(crate) rows_skipped: u32,
-  pub(crate) counters_saturated: bool,
+pub struct ReportStats {
+  pub registered_browsers: u32,
+  pub browsers_detected: u32,
+  pub browsers_not_detected: u32,
+  pub installations_discovered: u32,
+  pub profiles_discovered: u32,
+  pub sources_succeeded: u32,
+  pub sources_failed: u32,
+  pub rows_seen: u32,
+  pub cookies_emitted: u32,
+  pub rows_skipped: u32,
+  pub counters_saturated: bool,
 }
 
+/// A diagnostic attached to the request, a profile, or a source.
+///
+/// Repeated row-level problems are aggregated by code and stage:
+/// `occurrences` counts them all while `samples` keeps a bounded excerpt.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExtractionIssue {
-  pub(crate) code: IssueCode,
-  pub(crate) stage: ExtractionStageCode,
-  pub(crate) severity: IssueSeverityCode,
-  pub(crate) occurrences: u32,
-  pub(crate) samples: Vec<String>,
-  pub(crate) browser_id: Option<BrowserId>,
-  pub(crate) installation_id: Option<InstallationId>,
-  pub(crate) profile_id: Option<ProfileId>,
-  pub(crate) message: String,
+pub struct ExtractionIssue {
+  pub code: IssueCode,
+  pub stage: ExtractionStageCode,
+  pub severity: IssueSeverityCode,
+  pub occurrences: u32,
+  pub samples: Vec<String>,
+  pub browser_id: Option<BrowserId>,
+  pub installation_id: Option<InstallationId>,
+  pub profile_id: Option<ProfileId>,
+  pub message: String,
 }
 
+/// One attempted cookie source and the cookies it produced.
+///
+/// Cookies live here rather than on the profile so provenance survives. A
+/// profile-wide stream is the concatenation of the successful `selected`
+/// sources in role/precedence order.
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SourceExtraction {
-  pub(crate) source: CookieSourceIdentity,
-  pub(crate) status: SourceStatusCode,
-  pub(crate) selected: bool,
-  pub(crate) acquisition_strategy: AcquisitionStrategyCode,
-  pub(crate) cookies: Vec<Cookie>,
-  pub(crate) stats: ExtractionStats,
-  pub(crate) issues: Vec<ExtractionIssue>,
+pub struct SourceExtraction {
+  pub source: CookieSourceIdentity,
+  pub status: SourceStatusCode,
+  pub selected: bool,
+  pub acquisition_strategy: AcquisitionStrategyCode,
+  pub cookies: Vec<Cookie>,
+  pub stats: ExtractionStats,
+  pub issues: Vec<ExtractionIssue>,
 }
 
+/// One profile's sources, totals, and profile-scoped diagnostics.
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ProfileExtraction {
-  pub(crate) profile: ProfileIdentity,
-  pub(crate) sources: Vec<SourceExtraction>,
-  pub(crate) stats: ExtractionStats,
-  pub(crate) issues: Vec<ExtractionIssue>,
+pub struct ProfileExtraction {
+  pub profile: ProfileIdentity,
+  pub sources: Vec<SourceExtraction>,
+  pub stats: ExtractionStats,
+  pub issues: Vec<ExtractionIssue>,
 }
 
+/// A grouped extraction result.
+///
+/// `issues` holds only request-wide, registry, discovery, and installation
+/// problems; anything narrower is attached to its profile or source.
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ExtractionReport {
-  pub(crate) status: ReportStatusCode,
-  pub(crate) summary: ReportStats,
-  pub(crate) profiles: Vec<ProfileExtraction>,
-  pub(crate) issues: Vec<ExtractionIssue>,
+pub struct ExtractionReport {
+  pub status: ReportStatusCode,
+  pub summary: ReportStats,
+  pub profiles: Vec<ProfileExtraction>,
+  pub issues: Vec<ExtractionIssue>,
 }
 
 /// Engine adaptation layer from Section 5.7. Each engine converts one attempted

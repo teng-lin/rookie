@@ -3,6 +3,7 @@
 // Common
 pub mod common;
 pub mod config;
+pub mod report;
 mod utils;
 pub use common::enums;
 
@@ -52,6 +53,138 @@ fn browser_config(name: &str) -> Result<&config::Browser> {
 /// ```
 pub fn version() -> String {
   format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("COMMIT_HASH"))
+}
+
+/// Returns every browser registered for the running OS.
+///
+/// Registration is not detection: this never touches the filesystem, so a
+/// descriptor here only means rookie knows where that browser would keep its
+/// cookies and which cipher tiers this build could decrypt. Use
+/// [`browser_profiles`] to find out what is actually installed.
+///
+/// Unlike its three siblings this is infallible, because it has no request to
+/// reject and nothing to read. An OS with no registry entries has no registered
+/// browsers, which is an empty list rather than an error. The only other way it
+/// could fail is a malformed compile-time registry, which is a crate bug, not a
+/// condition a caller can act on: it is asserted in debug builds and logged in
+/// release.
+///
+/// # Examples
+///
+/// ```no_run
+/// for browser in rookie_cookies::supported_browsers() {
+///   println!("{} ({})", browser.id, browser.display_name);
+/// }
+/// ```
+pub fn supported_browsers() -> Vec<report::BrowserDescriptor> {
+  match browser::report_build::supported_browser_descriptors() {
+    Ok(browsers) => browsers,
+    Err(error) => {
+      debug_assert!(false, "embedded browser registry is unusable: {error:#}");
+      log::error!("rookie_cookies::supported_browsers: embedded registry is unusable: {error:#}");
+      Vec::new()
+    }
+  }
+}
+
+/// Returns the discovered profiles of one registered browser.
+///
+/// # Arguments
+///
+/// * `browser_id` - A canonical browser ID or alias from [`supported_browsers`]
+///
+/// # Errors
+///
+/// An unknown ID or alias is a request error. So is a browser whose every
+/// detected installation root failed enumeration, because an empty list would
+/// be indistinguishable from "not installed"; [`browser_report`] carries the
+/// per-root diagnostics in that case. A known browser with nothing installed
+/// returns an empty list rather than an error, and one failing root does not
+/// hide the profiles another root yielded.
+///
+/// # Examples
+///
+/// ```no_run
+/// for profile in rookie_cookies::browser_profiles("chrome")? {
+///   println!("{} {}", profile.profile.profile_id, profile.profile.display_name);
+/// }
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn browser_profiles(browser_id: &str) -> Result<Vec<report::ProfileDescriptor>> {
+  browser::report_build::browser_profile_descriptors(browser_id)
+}
+
+/// Extracts cookies from one browser as a grouped report.
+///
+/// Unlike the named selectors, this covers every installation and profile of
+/// the browser and keeps failures visible instead of collapsing them into an
+/// error or a short list: cookies stay attached to the source they came from,
+/// alongside that source's status, acquisition strategy, counters, and issues.
+///
+/// # Arguments
+///
+/// * `browser_id` - A canonical browser ID or alias from [`supported_browsers`]
+/// * `profile_id` - An optional [`ProfileId`](report::ProfileId) from
+///   [`browser_profiles`], restricting the report to that one profile. Display
+///   paths and names are not selection keys.
+/// * `domains` - An optional list for getting specific domains only
+///
+/// # Errors
+///
+/// Only a bad request fails: an unknown browser ID or alias, or a profile ID
+/// that this browser did not yield. Extraction problems are reported instead —
+/// a browser that is registered but not installed is an `Ok` report with
+/// [`no_sources`](report::ReportStatusCode::no_sources), and a total extraction
+/// failure is an `Ok` report with
+/// [`failed`](report::ReportStatusCode::failed).
+///
+/// # Examples
+///
+/// ```no_run
+/// let domains = vec!["google.com".to_string()];
+/// let report = rookie_cookies::browser_report("chrome", None, Some(domains))?;
+/// println!("{}: {} cookies", report.status, report.summary.cookies_emitted);
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn browser_report(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+) -> Result<report::ExtractionReport> {
+  browser::report_build::browser_extraction_report(browser_id, profile_id, domains)
+}
+
+/// Extracts cookies from every registered browser as one grouped report.
+///
+/// This is the report-shaped counterpart to [`load`], not a replacement for it:
+/// `load` keeps its historical browser set and flat output, while this covers
+/// every registered browser on the running OS. Registered browsers that are not
+/// installed are summarized in
+/// [`browsers_not_detected`](report::ReportStats::browsers_not_detected) rather
+/// than emitting an issue each; installed browsers that fail do emit issues.
+///
+/// # Arguments
+///
+/// * `domains` - An optional list for getting specific domains only
+///
+/// # Errors
+///
+/// There is no browser ID to reject here, so this fails only if the registry
+/// itself cannot be read. A browser that fails discovery or extraction does not
+/// abort the others; it becomes an issue on the returned report.
+///
+/// # Examples
+///
+/// ```no_run
+/// let report = rookie_cookies::load_report(None)?;
+/// println!(
+///   "{}/{} browsers detected",
+///   report.summary.browsers_detected, report.summary.registered_browsers
+/// );
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn load_report(domains: Option<Vec<String>>) -> Result<report::ExtractionReport> {
+  browser::report_build::load_extraction_report(domains)
 }
 
 /// Returns cookies from Firefox

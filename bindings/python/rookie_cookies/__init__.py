@@ -3,9 +3,12 @@ from sys import platform
 from typing import Any, Dict, List, Optional
 
 from .rookie_cookies import (
+    MAX_ISSUE_SAMPLES,
     any_browser,
     arc,
     brave,
+    browser_profiles,
+    browser_report,
     chrome,
     chromium,
     chromium_based,
@@ -16,17 +19,22 @@ from .rookie_cookies import (
     firefox_profiles,
     librewolf,
     load,
+    load_report,
     opera,
     opera_gx,
+    supported_browsers,
     version,
     vivaldi,
     zen,
 )
 
 __all__ = [
+    "MAX_ISSUE_SAMPLES",
     "any_browser",
     "arc",
     "brave",
+    "browser_profiles",
+    "browser_report",
     "chrome",
     "chromium",
     "chromium_based",
@@ -38,8 +46,10 @@ __all__ = [
     "firefox_profiles",
     "librewolf",
     "load",
+    "load_report",
     "opera",
     "opera_gx",
+    "supported_browsers",
     "to_cookiejar",
     "to_netscape",
     "version",
@@ -51,6 +61,11 @@ __all__ = [
 CookieList = List[Dict[str, Any]]
 FirefoxProfile = Dict[str, Any]
 FirefoxProfileList = List[FirefoxProfile]
+BrowserDescriptor = Dict[str, Any]
+BrowserDescriptorList = List[BrowserDescriptor]
+ProfileDescriptor = Dict[str, Any]
+ProfileDescriptorList = List[ProfileDescriptor]
+ExtractionReport = Dict[str, Any]
 
 
 # Windows
