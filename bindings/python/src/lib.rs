@@ -43,6 +43,9 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_function(wrap_pyfunction!(load, m)?)?;
   m.add_function(wrap_pyfunction!(any_browser, m)?)?;
 
+  // An issue counts every occurrence but keeps at most this many samples, so a
+  // caller comparing the two needs the cap to tell truncation from completeness.
+  m.add("MAX_ISSUE_SAMPLES", rookie_core::report::MAX_ISSUE_SAMPLES)?;
   m.add_function(wrap_pyfunction!(supported_browsers, m)?)?;
   m.add_function(wrap_pyfunction!(browser_profiles, m)?)?;
   m.add_function(wrap_pyfunction!(browser_report, m)?)?;

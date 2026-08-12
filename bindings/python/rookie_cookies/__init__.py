@@ -3,6 +3,7 @@ from sys import platform
 from typing import Any, Dict, List, Optional
 
 from .rookie_cookies import (
+    MAX_ISSUE_SAMPLES,
     any_browser,
     arc,
     brave,
@@ -28,6 +29,7 @@ from .rookie_cookies import (
 )
 
 __all__ = [
+    "MAX_ISSUE_SAMPLES",
     "any_browser",
     "arc",
     "brave",

@@ -44,8 +44,13 @@ for profile in report["profiles"]:
 Reports keep failures visible instead of raising: a registered browser that is
 not installed is a report with status `no_sources`, and problems arrive as
 `issues` on the report, a profile, or a source. Only a bad request — an unknown
-browser ID or a profile ID this browser did not yield — raises. `load_report()`
-covers every registered browser in one report.
+browser ID or a profile ID this browser did not yield — raises, as a
+`RuntimeError` whose message is a diagnostic rather than a stable contract.
+`load_report()` covers every registered browser in one report.
+
+An issue counts every occurrence in `occurrences` but keeps at most
+`MAX_ISSUE_SAMPLES` entries in `samples`; comparing the two tells a truncated
+excerpt from a complete one.
 
 Every identifier and code (`status`, `engine`, `role`, `format`, `severity`, …)
 is an open snake_case string, so compare against a known value and keep a

@@ -216,8 +216,14 @@ class BrowserReportTest(unittest.TestCase):
             self.assertEqual(source["status"], "succeeded")
             self.assertTrue(source["selected"])
             self.assertIsInstance(source["acquisition_strategy"], str)
+            self.assertEqual(
+                sorted(source["source"]),
+                ["format", "path", "path_lossy", "precedence", "role"],
+            )
             self.assertEqual(source["source"]["role"], "persistent")
             self.assertEqual(source["source"]["format"], "chromium_sqlite")
+            self.assertFalse(source["source"]["path_lossy"])
+            self.assertIsInstance(source["source"]["precedence"], int)
             self.assertEqual(
                 sorted(source["stats"]),
                 [
@@ -310,6 +316,29 @@ class BrowserReportTest(unittest.TestCase):
         self.assertTrue(decrypt_failed["samples"])
         self.assertTrue(all(isinstance(s, str) for s in decrypt_failed["samples"]))
         self.assertIn("decrypt_failed", decrypt_failed["message"])
+
+    def test_issue_samples_are_bounded_while_occurrences_counts_them_all(
+        self,
+    ) -> None:
+        rejected_rows = rookie_cookies.MAX_ISSUE_SAMPLES + 4
+        with _synthetic_home() as home:
+            root = _seed_chrome(home, profiles=())
+            _seed_chromium_profile(root, "Default", _UNDECRYPTABLE, rejected_rows)
+            report = rookie_cookies.browser_report("chrome")
+
+        source = report["profiles"][0]["sources"][0]
+        self.assertEqual(source["stats"]["rows_skipped"], rejected_rows)
+
+        issue = next(i for i in source["issues"] if i["code"] == "decrypt_failed")
+        self.assertEqual(issue["occurrences"], rejected_rows)
+        self.assertTrue(issue["samples"])
+        # A corrupt database cannot dictate report size. The exported cap is the
+        # ceiling, not the count: an engine may retain fewer, so truncation
+        # shows up as fewer samples than occurrences rather than as a full list.
+        self.assertLessEqual(
+            len(issue["samples"]), rookie_cookies.MAX_ISSUE_SAMPLES
+        )
+        self.assertLess(len(issue["samples"]), issue["occurrences"])
 
     def test_domain_filter_reaches_the_report(self) -> None:
         with _synthetic_home() as home:
@@ -404,14 +433,15 @@ def _chrome_root(home: Path) -> Path:
 def _seed_chrome(home: Path, profiles=("Default", "Profile 1")) -> Path:
     """Install Chrome's stable root with one plaintext-cookie profile each."""
     root = _chrome_root(home)
+    root.mkdir(parents=True, exist_ok=True)
     for profile in profiles:
         _seed_chromium_profile(root, profile, _PLAINTEXT_VALUES[profile])
     (root / "Local State").write_text("{}", encoding="utf-8")
     return root
 
 
-def _seed_chromium_profile(root: Path, profile: str, value) -> None:
-    """Write one cookie row, plaintext for `str` and encrypted for `bytes`."""
+def _seed_chromium_profile(root: Path, profile: str, value, rows: int = 1) -> None:
+    """Write cookie rows, plaintext for `str` and encrypted for `bytes`."""
     plaintext, encrypted = (value, b"") if isinstance(value, str) else ("", value)
     database = root / profile / "Network" / "Cookies"
     database.parent.mkdir(parents=True, exist_ok=True)
@@ -432,9 +462,12 @@ def _seed_chromium_profile(root: Path, profile: str, value) -> None:
             )
             """
         )
-        connection.execute(
-            "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'session', ?, ?, 0, 0)",
-            (plaintext, encrypted),
+        connection.executemany(
+            "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, ?, ?, ?, 0, 0)",
+            [
+                ("session" if rows == 1 else "session-{}".format(row), plaintext, encrypted)
+                for row in range(rows)
+            ],
         )
         connection.commit()
     finally:

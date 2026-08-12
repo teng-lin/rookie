@@ -31,6 +31,7 @@ class RookieCookiesHelpersTest(unittest.TestCase):
     def test_all_exports_are_defined(self) -> None:
         self.assertTrue(
             {
+                "MAX_ISSUE_SAMPLES",
                 "browser_profiles",
                 "browser_report",
                 "create_cookie",

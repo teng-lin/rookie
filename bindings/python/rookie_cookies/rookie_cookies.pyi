@@ -10,6 +10,13 @@ ProfileDescriptor = Dict[str, Any]
 ProfileDescriptorList = List[ProfileDescriptor]
 ExtractionReport = Dict[str, Any]
 
+MAX_ISSUE_SAMPLES: int
+"""Upper bound on ``samples`` per issue.
+
+``occurrences`` counts every occurrence while ``samples`` keeps at most this
+many, so comparing the two tells a truncated excerpt from a complete one.
+"""
+
 def version() -> str:
     """
     Get the rookie-cookies version.
@@ -215,10 +222,13 @@ def browser_profiles(browser_id: str) -> ProfileDescriptorList:
     ``profile_id``, ``display_name``, ``path``, ``path_lossy``), ``is_default``,
     and ``sources`` (``role``, ``format``, ``path``, ``path_lossy``,
     ``precedence``). A known browser with nothing installed returns an empty
-    list; an unknown ID raises.
+    list.
 
     :param browser_id: A canonical browser ID or alias from supported_browsers
     :return: A list of profile descriptor dictionaries
+    :raises RuntimeError: The browser ID is unknown, or every detected
+        installation root failed enumeration. The message is a diagnostic, not
+        a stable contract; branch on the exception type instead.
     """
     ...
 
@@ -233,14 +243,18 @@ def browser_report(
     The report contains ``status``, ``summary``, ``profiles``, and ``issues``.
     Cookies stay attached to the source they came from, alongside that source's
     ``status``, ``selected`` flag, ``acquisition_strategy``, ``stats``, and
-    ``issues``. Only a bad request raises: an absent browser is a report with
-    status ``no_sources``.
+    ``issues``. An absent browser is a report with status ``no_sources``, and a
+    failure during extraction is an issue rather than an exception.
 
     :param browser_id: A canonical browser ID or alias from supported_browsers
     :param profile_id: Optional profile_id from browser_profiles, restricting
         the report to that one profile
     :param domains: Optional list of domains to extract only from them
     :return: An extraction report dictionary
+    :raises RuntimeError: The request itself is bad -- an unknown browser ID,
+        or a profile ID this browser did not yield. The message is a
+        diagnostic, not a stable contract; branch on the exception type
+        instead.
     """
     ...
 
