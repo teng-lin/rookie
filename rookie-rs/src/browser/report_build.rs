@@ -21,7 +21,7 @@ use super::report_core::{
   CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineExtractionOutcome, EngineId,
   ExtractionIssue, ExtractionReport, ExtractionStageCode, InstallationId, IssueSeverityCode,
   ProfileDescriptor, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, SourceExtraction,
-  SourceExtractionOutcome, SourceStatusCode, StatsAccumulator,
+  SourceExtractionOutcome, SourceStatusCode, StatsAccumulator, MAX_ISSUE_SAMPLES,
 };
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{bail, Result};
@@ -632,7 +632,10 @@ pub(crate) fn browser_extraction_report(
       .profiles
       .retain(|profile| profile.profile.profile_id.as_str() == profile_id);
   }
-  if !outcome.detected {
+  // A browser whose roots were found but could not be read is detected-and-
+  // failed, not absent. Saying "not detected" beside a `failed` status would
+  // describe two different worlds in one report.
+  if !outcome.detected && !outcome.discovery_failed {
     let id: BrowserId = canonical_id.parse()?;
     push_aggregated(
       &mut outcome.issues,
@@ -688,26 +691,36 @@ pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<Profil
   let outcome = collect_report(&browser, None, false, None)?;
   // An empty list must mean "looked, found nothing". Roots that all failed to
   // enumerate are one way to lose everything; profiles that were all found and
-  // then all failed (canonicalization, source inspection) are another, and both
-  // would otherwise be indistinguishable from an uninstalled browser. The
-  // listing type cannot carry issues, so the ones that caused the loss are
-  // reported in the error rather than dropped at this boundary.
-  let errors = outcome
-    .issues
-    .iter()
-    .filter(|issue| issue.is_error())
-    .map(|issue| issue.message.as_str())
-    .collect::<Vec<_>>();
+  // then all failed is another, and both would otherwise be indistinguishable
+  // from an uninstalled browser. The listing type cannot carry issues, so the
+  // ones that caused the loss are reported in the error rather than dropped at
+  // this boundary.
+  let errors = |issues: &[ExtractionIssue], profile_scoped: bool| {
+    issues
+      .iter()
+      .filter(|issue| {
+        // Codes naming a profile describe losing that profile. A root-level
+        // failure beside another root that enumerated cleanly is not profile
+        // loss: Section 5.7 keeps that an `Ok` result.
+        issue.is_error() && (!profile_scoped || issue.code.as_str().starts_with("profile_"))
+      })
+      .map(|issue| issue.message.clone())
+      // Bounded for the same reason issue samples are: a profile tree full of
+      // the same defect must not decide how long an error message is.
+      .take(MAX_ISSUE_SAMPLES)
+      .collect::<Vec<_>>()
+  };
   if outcome.discovery_failed {
     bail!(
       "every detected {browser_id} installation failed profile enumeration: {}",
-      errors.join("; ")
+      errors(&outcome.issues, false).join("; ")
     )
   }
-  if outcome.profiles.is_empty() && !errors.is_empty() {
+  let lost_profiles = errors(&outcome.issues, true);
+  if outcome.profiles.is_empty() && !lost_profiles.is_empty() {
     bail!(
       "every discovered {browser_id} profile failed discovery: {}",
-      errors.join("; ")
+      lost_profiles.join("; ")
     )
   }
   Ok(
@@ -1438,10 +1451,19 @@ mod engine_chain_tests {
     assert_eq!(source.stats.rows_skipped, 1);
     assert_eq!(source.cookies.len(), 1);
     assert_eq!(source.cookies[0].name, "good");
-    assert!(source
+    // The mapping pairs `occurrences` with `rows_skipped` and the message with
+    // `persistent_row_error`, which is only sound while the counter and the
+    // error move together. A future rejection site that bumped one without the
+    // other would silently under-report lost cookies, so pin the invariant:
+    // rows skipped implies exactly one row issue counting exactly that many.
+    let row_issues = source
       .issues
       .iter()
-      .any(|issue| issue.code.as_str() == "row_read_failed" && issue.is_error()));
+      .filter(|issue| issue.code.as_str() == "row_read_failed")
+      .collect::<Vec<_>>();
+    assert_eq!(row_issues.len(), 1);
+    assert!(row_issues[0].is_error());
+    assert_eq!(row_issues[0].occurrences, source.stats.rows_skipped);
     // Rows were lost, so the report is degraded -- but not to `failed`.
     assert_eq!(report.status, ReportStatusCode::partial());
     assert_eq!(report.summary.sources_succeeded, 1);

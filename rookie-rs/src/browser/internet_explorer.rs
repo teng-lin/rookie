@@ -58,16 +58,23 @@ pub(crate) fn internet_explorer_outcome(
     let mut skipped_records = 0_usize;
 
     for (record_index, record) in records.enumerate() {
-      stats.records_seen += 1;
       let cookie = record
         .map_err(anyhow::Error::from)
         .and_then(|record| read_cookie_record(&record, columns))
         .and_then(|record| record.into_cookie(domains.as_deref()));
 
+      // Section 5.7 counts rows *relevant to the request*, so a record the
+      // domain filter excluded was never seen for reporting purposes. A record
+      // that failed before it could be tested still counts: it might have
+      // matched.
       match cookie {
-        Ok(Some(cookie)) => cookies.push(cookie),
+        Ok(Some(cookie)) => {
+          stats.records_seen += 1;
+          cookies.push(cookie)
+        }
         Ok(None) => {}
         Err(error) => {
+          stats.records_seen += 1;
           skipped_records += 1;
           stats.records_skipped += 1;
           log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");

@@ -263,6 +263,16 @@ pub(crate) struct CookieSourceIdentity {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExtractionStats {
+  /// Rows *relevant to the request*: those matching the domain filter, plus
+  /// any that failed before relevance could be determined. Rows the filter
+  /// excluded are not counted, so `rows_seen - rows_skipped == cookies_emitted`
+  /// holds and a consumer can read "how much did this source lose?" directly.
+  ///
+  /// The SQL engines get this from their `WHERE` clause. Safari is the known
+  /// deviation: it applies the domain filter after parsing the whole file, so
+  /// it still counts every record. Correcting that means moving the filter into
+  /// the record loop, which is low-level Safari parsing that Milestone 4E
+  /// explicitly does not reimplement.
   pub(crate) rows_seen: u32,
   pub(crate) cookies_emitted: u32,
   pub(crate) rows_skipped: u32,
@@ -425,10 +435,20 @@ pub(crate) struct StatsAccumulator {
 
 impl StatsAccumulator {
   pub(crate) fn add(&mut self, stats: &ExtractionStats) {
-    self.counters.rows_seen += u64::from(stats.rows_seen);
-    self.counters.cookies_emitted += u64::from(stats.cookies_emitted);
-    self.counters.rows_skipped += u64::from(stats.rows_skipped);
-    self.counters.acquisition_attempts += u64::from(stats.acquisition_attempts);
+    // Saturating rather than wrapping, for the same reason the wire counters
+    // saturate: an aggregate that silently wrapped would read as a small exact
+    // number. Reaching the `u64` ceiling from `u32` inputs takes 2^32 sources,
+    // so this is contract consistency rather than a reachable case.
+    let add = |counter: &mut u64, amount: u32| {
+      *counter = counter.saturating_add(u64::from(amount));
+    };
+    add(&mut self.counters.rows_seen, stats.rows_seen);
+    add(&mut self.counters.cookies_emitted, stats.cookies_emitted);
+    add(&mut self.counters.rows_skipped, stats.rows_skipped);
+    add(
+      &mut self.counters.acquisition_attempts,
+      stats.acquisition_attempts,
+    );
     self.saturated |= stats.counters_saturated;
   }
 

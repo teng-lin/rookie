@@ -3060,6 +3060,49 @@ mod tests {
       .any(|issue| issue.code == "duplicate_profile"));
   }
 
+  /// The registry's identifier grammar is looser than the report's: it accepts
+  /// `-` and a leading digit, which `report_core` rejects. Because descriptor
+  /// construction collects into a single `Result`, one registry entry that the
+  /// report cannot represent would fail *every* browser, on every platform, at
+  /// runtime. This turns that into a test failure instead.
+  #[test]
+  fn every_registered_identifier_is_representable_in_the_report_contract() {
+    use crate::browser::report_core::{BrowserId, CipherTierId, CookieSourceFormatId, EngineId};
+    use std::str::FromStr;
+
+    let registry = embedded_registry().expect("registry");
+    for (platform, definitions) in &registry.platforms {
+      for definition in definitions {
+        let id = &definition.canonical_id;
+        assert!(
+          BrowserId::from_str(id).is_ok(),
+          "{platform} browser id {id:?} is registry-legal but not report-legal"
+        );
+        assert!(
+          EngineId::from_str(definition.engine.as_str()).is_ok(),
+          "{platform} engine for {id:?} is not report-legal"
+        );
+        for format in definition
+          .capabilities
+          .declared_persistent_formats
+          .iter()
+          .chain(&definition.capabilities.declared_session_formats)
+        {
+          assert!(
+            CookieSourceFormatId::from_str(format).is_ok(),
+            "{platform} format {format:?} on {id:?} is not report-legal"
+          );
+        }
+        for tier in &definition.capabilities.declared_decryption_tiers {
+          assert!(
+            CipherTierId::from_str(tier).is_ok(),
+            "{platform} tier {tier:?} on {id:?} is not report-legal"
+          );
+        }
+      }
+    }
+  }
+
   #[test]
   fn only_browsers_with_known_elevation_keys_declare_v20() {
     let registry = embedded_registry().expect("registry");
