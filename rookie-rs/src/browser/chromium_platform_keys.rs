@@ -220,41 +220,99 @@ impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
 }
 
 #[cfg(target_os = "linux")]
-fn retrieve_linux_key_outcomes<B>(config: &Browser, backend: &B) -> ChromiumKeyOutcomes
+fn linux_v10_outcome() -> ChromiumKeyOutcome {
+  let salt = b"saltysalt";
+  ChromiumKeyOutcome::success(vec![
+    create_pbkdf2_key("peanuts", salt, 1),
+    create_pbkdf2_key("", salt, 1),
+  ])
+  .expect("Linux v10 has two fixed candidates")
+}
+
+#[cfg(target_os = "linux")]
+fn retrieve_linux_v11_outcome<B>(crypt_name: &str, backend: &B) -> ChromiumKeyOutcome
 where
   B: LinuxKeyringBackend,
 {
   let salt = b"saltysalt";
-  let v10 = ChromiumKeyOutcome::success(vec![
-    create_pbkdf2_key("peanuts", salt, 1),
-    create_pbkdf2_key("", salt, 1),
-  ])
-  .expect("Linux v10 has two fixed candidates");
+  let candidates = backend.passwords(crypt_name).map(|passwords| {
+    passwords
+      .into_iter()
+      .map(|password| create_pbkdf2_key(&password, salt, 1))
+      .collect()
+  });
+  outcome_from_result(
+    candidates,
+    "Chromium v11 keyring provider returned no key candidates",
+  )
+}
 
+#[cfg(target_os = "linux")]
+fn retrieve_linux_key_outcomes<B>(config: &Browser, backend: &B) -> ChromiumKeyOutcomes
+where
+  B: LinuxKeyringBackend,
+{
   let v11 = match config
     .unix_crypt_name
     .as_deref()
     .filter(|name| !name.is_empty())
   {
     None => ChromiumKeyOutcome::NotApplicable,
-    Some(crypt_name) => {
-      let candidates = backend.passwords(crypt_name).map(|passwords| {
-        passwords
-          .into_iter()
-          .map(|password| create_pbkdf2_key(&password, salt, 1))
-          .collect()
-      });
-      outcome_from_result(
-        candidates,
-        "Chromium v11 keyring provider returned no key candidates",
-      )
-    }
+    Some(crypt_name) => retrieve_linux_v11_outcome(crypt_name, backend),
   };
 
   ChromiumKeyOutcomes {
-    v10,
+    v10: linux_v10_outcome(),
     v11,
     v20: ChromiumKeyOutcome::NotApplicable,
+  }
+}
+
+/// Per-`any_browser` Linux key cache.
+///
+/// Several browser configurations deliberately share a `unix_crypt_name`.
+/// Caching the typed outcome (including failures) prevents repeated D-Bus
+/// calls and unlock prompts without discarding the diagnostics produced by the
+/// hardened keyring provider.
+#[cfg(target_os = "linux")]
+pub(crate) struct LinuxKeyOutcomeCache {
+  v11_by_crypt_name: std::collections::HashMap<String, ChromiumKeyOutcome>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxKeyOutcomeCache {
+  pub(crate) fn new() -> Self {
+    Self {
+      v11_by_crypt_name: std::collections::HashMap::new(),
+    }
+  }
+
+  pub(crate) fn outcomes_for(&mut self, config: &Browser) -> ChromiumKeyOutcomes {
+    self.outcomes_for_with_backend(config, &SystemLinuxKeyringBackend)
+  }
+
+  fn outcomes_for_with_backend<B>(&mut self, config: &Browser, backend: &B) -> ChromiumKeyOutcomes
+  where
+    B: LinuxKeyringBackend,
+  {
+    let v11 = match config
+      .unix_crypt_name
+      .as_deref()
+      .filter(|name| !name.is_empty())
+    {
+      None => ChromiumKeyOutcome::NotApplicable,
+      Some(crypt_name) => self
+        .v11_by_crypt_name
+        .entry(crypt_name.to_string())
+        .or_insert_with(|| retrieve_linux_v11_outcome(crypt_name, backend))
+        .clone(),
+    };
+
+    ChromiumKeyOutcomes {
+      v10: linux_v10_outcome(),
+      v11,
+      v20: ChromiumKeyOutcome::NotApplicable,
+    }
   }
 }
 
@@ -498,6 +556,52 @@ mod tests {
         tier: ChromiumKeyTier::V11
       }
     );
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn linux_any_browser_cache_reuses_success_per_crypt_name() {
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Ok(vec!["shared secret".to_string()]),
+    };
+    let mut cache = LinuxKeyOutcomeCache::new();
+
+    let chrome = cache.outcomes_for_with_backend(&linux_config(Some("chrome")), &backend);
+    let vivaldi = cache.outcomes_for_with_backend(&linux_config(Some("chrome")), &backend);
+    let brave = cache.outcomes_for_with_backend(&linux_config(Some("brave")), &backend);
+
+    assert_eq!(backend.calls.get(), 2, "one call per distinct crypt name");
+    assert_eq!(
+      candidate_bytes(&chrome, ChromiumCipherVersion::V11),
+      candidate_bytes(&vivaldi, ChromiumCipherVersion::V11)
+    );
+    assert_eq!(
+      candidate_bytes(&brave, ChromiumCipherVersion::V11),
+      vec![create_pbkdf2_key("shared secret", b"saltysalt", 1)]
+    );
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn linux_any_browser_cache_reuses_explicit_failure_diagnostics() {
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Err(anyhow::anyhow!("locked keyring")),
+    };
+    let mut cache = LinuxKeyOutcomeCache::new();
+
+    let first = cache.outcomes_for_with_backend(&linux_config(Some("chromium")), &backend);
+    let second = cache.outcomes_for_with_backend(&linux_config(Some("chromium")), &backend);
+
+    assert_eq!(backend.calls.get(), 1);
+    for outcomes in [&first, &second] {
+      let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V11)
+      else {
+        panic!("cached keyring failure must stay explicit");
+      };
+      assert_eq!(failure.message(), "locked keyring");
+    }
   }
 
   #[cfg(target_os = "windows")]

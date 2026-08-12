@@ -71,6 +71,49 @@ pub fn chromium_based(
   }
 }
 
+/// Runs one Unix Chromium identity and retains enough extraction quality data
+/// for `any_browser` to compare it with the other configured identities.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn chromium_based_probe(
+  config: &Browser,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<ChromiumProbeResult> {
+  #[cfg(target_os = "linux")]
+  {
+    let provider = LinuxPlatformKeyProvider::new(config);
+    let outcomes = retrieve_key_outcomes(&provider, &());
+    query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill)
+  }
+
+  #[cfg(target_os = "macos")]
+  {
+    let provider = MacosPlatformKeyProvider::new(config);
+    let outcomes = retrieve_key_outcomes(&provider, &());
+    query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill)
+  }
+
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = (config, db_path, domains, force_kill);
+    anyhow::bail!("Chromium cookie extraction is unsupported on this Unix platform")
+  }
+}
+
+/// Runs a Chromium probe using key outcomes already retrieved by the
+/// per-call Linux cache. Failures remain typed outcomes, so probing cannot turn
+/// a keyring error into an empty candidate list.
+#[cfg(target_os = "linux")]
+pub(crate) fn chromium_based_probe_with_key_outcomes(
+  outcomes: ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<ChromiumProbeResult> {
+  query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill)
+}
+
 const CHROMIUM_HOST_HASH_LEN: usize = 32;
 const MAX_CHROMIUM_ROW_ISSUE_SAMPLES: usize = 4;
 
@@ -171,6 +214,16 @@ pub(crate) struct ChromiumExtractionStats {
   pub(crate) rows_skipped: usize,
 }
 
+/// A successful Chromium configuration probe and its completeness signal.
+///
+/// `any_browser` compares all applicable identities instead of returning the
+/// first configuration that happens to decrypt one fallback-key row.
+#[derive(Debug)]
+pub(crate) struct ChromiumProbeResult {
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) rows_skipped: usize,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ChromiumEngineExtractionOutcome {
   pub(crate) cookies: Vec<Cookie>,
@@ -207,6 +260,16 @@ impl ChromiumEngineExtractionOutcome {
     match self.legacy_error {
       Some(error) => Err(error),
       None => Ok(self.cookies),
+    }
+  }
+
+  fn into_probe_result(self) -> Result<ChromiumProbeResult> {
+    match self.legacy_error {
+      Some(error) => Err(error),
+      None => Ok(ChromiumProbeResult {
+        cookies: self.cookies,
+        rows_skipped: self.stats.rows_skipped,
+      }),
     }
   }
 }
@@ -834,6 +897,32 @@ fn create_windows_shadow_source(
   })
 }
 
+/// Runs a source-inspection query through the same non-disruptive locked-file
+/// recovery policy as Chromium extraction.
+///
+/// `any_browser` uses this before key retrieval to classify a live database by
+/// schema. A share-locked DB+WAL pair can therefore be inspected through a
+/// verified shadow copy without bypassing the sniff-first boundary or closing
+/// the browser.
+#[cfg(target_os = "windows")]
+pub(crate) fn with_windows_locked_database_recovery<T, Query>(
+  db_path: &std::path::Path,
+  query: Query,
+) -> Result<T>
+where
+  Query: FnMut(&std::path::Path) -> Result<T>,
+{
+  with_windows_locked_database_policy(
+    db_path,
+    WindowsLockedDatabasePolicy::NonDisruptive,
+    query,
+    classify_windows_sharing_violation,
+    privilege::user::privileged,
+    create_windows_shadow_source,
+    |_| false,
+  )
+}
+
 fn query_cookies<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
@@ -856,6 +945,16 @@ pub(crate) fn query_cookies_with_key_outcomes(
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   query_cookies_engine_outcome(outcomes, db_path, domains, force_kill)?.into_legacy_result()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn query_cookies_probe_with_key_outcomes(
+  outcomes: ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<ChromiumProbeResult> {
+  query_cookies_engine_outcome(outcomes, db_path, domains, force_kill)?.into_probe_result()
 }
 
 #[allow(unused_variables)]
