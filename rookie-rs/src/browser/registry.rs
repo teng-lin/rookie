@@ -1575,10 +1575,12 @@ where
 {
   for profile in &mut outcome.profiles {
     let persistent = profile.path.join("cookies.sqlite");
-    // The Mozilla outcome also owns session fallback. A missing persistent DB
-    // is normal for a session-only profile and is not projected as a source.
+    // The Mozilla outcome also owns session fallback. A persistent DB that
+    // discovery never saw and that does not read back is normal for a
+    // session-only profile and is not projected as a source; one that reads
+    // back is real data no matter what discovery saw a moment earlier.
     let mut extraction = query(&persistent, domains);
-    if profile.persistent_source_discovered {
+    if profile.persistent_source_discovered || extraction.persistent_error.is_none() {
       sort_cookies(&mut extraction.persistent_cookies);
       profile.sources.push(EngineSourceExtraction {
         path: persistent,
@@ -1589,7 +1591,7 @@ where
         cookies: extraction.persistent_cookies,
         acquisition_strategy: extraction.persistent_acquisition_strategy,
         acquisition_attempts: extraction.persistent_acquisition_attempts,
-        diagnostics: Vec::new(),
+        diagnostics: extraction.persistent_diagnostics,
         error: extraction.persistent_error,
       });
     }
@@ -2109,6 +2111,47 @@ mod tests {
       .error
       .as_deref()
       .is_some_and(|error| error.contains("Can't resolve database path")));
+  }
+
+  #[test]
+  fn undiscovered_persistent_source_is_projected_when_the_query_succeeds() {
+    let temp = TempDir::new("gecko-persistent-appears");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid is still a discoverable source",
+    )
+    .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    let report = populate_gecko_sources(discovery, None, |persistent, domains| {
+      let profile = persistent.parent().expect("profile directory");
+      seed_empty_gecko_database(profile);
+      rusqlite::Connection::open(persistent)
+        .expect("open created database")
+        .execute(
+          "INSERT INTO moz_cookies VALUES ('.example.com', '/', 1, 0, 'created-late', 'v', 1, 0)",
+          [],
+        )
+        .expect("seed created database");
+      mozilla::query_cookies_engine_outcome(persistent, domains)
+    });
+    let sources = &report.profiles[0].sources;
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].format, "mozilla_sqlite");
+    assert!(sources[0].selected);
+    assert!(sources[0].error.is_none(), "{:?}", sources[0].error);
+    assert_eq!(sources[0].cookies[0].name, "created-late");
+    assert_eq!(sources[1].format, "firefox_session_jsonlz4");
   }
 
   #[test]

@@ -213,13 +213,17 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   pub(crate) persistent_rows_skipped: usize,
   pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
   pub(crate) persistent_acquisition_attempts: u32,
+  /// Set only when acquiring or querying the database failed, never for rows
+  /// skipped inside an otherwise successful extraction.
   pub(crate) persistent_error: Option<String>,
+  pub(crate) persistent_diagnostics: Vec<String>,
   pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
 }
 
 /// Extract a Mozilla profile with the same authoritative session ordering as
 /// `firefox_based`, retaining diagnostics which the legacy API intentionally
-/// only logs. Missing session candidates are not outcomes: absence is normal.
+/// only logs. Session candidates that were never on disk are not outcomes:
+/// absence is normal.
 pub(crate) fn query_cookies_engine_outcome(
   db_path: &Path,
   domains: Option<&[String]>,
@@ -234,7 +238,12 @@ pub(crate) fn query_cookies_engine_outcome(
       let persistent = database.into_value();
       outcome.persistent_rows_seen = persistent.rows_seen;
       outcome.persistent_rows_skipped = persistent.rows_skipped;
-      outcome.persistent_error = persistent.last_row_error.map(|error| format!("{error:#}"));
+      if let Some(error) = persistent.last_row_error {
+        outcome.persistent_diagnostics.push(format!(
+          "skipped {} malformed persistent row(s); last failure: {error:#}",
+          persistent.rows_skipped
+        ));
+      }
       outcome.persistent_cookies = persistent.cookies;
     }
     Err(error) => {
@@ -250,6 +259,7 @@ pub(crate) fn query_cookies_engine_outcome(
 
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
   for (path, format) in session_candidates(cookies_dir) {
+    let discovered = path.exists();
     match parse_session_candidate(&path, &format, domains) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
@@ -267,21 +277,46 @@ pub(crate) fn query_cookies_engine_outcome(
         });
         break;
       }
-      Err(error) if is_missing_session_file(&error) => {}
-      Err(error) => outcome.session_sources.push(MozillaSessionSourceOutcome {
-        path,
-        format: format.format_id(),
-        selected: false,
-        cookies: Vec::new(),
-        rows_seen: 0,
-        rows_skipped: 0,
-        acquisition_attempts: SESSION_STORE_READ_ATTEMPTS as u32,
-        diagnostics: Vec::new(),
-        error: Some(format!("{error:#}")),
-      }),
+      Err(error) => {
+        if let Some(source) = failed_session_source(path, format, discovered, &error) {
+          outcome.session_sources.push(source);
+        }
+      }
     }
   }
   outcome
+}
+
+/// Projects a failed session candidate, or `None` when the candidate was never
+/// on disk: absence is normal. A candidate that was there when the profile was
+/// admitted and then vanished mid-extraction is a real acquisition failure, so
+/// it stays visible instead of leaving the profile looking sourceless.
+fn failed_session_source(
+  path: PathBuf,
+  format: SessionStoreFormat,
+  discovered: bool,
+  error: &anyhow::Error,
+) -> Option<MozillaSessionSourceOutcome> {
+  let missing = is_missing_session_file(error);
+  if missing && !discovered {
+    return None;
+  }
+  Some(MozillaSessionSourceOutcome {
+    path,
+    format: format.format_id(),
+    selected: false,
+    cookies: Vec::new(),
+    rows_seen: 0,
+    rows_skipped: 0,
+    // A missing file is not retried; every other failure exhausts the budget.
+    acquisition_attempts: if missing {
+      1
+    } else {
+      SESSION_STORE_READ_ATTEMPTS as u32
+    },
+    diagnostics: Vec::new(),
+    error: Some(format!("{error:#}")),
+  })
 }
 
 fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
@@ -928,7 +963,32 @@ mod tests {
       Some(sqlite::DatabaseAcquisitionStrategy::LiveReadOnly)
     );
     assert_eq!(outcome.persistent_acquisition_attempts, 1);
-    assert!(outcome.persistent_error.is_some());
+    assert!(
+      outcome.persistent_error.is_none(),
+      "a skipped row must not read as a failed acquisition: {:?}",
+      outcome.persistent_error
+    );
+    assert_eq!(outcome.persistent_diagnostics.len(), 1);
+    assert!(outcome.persistent_diagnostics[0].contains("skipped 1 malformed persistent row"));
+  }
+
+  #[test]
+  fn vanished_session_candidate_is_reported_instead_of_dropped() {
+    let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+    let path = PathBuf::from("profile/sessionstore-backups/recovery.jsonlz4");
+
+    assert!(
+      failed_session_source(path.clone(), SessionStoreFormat::JsonLz4, false, &missing).is_none(),
+      "a candidate that was never on disk is not an outcome"
+    );
+
+    let source = failed_session_source(path.clone(), SessionStoreFormat::JsonLz4, true, &missing)
+      .expect("a discovered candidate that vanished is a failure, not an absence");
+    assert_eq!(source.path, path);
+    assert_eq!(source.format, "firefox_session_jsonlz4");
+    assert!(!source.selected);
+    assert_eq!(source.acquisition_attempts, 1);
+    assert!(source.error.is_some());
   }
 
   #[test]
