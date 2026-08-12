@@ -1463,7 +1463,17 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
     #[cfg(target_os = "macos")]
     {
       let credentials = match registry_key_credentials(&installation.browser_id) {
-        Ok(credentials) => credentials,
+        Ok(credentials) if credentials.osx_key_service.is_some() => credentials,
+        Ok(_) => {
+          return ChromiumKeyOutcomes {
+            v10: ChromiumKeyOutcome::failure(format!(
+              "no macOS keychain identity is known for browser {:?}, so its encrypted cookies cannot be decrypted",
+              installation.browser_id
+            )),
+            v11: ChromiumKeyOutcome::NotApplicable,
+            v20: ChromiumKeyOutcome::NotApplicable,
+          };
+        }
         Err(error) => {
           return ChromiumKeyOutcomes {
             v10: ChromiumKeyOutcome::failure(error.to_string()),
@@ -1471,15 +1481,6 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
             v20: ChromiumKeyOutcome::NotApplicable,
           };
         }
-      let Some(config) = crate::config::try_get_browser_config(&installation.browser_id) else {
-        return ChromiumKeyOutcomes {
-          v10: ChromiumKeyOutcome::failure(format!(
-            "no macOS keychain identity is known for browser {:?}, so its encrypted cookies cannot be decrypted",
-            installation.browser_id
-          )),
-          v11: ChromiumKeyOutcome::NotApplicable,
-          v20: ChromiumKeyOutcome::NotApplicable,
-        };
       };
       let provider = MacosPlatformKeyProvider::new(&credentials);
       return retrieve_key_outcomes(&provider, &());
@@ -4873,10 +4874,16 @@ mod tests {
         extraction.cookies.is_empty(),
         "{browser_id} must not report undecryptable rows as cookies"
       );
-      let error = extraction
-        .error
-        .as_deref()
+      let failure = extraction
+        .failure
+        .as_ref()
         .unwrap_or_else(|| panic!("{browser_id} must surface an error, not silently empty output"));
+      let error = match failure {
+        ChromiumProfileFailure::Extraction(message) => message.as_str(),
+        ChromiumProfileFailure::NoSource => {
+          panic!("{browser_id} must surface an extraction error, not NoSource")
+        }
+      };
       assert!(
         error.contains(browser_id) && error.contains("no macOS keychain identity"),
         "{browser_id} error must name the browser and its cause, got {error:?}"
