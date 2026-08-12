@@ -4,6 +4,11 @@ from typing import Any, Dict, List, Optional
 CookieList = List[Dict[str, Any]]
 FirefoxProfile = Dict[str, Any]
 FirefoxProfileList = List[FirefoxProfile]
+BrowserDescriptor = Dict[str, Any]
+BrowserDescriptorList = List[BrowserDescriptor]
+ProfileDescriptor = Dict[str, Any]
+ProfileDescriptorList = List[ProfileDescriptor]
+ExtractionReport = Dict[str, Any]
 
 def version() -> str:
     """
@@ -185,6 +190,66 @@ def any_browser(
     :param domains: Optional list of domains to extract cookies only from these domains.
     :param key_path: Optional path to key file used to decrypt `db_path`.
     :return: A list of dictionaries of cookies.
+    """
+    ...
+
+def supported_browsers() -> BrowserDescriptorList:
+    """
+    List every browser registered for the running OS.
+
+    Registration is not detection: a descriptor only means rookie knows where
+    that browser would keep its cookies. Each dictionary contains ``id``,
+    ``aliases``, ``display_name``, ``engine``, and ``capabilities``, itself a
+    dictionary of ``persistent_formats``, ``session_formats``,
+    ``declared_decryption_tiers``, and ``available_decryption_tiers``.
+
+    :return: A list of browser descriptor dictionaries
+    """
+    ...
+
+def browser_profiles(browser_id: str) -> ProfileDescriptorList:
+    """
+    List the discovered profiles of one registered browser.
+
+    Each dictionary contains ``profile`` (``browser_id``, ``installation_id``,
+    ``profile_id``, ``display_name``, ``path``, ``path_lossy``), ``is_default``,
+    and ``sources`` (``role``, ``format``, ``path``, ``path_lossy``,
+    ``precedence``). A known browser with nothing installed returns an empty
+    list; an unknown ID raises.
+
+    :param browser_id: A canonical browser ID or alias from supported_browsers
+    :return: A list of profile descriptor dictionaries
+    """
+    ...
+
+def browser_report(
+    browser_id: str,
+    profile_id: Optional[str] = None,
+    domains: Optional[List[str]] = None,
+) -> ExtractionReport:
+    """
+    Extract cookies from one browser as a grouped report.
+
+    The report contains ``status``, ``summary``, ``profiles``, and ``issues``.
+    Cookies stay attached to the source they came from, alongside that source's
+    ``status``, ``selected`` flag, ``acquisition_strategy``, ``stats``, and
+    ``issues``. Only a bad request raises: an absent browser is a report with
+    status ``no_sources``.
+
+    :param browser_id: A canonical browser ID or alias from supported_browsers
+    :param profile_id: Optional profile_id from browser_profiles, restricting
+        the report to that one profile
+    :param domains: Optional list of domains to extract only from them
+    :return: An extraction report dictionary
+    """
+    ...
+
+def load_report(domains: Optional[List[str]] = None) -> ExtractionReport:
+    """
+    Extract cookies from every registered browser as one grouped report.
+
+    :param domains: Optional list of domains to extract only from them
+    :return: An extraction report dictionary
     """
     ...
 
