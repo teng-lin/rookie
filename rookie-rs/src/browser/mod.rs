@@ -9,5 +9,5 @@ pub(crate) mod registry;
 #[cfg(target_os = "windows")]
 pub(crate) mod internet_explorer;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod safari;

@@ -1,10 +1,11 @@
-use crate::common::{date, enums::*, utils};
+use crate::common::{date, enums::*, sqlite, utils};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::{
-  fs::File,
+  fs::{self, File},
   io::Read,
   path::{Path, PathBuf},
+  time::SystemTime,
   vec::Vec,
 };
 
@@ -39,7 +40,7 @@ pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Ve
       ",
     db_path.display()
   ))?;
-  let bs = read_cookie_file(&mut file, &db_path)?;
+  let bs = read_stable_cookie_file(&mut file, &db_path)?;
   let cookies = parse_content(&bs)?;
 
   // Filter cookies by domain if domains are specified
@@ -55,11 +56,124 @@ pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Ve
   }
 }
 
-fn read_cookie_file(file: &mut File, db_path: &Path) -> Result<Vec<u8>> {
-  let advertised_len = file
+const STABLE_READ_ATTEMPTS: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileImageMetadata {
+  len: u64,
+  modified: Option<SystemTime>,
+  #[cfg(unix)]
+  device: u64,
+  #[cfg(unix)]
+  inode: u64,
+}
+
+fn image_metadata(file: &File, db_path: &Path) -> Result<FileImageMetadata> {
+  file
     .metadata()
-    .with_context(|| format!("Failed to inspect {}", db_path.display()))?
-    .len();
+    .with_context(|| format!("Failed to inspect {}", db_path.display()))
+    .map(file_image_metadata)
+}
+
+fn path_image_metadata(db_path: &Path) -> Result<FileImageMetadata> {
+  std::fs::metadata(db_path)
+    .with_context(|| format!("Failed to inspect Safari cookie path {}", db_path.display()))
+    .map(file_image_metadata)
+}
+
+fn file_image_metadata(metadata: std::fs::Metadata) -> FileImageMetadata {
+  #[cfg(unix)]
+  use std::os::unix::fs::MetadataExt;
+  FileImageMetadata {
+    len: metadata.len(),
+    modified: metadata.modified().ok(),
+    #[cfg(unix)]
+    device: metadata.dev(),
+    #[cfg(unix)]
+    inode: metadata.ino(),
+  }
+}
+
+/// Reads a complete BinaryCookies image and verifies that the opened file was
+/// not replaced or modified while its bytes were copied. Safari updates this
+/// file atomically in practice, but a bounded retry prevents a half-old image
+/// from silently becoming the extraction result when it does not.
+fn read_stable_cookie_file(file: &mut File, db_path: &Path) -> Result<Vec<u8>> {
+  read_stable_cookie_file_with(file, db_path, || {})
+}
+
+fn read_stable_cookie_file_with<F>(
+  file: &mut File,
+  db_path: &Path,
+  mut after_read: F,
+) -> Result<Vec<u8>>
+where
+  F: FnMut(),
+{
+  let mut last_change = None;
+  for _ in 0..STABLE_READ_ATTEMPTS {
+    let fd_before = image_metadata(file, db_path)?;
+    let path_before = path_image_metadata(db_path)?;
+    let first_bytes = read_cookie_file(file, db_path, fd_before.len)?;
+    after_read();
+    let fd_after = image_metadata(file, db_path)?;
+    let path_after = path_image_metadata(db_path)?;
+    // Comparing descriptor metadata alone misses an atomic rename: the old
+    // descriptor stays unchanged while the configured path now names a new
+    // image. Both snapshots must agree with each other and with the path.
+    if fd_before == path_before
+      && fd_after == path_after
+      && fd_before == fd_after
+      && path_before == path_after
+    {
+      // A writer can preserve metadata while rewriting in place. Reopen and
+      // compare a second complete, bounded image before accepting either one.
+      let mut verification =
+        File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+      let verification_before = image_metadata(&verification, db_path)?;
+      let verification_path_before = path_image_metadata(db_path)?;
+      let verification_bytes =
+        read_cookie_file(&mut verification, db_path, verification_before.len)?;
+      let verification_after = image_metadata(&verification, db_path)?;
+      let verification_path_after = path_image_metadata(db_path)?;
+      if verification_before == verification_path_before
+        && verification_after == verification_path_after
+        && verification_before == verification_after
+        && verification_path_before == verification_path_after
+        && verification_before == fd_before
+        && first_bytes == verification_bytes
+      {
+        *file = verification;
+        return Ok(first_bytes);
+      }
+      last_change = Some((
+        fd_before,
+        path_before,
+        verification_before,
+        verification_path_before,
+        verification_after,
+        verification_path_after,
+      ));
+    } else {
+      last_change = Some((
+        fd_before,
+        path_before,
+        fd_after.clone(),
+        path_after.clone(),
+        fd_after,
+        path_after,
+      ));
+    }
+    *file =
+      File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+  }
+  bail!(
+    "Safari cookie file {} changed during each of {STABLE_READ_ATTEMPTS} acquisition attempts: {last_change:?}",
+    db_path.display()
+  )
+}
+
+fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Result<Vec<u8>> {
   if advertised_len > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
       "Safari cookie file {} is too large: {advertised_len} bytes exceeds the {} byte limit",
@@ -289,6 +403,286 @@ fn c_str(bs: &[u8]) -> Result<String> {
     .and_then(|elements| {
       String::from_utf8(elements.to_vec()).map_err(|err| anyhow!(err.to_string()))
     })
+}
+
+const SAFARI_TABS_RELATIVE_PATH: &str = "Safari/SafariTabs.db";
+const SAFARI_PROFILE_TYPE: i64 = 1;
+const SAFARI_PROFILE_SUBTYPE: i64 = 2;
+const DEFAULT_PROFILE_SENTINEL: &str = "DefaultProfile";
+
+fn safari_tabs_database_path(library: &Path) -> PathBuf {
+  library
+    .join("Containers/com.apple.Safari/Data/Library")
+    .join(SAFARI_TABS_RELATIVE_PATH)
+}
+
+/// Crate-private profile descriptor used by the later cross-browser report
+/// adapter. It deliberately does not change the legacy `safari()` API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SafariProfile {
+  pub(crate) name: String,
+  pub(crate) uuid: Option<String>,
+  pub(crate) cookie_candidates: Vec<PathBuf>,
+}
+
+#[allow(dead_code)] // consumed by the private cross-engine report in Milestone 4E
+#[derive(Debug)]
+pub(crate) struct SafariProfileExtraction {
+  pub(crate) profile: SafariProfile,
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) error: Option<String>,
+}
+
+#[allow(dead_code)] // consumed by the private cross-engine report in Milestone 4E
+#[derive(Debug, Default)]
+pub(crate) struct SafariExtractionOutcome {
+  pub(crate) profiles: Vec<SafariProfileExtraction>,
+  pub(crate) discovery_warning: Option<String>,
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+  let bytes = value.as_bytes();
+  bytes.len() == 36
+    && [8, 13, 18, 23]
+      .into_iter()
+      .all(|index| bytes[index] == b'-')
+    && bytes
+      .iter()
+      .enumerate()
+      .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+}
+
+fn profile_name(title: &str, uuid: &str) -> String {
+  let cleaned = title
+    .trim()
+    .chars()
+    .map(|character| match character {
+      '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'..='\u{1f}' => '_',
+      character => character,
+    })
+    .collect::<String>();
+  if cleaned.is_empty() {
+    format!("profile-{}", uuid[..8].to_ascii_lowercase())
+  } else {
+    cleaned
+  }
+}
+
+fn disambiguate_profile_names(profiles: &mut [SafariProfile]) {
+  let mut used = std::collections::BTreeSet::new();
+  for profile in profiles {
+    let original = profile.name.clone();
+    let mut candidate = original.clone();
+    let mut suffix = 2usize;
+    while used.contains(&candidate) {
+      candidate = format!("{original}-{suffix}");
+      suffix += 1;
+    }
+    used.insert(candidate.clone());
+    profile.name = candidate;
+  }
+}
+
+fn default_profile(library: &Path) -> SafariProfile {
+  SafariProfile {
+    name: "default".to_owned(),
+    uuid: None,
+    cookie_candidates: vec![
+      library.join("Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"),
+      library.join("Cookies/Cookies.binarycookies"),
+    ],
+  }
+}
+
+fn named_profile(library: &Path, uuid: String, title: String) -> SafariProfile {
+  let lower_uuid = uuid.to_ascii_lowercase();
+  SafariProfile {
+    name: profile_name(&title, &uuid),
+    uuid: Some(uuid),
+    cookie_candidates: vec![library.join(format!(
+      "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/{lower_uuid}/WebsiteData/Cookies/Cookies.binarycookies"
+    ))],
+  }
+}
+
+/// Returns a successful (including zero-row) profile DB result. The common
+/// SQLite acquisition layer copies a live WAL pair, avoiding the silent
+/// omission of recently-created profiles that immutable reads cause.
+fn named_profiles_from_database(library: &Path) -> Result<Vec<(String, String)>> {
+  let database = safari_tabs_database_path(library);
+  sqlite::with_browser_database(database, |connection| {
+    let mut statement = connection.prepare(
+      "SELECT external_uuid, title FROM bookmarks \
+       WHERE type = ?1 AND subtype = ?2 AND external_uuid != ?3 \
+       ORDER BY external_uuid COLLATE BINARY, title COLLATE BINARY",
+    )?;
+    let mut rows = statement.query(rusqlite::params![
+      SAFARI_PROFILE_TYPE,
+      SAFARI_PROFILE_SUBTYPE,
+      DEFAULT_PROFILE_SENTINEL
+    ])?;
+    let mut profiles = Vec::new();
+    while let Some(row) = rows.next()? {
+      let uuid = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+      let title = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+      if is_canonical_uuid(&uuid) {
+        profiles.push((uuid, title));
+      } else if !uuid.is_empty() {
+        log::warn!("Skipping Safari profile row with invalid external UUID {uuid:?}");
+      }
+    }
+    Ok(profiles)
+  })
+  .map(|outcome| outcome.into_value())
+}
+
+fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>> {
+  let directory = library.join("Containers/com.apple.Safari/Data/Library/Safari/Profiles");
+  let entries = match fs::read_dir(&directory) {
+    Ok(entries) => entries,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    Err(error) => {
+      return Err(error).with_context(|| {
+        format!(
+          "Failed to enumerate Safari profile directory {}",
+          directory.display()
+        )
+      })
+    }
+  };
+  let mut profiles = Vec::new();
+  for entry in entries {
+    let entry = entry.with_context(|| {
+      format!(
+        "Failed to read an entry in Safari profile directory {}",
+        directory.display()
+      )
+    })?;
+    if entry
+      .file_type()
+      .with_context(|| {
+        format!(
+          "Failed to inspect Safari profile entry {}",
+          entry.path().display()
+        )
+      })?
+      .is_dir()
+    {
+      if let Ok(uuid) = entry.file_name().into_string() {
+        if is_canonical_uuid(&uuid) {
+          profiles.push((uuid, String::new()));
+        }
+      }
+    }
+  }
+  profiles.sort_by(|left, right| left.0.cmp(&right.0));
+  Ok(profiles)
+}
+
+/// Default profile is always first. A readable zero-row database is
+/// authoritative; only absent, unreadable, or schema-incompatible databases
+/// activate the deterministic directory fallback.
+pub(crate) fn discover_safari_profiles(library: &Path) -> (Vec<SafariProfile>, Option<String>) {
+  let mut profiles = vec![default_profile(library)];
+  let (named, warning) = match named_profiles_from_database(library) {
+    Ok(profiles) => (profiles, None),
+    Err(error) => {
+      let database = safari_tabs_database_path(library);
+      match named_profiles_from_directory(library) {
+        Ok(profiles) => (profiles, Some(format!(
+          "Safari profile database acquisition/query failed at {}; using directory fallback (Full Disk Access may be required): {error:#}",
+          database.display()
+        ))),
+        Err(directory_error) => (Vec::new(), Some(format!(
+          "Safari profile database acquisition/query failed at {}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}",
+          database.display()
+        ))),
+      }
+    }
+  };
+  let mut seen = std::collections::BTreeSet::new();
+  profiles.extend(named.into_iter().filter_map(|(uuid, title)| {
+    seen
+      .insert(uuid.to_ascii_uppercase())
+      .then(|| named_profile(library, uuid, title))
+  }));
+  disambiguate_profile_names(&mut profiles);
+  (profiles, warning)
+}
+
+/// Crate-private generic adapter. It is intentionally separate from the
+/// legacy API so a broken named profile cannot hide cookies selected by the
+/// historical default-path-first `safari()` function.
+fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&PathBuf>> {
+  for path in candidates {
+    match fs::metadata(path) {
+      Ok(_) => return Ok(Some(path)),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+      Err(error) => {
+        return Err(error)
+          .with_context(|| format!("Failed to inspect Safari cookie source {}", path.display()))
+      }
+    }
+  }
+  Ok(None)
+}
+
+fn sort_cookies(cookies: &mut [Cookie]) {
+  cookies.sort_by(|left, right| {
+    left
+      .domain
+      .cmp(&right.domain)
+      .then_with(|| left.path.cmp(&right.path))
+      .then_with(|| left.name.cmp(&right.name))
+      .then_with(|| left.expires.cmp(&right.expires))
+      .then_with(|| left.secure.cmp(&right.secure))
+      .then_with(|| left.http_only.cmp(&right.http_only))
+      .then_with(|| left.same_site.cmp(&right.same_site))
+      .then_with(|| left.value.cmp(&right.value))
+  });
+}
+
+#[allow(dead_code)] // retained as the private Safari-to-generic adapter
+pub(crate) fn safari_outcome(
+  library: &Path,
+  domains: Option<Vec<String>>,
+) -> SafariExtractionOutcome {
+  let (profiles, discovery_warning) = discover_safari_profiles(library);
+  let profiles = profiles
+    .into_iter()
+    .filter_map(
+      |profile| match first_existing_cookie_candidate(&profile.cookie_candidates) {
+        Ok(Some(path)) => match safari_based(path.clone(), domains.clone()) {
+          Ok(mut cookies) => {
+            sort_cookies(&mut cookies);
+            Some(SafariProfileExtraction {
+              profile,
+              cookies,
+              error: None,
+            })
+          }
+          Err(error) => Some(SafariProfileExtraction {
+            profile,
+            cookies: Vec::new(),
+            error: Some(format!("{error:#}")),
+          }),
+        },
+        // A discovered Safari profile without a cookie-bearing source is
+        // normal absence (for example a newly-created profile), not an
+        // extraction failure. It is omitted from the generic outcome.
+        Ok(None) => None,
+        Err(error) => Some(SafariProfileExtraction {
+          profile,
+          cookies: Vec::new(),
+          error: Some(format!("{error:#}")),
+        }),
+      },
+    )
+    .collect();
+  SafariExtractionOutcome {
+    profiles,
+    discovery_warning,
+  }
 }
 
 #[cfg(test)]
@@ -660,8 +1054,237 @@ mod tests {
     drop(file);
 
     let mut file = File::open(&path).expect("reopen sparse fixture");
-    let error = read_cookie_file(&mut file, &path).expect_err("oversized file should fail");
+    let error = read_stable_cookie_file(&mut file, &path).expect_err("oversized file should fail");
     fs::remove_file(&path).expect("remove sparse fixture");
     assert!(format!("{error:#}").contains("too large"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn stable_read_reopens_after_an_atomic_path_replacement() {
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system clock")
+      .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+      "rookie-safari-atomic-replace-{}-{unique}",
+      std::process::id()
+    ));
+    fs::create_dir_all(&directory).expect("create fixture directory");
+    let path = directory.join("Cookies.binarycookies");
+    let replacement = directory.join("replacement.binarycookies");
+    let old = golden_fixture();
+    let mut new = golden_fixture();
+    new.push(0);
+    fs::write(&path, old).expect("write original image");
+    fs::write(&replacement, &new).expect("write replacement image");
+
+    let mut file = File::open(&path).expect("open original image");
+    let mut replacement = Some(replacement);
+    let image = read_stable_cookie_file_with(&mut file, &path, || {
+      if let Some(replacement) = replacement.take() {
+        fs::rename(replacement, &path).expect("atomically replace cookie image");
+      }
+    })
+    .expect("reopen and acquire replacement image");
+    assert_eq!(image, new);
+    fs::remove_dir_all(&directory).expect("remove fixture directory");
+  }
+
+  #[test]
+  fn stable_read_retries_same_length_in_place_rewrite_with_preserved_mtime() {
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system clock")
+      .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+      "rookie-safari-in-place-rewrite-{}-{unique}.binarycookies",
+      std::process::id()
+    ));
+    let old = golden_fixture();
+    let mut new = old.clone();
+    new[0] = b'X';
+    fs::write(&path, &old).expect("write original image");
+    let original_mtime = fs::metadata(&path)
+      .expect("inspect original image")
+      .modified()
+      .expect("read original mtime");
+
+    let mut file = File::open(&path).expect("open original image");
+    let mut rewrite_once = true;
+    let image = read_stable_cookie_file_with(&mut file, &path, || {
+      if rewrite_once {
+        rewrite_once = false;
+        fs::write(&path, &new).expect("rewrite same-length image");
+        File::options()
+          .write(true)
+          .open(&path)
+          .expect("reopen rewritten image for metadata update")
+          .set_times(fs::FileTimes::new().set_modified(original_mtime))
+          .expect("restore original mtime");
+      }
+    })
+    .expect("retry and acquire rewritten image");
+    assert_eq!(image, new);
+    fs::remove_file(&path).expect("remove fixture");
+  }
+
+  fn temp_library(tag: &str) -> PathBuf {
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system clock")
+      .as_nanos();
+    let library = std::env::temp_dir().join(format!(
+      "rookie-safari-{tag}-{}-{unique}/Library",
+      std::process::id()
+    ));
+    fs::create_dir_all(&library).expect("create library fixture");
+    library
+  }
+
+  fn write_tabs_database(library: &Path, rows: &[(&str, &str)]) {
+    let database = library.join("Containers/com.apple.Safari/Data/Library/Safari/SafariTabs.db");
+    fs::create_dir_all(database.parent().expect("database parent"))
+      .expect("create database parent");
+    let connection = rusqlite::Connection::open(&database).expect("open SafariTabs fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE bookmarks (external_uuid TEXT, title TEXT, type INTEGER, subtype INTEGER)",
+      )
+      .expect("create bookmarks");
+    for (uuid, title) in rows {
+      connection
+        .execute(
+          "INSERT INTO bookmarks (external_uuid, title, type, subtype) VALUES (?1, ?2, 1, 2)",
+          rusqlite::params![uuid, title],
+        )
+        .expect("insert bookmark profile");
+    }
+  }
+
+  #[test]
+  fn safari_tabs_profiles_are_default_first_lowercase_and_disambiguated() {
+    let library = temp_library("tabs-profiles");
+    let first = "A0B1C2D3-1111-2222-3333-444444444444";
+    let second = "B0B1C2D3-1111-2222-3333-444444444444";
+    let third = "C0B1C2D3-1111-2222-3333-444444444444";
+    let non_profile = "D0B1C2D3-1111-2222-3333-444444444444";
+    write_tabs_database(
+      &library,
+      &[(third, "Work-2"), (second, "Work"), (first, "Work")],
+    );
+    let connection = rusqlite::Connection::open(safari_tabs_database_path(&library))
+      .expect("reopen SafariTabs fixture");
+    connection
+      .execute(
+        "INSERT INTO bookmarks (external_uuid, title, type, subtype) VALUES (?1, ?2, 2, 2)",
+        rusqlite::params![non_profile, "Not a profile"],
+      )
+      .expect("insert non-profile bookmark with matching subtype");
+    drop(connection);
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    assert!(warning.is_none());
+    assert_eq!(
+      profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["default", "Work", "Work-2", "Work-2-2"]
+    );
+    assert_eq!(profiles[1].uuid.as_deref(), Some(first));
+    assert!(profiles[1].cookie_candidates[0].ends_with(format!(
+      "WebsiteDataStore/{}/WebsiteData/Cookies/Cookies.binarycookies",
+      first.to_ascii_lowercase()
+    )));
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn readable_zero_row_profile_database_is_authoritative() {
+    let library = temp_library("zero-row-authority");
+    write_tabs_database(&library, &[]);
+    let uuid = "A0B1C2D3-1111-2222-3333-444444444444";
+    fs::create_dir_all(library.join(format!(
+      "Containers/com.apple.Safari/Data/Library/Safari/Profiles/{uuid}"
+    )))
+    .expect("create fallback profile");
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    assert!(warning.is_none());
+    assert_eq!(
+      profiles.len(),
+      1,
+      "directory fallback must not override a readable zero-row DB"
+    );
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn missing_profile_database_uses_sorted_directory_fallback_with_warning() {
+    let library = temp_library("directory-fallback");
+    let first = "B0B1C2D3-1111-2222-3333-444444444444";
+    let second = "A0B1C2D3-1111-2222-3333-444444444444";
+    for uuid in [first, second] {
+      fs::create_dir_all(library.join(format!(
+        "Containers/com.apple.Safari/Data/Library/Safari/Profiles/{uuid}"
+      )))
+      .expect("create fallback profile");
+    }
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    assert!(warning
+      .as_deref()
+      .is_some_and(|message| message.contains("directory fallback")));
+    assert_eq!(profiles[0].name, "default");
+    assert_eq!(profiles[1].uuid.as_deref(), Some(second));
+    assert_eq!(profiles[2].uuid.as_deref(), Some(first));
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn generic_outcome_omits_sourceless_profiles_and_sorts_cookie_rows() {
+    let library = temp_library("generic-outcome");
+    let uuid = "A0B1C2D3-1111-2222-3333-444444444444";
+    write_tabs_database(&library, &[(uuid, "Empty")]);
+
+    let modern = default_profile(&library).cookie_candidates.remove(0);
+    fs::create_dir_all(modern.parent().expect("cookie parent")).expect("create cookie parent");
+    let later = build_cookie_record(&FixtureCookie {
+      domain: ".z.example",
+      name: "later",
+      path: "/",
+      value: "2",
+      flags: 0,
+      expires: 0.0,
+    });
+    let earlier = build_cookie_record(&FixtureCookie {
+      domain: ".a.example",
+      name: "earlier",
+      path: "/",
+      value: "1",
+      flags: 0,
+      expires: 0.0,
+    });
+    fs::write(&modern, build_file(&[build_page(&[later, earlier])]))
+      .expect("write default cookie source");
+
+    let outcome = safari_outcome(&library, None);
+    assert_eq!(
+      outcome.profiles.len(),
+      1,
+      "sourceless named profile omitted"
+    );
+    assert_eq!(outcome.profiles[0].profile.name, "default");
+    assert_eq!(
+      outcome.profiles[0]
+        .cookies
+        .iter()
+        .map(|cookie| cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["earlier", "later"]
+    );
+    assert!(outcome.profiles[0].error.is_none());
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
   }
 }
