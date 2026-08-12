@@ -172,7 +172,13 @@ pub fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
     Ok(content) => match derive_v20_master_key(content) {
       Ok(Some(master_key)) => keys.push(master_key),
       Ok(None) => log::warn!("app-bound v20 master key derivation yielded no key"),
-      Err(err) => log::warn!("Failed to derive app-bound v20 master key: {err}"),
+      // A recognized wrapping scheme (one of Chrome's own flag bytes) failed to
+      // unwrap - most likely a CNG/DPAPI environment problem, not a vendor
+      // mismatch. Propagate it rather than silently falling back to the
+      // low-confidence trailing-bytes candidate and reporting success, which
+      // would surface as a generic decrypt failure far downstream instead of
+      // this specific, actionable diagnostic.
+      Err(err) => bail!("Failed to derive app-bound v20 master key: {err}"),
     },
     Err(err) => {
       log::warn!("Failed to parse app-bound key blob framing: {err}");

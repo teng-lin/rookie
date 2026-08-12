@@ -177,20 +177,29 @@ where
     // this Local State at this layer, so we can't say definitively that's what
     // happened - but surface it as a possibility rather than a bare decryption
     // error, so it isn't mistaken for a generic bug.
-    LocalStateKey::Encoded(encoded) => match backend.retrieve_v20(encoded) {
-      Ok(candidates) => ChromiumKeyOutcome::success(candidates).unwrap_or_else(|| {
-        ChromiumKeyOutcome::failure(
-          "Chromium v20 provider returned no key candidates. This vendor may use \
-           app-bound elevation keys rookie doesn't have (only Google Chrome's are \
-           known); legacy v10/v11 cookies are unaffected.",
-        )
-      }),
-      Err(error) => ChromiumKeyOutcome::failure(format!(
-        "App-Bound v20 decryption failed: {error}. This vendor may use elevation \
-         keys rookie doesn't have (only Google Chrome's are known); legacy v10/v11 \
-         cookies are unaffected."
-      )),
-    },
+    LocalStateKey::Encoded(encoded) => {
+      // Only reassure the caller that legacy cookies are unaffected when v10
+      // actually succeeded - v10 is retrieved independently and can itself have
+      // failed (or been absent) for the same Local State.
+      let legacy_note = if matches!(v10, ChromiumKeyOutcome::Success(_)) {
+        "legacy v10/v11 cookies are unaffected"
+      } else {
+        "legacy v10/v11 cookies may also have failed to decrypt - check the v10 outcome separately"
+      };
+      match backend.retrieve_v20(encoded) {
+        Ok(candidates) => ChromiumKeyOutcome::success(candidates).unwrap_or_else(|| {
+          ChromiumKeyOutcome::failure(format!(
+            "Chromium v20 provider returned no key candidates. This vendor may use \
+             app-bound elevation keys rookie doesn't have (only Google Chrome's are \
+             known); {legacy_note}."
+          ))
+        }),
+        Err(error) => ChromiumKeyOutcome::failure(format!(
+          "App-Bound v20 decryption failed: {error}. This vendor may use elevation \
+           keys rookie doesn't have (only Google Chrome's are known); {legacy_note}."
+        )),
+      }
+    }
   };
 
   ChromiumKeyOutcomes {
@@ -708,6 +717,48 @@ mod tests {
       outcomes.route(ChromiumCipherVersion::V20),
       ChromiumKeyRoute::Failure { .. }
     ));
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn windows_v20_failure_message_reassures_legacy_when_v10_succeeded() {
+    let backend = windows_backend(Ok(vec![vec![0x10; 32]]), Err(anyhow::anyhow!("v20 failed")));
+    let outcomes = retrieve_windows_key_outcomes(
+      &windows_local_state(serde_json::json!("legacy"), serde_json::json!("appbound")),
+      &backend,
+    );
+
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V20)
+    else {
+      panic!("expected v20 failure");
+    };
+    assert!(failure
+      .message()
+      .contains("legacy v10/v11 cookies are unaffected"));
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn windows_v20_failure_message_warns_about_legacy_when_v10_also_failed() {
+    let backend = windows_backend(
+      Err(anyhow::anyhow!("v10 failed")),
+      Err(anyhow::anyhow!("v20 failed")),
+    );
+    let outcomes = retrieve_windows_key_outcomes(
+      &windows_local_state(serde_json::json!("legacy"), serde_json::json!("appbound")),
+      &backend,
+    );
+
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V20)
+    else {
+      panic!("expected v20 failure");
+    };
+    assert!(!failure
+      .message()
+      .contains("legacy v10/v11 cookies are unaffected"));
+    assert!(failure
+      .message()
+      .contains("legacy v10/v11 cookies may also have failed"));
   }
 
   #[cfg(target_os = "windows")]

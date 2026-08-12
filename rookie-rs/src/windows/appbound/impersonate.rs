@@ -106,12 +106,21 @@ fn get_process_pids() -> Result<Vec<u32>> {
     }
 
     let count = cb_needed / 4;
-    if count < capacity || capacity >= MAX_CAPACITY {
+    if count < capacity {
       a_processes.truncate(count as usize);
       return Ok(a_processes);
     }
 
-    capacity *= 2;
+    if capacity >= MAX_CAPACITY {
+      bail!(
+        "EnumProcesses reported at least {count} processes, filling the \
+         {MAX_CAPACITY}-entry capacity cap; refusing to silently truncate the \
+         process list used to locate lsass.exe/winlogon.exe for SYSTEM \
+         impersonation"
+      );
+    }
+
+    capacity = capacity.saturating_mul(2).min(MAX_CAPACITY);
   }
 }
 
