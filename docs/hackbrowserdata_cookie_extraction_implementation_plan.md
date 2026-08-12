@@ -70,20 +70,25 @@ one merges, rebase and verify its exact head before consuming it. Missing privat
 cross-engine semantics are completed at the adapter/4E boundary instead of reopening a duplicate
 low-level package.
 
-The reconciled required delivery sequence is eleven PR units including PR #121, or ten new PRs
+The reconciled required delivery sequence is twelve PR units including PR #121, or eleven new PRs
 after #121 lands:
 
 1. PR #121: combined Milestone 3 private Chrome vertical slice.
 2. 4A: existing Chromium-family registry data and generalization of the Chrome-only path.
-3. 4B: Gecko/IE registry plus generic outcome adapters, including the generic Firefox residuals.
-4. 4D: Safari stable acquisition, named profiles, registry data, and generic outcome adapter.
-5. 4E: private cross-engine contract and fixture freeze.
-6. 5A: public Rust DTOs/APIs.
-7. 5B: Python bindings.
-8. 5C: Node bindings.
-9. 5D: CLI and cross-surface release gate.
-10. 6A: Windows standard/legacy browser batch.
-11. 6B: packaging/platform browser batch.
+3. 4F: registry credential metadata and generic key resolution.
+4. 4B: Gecko/IE registry plus generic outcome adapters, including the generic Firefox residuals.
+5. 4D: Safari stable acquisition, named profiles, registry data, and generic outcome adapter.
+6. 4E: private cross-engine contract and fixture freeze.
+7. 5A: public Rust DTOs/APIs.
+8. 5B: Python bindings.
+9. 5C: Node bindings.
+10. 5D: CLI and cross-surface release gate.
+11. 6A: Windows standard/legacy browser batch.
+12. 6B: packaging/platform browser batch.
+
+Unit 2 landed as PR #138 and is closed. Unit 3 exists because that PR delivered the 4A registry
+without Section 5.9 credential metadata, so the schema and provider migration need their own unit
+rather than an amendment to a completed package.
 
 The vendor-specific 6C upgrade remains optional and is not counted. PRs #119 and #122 are
 prerequisites already in flight outside these delivery units; they narrow 4B/4D but do not replace
@@ -91,7 +96,7 @@ the generic adapters.
 
 For portfolio tracking, add the eight plan-adjacent audit PRs explicitly consumed above
 (#119, #120, #122, #125, #126, #128, #129, and #132): the reconciled portfolio therefore has
-nineteen tracked items—eleven roadmap units plus eight supporting audit PRs. Other audit PRs may still
+twenty tracked items—twelve roadmap units plus eight supporting audit PRs. Other audit PRs may still
 require rebases at merge time, but are not counted here because they do not delete or narrow a
 roadmap package.
 
@@ -633,6 +638,12 @@ Resolution and validation are fixed:
 - a macOS definition declaring the `v10` tier must supply `macos_keychain`; a Linux definition
   declaring the `v11` tier must supply `linux_crypt_name`. A declared-but-uncredentialed tier is a
   registry validation error, not a runtime surprise;
+- presence alone is not sufficient. Every applicable `service`, `account`, and `linux_crypt_name`
+  must be non-empty after trimming ASCII whitespace, and validation rejects `Some("")` exactly as it
+  rejects an absent field. A generic-only browser has no `config.json` parity check to catch a blank
+  value, and a blank one silently reproduces the failure this invariant exists to prevent: Linux
+  filters an empty crypt name to `NotApplicable`, and macOS would issue a Keychain query with an
+  empty service/account;
 - browsers represented in both files extend the Section 5.1 parity invariant: registry
   `macos_keychain.service`/`account` and `linux_crypt_name` must equal the corresponding
   `config.json` values, pinned by a parity test. `config.json` gains no new browsers and no new
@@ -642,11 +653,26 @@ Resolution and validation are fixed:
 - values are lookup identifiers, not secrets. Key material is never stored in the registry, and
   credential metadata is not exposed on public descriptors or reports.
 
-Failure semantics reuse the Section 5.7 vocabulary. A credentialed lookup that the OS denies or that
-returns nothing is a typed `provider_failed` source issue with its tier outcome preserved
-independently of the other tiers; a tier with no compiled/enabled provider stays
-`provider_unavailable`. The existing fixed macOS fallback key candidates are unchanged, so a
-Keychain miss still degrades to those candidates rather than failing the source.
+Failure semantics reuse the Section 5.7 vocabulary, but the existing tier outcome cannot express
+them as-is. `ChromiumKeyOutcome` is today mutually exclusive—`Success`, `NotApplicable`, or
+`Failure`—while the fixed macOS fallback candidates mean a denied Keychain lookup still yields a
+usable `v10` key set. Reporting that as `Success` discards the diagnostic; reporting it as `Failure`
+throws away working candidates. Neither is acceptable, so the retrieval state is widened to a pair:
+a candidate state plus an optional provider diagnostic, with a tier outcome still resolved
+independently of the other tiers.
+
+- credentialed lookup succeeds: `Success`, no diagnostic;
+- lookup denied or empty but the tier still has usable candidates (macOS `v10`, which keeps its
+  existing fixed fallbacks): `Success` carrying a `provider_failed` diagnostic. It surfaces as a
+  `warning`-severity source issue, so under the Section 5.7 rule that only `error` degrades status,
+  the source and report stay `complete`. The fallback candidates remain usable and the Keychain
+  failure is no longer silently swallowed;
+- lookup denied or empty and no candidates remain (Linux `v11`, which has no fallback): `Failure`
+  with a `provider_failed` diagnostic, emitted at `error` severity and contributing to `partial`;
+- tier with no compiled/enabled provider: `provider_unavailable`, unchanged.
+
+This widening is a private retrieval-model change; it adds no public field beyond the Section 5.7
+issue already carried on `SourceExtraction`, and it is scheduled in package 4F rather than assumed.
 
 ## 6. Acquisition decisions
 
@@ -833,8 +859,9 @@ Before the 4E freeze, retain only these residuals from the retired alternate imp
 - source-level outcome/provenance/status, acquisition strategy and attempts, profile/report
   aggregates, `u32` saturation, and typed open issue code/stage/severity/context;
 - distinct `provider_unavailable` and `provider_failed` row outcomes;
-- schema/open-identifier/alias invariants needed by additional engines, including `opera gx`, plus
-  the Section 5.9 `key_credentials` field the generic-only Milestone 6 browsers depend on;
+- schema/open-identifier/alias invariants needed by additional engines, including `opera gx`; the
+  Section 5.9 `key_credentials` field the generic-only Milestone 6 browsers depend on arrives with
+  package 4F, which precedes this freeze;
 - typed filesystem/glob/canonicalization failures and the broader all-roots-failed rule;
 - golden ID vectors, preferred-source-no-fallback, markers/skipped directories, Unicode,
   duplicate-root ordering, and packaged-crate smoke fixtures.
@@ -848,10 +875,29 @@ reacquisition, domain-filter escaping, and Windows acquisition behavior.
 
 - Add every existing browser/root/channel to the private registry without changing named wrappers.
 - Corrected generic roots are allowed to differ from legacy selectors and are tested independently.
-- Add the Section 5.9 `key_credentials` field, its per-platform validation rules, and backfilled
-  macOS Keychain service/account plus Linux crypt-name values for the existing Chromium family.
+
+Delivered by PR #138 without Section 5.9 credential metadata. 4A is closed; the credential schema
+and provider migration are package 4F below, not a reopening of this one.
+
+#### 4F — Registry credential metadata and generic key resolution
+
+Depends on 4A. Must land before 4E freezes the private contract, and before any Milestone 6
+registry-only browser claims a macOS `v10` or Linux `v11` tier.
+
+- Add the Section 5.9 `key_credentials` field, its per-platform validation rules including the
+  non-empty-after-trim check, and backfilled macOS Keychain service/account plus Linux crypt-name
+  values for the existing Chromium family.
+- Widen the private tier retrieval state to the Section 5.9 candidate-state-plus-diagnostic pair so
+  a denied macOS Keychain lookup keeps its fallback candidates and still reports `provider_failed`.
 - Move generic Chromium key retrieval onto the registry credential metadata and add the
   registry/`config.json` parity test; legacy wrappers keep their `config.json` lookup.
+
+Acceptance:
+
+- A registry definition declaring an applicable tier without a non-empty credential fails validation.
+- A macOS Keychain denial yields usable `v10` candidates plus a `warning`-severity `provider_failed`
+  issue, and leaves report status `complete`.
+- Registry and `config.json` credential values match for every browser present in both.
 
 #### 4B — Gecko/IE registry and outcome adapters
 
