@@ -1367,6 +1367,13 @@ mod tests {
     db
   }
 
+  // Glob metacharacters embedded in injected path components. Windows forbids
+  // `*` and `?` in file names, so only the bracket class is creatable there.
+  #[cfg(windows)]
+  const GLOB_METACHARACTERS: &str = "[meta]";
+  #[cfg(not(windows))]
+  const GLOB_METACHARACTERS: &str = "[meta]*?";
+
   #[derive(Default)]
   struct CountingProvider {
     calls: RefCell<BTreeMap<String, usize>>,
@@ -1609,8 +1616,8 @@ mod tests {
   #[test]
   fn injected_path_components_remain_literal_while_registry_wildcards_are_preserved() {
     let temp = TempDir::new("escaped-glob-components");
-    let home = temp.path().join("home[meta]*?");
-    let config_home = temp.path().join("config[meta]*?");
+    let home = temp.path().join(format!("home{GLOB_METACHARACTERS}"));
+    let config_home = temp.path().join(format!("config{GLOB_METACHARACTERS}"));
     let context = test_context_for(
       PlatformId::Linux,
       home.clone(),
@@ -1653,7 +1660,7 @@ mod tests {
       1
     );
 
-    let local_app_data = temp.path().join("Local[meta]*?");
+    let local_app_data = temp.path().join(format!("Local{GLOB_METACHARACTERS}"));
     let windows_context = test_context_for(
       PlatformId::Windows,
       home,
@@ -1737,9 +1744,12 @@ mod tests {
       .expect("discover active Snap revision")
       .profiles();
     assert_eq!(profiles.len(), 1);
-    assert!(profiles[0]
-      .path
-      .starts_with(home.join("snap/brave/current")));
+    // Discovery reports canonical paths, so the expectation must be canonical too.
+    let current = home
+      .join("snap/brave/current")
+      .canonicalize()
+      .expect("canonical active Snap revision");
+    assert!(profiles[0].path.starts_with(current));
   }
 
   #[test]
@@ -1948,7 +1958,9 @@ mod tests {
     }
   }
 
-  #[cfg(unix)]
+  // macOS rejects file names that are not valid UTF-8, so the non-Unicode base
+  // path can only be materialised on the other supported Unix targets.
+  #[cfg(all(unix, not(target_os = "macos")))]
   #[test]
   fn non_unicode_injected_base_path_is_discovered_without_glob_string_conversion() {
     use std::os::unix::ffi::OsStringExt;
