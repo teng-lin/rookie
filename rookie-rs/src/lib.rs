@@ -3,6 +3,7 @@
 // Common
 pub mod common;
 pub mod config;
+pub mod report;
 mod utils;
 pub use common::enums;
 
