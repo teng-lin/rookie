@@ -768,6 +768,10 @@ pub(crate) fn list_profiles_from_str(
   contents: &str,
   profiles_path: &Path,
 ) -> Result<Vec<MozillaProfile>> {
+  // `Ini::load_from_file_opt` strips a UTF-8 BOM; the string parser does not,
+  // and U+FEFF is not whitespace, so a BOM would swallow every section into the
+  // anonymous one and yield zero profiles with no error at all.
+  let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
   let conf = Ini::load_from_str_opt(
     contents,
     ParseOption {

@@ -2365,6 +2365,35 @@ mod tests {
   }
 
   #[test]
+  fn byte_order_marked_profiles_ini_still_declares_its_profiles() {
+    let temp = TempDir::new("gecko-ini-bom");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    seed_empty_gecko_database(&root.join("Profiles/work"));
+    std::fs::write(
+      root.join("profiles.ini"),
+      "\u{feff}[Profile0]\nName=work\nPath=Profiles/work\nDefault=1\n",
+    )
+    .expect("write BOM-prefixed profiles.ini");
+
+    // Driven end to end: a BOM must not collapse into a successful empty
+    // discovery, which would silently claim the file declared nothing and
+    // promote the flat root to default instead.
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover BOM profiles");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(report.profiles[0].name, "work");
+    assert!(report.profiles[0].is_default);
+    assert_eq!(
+      report.profiles[0].path,
+      root
+        .join("Profiles/work")
+        .canonicalize()
+        .expect("canonical profile")
+    );
+    assert!(report.discovery_issues.is_empty());
+  }
+
+  #[test]
   fn gecko_profiles_ini_is_read_through_the_injected_filesystem() {
     let temp = TempDir::new("gecko-ini-seam");
     let real_context = test_context(temp.path().to_path_buf());
