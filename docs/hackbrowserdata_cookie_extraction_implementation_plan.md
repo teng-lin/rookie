@@ -36,9 +36,64 @@ The findings document predates recent work. The implementation must preserve, no
 - `d0ea87a`: IE cookie security flags are read from the ESE flags column.
 - Parameterized domain filtering, row-level malformed/decrypt failure isolation, aggregate total-failure reporting from `load()`, asynchronous Node browser tasks, Python GIL release, stderr-only CLI diagnostics, and explicit opt-in browser termination are already present.
 
-Remaining gaps are Chromium multi-profile discovery, cross-binding Firefox profile parity, independent Chromium cipher tiers, verified host hashes, structured partial results, a canonical internal browser registry, additional browser definitions, Firefox session semantics, and Safari named profiles.
+After the merged baseline and the in-flight work listed below, the remaining gaps are additional
+registry definitions, cross-engine source/report normalization, generic Gecko/IE adapters, Safari
+stable acquisition and named profiles, coordinated public surfaces, and the additional-browser
+batches.
 
-IE parsing is not being redesigned. It receives only a registry descriptor and a minimal `EngineExtractionOutcome` adapter when the generic report pipeline reaches it.
+IE parsing is not redesigned by this plan. PR #122 owns its row/schema/lock corrections; this plan
+adds only a registry descriptor and `EngineExtractionOutcome` adapter when the generic report
+pipeline reaches it.
+
+### 2.1 Execution reconciliation (2026-08-11)
+
+This plan is being executed alongside the audit-remediation slate. Before starting another package,
+recheck open and recently merged pull requests so two agents do not solve the same problem on
+incompatible private models.
+
+The following work is complete or already owned elsewhere:
+
+- Milestones 0, 1, and 2 landed in PRs #81–#87, #111, and #118.
+- PR #121 owns the combined Milestone 3 implementation foundation. Explicit contract/test
+  residuals move to 4A/4B/4E; do not publish the alternate `agent/private-browser-registry`,
+  `agent/generic-chromium-discovery`, or `agent/chrome-registry-vertical-slice` implementations.
+- PR #115 already moved every legacy Mozilla-family path to the Section 7 authoritative session
+  policy. There is no separate legacy Firefox-session PR left to write.
+- PR #119 owns Safari checked parsing, malformed page/record isolation, and parser fixtures.
+- PR #122 owns IE named-column decoding, row isolation, and non-destructive lock handling.
+- PR #120 owns Linux keyring correctness; PR #125 owns legacy CLI conflict/help cleanup; PR #126
+  owns fallible legacy-config lookup; PRs #128 and #129 own dependency/build/CI hardening; PR #132
+  owns release-packaging hardening.
+
+Open PRs are coordination references, not replacements for this document's contracts. After each
+one merges, rebase and verify its exact head before consuming it. Missing private report fields or
+cross-engine semantics are completed at the adapter/4E boundary instead of reopening a duplicate
+low-level package.
+
+The reconciled required delivery sequence is eleven PR units including PR #121, or ten new PRs
+after #121 lands:
+
+1. PR #121: combined Milestone 3 private Chrome vertical slice.
+2. 4A: existing Chromium-family registry data and generalization of the Chrome-only path.
+3. 4B: Gecko/IE registry plus generic outcome adapters, including the generic Firefox residuals.
+4. 4D: Safari stable acquisition, named profiles, registry data, and generic outcome adapter.
+5. 4E: private cross-engine contract and fixture freeze.
+6. 5A: public Rust DTOs/APIs.
+7. 5B: Python bindings.
+8. 5C: Node bindings.
+9. 5D: CLI and cross-surface release gate.
+10. 6A: Windows standard/legacy browser batch.
+11. 6B: packaging/platform browser batch.
+
+The vendor-specific 6C upgrade remains optional and is not counted. PRs #119 and #122 are
+prerequisites already in flight outside these delivery units; they narrow 4B/4D but do not replace
+the generic adapters.
+
+For portfolio tracking, add the eight plan-adjacent audit PRs explicitly consumed above
+(#119, #120, #122, #125, #126, #128, #129, and #132): the reconciled portfolio therefore has
+nineteen tracked items—eleven roadmap units plus eight supporting audit PRs. Other audit PRs may still
+require rebases at merge time, but are not counted here because they do not delete or narrow a
+roadmap package.
 
 ## 3. Scope
 
@@ -531,8 +586,9 @@ CLI grammar is fixed:
 - a registry-only browser ID without `--report` is a usage error that points to `--report`;
 - new browser IDs dispatch through the registry/report API, never
   `BROWSERS_MAP.get(...).unwrap()`;
-- pre-existing invocations, including no-selector default `load()`, retain their current precedence
-  and output.
+- valid pre-existing invocations, including no-selector default `load()`, retain their current
+  selection and output; combinations rejected by PR #125 are intentionally invalid rather than
+  silently resolved by the old precedence chain.
 
 ## 6. Acquisition decisions
 
@@ -672,7 +728,15 @@ Acceptance:
 - Synthetic WAL/exclusive SQLite matrix passes on three OSes.
 - Real Windows share-deny fixture either succeeds through an already-approved non-disruptive path or returns typed `locked`; shutdown does not count as default success.
 
-### Milestone 3 — Private registry and Chrome vertical slice
+### Milestone 3 — Private registry and Chrome vertical slice (combined in PR #121)
+
+Milestone 3 is one existing implementation unit, not three new PRs. PR #121 contains the embedded
+Chrome registry, installation/profile discovery, deterministic IDs, installation-scoped keys, and
+private listing/selection/report seams. The 3A–3C headings below remain the final Milestone 3
+contract, but PR #121 does not satisfy every bullet by itself: the explicit residual list after the
+acceptance block is a scheduling exception completed by the necessary schema extensions in 4A/4B
+and by the private contract freeze in 4E. None of those residuals justifies reviving an alternate
+Milestone 3 branch.
 
 #### 3A — Registry schema/resolver
 
@@ -706,6 +770,19 @@ Acceptance:
 - Default-feature and `--no-default-features` descriptor fixtures prove unavailable v20 is absent
   from `available_decryption_tiers`; a v20 row without the provider yields `provider_unavailable`.
 
+Before the 4E freeze, retain only these residuals from the retired alternate implementations:
+
+- source-level outcome/provenance/status, acquisition strategy and attempts, profile/report
+  aggregates, `u32` saturation, and typed open issue code/stage/severity/context;
+- distinct `provider_unavailable` and `provider_failed` row outcomes;
+- schema/open-identifier/alias invariants needed by additional engines, including `opera gx`;
+- typed filesystem/glob/canonicalization failures and the broader all-roots-failed rule;
+- golden ID vectors, preferred-source-no-fallback, markers/skipped directories, Unicode,
+  duplicate-root ordering, and packaged-crate smoke fixtures.
+
+Do not cherry-pick the retired 3C Chromium engine rewrite: it predates current query-level
+reacquisition, domain-filter escaping, and Windows acquisition behavior.
+
 ### Milestone 4 — Existing engines and final source semantics, still crate-private
 
 #### 4A — Register existing Chromium-family browsers
@@ -713,18 +790,28 @@ Acceptance:
 - Add every existing browser/root/channel to the private registry without changing named wrappers.
 - Corrected generic roots are allowed to differ from legacy selectors and are tested independently.
 
-#### 4B — Gecko/Safari/IE registry and outcome adapters
+#### 4B — Gecko/IE registry and outcome adapters
 
-- Register current Firefox-family, Safari, and IE definitions.
-- Adapt each engine to the nested profile/source `EngineExtractionOutcome` with real stats/issues.
+- Register current Firefox-family and IE definitions.
+- Adapt Gecko and IE to the nested profile/source `EngineExtractionOutcome` with real stats/issues.
+- Build on PR #122 for IE decoding/lock behavior; do not reimplement its parser or Restart Manager
+  work.
+- Consume the registry's five Firefox session candidates and emit source-level outcomes for every
+  existing invalid candidate while keeping missing candidates silent.
+- Add generic session-only discovery, strict malformed-row accounting, and same-handle stable-read
+  diagnostics without changing #115's metadata defaults or legacy semantics.
 - Keep all cross-engine generic/report entry points crate-private.
 
-#### 4C — Firefox authoritative session semantics
+#### 4C — Firefox authoritative session semantics (folded into #115 and 4B/4E)
 
-- Implement Section 7 lifecycle order, first-valid fallback, stable read/retry, and bounded
-  warnings.
-- Generic outcomes include session-only profiles and preserve duplicates.
-- Every legacy Mozilla-family wrapper/direct path through `firefox_based` uses authoritative selection.
+- PR #115 already implements the Section 7 lifecycle order, first-valid fallback, bounded retry,
+  missing silence, valid-empty authority, and authoritative selection for every legacy
+  Mozilla-family wrapper/direct path.
+- Do not ship the standalone private `firefox_session` module. It duplicates the candidate source
+  of truth and has no generic report consumer.
+- Fold generic session-only profiles, selected-source provenance, typed candidate failures,
+  row-level diagnostics, and source counters into 4B.
+- Fold common status/counter saturation and persisted-plus-session report assertions into 4E.
 
 Acceptance:
 
@@ -732,12 +819,14 @@ Acceptance:
   success, and session-only discovery fixtures pass.
 - Missing state is silent and no cross-tier merge occurs in generic outcomes.
 
-#### 4D — Safari parser and named-profile semantics
+#### 4D — Safari stable acquisition, named profiles, and outcome adapter
 
+- Build on PR #119 for checked parsing, fallible allocation, malformed page/record isolation, and
+  parser fixtures; do not create another low-level Safari parser PR.
 - Read `Cookies.binarycookies` into a stable whole-file image.
 - Detect atomic replacement and in-place metadata/identity changes with bounded retry.
-- Use checked arithmetic, structural bounds relative to input, and `try_reserve`; name and test
-  each derived limit and one-over-limit case rather than imposing an unexplained arbitrary cap.
+- Reconcile PR #119's fixed file/error ceilings with the contract: retain only justified limits,
+  name each one, and test its boundary; prefer structural bounds derived from the input format.
 - Read `SafariTabs.db` through WAL-aware acquisition; default is first, followed by named UUID
   profiles.
 - Treat a readable zero-row acquired snapshot as authoritative. Fall back to directory discovery
@@ -761,6 +850,11 @@ Acceptance:
   reports.
 - Prove first-existing persistent selection, multi-source provenance, successful zero-row source,
   partial root discovery, and external Firefox profile IDs.
+- Complete PR #121's deferred source-level acquisition metadata, typed provider failures,
+  aggregate statuses/counters, open identifier/schema rules, and remaining discovery fixtures.
+- This is shared report-core implementation, normalization, and contract verification—not only a
+  test pass. Low-level Safari parsing, IE lock handling, Linux keyring retrieval, and legacy
+  Firefox selection are already owned by #119/#122/#120/#115 and are not reimplemented here.
 
 Acceptance:
 
@@ -793,7 +887,10 @@ Acceptance:
 #### 5D — CLI and cross-surface gate
 
 - Implement the exact post-parse mode validation and JSON report/list grammar from Section 5.8.
-- Add Clap conflict/usage tests and ensure legacy invocation precedence is unchanged.
+- Build on PR #125's deterministic legacy help/conflict/stdout behavior. Record its conflict
+  rejection as the corrected compatibility baseline rather than restoring the formerly silent
+  precedence behavior.
+- Add only the new generic/report mode validation and Clap usage tests here.
 - Pin the invalid legacy `--browser` exit code/error class after moving validation out of Clap's
   possible-values parser; message text may evolve.
 - Run one synthetic multi-profile tree through Rust, Python, Node, and CLI as separate processes
