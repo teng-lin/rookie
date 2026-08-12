@@ -180,6 +180,16 @@ off dispatching from `main` (or any other ref) with an arbitrary `tag` value
 and having binaries built from unreviewed source silently overwrite that
 release's assets.
 
+That same step also asserts the tag is shaped `v<major>.<minor>.<patch>`, with
+an optional pre-release suffix. This workflow takes the tag verbatim, where
+`publish-crate.yml` and `publish-py.yml` build `v$VERSION` from a version input
+and so enforce the prefix by construction. Matching the dispatch ref alone
+would not: dispatching from a tag named `nightly` with `tag=nightly` satisfies
+it, and every later check — including the re-verification below — would agree,
+because they only ever compare the tag against itself. A tag outside `v*` is
+also outside the ruleset that blocks tag updates, which is precisely what holds
+the residual window described below shut.
+
 The checkout states `ref: ${{ github.sha }}`, the commit the dispatch ref
 resolved to. That is what `actions/checkout` already uses when given no `ref:`
 — it fetches the run's `github.sha` directly rather than re-resolving the ref
