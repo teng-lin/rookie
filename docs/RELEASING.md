@@ -143,9 +143,15 @@ ref*. Dispatching from `v$VERSION` therefore runs that tag's own copy of
 dispatching:
 
 ```console
-git fetch origin main "refs/tags/v$VERSION"
+git fetch origin main "+refs/tags/v$VERSION:refs/tags/v$VERSION"
 git diff "v$VERSION" origin/main -- .github/workflows/publish-cli.yml
 ```
+
+The explicit `refs/tags/...:refs/tags/...` destination is what creates the local
+tag; a source-only refspec leaves it in `FETCH_HEAD` only, so `git diff
+"v$VERSION"` would fail in a fresh clone. The leading `+` forces the local tag to
+match the remote, so a stale local tag cannot make this check compare the wrong
+workflow copy against the tag `gh workflow run --ref` will actually dispatch.
 
 If that diff is empty, dispatch the run:
 
@@ -213,7 +219,7 @@ Handle it one of two ways:
    loudly instead of destroying an existing asset.
 
 ```console
-git fetch origin "refs/tags/v$VERSION"
+git fetch origin "+refs/tags/v$VERSION:refs/tags/v$VERSION"
 git switch --detach "v$VERSION"
 git status --porcelain # must print nothing
 export TARGET=x86_64-unknown-linux-gnu
