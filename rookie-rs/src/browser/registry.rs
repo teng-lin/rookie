@@ -2700,6 +2700,32 @@ pub(crate) mod test_seams {
     gecko_report_with_context(context, browser_id, domains)
   }
 
+  /// Like `gecko_report`, but calls `on_before_query` once per profile right
+  /// before its database/session read, so a test can mutate the filesystem in
+  /// between discovery and query to simulate a source that vanishes in the
+  /// race window - the same seam `populate_gecko_sources`'s own unit tests use,
+  /// exposed for tests that need the full discover-then-query pipeline.
+  pub(crate) fn gecko_report_with_race<R>(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    domains: Option<&[String]>,
+    mut on_before_query: R,
+  ) -> Result<EngineExtractionOutcome>
+  where
+    R: FnMut(&Path),
+  {
+    let discovery = discover_gecko_with_context(context, browser_id)?;
+    Ok(populate_gecko_sources(
+      discovery,
+      domains,
+      |persistent, domains| {
+        on_before_query(persistent);
+        mozilla::query_cookies_engine_outcome(persistent, domains)
+      },
+      |path| context.fs.exists(path),
+    ))
+  }
+
   pub(crate) fn gecko_profiles(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
@@ -3735,6 +3761,55 @@ mod tests {
       .error
       .as_deref()
       .is_some_and(|error| error.contains("Can't resolve database path")));
+  }
+
+  /// The admission gate (`gecko_profile_has_source`) guarantees a session-only
+  /// profile had a session candidate on disk at discovery time. If that
+  /// candidate is gone by query time, this layer intentionally leaves the
+  /// profile with zero sources rather than fabricating one for a file that no
+  /// longer exists - see `mozilla::a_candidate_that_vanishes_after_a_transient_failure_stays_silent`.
+  /// Distinguishing "vanished" from "never existed" is therefore left to the
+  /// report layer, which can see the whole profile rather than one candidate;
+  /// `report_build::a_gecko_session_candidate_that_vanishes_before_query_is_failed_not_absent`
+  /// pins that it does so correctly.
+  #[test]
+  fn session_only_profile_whose_candidate_vanishes_before_query_has_no_sources_at_this_layer() {
+    let temp = TempDir::new("gecko-session-vanishes");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    let session_file = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(&session_file, b"discoverable but will vanish before query")
+      .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert_eq!(
+      discovery.profiles.len(),
+      1,
+      "profile admitted as session-only"
+    );
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |persistent, domains| {
+        // The persistent DB never existed; the race is on the session file,
+        // which we remove right before the engine would read it.
+        let _ = std::fs::remove_file(&session_file);
+        mozilla::query_cookies_engine_outcome(persistent, domains)
+      },
+      |path| path.exists(),
+    );
+
+    assert_eq!(report.profiles.len(), 1);
+    assert!(report.profiles[0].sources.is_empty());
   }
 
   #[test]
