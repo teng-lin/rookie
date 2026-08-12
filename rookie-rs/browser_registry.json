@@ -209,6 +209,56 @@
         }
       },
       {
+        "canonical_id": "coccoc",
+        "aliases": [],
+        "display_name": "CocCoc",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "coccoc-local",
+            "template": "{local_app_data}/CocCoc/Browser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "duckduckgo",
+        "aliases": [],
+        "display_name": "DuckDuckGo",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "duckduckgo-package-stable",
+            "template": "{local_app_data}/Packages/DuckDuckGo.DesktopBrowser_*/LocalState/EBWebView",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
         "canonical_id": "edge",
         "aliases": [],
         "display_name": "Microsoft Edge",
@@ -733,6 +783,28 @@
         }
       },
       {
+        "canonical_id": "coccoc",
+        "aliases": [],
+        "display_name": "CocCoc",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "coccoc-stable",
+            "template": "{home}/Library/Application Support/Coccoc",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
         "canonical_id": "edge",
         "aliases": [],
         "display_name": "Microsoft Edge",
@@ -888,6 +960,28 @@
             "service": "Vivaldi Safe Storage",
             "account": "Vivaldi"
           }
+        }
+      },
+      {
+        "canonical_id": "yandex",
+        "aliases": [],
+        "display_name": "Yandex Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "yandex-stable",
+            "template": "{home}/Library/Application Support/Yandex/YandexBrowser",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": []
         }
       },
       {

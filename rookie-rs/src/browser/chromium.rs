@@ -115,7 +115,11 @@ pub(crate) fn chromium_based_probe_with_key_outcomes(
 }
 
 const CHROMIUM_HOST_HASH_LEN: usize = 32;
-const MAX_CHROMIUM_ROW_ISSUE_SAMPLES: usize = 4;
+/// Row-issue samples are collected against the report contract's bound rather
+/// than a separate number. Collecting fewer than the report retains silently
+/// caps what a consumer can ever see below the documented limit; collecting
+/// more only to have the report truncate them is wasted work.
+const MAX_CHROMIUM_ROW_ISSUE_SAMPLES: usize = crate::browser::report_core::MAX_ISSUE_SAMPLES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChromiumCookieDecodeError {
@@ -2364,12 +2368,17 @@ mod tests {
       outcome.record_skipped_row(ChromiumRowIssueCode::Decode, row_number);
     }
 
-    assert_eq!(outcome.stats.rows_skipped, 7);
+    // Derived from the cap rather than hardcoded, so raising the bound cannot
+    // leave the expectation describing a number the code no longer uses.
+    let skipped = MAX_CHROMIUM_ROW_ISSUE_SAMPLES + 3;
+    assert_eq!(outcome.stats.rows_skipped, skipped);
     assert_eq!(outcome.issues.len(), 1);
-    assert_eq!(outcome.issues[0].occurrences, 7);
+    assert_eq!(outcome.issues[0].occurrences, skipped);
     assert_eq!(
       outcome.issues[0].samples,
-      vec!["row 1", "row 2", "row 3", "row 4"]
+      (1..=MAX_CHROMIUM_ROW_ISSUE_SAMPLES)
+        .map(|row| format!("row {row}"))
+        .collect::<Vec<_>>()
     );
   }
 
