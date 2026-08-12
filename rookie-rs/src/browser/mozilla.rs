@@ -973,6 +973,27 @@ mod tests {
   }
 
   #[test]
+  fn engine_outcome_reports_a_failed_query_without_row_diagnostics() {
+    let dir = unique_tmpdir("ff-engine-query-failure");
+    let db = dir.join("cookies.sqlite");
+    std::fs::write(&db, b"this is not a sqlite database").expect("write bogus database");
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert!(
+      outcome.persistent_error.is_some(),
+      "a failed query must read as a failed acquisition"
+    );
+    assert!(
+      outcome.persistent_diagnostics.is_empty(),
+      "a failed acquisition has no skipped rows to diagnose: {:?}",
+      outcome.persistent_diagnostics
+    );
+    assert!(outcome.persistent_cookies.is_empty());
+    assert_eq!(outcome.persistent_rows_seen, 0);
+    assert_eq!(outcome.persistent_rows_skipped, 0);
+  }
+
+  #[test]
   fn vanished_session_candidate_is_reported_instead_of_dropped() {
     let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
     let path = PathBuf::from("profile/sessionstore-backups/recovery.jsonlz4");
