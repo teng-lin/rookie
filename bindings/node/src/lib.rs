@@ -144,7 +144,14 @@ pub struct ReportStatsObject {
 ///
 /// Repeated row-level problems are aggregated by code and stage: `occurrences`
 /// counts them all while `samples` keeps a bounded excerpt.
-#[napi(object)]
+///
+/// `use_nullable` keeps the optional context fields present and `null` rather
+/// than absent, so an unset one reads the same here as the `None` Python emits
+/// and the `null` the CLI's serde output emits. napi's default would omit the
+/// key entirely and make Node the only surface where it disappears.
+/// [`CookieObject`] deliberately keeps the default: its shape predates the
+/// report DTOs and is frozen by the compatibility contract.
+#[napi(object, use_nullable = true)]
 pub struct ExtractionIssueObject {
   pub code: String,
   pub stage: String,

@@ -27,7 +27,10 @@ failures visible, instead of returning one source's cookies as a flat array.
 import { browserProfiles, browserReport } from "rookie-cookies";
 
 const profiles = await browserProfiles("chrome");
-const report = await browserReport("chrome", profiles[0]?.profile.profileId);
+// An explicit profile ID restricts the report to that profile; passing
+// `undefined` means every profile, so guard the empty case rather than
+// reaching for `profiles[0]?.profile.profileId`.
+const report = await browserReport("chrome", profiles[0].profile.profileId);
 ```
 
 Cookies stay attached to the source they came from, alongside that source's

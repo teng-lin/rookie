@@ -350,26 +350,41 @@ test("unknown browser identifiers reject rather than resolving empty", async (t)
   await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
 });
 
-test("loadReport resolves a report whose counters are plain numbers", async (t) => {
-  const report = await rookieCookies.loadReport(["example.invalid"]);
+test.serial("loadReport resolves a report whose counters are plain numbers", async (t) => {
+  // Sandboxed to a synthetic home: unlike the other report calls in this file,
+  // loadReport enumerates every registered browser, so against the real
+  // environment it would read whatever is actually installed on the host.
+  const temp = mkdtempSync(join(tmpdir(), "rookie-node-load-"));
+  const fixture = firefoxFixtureRoot(temp);
+  writeFirefoxProfileTree(fixture.root, 2);
 
-  t.is(typeof report.status, "string");
-  t.true(Array.isArray(report.profiles));
-  t.true(Array.isArray(report.issues));
-  t.true(
-    report.summary.registeredBrowsers > 0,
-    "every registered browser is summarized even when absent",
-  );
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [fileURLToPath(new URL("load-report-child.mjs", import.meta.url))],
+      { env: { ...process.env, ...fixture.environment, XDG_CONFIG_HOME: join(temp, ".config") } },
+    );
+    const report = JSON.parse(stdout);
 
-  for (const [name, value] of Object.entries(report.summary)) {
-    const expected = name === "countersSaturated" ? "boolean" : "number";
-    t.is(typeof value, expected, `summary.${name} must be a ${expected}`);
-    // A u64 binding would arrive as a BigInt, which JSON.stringify rejects and
-    // no existing consumer of this package handles.
-    t.not(typeof value, "bigint", `summary.${name} must not be a BigInt`);
+    t.is(typeof report.status, "string");
+    t.true(
+      report.summary.registeredBrowsers > 0,
+      "every registered browser is summarized even when absent",
+    );
+    t.is(report.profileCount, 2, "the synthetic home must be the only source");
+
+    for (const [name, observed] of Object.entries(report.summaryTypes)) {
+      const expected = name === "countersSaturated" ? "boolean" : "number";
+      // A u64 binding would arrive as a BigInt, which JSON.stringify rejects
+      // and no existing consumer of this package handles. Types are captured
+      // in the child, before serialization could disguise one.
+      t.is(observed, expected, `summary.${name} must be a ${expected}`);
+    }
+
+    t.true(report.serializes, "the report must survive JSON.stringify");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
   }
-
-  t.notThrows(() => JSON.stringify(report));
 });
 
 test.serial("report APIs expose per-source cookie provenance", async (t) => {
@@ -569,7 +584,7 @@ test("patch-loader reproduces the committed artifacts exactly", (t) => {
   );
 });
 
-test("patch-loader rejects truncation that would drop the report declarations", (t) => {
+test("patch-loader rejects generated declarations that arrive incomplete", (t) => {
   const result = runPatchLoader(({ loader, types }) => ({
     loader,
     types: types.slice(
@@ -579,7 +594,7 @@ test("patch-loader rejects truncation that would drop the report declarations", 
   }));
 
   t.not(result.status, 0, "patch-loader must fail rather than emit a short file");
-  t.regex(result.stderr, /missing export declare function supportedBrowsers\(/);
+  t.regex(result.stderr, /Generated declarations were truncated: missing .*\bsupportedBrowsers\b/);
 });
 
 test("patch-loader rejects the historical slice-at-load regression", (t) => {
@@ -593,6 +608,25 @@ test("patch-loader rejects the historical slice-at-load regression", (t) => {
 
   t.not(result.status, 0);
   t.regex(result.stderr, /Generated declarations were truncated/);
+  t.regex(result.stderr, /\bfirefoxProfiles\b/);
+});
+
+test("patch-loader rejects patching that would drop a declaration", (t) => {
+  // The other direction: the input is complete, but the rewrite loses part of
+  // it. An early facade marker makes the slice cut before the report APIs,
+  // which is the failure the hand-maintained list used to miss for any
+  // declaration nobody had added to it.
+  const result = runPatchLoader(({ loader, types }) => ({
+    loader,
+    types: types.replace(
+      "export declare function supportedBrowsers(",
+      "/** rookie-cookies cross-platform facade */\nexport declare function supportedBrowsers(",
+    ),
+  }));
+
+  t.not(result.status, 0, "patch-loader must not silently emit a short file");
+  t.regex(result.stderr, /Patching dropped generated declarations:/);
+  t.regex(result.stderr, /\bsupportedBrowsers\b/);
 });
 
 test("patch-loader rejects an unrecognized napi destructure line", (t) => {
@@ -698,26 +732,37 @@ Path=Profiles/work
       t.true(observed.firefoxKeys.includes(key), `expected key ${key}`);
     }
 
-    // A failing source proves the nested issue objects are converted too.
-    t.truthy(observed.sourceIssue, "the corrupt profile must produce a source issue");
-    t.deepEqual(observed.sourceIssueKeys, [
+    // ExtractionIssueObject is the only report DTO with optional fields, so its
+    // key set is pinned exactly. Unset context fields must be present and null,
+    // matching Python's None and the CLI's serde null -- napi's default would
+    // drop the keys and make Node the only surface where they vanish.
+    const issueKeys = [
       "code",
       "stage",
       "severity",
       "occurrences",
       "samples",
+      "browserId",
+      "installationId",
+      "profileId",
       "message",
-    ]);
+    ];
+
+    // A failing source proves the nested issue objects are converted too.
+    t.truthy(observed.sourceIssue, "the corrupt profile must produce a source issue");
+    t.deepEqual(observed.sourceIssueKeys, issueKeys);
     t.is(observed.sourceIssue.severity, "error");
     t.is(typeof observed.sourceIssue.occurrences, "number");
+    t.is(observed.sourceIssue.browserId, null, "an unset context field must be null, not absent");
 
     // browserId is the rename most at risk and is only ever populated on a
     // request-scoped issue, so it needs its own scenario.
     t.is(observed.absentStatus, "no_sources");
     t.truthy(observed.requestIssue, "an absent browser must report an issue");
+    t.deepEqual(observed.requestIssueKeys, issueKeys);
     t.is(observed.requestIssue.browserId, "chrome");
-    t.true(observed.requestIssueKeys.includes("browserId"));
-    t.false(observed.requestIssueKeys.includes("browser_id"));
+    t.is(observed.requestIssue.installationId, null);
+    t.is(observed.requestIssue.profileId, null);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

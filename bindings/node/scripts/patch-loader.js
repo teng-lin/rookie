@@ -124,6 +124,40 @@ writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
 
+// Two separate hazards need two separate checks, because one cannot cover the
+// other: a baseline derived from the input can never notice that the input
+// itself came up short.
+//
+//   1. The generated declarations arrive incomplete -- caught below by
+//      requiring every function the export facade publishes to be declared.
+//      The facade is this script's own list of what the package exports, so it
+//      is an external floor rather than a restatement of the input.
+//   2. Patching drops something on the way through -- caught after the rewrite
+//      by comparing the surviving names against everything napi generated.
+//      This one is structural: a declaration added later is covered without
+//      anybody remembering to list it.
+const declarationPattern = /^export (?:declare function|interface) (\w+)/gm
+const generatedNames = new Set(
+  [...types.matchAll(declarationPattern)].map((match) => match[1])
+)
+// Compiled only into the regression-test build and deliberately stripped below,
+// so it is the one generated name that must not survive.
+generatedNames.delete('testWorkerPanic')
+
+// napi only generates these on the platform that owns them; the facade
+// re-declares them for every platform, so they are absent from `generatedNames`
+// on most builds and cannot be required of it.
+const platformFunctions = ['octoBrowser', 'internetExplorer', 'safari', 'chromiumBased']
+const publishedFunctions = [...loader.matchAll(/^module\.exports\.(\w+) = /gm)]
+  .map((match) => match[1])
+  .filter((name) => !name.startsWith('__') && !platformFunctions.includes(name))
+const undeclared = publishedFunctions.filter((name) => !generatedNames.has(name))
+if (undeclared.length > 0) {
+  throw new Error(
+    `Generated declarations were truncated: missing ${undeclared.join(', ')}`
+  )
+}
+
 // NAPI-RS emits declarations for the platform doing the build. Remove only
 // those platform-specific functions and append the cross-platform facade.
 // Keeping the rest of the generated file intact is load-bearing: slicing at a
@@ -158,33 +192,18 @@ export declare function chromiumBased(dbPath: string, domains?: Array<string> | 
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 `
 
-// Everything napi generates ahead of the facade must survive the slice above.
-// Declarations added after a common one such as `load` are the ones a naive
-// slice silently drops, so each new export is listed here as well.
-for (const declaration of [
-  'export declare function toNetscape(',
-  'export declare function firefoxProfiles(',
-  'export declare function firefoxProfile(',
-  'export declare function supportedBrowsers(',
-  'export declare function browserProfiles(',
-  'export declare function browserReport(',
-  'export declare function loadReport(',
-  'export interface BrowserCapabilitiesObject',
-  'export interface BrowserDescriptorObject',
-  'export interface ProfileIdentityObject',
-  'export interface CookieSourceDescriptorObject',
-  'export interface CookieSourceIdentityObject',
-  'export interface ProfileDescriptorObject',
-  'export interface ExtractionStatsObject',
-  'export interface ReportStatsObject',
-  'export interface ExtractionIssueObject',
-  'export interface SourceExtractionObject',
-  'export interface ProfileExtractionObject',
-  'export interface ExtractionReportObject'
-]) {
-  if (!types.includes(declaration)) {
-    throw new Error(`Generated declarations were truncated: missing ${declaration}`)
-  }
+// Everything napi generated must still be declared. The platform-specific
+// functions were stripped above and re-added by the facade, so they are
+// expected to reappear rather than to have survived in place.
+const survivors = new Set(
+  [...types.matchAll(declarationPattern)].map((match) => match[1])
+)
+const dropped = [...generatedNames].filter((name) => !survivors.has(name))
+if (dropped.length > 0) {
+  throw new Error(`Patching dropped generated declarations: ${dropped.join(', ')}`)
+}
+if (survivors.has('testWorkerPanic')) {
+  throw new Error('patch-loader.js: testWorkerPanic must not reach the published declarations')
 }
 
 writeFileSync(typesPath, types)
