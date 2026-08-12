@@ -278,8 +278,7 @@
           "declared_session_formats": [],
           "declared_decryption_tiers": [
             "legacy_dpapi",
-            "v10",
-            "v20"
+            "v10"
           ]
         }
       },
@@ -793,7 +792,7 @@
           },
           {
             "root_id": "brave-snap",
-            "template": "{home}/snap/brave/*/.config/BraveSoftware/Brave-Browser",
+            "template": "{home}/snap/brave/current/.config/BraveSoftware/Brave-Browser",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 50
@@ -984,21 +983,21 @@
           },
           {
             "root_id": "opera-stable-snap",
-            "template": "{home}/snap/opera/*/.config/opera",
+            "template": "{home}/snap/opera/current/.config/opera",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 40
           },
           {
             "root_id": "opera-beta-snap",
-            "template": "{home}/snap/opera-beta/*/.config/opera",
+            "template": "{home}/snap/opera-beta/current/.config/opera",
             "channel": "beta",
             "discovery": "chromium_user_data",
             "priority": 50
           },
           {
             "root_id": "opera-developer-snap",
-            "template": "{home}/snap/opera-developer/*/.config/opera",
+            "template": "{home}/snap/opera-developer/current/.config/opera",
             "channel": "developer",
             "discovery": "chromium_user_data",
             "priority": 60

@@ -343,7 +343,13 @@ impl<F> DiscoveryContext<F> {
     for (token, replacement) in replacements {
       if let Some(suffix) = template.strip_prefix(token) {
         let replacement = replacement?;
-        return Some(replacement.join(suffix.trim_start_matches(['/', '\\'])));
+        // Registry templates may intentionally contain glob syntax (for
+        // container-managed roots), but environment-derived base directories
+        // are literal filesystem locations. Escape the latter before joining
+        // the registry-authored suffix so a metacharacter in HOME, APPDATA,
+        // or an override cannot widen the discovery pattern.
+        let escaped = glob::Pattern::escape(&replacement.to_string_lossy());
+        return Some(PathBuf::from(escaped).join(suffix.trim_start_matches(['/', '\\'])));
       }
     }
     (!template.contains('{')).then(|| PathBuf::from(template))
@@ -1088,12 +1094,18 @@ pub(crate) fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
 /// their frozen selectors.
 pub(crate) fn chromium_profiles(browser_id: &str) -> Result<Vec<ChromiumProfile>> {
   let context = DiscoveryContext::system()?;
-  profiles_for_listing(discover_browser_with_context(&context, browser_id)?)
+  profiles_for_listing(
+    browser_id,
+    discover_browser_with_context(&context, browser_id)?,
+  )
 }
 
-fn profiles_for_listing(discovery: ChromiumDiscovery) -> Result<Vec<ChromiumProfile>> {
+fn profiles_for_listing(
+  browser_id: &str,
+  discovery: ChromiumDiscovery,
+) -> Result<Vec<ChromiumProfile>> {
   if discovery.all_detected_roots_failed() {
-    bail!("every detected Chrome installation failed profile enumeration")
+    bail!("every detected {browser_id} installation failed profile enumeration")
   }
   Ok(discovery.profiles())
 }
@@ -1467,6 +1479,145 @@ mod tests {
   }
 
   #[test]
+  fn injected_path_components_are_escaped_but_registry_wildcards_are_preserved() {
+    let temp = TempDir::new("escaped-glob-components");
+    let home = temp.path().join("home[meta]*?");
+    let config_home = temp.path().join("config[meta]*?");
+    let context = test_context_for(
+      PlatformId::Linux,
+      home.clone(),
+      [("XDG_CONFIG_HOME", config_home.clone())],
+    );
+    let template = "{config_home}/google-chrome";
+    let resolved = context
+      .resolve_template(template)
+      .expect("resolved Chrome root");
+    assert_eq!(
+      resolved,
+      PathBuf::from(glob::Pattern::escape(&config_home.to_string_lossy())).join("google-chrome")
+    );
+    seed_cookie(
+      &config_home.join("google-chrome/Default"),
+      true,
+      "escaped-base",
+      "value",
+    );
+    assert_eq!(
+      discover_browser_with_context(&context, "chrome")
+        .expect("discover Chrome beneath a literal metacharacter path")
+        .profiles()
+        .len(),
+      1
+    );
+
+    let mac_context = test_context_for(PlatformId::Macos, home.clone(), []);
+    seed_cookie(
+      &home.join("Library/Application Support/Google/Chrome/Default"),
+      true,
+      "escaped-home",
+      "value",
+    );
+    assert_eq!(
+      discover_browser_with_context(&mac_context, "chrome")
+        .expect("discover Chrome below a literal HOME path")
+        .profiles()
+        .len(),
+      1
+    );
+
+    let local_app_data = temp.path().join("Local[meta]*?");
+    let windows_context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let octo_pattern = windows_context
+      .resolve_template("{local_app_data}/Octo Browser/tmp/*")
+      .expect("resolved Octo root");
+    assert_eq!(
+      octo_pattern,
+      PathBuf::from(glob::Pattern::escape(&local_app_data.to_string_lossy()))
+        .join("Octo Browser/tmp/*")
+    );
+    seed_cookie(
+      &local_app_data.join("Octo Browser/tmp/literal-profile/Default"),
+      true,
+      "escaped-windows-base",
+      "value",
+    );
+    assert_eq!(
+      discover_browser_with_context(&windows_context, "octo_browser")
+        .expect("discover wildcard root beneath a literal metacharacter path")
+        .installations
+        .len(),
+      1
+    );
+  }
+
+  #[test]
+  fn snap_roots_target_only_the_active_current_revision() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    for (browser_id, root_id, expected) in [
+      (
+        "brave",
+        "brave-snap",
+        "{home}/snap/brave/current/.config/BraveSoftware/Brave-Browser",
+      ),
+      (
+        "opera",
+        "opera-stable-snap",
+        "{home}/snap/opera/current/.config/opera",
+      ),
+      (
+        "opera",
+        "opera-beta-snap",
+        "{home}/snap/opera-beta/current/.config/opera",
+      ),
+      (
+        "opera",
+        "opera-developer-snap",
+        "{home}/snap/opera-developer/current/.config/opera",
+      ),
+    ] {
+      let root = browser_definition(registry, PlatformId::Linux, browser_id)
+        .expect("browser")
+        .roots
+        .iter()
+        .find(|root| root.root_id == root_id)
+        .expect("Snap root");
+      assert_eq!(root.template, expected);
+      assert!(!root.template.contains('*'));
+    }
+  }
+
+  #[test]
+  fn snap_discovery_ignores_retained_revisions() {
+    let temp = TempDir::new("snap-current");
+    let home = temp.path().join("home");
+    let context = test_context_for(PlatformId::Linux, home.clone(), []);
+    seed_cookie(
+      &home.join("snap/brave/current/.config/BraveSoftware/Brave-Browser/Default"),
+      true,
+      "current",
+      "value",
+    );
+    seed_cookie(
+      &home.join("snap/brave/retained/.config/BraveSoftware/Brave-Browser/Default"),
+      true,
+      "retained",
+      "value",
+    );
+
+    let profiles = discover_browser_with_context(&context, "brave")
+      .expect("discover active Snap revision")
+      .profiles();
+    assert_eq!(profiles.len(), 1);
+    assert!(profiles[0]
+      .path
+      .starts_with(home.join("snap/brave/current")));
+  }
+
+  #[test]
   fn generic_chromium_discovery_handles_default_and_flat_existing_browser_layouts() {
     let temp = TempDir::new("generic-layouts");
     let home = temp.path().join("home");
@@ -1652,6 +1803,16 @@ mod tests {
         .any(|tier| tier == "v20"),
       cfg!(feature = "appbound")
     );
+    let edge = browser_definition(registry, PlatformId::Windows, "edge").expect("Windows Edge");
+    let edge_descriptor = capability_descriptor(edge, PlatformId::Windows);
+    assert!(!edge_descriptor
+      .declared_decryption_tiers
+      .iter()
+      .any(|tier| tier == "v20"));
+    assert!(!edge_descriptor
+      .available_decryption_tiers
+      .iter()
+      .any(|tier| tier == "v20"));
   }
 
   #[test]
@@ -1934,11 +2095,11 @@ mod tests {
 
     let listing_discovery =
       discover_browser_with_context(&context, "chrome").expect("retain discovery failure");
-    let listing_error =
-      profiles_for_listing(listing_discovery).expect_err("bare listing must surface total failure");
+    let listing_error = profiles_for_listing("chrome", listing_discovery)
+      .expect_err("bare listing must surface total failure");
     assert!(listing_error
       .to_string()
-      .contains("every detected Chrome installation failed"));
+      .contains("every detected chrome installation failed"));
 
     let provider = CountingProvider::default();
     let report = extract_chromium_with_provider(&context, "chrome", None, None, &provider)
@@ -1950,6 +2111,33 @@ mod tests {
       .iter()
       .any(|issue| issue.code == "installation_enumeration_failed"));
     assert!(provider.calls.borrow().is_empty());
+  }
+
+  #[test]
+  fn generic_listing_names_the_selected_browser_when_all_roots_fail() {
+    let temp = TempDir::new("edge-enumeration-failure");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let real_context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data)],
+    );
+    let root = browser_root(&real_context, "edge", "edge-stable-local");
+    std::fs::create_dir_all(&root).expect("create detected Edge installation");
+    let canonical_root = root.canonicalize().expect("canonical Edge installation");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_read_dir: Some(canonical_root),
+        ..TestDiscoveryFs::default()
+      },
+    );
+    let discovery = discover_browser_with_context(&context, "edge").expect("retain failure");
+    let error = profiles_for_listing("edge", discovery).expect_err("listing must surface failure");
+    assert!(error
+      .to_string()
+      .contains("every detected edge installation failed"));
   }
 
   #[test]
