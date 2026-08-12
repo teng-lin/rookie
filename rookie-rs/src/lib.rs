@@ -565,14 +565,17 @@ fn sniff_sqlite_cookie_source(path: PathBuf) -> Result<AnyBrowserSource> {
   }
 }
 
-/// Inspects the source's on-disk signature before choosing a decoder family.
-fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
+#[cfg(not(target_os = "windows"))]
+fn validate_cookie_source_file(path: &std::path::Path) -> Result<()> {
   let metadata = std::fs::metadata(path)
     .with_context(|| format!("can't inspect cookie source {}", path.display()))?;
   if !metadata.is_file() {
     bail!("cookie source is not a file: {}", path.display());
   }
+  Ok(())
+}
 
+fn read_cookie_source_header(path: &std::path::Path) -> Result<Vec<u8>> {
   let file = std::fs::File::open(path)
     .with_context(|| format!("can't open cookie source {}", path.display()))?;
   let mut header = Vec::with_capacity(16);
@@ -580,11 +583,53 @@ fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
     .take(16)
     .read_to_end(&mut header)
     .with_context(|| format!("can't read cookie source header {}", path.display()))?;
+  Ok(header)
+}
+
+/// Inspects the source's on-disk signature before choosing a decoder family.
+#[cfg(not(target_os = "windows"))]
+fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
+  validate_cookie_source_file(path)?;
+  let header = read_cookie_source_header(path)?;
 
   if header.starts_with(b"SQLite format 3\0") {
     return sniff_sqlite_cookie_source(path.to_path_buf());
   }
-  if header.starts_with(b"COOK") {
+  if header.starts_with(b"cook") {
+    return Ok(AnyBrowserSource::SafariBinaryCookies);
+  }
+
+  bail!("unsupported cookie source format: {}", path.display())
+}
+
+/// Applies a Windows SQLite acquisition policy before attempting direct magic
+/// inspection. A successful recovered schema is authoritative, so a locked
+/// live database never has to be reopened merely to read its header.
+#[cfg(any(target_os = "windows", test))]
+fn sniff_cookie_source_with_windows_recovery<Recover>(
+  path: &std::path::Path,
+  mut recover_sqlite_source: Recover,
+) -> Result<AnyBrowserSource>
+where
+  Recover: FnMut(&std::path::Path) -> Result<AnyBrowserSource>,
+{
+  let sqlite_error = match recover_sqlite_source(path) {
+    Ok(source) => return Ok(source),
+    Err(error) => error,
+  };
+
+  let header = match read_cookie_source_header(path) {
+    Ok(header) => header,
+    Err(header_error) => {
+      return Err(sqlite_error.context(format!(
+        "cookie source signature fallback also failed: {header_error:#}"
+      )))
+    }
+  };
+  if header.starts_with(b"SQLite format 3\0") {
+    return Err(sqlite_error);
+  }
+  if header.starts_with(b"cook") {
     return Ok(AnyBrowserSource::SafariBinaryCookies);
   }
   #[cfg(target_os = "windows")]
@@ -593,6 +638,15 @@ fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
   }
 
   bail!("unsupported cookie source format: {}", path.display())
+}
+
+#[cfg(target_os = "windows")]
+fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
+  sniff_cookie_source_with_windows_recovery(path, |live_path| {
+    browser::chromium::with_windows_locked_database_recovery(live_path, |source_path| {
+      sniff_sqlite_cookie_source(source_path.to_path_buf())
+    })
+  })
 }
 
 #[cfg(unix)]
@@ -860,7 +914,7 @@ mod tests {
       .map(|(name, _)| name)
       .collect();
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     assert_eq!(
       names,
       vec![
@@ -991,11 +1045,41 @@ mod tests {
   #[test]
   fn any_browser_sniffs_binary_cookie_signature_without_decoder_probing() {
     let (_dir, path) = source_test_path("Cookies.binarycookies");
-    std::fs::write(&path, b"COOKsynthetic").expect("Safari header fixture");
+    std::fs::write(&path, b"cooksynthetic").expect("Safari header fixture");
     assert_eq!(
       sniff_cookie_source(&path).expect("sniff Safari"),
       AnyBrowserSource::SafariBinaryCookies
     );
+  }
+
+  #[test]
+  fn any_browser_windows_sniff_uses_recovered_schema_without_reopening_live_header() {
+    let (_dir, path) = source_test_path("locked-live-Cookies");
+    std::fs::write(&path, b"header cannot classify this live path")
+      .expect("unclassifiable live fixture");
+    let calls = std::cell::Cell::new(0);
+
+    let source = sniff_cookie_source_with_windows_recovery(&path, |_| {
+      calls.set(calls.get() + 1);
+      Ok(AnyBrowserSource::ChromiumSqlite)
+    })
+    .expect("recovered shadow schema is authoritative");
+
+    assert_eq!(source, AnyBrowserSource::ChromiumSqlite);
+    assert_eq!(calls.get(), 1);
+  }
+
+  #[test]
+  fn any_browser_windows_sniff_falls_back_to_real_safari_magic_after_sqlite_rejection() {
+    let (_dir, path) = source_test_path("Cookies.binarycookies");
+    std::fs::write(&path, b"cooksynthetic").expect("Safari header fixture");
+
+    let source = sniff_cookie_source_with_windows_recovery(&path, |_| {
+      Err(anyhow::anyhow!("not a SQLite database"))
+    })
+    .expect("lowercase Safari magic is recognized after SQLite rejection");
+
+    assert_eq!(source, AnyBrowserSource::SafariBinaryCookies);
   }
 
   #[cfg(target_os = "windows")]
