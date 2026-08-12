@@ -240,6 +240,7 @@ impl PlatformId {
 trait DiscoveryFs {
   fn exists(&self, path: &Path) -> bool;
   fn is_dir(&self, path: &Path) -> bool;
+  fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata>;
   fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>>;
   fn canonicalize(&self, path: &Path) -> Result<PathBuf>;
   fn read_to_string(&self, path: &Path) -> Result<String>;
@@ -268,6 +269,10 @@ impl DiscoveryFs for RealDiscoveryFs {
 
   fn is_dir(&self, path: &Path) -> bool {
     path.is_dir()
+  }
+
+  fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+    std::fs::metadata(path)
   }
 
   fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
@@ -806,15 +811,7 @@ fn discover_browser_with_context<F: DiscoveryFs>(
         continue;
       }
     };
-    // A non-NotFound wildcard expansion failure means this configured root
-    // could not be examined. If it produced no candidates, count it as a
-    // detected-but-failed root so bare profile listing does not mistake the
-    // prevented discovery for a supported browser with no profiles. Missing
-    // optional parents stay silent because `expand_registry_glob` emits no
-    // issue for NotFound.
-    if expansion.paths.is_empty() && !expansion.issues.is_empty() {
-      discovery.detected_roots += 1;
-    }
+    let expansion_had_issues = !expansion.issues.is_empty();
     for issue in expansion.issues.drain(..) {
       discovery.issues.push(DiscoveryIssue {
         code: "installation_glob_expand_failed",
@@ -825,9 +822,21 @@ fn discover_browser_with_context<F: DiscoveryFs>(
     expansion
       .paths
       .sort_by_key(|path| normalized_path_bytes(path));
+    let mut usable_roots = 0usize;
     for resolved in expansion.paths {
-      if !context.fs.is_dir(&resolved) {
-        continue;
+      match context.fs.metadata(&resolved) {
+        Ok(metadata) if metadata.is_dir() => usable_roots += 1,
+        Ok(_) => continue,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        Err(error) => {
+          discovery.detected_roots += 1;
+          discovery.issues.push(DiscoveryIssue {
+            code: "installation_metadata_failed",
+            path: resolved,
+            message: error.to_string(),
+          });
+          continue;
+        }
       }
       discovery.detected_roots += 1;
       let canonical_path = match context.fs.canonicalize(&resolved) {
@@ -888,6 +897,13 @@ fn discover_browser_with_context<F: DiscoveryFs>(
         }
       }
       discovery.installations.push(installation);
+    }
+    // Expansion can return syntactic matches that are not usable roots (for
+    // example a regular file or a package path whose later suffix vanished).
+    // If expansion also reported a real I/O failure and no usable directory
+    // survived, preserve the detected-but-failed state for bare listing.
+    if usable_roots == 0 && expansion_had_issues {
+      discovery.detected_roots += 1;
     }
   }
 
@@ -1370,6 +1386,7 @@ mod tests {
   #[derive(Default)]
   struct TestDiscoveryFs {
     denied_read_dir: Option<PathBuf>,
+    denied_metadata: Option<PathBuf>,
     canonical_aliases: BTreeMap<PathBuf, PathBuf>,
     glob_expansions: BTreeMap<(PathBuf, String), GlobExpansion>,
   }
@@ -1381,6 +1398,16 @@ mod tests {
 
     fn is_dir(&self, path: &Path) -> bool {
       RealDiscoveryFs.is_dir(path)
+    }
+
+    fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+      if self.denied_metadata.as_deref() == Some(path) {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::PermissionDenied,
+          "injected metadata denial",
+        ));
+      }
+      RealDiscoveryFs.metadata(path)
     }
 
     fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
@@ -2029,6 +2056,58 @@ mod tests {
       .discovery_issues
       .iter()
       .any(|issue| issue.code == "installation_glob_expand_failed"));
+  }
+
+  #[test]
+  fn failed_wildcard_with_only_unusable_matches_still_fails_listing() {
+    let temp = TempDir::new("glob-expansion-unusable-match");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let real_context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let unusable = local_app_data.join("Octo Browser/tmp/not-a-directory");
+    std::fs::create_dir_all(unusable.parent().expect("match parent")).expect("create match parent");
+    std::fs::write(&unusable, b"not a browser root").expect("write regular-file match");
+    let mut fs = TestDiscoveryFs::default();
+    fs.glob_expansions.insert(
+      (local_app_data, "Octo Browser/tmp/*".to_owned()),
+      GlobExpansion {
+        paths: vec![unusable],
+        issues: vec![GlobExpansionIssue {
+          path: PathBuf::from("inaccessible-candidate"),
+          message: "injected wildcard candidate failure".to_owned(),
+        }],
+      },
+    );
+    let context = with_test_fs(real_context, fs);
+    let discovery = discover_browser_with_context(&context, "octo_browser")
+      .expect("retain issue beside unusable match");
+    assert!(profiles_for_listing("octo_browser", discovery).is_err());
+  }
+
+  #[test]
+  fn inaccessible_root_metadata_is_reported_while_not_found_is_silent() {
+    let temp = TempDir::new("root-metadata-failure");
+    let home = temp.path().join("home");
+    let real_context = test_context_for(PlatformId::Linux, home, []);
+    let root = browser_root(&real_context, "chrome", "chrome-stable");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_metadata: Some(root.clone()),
+        ..TestDiscoveryFs::default()
+      },
+    );
+    let discovery =
+      discover_browser_with_context(&context, "chrome").expect("retain metadata failure");
+    assert!(discovery
+      .issues
+      .iter()
+      .any(|issue| issue.code == "installation_metadata_failed" && issue.path == root));
+    assert!(profiles_for_listing("chrome", discovery).is_err());
   }
 
   #[test]
