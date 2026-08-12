@@ -114,6 +114,7 @@ try {
     "--disable-background-networking",
     "--disable-component-update",
     "--disable-sync",
+    "--enable-features=EnableWALModeByDefault",
     "http://127.0.0.1:8765/set"
   ) | Out-Null
   Wait-ForChrome
@@ -142,15 +143,10 @@ try {
     --expected-prefix v20 --require-app-bound-key
   if ($LASTEXITCODE -ne 0) { throw "strict v20 profile check failed" }
 
-  # Chrome leaves this fresh database in DELETE mode after the first shutdown.
-  # Enable WAL while it is closed, then release every SQLite lock before Chrome
-  # reopens with its exclusive connection. WAL validation below raw-copies the
-  # live files, matching rookie-cookies' lock-free acquisition strategy.
-  & .\.venv\Scripts\python.exe tests/e2e/prepare_sqlite_wal.py "$cookiesDb"
-  if ($LASTEXITCODE -ne 0) { throw "could not prepare Chrome Cookies WAL" }
-
   # Reopen the same default profile and leave Chrome running. /wal sets a
-  # unique cookie that every extraction surface must recover.
+  # unique cookie that every extraction surface must recover. Chrome's own SQL
+  # feature must select WAL: without it Chrome deliberately selects a rollback
+  # journal when its exclusive cookie-store connection opens.
   Start-Process -FilePath $env:ROOKIE_E2E_CHROME_PATH -ArgumentList @(
     "--no-first-run",
     "--new-window",
@@ -158,6 +154,7 @@ try {
     "--disable-background-networking",
     "--disable-component-update",
     "--disable-sync",
+    "--enable-features=EnableWALModeByDefault",
     "http://127.0.0.1:8765/wal"
   ) | Out-Null
   Wait-ForChrome

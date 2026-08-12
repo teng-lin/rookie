@@ -1,4 +1,4 @@
-"""Tests for lock-free WAL preparation and inspection used by the canary."""
+"""Tests for lock-free WAL inspection used by the App-Bound canary."""
 
 from __future__ import annotations
 
@@ -20,11 +20,10 @@ def load_module(name: str, filename: str):
     return module
 
 
-PREPARE = load_module("prepare_sqlite_wal", "prepare_sqlite_wal.py")
 INSPECT = load_module("inspect_chromium_profile", "inspect_chromium_profile.py")
 
 
-class PrepareSqliteWalTests(unittest.TestCase):
+class InspectChromiumProfileTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory(prefix="rookie WAL fixture ")
         self.database = Path(self.tempdir.name) / "Chromium Profile" / "Cookies"
@@ -51,7 +50,12 @@ class PrepareSqliteWalTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_exclusive_writer_can_commit_and_snapshot_stays_lock_free(self) -> None:
-        PREPARE.prepare_wal(self.database)
+        setup = sqlite3.connect(self.database)
+        try:
+            mode = setup.execute("PRAGMA journal_mode=WAL").fetchone()
+            self.assertEqual(mode, ("wal",))
+        finally:
+            setup.close()
 
         writer = sqlite3.connect(self.database, timeout=0.25)
         try:

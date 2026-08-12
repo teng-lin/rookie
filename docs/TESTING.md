@@ -48,8 +48,8 @@ Before extraction it requires all of the following:
 - `Local State.os_crypt.app_bound_encrypted_key` with the `APPB` prefix;
 - a seeded cookie whose encrypted value has the `v20` prefix;
 - a second `v20` fake cookie visible through the live WAL but absent from a
-  main-database-only copy, with WAL enabled before Chrome reopens and validation
-  performed through a lock-free raw snapshot of the live DB+WAL pair;
+  main-database-only copy, with Chrome's own SQL feature selecting WAL and
+  validation performed through a lock-free raw snapshot of the live DB+WAL pair;
 - both explicit-path extraction and default Chrome profile/key discovery;
 - Chrome remaining alive after each Rust, Python, Node, and CLI extraction.
 
