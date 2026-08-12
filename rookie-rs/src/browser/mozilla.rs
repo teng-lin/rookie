@@ -191,6 +191,16 @@ struct SessionCandidateSuccess {
   transient_errors: Vec<String>,
 }
 
+/// The failure counterpart of [`SessionCandidateSuccess`]: a candidate that
+/// never parsed still consumed real attempts and may have produced real retry
+/// diagnostics, so both travel with the error instead of being re-derived.
+#[derive(Debug)]
+struct SessionCandidateFailure {
+  error: anyhow::Error,
+  attempts: u32,
+  transient_errors: Vec<String>,
+}
+
 /// Crate-private source outcome for the generic registry adapter.  The legacy
 /// API deliberately continues to project this to a flat `Vec<Cookie>`.
 #[derive(Debug)]
@@ -277,8 +287,8 @@ pub(crate) fn query_cookies_engine_outcome(
         });
         break;
       }
-      Err(error) => {
-        if let Some(source) = failed_session_source(path, format, discovered, &error) {
+      Err(failure) => {
+        if let Some(source) = failed_session_source(path, format, discovered, failure) {
           outcome.session_sources.push(source);
         }
       }
@@ -288,17 +298,17 @@ pub(crate) fn query_cookies_engine_outcome(
 }
 
 /// Projects a failed session candidate, or `None` when the candidate was never
-/// on disk: absence is normal. A candidate that was there when the profile was
-/// admitted and then vanished mid-extraction is a real acquisition failure, so
-/// it stays visible instead of leaving the profile looking sourceless.
+/// on disk: absence is normal. `discovered` is the stat taken immediately
+/// before the parse, so a candidate that was present then and gone by the time
+/// it was opened is a real acquisition failure within that window, and stays
+/// visible instead of leaving the profile looking sourceless.
 fn failed_session_source(
   path: PathBuf,
   format: SessionStoreFormat,
   discovered: bool,
-  error: &anyhow::Error,
+  failure: SessionCandidateFailure,
 ) -> Option<MozillaSessionSourceOutcome> {
-  let missing = is_missing_session_file(error);
-  if missing && !discovered {
+  if is_missing_session_file(&failure.error) && !discovered {
     return None;
   }
   Some(MozillaSessionSourceOutcome {
@@ -308,14 +318,9 @@ fn failed_session_source(
     cookies: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
-    // A missing file is not retried; every other failure exhausts the budget.
-    acquisition_attempts: if missing {
-      1
-    } else {
-      SESSION_STORE_READ_ATTEMPTS as u32
-    },
-    diagnostics: Vec::new(),
-    error: Some(format!("{error:#}")),
+    acquisition_attempts: failure.attempts,
+    diagnostics: failure.transient_errors,
+    error: Some(format!("{:#}", failure.error)),
   })
 }
 
@@ -351,8 +356,12 @@ fn get_authoritative_session_cookies(
   for (path, format) in session_candidates(cookies_dir) {
     match parse_session_candidate(&path, &format, domains.as_deref()) {
       Ok(success) => return success.parsed.cookies,
-      Err(error) if is_missing_session_file(&error) => continue,
-      Err(error) => log::warn!("Failed to parse Firefox session store {:?}: {error}", path),
+      Err(failure) if is_missing_session_file(&failure.error) => continue,
+      Err(failure) => log::warn!(
+        "Failed to parse Firefox session store {:?}: {}",
+        path,
+        failure.error
+      ),
     }
   }
 
@@ -363,14 +372,16 @@ fn parse_session_candidate(
   path: &Path,
   format: &SessionStoreFormat,
   domains: Option<&[String]>,
-) -> Result<SessionCandidateSuccess> {
+) -> Result<SessionCandidateSuccess, SessionCandidateFailure> {
   parse_session_candidate_with(|| match format {
     SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(path, domains),
     SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(path, domains),
   })
 }
 
-fn parse_session_candidate_with<F>(mut parse: F) -> Result<SessionCandidateSuccess>
+fn parse_session_candidate_with<F>(
+  mut parse: F,
+) -> Result<SessionCandidateSuccess, SessionCandidateFailure>
 where
   F: FnMut() -> Result<SessionCookieParseOutcome>,
 {
@@ -385,7 +396,13 @@ where
           transient_errors,
         })
       }
-      Err(error) if is_missing_session_file(&error) => return Err(error),
+      Err(error) if is_missing_session_file(&error) => {
+        return Err(SessionCandidateFailure {
+          error,
+          attempts: attempt as u32,
+          transient_errors,
+        })
+      }
       Err(error) => {
         let diagnostic = format!("session acquisition/parse attempt {attempt} failed: {error:#}");
         if attempt < SESSION_STORE_READ_ATTEMPTS {
@@ -397,7 +414,11 @@ where
     }
   }
 
-  Err(last_error.expect("session store parser always attempts at least once"))
+  Err(SessionCandidateFailure {
+    error: last_error.expect("session store parser always attempts at least once"),
+    attempts: SESSION_STORE_READ_ATTEMPTS as u32,
+    transient_errors,
+  })
 }
 
 fn is_missing_session_file(error: &anyhow::Error) -> bool {
@@ -995,21 +1016,57 @@ mod tests {
 
   #[test]
   fn vanished_session_candidate_is_reported_instead_of_dropped() {
-    let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+    let missing = || SessionCandidateFailure {
+      error: anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound)),
+      attempts: 1,
+      transient_errors: Vec::new(),
+    };
     let path = PathBuf::from("profile/sessionstore-backups/recovery.jsonlz4");
 
     assert!(
-      failed_session_source(path.clone(), SessionStoreFormat::JsonLz4, false, &missing).is_none(),
+      failed_session_source(path.clone(), SessionStoreFormat::JsonLz4, false, missing()).is_none(),
       "a candidate that was never on disk is not an outcome"
     );
 
-    let source = failed_session_source(path.clone(), SessionStoreFormat::JsonLz4, true, &missing)
+    let source = failed_session_source(path.clone(), SessionStoreFormat::JsonLz4, true, missing())
       .expect("a discovered candidate that vanished is a failure, not an absence");
     assert_eq!(source.path, path);
     assert_eq!(source.format, "firefox_session_jsonlz4");
     assert!(!source.selected);
     assert_eq!(source.acquisition_attempts, 1);
     assert!(source.error.is_some());
+  }
+
+  #[test]
+  fn failed_session_retry_retains_attempt_and_transient_diagnostic() {
+    let mut attempts = 0;
+    let failure = parse_session_candidate_with(|| {
+      attempts += 1;
+      if attempts == 1 {
+        bail!("Firefox session store changed while it was being read")
+      }
+      Err(anyhow::Error::from(std::io::Error::from(
+        std::io::ErrorKind::NotFound,
+      )))
+    })
+    .expect_err("a candidate that vanishes on retry never parses");
+
+    // A vanished candidate is not retried again, but the attempt that preceded
+    // it was real: reporting it as a single attempt hides the retry.
+    assert_eq!(failure.attempts, 2);
+    assert_eq!(failure.transient_errors.len(), 1);
+
+    let source = failed_session_source(
+      PathBuf::from("profile/sessionstore-backups/recovery.jsonlz4"),
+      SessionStoreFormat::JsonLz4,
+      true,
+      failure,
+    )
+    .expect("a discovered candidate that vanished is a failure, not an absence");
+    assert_eq!(source.acquisition_attempts, 2);
+    assert_eq!(source.diagnostics.len(), 1);
+    assert!(source.diagnostics[0].contains("attempt 1"));
+    assert!(source.diagnostics[0].contains("changed while it was being read"));
   }
 
   #[test]

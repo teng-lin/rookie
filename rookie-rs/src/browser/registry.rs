@@ -2155,6 +2155,36 @@ mod tests {
   }
 
   #[test]
+  fn undiscovered_persistent_source_stays_absent_when_the_query_fails() {
+    let temp = TempDir::new("gecko-persistent-absent");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid is still a discoverable source",
+    )
+    .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    let report = populate_gecko_sources(discovery, None, mozilla::query_cookies_engine_outcome);
+    let sources = &report.profiles[0].sources;
+    assert_eq!(
+      sources.len(),
+      1,
+      "a session-only profile must not gain a phantom persistent source: {sources:?}"
+    );
+    assert_eq!(sources[0].format, "firefox_session_jsonlz4");
+  }
+
+  #[test]
   fn generic_gecko_discovery_includes_session_only_profiles() {
     let temp = TempDir::new("gecko-session-only");
     let platform = PlatformId::current().expect("platform");
