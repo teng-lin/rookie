@@ -85,25 +85,34 @@ fn enable_privilege() -> Result<DebugPrivilegeGuard> {
 
 fn get_process_pids() -> Result<Vec<u32>> {
   use windows::Win32::System::ProcessStatus::EnumProcesses;
-  let mut cb_needed: u32 = 0;
-  let mut a_processes: Vec<u32> = Vec::with_capacity(1024);
 
-  unsafe {
-    EnumProcesses(a_processes.as_mut_ptr(), 1024 * 4, &mut cb_needed)?;
-    a_processes.set_len((cb_needed / 4) as usize);
-  };
-  let mut _c_processes: u32 = 0;
-  _c_processes = cb_needed / 4;
+  // EnumProcesses has no way to report "the buffer was too small" - it just
+  // fills the buffer and returns the number of bytes written. If the byte
+  // count returned equals the full capacity of the buffer, that's a strong
+  // signal the list was truncated (there could be more PIDs than fit), so we
+  // grow the buffer and retry rather than silently dropping processes. This
+  // matters because the PID list is used to find lsass.exe/winlogon.exe for
+  // SYSTEM impersonation; a truncated list on a busy machine could cause the
+  // target process to be missed with no error at all.
+  const MAX_CAPACITY: u32 = 65536;
+  let mut capacity: u32 = 1024;
 
-  let mut processes = Vec::new();
-  let mut count: u32 = 0;
-  while count < _c_processes {
-    let pid = a_processes[count as usize];
-    processes.push(pid);
-    count += 1;
+  loop {
+    let mut a_processes: Vec<u32> = vec![0; capacity as usize];
+    let mut cb_needed: u32 = 0;
+
+    unsafe {
+      EnumProcesses(a_processes.as_mut_ptr(), capacity * 4, &mut cb_needed)?;
+    }
+
+    let count = cb_needed / 4;
+    if count < capacity || capacity >= MAX_CAPACITY {
+      a_processes.truncate(count as usize);
+      return Ok(a_processes);
+    }
+
+    capacity *= 2;
   }
-
-  Ok(processes)
 }
 
 fn get_process_name(pid: u32) -> Result<String> {
