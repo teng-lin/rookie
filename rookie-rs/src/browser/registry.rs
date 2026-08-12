@@ -2384,6 +2384,7 @@ mod tests {
           "vivaldi",
         ]
         .as_slice(),
+        ["coccoc", "duckduckgo"].as_slice(),
       ),
       (
         PlatformId::Macos,
@@ -2391,6 +2392,7 @@ mod tests {
           "arc", "brave", "chrome", "chromium", "edge", "opera", "opera_gx", "vivaldi",
         ]
         .as_slice(),
+        ["coccoc", "yandex"].as_slice(),
       ),
       (
         PlatformId::Linux,
@@ -2398,10 +2400,11 @@ mod tests {
           "arc", "brave", "chrome", "chromium", "edge", "opera", "vivaldi",
         ]
         .as_slice(),
+        [].as_slice(),
       ),
     ];
 
-    for (platform, expected) in cases {
+    for (platform, legacy_backed, registry_only) in cases {
       let definitions = registry
         .platforms
         .get(platform.as_str())
@@ -2411,13 +2414,27 @@ mod tests {
         .filter(|definition| definition.engine == BrowserEngine::Chromium)
         .map(|definition| definition.canonical_id.as_str())
         .collect::<BTreeSet<_>>();
-      assert_eq!(actual, expected.iter().copied().collect());
-      for browser_id in expected {
-        assert!(crate::config::CONFIG
-          .platforms
-          .get(platform.as_str())
+      assert_eq!(
+        actual,
+        legacy_backed
+          .iter()
+          .chain(registry_only)
+          .copied()
+          .collect::<BTreeSet<_>>()
+      );
+      let legacy_config = crate::config::CONFIG.platforms.get(platform.as_str());
+      for browser_id in legacy_backed {
+        assert!(legacy_config
           .and_then(|browsers| browsers.get(*browser_id))
           .is_some());
+      }
+      for browser_id in registry_only {
+        assert!(
+          legacy_config
+            .and_then(|browsers| browsers.get(*browser_id))
+            .is_none(),
+          "{browser_id} must stay out of the legacy configuration"
+        );
       }
     }
 
@@ -2504,6 +2521,168 @@ mod tests {
         assert_eq!(root.template, *template);
       }
     }
+  }
+
+  #[test]
+  fn packaging_and_platform_variant_roots_are_explicit_per_os() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let cases = [
+      (
+        PlatformId::Windows,
+        "coccoc",
+        "coccoc-local",
+        "stable",
+        "{local_app_data}/CocCoc/Browser/User Data",
+      ),
+      (
+        PlatformId::Windows,
+        "duckduckgo",
+        "duckduckgo-package-stable",
+        "stable",
+        "{local_app_data}/Packages/DuckDuckGo.DesktopBrowser_*/LocalState/EBWebView",
+      ),
+      (
+        PlatformId::Macos,
+        "coccoc",
+        "coccoc-stable",
+        "stable",
+        "{home}/Library/Application Support/Coccoc",
+      ),
+      (
+        PlatformId::Macos,
+        "yandex",
+        "yandex-stable",
+        "stable",
+        "{home}/Library/Application Support/Yandex/YandexBrowser",
+      ),
+    ];
+
+    for (platform, browser_id, root_id, channel, template) in cases {
+      let definition = browser_definition(registry, platform, browser_id).expect("browser");
+      assert_eq!(definition.engine, BrowserEngine::Chromium);
+      assert!(definition.aliases.is_empty());
+      let roots = definition
+        .roots
+        .iter()
+        .map(|root| {
+          (
+            root.root_id.as_str(),
+            root.channel.as_str(),
+            root.template.as_str(),
+          )
+        })
+        .collect::<Vec<_>>();
+      assert_eq!(roots, [(root_id, channel, template)]);
+    }
+
+    assert!(browser_definition(registry, PlatformId::Linux, "coccoc").is_err());
+    assert!(browser_definition(registry, PlatformId::Linux, "duckduckgo").is_err());
+    assert!(browser_definition(registry, PlatformId::Linux, "yandex").is_err());
+    assert!(browser_definition(registry, PlatformId::Macos, "duckduckgo").is_err());
+  }
+
+  #[test]
+  fn windows_coccoc_claims_plaintext_and_v10_without_app_bound() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let definition = browser_definition(registry, PlatformId::Windows, "coccoc").expect("CocCoc");
+    let descriptor = capability_descriptor(definition, PlatformId::Windows);
+    assert_eq!(descriptor.declared_persistent_formats, ["chromium_sqlite"]);
+    assert!(descriptor.declared_session_formats.is_empty());
+    assert_eq!(
+      descriptor.declared_decryption_tiers,
+      ["legacy_dpapi", "v10"]
+    );
+    assert_eq!(
+      descriptor.available_decryption_tiers,
+      ["legacy_dpapi", "v10"]
+    );
+  }
+
+  #[test]
+  fn windows_duckduckgo_wildcard_package_root_ignores_unrelated_msix_packages() {
+    let temp = TempDir::new("duckduckgo-msix");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let packages = local_app_data.join("Packages");
+    seed_cookie(
+      &packages.join("DuckDuckGo.DesktopBrowser_ya2fgkz3nks94/LocalState/EBWebView/Default"),
+      true,
+      "duckduckgo",
+      "value",
+    );
+    seed_cookie(
+      &packages.join("Microsoft.WebView2_8wekyb3d8bbwe/LocalState/EBWebView/Default"),
+      true,
+      "unrelated",
+      "value",
+    );
+
+    let discovery =
+      discover_browser_with_context(&context, "duckduckgo").expect("discover DuckDuckGo");
+    assert_eq!(discovery.installations.len(), 1);
+    assert_eq!(
+      discovery.installations[0].root_id,
+      "duckduckgo-package-stable"
+    );
+    let profiles = discovery.profiles();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].directory_name, "Default");
+    assert!(profiles[0].is_default);
+  }
+
+  #[test]
+  fn windows_coccoc_discovers_its_standard_user_data_root() {
+    let temp = TempDir::new("coccoc-windows");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data)],
+    );
+    let root = browser_root(&context, "coccoc", "coccoc-local");
+    seed_cookie(&root.join("Default"), true, "coccoc", "value");
+    seed_cookie(&root.join("Profile 1"), false, "coccoc-secondary", "value");
+
+    let profiles = discover_browser_with_context(&context, "coccoc")
+      .expect("discover CocCoc")
+      .profiles();
+    assert_eq!(
+      profiles
+        .iter()
+        .map(|profile| profile.directory_name.as_str())
+        .collect::<Vec<_>>(),
+      ["Default", "Profile 1"]
+    );
+  }
+
+  #[test]
+  fn macos_packaging_variants_discover_flat_and_marked_profiles() {
+    let temp = TempDir::new("macos-variants");
+    let home = temp.path().join("home");
+    let context = test_context_for(PlatformId::Macos, home, []);
+
+    let coccoc = browser_root(&context, "coccoc", "coccoc-stable");
+    seed_cookie(&coccoc, false, "coccoc", "value");
+    let coccoc_profiles = discover_browser_with_context(&context, "coccoc")
+      .expect("discover macOS CocCoc")
+      .profiles();
+    assert_eq!(coccoc_profiles.len(), 1);
+    assert_eq!(coccoc_profiles[0].directory_name, ".");
+    assert!(coccoc_profiles[0].is_default);
+
+    let yandex = browser_root(&context, "yandex", "yandex-stable");
+    seed_cookie(&yandex.join("Default"), true, "yandex", "value");
+    let yandex_profiles = discover_browser_with_context(&context, "yandex")
+      .expect("discover macOS Yandex")
+      .profiles();
+    assert_eq!(yandex_profiles.len(), 1);
+    assert_eq!(yandex_profiles[0].directory_name, "Default");
   }
 
   #[test]
