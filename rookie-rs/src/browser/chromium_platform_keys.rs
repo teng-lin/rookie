@@ -9,14 +9,25 @@ use crate::config::Browser;
 #[cfg(target_os = "windows")]
 use base64::{engine::general_purpose, Engine as _};
 
+use zeroize::Zeroizing;
+
+/// Derives a Chromium v10/v11 key from a candidate password.
+///
+/// Wrapped in `Zeroizing` because this is the key material handed to AES-GCM
+/// to decrypt cookie values; it is wiped from memory as soon as its owner
+/// drops it rather than left in freed heap memory.
 #[cfg(unix)]
-pub(crate) fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8> {
+pub(crate) fn create_pbkdf2_key(
+  password: &str,
+  salt: &[u8; 9],
+  iterations: u32,
+) -> Zeroizing<Vec<u8>> {
   use pbkdf2::pbkdf2_hmac;
   use sha1::Sha1;
 
   let mut output = [0u8; 16];
   pbkdf2_hmac::<Sha1>(password.as_bytes(), salt, iterations, &mut output);
-  output.to_vec()
+  Zeroizing::new(output.to_vec())
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -85,11 +96,15 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
     }
 
     let wrapped_len = decoded_len - 5;
-    let v10_key = crate::windows::dpapi::decrypt(&wrapped[5..]).map_err(|error| {
-      anyhow::anyhow!(
-        "Failed to unwrap DPAPI encrypted key (decoded_length={decoded_len}, wrapped_length={wrapped_len}): {error}"
-      )
-    })?;
+    // Wrap the unwrapped master key immediately so it is zeroized as soon as
+    // this scope ends, rather than left in freed heap memory.
+    let v10_key = Zeroizing::new(crate::windows::dpapi::decrypt(&wrapped[5..]).map_err(
+      |error| {
+        anyhow::anyhow!(
+          "Failed to unwrap DPAPI encrypted key (decoded_length={decoded_len}, wrapped_length={wrapped_len}): {error}"
+        )
+      },
+    )?);
     if v10_key.len() != 32 {
       bail!(
         "DPAPI unwrapped key length was {}, expected 32 (decoded_length={}, wrapped_length={})",
@@ -98,7 +113,7 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
         wrapped_len
       );
     }
-    Ok(vec![v10_key])
+    Ok(vec![v10_key.to_vec()])
   }
 
   fn appbound_compiled(&self) -> bool {
@@ -206,7 +221,7 @@ impl ChromiumKeyProvider<()> for WindowsPlatformKeyProvider<'_> {
 
 #[cfg(target_os = "linux")]
 trait LinuxKeyringBackend {
-  fn passwords(&self, crypt_name: &str) -> Result<Vec<String>>;
+  fn passwords(&self, crypt_name: &str) -> Result<Vec<Zeroizing<String>>>;
 }
 
 #[cfg(target_os = "linux")]
@@ -214,7 +229,7 @@ struct SystemLinuxKeyringBackend;
 
 #[cfg(target_os = "linux")]
 impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
-  fn passwords(&self, crypt_name: &str) -> Result<Vec<String>> {
+  fn passwords(&self, crypt_name: &str) -> Result<Vec<Zeroizing<String>>> {
     crate::linux::get_passwords(crypt_name)
   }
 }
@@ -223,8 +238,8 @@ impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
 fn linux_v10_outcome() -> ChromiumKeyOutcome {
   let salt = b"saltysalt";
   ChromiumKeyOutcome::success(vec![
-    create_pbkdf2_key("peanuts", salt, 1),
-    create_pbkdf2_key("", salt, 1),
+    create_pbkdf2_key("peanuts", salt, 1).to_vec(),
+    create_pbkdf2_key("", salt, 1).to_vec(),
   ])
   .expect("Linux v10 has two fixed candidates")
 }
@@ -238,7 +253,7 @@ where
   let candidates = backend.passwords(crypt_name).map(|passwords| {
     passwords
       .into_iter()
-      .map(|password| create_pbkdf2_key(&password, salt, 1))
+      .map(|password| create_pbkdf2_key(&password, salt, 1).to_vec())
       .collect()
   });
   outcome_from_result(
@@ -337,7 +352,7 @@ impl ChromiumKeyProvider<()> for LinuxPlatformKeyProvider<'_> {
 
 #[cfg(target_os = "macos")]
 trait MacosKeychainBackend {
-  fn password(&self, service: &str, user: &str) -> Result<String>;
+  fn password(&self, service: &str, user: &str) -> Result<Zeroizing<String>>;
 }
 
 #[cfg(target_os = "macos")]
@@ -345,7 +360,7 @@ struct SystemMacosKeychainBackend;
 
 #[cfg(target_os = "macos")]
 impl MacosKeychainBackend for SystemMacosKeychainBackend {
-  fn password(&self, service: &str, user: &str) -> Result<String> {
+  fn password(&self, service: &str, user: &str) -> Result<Zeroizing<String>> {
     crate::macos::get_osx_keychain_password(service, user)
   }
 }
@@ -355,9 +370,12 @@ fn retrieve_macos_key_outcomes<B>(config: &Browser, backend: &B) -> ChromiumKeyO
 where
   B: MacosKeychainBackend,
 {
-  let mut passwords = Vec::new();
-  let mut push_password = |password: String| {
-    if !passwords.iter().any(|existing| existing == &password) {
+  let mut passwords: Vec<Zeroizing<String>> = Vec::new();
+  let mut push_password = |password: Zeroizing<String>| {
+    if !passwords
+      .iter()
+      .any(|existing| existing.as_str() == password.as_str())
+    {
       passwords.push(password);
     }
   };
@@ -369,12 +387,12 @@ where
     }
   }
   for password in ["mock_password", "peanuts", ""] {
-    push_password(password.to_string());
+    push_password(Zeroizing::new(password.to_string()));
   }
 
   let candidates = passwords
     .into_iter()
-    .map(|password| create_pbkdf2_key(&password, b"saltysalt", 1003))
+    .map(|password| create_pbkdf2_key(&password, b"saltysalt", 1003).to_vec())
     .collect();
   let v10 = ChromiumKeyOutcome::success(candidates)
     .expect("macOS v10 always has compatibility fallback candidates");
@@ -430,12 +448,12 @@ mod tests {
   #[cfg(target_os = "linux")]
   struct FakeLinuxBackend {
     calls: Cell<usize>,
-    result: Result<Vec<String>>,
+    result: Result<Vec<Zeroizing<String>>>,
   }
 
   #[cfg(target_os = "linux")]
   impl LinuxKeyringBackend for FakeLinuxBackend {
-    fn passwords(&self, _crypt_name: &str) -> Result<Vec<String>> {
+    fn passwords(&self, _crypt_name: &str) -> Result<Vec<Zeroizing<String>>> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -461,7 +479,10 @@ mod tests {
   fn linux_separates_fixed_v10_from_ordered_keyring_v11_candidates() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
-      result: Ok(vec!["first".to_string(), "second".to_string()]),
+      result: Ok(vec![
+        Zeroizing::new("first".to_string()),
+        Zeroizing::new("second".to_string()),
+      ]),
     };
     let outcomes = retrieve_linux_key_outcomes(&linux_config(Some("chrome")), &backend);
 
@@ -469,15 +490,15 @@ mod tests {
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
       vec![
-        create_pbkdf2_key("peanuts", b"saltysalt", 1),
-        create_pbkdf2_key("", b"saltysalt", 1),
+        create_pbkdf2_key("peanuts", b"saltysalt", 1).to_vec(),
+        create_pbkdf2_key("", b"saltysalt", 1).to_vec(),
       ]
     );
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V11),
       vec![
-        create_pbkdf2_key("first", b"saltysalt", 1),
-        create_pbkdf2_key("second", b"saltysalt", 1),
+        create_pbkdf2_key("first", b"saltysalt", 1).to_vec(),
+        create_pbkdf2_key("second", b"saltysalt", 1).to_vec(),
       ]
     );
     assert_eq!(
@@ -541,7 +562,7 @@ mod tests {
   fn linux_without_keyring_configuration_does_not_call_backend() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
-      result: Ok(vec!["unused".to_string()]),
+      result: Ok(vec![Zeroizing::new("unused".to_string())]),
     };
     let outcomes = retrieve_linux_key_outcomes(&linux_config(None), &backend);
 
@@ -785,12 +806,12 @@ mod tests {
   #[cfg(target_os = "macos")]
   struct FakeMacosBackend {
     calls: Cell<usize>,
-    result: Result<String>,
+    result: Result<Zeroizing<String>>,
   }
 
   #[cfg(target_os = "macos")]
   impl MacosKeychainBackend for FakeMacosBackend {
-    fn password(&self, _service: &str, _user: &str) -> Result<String> {
+    fn password(&self, _service: &str, _user: &str) -> Result<Zeroizing<String>> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -816,7 +837,7 @@ mod tests {
   fn macos_keeps_current_ordered_deduped_candidates_in_v10_only() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok("keychain".to_string()),
+      result: Ok(Zeroizing::new("keychain".to_string())),
     };
     let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
     assert_eq!(backend.calls.get(), 1);
@@ -824,7 +845,7 @@ mod tests {
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
       ["keychain", "mock_password", "peanuts", ""]
         .into_iter()
-        .map(|password| create_pbkdf2_key(password, b"saltysalt", 1003))
+        .map(|password| create_pbkdf2_key(password, b"saltysalt", 1003).to_vec())
         .collect::<Vec<_>>()
     );
     assert!(matches!(
@@ -857,7 +878,7 @@ mod tests {
   fn macos_deduplicates_keychain_password_against_fallbacks() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok("peanuts".to_string()),
+      result: Ok(Zeroizing::new("peanuts".to_string())),
     };
     let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
     assert_eq!(

@@ -2252,7 +2252,7 @@ mod tests {
     let salt = b"saltysalt";
     let key = create_pbkdf2_key("mock_password", salt, 1003);
     assert_eq!(
-      key,
+      *key,
       vec![
         0xaf, 0x0f, 0x76, 0x2a, 0xaf, 0x6d, 0x7d, 0x11, 0x58, 0x1b, 0x7a, 0xa8, 0xce, 0x72, 0x18,
         0xde,
@@ -2271,8 +2271,9 @@ mod tests {
       0x1e, 0x1f,
     ];
 
-    let decrypted = decrypt_encrypted_value(".example.com", "".to_string(), &ciphertext, &[key])
-      .expect("decrypt vector");
+    let decrypted =
+      decrypt_encrypted_value(".example.com", "".to_string(), &ciphertext, &[key.to_vec()])
+        .expect("decrypt vector");
     assert_eq!(decrypted.as_bytes(), plaintext);
   }
 

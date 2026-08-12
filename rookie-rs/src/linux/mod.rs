@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::{collections::HashMap, sync::Arc};
 use zbus::{blocking::Connection, zvariant::ObjectPath, zvariant::Value, Message};
+use zeroize::Zeroizing;
 
 // Keep the legacy KWallet caller ID so existing access grants continue to work.
 pub const APP_ID: &str = "rookie";
@@ -15,7 +16,10 @@ const LIBSECRET_SCHEMAS: [&str; 2] = [
 /// A successful backend is enough to continue, but if every configured
 /// backend fails the individual diagnostics are preserved in the returned
 /// error. Secret values are never included in those diagnostics.
-pub fn get_passwords(unix_crypt_name: &str) -> Result<Vec<String>> {
+///
+/// Each returned password is wrapped in `Zeroizing` so it is wiped from
+/// memory when the caller drops it rather than left in freed heap memory.
+pub fn get_passwords(unix_crypt_name: &str) -> Result<Vec<Zeroizing<String>>> {
   get_passwords_with_source(&SystemLinuxKeyringSource, unix_crypt_name)
 }
 
@@ -36,7 +40,7 @@ impl LinuxKeyringSource for SystemLinuxKeyringSource {
   }
 }
 
-fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<String>>
+fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<Zeroizing<String>>>
 where
   S: LinuxKeyringSource,
 {
@@ -45,13 +49,13 @@ where
 
   for schema in LIBSECRET_SCHEMAS {
     match source.libsecret_password(schema, crypt_name) {
-      Ok(password) => push_unique(&mut passwords, password),
+      Ok(password) => push_unique(&mut passwords, Zeroizing::new(password)),
       Err(error) => failures.push(format!("Secret Service schema '{schema}': {error:#}")),
     }
   }
 
   match source.kwallet_password(crypt_name) {
-    Ok(password) => push_unique(&mut passwords, password),
+    Ok(password) => push_unique(&mut passwords, Zeroizing::new(password)),
     Err(error) => failures.push(format!("KWallet: {error:#}")),
   }
 
@@ -70,8 +74,8 @@ where
   Ok(passwords)
 }
 
-fn push_unique(values: &mut Vec<String>, value: String) {
-  if !values.iter().any(|existing| existing == &value) {
+fn push_unique(values: &mut Vec<Zeroizing<String>>, value: Zeroizing<String>) {
+  if !values.iter().any(|existing| existing.as_str() == value.as_str()) {
     values.push(value);
   }
 }
@@ -418,10 +422,9 @@ mod tests {
       kwallet: RefCell::new(Some(Ok("candidate".to_string()))),
     };
 
-    assert_eq!(
-      get_passwords_with_source(&source, "chrome").unwrap(),
-      ["candidate"]
-    );
+    let passwords = get_passwords_with_source(&source, "chrome").unwrap();
+    let passwords: Vec<&str> = passwords.iter().map(|password| password.as_str()).collect();
+    assert_eq!(passwords, ["candidate"]);
   }
 
   #[derive(Default)]

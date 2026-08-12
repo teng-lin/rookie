@@ -10,6 +10,7 @@ use aes_gcm::{
   Aes256Gcm,
 };
 use chacha20poly1305::ChaCha20Poly1305;
+use zeroize::Zeroizing;
 
 mod impersonate;
 
@@ -22,14 +23,18 @@ const CHACHA20_ELEVATION_KEY: &[u8; 32] =
 const FLAG3_XOR_KEY: &[u8; 32] =
   b"\xCC\xF8\xA1\xCE\xC5\x66\x05\xB8\x51\x75\x52\xBA\x1A\x2D\x06\x1C\x03\xA2\x9E\x90\x27\x4F\xB2\xFC\xF5\x9B\xA4\xB7\x5C\x39\x23\x90";
 
-fn decrypt_dpapi(key: &[u8], as_system: bool) -> Result<Vec<u8>> {
+// These unwrap layers of DPAPI/CNG encryption around the app-bound master
+// key. The results are wrapped in `Zeroizing` because they hold decrypted
+// key material that should be wiped from memory as soon as it is consumed,
+// rather than left in freed heap memory.
+fn decrypt_dpapi(key: &[u8], as_system: bool) -> Result<Zeroizing<Vec<u8>>> {
   let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
-  crate::windows::dpapi::decrypt(key)
+  crate::windows::dpapi::decrypt(key).map(Zeroizing::new)
 }
 
-fn decrypt_ncrypt(key: &[u8], as_system: bool) -> Result<Vec<u8>> {
+fn decrypt_ncrypt(key: &[u8], as_system: bool) -> Result<Zeroizing<Vec<u8>>> {
   let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
-  crate::windows::ncrypt::decrypt(key)
+  crate::windows::ncrypt::decrypt(key).map(Zeroizing::new)
 }
 
 /// AEAD-decrypt `[iv(12) | ciphertext | tag(16)]` with `key`.
@@ -120,11 +125,13 @@ fn derive_v20_master_key(content: &[u8]) -> Result<Option<Vec<u8>>> {
       let decrypted_aes_key = decrypt_ncrypt(encrypted_aes_key, true)?;
       // XOR the CNG-unwrapped key with the hardcoded key; zipping yields a
       // 32-byte key when CNG returns the expected 32 bytes (as the reference does).
-      let aes_key: Vec<u8> = decrypted_aes_key
-        .iter()
-        .zip(FLAG3_XOR_KEY)
-        .map(|(a, b)| a ^ b)
-        .collect();
+      let aes_key: Zeroizing<Vec<u8>> = Zeroizing::new(
+        decrypted_aes_key
+          .iter()
+          .zip(FLAG3_XOR_KEY)
+          .map(|(a, b)| a ^ b)
+          .collect(),
+      );
       Ok(aead_decrypt::<Aes256Gcm>(&aes_key, iv_and_ciphertext))
     }
     other => {
