@@ -15,6 +15,7 @@ serde_json = "1.0.107"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 [features]
+default = ["appbound"]
 appbound = ["rookie-cookies/appbound"]
 
 [[bin]]

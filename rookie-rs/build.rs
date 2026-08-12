@@ -82,9 +82,10 @@ fn watch_git_head(dot_git: &Path) -> bool {
   if let Ok(head_contents) = fs::read_to_string(&head_path) {
     if let Some(ref_name) = head_contents.trim().strip_prefix("ref:") {
       let ref_path = common_dir.join(ref_name.trim());
-      if ref_path.exists() {
-        println!("cargo:rerun-if-changed={}", ref_path.display());
-      }
+      // Register the loose ref even when it is currently represented only in
+      // packed-refs. A subsequent commit creates this file; watching it
+      // unconditionally ensures Cargo reruns this script for that transition.
+      println!("cargo:rerun-if-changed={}", ref_path.display());
     }
   }
 
