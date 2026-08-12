@@ -1,4 +1,3 @@
-use crate::browsers_map;
 use clap::{builder::PossibleValuesParser, Parser};
 
 #[derive(Parser, Debug, Clone)]
@@ -20,8 +19,8 @@ pub struct Args {
   #[arg(short, long, exclusive = true)]
   pub version: bool,
 
-  /// Get cookies from specified browser
-  #[arg(short, long, value_parser = browser_keys(), conflicts_with_all = ["path", "key_path", "load"])]
+  /// Get cookies from specified browser (see --list-browsers)
+  #[arg(short, long, conflicts_with_all = ["path", "key_path", "load"])]
   pub browser: Option<String>,
 
   /// Get cookies from all possible browsers
@@ -31,9 +30,35 @@ pub struct Args {
   /// Specify output format
   #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
   pub format: String,
+
+  /// List registered browsers as JSON
+  #[arg(
+    long,
+    conflicts_with_all = ["browser", "load", "path", "key_path", "domains", "list_profiles", "report", "profile"]
+  )]
+  pub list_browsers: bool,
+
+  /// List the discovered profiles of --browser as JSON
+  #[arg(
+    long,
+    requires = "browser",
+    conflicts_with_all = ["load", "path", "key_path", "domains", "report", "profile"]
+  )]
+  pub list_profiles: bool,
+
+  /// Emit a structured extraction report as JSON
+  #[arg(long, conflicts_with_all = ["load", "path", "key_path"])]
+  pub report: bool,
+
+  /// Restrict --report to one profile ID from --list-profiles
+  #[arg(long, requires_all = ["report", "browser"])]
+  pub profile: Option<String>,
 }
 
-fn browser_keys() -> PossibleValuesParser {
-  let keys: Vec<&str> = browsers_map::BROWSERS_MAP.keys().copied().collect();
-  PossibleValuesParser::new(keys)
+impl Args {
+  /// True when a Section 5.8 list/report mode is selected, which is what
+  /// widens `--browser` from the legacy map to the registry.
+  pub fn is_generic_mode(&self) -> bool {
+    self.list_browsers || self.list_profiles || self.report
+  }
 }
