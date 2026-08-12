@@ -81,7 +81,7 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ inputs.python-target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --locked
           sccache: true
           manylinux: auto
           working-directory: bindings/python
@@ -93,7 +93,7 @@ jobs:
       - name: Build native Node binding outside Linux
         if: runner.os != 'Linux'
         working-directory: bindings/node
-        run: npm run build -- --target ${{ inputs.rust-target }}
+        run: npm run build -- --target ${{ inputs.rust-target }} --cargo-flags=--locked
       - name: Build native Node binding in the pinned release container
         if: runner.os == 'Linux'
         env:
@@ -106,8 +106,11 @@ jobs:
           # cargo can see the workspace Cargo.toml, the committed Cargo.lock, and
           # every workspace member (cli/, bindings/python/) it needs to parse to
           # resolve the graph — `--locked` requires all of this to be visible.
+          # Do not reuse artifacts from the host-side CLI build mounted at
+          # /workspace/target; the smoke binding must be container-built.
           docker run --rm --user 0:0 \
             -e ROOKIE_RUST_TARGET="$RUST_TARGET" \
+            -e CARGO_TARGET_DIR=/tmp/rookie-target \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/git/db:/usr/local/cargo/git/db" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/cache:/usr/local/cargo/registry/cache" \
@@ -119,7 +122,7 @@ jobs:
               export RUSTUP_TOOLCHAIN=stable
               rustup set auto-self-update disable
               rustup toolchain install stable --profile minimal
-              npm run build -- --target "$ROOKIE_RUST_TARGET" -- --locked
+              npm run build -- --target "$ROOKIE_RUST_TARGET" --cargo-flags=--locked
             '
       - name: Assemble release-shaped packages and provenance
         run: python tests/artifact_smoke/package_release_artifacts.py --target "${{ inputs.rust-target }}" --npm-platform "${{ inputs.npm-platform }}" --source-sha "${{ github.sha }}"

@@ -170,7 +170,7 @@ jobs:
         run: npm install
       - name: Build node binding
         working-directory: bindings/node
-        run: npm run build:test
+        run: npm run build:test -- --cargo-flags=--locked
       - name: Test native worker panic rejection
         working-directory: bindings/node
         run: npm run test:worker-panic
@@ -199,7 +199,7 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --locked
           sccache: 'true'
           manylinux: auto
           working-directory: bindings/python
@@ -229,7 +229,7 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --quiet maturin
           cd bindings/python
-          ../../.venv/bin/maturin develop --release
+          ../../.venv/bin/maturin develop --release --locked
       - name: Run Python unit tests
         run: .venv/bin/python -m unittest discover -s tests/python -p 'test_*.py' -v
 
@@ -250,7 +250,7 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --locked
           working-directory: bindings/python
           sccache: 'true'
 
@@ -270,7 +270,7 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --locked
           working-directory: bindings/python
           sccache: 'true'
 
