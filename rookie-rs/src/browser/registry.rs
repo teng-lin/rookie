@@ -1174,6 +1174,11 @@ pub(crate) struct ChromiumInstallationExtraction {
 #[derive(Debug, Default)]
 pub(crate) struct ChromiumRegistryReport {
   pub(crate) installations: Vec<ChromiumInstallationExtraction>,
+  /// Installations discovered before profile selection narrowed the list.
+  /// Selecting a profile must not make the other installations look absent, and
+  /// the other engines discover everything and filter afterwards, so this is
+  /// what keeps the summary counters comparable across engines.
+  pub(crate) installations_discovered: usize,
   pub(crate) discovery_issues: Vec<DiscoveryIssue>,
   /// Every detected root failed enumeration, so an empty installation list is a
   /// failure rather than an absent browser.
@@ -1205,6 +1210,7 @@ where
 
   let mut report = ChromiumRegistryReport {
     all_detected_roots_failed: discovery.all_detected_roots_failed(),
+    installations_discovered: discovery.installations.len(),
     discovery_issues: discovery.issues,
     ..ChromiumRegistryReport::default()
   };
@@ -2382,23 +2388,33 @@ pub(crate) mod test_seams {
   /// Resolves the highest-priority installation root for a browser on the
   /// running platform, so a fixture does not have to name a platform-specific
   /// root id.
-  pub(crate) fn primary_root_path(
+  /// Every installation root a browser can resolve on the running platform, in
+  /// registry order, so a fixture does not have to name platform-specific root
+  /// ids.
+  pub(crate) fn resolvable_root_paths(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
-  ) -> PathBuf {
+  ) -> Vec<PathBuf> {
     let registry = embedded_registry().expect("registry");
     let definition =
       browser_definition(registry, context.platform, browser_id).expect("registered browser");
     let mut roots: Vec<&InstallationRoot> = definition.roots.iter().collect();
     roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
-    let root = roots
+    roots
       .iter()
-      .find(|root| context.resolve_template(&root.template).is_some())
-      .expect("a resolvable installation root");
-    let resolved = context
-      .resolve_template(&root.template)
-      .expect("resolved root");
-    resolved.base.join(resolved.suffix)
+      .filter_map(|root| context.resolve_template(&root.template))
+      .map(|resolved| resolved.base.join(resolved.suffix))
+      .collect()
+  }
+
+  pub(crate) fn primary_root_path(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+  ) -> PathBuf {
+    resolvable_root_paths(context, browser_id)
+      .into_iter()
+      .next()
+      .expect("a resolvable installation root")
   }
 
   /// Seeds a Gecko profile with an empty but well-formed cookie database.

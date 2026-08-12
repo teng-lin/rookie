@@ -333,8 +333,10 @@ fn chromium_browser_outcome(
   report: ChromiumRegistryReport,
 ) -> Result<BrowserOutcome> {
   let mut outcome = BrowserOutcome {
-    detected: !report.installations.is_empty(),
-    installations_discovered: report.installations.len(),
+    // Discovery counts, not the post-selection list: a profile-selected report
+    // must not claim the installations it filtered out were never there.
+    detected: report.installations_discovered > 0,
+    installations_discovered: report.installations_discovered,
     discovery_failed: report.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
@@ -1469,5 +1471,40 @@ mod engine_chain_tests {
     assert_eq!(report.status, ReportStatusCode::partial());
     assert_eq!(report.summary.sources_succeeded, 1);
     assert_eq!(report.summary.sources_failed, 0);
+  }
+
+  /// Selecting a profile narrows which installations are extracted, but must
+  /// not rewrite how many were discovered. Chromium filters installations
+  /// during extraction while the other engines filter profiles afterwards, so
+  /// deriving the count from the post-selection list made the same request
+  /// report different totals depending on the engine.
+  #[test]
+  fn selecting_a_chromium_profile_keeps_the_discovered_installation_count() {
+    let temp = TempDir::new("chromium-profile-selection");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let roots = test_seams::resolvable_root_paths(&context, "chrome");
+    assert!(
+      roots.len() >= 2,
+      "chrome must declare at least two roots for this fixture"
+    );
+    test_seams::seed_chromium_profile(&roots[0], "Default", "Person 1");
+    test_seams::seed_chromium_profile(&roots[1], "Default", "Person 2");
+
+    let all = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
+      .expect("chromium report");
+    assert_eq!(all.installations_discovered, 2);
+    let selected_profile = all.installations[0].profiles[0].profile.profile_id.clone();
+
+    let one =
+      test_seams::chromium_report(&context, "chrome", Some(&selected_profile), None, no_keys())
+        .expect("profile-selected chromium report");
+    assert_eq!(one.installations.len(), 1);
+    assert_eq!(one.installations_discovered, 2);
+
+    let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), one)
+      .expect("adapt the chromium report");
+    let report = assemble(1, vec![outcome]);
+    assert_eq!(report.summary.installations_discovered, 2);
+    assert_eq!(report.summary.profiles_discovered, 1);
   }
 }
