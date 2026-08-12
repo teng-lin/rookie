@@ -2346,8 +2346,14 @@ mod tests {
     }
     std::fs::write(root.join("profiles.ini"), ini).expect("write profiles.ini");
 
+    // Discovery canonicalizes the installation root first and resolves declared
+    // profiles against *that*, so the denial list has to be built the same way.
+    // Windows canonicalization returns a `\\?\` verbatim path, and a symlinked
+    // temporary directory diverges on Unix too, so keying off the uncanonical
+    // root would silently deny nothing.
+    let canonical_root = root.canonicalize().expect("canonical Firefox root");
     let denied = (0..declarations)
-      .map(|index| root.join(format!("Profiles/broken-{index}")))
+      .map(|index| canonical_root.join(format!("Profiles/broken-{index}")))
       .collect::<Vec<_>>();
     let context = with_test_fs(
       real_context,
