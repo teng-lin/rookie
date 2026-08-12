@@ -395,3 +395,95 @@ fn reports_serialize_to_snake_case_json_with_open_string_codes() {
     ]
   );
 }
+
+#[test]
+fn reports_round_trip_through_the_wire_format() {
+  let _home = seeded_chrome("chrome-round-trip");
+
+  let report = rookie_cookies::browser_report("chrome", None, None).expect("chrome report");
+  // Guard against a vacuous pass: the comparisons below are per-element loops,
+  // so an empty report would satisfy every one of them.
+  assert_eq!(report.profiles.len(), 2);
+  assert!(report.profiles.iter().all(|profile| profile
+    .sources
+    .iter()
+    .any(|source| !source.cookies.is_empty())));
+
+  let encoded = serde_json::to_string(&report).expect("serialize report");
+  let restored: ExtractionReport = serde_json::from_str(&encoded).expect("deserialize report");
+
+  // Typed fields must come back as their newtypes, not degrade to strings.
+  assert_eq!(restored.status, report.status);
+  assert_eq!(restored.summary, report.summary);
+  assert_eq!(restored.issues, report.issues);
+  assert_eq!(restored.profiles.len(), report.profiles.len());
+
+  for (original, restored) in report.profiles.iter().zip(&restored.profiles) {
+    assert_eq!(restored.profile, original.profile);
+    assert_eq!(restored.stats, original.stats);
+    assert_eq!(restored.issues, original.issues);
+    assert_eq!(restored.sources.len(), original.sources.len());
+
+    for (original, restored) in original.sources.iter().zip(&restored.sources) {
+      assert_eq!(restored.source, original.source);
+      assert_eq!(restored.status, original.status);
+      assert_eq!(restored.selected, original.selected);
+      assert_eq!(restored.acquisition_strategy, original.acquisition_strategy);
+      assert_eq!(restored.stats, original.stats);
+      assert_eq!(restored.issues, original.issues);
+      // `Cookie` has no `PartialEq` and this milestone does not widen it, so
+      // compare the eight fields the wire format actually carries.
+      assert_eq!(restored.cookies.len(), original.cookies.len());
+      for (original, restored) in original.cookies.iter().zip(&restored.cookies) {
+        assert_eq!(restored.domain, original.domain);
+        assert_eq!(restored.path, original.path);
+        assert_eq!(restored.secure, original.secure);
+        assert_eq!(restored.expires, original.expires);
+        assert_eq!(restored.name, original.name);
+        assert_eq!(restored.value, original.value);
+        assert_eq!(restored.http_only, original.http_only);
+        assert_eq!(restored.same_site, original.same_site);
+      }
+    }
+  }
+
+  // Nothing the wire format exposes is dropped on the way back in.
+  assert_eq!(
+    serde_json::to_value(&restored).expect("reserialize"),
+    serde_json::to_value(&report).expect("serialize")
+  );
+}
+
+#[test]
+fn the_wire_format_validates_identifiers_on_the_way_in() {
+  let _home = seeded_chrome("chrome-wire-validation");
+
+  let report = rookie_cookies::browser_report("chrome", None, None).expect("chrome report");
+  let wire = serde_json::to_value(&report).expect("serialize report");
+
+  // An open vocabulary still has a grammar: a decoded report cannot carry a
+  // code that `FromStr` would have rejected.
+  let mut tampered = wire.clone();
+  tampered["status"] = serde_json::json!("Not A Status");
+  assert!(
+    serde_json::from_value::<ExtractionReport>(tampered).is_err(),
+    "a malformed open identifier must not decode"
+  );
+
+  // Opaque IDs are selection keys, so a truncated digest must not decode into
+  // something a caller would then pass back to `browser_report`.
+  let mut tampered = wire.clone();
+  tampered["profiles"][0]["profile"]["profile_id"] = serde_json::json!("short");
+  assert!(
+    serde_json::from_value::<ExtractionReport>(tampered).is_err(),
+    "a malformed opaque identifier must not decode"
+  );
+
+  // A code this build never emits is not malformed; it is the open vocabulary
+  // working as intended.
+  let mut extended = wire;
+  extended["status"] = serde_json::json!("future_status");
+  let decoded =
+    serde_json::from_value::<ExtractionReport>(extended).expect("unknown codes stay representable");
+  assert_eq!(decoded.status.as_str(), "future_status");
+}
