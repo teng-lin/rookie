@@ -38,12 +38,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # NOTE: deliberately NO `ref:` override — this lets the checkout use
-          # whatever ref actually triggered the dispatch, so the verification
-          # step below can catch a wrong-ref dispatch instead of silently
-          # "fixing" it into always checking out the named tag (that's the
-          # tautology bug in publish-npm.yml's original preflight — don't
-          # reproduce it).
+          # Pin to the commit the dispatch ref already resolved to. Checking
+          # out `refs/tags/...` by name re-fetches the tag at checkout time, so
+          # a tag force-moved after dispatch would swap the source out from
+          # under this run.
+          #
+          # NOTE: this is deliberately NOT `ref: refs/tags/${{ inputs.tag }}`.
+          # Overriding with the *input* would make the verification step below
+          # a tautology (the bug in publish-npm.yml's original preflight —
+          # don't reproduce it). `github.sha` is the dispatch ref's own commit,
+          # so the ref-type and ref-name checks still catch a wrong-ref
+          # dispatch.
+          ref: ${{ github.sha }}
 
       - name: Verify release tag
         shell: bash
@@ -73,16 +79,32 @@ jobs:
         run: Move-Item target/${{ matrix.target }}/release/rookie-cookies.exe rookie-cookies-cli-${{ matrix.target }}.exe
         if: contains(matrix.platform, 'windows')
 
+      # `gh release upload` addresses a release by tag name, not by commit, so
+      # the verified-tag binding only holds while the tag still resolves to the
+      # commit this run built. Re-resolve it here and fail closed if it moved.
+      - name: Re-verify release tag still points at the built commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+          if test "$tag_sha" != "$GITHUB_SHA"; then
+            echo "::error::$RELEASE_TAG now resolves to $tag_sha, but this run built $GITHUB_SHA"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+
       - name: Upload Unix
         run: gh release upload "$RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }} --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ inputs.tag }}
         if: contains(matrix.platform, 'macos') || contains(matrix.platform, 'ubuntu')
 
       - name: Upload Windows
         run: gh release upload "$env:RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }}.exe --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ inputs.tag }}
         if: contains(matrix.platform, 'windows')
