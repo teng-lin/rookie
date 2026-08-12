@@ -26,12 +26,12 @@ fn print_version() {
     env!("CARGO_PKG_VERSION"),
     rookie_cookies::version()
   );
-  std::process::exit(0);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt()
     .with_writer(std::io::stderr)
+    .with_ansi(false)
     .with_env_filter(
       tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
@@ -41,14 +41,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args = Args::parse();
   if args.version {
     print_version();
+    return Ok(());
   }
+  tracing::info!("extracting cookies");
   #[allow(unused_assignments)]
   let mut cookies = vec![];
   let args_c = args.clone();
   if args.load {
     cookies = rookie_cookies::load(args.domains)?;
   } else if let Some(browser) = args.browser {
-    let browser_fn = BROWSERS_MAP.get(&browser).unwrap();
+    let browser_fn = BROWSERS_MAP.get(browser.as_str()).unwrap();
     cookies = browser_fn(args.domains)?;
   } else if let Some(path) = args.path {
     cookies = any_browser(path.as_str(), args.domains, args.key_path.as_deref())?;
