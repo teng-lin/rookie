@@ -158,20 +158,51 @@ fn query_persistent_cookies(
   })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionStoreFormat {
   JsonLz4,
   LegacyJson,
 }
 
+impl SessionStoreFormat {
+  fn format_id(self) -> &'static str {
+    match self {
+      Self::JsonLz4 => "firefox_session_jsonlz4",
+      Self::LegacyJson => "firefox_session_json",
+    }
+  }
+}
+
 const SESSION_STORE_READ_ATTEMPTS: usize = 2;
+const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
+
+#[derive(Debug)]
+struct SessionCookieParseOutcome {
+  cookies: Vec<Cookie>,
+  rows_seen: usize,
+  rows_skipped: usize,
+  diagnostics: Vec<String>,
+}
+
+#[derive(Debug)]
+struct SessionCandidateSuccess {
+  parsed: SessionCookieParseOutcome,
+  attempts: u32,
+  transient_errors: Vec<String>,
+}
 
 /// Crate-private source outcome for the generic registry adapter.  The legacy
 /// API deliberately continues to project this to a flat `Vec<Cookie>`.
 #[derive(Debug)]
 pub(crate) struct MozillaSessionSourceOutcome {
   pub(crate) path: PathBuf,
+  pub(crate) format: &'static str,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) rows_seen: usize,
+  pub(crate) rows_skipped: usize,
+  pub(crate) acquisition_attempts: u32,
+  pub(crate) diagnostics: Vec<String>,
   pub(crate) error: Option<String>,
 }
 
@@ -180,6 +211,7 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   pub(crate) persistent_cookies: Vec<Cookie>,
   pub(crate) persistent_rows_seen: usize,
   pub(crate) persistent_rows_skipped: usize,
+  pub(crate) persistent_acquisition_attempts: u32,
   pub(crate) persistent_error: Option<String>,
   pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
 }
@@ -196,23 +228,36 @@ pub(crate) fn query_cookies_engine_outcome(
     query_persistent_cookies(connection, domains)
   }) {
     Ok(database) => {
+      outcome.persistent_acquisition_attempts = database.attempts();
       let persistent = database.into_value();
       outcome.persistent_rows_seen = persistent.rows_seen;
       outcome.persistent_rows_skipped = persistent.rows_skipped;
-      outcome.persistent_error = persistent.last_row_error.map(|error| error.to_string());
+      outcome.persistent_error = persistent.last_row_error.map(|error| format!("{error:#}"));
       outcome.persistent_cookies = persistent.cookies;
     }
-    Err(error) => outcome.persistent_error = Some(error.to_string()),
+    Err(error) => {
+      outcome.persistent_acquisition_attempts = error
+        .downcast_ref::<sqlite::BrowserDatabaseFailure>()
+        .map_or(1, |failure| failure.attempts);
+      outcome.persistent_error = Some(format!("{error:#}"));
+    }
   }
 
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
   for (path, format) in session_candidates(cookies_dir) {
     match parse_session_candidate(&path, &format, domains) {
-      Ok(cookies) => {
+      Ok(success) => {
+        let mut diagnostics = success.transient_errors;
+        diagnostics.extend(success.parsed.diagnostics);
         outcome.session_sources.push(MozillaSessionSourceOutcome {
           path,
+          format: format.format_id(),
           selected: true,
-          cookies,
+          cookies: success.parsed.cookies,
+          rows_seen: success.parsed.rows_seen,
+          rows_skipped: success.parsed.rows_skipped,
+          acquisition_attempts: success.attempts,
+          diagnostics,
           error: None,
         });
         break;
@@ -220,9 +265,14 @@ pub(crate) fn query_cookies_engine_outcome(
       Err(error) if is_missing_session_file(&error) => {}
       Err(error) => outcome.session_sources.push(MozillaSessionSourceOutcome {
         path,
+        format: format.format_id(),
         selected: false,
         cookies: Vec::new(),
-        error: Some(error.to_string()),
+        rows_seen: 0,
+        rows_skipped: 0,
+        acquisition_attempts: SESSION_STORE_READ_ATTEMPTS as u32,
+        diagnostics: Vec::new(),
+        error: Some(format!("{error:#}")),
       }),
     }
   }
@@ -260,7 +310,7 @@ fn get_authoritative_session_cookies(
 ) -> Vec<Cookie> {
   for (path, format) in session_candidates(cookies_dir) {
     match parse_session_candidate(&path, &format, domains.as_deref()) {
-      Ok(cookies) => return cookies,
+      Ok(success) => return success.parsed.cookies,
       Err(error) if is_missing_session_file(&error) => continue,
       Err(error) => log::warn!("Failed to parse Firefox session store {:?}: {error}", path),
     }
@@ -273,24 +323,36 @@ fn parse_session_candidate(
   path: &Path,
   format: &SessionStoreFormat,
   domains: Option<&[String]>,
-) -> Result<Vec<Cookie>> {
+) -> Result<SessionCandidateSuccess> {
+  parse_session_candidate_with(|| match format {
+    SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(path, domains),
+    SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(path, domains),
+  })
+}
+
+fn parse_session_candidate_with<F>(mut parse: F) -> Result<SessionCandidateSuccess>
+where
+  F: FnMut() -> Result<SessionCookieParseOutcome>,
+{
   let mut last_error = None;
+  let mut transient_errors = Vec::new();
   for attempt in 1..=SESSION_STORE_READ_ATTEMPTS {
-    let parsed = match format {
-      SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(path, domains),
-      SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(path, domains),
-    };
-    match parsed {
-      Ok(cookies) => return Ok(cookies),
+    match parse() {
+      Ok(parsed) => {
+        return Ok(SessionCandidateSuccess {
+          parsed,
+          attempts: attempt as u32,
+          transient_errors,
+        })
+      }
       Err(error) if is_missing_session_file(&error) => return Err(error),
       Err(error) => {
-        last_error = Some(error);
+        let diagnostic = format!("session acquisition/parse attempt {attempt} failed: {error:#}");
         if attempt < SESSION_STORE_READ_ATTEMPTS {
-          log::debug!(
-            "Retrying Firefox session store {:?} after an acquisition or parse failure",
-            path
-          );
+          log::debug!("Retrying Firefox session store after {diagnostic}");
+          transient_errors.push(diagnostic);
         }
+        last_error = Some(error);
       }
     }
   }
@@ -328,10 +390,46 @@ pub fn get_session_cookies(
   cookies_dir: PathBuf,
 ) -> Result<Vec<Cookie>> {
   parse_legacy_session_cookies(&cookies_dir.join("sessionstore.js"), domains.as_deref())
+    .map(|outcome| outcome.cookies)
 }
 
-fn parse_legacy_session_cookies(path: &Path, domains: Option<&[String]>) -> Result<Vec<Cookie>> {
-  let mut cookies: Vec<Cookie> = vec![];
+fn record_session_cookie(
+  outcome: &mut SessionCookieParseOutcome,
+  json_cookie: &Value,
+  location: &str,
+  domains: Option<&[String]>,
+) {
+  let domain = json_cookie
+    .get("host")
+    .and_then(|value| value.as_str())
+    .unwrap_or("");
+  if !utils::some_domain_in_host(domains, domain) {
+    return;
+  }
+  outcome.rows_seen += 1;
+  match create_cookie(json_cookie) {
+    Ok(cookie) => outcome.cookies.push(cookie),
+    Err(error) => {
+      outcome.rows_skipped += 1;
+      if outcome.diagnostics.len() < MAX_SESSION_COOKIE_DIAGNOSTICS {
+        outcome
+          .diagnostics
+          .push(format!("malformed session cookie at {location}: {error:#}"));
+      }
+    }
+  }
+}
+
+fn parse_legacy_session_cookies(
+  path: &Path,
+  domains: Option<&[String]>,
+) -> Result<SessionCookieParseOutcome> {
+  let mut outcome = SessionCookieParseOutcome {
+    cookies: Vec::new(),
+    rows_seen: 0,
+    rows_skipped: 0,
+    diagnostics: Vec::new(),
+  };
   let plain = String::from_utf8(read_stable_session_file(path)?)?;
   let json: Value = serde_json::from_str(&plain)?;
   let windows = json
@@ -339,28 +437,23 @@ fn parse_legacy_session_cookies(path: &Path, domains: Option<&[String]>) -> Resu
     .ok_or(anyhow!("no windows in json"))?
     .as_array()
     .ok_or(anyhow!("windows are not array"))?;
-  for window in windows {
+  for (window_index, window) in windows.iter().enumerate() {
     let may_cookies_json = window.get("cookies");
     if let Some(cookies_json) = may_cookies_json {
       let cookies_json = cookies_json.as_array();
       if let Some(cookies_json) = cookies_json {
-        for json_cookie in cookies_json {
-          let domain = json_cookie
-            .get("host")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-          let should_add = utils::some_domain_in_host(domains, domain);
-          if !should_add {
-            continue;
-          }
-          if let Ok(cookie) = create_cookie(json_cookie) {
-            cookies.push(cookie);
-          }
+        for (cookie_index, json_cookie) in cookies_json.iter().enumerate() {
+          record_session_cookie(
+            &mut outcome,
+            json_cookie,
+            &format!("windows[{window_index}].cookies[{cookie_index}]"),
+            domains,
+          );
         }
       }
     }
   }
-  Ok(cookies)
+  Ok(outcome)
 }
 
 #[cfg(test)]
@@ -372,10 +465,19 @@ pub fn get_session_cookies_lz4(
     &cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
     domains.as_deref(),
   )
+  .map(|outcome| outcome.cookies)
 }
 
-fn parse_session_cookies_lz4(path: &Path, domains: Option<&[String]>) -> Result<Vec<Cookie>> {
-  let mut cookies: Vec<Cookie> = vec![];
+fn parse_session_cookies_lz4(
+  path: &Path,
+  domains: Option<&[String]>,
+) -> Result<SessionCookieParseOutcome> {
+  let mut outcome = SessionCookieParseOutcome {
+    cookies: Vec::new(),
+    rows_seen: 0,
+    rows_skipped: 0,
+    diagnostics: Vec::new(),
+  };
   let compressed = read_stable_session_file(path)?;
   if !compressed.starts_with(b"mozLz40\0") {
     bail!("Invalid mozLz40 header");
@@ -387,25 +489,20 @@ fn parse_session_cookies_lz4(path: &Path, domains: Option<&[String]>) -> Result<
   let plain = String::from_utf8(decompressed)?;
   let json: Value = serde_json::from_str(&plain)?;
   let Some(cookies_json) = json.get("cookies") else {
-    return Ok(cookies);
+    return Ok(outcome);
   };
   let cookies_json = cookies_json
     .as_array()
     .ok_or(anyhow!("cookies is not list"))?;
-  for json_cookie in cookies_json {
-    let domain = json_cookie
-      .get("host")
-      .and_then(|v| v.as_str())
-      .unwrap_or("");
-    let should_add = utils::some_domain_in_host(domains, domain);
-    if !should_add {
-      continue;
-    }
-    if let Ok(cookie) = create_cookie(json_cookie) {
-      cookies.push(cookie);
-    }
+  for (cookie_index, json_cookie) in cookies_json.iter().enumerate() {
+    record_session_cookie(
+      &mut outcome,
+      json_cookie,
+      &format!("cookies[{cookie_index}]"),
+      domains,
+    );
   }
-  Ok(cookies)
+  Ok(outcome)
 }
 
 pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
@@ -838,11 +935,86 @@ mod tests {
     let outcome = query_cookies_engine_outcome(&db, None);
     assert_eq!(outcome.session_sources.len(), 2);
     assert_eq!(outcome.session_sources[0].path, invalid);
+    assert_eq!(outcome.session_sources[0].format, "firefox_session_jsonlz4");
     assert!(!outcome.session_sources[0].selected);
     assert!(outcome.session_sources[0].error.is_some());
     assert_eq!(outcome.session_sources[1].path, selected);
+    assert_eq!(outcome.session_sources[1].format, "firefox_session_jsonlz4");
     assert!(outcome.session_sources[1].selected);
     assert_eq!(outcome.session_sources[1].cookies[0].name, "recovered");
+  }
+
+  #[test]
+  fn engine_outcome_counts_and_bounds_malformed_session_cookies() {
+    let dir = unique_tmpdir("ff-engine-session-row-counts");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let malformed = (0..MAX_SESSION_COOKIE_DIAGNOSTICS + 3)
+      .map(|index| {
+        serde_json::json!({
+          "host": ".example.com",
+          "path": "/",
+          "name": format!("missing-value-{index}")
+        })
+      })
+      .collect::<Vec<_>>();
+    write_session_jsonlz4(
+      &dir.join("sessionstore-backups/recovery.jsonlz4"),
+      serde_json::Value::Array(malformed),
+    );
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    let source = &outcome.session_sources[0];
+    assert!(source.selected);
+    assert_eq!(source.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
+    assert_eq!(source.rows_skipped, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
+    assert!(source.cookies.is_empty());
+    assert_eq!(source.diagnostics.len(), MAX_SESSION_COOKIE_DIAGNOSTICS);
+    assert!(source.diagnostics[0].contains("cookies[0]"));
+    assert!(source.diagnostics[0].contains("has no value"));
+  }
+
+  #[test]
+  fn engine_outcome_labels_legacy_json_and_counts_malformed_rows() {
+    let dir = unique_tmpdir("ff-engine-legacy-row-counts");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    std::fs::write(
+      dir.join("sessionstore.js"),
+      r#"{"windows":[{"cookies":[{"host":".example.com","name":"bad"},{"host":".example.com","name":"good","value":"v"}]}]}"#,
+    )
+    .expect("write legacy session store");
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    let source = &outcome.session_sources[0];
+    assert_eq!(source.format, "firefox_session_json");
+    assert_eq!(source.rows_seen, 2);
+    assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.cookies.len(), 1);
+    assert_eq!(source.diagnostics.len(), 1);
+  }
+
+  #[test]
+  fn successful_session_retry_retains_attempt_and_transient_diagnostic() {
+    let mut attempts = 0;
+    let success = parse_session_candidate_with(|| {
+      attempts += 1;
+      if attempts == 1 {
+        bail!("Firefox session store changed while it was being read")
+      }
+      Ok(SessionCookieParseOutcome {
+        cookies: Vec::new(),
+        rows_seen: 0,
+        rows_skipped: 0,
+        diagnostics: Vec::new(),
+      })
+    })
+    .expect("second attempt succeeds");
+
+    assert_eq!(success.attempts, 2);
+    assert_eq!(success.transient_errors.len(), 1);
+    assert!(success.transient_errors[0].contains("attempt 1"));
+    assert!(success.transient_errors[0].contains("changed while it was being read"));
   }
 
   #[test]
