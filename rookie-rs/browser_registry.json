@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "platforms": {
+    "windows": [
+      {
+        "canonical_id": "chrome",
+        "aliases": [],
+        "display_name": "Google Chrome",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "chrome-stable-local",
+            "template": "{local_app_data}/Google/Chrome/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "chrome-beta-local",
+            "template": "{local_app_data}/Google/Chrome Beta/User Data",
+            "channel": "beta",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          },
+          {
+            "root_id": "chrome-dev-local",
+            "template": "{local_app_data}/Google/Chrome Dev/User Data",
+            "channel": "dev",
+            "discovery": "chromium_user_data",
+            "priority": 30
+          },
+          {
+            "root_id": "chrome-canary-local",
+            "template": "{local_app_data}/Google/Chrome SxS/User Data",
+            "channel": "canary",
+            "discovery": "chromium_user_data",
+            "priority": 40
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": ["chromium_sqlite"],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": ["legacy_dpapi", "v10", "v20"]
+        }
+      }
+    ],
+    "macos": [
+      {
+        "canonical_id": "chrome",
+        "aliases": [],
+        "display_name": "Google Chrome",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "chrome-stable",
+            "template": "{home}/Library/Application Support/Google/Chrome",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "chrome-beta",
+            "template": "{home}/Library/Application Support/Google/Chrome Beta",
+            "channel": "beta",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          },
+          {
+            "root_id": "chrome-dev",
+            "template": "{home}/Library/Application Support/Google/Chrome Dev",
+            "channel": "dev",
+            "discovery": "chromium_user_data",
+            "priority": 30
+          },
+          {
+            "root_id": "chrome-canary",
+            "template": "{home}/Library/Application Support/Google/Chrome Canary",
+            "channel": "canary",
+            "discovery": "chromium_user_data",
+            "priority": 40
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": ["chromium_sqlite"],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": ["v10"]
+        }
+      }
+    ],
+    "linux": [
+      {
+        "canonical_id": "chrome",
+        "aliases": [],
+        "display_name": "Google Chrome",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "chrome-stable",
+            "template": "{config_home}/google-chrome",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "chrome-beta",
+            "template": "{config_home}/google-chrome-beta",
+            "channel": "beta",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          },
+          {
+            "root_id": "chrome-dev",
+            "template": "{config_home}/google-chrome-unstable",
+            "channel": "dev",
+            "discovery": "chromium_user_data",
+            "priority": 30
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": ["chromium_sqlite"],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": ["v10", "v11"]
+        }
+      }
+    ]
+  }
+}

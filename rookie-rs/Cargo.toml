@@ -1,5 +1,6 @@
 [package]
 include = [
+    "browser_registry.json",
     "config.json",
     "build.rs",
     "src/**/*",
