@@ -1673,6 +1673,36 @@ impl EngineExtractionOutcome {
   }
 }
 
+/// Narrows a discovered engine outcome to the one requested profile, before any
+/// source is acquired. This mirrors what the Chromium seam does with its own
+/// `profile_id` filter, and it is the whole point of pushing the selection down
+/// here: filtering the profiles out of a finished report still reads, decrypts,
+/// and materializes cookies the caller never asked for.
+///
+/// Only the profile list is narrowed. Discovery has already completed, so the
+/// counters and discovery issues stay exactly what an unselected run reports --
+/// selecting a profile must not make the other installations look absent.
+fn select_engine_profiles(
+  outcome: &mut EngineExtractionOutcome,
+  browser_id: &str,
+  profile_id: Option<&str>,
+) -> Result<()> {
+  let Some(profile_id) = profile_id else {
+    return Ok(());
+  };
+  if !outcome
+    .profiles
+    .iter()
+    .any(|profile| profile.profile_id == profile_id)
+  {
+    bail!("unknown {browser_id} profile id {profile_id:?}")
+  }
+  outcome
+    .profiles
+    .retain(|profile| profile.profile_id == profile_id);
+  Ok(())
+}
+
 pub(crate) const GECKO_PERSISTENT_SOURCE: &str = "cookies.sqlite";
 
 fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
@@ -2033,15 +2063,38 @@ fn sort_engine_profiles(profiles: &mut [EngineProfileExtraction]) {
 fn gecko_report_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
+  profile_id: Option<&str>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtractionOutcome> {
-  let outcome = discover_gecko_with_context(context, browser_id)?;
-  Ok(populate_gecko_sources(
-    outcome,
+  gecko_report_with_query(
+    context,
+    browser_id,
+    profile_id,
     domains,
     mozilla::query_cookies_engine_outcome,
-    |path| context.fs.exists(path),
-  ))
+  )
+}
+
+/// The Gecko report with its cookie query injected, so a test can observe which
+/// profiles were actually read rather than only which ones survived into the
+/// report. Production takes the same path through
+/// [`gecko_report_with_context`], so the profile selection below is the one
+/// that ships.
+fn gecko_report_with_query<F: DiscoveryFs, Q>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<&[String]>,
+  query: Q,
+) -> Result<EngineExtractionOutcome>
+where
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaEngineExtractionOutcome,
+{
+  let mut outcome = discover_gecko_with_context(context, browser_id)?;
+  select_engine_profiles(&mut outcome, browser_id, profile_id)?;
+  Ok(populate_gecko_sources(outcome, domains, query, |path| {
+    context.fs.exists(path)
+  }))
 }
 
 fn populate_gecko_sources<Q, E>(
@@ -2127,10 +2180,11 @@ where
 
 pub(crate) fn gecko_report(
   browser_id: &str,
+  profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
-  gecko_report_with_context(&context, browser_id, domains.as_deref())
+  gecko_report_with_context(&context, browser_id, profile_id, domains.as_deref())
 }
 
 /// Resolves the installation roots an engine adapter should walk, in the fixed
@@ -2315,15 +2369,35 @@ fn discover_safari_with_context<F: DiscoveryFs>(
 fn safari_report_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
+  profile_id: Option<&str>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtractionOutcome> {
+  safari_report_with_query(context, browser_id, profile_id, domains, |path, domains| {
+    super::safari::safari_based_outcome(path.to_path_buf(), domains.map(<[String]>::to_vec))
+  })
+}
+
+/// The Safari report with its cookie reader injected, for the same reason the
+/// Gecko seam takes one: a test must be able to see that a non-selected
+/// profile's cookie file was never opened, which absence from the report cannot
+/// show. [`safari_report_with_context`] is the production caller.
+#[cfg(any(target_os = "macos", test))]
+fn safari_report_with_query<F, Q>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<&[String]>,
+  mut query: Q,
+) -> Result<EngineExtractionOutcome>
+where
+  F: DiscoveryFs,
+  Q: FnMut(&Path, Option<&[String]>) -> Result<super::safari::SafariFileExtraction>,
+{
   let mut outcome = discover_safari_with_context(context, browser_id)?;
+  select_engine_profiles(&mut outcome, browser_id, profile_id)?;
   for profile in &mut outcome.profiles {
     for source in &mut profile.sources {
-      match super::safari::safari_based_outcome(
-        source.path.clone(),
-        domains.map(<[String]>::to_vec),
-      ) {
+      match query(&source.path, domains) {
         Ok(extraction) => {
           source.rows_seen = extraction.stats.records_seen;
           source.rows_skipped = extraction.stats.records_skipped;
@@ -2353,10 +2427,11 @@ fn safari_report_with_context<F: DiscoveryFs>(
 #[cfg(target_os = "macos")]
 pub(crate) fn safari_report(
   browser_id: &str,
+  profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
-  safari_report_with_context(&context, browser_id, domains.as_deref())
+  safari_report_with_context(&context, browser_id, profile_id, domains.as_deref())
 }
 
 #[cfg(target_os = "macos")]
@@ -2474,6 +2549,7 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
 fn internet_explorer_report_with_context<F, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
+  profile_id: Option<&str>,
   domains: Option<&[String]>,
   mut query: Q,
 ) -> Result<EngineExtractionOutcome>
@@ -2482,6 +2558,7 @@ where
   Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
 {
   let mut outcome = discover_internet_explorer_with_context(context, browser_id)?;
+  select_engine_profiles(&mut outcome, browser_id, profile_id)?;
   for profile in &mut outcome.profiles {
     for source in &mut profile.sources {
       match query(&source.path, domains) {
@@ -2511,12 +2588,14 @@ pub(crate) fn internet_explorer_profiles(browser_id: &str) -> Result<EngineExtra
 #[cfg(target_os = "windows")]
 pub(crate) fn internet_explorer_report(
   browser_id: &str,
+  profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
   internet_explorer_report_with_context(
     &context,
     browser_id,
+    profile_id,
     domains.as_deref(),
     |path, domains| {
       super::internet_explorer::internet_explorer_outcome(
@@ -2695,9 +2774,36 @@ pub(crate) mod test_seams {
   pub(crate) fn gecko_report(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
+    profile_id: Option<&str>,
     domains: Option<&[String]>,
   ) -> Result<EngineExtractionOutcome> {
-    gecko_report_with_context(context, browser_id, domains)
+    gecko_report_with_context(context, browser_id, profile_id, domains)
+  }
+
+  /// Like `gecko_report`, but calls `on_before_query` once per profile right
+  /// before its database/session read, so a test can mutate the filesystem in
+  /// between discovery and query to simulate a source that vanishes in the
+  /// race window - the same seam `populate_gecko_sources`'s own unit tests use,
+  /// exposed for tests that need the full discover-then-query pipeline.
+  pub(crate) fn gecko_report_with_race<R>(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    domains: Option<&[String]>,
+    mut on_before_query: R,
+  ) -> Result<EngineExtractionOutcome>
+  where
+    R: FnMut(&Path),
+  {
+    let discovery = discover_gecko_with_context(context, browser_id)?;
+    Ok(populate_gecko_sources(
+      discovery,
+      domains,
+      |persistent, domains| {
+        on_before_query(persistent);
+        mozilla::query_cookies_engine_outcome(persistent, domains)
+      },
+      |path| context.fs.exists(path),
+    ))
   }
 
   pub(crate) fn gecko_profiles(
@@ -2710,21 +2816,23 @@ pub(crate) mod test_seams {
   pub(crate) fn safari_report(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
+    profile_id: Option<&str>,
     domains: Option<&[String]>,
   ) -> Result<EngineExtractionOutcome> {
-    safari_report_with_context(context, browser_id, domains)
+    safari_report_with_context(context, browser_id, profile_id, domains)
   }
 
   pub(crate) fn internet_explorer_report<Q>(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
+    profile_id: Option<&str>,
     domains: Option<&[String]>,
     query: Q,
   ) -> Result<EngineExtractionOutcome>
   where
     Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
   {
-    internet_explorer_report_with_context(context, browser_id, domains, query)
+    internet_explorer_report_with_context(context, browser_id, profile_id, domains, query)
   }
 }
 
@@ -3737,6 +3845,55 @@ mod tests {
       .is_some_and(|error| error.contains("Can't resolve database path")));
   }
 
+  /// The admission gate (`gecko_profile_has_source`) guarantees a session-only
+  /// profile had a session candidate on disk at discovery time. If that
+  /// candidate is gone by query time, this layer intentionally leaves the
+  /// profile with zero sources rather than fabricating one for a file that no
+  /// longer exists - see `mozilla::a_candidate_that_vanishes_after_a_transient_failure_stays_silent`.
+  /// Distinguishing "vanished" from "never existed" is therefore left to the
+  /// report layer, which can see the whole profile rather than one candidate;
+  /// `report_build::a_gecko_session_candidate_that_vanishes_before_query_is_failed_not_absent`
+  /// pins that it does so correctly.
+  #[test]
+  fn session_only_profile_whose_candidate_vanishes_before_query_has_no_sources_at_this_layer() {
+    let temp = TempDir::new("gecko-session-vanishes");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    let session_file = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(&session_file, b"discoverable but will vanish before query")
+      .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert_eq!(
+      discovery.profiles.len(),
+      1,
+      "profile admitted as session-only"
+    );
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |persistent, domains| {
+        // The persistent DB never existed; the race is on the session file,
+        // which we remove right before the engine would read it.
+        let _ = std::fs::remove_file(&session_file);
+        mozilla::query_cookies_engine_outcome(persistent, domains)
+      },
+      |path| path.exists(),
+    );
+
+    assert_eq!(report.profiles.len(), 1);
+    assert!(report.profiles[0].sources.is_empty());
+  }
+
   #[test]
   fn generic_gecko_discovery_includes_session_only_profiles() {
     let temp = TempDir::new("gecko-session-only");
@@ -3818,7 +3975,7 @@ mod tests {
     )
     .expect("write valid session candidate");
 
-    let report = gecko_report_with_context(&context, "firefox", None).expect("report");
+    let report = gecko_report_with_context(&context, "firefox", None, None).expect("report");
     assert!(report.discovery_issues.is_empty());
     assert_eq!(report.profiles.len(), 1);
     let sources = &report.profiles[0].sources;
@@ -3842,6 +3999,180 @@ mod tests {
     assert_eq!(sources[2].diagnostics.len(), 1);
     assert_eq!(sources[2].cookies[0].name, "session-a");
     assert_eq!(sources[2].cookies[1].name, "session-z");
+  }
+
+  /// A profile-selected report must not read the profiles it was not asked
+  /// for. The non-Chromium engines used to extract every profile and drop the
+  /// unwanted ones from the finished report, which decrypts and materializes
+  /// cookies outside the request. Absence from the report cannot tell that
+  /// apart from work that never happened, so these three tests count the
+  /// cookie-store reads instead.
+  #[test]
+  fn a_profile_selected_gecko_report_reads_only_the_selected_profile() {
+    let temp = TempDir::new("gecko-profile-selection");
+    let context = test_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "firefox");
+    test_seams::seed_gecko_profile(&root.join("Profiles/default"));
+    test_seams::seed_gecko_profile(&root.join("Profiles/other"));
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/default\nDefault=1\n\
+       [Profile1]\nName=other\nIsRelative=1\nPath=Profiles/other\n",
+    )
+    .expect("write profiles.ini");
+
+    let all = gecko_report_with_context(&context, "firefox", None, None).expect("full report");
+    assert_eq!(all.profiles.len(), 2);
+    // Deliberately not the first profile: reading only the first one would
+    // otherwise pass for the wrong reason.
+    let selected = all.profiles[1].profile_id.clone();
+    let selected_source = all.profiles[1].path.join(GECKO_PERSISTENT_SOURCE);
+
+    let mut read = Vec::new();
+    let one = gecko_report_with_query(
+      &context,
+      "firefox",
+      Some(&selected),
+      None,
+      |path, domains| {
+        read.push(path.to_path_buf());
+        mozilla::query_cookies_engine_outcome(path, domains)
+      },
+    )
+    .expect("profile-selected report");
+
+    assert_eq!(read, vec![selected_source]);
+    assert_eq!(one.profiles.len(), 1);
+    assert_eq!(one.profiles[0].profile_id, selected);
+    // Discovery still ran across every installation, so the counters a
+    // profile-selected report publishes are unchanged.
+    assert_eq!(one.installations_discovered, all.installations_discovered);
+
+    let unknown = gecko_report_with_context(&context, "firefox", Some("not-a-profile"), None)
+      .expect_err("an unknown profile id is a request error");
+    assert!(unknown.to_string().contains("unknown firefox profile id"));
+  }
+
+  #[test]
+  fn a_profile_selected_safari_report_reads_only_the_selected_profile() {
+    const NAMED_PROFILE_UUID: &str = "01234567-89AB-CDEF-0123-456789ABCDEF";
+
+    let temp = TempDir::new("safari-profile-selection");
+    let context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&context, "safari");
+    let data = library.join("Containers/com.apple.Safari/Data/Library");
+    let seed = |directory: PathBuf| {
+      std::fs::create_dir_all(&directory).expect("create Safari cookie directory");
+      let path = directory.join(SAFARI_COOKIE_FILE);
+      std::fs::write(&path, b"cook\x00\x00\x00\x00").expect("seed Safari cookie file");
+      path
+    };
+    seed(data.join("Cookies"));
+    // No profile database, so named profiles come from the directory fallback.
+    std::fs::create_dir_all(data.join(format!("Safari/Profiles/{NAMED_PROFILE_UUID}")))
+      .expect("create Safari profile marker directory");
+    let named_source = seed(data.join(format!(
+      "WebKit/WebsiteDataStore/{}/WebsiteData/Cookies",
+      NAMED_PROFILE_UUID.to_ascii_lowercase()
+    )))
+    .canonicalize()
+    .expect("canonical named Safari source");
+
+    let all = safari_report_with_context(&context, "safari", None, None).expect("full report");
+    assert_eq!(all.profiles.len(), 2);
+    let selected = all.profiles[1].profile_id.clone();
+    assert_eq!(all.profiles[1].sources[0].path, named_source);
+
+    let mut read = Vec::new();
+    let one = safari_report_with_query(
+      &context,
+      "safari",
+      Some(&selected),
+      None,
+      |path, domains| {
+        read.push(path.to_path_buf());
+        crate::browser::safari::safari_based_outcome(
+          path.to_path_buf(),
+          domains.map(<[String]>::to_vec),
+        )
+      },
+    )
+    .expect("profile-selected report");
+
+    assert_eq!(read, vec![named_source]);
+    assert_eq!(one.profiles.len(), 1);
+    assert_eq!(one.profiles[0].profile_id, selected);
+    assert_eq!(one.installations_discovered, all.installations_discovered);
+
+    let unknown = safari_report_with_context(&context, "safari", Some("not-a-profile"), None)
+      .expect_err("an unknown profile id is a request error");
+    assert!(unknown.to_string().contains("unknown safari profile id"));
+  }
+
+  #[test]
+  fn a_profile_selected_internet_explorer_report_reads_only_the_selected_profile() {
+    let temp = TempDir::new("ie-profile-selection");
+    let home = temp.path().to_path_buf();
+    let context = test_context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    // A WebCache root is its own profile, so two roots are two profiles.
+    let roots = test_seams::resolvable_root_paths(&context, "internet_explorer");
+    assert_eq!(roots.len(), 2, "IE must declare two WebCache roots");
+    for root in &roots {
+      std::fs::create_dir_all(root).expect("create WebCache root");
+      std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+        .expect("seed WebCache database");
+    }
+    let rows = |_: &Path, _: Option<&[String]>| {
+      Ok(InternetExplorerRows {
+        cookies: Vec::new(),
+        records_seen: 0,
+        records_skipped: 0,
+      })
+    };
+
+    let all =
+      internet_explorer_report_with_context(&context, "internet_explorer", None, None, rows)
+        .expect("full report");
+    assert_eq!(all.profiles.len(), 2);
+    let selected = all.profiles[1].profile_id.clone();
+    let selected_source = all.profiles[1].sources[0].path.clone();
+
+    let mut read = Vec::new();
+    let one = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      Some(&selected),
+      None,
+      |path, domains| {
+        read.push(path.to_path_buf());
+        rows(path, domains)
+      },
+    )
+    .expect("profile-selected report");
+
+    assert_eq!(read, vec![selected_source]);
+    assert_eq!(one.profiles.len(), 1);
+    assert_eq!(one.profiles[0].profile_id, selected);
+    assert_eq!(one.installations_discovered, all.installations_discovered);
+
+    let unknown = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      Some("not-a-profile"),
+      None,
+      rows,
+    )
+    .expect_err("an unknown profile id is a request error");
+    assert!(unknown
+      .to_string()
+      .contains("unknown internet_explorer profile id"));
   }
 
   #[test]
@@ -4191,7 +4522,8 @@ mod tests {
     )
     .expect("write session candidate");
 
-    let report = gecko_report_with_context(&context, "firefox", None).expect("session-only report");
+    let report =
+      gecko_report_with_context(&context, "firefox", None, None).expect("session-only report");
     assert_eq!(report.profiles.len(), 1);
     let sources = &report.profiles[0].sources;
     // A profile with no cookies.sqlite must not fabricate a failed persistent
@@ -4831,7 +5163,7 @@ mod tests {
 
   #[cfg(target_os = "macos")]
   #[test]
-  fn macos_missing_key_configuration_surfaces_as_profile_error_not_silent_empty() {
+  fn macos_missing_key_configuration_surfaces_as_row_issue_not_silent_empty() {
     let temp = TempDir::new("macos-missing-key-config");
     let home = temp.path().join("home");
     let context = test_context_for(PlatformId::Macos, home, []);
@@ -4874,21 +5206,31 @@ mod tests {
         extraction.cookies.is_empty(),
         "{browser_id} must not report undecryptable rows as cookies"
       );
-      let failure = extraction
-        .failure
-        .as_ref()
-        .unwrap_or_else(|| panic!("{browser_id} must surface an error, not silently empty output"));
-      let error = match failure {
-        ChromiumProfileFailure::Extraction(message) => message.as_str(),
-        ChromiumProfileFailure::NoSource => {
-          panic!("{browser_id} must surface an extraction error, not NoSource")
-        }
-      };
-      assert!(
-        error.contains(browser_id) && error.contains("no macOS keychain identity"),
-        "{browser_id} error must name the browser and its cause, got {error:?}"
+      assert_eq!(
+        extraction.stats,
+        ChromiumExtractionStats {
+          rows_seen: 1,
+          cookies_emitted: 0,
+          rows_skipped: 1,
+        },
+        "{browser_id} must count the row rejected by the missing provider"
       );
-      assert!(error.contains("v10 key provider failed"));
+      assert_eq!(
+        extraction.failure, None,
+        "a rejected row does not make the successfully queried source fail"
+      );
+      assert_eq!(
+        extraction.row_issues.len(),
+        1,
+        "{browser_id} must surface the rejected row instead of silently returning empty output"
+      );
+      let issue = &extraction.row_issues[0];
+      assert_eq!(
+        issue.code,
+        crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed
+      );
+      assert_eq!(issue.occurrences, 1);
+      assert_eq!(issue.samples, vec!["row 1".to_owned()]);
     }
   }
 
