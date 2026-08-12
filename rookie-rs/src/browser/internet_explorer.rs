@@ -11,8 +11,31 @@ pub fn internet_explorer_based(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
+  internet_explorer_outcome(db_path, domains, force_kill).map(|outcome| outcome.cookies)
+}
+
+/// Record accounting for the private cross-engine report. The legacy
+/// [`internet_explorer_based`] projection deliberately discards it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InternetExplorerExtractionStats {
+  pub(crate) records_seen: usize,
+  pub(crate) records_skipped: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct InternetExplorerExtraction {
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) stats: InternetExplorerExtractionStats,
+}
+
+pub(crate) fn internet_explorer_outcome(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<InternetExplorerExtraction> {
   let db = open_database(&db_path, force_kill)?;
   let mut cookies = Vec::new();
+  let mut stats = InternetExplorerExtractionStats::default();
 
   for table in db
     .iter_tables()
@@ -40,11 +63,20 @@ pub fn internet_explorer_based(
         .and_then(|record| read_cookie_record(&record, columns))
         .and_then(|record| record.into_cookie(domains.as_deref()));
 
+      // Section 5.7 counts rows *relevant to the request*, so a record the
+      // domain filter excluded was never seen for reporting purposes. A record
+      // that failed before it could be tested still counts: it might have
+      // matched.
       match cookie {
-        Ok(Some(cookie)) => cookies.push(cookie),
+        Ok(Some(cookie)) => {
+          stats.records_seen += 1;
+          cookies.push(cookie)
+        }
         Ok(None) => {}
         Err(error) => {
+          stats.records_seen += 1;
           skipped_records += 1;
+          stats.records_skipped += 1;
           log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
         }
       }
@@ -55,7 +87,7 @@ pub fn internet_explorer_based(
     }
   }
 
-  Ok(cookies)
+  Ok(InternetExplorerExtraction { cookies, stats })
 }
 
 fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {

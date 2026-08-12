@@ -159,7 +159,7 @@ fn query_persistent_cookies(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionStoreFormat {
+pub(crate) enum SessionStoreFormat {
   JsonLz4,
   LegacyJson,
 }
@@ -172,7 +172,7 @@ pub(crate) const SESSION_JSONLZ4_FORMAT_ID: &str = "firefox_session_jsonlz4";
 pub(crate) const SESSION_JSON_FORMAT_ID: &str = "firefox_session_json";
 
 impl SessionStoreFormat {
-  fn format_id(self) -> &'static str {
+  pub(crate) fn format_id(self) -> &'static str {
     match self {
       Self::JsonLz4 => SESSION_JSONLZ4_FORMAT_ID,
       Self::LegacyJson => SESSION_JSON_FORMAT_ID,
@@ -180,7 +180,36 @@ impl SessionStoreFormat {
   }
 }
 
+/// Section 7 session candidates in authoritative order, as profile-relative
+/// paths. This is the single source of truth: extraction attempts them in this
+/// order and registry discovery lists them in this order, so a candidate can
+/// never be added to one and missed by the other.
+pub(crate) const SESSION_CANDIDATES: [(&str, SessionStoreFormat); 5] = [
+  (
+    "sessionstore-backups/recovery.jsonlz4",
+    SessionStoreFormat::JsonLz4,
+  ),
+  (
+    "sessionstore-backups/recovery.baklz4",
+    SessionStoreFormat::JsonLz4,
+  ),
+  ("sessionstore.jsonlz4", SessionStoreFormat::JsonLz4),
+  ("sessionstore.js", SessionStoreFormat::LegacyJson),
+  (
+    "sessionstore-backups/previous.jsonlz4",
+    SessionStoreFormat::JsonLz4,
+  ),
+];
+
+/// Declared precedence of a session candidate at `index` in
+/// [`SESSION_CANDIDATES`], so reports order attempted candidates by declaration
+/// rather than by which ones happened to exist.
+pub(crate) fn session_candidate_precedence(index: usize) -> u16 {
+  SESSION_CANDIDATE_PRECEDENCE_STEP.saturating_mul(index as u16 + 1)
+}
+
 const SESSION_STORE_READ_ATTEMPTS: usize = 2;
+const SESSION_CANDIDATE_PRECEDENCE_STEP: u16 = 10;
 const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
 
 #[derive(Debug)]
@@ -214,6 +243,10 @@ struct SessionCandidateFailure {
 pub(crate) struct MozillaSessionSourceOutcome {
   pub(crate) path: PathBuf,
   pub(crate) format: &'static str,
+  /// Declared candidate precedence from [`session_candidates`], retained so a
+  /// report orders attempted candidates by declaration rather than by which
+  /// ones happened to exist.
+  pub(crate) precedence: u16,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) rows_seen: usize,
@@ -230,11 +263,18 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   pub(crate) persistent_rows_skipped: usize,
   pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
   pub(crate) persistent_acquisition_attempts: u32,
-  /// Set only when the persistent source could not be read at all. A source
-  /// that produced rows is never reported through this field, so a caller can
-  /// distinguish total failure from partial success.
+  /// Acquisition, schema validation, or the query did not complete, so the
+  /// source failed outright. A source that produced rows is never reported
+  /// through this field, so a caller can tell total failure from partial
+  /// success.
   pub(crate) persistent_error: Option<String>,
-  /// Set when individual rows failed while the source itself was readable.
+  /// Which of those it was, taken from the SQLite layer's typed failure rather
+  /// than assumed.
+  pub(crate) persistent_failure_kind: Option<sqlite::BrowserDatabaseFailureKind>,
+  /// A row was seen and rejected while the source itself stayed readable.
+  /// Section 5.7 counts this in `rows_skipped` and reports it as a row issue
+  /// against a source that still succeeded, which is why it is deliberately
+  /// separate from `persistent_error`.
   pub(crate) persistent_row_error: Option<String>,
   pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
 }
@@ -263,6 +303,7 @@ pub(crate) fn query_cookies_engine_outcome(
       if let Some(failure) = error.downcast_ref::<sqlite::BrowserDatabaseFailure>() {
         outcome.persistent_acquisition_strategy = failure.strategy;
         outcome.persistent_acquisition_attempts = failure.attempts;
+        outcome.persistent_failure_kind = Some(failure.kind);
       } else {
         outcome.persistent_acquisition_attempts = 1;
       }
@@ -271,7 +312,8 @@ pub(crate) fn query_cookies_engine_outcome(
   }
 
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
-  for (path, format) in session_candidates(cookies_dir) {
+  for (index, (path, format)) in session_candidates(cookies_dir).into_iter().enumerate() {
+    let precedence = session_candidate_precedence(index);
     match parse_session_candidate(&path, &format, domains) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
@@ -279,6 +321,7 @@ pub(crate) fn query_cookies_engine_outcome(
         outcome.session_sources.push(MozillaSessionSourceOutcome {
           path,
           format: format.format_id(),
+          precedence,
           selected: true,
           cookies: success.parsed.cookies,
           rows_seen: success.parsed.rows_seen,
@@ -296,6 +339,7 @@ pub(crate) fn query_cookies_engine_outcome(
       Err(failure) => outcome.session_sources.push(MozillaSessionSourceOutcome {
         path,
         format: format.format_id(),
+        precedence,
         selected: false,
         cookies: Vec::new(),
         rows_seen: 0,
@@ -310,28 +354,7 @@ pub(crate) fn query_cookies_engine_outcome(
 }
 
 fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
-  [
-    (
-      cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-    (
-      cookies_dir.join("sessionstore-backups/recovery.baklz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-    (
-      cookies_dir.join("sessionstore.jsonlz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-    (
-      cookies_dir.join("sessionstore.js"),
-      SessionStoreFormat::LegacyJson,
-    ),
-    (
-      cookies_dir.join("sessionstore-backups/previous.jsonlz4"),
-      SessionStoreFormat::JsonLz4,
-    ),
-  ]
+  SESSION_CANDIDATES.map(|(relative, format)| (cookies_dir.join(relative), format))
 }
 
 fn get_authoritative_session_cookies(
@@ -1000,8 +1023,8 @@ mod tests {
       Some(sqlite::DatabaseAcquisitionStrategy::LiveReadOnly)
     );
     assert_eq!(outcome.persistent_acquisition_attempts, 1);
-    // A rejected row is a partial success: the source itself was readable, so
-    // only the row-level field is set.
+    // A rejected row is a partial success: the source itself was readable and
+    // returned its good cookies, so only the row-level field is set.
     assert!(outcome.persistent_row_error.is_some());
     assert!(outcome.persistent_error.is_none());
   }
