@@ -21,6 +21,7 @@ mod browser;
 pub use anyhow::{self, Result};
 use anyhow::{bail, Context};
 use common::paths;
+#[cfg(unix)]
 use config::Browser;
 use enums::Cookie;
 #[cfg(target_os = "linux")]
