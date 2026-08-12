@@ -24,7 +24,10 @@ pub fn get_osx_keychain_password(
   match cmd {
     Ok(output) => {
       if output.status.success() {
-        let password = String::from_utf8(output.stdout)?;
+        // Wrap the raw output immediately: `trim().to_string()` below copies
+        // into a second allocation, and without this wrapper the original
+        // (untrimmed) plaintext password would be dropped unzeroized.
+        let password = Zeroizing::new(String::from_utf8(output.stdout)?);
         Ok(Zeroizing::new(password.trim().to_string()))
       } else {
         bail!("Failed to retrieve password from OSX Keychain")
