@@ -1908,7 +1908,6 @@ fn gecko_report_with_context<F: DiscoveryFs>(
   Ok(populate_gecko_sources(
     outcome,
     domains,
-    |path| context.fs.exists(path),
     mozilla::query_cookies_engine_outcome,
     |path| context.fs.exists(path),
   ))
@@ -3232,7 +3231,6 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
-      |path| path.exists(),
       |persistent, domains| {
         if !created {
           created = true;
@@ -3240,6 +3238,7 @@ mod tests {
         }
         mozilla::query_cookies_engine_outcome(persistent, domains)
       },
+      |path| path.exists(),
     );
     let persistent = report.profiles[0]
       .sources
@@ -3273,7 +3272,6 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
-      |path| path.exists(),
       |persistent, domains| {
         if !created {
           created = true;
@@ -3281,6 +3279,7 @@ mod tests {
         }
         mozilla::query_cookies_engine_outcome(persistent, domains)
       },
+      |path| path.exists(),
     );
     let persistent = report.profiles[0]
       .sources
@@ -3309,8 +3308,8 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
-      |path| path.exists(),
       mozilla::query_cookies_engine_outcome,
+      |path| path.exists(),
     );
     assert!(!report.profiles[0]
       .sources
@@ -3557,7 +3556,7 @@ mod tests {
     let temp = TempDir::new("gecko-canonicalize-bound");
     let real_context = test_context(temp.path().to_path_buf());
     let root = gecko_test_root(&real_context);
-    let declarations = MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 5;
+    let declarations = MAX_DISCOVERY_ISSUE_SAMPLES + 5;
     let mut ini = String::new();
     for index in 0..declarations {
       let profile = root.join(format!("Profiles/broken-{index}"));
@@ -3597,9 +3596,17 @@ mod tests {
       .iter()
       .filter(|issue| issue.code == "profile_canonicalize_failed")
       .collect::<Vec<_>>();
-    assert_eq!(issues.len(), MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1);
-    let summary = issues.last().expect("overflow summary");
-    assert!(summary.message.contains("additional 5"));
+    // Bounded to the sample cap, with the unsampled remainder carried as a
+    // typed count on the first retained sample rather than formatted into a
+    // message and parsed back out.
+    assert_eq!(issues.len(), MAX_DISCOVERY_ISSUE_SAMPLES);
+    assert_eq!(
+      issues.iter().map(|issue| issue.occurrences).sum::<u32>(),
+      declarations as u32
+    );
+    assert!(issues
+      .iter()
+      .all(|issue| !issue.message.contains("additional")));
   }
 
   #[test]
