@@ -741,8 +741,9 @@ pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<Profil
           .collect::<Vec<_>>();
         sort_source_descriptors(&mut sources);
         ProfileDescriptor {
-          // Default-first ordering is applied by each engine's discovery, so
-          // the first profile of an installation is its default.
+          // Carried from discovery rather than inferred from position: engines
+          // sort default-first, but that is presentation, and a later ordering
+          // change must not silently rename which profile is the default.
           is_default: engine.is_default,
           profile: engine.profile,
           sources,
