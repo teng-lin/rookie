@@ -31,6 +31,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   MACOSX_DEPLOYMENT_TARGET: '10.13'
+  # JavaScript actions run on Node 24. Trust certificates installed in the
+  # hosted runner's system store when downloading maturin and other tools.
+  NODE_OPTIONS: --use-system-ca
 
 jobs:
   build:

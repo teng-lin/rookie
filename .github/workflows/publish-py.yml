@@ -16,6 +16,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # JavaScript actions run on Node 24. Trust certificates installed in the
+  # hosted runner's system store when downloading maturin and other tools.
+  NODE_OPTIONS: --use-system-ca
   RELEASE_VERSION: ${{ inputs.version }}
 
 jobs:
