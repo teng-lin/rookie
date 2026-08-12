@@ -16,6 +16,7 @@ use super::chromium_platform_keys::LinuxPlatformKeyProvider;
 use super::chromium_platform_keys::MacosPlatformKeyProvider;
 #[cfg(target_os = "windows")]
 use super::chromium_platform_keys::WindowsPlatformKeyProvider;
+use super::mozilla;
 use crate::common::enums::Cookie;
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::Lazy;
@@ -49,6 +50,8 @@ struct BrowserDefinition {
 #[serde(rename_all = "snake_case")]
 enum BrowserEngine {
   Chromium,
+  Gecko,
+  InternetExplorer,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +110,8 @@ struct InstallationRoot {
 #[serde(rename_all = "snake_case")]
 enum DiscoveryStrategy {
   ChromiumUserData,
+  MozillaProfilesIni,
+  InternetExplorerWebCache,
 }
 
 static REGISTRY: Lazy<std::result::Result<Registry, String>> = Lazy::new(|| {
@@ -757,6 +762,12 @@ fn discover_browser_with_context<F: DiscoveryFs>(
           }
         }
       }
+      DiscoveryStrategy::MozillaProfilesIni | DiscoveryStrategy::InternetExplorerWebCache => {
+        bail!(
+          "Chromium browser {:?} has incompatible discovery strategy",
+          definition.canonical_id
+        )
+      }
     }
     discovery.installations.push(installation);
   }
@@ -1046,6 +1057,222 @@ pub(crate) fn chrome_profile(
   )
 }
 
+/// Source-level outcome shared by the non-Chromium adapters. It is deliberately
+/// crate-private: 4E owns the final cross-engine DTO freeze.
+#[derive(Debug)]
+pub(crate) struct EngineSourceExtraction {
+  pub(crate) path: PathBuf,
+  pub(crate) format: &'static str,
+  pub(crate) selected: bool,
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) rows_seen: usize,
+  pub(crate) rows_skipped: usize,
+  pub(crate) error: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EngineProfileExtraction {
+  pub(crate) profile_id: String,
+  pub(crate) installation_id: String,
+  pub(crate) path: PathBuf,
+  pub(crate) is_default: bool,
+  pub(crate) sources: Vec<EngineSourceExtraction>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EngineExtractionOutcome {
+  pub(crate) profiles: Vec<EngineProfileExtraction>,
+  pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+}
+
+fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
+  context.fs.exists(&path.join("cookies.sqlite"))
+    || [
+      "sessionstore-backups/recovery.jsonlz4",
+      "sessionstore-backups/recovery.baklz4",
+      "sessionstore.jsonlz4",
+      "sessionstore.js",
+      "sessionstore-backups/previous.jsonlz4",
+    ]
+    .iter()
+    .any(|relative| context.fs.exists(&path.join(relative)))
+}
+
+fn discover_gecko_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+) -> Result<EngineExtractionOutcome> {
+  let registry = embedded_registry()?;
+  let definition = browser_definition(registry, context.platform, browser_id)?;
+  if definition.engine != BrowserEngine::Gecko {
+    bail!("browser {browser_id:?} is not a Gecko browser")
+  }
+  let mut roots: Vec<&InstallationRoot> = definition.roots.iter().collect();
+  roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
+  let mut seen_profiles = HashSet::new();
+  let mut outcome = EngineExtractionOutcome::default();
+
+  for root in roots {
+    if root.discovery != DiscoveryStrategy::MozillaProfilesIni {
+      continue;
+    }
+    let Some(root_path) = context.resolve_template(&root.template) else {
+      continue;
+    };
+    if !context.fs.is_dir(&root_path) {
+      continue;
+    }
+    let canonical_root = match context.fs.canonicalize(&root_path) {
+      Ok(path) => path,
+      Err(error) => {
+        outcome.discovery_issues.push(DiscoveryIssue {
+          code: "installation_canonicalize_failed",
+          path: root_path,
+          message: error.to_string(),
+        });
+        continue;
+      }
+    };
+    let installation_id = installation_id(
+      &definition.canonical_id,
+      &root.root_id,
+      &root.channel,
+      &normalized_path_bytes(&canonical_root),
+    );
+    let ini_path = canonical_root.join("profiles.ini");
+    let mut declared = if context.fs.exists(&ini_path) {
+      match mozilla::list_profiles(&ini_path) {
+        Ok(profiles) => profiles,
+        Err(error) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "mozilla_profiles_ini_invalid",
+            path: ini_path,
+            message: error.to_string(),
+          });
+          Vec::new()
+        }
+      }
+    } else {
+      Vec::new()
+    };
+    if declared.is_empty() && gecko_profile_has_source(context, &canonical_root) {
+      declared.push(mozilla::MozillaProfile {
+        name: String::new(),
+        path: canonical_root.clone(),
+        is_default: true,
+      });
+    }
+    for declared_profile in declared {
+      if !gecko_profile_has_source(context, &declared_profile.path) {
+        continue;
+      }
+      let profile_path = match context.fs.canonicalize(&declared_profile.path) {
+        Ok(path) => path,
+        Err(error) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "profile_canonicalize_failed",
+            path: declared_profile.path,
+            message: error.to_string(),
+          });
+          continue;
+        }
+      };
+      if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
+        continue;
+      }
+      let locator = profile_path
+        .strip_prefix(&canonical_root)
+        .map(ProfileLocator::Relative)
+        .unwrap_or(ProfileLocator::Absolute(&profile_path));
+      outcome.profiles.push(EngineProfileExtraction {
+        profile_id: profile_id(&installation_id, locator),
+        installation_id: installation_id.clone(),
+        path: profile_path,
+        is_default: declared_profile.is_default,
+        sources: Vec::new(),
+      });
+    }
+  }
+  outcome
+    .profiles
+    .sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
+  Ok(outcome)
+}
+
+/// Crate-private generic Gecko report seam. It deliberately does not call the
+/// legacy wrapper, so it can retain every invalid session candidate and can
+/// surface a session-only profile without changing `firefox_profiles()`.
+fn gecko_report_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  domains: Option<&[String]>,
+) -> Result<EngineExtractionOutcome> {
+  let mut outcome = discover_gecko_with_context(context, browser_id)?;
+  for profile in &mut outcome.profiles {
+    let persistent = profile.path.join("cookies.sqlite");
+    if context.fs.exists(&persistent) {
+      let extraction = mozilla::query_cookies_engine_outcome(&persistent, domains);
+      profile.sources.push(EngineSourceExtraction {
+        path: persistent,
+        format: "mozilla_sqlite",
+        selected: true,
+        rows_seen: extraction.persistent_rows_seen,
+        rows_skipped: extraction.persistent_rows_skipped,
+        cookies: extraction.persistent_cookies,
+        error: extraction.persistent_error,
+      });
+      profile
+        .sources
+        .extend(
+          extraction
+            .session_sources
+            .into_iter()
+            .map(|source| EngineSourceExtraction {
+              path: source.path,
+              format: "firefox_session",
+              selected: source.selected,
+              rows_seen: source.cookies.len(),
+              rows_skipped: 0,
+              cookies: source.cookies,
+              error: source.error,
+            }),
+        );
+    } else {
+      // `query_cookies_engine_outcome` is also the session adapter; passing a
+      // missing persistent source records no fake persistent failure.
+      let extraction = mozilla::query_cookies_engine_outcome(&persistent, domains);
+      profile
+        .sources
+        .extend(
+          extraction
+            .session_sources
+            .into_iter()
+            .map(|source| EngineSourceExtraction {
+              path: source.path,
+              format: "firefox_session",
+              selected: source.selected,
+              rows_seen: source.cookies.len(),
+              rows_skipped: 0,
+              cookies: source.cookies,
+              error: source.error,
+            }),
+        );
+    }
+  }
+  Ok(outcome)
+}
+
+/// Crate-private generic Gecko report seam. It deliberately does not call the
+/// legacy wrapper, so it can retain every invalid session candidate and can
+/// surface a session-only profile without changing `firefox_profiles()`.
+pub(crate) fn gecko_report(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  gecko_report_with_context(&context, browser_id, domains.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1124,6 +1351,155 @@ mod tests {
       .find(|root| root.channel == channel)
       .expect("channel root");
     context.resolve_template(&root.template).expect("root path")
+  }
+
+  #[test]
+  fn registry_registers_gecko_and_ie_without_widening_public_api() {
+    let registry = embedded_registry().expect("registry");
+    for platform in [PlatformId::Windows, PlatformId::Macos, PlatformId::Linux] {
+      assert_eq!(
+        browser_definition(registry, platform, "firefox")
+          .expect("Firefox definition")
+          .engine,
+        BrowserEngine::Gecko
+      );
+    }
+    for browser in ["librewolf", "zen"] {
+      for platform in [PlatformId::Windows, PlatformId::Macos, PlatformId::Linux] {
+        assert_eq!(
+          browser_definition(registry, platform, browser)
+            .expect("Gecko definition")
+            .engine,
+          BrowserEngine::Gecko
+        );
+      }
+    }
+    assert_eq!(
+      browser_definition(registry, PlatformId::Linux, "cachy")
+        .expect("Cachy definition")
+        .engine,
+      BrowserEngine::Gecko
+    );
+    assert_eq!(
+      browser_definition(registry, PlatformId::Windows, "ie")
+        .expect("IE alias")
+        .engine,
+      BrowserEngine::InternetExplorer
+    );
+    let ie = browser_definition(registry, PlatformId::Windows, "internet_explorer")
+      .expect("IE definition");
+    assert_eq!(
+      ie.roots
+        .iter()
+        .map(|root| (root.root_id.as_str(), root.template.as_str(), root.priority))
+        .collect::<Vec<_>>(),
+      vec![
+        (
+          "ie-webcache-roaming",
+          "{roaming_app_data}/Microsoft/Windows/WebCache",
+          10,
+        ),
+        (
+          "ie-webcache-local",
+          "{local_app_data}/Microsoft/Windows/WebCache",
+          20,
+        ),
+      ]
+    );
+  }
+
+  #[test]
+  fn generic_gecko_discovery_includes_session_only_profiles() {
+    let temp = TempDir::new("gecko-session-only");
+    let platform = PlatformId::current().expect("platform");
+    let context = test_context(temp.path().to_path_buf());
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, platform, "firefox").expect("Firefox");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id.contains("native") || root.root_id == "firefox")
+      .unwrap_or(&definition.roots[0]);
+    let root_path = context.resolve_template(&root.template).expect("root path");
+    let profile = root_path.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      root_path.join("profiles.ini"),
+      "[Profile0]\nName=session\nIsRelative=1\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid is still a discoverable source",
+    )
+    .expect("write session candidate");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover Gecko");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(
+      report.profiles[0].path,
+      profile.canonicalize().expect("canonical profile")
+    );
+    assert!(report.profiles[0].is_default);
+  }
+
+  #[test]
+  fn generic_gecko_report_preserves_persistent_and_session_source_outcomes() {
+    let temp = TempDir::new("gecko-report-sources");
+    let platform = PlatformId::current().expect("platform");
+    let context = test_context(temp.path().to_path_buf());
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, platform, "firefox").expect("Firefox");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id.contains("native") || root.root_id == "firefox")
+      .unwrap_or(&definition.roots[0]);
+    let root_path = context.resolve_template(&root.template).expect("root path");
+    let profile = root_path.join("Profiles/default");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      root_path.join("profiles.ini"),
+      "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let db_path = profile.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db_path).expect("open fixture database");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+           host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+           name TEXT, value TEXT, isHttpOnly INTEGER, sameSite INTEGER
+         );
+         INSERT INTO moz_cookies VALUES ('.example.com', '/', 1, 0, 'persistent', 'value', 1, 0);",
+      )
+      .expect("seed fixture database");
+    drop(connection);
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid session store",
+    )
+    .expect("write invalid session candidate");
+    std::fs::write(
+      profile.join("sessionstore.js"),
+      r#"{"windows":[{"cookies":[{"host":".example.com","path":"/","name":"session","value":"value"}]}]}"#,
+    )
+    .expect("write valid session candidate");
+
+    let report = gecko_report_with_context(&context, "firefox", None).expect("report");
+    assert!(report.discovery_issues.is_empty());
+    assert_eq!(report.profiles.len(), 1);
+    let sources = &report.profiles[0].sources;
+    assert_eq!(sources.len(), 3);
+    assert_eq!(sources[0].format, "mozilla_sqlite");
+    assert_eq!(sources[0].rows_seen, 1);
+    assert_eq!(sources[0].cookies[0].name, "persistent");
+    assert_eq!(sources[1].format, "firefox_session");
+    assert!(!sources[1].selected);
+    assert!(sources[1].error.is_some());
+    assert_eq!(sources[2].format, "firefox_session");
+    assert!(sources[2].selected);
+    assert_eq!(sources[2].cookies[0].name, "session");
   }
 
   fn write_local_state(root: &Path, value: serde_json::Value) {

@@ -19,12 +19,13 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
     database.strategy(),
     database.attempts()
   );
-  let (mut cookies, last_row_error) = database.into_value();
+  let persistent = database.into_value();
+  let mut cookies = persistent.cookies;
 
   let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
   cookies.extend(get_authoritative_session_cookies(domains, &parent_path));
   if cookies.is_empty() {
-    if let Some(error) = last_row_error {
+    if let Some(error) = persistent.last_row_error {
       return Err(error);
     }
   }
@@ -41,10 +42,17 @@ fn escape_like_pattern(input: &str) -> String {
     .replace('_', "\\_")
 }
 
+struct PersistentCookieQuery {
+  cookies: Vec<Cookie>,
+  rows_seen: usize,
+  rows_skipped: usize,
+  last_row_error: Option<anyhow::Error>,
+}
+
 fn query_persistent_cookies(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
-) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
+) -> Result<PersistentCookieQuery> {
   let mut query = "
         SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies
     "
@@ -71,10 +79,13 @@ fn query_persistent_cookies(
 
   let mut cookies: Vec<Cookie> = vec![];
   let mut last_row_error: Option<anyhow::Error> = None;
+  let mut rows_seen = 0;
+  let mut rows_skipped = 0;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
+    rows_seen += 1;
     let host = row
       .get::<_, Option<String>>(0)
       .ok()
@@ -102,6 +113,7 @@ fn query_persistent_cookies(
       Err(err) => {
         log::warn!("Failed to read name from row: {err}");
         last_row_error = Some(anyhow!("failed to read name from row: {err}"));
+        rows_skipped += 1;
         continue;
       }
     };
@@ -111,6 +123,7 @@ fn query_persistent_cookies(
       Err(err) => {
         log::warn!("Failed to read value from row: {err}");
         last_row_error = Some(anyhow!("failed to read value from row: {err}"));
+        rows_skipped += 1;
         continue;
       }
     };
@@ -137,7 +150,12 @@ fn query_persistent_cookies(
     cookies.push(cookie);
   }
 
-  Ok((cookies, last_row_error))
+  Ok(PersistentCookieQuery {
+    cookies,
+    rows_seen,
+    rows_skipped,
+    last_row_error,
+  })
 }
 
 enum SessionStoreFormat {
@@ -147,11 +165,72 @@ enum SessionStoreFormat {
 
 const SESSION_STORE_READ_ATTEMPTS: usize = 2;
 
-fn get_authoritative_session_cookies(
-  domains: Option<Vec<String>>,
-  cookies_dir: &Path,
-) -> Vec<Cookie> {
-  let candidates = [
+/// Crate-private source outcome for the generic registry adapter.  The legacy
+/// API deliberately continues to project this to a flat `Vec<Cookie>`.
+#[derive(Debug)]
+pub(crate) struct MozillaSessionSourceOutcome {
+  pub(crate) path: PathBuf,
+  pub(crate) selected: bool,
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MozillaEngineExtractionOutcome {
+  pub(crate) persistent_cookies: Vec<Cookie>,
+  pub(crate) persistent_rows_seen: usize,
+  pub(crate) persistent_rows_skipped: usize,
+  pub(crate) persistent_error: Option<String>,
+  pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
+}
+
+/// Extract a Mozilla profile with the same authoritative session ordering as
+/// `firefox_based`, retaining diagnostics which the legacy API intentionally
+/// only logs. Missing session candidates are not outcomes: absence is normal.
+pub(crate) fn query_cookies_engine_outcome(
+  db_path: &Path,
+  domains: Option<&[String]>,
+) -> MozillaEngineExtractionOutcome {
+  let mut outcome = MozillaEngineExtractionOutcome::default();
+  match sqlite::with_browser_database(db_path.to_path_buf(), |connection| {
+    query_persistent_cookies(connection, domains)
+  }) {
+    Ok(database) => {
+      let persistent = database.into_value();
+      outcome.persistent_rows_seen = persistent.rows_seen;
+      outcome.persistent_rows_skipped = persistent.rows_skipped;
+      outcome.persistent_error = persistent.last_row_error.map(|error| error.to_string());
+      outcome.persistent_cookies = persistent.cookies;
+    }
+    Err(error) => outcome.persistent_error = Some(error.to_string()),
+  }
+
+  let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
+  for (path, format) in session_candidates(cookies_dir) {
+    match parse_session_candidate(&path, &format, domains) {
+      Ok(cookies) => {
+        outcome.session_sources.push(MozillaSessionSourceOutcome {
+          path,
+          selected: true,
+          cookies,
+          error: None,
+        });
+        break;
+      }
+      Err(error) if is_missing_session_file(&error) => {}
+      Err(error) => outcome.session_sources.push(MozillaSessionSourceOutcome {
+        path,
+        selected: false,
+        cookies: Vec::new(),
+        error: Some(error.to_string()),
+      }),
+    }
+  }
+  outcome
+}
+
+fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
+  [
     (
       cookies_dir.join("sessionstore-backups/recovery.jsonlz4"),
       SessionStoreFormat::JsonLz4,
@@ -172,9 +251,14 @@ fn get_authoritative_session_cookies(
       cookies_dir.join("sessionstore-backups/previous.jsonlz4"),
       SessionStoreFormat::JsonLz4,
     ),
-  ];
+  ]
+}
 
-  for (path, format) in candidates {
+fn get_authoritative_session_cookies(
+  domains: Option<Vec<String>>,
+  cookies_dir: &Path,
+) -> Vec<Cookie> {
+  for (path, format) in session_candidates(cookies_dir) {
     match parse_session_candidate(&path, &format, domains.as_deref()) {
       Ok(cookies) => return cookies,
       Err(error) if is_missing_session_file(&error) => continue,
@@ -713,6 +797,63 @@ mod tests {
       "expected Err when no row decodes, got {:?}",
       result
     );
+  }
+
+  #[test]
+  fn engine_outcome_counts_each_malformed_persistent_row() {
+    let dir = unique_tmpdir("ff-engine-row-counts");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[(".example.com", "/", false, 0, "kept", "value", false, 0)],
+    );
+    let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    conn
+      .execute(
+        "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
+          VALUES ('.example.com', '/', 0, 0, X'DEADBEEF', 'discarded', 0, 0)",
+        [],
+      )
+      .expect("insert malformed cookie");
+    drop(conn);
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert_eq!(outcome.persistent_rows_seen, 2);
+    assert_eq!(outcome.persistent_rows_skipped, 1);
+    assert_eq!(outcome.persistent_cookies.len(), 1);
+    assert!(outcome.persistent_error.is_some());
+  }
+
+  #[test]
+  fn engine_outcome_retains_invalid_session_candidates_and_selects_first_valid_one() {
+    let dir = unique_tmpdir("ff-engine-session-outcomes");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let invalid = dir.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::create_dir_all(invalid.parent().expect("session parent")).expect("create parent");
+    std::fs::write(&invalid, b"not a compressed session store").expect("write invalid session");
+    let selected = dir.join("sessionstore-backups/recovery.baklz4");
+    write_session_jsonlz4(&selected, serde_json::json!([session_cookie("recovered")]));
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert_eq!(outcome.session_sources.len(), 2);
+    assert_eq!(outcome.session_sources[0].path, invalid);
+    assert!(!outcome.session_sources[0].selected);
+    assert!(outcome.session_sources[0].error.is_some());
+    assert_eq!(outcome.session_sources[1].path, selected);
+    assert!(outcome.session_sources[1].selected);
+    assert_eq!(outcome.session_sources[1].cookies[0].name, "recovered");
+  }
+
+  #[test]
+  fn engine_outcome_keeps_missing_session_candidates_silent() {
+    let dir = unique_tmpdir("ff-engine-missing-session");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert!(outcome.persistent_error.is_none());
+    assert!(outcome.session_sources.is_empty());
   }
 
   #[test]

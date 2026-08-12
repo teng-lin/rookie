@@ -38,9 +38,142 @@
           }
         ],
         "capabilities": {
-          "declared_persistent_formats": ["chromium_sqlite"],
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
           "declared_session_formats": [],
-          "declared_decryption_tiers": ["legacy_dpapi", "v10", "v20"]
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10",
+            "v20"
+          ]
+        }
+      },
+      {
+        "canonical_id": "firefox",
+        "aliases": [],
+        "display_name": "Firefox",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "firefox-roaming",
+            "template": "{roaming_app_data}/Mozilla/Firefox",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          },
+          {
+            "root_id": "firefox-local",
+            "template": "{local_app_data}/Mozilla/Firefox",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "librewolf",
+        "aliases": [],
+        "display_name": "LibreWolf",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "librewolf-local",
+            "template": "{local_app_data}/librewolf",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          },
+          {
+            "root_id": "librewolf-roaming",
+            "template": "{roaming_app_data}/librewolf",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "zen",
+        "aliases": [],
+        "display_name": "Zen Browser",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "zen-roaming",
+            "template": "{roaming_app_data}/zen",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          },
+          {
+            "root_id": "zen-local",
+            "template": "{local_app_data}/zen",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "internet_explorer",
+        "aliases": [
+          "ie"
+        ],
+        "display_name": "Internet Explorer",
+        "engine": "internet_explorer",
+        "roots": [
+          {
+            "root_id": "ie-webcache-roaming",
+            "template": "{roaming_app_data}/Microsoft/Windows/WebCache",
+            "channel": "stable",
+            "discovery": "internet_explorer_web_cache",
+            "priority": 10
+          },
+          {
+            "root_id": "ie-webcache-local",
+            "template": "{local_app_data}/Microsoft/Windows/WebCache",
+            "channel": "stable",
+            "discovery": "internet_explorer_web_cache",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "internet_explorer_ese"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": []
         }
       }
     ],
@@ -81,9 +214,88 @@
           }
         ],
         "capabilities": {
-          "declared_persistent_formats": ["chromium_sqlite"],
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
           "declared_session_formats": [],
-          "declared_decryption_tiers": ["v10"]
+          "declared_decryption_tiers": [
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "firefox",
+        "aliases": [],
+        "display_name": "Firefox",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "firefox",
+            "template": "{home}/Library/Application Support/Firefox",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "librewolf",
+        "aliases": [],
+        "display_name": "LibreWolf",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "librewolf",
+            "template": "{home}/Library/Application Support/librewolf",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "zen",
+        "aliases": [],
+        "display_name": "Zen Browser",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "zen",
+            "template": "{home}/Library/Application Support/zen",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
         }
       }
     ],
@@ -117,9 +329,135 @@
           }
         ],
         "capabilities": {
-          "declared_persistent_formats": ["chromium_sqlite"],
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
           "declared_session_formats": [],
-          "declared_decryption_tiers": ["v10", "v11"]
+          "declared_decryption_tiers": [
+            "v10",
+            "v11"
+          ]
+        }
+      },
+      {
+        "canonical_id": "firefox",
+        "aliases": [],
+        "display_name": "Firefox",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "firefox-snap",
+            "template": "{home}/snap/firefox/common/.mozilla/firefox",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          },
+          {
+            "root_id": "firefox-native",
+            "template": "{home}/.mozilla/firefox",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 20
+          },
+          {
+            "root_id": "firefox-flatpak",
+            "template": "{home}/.var/app/org.mozilla.firefox/.mozilla/firefox",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 30
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "librewolf",
+        "aliases": [],
+        "display_name": "LibreWolf",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "librewolf-snap",
+            "template": "{home}/snap/librewolf/common/.librewolf",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          },
+          {
+            "root_id": "librewolf-native",
+            "template": "{home}/.librewolf",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "zen",
+        "aliases": [],
+        "display_name": "Zen Browser",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "zen-native",
+            "template": "{home}/.zen",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
+        "canonical_id": "cachy",
+        "aliases": [],
+        "display_name": "Cachy Browser",
+        "engine": "gecko",
+        "roots": [
+          {
+            "root_id": "cachy-native",
+            "template": "{home}/.cachy",
+            "channel": "stable",
+            "discovery": "mozilla_profiles_ini",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "mozilla_sqlite"
+          ],
+          "declared_session_formats": [
+            "firefox_session_jsonlz4",
+            "firefox_session_json"
+          ],
+          "declared_decryption_tiers": []
         }
       }
     ]
