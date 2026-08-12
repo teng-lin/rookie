@@ -37,12 +37,25 @@ fn usage_error(
   command.error(kind, message)
 }
 
-fn is_registered(browser: &str) -> bool {
-  rookie_cookies::supported_browsers()
-    .iter()
-    .any(|descriptor| {
-      descriptor.id.as_str() == browser || descriptor.aliases.iter().any(|alias| alias == browser)
-    })
+/// Whether `browser` is a registered ID or alias, or `None` when the registered
+/// inventory is unavailable and the question cannot be answered here.
+///
+/// This is only a pre-check; `browser_profiles` and `browser_report` resolve the
+/// ID themselves. The two do not agree in every case: `supported_browsers`
+/// builds descriptors with a stricter identifier rule than registry resolution
+/// applies, and it reports any registry failure as an empty list rather than an
+/// error. Both conditions collapse the inventory to empty, so treating empty as
+/// "nothing is registered" would reject every ID in every generic mode over one
+/// unrepresentable row — including IDs that resolve perfectly well. An empty
+/// inventory therefore defers to the library's own resolution instead.
+fn registration_of(browser: &str) -> Option<bool> {
+  let registered = rookie_cookies::supported_browsers();
+  if registered.is_empty() {
+    return None;
+  }
+  Some(registered.iter().any(|descriptor| {
+    descriptor.id.as_str() == browser || descriptor.aliases.iter().any(|alias| alias == browser)
+  }))
 }
 
 fn legacy_browser_values() -> String {
@@ -79,7 +92,7 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
   };
 
   if args.is_generic_mode() {
-    if is_registered(browser) {
+    if registration_of(browser) != Some(false) {
       return Ok(());
     }
     return Err(usage_error(
@@ -97,7 +110,7 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
     return Ok(());
   }
 
-  if is_registered(browser) {
+  if registration_of(browser) == Some(true) {
     return Err(usage_error(
       command,
       ErrorKind::InvalidValue,
