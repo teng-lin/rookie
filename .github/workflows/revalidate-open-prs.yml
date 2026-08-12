@@ -45,9 +45,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Only PRs that touch compiled code can be broken by a Rust change on
+          # main, so a docs-only branch does not pay for three rebuilds.
           prs=$(gh pr list --base main --state open --limit 50 \
-                  --json number,headRefOid \
-                  --jq '[.[] | {number: .number, sha: .headRefOid}]')
+                  --json number,headRefOid,files \
+                  --jq '[.[]
+                         | select(any(.files[].path;
+                             startswith("rookie-rs/")
+                             or startswith("cli/")
+                             or startswith("bindings/")
+                             or . == "Cargo.toml"
+                             or . == "Cargo.lock"))
+                         | {number: .number, sha: .headRefOid}]')
           echo "prs=$prs" >> "$GITHUB_OUTPUT"
           echo "Revalidating: $prs"
 
