@@ -1597,7 +1597,12 @@ where
         cookies: extraction.persistent_cookies,
         acquisition_strategy: extraction.persistent_acquisition_strategy,
         acquisition_attempts: extraction.persistent_acquisition_attempts,
-        diagnostics: extraction.persistent_row_error.into_iter().collect(),
+        // `diagnostics` carries acquisition retry notes, which a report renders
+        // as a warning meaning "retried, then succeeded". A rejected row is
+        // neither a retry nor a recovery — rows were lost — so it must not be
+        // reported that way. The row error stays on the Mozilla outcome for the
+        // report layer to raise as an error-severity row failure instead.
+        diagnostics: Vec::new(),
         error: extraction.persistent_error,
       });
     }
@@ -2362,6 +2367,41 @@ mod tests {
     assert_eq!(issues.len(), MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1);
     let summary = issues.last().expect("overflow summary");
     assert!(summary.message.contains("additional 5"));
+  }
+
+  #[test]
+  fn a_rejected_row_is_not_projected_as_an_acquisition_retry() {
+    let temp = TempDir::new("gecko-row-error-not-retry");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    seed_empty_gecko_database(&root.join("Profiles/default"));
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |_, _| mozilla::MozillaEngineExtractionOutcome {
+        persistent_rows_seen: 2,
+        persistent_rows_skipped: 1,
+        persistent_row_error: Some("failed to read value from row: invalid utf-8".to_owned()),
+        ..mozilla::MozillaEngineExtractionOutcome::default()
+      },
+      |path| path.exists(),
+    );
+
+    let source = &report.profiles[0].sources[0];
+    // A rejected row means cookies were lost. `diagnostics` renders as a
+    // "retried, then succeeded" warning, so routing the row error there would
+    // claim a recovery that never happened; the report layer raises it as an
+    // error-severity row failure instead.
+    assert!(source.diagnostics.is_empty());
+    assert!(source.error.is_none());
+    assert_eq!(source.rows_skipped, 1);
   }
 
   #[test]
