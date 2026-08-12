@@ -1282,6 +1282,9 @@ pub(crate) struct EngineProfileExtraction {
   pub(crate) path: PathBuf,
   pub(crate) is_default: bool,
   pub(crate) persistent_source_discovered: bool,
+  /// Session candidates discovery saw on disk. Extraction needs this to tell a
+  /// candidate that vanished under it from one that was never there.
+  pub(crate) session_sources_discovered: Vec<PathBuf>,
   pub(crate) sources: Vec<EngineSourceExtraction>,
 }
 
@@ -1291,17 +1294,19 @@ pub(crate) struct EngineExtractionOutcome {
   pub(crate) discovery_issues: Vec<DiscoveryIssue>,
 }
 
+fn discovered_session_sources<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  path: &Path,
+) -> Vec<PathBuf> {
+  mozilla::session_candidate_paths(path)
+    .into_iter()
+    .filter(|candidate| context.fs.exists(candidate))
+    .collect()
+}
+
 fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
   context.fs.exists(&path.join("cookies.sqlite"))
-    || [
-      "sessionstore-backups/recovery.jsonlz4",
-      "sessionstore-backups/recovery.baklz4",
-      "sessionstore.jsonlz4",
-      "sessionstore.js",
-      "sessionstore-backups/previous.jsonlz4",
-    ]
-    .iter()
-    .any(|relative| context.fs.exists(&path.join(relative)))
+    || !discovered_session_sources(context, path).is_empty()
 }
 
 const MAX_GECKO_DISCOVERY_ISSUES_PER_CODE: usize = 32;
@@ -1527,6 +1532,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         installation_path: canonical_root.clone(),
         name: declared_profile.name,
         persistent_source_discovered: context.fs.exists(&profile_path.join("cookies.sqlite")),
+        session_sources_discovered: discovered_session_sources(context, &profile_path),
         path: profile_path,
         is_default: declared_profile.is_default,
         sources: Vec::new(),
@@ -1571,7 +1577,7 @@ fn populate_gecko_sources<Q>(
   mut query: Q,
 ) -> EngineExtractionOutcome
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaEngineExtractionOutcome,
+  Q: FnMut(&Path, Option<&[String]>, &[PathBuf]) -> mozilla::MozillaEngineExtractionOutcome,
 {
   for profile in &mut outcome.profiles {
     let persistent = profile.path.join("cookies.sqlite");
@@ -1579,7 +1585,7 @@ where
     // discovery never saw and that does not read back is normal for a
     // session-only profile and is not projected as a source; one that reads
     // back is real data no matter what discovery saw a moment earlier.
-    let mut extraction = query(&persistent, domains);
+    let mut extraction = query(&persistent, domains, &profile.session_sources_discovered);
     if profile.persistent_source_discovered || extraction.persistent_error.is_none() {
       sort_cookies(&mut extraction.persistent_cookies);
       profile.sources.push(EngineSourceExtraction {
@@ -2096,12 +2102,12 @@ mod tests {
     assert!(discovery.profiles[0].persistent_source_discovered);
 
     let mut removed = false;
-    let report = populate_gecko_sources(discovery, None, |persistent, domains| {
+    let report = populate_gecko_sources(discovery, None, |persistent, domains, sessions| {
       if !removed {
         removed = true;
         std::fs::remove_file(persistent).expect("remove discovered source");
       }
-      mozilla::query_cookies_engine_outcome(persistent, domains)
+      mozilla::query_cookies_engine_outcome(persistent, domains, sessions)
     });
     assert_eq!(report.profiles[0].sources.len(), 1);
     let source = &report.profiles[0].sources[0];
@@ -2111,6 +2117,38 @@ mod tests {
       .error
       .as_deref()
       .is_some_and(|error| error.contains("Can't resolve database path")));
+  }
+
+  #[test]
+  fn discovered_session_source_remains_projected_if_it_disappears_before_extraction() {
+    let temp = TempDir::new("gecko-session-disappears");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    let candidate = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::create_dir_all(candidate.parent().expect("session dir")).expect("create profile");
+    std::fs::write(&candidate, b"a real session store lived here").expect("write session");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert_eq!(discovery.profiles[0].session_sources_discovered.len(), 1);
+
+    let report = populate_gecko_sources(discovery, None, |persistent, domains, sessions| {
+      std::fs::remove_file(&candidate).expect("remove discovered session candidate");
+      mozilla::query_cookies_engine_outcome(persistent, domains, sessions)
+    });
+    let sources = &report.profiles[0].sources;
+    assert_eq!(
+      sources.len(),
+      1,
+      "a profile admitted on a session candidate must not extract as sourceless: {sources:?}"
+    );
+    assert_eq!(sources[0].format, "firefox_session_jsonlz4");
+    assert!(!sources[0].selected);
+    assert!(sources[0].error.is_some());
   }
 
   #[test]
@@ -2133,7 +2171,7 @@ mod tests {
     let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
     assert!(!discovery.profiles[0].persistent_source_discovered);
 
-    let report = populate_gecko_sources(discovery, None, |persistent, domains| {
+    let report = populate_gecko_sources(discovery, None, |persistent, domains, sessions| {
       let profile = persistent.parent().expect("profile directory");
       seed_empty_gecko_database(profile);
       rusqlite::Connection::open(persistent)
@@ -2143,7 +2181,7 @@ mod tests {
           [],
         )
         .expect("seed created database");
-      mozilla::query_cookies_engine_outcome(persistent, domains)
+      mozilla::query_cookies_engine_outcome(persistent, domains, sessions)
     });
     let sources = &report.profiles[0].sources;
     assert_eq!(sources.len(), 2);

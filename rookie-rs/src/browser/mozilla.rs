@@ -232,11 +232,13 @@ pub(crate) struct MozillaEngineExtractionOutcome {
 
 /// Extract a Mozilla profile with the same authoritative session ordering as
 /// `firefox_based`, retaining diagnostics which the legacy API intentionally
-/// only logs. Session candidates that were never on disk are not outcomes:
-/// absence is normal.
+/// only logs. `discovered_session_sources` carries the candidates discovery
+/// observed on disk; a candidate outside it that is missing now was never
+/// there, and absence is normal.
 pub(crate) fn query_cookies_engine_outcome(
   db_path: &Path,
   domains: Option<&[String]>,
+  discovered_session_sources: &[PathBuf],
 ) -> MozillaEngineExtractionOutcome {
   let mut outcome = MozillaEngineExtractionOutcome::default();
   match sqlite::with_browser_database(db_path.to_path_buf(), |connection| {
@@ -269,7 +271,7 @@ pub(crate) fn query_cookies_engine_outcome(
 
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
   for (path, format) in session_candidates(cookies_dir) {
-    let discovered = path.exists();
+    let discovered = discovered_session_sources.contains(&path);
     match parse_session_candidate(&path, &format, domains) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
@@ -298,10 +300,10 @@ pub(crate) fn query_cookies_engine_outcome(
 }
 
 /// Projects a failed session candidate, or `None` when the candidate was never
-/// on disk: absence is normal. `discovered` is the stat taken immediately
-/// before the parse, so a candidate that was present then and gone by the time
-/// it was opened is a real acquisition failure within that window, and stays
-/// visible instead of leaving the profile looking sourceless.
+/// on disk: absence is normal. `discovered` is what registry discovery saw, so
+/// a candidate that admitted the profile and has since vanished is a real
+/// acquisition failure and stays visible instead of leaving the profile
+/// looking sourceless.
 fn failed_session_source(
   path: PathBuf,
   format: SessionStoreFormat,
@@ -322,6 +324,16 @@ fn failed_session_source(
     diagnostics: failure.transient_errors,
     error: Some(format!("{:#}", failure.error)),
   })
+}
+
+/// The session candidate paths for a profile directory, in the same
+/// authoritative order extraction walks them, so discovery and extraction can
+/// never disagree about which files count as session sources.
+pub(crate) fn session_candidate_paths(cookies_dir: &Path) -> Vec<PathBuf> {
+  session_candidates(cookies_dir)
+    .into_iter()
+    .map(|(path, _)| path)
+    .collect()
 }
 
 fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
@@ -880,6 +892,14 @@ mod tests {
     dir
   }
 
+  /// Mirrors what registry discovery records for a profile.
+  fn discovered_sessions(cookies_dir: &Path) -> Vec<PathBuf> {
+    session_candidate_paths(cookies_dir)
+      .into_iter()
+      .filter(|path| path.exists())
+      .collect()
+  }
+
   // (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
   type CookieRow<'a> = (&'a str, &'a str, bool, u64, &'a str, &'a str, bool, i64);
 
@@ -975,7 +995,7 @@ mod tests {
       .expect("insert malformed cookie");
     drop(conn);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(&dir));
     assert_eq!(outcome.persistent_rows_seen, 2);
     assert_eq!(outcome.persistent_rows_skipped, 1);
     assert_eq!(outcome.persistent_cookies.len(), 1);
@@ -999,7 +1019,7 @@ mod tests {
     let db = dir.join("cookies.sqlite");
     std::fs::write(&db, b"this is not a sqlite database").expect("write bogus database");
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(&dir));
     assert!(
       outcome.persistent_error.is_some(),
       "a failed query must read as a failed acquisition"
@@ -1080,7 +1100,7 @@ mod tests {
     let selected = dir.join("sessionstore-backups/recovery.baklz4");
     write_session_jsonlz4(&selected, serde_json::json!([session_cookie("recovered")]));
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(&dir));
     assert_eq!(outcome.session_sources.len(), 2);
     assert_eq!(outcome.session_sources[0].path, invalid);
     assert_eq!(outcome.session_sources[0].format, "firefox_session_jsonlz4");
@@ -1111,7 +1131,7 @@ mod tests {
       serde_json::Value::Array(malformed),
     );
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(&dir));
     let source = &outcome.session_sources[0];
     assert!(source.selected);
     assert_eq!(source.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
@@ -1133,7 +1153,7 @@ mod tests {
     )
     .expect("write legacy session store");
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(&dir));
     let source = &outcome.session_sources[0];
     assert_eq!(source.format, "firefox_session_json");
     assert_eq!(source.rows_seen, 2);
@@ -1171,7 +1191,7 @@ mod tests {
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(&db, &[]);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(&dir));
     assert!(outcome.persistent_error.is_none());
     assert!(outcome.session_sources.is_empty());
   }
@@ -1398,7 +1418,7 @@ mod tests {
       "the WAL row must decode, not just appear"
     );
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = query_cookies_engine_outcome(&db, None, &discovered_sessions(dir.path()));
     assert_eq!(
       outcome.persistent_acquisition_strategy,
       Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot)
