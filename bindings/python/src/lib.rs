@@ -55,8 +55,8 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   Ok(())
 }
 
-pub(crate) fn to_dict(py: Python<'_>, cookies: Vec<Cookie>) -> PyResult<Vec<PyObject>> {
-  let mut cookie_objects: Vec<PyObject> = vec![];
+pub(crate) fn to_dict(py: Python<'_>, cookies: Vec<Cookie>) -> PyResult<Vec<Py<PyAny>>> {
+  let mut cookie_objects: Vec<Py<PyAny>> = vec![];
   for cookie in cookies {
     let dict = PyDict::new(py);
     dict.set_item("domain", cookie.domain)?;
