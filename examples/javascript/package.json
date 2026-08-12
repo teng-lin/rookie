@@ -1,5 +1,8 @@
 {
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "rookie-cookies": "file:../../bindings/node"
   }

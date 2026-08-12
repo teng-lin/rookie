@@ -63,7 +63,56 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         self.assertEqual(cookie.value, "abc123")
         self.assertTrue(cookie.secure)
         self.assertEqual(cookie.expires, 1_700_000_000)
+        self.assertFalse(cookie.discard)
         self.assertTrue(cookie.has_nonstandard_attr("HTTPOnly"))
+
+    def test_session_cookie_is_discarded(self) -> None:
+        cookie_data = dict(COOKIE)
+        cookie_data["expires"] = None
+
+        cookie = rookie_cookies.create_cookie(
+            host=cookie_data["domain"],
+            path=cookie_data["path"],
+            secure=cookie_data["secure"],
+            expires=cookie_data["expires"],
+            name=cookie_data["name"],
+            value=cookie_data["value"],
+            http_only=cookie_data["http_only"],
+        )
+
+        self.assertIsNone(cookie.expires)
+        self.assertTrue(cookie.discard)
+
+    def test_clear_session_cookies_preserves_persistent_cookies(self) -> None:
+        session_cookie = dict(COOKIE)
+        session_cookie.update(name="session", expires=None)
+        persistent_cookie = dict(COOKIE)
+        persistent_cookie.update(name="persistent", expires=4_102_444_800)
+        jar = rookie_cookies.to_cookiejar([session_cookie, persistent_cookie])
+
+        jar.clear_session_cookies()
+
+        self.assertEqual([cookie.name for cookie in jar], ["persistent"])
+
+    def test_session_cookies_are_not_persisted_by_default(self) -> None:
+        session_cookie = dict(COOKIE)
+        session_cookie.update(name="session", expires=None)
+        persistent_cookie = dict(COOKIE)
+        persistent_cookie.update(name="persistent", expires=4_102_444_800)
+
+        with tempfile.TemporaryDirectory(prefix="rookie-python-cookiejar-") as temp:
+            path = Path(temp) / "cookies.txt"
+            jar = http.cookiejar.MozillaCookieJar(str(path))
+            for cookie in rookie_cookies.to_cookiejar(
+                [session_cookie, persistent_cookie]
+            ):
+                jar.set_cookie(cookie)
+            jar.save(ignore_discard=False, ignore_expires=False)
+
+            reloaded = http.cookiejar.MozillaCookieJar(str(path))
+            reloaded.load(ignore_discard=False, ignore_expires=False)
+
+        self.assertEqual([cookie.name for cookie in reloaded], ["persistent"])
 
     def test_to_cookiejar_returns_usable_cookiejar(self) -> None:
         jar = rookie_cookies.to_cookiejar([COOKIE])
