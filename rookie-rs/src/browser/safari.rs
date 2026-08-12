@@ -1116,8 +1116,10 @@ mod tests {
       if rewrite_once {
         rewrite_once = false;
         fs::write(&path, &new).expect("rewrite same-length image");
-        File::open(&path)
-          .expect("reopen rewritten image")
+        File::options()
+          .write(true)
+          .open(&path)
+          .expect("reopen rewritten image for metadata update")
           .set_times(fs::FileTimes::new().set_modified(original_mtime))
           .expect("restore original mtime");
       }
