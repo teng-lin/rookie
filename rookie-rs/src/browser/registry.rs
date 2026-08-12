@@ -1131,7 +1131,23 @@ pub(crate) struct ChromiumProfileExtraction {
   pub(crate) row_issues: Vec<ChromiumRowIssue>,
   pub(crate) acquisition: SourceAcquisition,
   pub(crate) acquisition_attempts: u32,
-  pub(crate) error: Option<String>,
+  pub(crate) failure: Option<ChromiumProfileFailure>,
+}
+
+/// Why a profile yielded no cookies, typed so the report can tell ordinary
+/// absence from a real failure.
+///
+/// These were once one `Option<String>` whose "no source" case was a message
+/// sentinel, which made an installed browser with no cookie store
+/// indistinguishable from one that could not be read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChromiumProfileFailure {
+  /// The profile declares no cookie database. Ordinary absence, not an error.
+  NoSource,
+  /// Acquisition, schema validation, or the query did not complete. Rejected
+  /// rows are not this: they are counted in `rows_skipped` and described by
+  /// `row_issues` while the source itself still succeeds.
+  Extraction(String),
 }
 
 #[derive(Debug)]
@@ -1208,7 +1224,7 @@ where
           row_issues: Vec::new(),
           acquisition: SourceAcquisition::NotAttempted,
           acquisition_attempts: 0,
-          error: Some("profile has no selected persistent source".to_owned()),
+          failure: Some(ChromiumProfileFailure::NoSource),
         });
         continue;
       };
@@ -1222,7 +1238,12 @@ where
             row_issues: outcome.issues,
             acquisition: outcome.acquisition_strategy.into(),
             acquisition_attempts: outcome.acquisition_attempts,
-            error: outcome.legacy_error.map(|error| error.to_string()),
+            // `legacy_error` reports that no row decoded, which the legacy API
+            // treats as a failure. Section 5.7 does not: acquisition, parsing,
+            // and the query all completed, so the source succeeded with every
+            // row skipped. `row_issues` and `rows_skipped` already carry that
+            // detail, so nothing is lost by not restating it as a failure.
+            failure: None,
           });
         }
         Err(error) => {
@@ -1234,7 +1255,7 @@ where
             row_issues: Vec::new(),
             acquisition: failure.and_then(|failure| failure.strategy).into(),
             acquisition_attempts: failure.map_or(1, |failure| failure.attempts),
-            error: Some(error.to_string()),
+            failure: Some(ChromiumProfileFailure::Extraction(error.to_string())),
           });
         }
       }
@@ -1422,7 +1443,11 @@ pub(crate) struct EngineSourceExtraction {
   pub(crate) acquisition: SourceAcquisition,
   pub(crate) acquisition_attempts: u32,
   pub(crate) diagnostics: Vec<String>,
+  /// The source could not be acquired, parsed, or queried, so it failed.
   pub(crate) error: Option<String>,
+  /// A row was seen and rejected. Reported as a row issue against a source
+  /// that still succeeded, never as a source failure.
+  pub(crate) row_error: Option<String>,
 }
 
 /// How a source was made readable. Non-SQLite engines never acquire through the
@@ -1507,6 +1532,7 @@ fn source_candidate(
     acquisition_attempts: 0,
     diagnostics: Vec::new(),
     error: None,
+    row_error: None,
   }
 }
 
@@ -1881,6 +1907,7 @@ where
         // report layer to raise as an error-severity row failure instead.
         diagnostics: Vec::new(),
         error: extraction.persistent_error,
+        row_error: extraction.persistent_row_error,
       });
     }
     profile
@@ -1899,7 +1926,11 @@ where
           acquisition: SourceAcquisition::StableFileImage,
           acquisition_attempts: source.acquisition_attempts,
           diagnostics: source.diagnostics,
+          // A session candidate's `error` means the candidate itself could not
+          // be parsed, which is a real source failure. Rows it rejected are
+          // already counted in `rows_skipped` and described by `diagnostics`.
           error: source.error,
+          row_error: None,
         }
       }));
   }
@@ -2061,6 +2092,7 @@ fn discover_safari_with_context<F: DiscoveryFs>(
         acquisition_attempts: 1,
         diagnostics: Vec::new(),
         error: None,
+        row_error: None,
       };
       outcome.profiles.push(EngineProfileExtraction {
         profile_id: profile_id(&installation_id, locator),
@@ -2205,6 +2237,7 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
       error: None,
+      row_error: None,
     };
     outcome.profiles.push(EngineProfileExtraction {
       profile_id: profile_id(&installation_id, ProfileLocator::Relative(Path::new(""))),
@@ -4633,7 +4666,10 @@ mod tests {
     assert_eq!(good.cookies[0].name, "shared");
     assert_eq!(good.cookies[0].value, "profile-value");
     assert!(broken.cookies.is_empty());
-    assert!(broken.error.is_some());
+    assert!(matches!(
+      broken.failure,
+      Some(ChromiumProfileFailure::Extraction(_))
+    ));
   }
 
   #[test]
@@ -4662,7 +4698,7 @@ mod tests {
     assert_eq!(extraction.stats.rows_skipped, 1);
     assert_eq!(extraction.row_issues.len(), 1);
     assert_eq!(extraction.row_issues[0].occurrences, 1);
-    assert!(extraction.error.is_none());
+    assert!(extraction.failure.is_none());
   }
 
   #[test]

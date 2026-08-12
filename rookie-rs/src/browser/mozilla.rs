@@ -263,11 +263,15 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   pub(crate) persistent_rows_skipped: usize,
   pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
   pub(crate) persistent_acquisition_attempts: u32,
-  /// Set only when the persistent source could not be read at all. A source
-  /// that produced rows is never reported through this field, so a caller can
-  /// distinguish total failure from partial success.
+  /// Acquisition, schema validation, or the query did not complete, so the
+  /// source failed outright. A source that produced rows is never reported
+  /// through this field, so a caller can tell total failure from partial
+  /// success.
   pub(crate) persistent_error: Option<String>,
-  /// Set when individual rows failed while the source itself was readable.
+  /// A row was seen and rejected while the source itself stayed readable.
+  /// Section 5.7 counts this in `rows_skipped` and reports it as a row issue
+  /// against a source that still succeeded, which is why it is deliberately
+  /// separate from `persistent_error`.
   pub(crate) persistent_row_error: Option<String>,
   pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
 }
@@ -1015,8 +1019,8 @@ mod tests {
       Some(sqlite::DatabaseAcquisitionStrategy::LiveReadOnly)
     );
     assert_eq!(outcome.persistent_acquisition_attempts, 1);
-    // A rejected row is a partial success: the source itself was readable, so
-    // only the row-level field is set.
+    // A rejected row is a partial success: the source itself was readable and
+    // returned its good cookies, so only the row-level field is set.
     assert!(outcome.persistent_row_error.is_some());
     assert!(outcome.persistent_error.is_none());
   }

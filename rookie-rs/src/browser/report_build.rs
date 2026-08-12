@@ -10,8 +10,9 @@
 
 use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
 use super::registry::{
-  self, ChromiumProfileExtraction, ChromiumRegistryReport, DiscoveryIssue, EngineProfileExtraction,
-  EngineSourceExtraction, RegisteredBrowser, SourceAcquisition, SOURCE_ROLE_PERSISTENT,
+  self, ChromiumProfileExtraction, ChromiumProfileFailure, ChromiumRegistryReport, DiscoveryIssue,
+  EngineProfileExtraction, EngineSourceExtraction, RegisteredBrowser, SourceAcquisition,
+  SOURCE_ROLE_PERSISTENT,
 };
 use super::report_core::{
   display_path, issue, push_aggregated, report_status, sort_cookies, sort_source_descriptors,
@@ -151,7 +152,7 @@ fn chromium_profile_outcome(
     row_issues,
     acquisition,
     acquisition_attempts,
-    error,
+    failure,
   } = extraction;
   let identity = profile_identity(
     browser_id,
@@ -168,16 +169,16 @@ fn chromium_profile_outcome(
     .find(|candidate| candidate.selected)
   else {
     // A profile that simply has no cookie database is ordinary absence, but one
-    // that reports an extraction error lost something, so it must not be
+    // that reports an extraction failure lost something, so it must not be
     // downgraded to the same `info` signal as an empty profile.
-    outcome.issues.push(match error {
-      Some(error) => issue(
+    outcome.issues.push(match failure {
+      Some(ChromiumProfileFailure::Extraction(message)) => issue(
         "profile_extraction_failed",
         ExtractionStageCode::acquisition(),
         IssueSeverityCode::error(),
-        error,
+        message,
       ),
-      None => issue(
+      _ => issue(
         "profile_has_no_cookie_source",
         ExtractionStageCode::discovery(),
         IssueSeverityCode::info(),
@@ -208,14 +209,16 @@ fn chromium_profile_outcome(
   for row in &row_issues {
     push_aggregated(&mut source.issues, row_issue(row));
   }
-  if let Some(error) = error {
+  // Only a failure to acquire, parse, or query demotes the source. Rejected
+  // rows are already reported above and leave the source succeeded.
+  if let Some(ChromiumProfileFailure::Extraction(message)) = failure {
     push_aggregated(
       &mut source.issues,
       issue(
         "source_extraction_failed",
         ExtractionStageCode::acquisition(),
         IssueSeverityCode::error(),
-        error,
+        message,
       ),
     );
     source.failed = true;
@@ -256,6 +259,7 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
     acquisition_attempts,
     diagnostics,
     error,
+    row_error,
   } = source;
   let mut outcome = SourceExtractionOutcome::new(
     source_identity(&path, role, format, precedence),
@@ -279,6 +283,22 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
         IssueSeverityCode::warning(),
         diagnostic,
       ),
+    );
+  }
+  // A rejected row costs cookies, so it is an error-severity issue that makes
+  // the report `partial` -- but acquisition, parsing, and the query completed,
+  // so the source itself still succeeded. This mirrors how the Chromium adapter
+  // treats its row issues.
+  if let Some(row_error) = row_error {
+    push_aggregated(
+      &mut outcome.issues,
+      issue(
+        "row_read_failed",
+        ExtractionStageCode::parse(),
+        IssueSeverityCode::error(),
+        row_error,
+      )
+      .with_occurrences(u32::try_from(rows_skipped).unwrap_or(u32::MAX)),
     );
   }
   if let Some(error) = error {
@@ -767,7 +787,7 @@ mod tests {
 
   fn chromium_profile(
     selected_candidate: bool,
-    error: Option<&str>,
+    failure: Option<ChromiumProfileFailure>,
   ) -> registry::ChromiumProfileExtraction {
     let path = PathBuf::from("/chrome/Default");
     registry::ChromiumProfileExtraction {
@@ -797,7 +817,7 @@ mod tests {
       row_issues: Vec::new(),
       acquisition: registry::SourceAcquisition::NotAttempted,
       acquisition_attempts: 1,
-      error: error.map(str::to_owned),
+      failure,
     }
   }
 
@@ -810,7 +830,12 @@ mod tests {
     let engine = chromium_profile_outcome(
       &browser,
       &"d".repeat(64),
-      chromium_profile(false, Some("Local State is unreadable")),
+      chromium_profile(
+        false,
+        Some(ChromiumProfileFailure::Extraction(
+          "Local State is unreadable".to_owned(),
+        )),
+      ),
     )
     .expect("adapt the profile");
     assert!(engine.sources.is_empty());
@@ -821,20 +846,6 @@ mod tests {
     assert_eq!(
       status(outcome(vec![engine], false)),
       ReportStatusCode::failed()
-    );
-  }
-
-  #[test]
-  fn chromium_profile_without_a_source_is_ordinary_absence() {
-    let browser = BrowserId::known("chrome");
-    let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(false, None))
-      .expect("adapt the profile");
-    let issue = engine.issues.first().expect("an absence signal");
-    assert_eq!(issue.code.as_str(), "profile_has_no_cookie_source");
-    assert!(!issue.is_error());
-    assert_eq!(
-      status(outcome(vec![engine], false)),
-      ReportStatusCode::no_sources()
     );
   }
 
@@ -924,6 +935,7 @@ mod tests {
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
       error: error.map(str::to_owned),
+      row_error: None,
     }
   }
 
@@ -1349,5 +1361,90 @@ mod engine_chain_tests {
       AcquisitionStrategyCode::ese_database()
     );
     assert_eq!(source.cookies[0].name, "ie-cookie");
+  }
+
+  /// Ordinary absence, driven through the real registry rather than a
+  /// hand-built state. An installed browser whose profile has no cookie store
+  /// is `no_sources`.
+  ///
+  /// Discovery, not extraction, is where this is decided: a profile with no
+  /// cookie database is filtered out of the installation and recorded as an
+  /// info-severity discovery issue. `ChromiumProfileFailure::NoSource` is the
+  /// defensive branch for a source that vanishes after discovery selected it,
+  /// which is why asserting absence against a fabricated extraction state
+  /// proved nothing about production.
+  #[test]
+  fn an_installed_chromium_profile_without_a_cookie_store_is_no_sources() {
+    let temp = TempDir::new("chromium-absent-store");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "chrome");
+    // Declares a profile in Local State, but leaves it with no cookie database.
+    test_seams::seed_chromium_profile(&root, "Default", "Person 1");
+    std::fs::remove_file(root.join("Default/Cookies")).expect("remove the cookie database");
+
+    let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
+      .expect("chromium report");
+    assert_eq!(registry_report.installations.len(), 1);
+    assert!(registry_report.installations[0].profiles.is_empty());
+
+    let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)
+      .expect("adapt the chromium report");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.status, ReportStatusCode::no_sources());
+    assert_eq!(report.summary.installations_discovered, 1);
+    let issue = report
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "profile_has_no_cookie_source")
+      .expect("an absence signal for the sourceless profile");
+    assert!(!issue.is_error());
+  }
+
+  /// Section 5.7: a rejected row is counted and reported, but acquisition,
+  /// parsing, and the query all completed, so the source still succeeded. Gecko
+  /// used to fail the whole source on one bad row while Chromium did not.
+  #[test]
+  fn a_rejected_row_keeps_the_gecko_source_succeeded_and_the_report_partial() {
+    let temp = TempDir::new("gecko-bad-row");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "firefox");
+    let profile = root.join("Profiles/default");
+    test_seams::seed_gecko_profile(&profile);
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    // One readable row and one whose name column is not text.
+    let connection =
+      rusqlite::Connection::open(profile.join("cookies.sqlite")).expect("open Gecko database");
+    connection
+      .execute_batch(
+        "INSERT INTO moz_cookies VALUES ('.example.com','/',0,0,'good','value',0,0);
+         INSERT INTO moz_cookies VALUES ('.example.com','/',0,0,X'00ff','value',0,0);",
+      )
+      .expect("seed rows");
+    drop(connection);
+
+    let engine = test_seams::gecko_report(&context, "firefox", None).expect("gecko report");
+    let outcome = engine_browser_outcome(&BrowserId::known("firefox"), engine)
+      .expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.cookies.len(), 1);
+    assert_eq!(source.cookies[0].name, "good");
+    assert!(source
+      .issues
+      .iter()
+      .any(|issue| issue.code.as_str() == "row_read_failed" && issue.is_error()));
+    // Rows were lost, so the report is degraded -- but not to `failed`.
+    assert_eq!(report.status, ReportStatusCode::partial());
+    assert_eq!(report.summary.sources_succeeded, 1);
+    assert_eq!(report.summary.sources_failed, 0);
   }
 }
