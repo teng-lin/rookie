@@ -7,6 +7,7 @@ cannot decide whether an assertion passes.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sqlite3
 import sys
@@ -16,6 +17,11 @@ from pathlib import Path
 from unittest import mock
 
 import rookie_cookies
+
+_PLAINTEXT_VALUES = {"Default": "default-value", "Profile 1": "profile-value"}
+
+# A v10 Chromium blob no key can open, so the row is seen and then rejected.
+_UNDECRYPTABLE = b"v10" + bytes(20)
 
 
 class SupportedBrowsersTest(unittest.TestCase):
@@ -263,6 +269,48 @@ class BrowserReportTest(unittest.TestCase):
         self.assertEqual(len(report["profiles"]), 1)
         self.assertEqual(report["profiles"][0]["profile"]["profile_id"], selected)
 
+    def test_rejected_rows_surface_as_error_issues_and_degrade_the_status(
+        self,
+    ) -> None:
+        with _synthetic_home() as home:
+            root = _seed_chrome(home, profiles=("Default",))
+            _seed_chromium_profile(root, "Profile 1", _UNDECRYPTABLE)
+            report = rookie_cookies.browser_report("chrome")
+
+        # One profile still produced its cookie, so the request degrades to
+        # partial rather than failing outright.
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual(report["summary"]["rows_seen"], 2)
+        self.assertEqual(report["summary"]["cookies_emitted"], 1)
+        self.assertEqual(report["summary"]["rows_skipped"], 1)
+
+        by_name = {
+            profile["profile"]["display_name"]: profile
+            for profile in report["profiles"]
+        }
+        self.assertEqual(sorted(by_name), ["Default", "Profile 1"])
+
+        healthy = by_name["Default"]["sources"][0]
+        self.assertEqual(healthy["issues"], [])
+        self.assertEqual(len(healthy["cookies"]), 1)
+        self.assertEqual(healthy["stats"]["rows_skipped"], 0)
+
+        rejected = by_name["Profile 1"]["sources"][0]
+        self.assertEqual(rejected["cookies"], [])
+        self.assertEqual(rejected["stats"]["rows_seen"], 1)
+        self.assertEqual(rejected["stats"]["cookies_emitted"], 0)
+        self.assertEqual(rejected["stats"]["rows_skipped"], 1)
+
+        decrypt_failed = next(
+            issue for issue in rejected["issues"] if issue["code"] == "decrypt_failed"
+        )
+        self.assertEqual(decrypt_failed["severity"], "error")
+        self.assertEqual(decrypt_failed["stage"], "decrypt")
+        self.assertEqual(decrypt_failed["occurrences"], 1)
+        self.assertTrue(decrypt_failed["samples"])
+        self.assertTrue(all(isinstance(s, str) for s in decrypt_failed["samples"]))
+        self.assertIn("decrypt_failed", decrypt_failed["message"])
+
     def test_domain_filter_reaches_the_report(self) -> None:
         with _synthetic_home() as home:
             _seed_chrome(home)
@@ -305,6 +353,29 @@ class LoadReportTest(unittest.TestCase):
         )
 
 
+class WireFormatTest(unittest.TestCase):
+    """JSON is the intended consumption path, so every value must survive it."""
+
+    def test_every_dto_round_trips_through_json_unchanged(self) -> None:
+        with _synthetic_home() as home:
+            root = _seed_chrome(home, profiles=("Default",))
+            _seed_chromium_profile(root, "Profile 1", _UNDECRYPTABLE)
+            browsers = rookie_cookies.supported_browsers()
+            profiles = rookie_cookies.browser_profiles("chrome")
+            # A report carrying cookies, counters, and issues covers every
+            # value kind the conversion produces.
+            report = rookie_cookies.browser_report("chrome")
+
+        self.assertEqual(report["status"], "partial")
+        self.assertTrue(any(source["issues"] for source in _sources(report)))
+        self.assertTrue(any(source["cookies"] for source in _sources(report)))
+
+        for value in (browsers, profiles, report):
+            # A bytes or non-primitive leak raises here rather than comparing
+            # unequal, so the encode and the decode are both assertions.
+            self.assertEqual(json.loads(json.dumps(value)), value)
+
+
 @contextlib.contextmanager
 def _synthetic_home():
     """Point every root-discovery variable at one empty temporary directory."""
@@ -330,16 +401,18 @@ def _chrome_root(home: Path) -> Path:
     return home / ".config" / "google-chrome"
 
 
-def _seed_chrome(home: Path) -> Path:
-    """Install Chrome's stable root with two plaintext-cookie profiles."""
+def _seed_chrome(home: Path, profiles=("Default", "Profile 1")) -> Path:
+    """Install Chrome's stable root with one plaintext-cookie profile each."""
     root = _chrome_root(home)
-    _seed_chromium_profile(root, "Default", "default-value")
-    _seed_chromium_profile(root, "Profile 1", "profile-value")
+    for profile in profiles:
+        _seed_chromium_profile(root, profile, _PLAINTEXT_VALUES[profile])
     (root / "Local State").write_text("{}", encoding="utf-8")
     return root
 
 
-def _seed_chromium_profile(root: Path, profile: str, value: str) -> None:
+def _seed_chromium_profile(root: Path, profile: str, value) -> None:
+    """Write one cookie row, plaintext for `str` and encrypted for `bytes`."""
+    plaintext, encrypted = (value, b"") if isinstance(value, str) else ("", value)
     database = root / profile / "Network" / "Cookies"
     database.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(database))
@@ -361,11 +434,17 @@ def _seed_chromium_profile(root: Path, profile: str, value: str) -> None:
         )
         connection.execute(
             "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'session', ?, ?, 0, 0)",
-            (value, b""),
+            (plaintext, encrypted),
         )
         connection.commit()
     finally:
         connection.close()
+
+
+def _sources(report):
+    return [
+        source for profile in report["profiles"] for source in profile["sources"]
+    ]
 
 
 def _is_opaque_id(value: str) -> bool:
