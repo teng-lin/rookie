@@ -1581,12 +1581,17 @@ where
 {
   for profile in &mut outcome.profiles {
     let persistent = profile.path.join("cookies.sqlite");
-    // The Mozilla outcome also owns session fallback. A persistent DB that
-    // discovery never saw and that does not read back is normal for a
-    // session-only profile and is not projected as a source; one that reads
-    // back is real data no matter what discovery saw a moment earlier.
+    // The Mozilla outcome also owns session fallback. Only a persistent DB
+    // that discovery never saw and that is still not on disk is an absence:
+    // that is a session-only profile, not a source. One that reads back is
+    // real data no matter what discovery saw a moment earlier, and one that
+    // is on disk but will not open is a typed failure worth reporting rather
+    // than a source to drop silently.
     let mut extraction = query(&persistent, domains, &profile.session_sources_discovered);
-    if profile.persistent_source_discovered || extraction.persistent_error.is_none() {
+    if profile.persistent_source_discovered
+      || extraction.persistent_error.is_none()
+      || persistent.exists()
+    {
       sort_cookies(&mut extraction.persistent_cookies);
       profile.sources.push(EngineSourceExtraction {
         path: persistent,
@@ -2220,6 +2225,43 @@ mod tests {
       "a session-only profile must not gain a phantom persistent source: {sources:?}"
     );
     assert_eq!(sources[0].format, "firefox_session_jsonlz4");
+  }
+
+  #[test]
+  fn undiscovered_persistent_source_is_projected_when_it_appears_but_will_not_open() {
+    let temp = TempDir::new("gecko-persistent-appears-broken");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid is still a discoverable source",
+    )
+    .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert!(!discovery.profiles[0].persistent_source_discovered);
+
+    let report = populate_gecko_sources(discovery, None, |persistent, domains, sessions| {
+      std::fs::write(persistent, b"this is not a sqlite database").expect("write broken database");
+      mozilla::query_cookies_engine_outcome(persistent, domains, sessions)
+    });
+    let sources = &report.profiles[0].sources;
+    assert_eq!(
+      sources.len(),
+      2,
+      "a source that appeared but cannot be opened is a failure, not an absence: {sources:?}"
+    );
+    assert_eq!(sources[0].format, "mozilla_sqlite");
+    assert!(sources[0].selected);
+    assert!(sources[0].error.is_some());
+    assert!(sources[0].cookies.is_empty());
+    assert_eq!(sources[1].format, "firefox_session_jsonlz4");
   }
 
   #[test]
