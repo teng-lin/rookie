@@ -50,15 +50,12 @@ struct BrowserDefinition {
   /// nothing about *which* OS credential a key provider should read, so a
   /// registry-only browser has no other source of truth for it. Values are
   /// lookup identifiers, never key material.
-  #[serde(default)]
   key_credentials: Option<KeyCredentials>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct KeyCredentials {
-  #[serde(default)]
   macos_keychain: Option<MacosKeychainCredential>,
-  #[serde(default)]
   linux_crypt_name: Option<String>,
 }
 
@@ -2930,6 +2927,47 @@ mod tests {
     assert_eq!(empty.osx_key_service, None);
     assert_eq!(empty.osx_key_user, None);
     assert_eq!(empty.unix_crypt_name, None);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn generic_resolution_matches_legacy_resolution_for_shared_browsers() {
+    // The product guarantee, stated as a relation rather than as snapshot
+    // values: for a browser present in both files, the generic pipeline must
+    // resolve exactly what the legacy path resolves. A future credential
+    // change lands in both files and this still holds, where an assertion on
+    // literal values would have to be rewritten.
+    let platform = PlatformId::current().expect("platform");
+    let registry = embedded_registry().expect("registry");
+    let mut compared = 0;
+    for definition in registry
+      .platforms
+      .get(platform.as_str())
+      .expect("platform definitions")
+    {
+      let Some(legacy) = crate::config::try_get_browser_config(&definition.canonical_id) else {
+        continue;
+      };
+      let generic =
+        registry_key_credentials(&definition.canonical_id).expect("registry credentials");
+      assert_eq!(
+        generic.osx_key_service, legacy.osx_key_service,
+        "{} keychain service",
+        definition.canonical_id
+      );
+      assert_eq!(
+        generic.osx_key_user, legacy.osx_key_user,
+        "{} keychain account",
+        definition.canonical_id
+      );
+      assert_eq!(
+        generic.unix_crypt_name, legacy.unix_crypt_name,
+        "{} crypt name",
+        definition.canonical_id
+      );
+      compared += 1;
+    }
+    assert!(compared > 0, "no shared browsers were compared");
   }
 
   #[test]
