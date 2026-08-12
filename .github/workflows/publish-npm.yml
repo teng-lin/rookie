@@ -66,17 +66,17 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
-            build: npm run build -- --target x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin --cargo-flags=--locked
           - host: windows-latest
-            build: npm run build -- --target x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc --cargo-flags=--locked
             target: x86_64-pc-windows-msvc
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust@sha256:6f910fc8a723a1eeab2483d2302e8c1fabe36e54c51eb0da27fafd5c3083e08c
-            build: npm run build -- --target x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu --cargo-flags=--locked
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: npm run build -- --target aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin --cargo-flags=--locked
     name: stable - ${{ matrix.settings.target }} - node@20
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -115,13 +115,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p .cargo-cache/git/db .cargo-cache/registry/cache .cargo-cache/registry/index
+          # Mount the whole workspace root (not just rookie-rs/ + bindings/node/) so
+          # cargo can see the workspace Cargo.toml, the committed Cargo.lock, and
+          # every workspace member (cli/, bindings/python/) it needs to parse to
+          # resolve the graph — `--locked` requires all of this to be visible.
           docker run --rm --user 0:0 \
-            -v "$GITHUB_WORKSPACE/rookie-rs:/rookie-rs" \
+            -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/git/db:/usr/local/cargo/git/db" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/cache:/usr/local/cargo/registry/cache" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/index:/usr/local/cargo/registry/index" \
-            -v "$GITHUB_WORKSPACE/bindings/node:/build" \
-            -w /build \
+            -w /workspace/bindings/node \
             "${{ matrix.settings.docker }}" \
             sh -lc '
               export RUSTUP_HOME=/tmp/rookie-rustup

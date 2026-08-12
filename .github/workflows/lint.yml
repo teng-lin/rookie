@@ -59,7 +59,7 @@ jobs:
           workspaces: .
 
       - name: run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   package:
     runs-on: ubuntu-latest
@@ -72,7 +72,7 @@ jobs:
 
       - name: Verify cargo package
         run: |
-          cargo package --manifest-path Cargo.toml -p rookie-cookies --list > package_files.txt
+          cargo package --manifest-path Cargo.toml -p rookie-cookies --locked --list > package_files.txt
           cat package_files.txt
           grep -q "^examples/simple.rs$" package_files.txt
           grep -q "^examples/from_path.rs$" package_files.txt
