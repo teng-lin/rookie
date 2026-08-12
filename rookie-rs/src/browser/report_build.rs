@@ -250,6 +250,26 @@ fn engine_profile_outcome(
   for source in profile.sources {
     outcome.sources.push(engine_source_outcome(source));
   }
+  if outcome.sources.is_empty() {
+    // Discovery only admits a profile here when it found either a persistent
+    // database or a session candidate (`gecko_profile_has_source`), so a
+    // profile that reaches this adapter with zero sources means whatever
+    // justified its admission - a Gecko session candidate, since a
+    // discovered persistent source always projects into `sources` - is gone
+    // by the time of extraction. That is a real failure, not the "nothing
+    // was ever there" case `no_sources` means. Safari and Internet Explorer
+    // profiles always carry a pre-populated source slot (see their registry
+    // discovery), so this branch is unreachable for them.
+    push_aggregated(
+      &mut outcome.issues,
+      issue(
+        "profile_extraction_failed",
+        ExtractionStageCode::acquisition(),
+        IssueSeverityCode::error(),
+        "a cookie source present at discovery could not be found by the time of extraction",
+      ),
+    );
+  }
   Ok(outcome)
 }
 
@@ -1468,6 +1488,57 @@ mod engine_chain_tests {
 
     assert_eq!(report.status, ReportStatusCode::no_sources());
     assert_eq!(report.summary.installations_discovered, 0);
+  }
+
+  /// A session-only profile is admitted only because a session candidate
+  /// exists at discovery time (`gecko_profile_has_source`). If that candidate
+  /// is gone by the time extraction runs, the profile is not "nothing was
+  /// ever there" - it is "something was there and extraction failed to reach
+  /// it" - and Section 5.7 reserves `no_sources` for the former. Distinct from
+  /// `an_absent_installation_reaches_the_report_as_no_sources`: here the
+  /// profile itself is real and was discovered, only its one source raced
+  /// away, so `installations_discovered`/`profiles_discovered` stay 1.
+  #[test]
+  fn a_gecko_session_candidate_that_vanishes_before_query_is_failed_not_absent() {
+    let temp = TempDir::new("gecko-session-vanishes-report");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "firefox");
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    let session_file = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(&session_file, b"discoverable but will vanish before query")
+      .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let engine = test_seams::gecko_report_with_race(&context, "firefox", None, |_persistent| {
+      let _ = std::fs::remove_file(&session_file);
+    })
+    .expect("gecko report");
+    assert_eq!(
+      engine.profiles.len(),
+      1,
+      "the profile itself was discovered"
+    );
+
+    let browser = BrowserId::known("firefox");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.status, ReportStatusCode::failed());
+    assert_eq!(report.summary.installations_discovered, 1);
+    assert_eq!(report.summary.profiles_discovered, 1);
+    let profile = &report.profiles[0];
+    assert!(profile.sources.is_empty());
+    let issue = profile
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "profile_extraction_failed")
+      .expect("a failure signal, not silent absence");
+    assert!(issue.is_error());
   }
 
   /// Safari and Internet Explorer are OS-gated in `collect_report`, so their
