@@ -1618,4 +1618,61 @@ mod engine_chain_tests {
     assert_eq!(report.summary.installations_discovered, 2);
     assert_eq!(report.summary.profiles_discovered, 1);
   }
+
+  /// Reported against pre-round-3 4E: a Chromium row that could not be
+  /// decrypted took the whole source down with it, because "no row decoded"
+  /// became a source-level failure. Section 5.7 counts a rejected row in
+  /// `rows_skipped` against a source that still succeeded, so this pins the
+  /// scenario end-to-end on the real chain.
+  #[test]
+  fn an_undecryptable_row_does_not_fail_the_chromium_source() {
+    let temp = TempDir::new("chromium-undecryptable-row");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "chrome");
+    test_seams::seed_chromium_profile(&root, "Default", "Person 1");
+
+    // Replace the plaintext cookie with a v10 blob no provider can open, so
+    // every row in the profile is rejected.
+    let database = root.join("Default/Cookies");
+    let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+    connection
+      .execute("DELETE FROM cookies", [])
+      .expect("clear seeded cookie");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'locked', '', ?1, 0, 0)",
+        [b"v10undecryptable".to_vec()],
+      )
+      .expect("insert encrypted cookie");
+    drop(connection);
+
+    let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
+      .expect("chromium report");
+    let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)
+      .expect("adapt the chromium report");
+    let report = assemble(1, vec![outcome]);
+
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+    assert_eq!(source.stats.rows_seen, 1);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert!(source.cookies.is_empty());
+    assert!(
+      source.issues.iter().any(|issue| issue.is_error()
+        && matches!(
+          issue.code.as_str(),
+          "provider_unavailable" | "provider_failed" | "decrypt_failed"
+        )),
+      "the rejected row must be reported: {:?}",
+      source.issues
+    );
+    // Acquisition and the query completed, so nothing failed at source level.
+    assert!(!source
+      .issues
+      .iter()
+      .any(|issue| issue.code.as_str() == "source_extraction_failed"));
+    assert_eq!(report.status, ReportStatusCode::partial());
+    assert_eq!(report.summary.sources_succeeded, 1);
+    assert_eq!(report.summary.sources_failed, 0);
+  }
 }
