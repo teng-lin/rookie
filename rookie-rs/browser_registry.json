@@ -642,6 +642,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Arc Safe Storage",
+            "account": "Arc"
+          }
         }
       },
       {
@@ -687,6 +693,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Brave Safe Storage",
+            "account": "Brave"
+          }
         }
       },
       {
@@ -732,6 +744,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Chrome Safe Storage",
+            "account": "Chrome"
+          }
         }
       },
       {
@@ -756,6 +774,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Chrome Safe Storage",
+            "account": "Chromium"
+          }
         }
       },
       {
@@ -823,6 +847,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Microsoft Edge Safe Storage",
+            "account": "Microsoft Edge"
+          }
         }
       },
       {
@@ -861,6 +891,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Opera Safe Storage",
+            "account": "Opera"
+          }
         }
       },
       {
@@ -888,6 +924,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Opera Safe Storage",
+            "account": "Opera"
+          }
         }
       },
       {
@@ -912,6 +954,12 @@
           "declared_decryption_tiers": [
             "v10"
           ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Vivaldi Safe Storage",
+            "account": "Vivaldi"
+          }
         }
       },
       {
@@ -1026,7 +1074,9 @@
           }
         ],
         "capabilities": {
-          "declared_persistent_formats": ["safari_binarycookies"],
+          "declared_persistent_formats": [
+            "safari_binarycookies"
+          ],
           "declared_session_formats": [],
           "declared_decryption_tiers": []
         }
@@ -1070,6 +1120,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "arc"
         }
       },
       {
@@ -1130,6 +1183,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "brave"
         }
       },
       {
@@ -1176,6 +1232,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "chrome"
         }
       },
       {
@@ -1215,6 +1274,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "chromium"
         }
       },
       {
@@ -1268,6 +1330,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "chromium"
         }
       },
       {
@@ -1349,6 +1414,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "chromium"
         }
       },
       {
@@ -1388,6 +1456,9 @@
             "v10",
             "v11"
           ]
+        },
+        "key_credentials": {
+          "linux_crypt_name": "chrome"
         }
       },
       {
