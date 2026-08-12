@@ -1008,7 +1008,9 @@ mod tests {
   #[test]
   fn injected_windows_env_glob_metacharacters_are_literal() {
     let root = unique_tmpdir("windows-home-glob");
-    let home = root.join("home[seed]*?");
+    // `*` and `?` are invalid filename characters on Windows; brackets are valid and
+    // still exercise escaping a value that glob would otherwise treat as a pattern.
+    let home = root.join("home[seed]");
     let db = home.join("Google/Chrome/User Data/Default/Network/Cookies");
     std::fs::create_dir_all(db.parent().unwrap()).expect("profile dir");
     std::fs::write(&db, b"").expect("cookie DB");
