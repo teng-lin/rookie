@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 
 import rookieCookies, {
   firefoxBased,
@@ -48,6 +49,31 @@ const EXPECTED_EXPORTS = [
   "chromiumBased",
 ];
 
+function constructFacade(platform, omittedNativeExport) {
+  const loader = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  const facadeStart = loader.indexOf("function requiredNative(");
+  if (facadeStart === -1) {
+    throw new Error("generated loader has no validated export facade");
+  }
+
+  const nativeFunctions = Object.fromEntries(
+    EXPECTED_EXPORTS.map((name) => [name, () => []]),
+  );
+  nativeFunctions.testWorkerPanic = undefined;
+  nativeFunctions[omittedNativeExport] = undefined;
+
+  const module = { exports: {} };
+  runInNewContext(loader.slice(facadeStart), {
+    ...nativeFunctions,
+    module,
+    platform,
+    Promise,
+    Error,
+    TypeError,
+  });
+  return module.exports;
+}
+
 test("index.js exports every documented function", (t) => {
   for (const name of EXPECTED_EXPORTS) {
     t.is(
@@ -62,6 +88,29 @@ test("version returns a non-empty string", (t) => {
   const v = version();
   t.is(typeof v, "string");
   t.true(v.length > 0);
+});
+
+test("the generated facade validates required native exports", (t) => {
+  t.throws(() => constructFacade("linux", "version"), {
+    message: /native binding function: version/,
+  });
+  t.throws(() => constructFacade("linux", "chrome"), {
+    message: /native binding function: chrome/,
+  });
+});
+
+test("platform exports are required only on their supported OS", async (t) => {
+  t.throws(() => constructFacade("win32", "octoBrowser"), {
+    message: /native binding function: octoBrowser/,
+  });
+  t.throws(() => constructFacade("darwin", "safari"), {
+    message: /native binding function: safari/,
+  });
+
+  const linux = constructFacade("linux", "octoBrowser");
+  await t.throwsAsync(linux.octoBrowser(), {
+    message: /only available on Windows/,
+  });
 });
 
 test("all packages advertise the exact Node-API v4 engine range", (t) => {
