@@ -154,7 +154,7 @@ fn validate_registry(registry: &Registry) -> std::result::Result<(), String> {
         ));
       }
       for alias in &definition.aliases {
-        validate_identifier("alias", alias)?;
+        validate_alias(alias)?;
         if browser_ids.contains(alias.as_str()) || !aliases.insert(alias.as_str()) {
           return Err(format!("duplicate browser alias {alias:?} on {platform}"));
         }
@@ -196,6 +196,18 @@ fn validate_identifier(kind: &str, value: &str) -> std::result::Result<(), Strin
   Ok(())
 }
 
+fn validate_alias(value: &str) -> std::result::Result<(), String> {
+  if value.is_empty()
+    || value.trim() != value
+    || !value.bytes().all(|byte| {
+      byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b' ')
+    })
+  {
+    return Err(format!("invalid alias identifier {value:?}"));
+  }
+  Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlatformId {
   Windows,
@@ -231,6 +243,7 @@ trait DiscoveryFs {
   fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>>;
   fn canonicalize(&self, path: &Path) -> Result<PathBuf>;
   fn read_to_string(&self, path: &Path) -> Result<String>;
+  fn glob(&self, pattern: &Path) -> Result<Vec<PathBuf>>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -262,6 +275,16 @@ impl DiscoveryFs for RealDiscoveryFs {
 
   fn read_to_string(&self, path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
+  }
+
+  fn glob(&self, pattern: &Path) -> Result<Vec<PathBuf>> {
+    let pattern = pattern
+      .to_str()
+      .ok_or_else(|| anyhow!("glob pattern is not valid Unicode: {}", pattern.display()))?;
+    glob::glob(pattern)
+      .with_context(|| format!("parse glob {pattern}"))?
+      .map(|entry| entry.with_context(|| format!("expand glob {pattern}")))
+      .collect()
   }
 }
 
@@ -694,71 +717,85 @@ fn discover_browser_with_context<F: DiscoveryFs>(
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
   for root in roots {
-    let Some(resolved) = context.resolve_template(&root.template) else {
+    let Some(pattern) = context.resolve_template(&root.template) else {
       continue;
     };
-    if !context.fs.is_dir(&resolved) {
-      continue;
-    }
-    discovery.detected_roots += 1;
-    let canonical_path = match context.fs.canonicalize(&resolved) {
-      Ok(path) => path,
+    let mut resolved_roots = match context.fs.glob(&pattern) {
+      Ok(roots) => roots,
       Err(error) => {
         discovery.issues.push(DiscoveryIssue {
-          code: "installation_canonicalize_failed",
-          path: resolved,
+          code: "installation_glob_failed",
+          path: pattern,
           message: error.to_string(),
         });
         continue;
       }
     };
-    let installation_key = normalized_path_bytes(&canonical_path);
-    if !seen_installations.insert(installation_key.clone()) {
-      discovery.issues.push(DiscoveryIssue {
-        code: "duplicate_installation",
+    resolved_roots.sort_by_key(|path| normalized_path_bytes(path));
+    for resolved in resolved_roots {
+      if !context.fs.is_dir(&resolved) {
+        continue;
+      }
+      discovery.detected_roots += 1;
+      let canonical_path = match context.fs.canonicalize(&resolved) {
+        Ok(path) => path,
+        Err(error) => {
+          discovery.issues.push(DiscoveryIssue {
+            code: "installation_canonicalize_failed",
+            path: resolved,
+            message: error.to_string(),
+          });
+          continue;
+        }
+      };
+      let installation_key = normalized_path_bytes(&canonical_path);
+      if !seen_installations.insert(installation_key.clone()) {
+        discovery.issues.push(DiscoveryIssue {
+          code: "duplicate_installation",
+          path: canonical_path,
+          message: "installation is already owned by an earlier registry root".to_owned(),
+        });
+        continue;
+      }
+      let id = installation_id(
+        &definition.canonical_id,
+        &root.root_id,
+        &root.channel,
+        &installation_key,
+      );
+      let mut installation = BrowserInstallation {
+        installation_id: id,
+        browser_id: definition.canonical_id.clone(),
+        root_id: root.root_id.clone(),
+        channel: root.channel.clone(),
+        local_state_path: canonical_path.join("Local State"),
         path: canonical_path,
-        message: "installation is already owned by an earlier registry root".to_owned(),
-      });
-      continue;
-    }
-    let id = installation_id(
-      &definition.canonical_id,
-      &root.root_id,
-      &root.channel,
-      &installation_key,
-    );
-    let mut installation = BrowserInstallation {
-      installation_id: id,
-      browser_id: definition.canonical_id.clone(),
-      root_id: root.root_id.clone(),
-      channel: root.channel.clone(),
-      local_state_path: canonical_path.join("Local State"),
-      path: canonical_path,
-      priority: root.priority,
-      profiles: Vec::new(),
-    };
-    match root.discovery {
-      DiscoveryStrategy::ChromiumUserData => {
-        match discover_installation_profiles(
-          context,
-          &mut installation,
-          &mut seen_profiles,
-          &mut discovery.issues,
-        ) {
-          Ok(()) => discovery.enumerated_roots += 1,
-          Err(error) => {
-            discovery.issues.push(DiscoveryIssue {
-              code: "installation_enumeration_failed",
-              path: installation.path.clone(),
-              message: error.to_string(),
-            });
-            discovery.installations.push(installation);
-            continue;
+        priority: root.priority,
+        profiles: Vec::new(),
+      };
+      match root.discovery {
+        DiscoveryStrategy::ChromiumUserData => {
+          match discover_installation_profiles(
+            context,
+            &mut installation,
+            &mut seen_profiles,
+            &mut discovery.issues,
+          ) {
+            Ok(()) => discovery.enumerated_roots += 1,
+            Err(error) => {
+              discovery.issues.push(DiscoveryIssue {
+                code: "installation_enumeration_failed",
+                path: installation.path.clone(),
+                message: error.to_string(),
+              });
+              discovery.installations.push(installation);
+              continue;
+            }
           }
         }
       }
+      discovery.installations.push(installation);
     }
-    discovery.installations.push(installation);
   }
 
   discovery.installations.sort_by(|left, right| {
@@ -882,8 +919,9 @@ fn sort_cookies(cookies: &mut [Cookie]) {
   });
 }
 
-fn extract_chrome_with_provider<F, P>(
+fn extract_chromium_with_provider<F, P>(
   context: &DiscoveryContext<F>,
+  browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
   provider: &P,
@@ -892,7 +930,7 @@ where
   F: DiscoveryFs,
   P: ChromiumKeyProvider<BrowserInstallation>,
 {
-  let discovery = discover_browser_with_context(context, "chrome")?;
+  let discovery = discover_browser_with_context(context, browser_id)?;
   if let Some(profile_id) = profile_id {
     let found = discovery
       .installations
@@ -900,7 +938,7 @@ where
       .flat_map(|installation| &installation.profiles)
       .any(|profile| profile.profile_id == profile_id);
     if !found {
-      bail!("unknown Chrome profile id {profile_id:?}")
+      bail!("unknown {browser_id} profile id {profile_id:?}")
     }
   }
 
@@ -969,9 +1007,9 @@ where
   Ok(report)
 }
 
-struct SystemChromeKeyProvider;
+struct SystemChromiumKeyProvider;
 
-impl ChromiumKeyProvider<BrowserInstallation> for SystemChromeKeyProvider {
+impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
   fn retrieve(&self, installation: &BrowserInstallation) -> ChromiumKeyOutcomes {
     #[cfg(target_os = "windows")]
     {
@@ -997,15 +1035,36 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromeKeyProvider {
 
     #[cfg(target_os = "linux")]
     {
-      let _ = installation;
-      let provider = LinuxPlatformKeyProvider::new(crate::config::get_browser_config("chrome"));
+      let Some(config) = crate::config::try_get_browser_config(&installation.browser_id) else {
+        return ChromiumKeyOutcomes {
+          v10: ChromiumKeyOutcome::failure(format!(
+            "no legacy key configuration for browser {:?}",
+            installation.browser_id
+          )),
+          v11: ChromiumKeyOutcome::failure(format!(
+            "no legacy key configuration for browser {:?}",
+            installation.browser_id
+          )),
+          v20: ChromiumKeyOutcome::NotApplicable,
+        };
+      };
+      let provider = LinuxPlatformKeyProvider::new(config);
       return retrieve_key_outcomes(&provider, &());
     }
 
     #[cfg(target_os = "macos")]
     {
-      let _ = installation;
-      let provider = MacosPlatformKeyProvider::new(crate::config::get_browser_config("chrome"));
+      let Some(config) = crate::config::try_get_browser_config(&installation.browser_id) else {
+        return ChromiumKeyOutcomes {
+          v10: ChromiumKeyOutcome::failure(format!(
+            "no legacy key configuration for browser {:?}",
+            installation.browser_id
+          )),
+          v11: ChromiumKeyOutcome::NotApplicable,
+          v20: ChromiumKeyOutcome::NotApplicable,
+        };
+      };
+      let provider = MacosPlatformKeyProvider::new(config);
       return retrieve_key_outcomes(&provider, &());
     }
 
@@ -1021,8 +1080,15 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromeKeyProvider {
 /// Private Milestone 3C profile-listing seam. This is deliberately not
 /// re-exported from `lib.rs` before the coordinated public report release.
 pub(crate) fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
+  chromium_profiles("chrome")
+}
+
+/// Private generic Chromium listing seam. It intentionally remains crate-private
+/// until the coordinated public report release; legacy named wrappers still use
+/// their frozen selectors.
+pub(crate) fn chromium_profiles(browser_id: &str) -> Result<Vec<ChromiumProfile>> {
   let context = DiscoveryContext::system()?;
-  profiles_for_listing(discover_browser_with_context(&context, "chrome")?)
+  profiles_for_listing(discover_browser_with_context(&context, browser_id)?)
 }
 
 fn profiles_for_listing(discovery: ChromiumDiscovery) -> Result<Vec<ChromiumProfile>> {
@@ -1038,11 +1104,12 @@ pub(crate) fn chrome_profile(
   domains: Option<Vec<String>>,
 ) -> Result<ChromiumRegistryReport> {
   let context = DiscoveryContext::system()?;
-  extract_chrome_with_provider(
+  extract_chromium_with_provider(
     &context,
+    "chrome",
     Some(profile_id),
     domains,
-    &SystemChromeKeyProvider,
+    &SystemChromiumKeyProvider,
   )
 }
 
@@ -1123,6 +1190,22 @@ mod tests {
       .iter()
       .find(|root| root.channel == channel)
       .expect("channel root");
+    context.resolve_template(&root.template).expect("root path")
+  }
+
+  fn browser_root(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    root_id: &str,
+  ) -> PathBuf {
+    let registry = embedded_registry().expect("registry");
+    let definition =
+      browser_definition(registry, context.platform, browser_id).expect("browser definition");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id == root_id)
+      .expect("root definition");
     context.resolve_template(&root.template).expect("root path")
   }
 
@@ -1217,6 +1300,10 @@ mod tests {
     fn read_to_string(&self, path: &Path) -> Result<String> {
       RealDiscoveryFs.read_to_string(path)
     }
+
+    fn glob(&self, pattern: &Path) -> Result<Vec<PathBuf>> {
+      RealDiscoveryFs.glob(pattern)
+    }
   }
 
   fn with_test_fs(
@@ -1243,6 +1330,190 @@ mod tests {
     assert_eq!(
       definition.capabilities.declared_persistent_formats,
       ["chromium_sqlite"]
+    );
+  }
+
+  #[test]
+  fn registry_contains_every_existing_chromium_family_browser_without_mutating_legacy_config() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let cases = [
+      (
+        PlatformId::Windows,
+        [
+          "arc",
+          "brave",
+          "chrome",
+          "chromium",
+          "edge",
+          "octo_browser",
+          "opera",
+          "opera_gx",
+          "vivaldi",
+        ]
+        .as_slice(),
+      ),
+      (
+        PlatformId::Macos,
+        [
+          "arc", "brave", "chrome", "chromium", "edge", "opera", "opera_gx", "vivaldi",
+        ]
+        .as_slice(),
+      ),
+      (
+        PlatformId::Linux,
+        [
+          "arc", "brave", "chrome", "chromium", "edge", "opera", "opera_gx", "vivaldi",
+        ]
+        .as_slice(),
+      ),
+    ];
+
+    for (platform, expected) in cases {
+      let definitions = registry
+        .platforms
+        .get(platform.as_str())
+        .expect("platform definitions");
+      let actual = definitions
+        .iter()
+        .map(|definition| definition.canonical_id.as_str())
+        .collect::<BTreeSet<_>>();
+      assert_eq!(actual, expected.iter().copied().collect());
+      for browser_id in expected {
+        assert!(crate::config::CONFIG
+          .platforms
+          .get(platform.as_str())
+          .and_then(|browsers| browsers.get(*browser_id))
+          .is_some());
+      }
+    }
+
+    for platform in [PlatformId::Windows, PlatformId::Macos, PlatformId::Linux] {
+      let opera_gx = browser_definition(registry, platform, "opera-gx").expect("Opera GX alias");
+      assert_eq!(opera_gx.canonical_id, "opera_gx");
+      assert_eq!(
+        browser_definition(registry, platform, "opera gx")
+          .expect("spaced Opera GX alias")
+          .canonical_id,
+        "opera_gx"
+      );
+    }
+  }
+
+  #[test]
+  fn corrected_chromium_roots_and_channels_are_explicit_per_os() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let cases = [
+      (
+        PlatformId::Windows,
+        "edge",
+        [
+          (
+            "edge-stable-local",
+            "stable",
+            "{local_app_data}/Microsoft/Edge/User Data",
+          ),
+          (
+            "edge-canary-local",
+            "canary",
+            "{local_app_data}/Microsoft/Edge SxS/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        PlatformId::Macos,
+        "opera",
+        [
+          (
+            "opera-stable",
+            "stable",
+            "{home}/Library/Application Support/com.operasoftware.Opera",
+          ),
+          (
+            "opera-developer",
+            "developer",
+            "{home}/Library/Application Support/com.operasoftware.OperaDeveloper",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        PlatformId::Linux,
+        "vivaldi",
+        [
+          ("vivaldi-stable-native", "stable", "{config_home}/vivaldi"),
+          (
+            "vivaldi-snapshot-native",
+            "snapshot",
+            "{config_home}/vivaldi-snapshot",
+          ),
+        ]
+        .as_slice(),
+      ),
+    ];
+
+    for (platform, browser_id, expected_roots) in cases {
+      let definition = browser_definition(registry, platform, browser_id).expect("browser");
+      for (root_id, channel, template) in expected_roots {
+        let root = definition
+          .roots
+          .iter()
+          .find(|root| root.root_id == *root_id)
+          .expect("root");
+        assert_eq!(root.channel, *channel);
+        assert_eq!(root.template, *template);
+      }
+    }
+  }
+
+  #[test]
+  fn generic_chromium_discovery_handles_default_and_flat_existing_browser_layouts() {
+    let temp = TempDir::new("generic-layouts");
+    let home = temp.path().join("home");
+    let context = test_context_for(PlatformId::Linux, home.clone(), []);
+
+    let brave = browser_root(&context, "brave", "brave-stable-native");
+    seed_cookie(&brave.join("Default"), true, "brave", "value");
+    let brave_profiles = discover_browser_with_context(&context, "brave")
+      .expect("discover Brave")
+      .profiles();
+    assert_eq!(brave_profiles.len(), 1);
+    assert_eq!(brave_profiles[0].directory_name, "Default");
+
+    let opera = browser_root(&context, "opera", "opera-stable-native");
+    seed_cookie(&opera, false, "opera", "value");
+    let opera_profiles = discover_browser_with_context(&context, "opera")
+      .expect("discover flat Opera")
+      .profiles();
+    assert_eq!(opera_profiles.len(), 1);
+    assert_eq!(opera_profiles[0].directory_name, ".");
+    assert!(opera_profiles[0].is_default);
+  }
+
+  #[test]
+  fn wildcard_roots_are_sorted_before_generic_discovery() {
+    let temp = TempDir::new("wildcard-roots");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let root_pattern = browser_root(&context, "octo_browser", "octo-local-temporary");
+    let parent = root_pattern.parent().expect("Octo parent");
+    seed_cookie(&parent.join("z-profile/Default"), true, "z", "value");
+    seed_cookie(&parent.join("a-profile/Default"), true, "a", "value");
+
+    let discovery = discover_browser_with_context(&context, "octo_browser").expect("discover Octo");
+    assert_eq!(discovery.installations.len(), 2);
+    assert_eq!(
+      discovery
+        .installations
+        .iter()
+        .map(|installation| installation.path.file_name().unwrap().to_string_lossy())
+        .collect::<Vec<_>>(),
+      ["a-profile", "z-profile"]
     );
   }
 
@@ -1485,8 +1756,8 @@ mod tests {
     );
     let provider = CountingProvider::default();
 
-    let report =
-      extract_chrome_with_provider(&context, None, None, &provider).expect("extract report");
+    let report = extract_chromium_with_provider(&context, "chrome", None, None, &provider)
+      .expect("extract report");
     assert_eq!(report.installations.len(), 1);
     let profiles = &report.installations[0].profiles;
     assert_eq!(profiles.len(), 3);
@@ -1534,8 +1805,9 @@ mod tests {
       .expect("insert undecryptable row");
     write_local_state(&root, serde_json::json!({}));
 
-    let report = extract_chrome_with_provider(&context, None, None, &CountingProvider::default())
-      .expect("partial report");
+    let report =
+      extract_chromium_with_provider(&context, "chrome", None, None, &CountingProvider::default())
+        .expect("partial report");
     let extraction = &report.installations[0].profiles[0];
     assert_eq!(extraction.cookies.len(), 1);
     assert_eq!(extraction.cookies[0].name, "readable");
@@ -1564,8 +1836,9 @@ mod tests {
       .profile_id;
     let provider = CountingProvider::default();
 
-    let report = extract_chrome_with_provider(
+    let report = extract_chromium_with_provider(
       &context,
+      "chrome",
       Some(&profile_id),
       Some(vec!["example.com".to_owned()]),
       &provider,
@@ -1591,9 +1864,15 @@ mod tests {
       [1]
     );
 
-    let error = extract_chrome_with_provider(&context, Some("not-a-profile-id"), None, &provider)
-      .expect_err("unknown profile must fail");
-    assert!(error.to_string().contains("unknown Chrome profile id"));
+    let error = extract_chromium_with_provider(
+      &context,
+      "chrome",
+      Some("not-a-profile-id"),
+      None,
+      &provider,
+    )
+    .expect_err("unknown profile must fail");
+    assert!(error.to_string().contains("unknown chrome profile id"));
   }
 
   #[test]
@@ -1662,8 +1941,8 @@ mod tests {
       .contains("every detected Chrome installation failed"));
 
     let provider = CountingProvider::default();
-    let report =
-      extract_chrome_with_provider(&context, None, None, &provider).expect("failed report outcome");
+    let report = extract_chromium_with_provider(&context, "chrome", None, None, &provider)
+      .expect("failed report outcome");
     assert_eq!(report.installations.len(), 1);
     assert!(report.installations[0].profiles.is_empty());
     assert!(report
