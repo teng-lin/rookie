@@ -470,7 +470,7 @@ fn collect_report(
     }
     "gecko" => {
       let engine = if extract {
-        registry::gecko_report(&browser.canonical_id, domains)?
+        registry::gecko_report(&browser.canonical_id, profile_id, domains)?
       } else {
         registry::gecko_profiles(&browser.canonical_id)?
       };
@@ -479,7 +479,7 @@ fn collect_report(
     #[cfg(target_os = "macos")]
     "safari" => {
       let engine = if extract {
-        registry::safari_report(&browser.canonical_id, domains)?
+        registry::safari_report(&browser.canonical_id, profile_id, domains)?
       } else {
         registry::safari_profiles(&browser.canonical_id)?
       };
@@ -488,7 +488,7 @@ fn collect_report(
     #[cfg(target_os = "windows")]
     "internet_explorer" => {
       let engine = if extract {
-        registry::internet_explorer_report(&browser.canonical_id, domains)?
+        registry::internet_explorer_report(&browser.canonical_id, profile_id, domains)?
       } else {
         registry::internet_explorer_profiles(&browser.canonical_id)?
       };
@@ -677,6 +677,11 @@ pub(crate) fn browser_extraction_report(
   let browser = registry::resolve_registered_browser(browser_id)?;
   let canonical_id = &browser.canonical_id;
   let mut outcome = collect_report(&browser, profile_id, true, domains)?;
+  // Every engine seam now applies the selection itself, before it acquires a
+  // single source, so by here the list is already narrowed. This stays as the
+  // boundary check for the one case no engine covers: a registered browser
+  // whose engine has no adapter compiled into this build reports no profiles at
+  // all, and an unknown profile id must still be a request error there.
   if let Some(profile_id) = profile_id {
     if !outcome
       .profiles
@@ -1428,7 +1433,7 @@ mod engine_chain_tests {
     )
     .expect("write profiles.ini");
 
-    let engine = test_seams::gecko_report(&context, "firefox", None).expect("gecko report");
+    let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
     let browser = BrowserId::known("firefox");
     let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
@@ -1480,7 +1485,7 @@ mod engine_chain_tests {
     let temp = TempDir::new("absent");
     let context = test_seams::current_context(temp.path().to_path_buf());
 
-    let engine = test_seams::gecko_report(&context, "firefox", None).expect("gecko report");
+    let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
     assert!(engine.profiles.is_empty());
     let browser = BrowserId::known("firefox");
     let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
@@ -1560,7 +1565,7 @@ mod engine_chain_tests {
     )
     .expect("seed Safari cookie file");
 
-    let engine = test_seams::safari_report(&context, "safari", None).expect("safari report");
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let browser = BrowserId::known("safari");
     let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
@@ -1591,7 +1596,7 @@ mod engine_chain_tests {
     // The ESE reader is injected, so this exercises the adapter chain without
     // needing a real ESE database on a non-Windows host.
     let engine =
-      test_seams::internet_explorer_report(&context, "internet_explorer", None, |_, _| {
+      test_seams::internet_explorer_report(&context, "internet_explorer", None, None, |_, _| {
         Ok(InternetExplorerRows {
           cookies: vec![crate::common::enums::Cookie {
             domain: ".example.com".to_owned(),
@@ -1689,7 +1694,7 @@ mod engine_chain_tests {
       .expect("seed rows");
     drop(connection);
 
-    let engine = test_seams::gecko_report(&context, "firefox", None).expect("gecko report");
+    let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
     let outcome = engine_browser_outcome(&BrowserId::known("firefox"), engine)
       .expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
@@ -1751,6 +1756,178 @@ mod engine_chain_tests {
     let report = assemble(1, vec![outcome]);
     assert_eq!(report.summary.installations_discovered, 2);
     assert_eq!(report.summary.profiles_discovered, 1);
+  }
+
+  /// Section 5.7 freezes what a profile-selected report says, and pushing the
+  /// selection down into the engines changes only *when* the work happens. So
+  /// every one of these compares the profile-selected report against the report
+  /// the old build produced -- extract every profile, then drop the unwanted
+  /// ones -- and requires them to be identical field for field, issues and
+  /// counters included.
+  fn post_filtered_report(
+    browser: &BrowserId,
+    engine: registry::EngineExtractionOutcome,
+    profile_id: &str,
+  ) -> ExtractionReport {
+    let mut outcome = engine_browser_outcome(browser, engine).expect("adapt the engine outcome");
+    outcome
+      .profiles
+      .retain(|profile| profile.profile.profile_id.as_str() == profile_id);
+    assemble(1, vec![outcome])
+  }
+
+  fn selected_report(
+    browser: &BrowserId,
+    engine: registry::EngineExtractionOutcome,
+  ) -> ExtractionReport {
+    assemble(
+      1,
+      vec![engine_browser_outcome(browser, engine).expect("adapt the engine outcome")],
+    )
+  }
+
+  /// The serialized form is the observable contract, so comparing it compares
+  /// every frozen field rather than the handful a hand-written assertion would
+  /// remember to check.
+  fn wire(report: &ExtractionReport) -> serde_json::Value {
+    serde_json::to_value(report).expect("serialize the report")
+  }
+
+  #[test]
+  fn a_profile_selected_gecko_report_says_what_the_post_filtered_report_said() {
+    let temp = TempDir::new("gecko-profile-contract");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "firefox");
+    for (directory, rows) in [
+      (
+        "default",
+        "INSERT INTO moz_cookies VALUES ('.example.com','/',0,0,'default-cookie','value',0,0);",
+      ),
+      // The selected profile loses a row, so the comparison covers a report
+      // carrying an error-severity issue and a degraded status, not just a
+      // clean one.
+      (
+        "other",
+        "INSERT INTO moz_cookies VALUES ('.example.com','/',0,0,'other-cookie','value',0,0);
+         INSERT INTO moz_cookies VALUES ('.example.com','/',0,0,X'00ff','value',0,0);",
+      ),
+    ] {
+      let profile = root.join("Profiles").join(directory);
+      test_seams::seed_gecko_profile(&profile);
+      let connection =
+        rusqlite::Connection::open(profile.join("cookies.sqlite")).expect("open Gecko database");
+      connection.execute_batch(rows).expect("seed rows");
+    }
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/default\nDefault=1\n\
+       [Profile1]\nName=other\nIsRelative=1\nPath=Profiles/other\n",
+    )
+    .expect("write profiles.ini");
+
+    let browser = BrowserId::known("firefox");
+    let full = test_seams::gecko_report(&context, "firefox", None, None).expect("full report");
+    assert_eq!(full.profiles.len(), 2);
+    let selected = full.profiles[1].profile_id.clone();
+    let expected = post_filtered_report(&browser, full, &selected);
+
+    let engine = test_seams::gecko_report(&context, "firefox", Some(&selected), None)
+      .expect("profile-selected report");
+    let actual = selected_report(&browser, engine);
+
+    assert_eq!(actual.status, ReportStatusCode::partial());
+    assert_eq!(actual.summary.cookies_emitted, 1);
+    assert_eq!(wire(&actual), wire(&expected));
+  }
+
+  #[test]
+  fn a_profile_selected_safari_report_says_what_the_post_filtered_report_said() {
+    use crate::browser::registry::PlatformId;
+
+    let temp = TempDir::new("safari-profile-contract");
+    let context = test_seams::context(PlatformId::Macos, temp.path().to_path_buf());
+    let data = test_seams::primary_root_path(&context, "safari")
+      .join("Containers/com.apple.Safari/Data/Library");
+    let uuid = "01234567-89AB-CDEF-0123-456789ABCDEF";
+    for directory in [
+      data.join("Cookies"),
+      data.join(format!(
+        "WebKit/WebsiteDataStore/{}/WebsiteData/Cookies",
+        uuid.to_ascii_lowercase()
+      )),
+    ] {
+      std::fs::create_dir_all(&directory).expect("create Safari cookie directory");
+      std::fs::write(
+        directory.join("Cookies.binarycookies"),
+        b"cook\x00\x00\x00\x00",
+      )
+      .expect("seed Safari cookie file");
+    }
+    std::fs::create_dir_all(data.join(format!("Safari/Profiles/{uuid}")))
+      .expect("create Safari profile marker directory");
+
+    let browser = BrowserId::known("safari");
+    let full = test_seams::safari_report(&context, "safari", None, None).expect("full report");
+    assert_eq!(full.profiles.len(), 2);
+    let selected = full.profiles[1].profile_id.clone();
+    let expected = post_filtered_report(&browser, full, &selected);
+
+    let engine = test_seams::safari_report(&context, "safari", Some(&selected), None)
+      .expect("profile-selected report");
+    assert_eq!(wire(&selected_report(&browser, engine)), wire(&expected));
+  }
+
+  #[test]
+  fn a_profile_selected_internet_explorer_report_says_what_the_post_filtered_report_said() {
+    use crate::browser::registry::{InternetExplorerRows, PlatformId};
+
+    let temp = TempDir::new("ie-profile-contract");
+    let context = test_seams::context(PlatformId::Windows, temp.path().to_path_buf());
+    let roots = test_seams::resolvable_root_paths(&context, "internet_explorer");
+    assert_eq!(roots.len(), 2, "IE must declare two WebCache roots");
+    for root in &roots {
+      std::fs::create_dir_all(root).expect("create WebCache root");
+      std::fs::write(root.join("WebCacheV01.dat"), b"ese").expect("seed WebCache database");
+    }
+    // Each root answers with its own cookie, so a report built from the wrong
+    // profile could not pass by coincidence.
+    let rows = |path: &std::path::Path, _: Option<&[String]>| {
+      Ok(InternetExplorerRows {
+        cookies: vec![crate::common::enums::Cookie {
+          domain: ".example.com".to_owned(),
+          path: "/".to_owned(),
+          secure: false,
+          expires: None,
+          name: format!("{}", path.display()),
+          value: "value".to_owned(),
+          http_only: false,
+          same_site: 0,
+        }],
+        records_seen: 1,
+        records_skipped: 0,
+      })
+    };
+
+    let browser = BrowserId::known("internet_explorer");
+    let full =
+      test_seams::internet_explorer_report(&context, "internet_explorer", None, None, rows)
+        .expect("full report");
+    assert_eq!(full.profiles.len(), 2);
+    let selected = full.profiles[1].profile_id.clone();
+    let expected = post_filtered_report(&browser, full, &selected);
+
+    let engine = test_seams::internet_explorer_report(
+      &context,
+      "internet_explorer",
+      Some(&selected),
+      None,
+      rows,
+    )
+    .expect("profile-selected report");
+    let actual = selected_report(&browser, engine);
+
+    assert_eq!(actual.summary.cookies_emitted, 1);
+    assert_eq!(wire(&actual), wire(&expected));
   }
 
   /// Reported against pre-round-3 4E: a Chromium row that could not be
