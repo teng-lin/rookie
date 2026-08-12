@@ -167,12 +167,23 @@ fn chromium_profile_outcome(
     .iter()
     .find(|candidate| candidate.selected)
   else {
-    outcome.issues.push(issue(
-      "profile_has_no_cookie_source",
-      ExtractionStageCode::discovery(),
-      IssueSeverityCode::info(),
-      error.unwrap_or_else(|| "profile has no selected persistent source".to_owned()),
-    ));
+    // A profile that simply has no cookie database is ordinary absence, but one
+    // that reports an extraction error lost something, so it must not be
+    // downgraded to the same `info` signal as an empty profile.
+    outcome.issues.push(match error {
+      Some(error) => issue(
+        "profile_extraction_failed",
+        ExtractionStageCode::acquisition(),
+        IssueSeverityCode::error(),
+        error,
+      ),
+      None => issue(
+        "profile_has_no_cookie_source",
+        ExtractionStageCode::discovery(),
+        IssueSeverityCode::info(),
+        "profile has no selected persistent source",
+      ),
+    });
     return Ok(outcome);
   };
 
@@ -730,6 +741,39 @@ mod tests {
     assert_eq!(
       status(outcome(Vec::new(), true)),
       ReportStatusCode::failed()
+    );
+  }
+
+  #[test]
+  fn a_profile_error_with_no_sources_is_failed_not_no_sources() {
+    // Same zero-source shape as the `no_sources` case, but the profile lost
+    // something. Section 5.7 reserves `no_sources` for discovery that completed
+    // without an error-severity failure.
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.issues.push(issue(
+      "profile_extraction_failed",
+      ExtractionStageCode::acquisition(),
+      IssueSeverityCode::error(),
+      "the profile database could not be read",
+    ));
+    assert_eq!(
+      status(outcome(vec![profile], false)),
+      ReportStatusCode::failed()
+    );
+  }
+
+  #[test]
+  fn an_info_issue_with_no_sources_stays_no_sources() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.issues.push(issue(
+      "profile_has_no_cookie_source",
+      ExtractionStageCode::discovery(),
+      IssueSeverityCode::info(),
+      "profile has no selected persistent source",
+    ));
+    assert_eq!(
+      status(outcome(vec![profile], false)),
+      ReportStatusCode::no_sources()
     );
   }
 

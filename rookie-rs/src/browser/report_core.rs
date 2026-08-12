@@ -569,6 +569,11 @@ pub(crate) fn source_status(failed: bool) -> SourceStatusCode {
 
 /// Section 5.7 report status. `discovery_failed` reports whether any detected
 /// installation or root failed hard enough to prevent source enumeration.
+///
+/// An error-severity issue anywhere resolves to `partial` or `failed` and never
+/// to `no_sources`, which Section 5.7 defines as discovery completing *without*
+/// an error-severity failure. A profile that ended up with no sources because
+/// something errored has not found "no sources"; it failed to look.
 pub(crate) fn report_status(
   profiles: &[ProfileExtraction],
   top_level: &[ExtractionIssue],
@@ -596,7 +601,7 @@ pub(crate) fn report_status(
     } else {
       ReportStatusCode::complete()
     }
-  } else if attempted || discovery_failed {
+  } else if attempted || discovery_failed || has_error {
     ReportStatusCode::failed()
   } else {
     ReportStatusCode::no_sources()
