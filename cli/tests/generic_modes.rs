@@ -509,6 +509,13 @@ fn report_and_list_modes_reject_netscape_format() {
 fn report_and_list_modes_accept_an_explicit_json_format() {
   for args in [
     &["--list-browsers", "--format", "json"][..],
+    &[
+      "--list-profiles",
+      "--browser",
+      "firefox",
+      "--format",
+      "json",
+    ][..],
     &["--report", "--browser", "firefox", "--format", "json"][..],
   ] {
     let root = unique_tmpdir("explicit-json");
@@ -520,6 +527,58 @@ fn report_and_list_modes_accept_an_explicit_json_format() {
     );
     serde_json::from_slice::<serde_json::Value>(&out.stdout)
       .unwrap_or_else(|err| panic!("{args:?} emitted invalid JSON: {err}"));
+  }
+}
+
+/// Clap evaluates conflicts before `requires`, so each declared pair can be
+/// provoked on its own. Asserting that the diagnostic names *both* halves keeps
+/// these honest: dropping one flag from a `conflicts_with_all` list fails here
+/// rather than silently widening the grammar.
+#[test]
+fn profile_conflicts_with_each_list_mode_individually() {
+  for (args, other) in [
+    (
+      &["--profile", "x", "--list-browsers"][..],
+      "--list-browsers",
+    ),
+    (
+      &["--profile", "x", "--list-profiles", "--browser", "firefox"][..],
+      "--list-profiles",
+    ),
+  ] {
+    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
+    assert!(
+      stderr.contains(&format!(
+        "the argument '--profile <PROFILE>' cannot be used with '{other}'"
+      )),
+      "{args:?}: expected the --profile/{other} conflict: {stderr}"
+    );
+  }
+}
+
+#[test]
+fn key_path_conflicts_with_each_new_mode_individually() {
+  for (args, other) in [
+    (
+      &["--key-path", "ks", "--list-browsers"][..],
+      "--list-browsers",
+    ),
+    // No `--browser` here: it conflicts with `--key-path` too, and a second
+    // conflict switches clap to a multi-line rendering that would obscure the
+    // pair under test.
+    (
+      &["--key-path", "ks", "--list-profiles"][..],
+      "--list-profiles",
+    ),
+    (&["--key-path", "ks", "--report"][..], "--report"),
+  ] {
+    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
+    assert!(
+      stderr.contains(&format!(
+        "the argument '--key-path <KEY_PATH>' cannot be used with '{other}'"
+      )),
+      "{args:?}: expected the --key-path/{other} conflict: {stderr}"
+    );
   }
 }
 
