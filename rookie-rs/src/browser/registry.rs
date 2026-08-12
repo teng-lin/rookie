@@ -1401,18 +1401,23 @@ fn registry_key_credentials(browser_id: &str) -> Result<crate::config::Browser> 
   let registry = embedded_registry()?;
   let platform = PlatformId::current()?;
   let definition = browser_definition(registry, platform, browser_id)?;
-  let credentials = definition.key_credentials.as_ref();
-  Ok(crate::config::Browser {
+  Ok(provider_input(definition.key_credentials.as_ref()))
+}
+
+/// Field-for-field mapping, kept separate from the lookup so it can be
+/// exercised with credentials from any platform. A definition only ever carries
+/// its own platform's subfields, so testing this through the lookup alone would
+/// leave the other platform's mapping unobserved.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn provider_input(credentials: Option<&KeyCredentials>) -> crate::config::Browser {
+  let keychain = credentials.and_then(|credentials| credentials.macos_keychain.as_ref());
+  crate::config::Browser {
     paths: Vec::new(),
     channels: None,
     unix_crypt_name: credentials.and_then(|credentials| credentials.linux_crypt_name.clone()),
-    osx_key_service: credentials
-      .and_then(|credentials| credentials.macos_keychain.as_ref())
-      .map(|keychain| keychain.service.clone()),
-    osx_key_user: credentials
-      .and_then(|credentials| credentials.macos_keychain.as_ref())
-      .map(|keychain| keychain.account.clone()),
-  })
+    osx_key_service: keychain.map(|keychain| keychain.service.clone()),
+    osx_key_user: keychain.map(|keychain| keychain.account.clone()),
+  }
 }
 
 struct SystemChromiumKeyProvider;
@@ -2867,6 +2872,64 @@ mod tests {
         ),
       ]
     );
+  }
+
+  #[test]
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn registry_credentials_map_onto_the_platform_provider_input() {
+    // The parity test proves the registry *data* matches config.json; this
+    // proves the code that reads it maps the right field onto the right
+    // provider input. A swapped service/account or a wrong platform branch
+    // would satisfy parity and still break retrieval.
+    let chrome = registry_key_credentials("chrome").expect("Chrome credentials");
+
+    #[cfg(target_os = "linux")]
+    {
+      assert_eq!(chrome.unix_crypt_name.as_deref(), Some("chrome"));
+      // Linux definitions carry no Keychain credentials, so mapping the macOS
+      // branch here would be a silent cross-platform leak.
+      assert_eq!(chrome.osx_key_service, None);
+      assert_eq!(chrome.osx_key_user, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+      // Distinct values, so transposing service and account fails here.
+      assert_eq!(
+        chrome.osx_key_service.as_deref(),
+        Some("Chrome Safe Storage")
+      );
+      assert_eq!(chrome.osx_key_user.as_deref(), Some("Chrome"));
+      assert_eq!(chrome.unix_crypt_name, None);
+    }
+
+    // An unknown browser is an error rather than silently credential-less.
+    assert!(registry_key_credentials("definitely-not-a-browser").is_err());
+
+    // A definition only carries its own platform's subfields, so drive the
+    // mapping directly with both halves present. Service and account are
+    // deliberately distinct, so transposing them fails here on every platform
+    // rather than only on the macOS job.
+    let both = KeyCredentials {
+      macos_keychain: Some(MacosKeychainCredential {
+        service: "Probe Safe Storage".to_owned(),
+        account: "Probe Account".to_owned(),
+      }),
+      linux_crypt_name: Some("probe-crypt".to_owned()),
+    };
+    let mapped = provider_input(Some(&both));
+    assert_eq!(
+      mapped.osx_key_service.as_deref(),
+      Some("Probe Safe Storage")
+    );
+    assert_eq!(mapped.osx_key_user.as_deref(), Some("Probe Account"));
+    assert_eq!(mapped.unix_crypt_name.as_deref(), Some("probe-crypt"));
+
+    // No credentials maps to no credentials, never to a blank lookup.
+    let empty = provider_input(None);
+    assert_eq!(empty.osx_key_service, None);
+    assert_eq!(empty.osx_key_user, None);
+    assert_eq!(empty.unix_crypt_name, None);
   }
 
   #[test]
