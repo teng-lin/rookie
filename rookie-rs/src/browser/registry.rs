@@ -16,7 +16,9 @@ use super::chromium_platform_keys::LinuxPlatformKeyProvider;
 use super::chromium_platform_keys::MacosPlatformKeyProvider;
 #[cfg(target_os = "windows")]
 use super::chromium_platform_keys::WindowsPlatformKeyProvider;
+use super::mozilla;
 use crate::common::enums::Cookie;
+use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -49,6 +51,9 @@ struct BrowserDefinition {
 #[serde(rename_all = "snake_case")]
 enum BrowserEngine {
   Chromium,
+  Gecko,
+  Safari,
+  InternetExplorer,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +112,9 @@ struct InstallationRoot {
 #[serde(rename_all = "snake_case")]
 enum DiscoveryStrategy {
   ChromiumUserData,
+  MozillaProfilesIni,
+  SafariDefaultProfile,
+  InternetExplorerWebCache,
 }
 
 static REGISTRY: Lazy<std::result::Result<Registry, String>> = Lazy::new(|| {
@@ -169,6 +177,18 @@ fn validate_registry(registry: &Registry) -> std::result::Result<(), String> {
         }
         if root.template.trim().is_empty() || root.channel.trim().is_empty() {
           return Err(format!("root {:?} has empty required fields", root.root_id));
+        }
+        let expected = match definition.engine {
+          BrowserEngine::Chromium => DiscoveryStrategy::ChromiumUserData,
+          BrowserEngine::Gecko => DiscoveryStrategy::MozillaProfilesIni,
+          BrowserEngine::Safari => DiscoveryStrategy::SafariDefaultProfile,
+          BrowserEngine::InternetExplorer => DiscoveryStrategy::InternetExplorerWebCache,
+        };
+        if root.discovery != expected {
+          return Err(format!(
+            "browser {:?} uses engine {:?} but root {:?} uses incompatible discovery strategy {:?}",
+            definition.canonical_id, definition.engine, root.root_id, root.discovery
+          ));
         }
       }
       for identifier in definition
@@ -757,6 +777,14 @@ fn discover_browser_with_context<F: DiscoveryFs>(
           }
         }
       }
+      DiscoveryStrategy::MozillaProfilesIni
+      | DiscoveryStrategy::SafariDefaultProfile
+      | DiscoveryStrategy::InternetExplorerWebCache => {
+        bail!(
+          "Chromium browser {:?} has incompatible discovery strategy",
+          definition.canonical_id
+        )
+      }
     }
     discovery.installations.push(installation);
   }
@@ -1046,6 +1074,371 @@ pub(crate) fn chrome_profile(
   )
 }
 
+/// Source-level outcome shared by the non-Chromium adapters. It is deliberately
+/// crate-private: 4E owns the final cross-engine DTO freeze.
+#[derive(Debug)]
+pub(crate) struct EngineSourceExtraction {
+  pub(crate) path: PathBuf,
+  pub(crate) format: &'static str,
+  pub(crate) selected: bool,
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) rows_seen: usize,
+  pub(crate) rows_skipped: usize,
+  pub(crate) acquisition_strategy: Option<DatabaseAcquisitionStrategy>,
+  pub(crate) acquisition_attempts: u32,
+  pub(crate) diagnostics: Vec<String>,
+  pub(crate) error: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EngineProfileExtraction {
+  pub(crate) profile_id: String,
+  pub(crate) installation_id: String,
+  pub(crate) installation_priority: u16,
+  pub(crate) installation_path: PathBuf,
+  pub(crate) name: String,
+  pub(crate) path: PathBuf,
+  pub(crate) is_default: bool,
+  pub(crate) persistent_source_discovered: bool,
+  pub(crate) sources: Vec<EngineSourceExtraction>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EngineExtractionOutcome {
+  pub(crate) profiles: Vec<EngineProfileExtraction>,
+  pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+}
+
+fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
+  context.fs.exists(&path.join("cookies.sqlite"))
+    || [
+      "sessionstore-backups/recovery.jsonlz4",
+      "sessionstore-backups/recovery.baklz4",
+      "sessionstore.jsonlz4",
+      "sessionstore.js",
+      "sessionstore-backups/previous.jsonlz4",
+    ]
+    .iter()
+    .any(|relative| context.fs.exists(&path.join(relative)))
+}
+
+const MAX_GECKO_DISCOVERY_ISSUES_PER_CODE: usize = 32;
+
+fn push_bounded_gecko_issue(
+  issues: &mut Vec<DiscoveryIssue>,
+  code: &'static str,
+  path: PathBuf,
+  message: &str,
+) {
+  if let Some(summary) = issues
+    .iter_mut()
+    .find(|issue| issue.code == code && issue.message.starts_with("additional "))
+  {
+    let omitted = summary
+      .message
+      .split_whitespace()
+      .nth(1)
+      .and_then(|count| count.parse::<usize>().ok())
+      .unwrap_or(1)
+      + 1;
+    summary.message = format!(
+      "additional {omitted} {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
+    );
+    return;
+  }
+  let sampled = issues.iter().filter(|issue| issue.code == code).count();
+  if sampled < MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
+    issues.push(DiscoveryIssue {
+      code,
+      path,
+      message: message.to_owned(),
+    });
+  } else if sampled == MAX_GECKO_DISCOVERY_ISSUES_PER_CODE {
+    issues.push(DiscoveryIssue {
+      code,
+      path,
+      message: format!(
+        "additional 1 {code} diagnostics omitted after {MAX_GECKO_DISCOVERY_ISSUES_PER_CODE} samples"
+      ),
+    });
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfilesIniState {
+  Absent,
+  Empty,
+  Invalid,
+  Declared,
+}
+
+struct MarkerlessGeckoProfiles {
+  profiles: Vec<mozilla::MozillaProfile>,
+  optional_container_error: Option<anyhow::Error>,
+}
+
+fn markerless_gecko_profiles<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  root: &Path,
+) -> Result<MarkerlessGeckoProfiles> {
+  let mut candidates = context.fs.read_dir(root)?;
+  let profiles_container = root.join("Profiles");
+  let mut optional_container_error = None;
+  if context.fs.is_dir(&profiles_container) {
+    match context.fs.read_dir(&profiles_container) {
+      Ok(children) => candidates.extend(children),
+      Err(error) => optional_container_error = Some(error),
+    }
+  }
+  candidates.sort_by_key(|path| normalized_path_bytes(path));
+  candidates.dedup_by(|left, right| normalized_path_bytes(left) == normalized_path_bytes(right));
+  Ok(MarkerlessGeckoProfiles {
+    profiles: candidates
+      .into_iter()
+      .filter(|path| context.fs.is_dir(path) && gecko_profile_has_source(context, path))
+      .map(|path| mozilla::MozillaProfile {
+        name: path
+          .file_name()
+          .map(|name| name.to_string_lossy().into_owned())
+          .unwrap_or_default(),
+        path,
+        is_default: false,
+      })
+      .collect(),
+    optional_container_error,
+  })
+}
+
+fn discover_gecko_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+) -> Result<EngineExtractionOutcome> {
+  let registry = embedded_registry()?;
+  let definition = browser_definition(registry, context.platform, browser_id)?;
+  if definition.engine != BrowserEngine::Gecko {
+    bail!("browser {browser_id:?} is not a Gecko browser")
+  }
+  let mut roots: Vec<&InstallationRoot> = definition.roots.iter().collect();
+  roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
+  let mut seen_profiles = HashSet::new();
+  let mut outcome = EngineExtractionOutcome::default();
+
+  for root in roots {
+    if root.discovery != DiscoveryStrategy::MozillaProfilesIni {
+      continue;
+    }
+    let Some(root_path) = context.resolve_template(&root.template) else {
+      continue;
+    };
+    if !context.fs.is_dir(&root_path) {
+      continue;
+    }
+    let canonical_root = match context.fs.canonicalize(&root_path) {
+      Ok(path) => path,
+      Err(error) => {
+        outcome.discovery_issues.push(DiscoveryIssue {
+          code: "installation_canonicalize_failed",
+          path: root_path,
+          message: error.to_string(),
+        });
+        continue;
+      }
+    };
+    let installation_id = installation_id(
+      &definition.canonical_id,
+      &root.root_id,
+      &root.channel,
+      &normalized_path_bytes(&canonical_root),
+    );
+    let ini_path = canonical_root.join("profiles.ini");
+    let (declared, ini_state) = if context.fs.exists(&ini_path) {
+      match mozilla::list_profiles(&ini_path) {
+        Ok(profiles) if profiles.is_empty() => (profiles, ProfilesIniState::Empty),
+        Ok(profiles) => (profiles, ProfilesIniState::Declared),
+        Err(error) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "mozilla_profiles_ini_invalid",
+            path: ini_path,
+            message: error.to_string(),
+          });
+          (Vec::new(), ProfilesIniState::Invalid)
+        }
+      }
+    } else {
+      (Vec::new(), ProfilesIniState::Absent)
+    };
+
+    let mut usable = Vec::new();
+    for declared_profile in declared {
+      if !gecko_profile_has_source(context, &declared_profile.path) {
+        push_bounded_gecko_issue(
+          &mut outcome.discovery_issues,
+          "profile_has_no_cookie_source",
+          declared_profile.path,
+          "declared Gecko profile has no supported cookie source",
+        );
+        continue;
+      }
+      usable.push(declared_profile);
+    }
+    if usable.is_empty() {
+      if gecko_profile_has_source(context, &canonical_root) {
+        usable.push(mozilla::MozillaProfile {
+          name: String::new(),
+          path: canonical_root.clone(),
+          is_default: matches!(
+            ini_state,
+            ProfilesIniState::Absent | ProfilesIniState::Empty
+          ),
+        });
+      } else {
+        match markerless_gecko_profiles(context, &canonical_root) {
+          Ok(discovery) => {
+            usable = discovery.profiles;
+            if let Some(error) = discovery.optional_container_error {
+              outcome.discovery_issues.push(DiscoveryIssue {
+                code: "optional_profiles_enumeration_failed",
+                path: canonical_root.join("Profiles"),
+                message: error.to_string(),
+              });
+            }
+          }
+          Err(error) => outcome.discovery_issues.push(DiscoveryIssue {
+            code: "installation_enumeration_failed",
+            path: canonical_root.clone(),
+            message: error.to_string(),
+          }),
+        }
+      }
+    }
+
+    for declared_profile in usable {
+      let profile_path = match context.fs.canonicalize(&declared_profile.path) {
+        Ok(path) => path,
+        Err(error) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "profile_canonicalize_failed",
+            path: declared_profile.path,
+            message: error.to_string(),
+          });
+          continue;
+        }
+      };
+      if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
+        push_bounded_gecko_issue(
+          &mut outcome.discovery_issues,
+          "duplicate_profile",
+          profile_path,
+          "profile is already owned by an earlier registry root",
+        );
+        continue;
+      }
+      let locator = profile_path
+        .strip_prefix(&canonical_root)
+        .map(ProfileLocator::Relative)
+        .unwrap_or(ProfileLocator::Absolute(&profile_path));
+      outcome.profiles.push(EngineProfileExtraction {
+        profile_id: profile_id(&installation_id, locator),
+        installation_id: installation_id.clone(),
+        installation_priority: root.priority,
+        installation_path: canonical_root.clone(),
+        name: declared_profile.name,
+        persistent_source_discovered: context.fs.exists(&profile_path.join("cookies.sqlite")),
+        path: profile_path,
+        is_default: declared_profile.is_default,
+        sources: Vec::new(),
+      });
+    }
+  }
+  outcome.profiles.sort_by(|left, right| {
+    left
+      .installation_priority
+      .cmp(&right.installation_priority)
+      .then_with(|| {
+        normalized_path_bytes(&left.installation_path)
+          .cmp(&normalized_path_bytes(&right.installation_path))
+      })
+      .then_with(|| (!left.is_default).cmp(&(!right.is_default)))
+      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+      .then_with(|| left.name.cmp(&right.name))
+      .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
+  });
+  Ok(outcome)
+}
+
+/// Crate-private generic Gecko report seam. It deliberately does not call the
+/// legacy wrapper, so it can retain every invalid session candidate and can
+/// surface a session-only profile without changing `firefox_profiles()`.
+fn gecko_report_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  domains: Option<&[String]>,
+) -> Result<EngineExtractionOutcome> {
+  let outcome = discover_gecko_with_context(context, browser_id)?;
+  Ok(populate_gecko_sources(
+    outcome,
+    domains,
+    mozilla::query_cookies_engine_outcome,
+  ))
+}
+
+fn populate_gecko_sources<Q>(
+  mut outcome: EngineExtractionOutcome,
+  domains: Option<&[String]>,
+  mut query: Q,
+) -> EngineExtractionOutcome
+where
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaEngineExtractionOutcome,
+{
+  for profile in &mut outcome.profiles {
+    let persistent = profile.path.join("cookies.sqlite");
+    // The Mozilla outcome also owns session fallback. A missing persistent DB
+    // is normal for a session-only profile and is not projected as a source.
+    let mut extraction = query(&persistent, domains);
+    if profile.persistent_source_discovered {
+      sort_cookies(&mut extraction.persistent_cookies);
+      profile.sources.push(EngineSourceExtraction {
+        path: persistent,
+        format: "mozilla_sqlite",
+        selected: true,
+        rows_seen: extraction.persistent_rows_seen,
+        rows_skipped: extraction.persistent_rows_skipped,
+        cookies: extraction.persistent_cookies,
+        acquisition_strategy: extraction.persistent_acquisition_strategy,
+        acquisition_attempts: extraction.persistent_acquisition_attempts,
+        diagnostics: Vec::new(),
+        error: extraction.persistent_error,
+      });
+    }
+    profile
+      .sources
+      .extend(extraction.session_sources.into_iter().map(|mut source| {
+        sort_cookies(&mut source.cookies);
+        EngineSourceExtraction {
+          path: source.path,
+          format: source.format,
+          selected: source.selected,
+          rows_seen: source.rows_seen,
+          rows_skipped: source.rows_skipped,
+          cookies: source.cookies,
+          acquisition_strategy: None,
+          acquisition_attempts: source.acquisition_attempts,
+          diagnostics: source.diagnostics,
+          error: source.error,
+        }
+      }));
+  }
+  outcome
+}
+
+pub(crate) fn gecko_report(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  gecko_report_with_context(&context, browser_id, domains.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1124,6 +1517,500 @@ mod tests {
       .find(|root| root.channel == channel)
       .expect("channel root");
     context.resolve_template(&root.template).expect("root path")
+  }
+
+  #[test]
+  fn registry_registers_gecko_and_ie_without_widening_public_api() {
+    let registry = embedded_registry().expect("registry");
+    for platform in [PlatformId::Windows, PlatformId::Macos, PlatformId::Linux] {
+      assert_eq!(
+        browser_definition(registry, platform, "firefox")
+          .expect("Firefox definition")
+          .engine,
+        BrowserEngine::Gecko
+      );
+    }
+    for browser in ["librewolf", "zen"] {
+      for platform in [PlatformId::Windows, PlatformId::Macos, PlatformId::Linux] {
+        assert_eq!(
+          browser_definition(registry, platform, browser)
+            .expect("Gecko definition")
+            .engine,
+          BrowserEngine::Gecko
+        );
+      }
+    }
+    assert_eq!(
+      browser_definition(registry, PlatformId::Linux, "cachy")
+        .expect("Cachy definition")
+        .engine,
+      BrowserEngine::Gecko
+    );
+    assert_eq!(
+      browser_definition(registry, PlatformId::Windows, "ie")
+        .expect("IE alias")
+        .engine,
+      BrowserEngine::InternetExplorer
+    );
+    let ie = browser_definition(registry, PlatformId::Windows, "internet_explorer")
+      .expect("IE definition");
+    assert_eq!(
+      ie.roots
+        .iter()
+        .map(|root| (root.root_id.as_str(), root.template.as_str(), root.priority))
+        .collect::<Vec<_>>(),
+      vec![
+        (
+          "ie-webcache-roaming",
+          "{roaming_app_data}/Microsoft/Windows/WebCache",
+          10,
+        ),
+        (
+          "ie-webcache-local",
+          "{local_app_data}/Microsoft/Windows/WebCache",
+          20,
+        ),
+      ]
+    );
+  }
+
+  #[test]
+  fn registry_rejects_engine_discovery_strategy_mismatches() {
+    for (engine, discovery) in [
+      ("chromium", "mozilla_profiles_ini"),
+      ("gecko", "chromium_user_data"),
+      ("safari", "chromium_user_data"),
+      ("internet_explorer", "mozilla_profiles_ini"),
+    ] {
+      let json = format!(
+        r#"{{
+          "schema_version": 1,
+          "platforms": {{
+            "linux": [{{
+              "canonical_id": "test",
+              "aliases": [],
+              "display_name": "Test",
+              "engine": "{engine}",
+              "roots": [{{
+                "root_id": "test-root",
+                "template": "{{home}}/test",
+                "channel": "stable",
+                "discovery": "{discovery}",
+                "priority": 10
+              }}],
+              "capabilities": {{
+                "declared_persistent_formats": [],
+                "declared_session_formats": [],
+                "declared_decryption_tiers": []
+              }}
+            }}]
+          }}
+        }}"#
+      );
+      let registry: Registry = serde_json::from_str(&json).expect("deserialize test registry");
+      let error = validate_registry(&registry).expect_err("mismatched strategy must fail");
+      assert!(error.contains("incompatible discovery strategy"), "{error}");
+    }
+
+    let safari: Registry = serde_json::from_str(
+      r#"{
+        "schema_version": 1,
+        "platforms": {
+          "macos": [{
+            "canonical_id": "safari",
+            "aliases": [],
+            "display_name": "Safari",
+            "engine": "safari",
+            "roots": [{
+              "root_id": "safari-user-default",
+              "template": "{home}/Library",
+              "channel": "stable",
+              "discovery": "safari_default_profile",
+              "priority": 10
+            }],
+            "capabilities": {
+              "declared_persistent_formats": ["safari_binarycookies"],
+              "declared_session_formats": [],
+              "declared_decryption_tiers": []
+            }
+          }]
+        }
+      }"#,
+    )
+    .expect("deserialize valid Safari registry");
+    validate_registry(&safari).expect("Safari strategy pairing is valid");
+  }
+
+  fn gecko_test_root(context: &DiscoveryContext<RealDiscoveryFs>) -> PathBuf {
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, context.platform, "firefox").expect("Firefox");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id.contains("native") || root.root_id == "firefox")
+      .unwrap_or(&definition.roots[0]);
+    context.resolve_template(&root.template).expect("root path")
+  }
+
+  fn seed_empty_gecko_database(profile: &Path) {
+    std::fs::create_dir_all(profile).expect("create Gecko profile");
+    let connection =
+      rusqlite::Connection::open(profile.join("cookies.sqlite")).expect("open Gecko database");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+          name TEXT, value TEXT, isHttpOnly INTEGER, sameSite INTEGER
+        );",
+      )
+      .expect("create Gecko cookie table");
+  }
+
+  #[test]
+  fn gecko_profiles_are_default_first_then_name_and_path() {
+    let temp = TempDir::new("gecko-order");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    for directory in ["z-default", "b-secondary", "a-secondary"] {
+      seed_empty_gecko_database(&root.join("Profiles").join(directory));
+    }
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=Zulu\nPath=Profiles/z-default\nDefault=1\n\
+       [Profile1]\nName=beta\nPath=Profiles/b-secondary\n\
+       [Profile2]\nName=Alpha\nPath=Profiles/a-secondary\n",
+    )
+    .expect("write profiles.ini");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover profiles");
+    assert_eq!(
+      report
+        .profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>(),
+      ["Zulu", "Alpha", "beta"]
+    );
+    assert!(report.profiles[0].is_default);
+  }
+
+  #[test]
+  fn linux_gecko_profiles_preserve_snap_native_flatpak_installation_priority() {
+    let temp = TempDir::new("gecko-installation-order");
+    let context = test_context_for(PlatformId::Linux, temp.path().to_path_buf(), []);
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, PlatformId::Linux, "firefox").expect("Firefox");
+    let names = [
+      ("firefox-snap", "Zulu"),
+      ("firefox-native", "Alpha"),
+      ("firefox-flatpak", "Beta"),
+    ];
+    let mut expected = Vec::new();
+    for (root_id, name) in names {
+      let root = definition
+        .roots
+        .iter()
+        .find(|root| root.root_id == root_id)
+        .expect("Firefox registry root");
+      let root_path = context.resolve_template(&root.template).expect("root path");
+      seed_empty_gecko_database(&root_path.join("Profiles/profile"));
+      std::fs::write(
+        root_path.join("profiles.ini"),
+        format!("[Profile0]\nName={name}\nPath=Profiles/profile\nDefault=1\n"),
+      )
+      .expect("write profiles.ini");
+      expected.push((root.priority, name));
+    }
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover Firefox");
+    assert_eq!(
+      report
+        .profiles
+        .iter()
+        .map(|profile| (profile.installation_priority, profile.name.as_str()))
+        .collect::<Vec<_>>(),
+      expected
+    );
+  }
+
+  #[test]
+  fn gecko_unusable_declarations_fall_back_to_flat_or_markerless_sources() {
+    let temp = TempDir::new("gecko-fallbacks");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    std::fs::create_dir_all(root.join("Profiles/stale")).expect("create stale declaration");
+    seed_empty_gecko_database(&root);
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=stale\nPath=Profiles/stale\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let flat = discover_gecko_with_context(&context, "firefox").expect("discover flat fallback");
+    assert_eq!(flat.profiles.len(), 1);
+    assert_eq!(flat.profiles[0].path, root.canonicalize().unwrap());
+    assert!(
+      !flat.profiles[0].is_default,
+      "a stale declaration cannot transfer its default flag"
+    );
+    assert!(flat
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "profile_has_no_cookie_source"));
+
+    std::fs::remove_file(root.join("cookies.sqlite")).expect("remove flat source");
+    seed_empty_gecko_database(&root.join("Profiles/Restored One"));
+    seed_empty_gecko_database(&root.join("Restored Two"));
+    let markerless =
+      discover_gecko_with_context(&context, "firefox").expect("discover markerless fallbacks");
+    assert_eq!(
+      markerless
+        .profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>(),
+      ["Restored One", "Restored Two"]
+    );
+    assert!(markerless
+      .profiles
+      .iter()
+      .all(|profile| !profile.is_default));
+  }
+
+  #[test]
+  fn invalid_profiles_ini_does_not_mark_flat_fallback_default() {
+    let temp = TempDir::new("gecko-invalid-ini-flat");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    seed_empty_gecko_database(&root);
+    std::fs::write(root.join("profiles.ini"), "[Profile0\nPath=broken").expect("write invalid ini");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover flat fallback");
+    assert_eq!(report.profiles.len(), 1);
+    assert!(!report.profiles[0].is_default);
+    assert!(report
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "mozilla_profiles_ini_invalid"));
+  }
+
+  #[test]
+  fn duplicate_gecko_profile_issues_are_emitted_and_bounded() {
+    let temp = TempDir::new("gecko-duplicate-bound");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    seed_empty_gecko_database(&root.join("Profiles/shared"));
+    let ini = (0..MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 5)
+      .map(|index| format!("[Profile{index}]\nName=duplicate-{index}\nPath=Profiles/shared\n"))
+      .collect::<String>();
+    std::fs::write(root.join("profiles.ini"), ini).expect("write duplicate declarations");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover duplicates");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(
+      report
+        .discovery_issues
+        .iter()
+        .filter(|issue| issue.code == "duplicate_profile")
+        .count(),
+      MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1
+    );
+    let summary = report
+      .discovery_issues
+      .iter()
+      .find(|issue| issue.code == "duplicate_profile" && issue.message.starts_with("additional "))
+      .expect("duplicate overflow summary");
+    assert!(summary.message.contains("additional 4 duplicate_profile"));
+  }
+
+  #[test]
+  fn missing_source_gecko_issues_are_bounded_with_an_overflow_summary() {
+    let temp = TempDir::new("gecko-missing-source-bound");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    std::fs::create_dir_all(&root).expect("create Firefox root");
+    let ini = (0..MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 5)
+      .map(|index| format!("[Profile{index}]\nName=stale-{index}\nPath=Profiles/stale-{index}\n"))
+      .collect::<String>();
+    std::fs::write(root.join("profiles.ini"), ini).expect("write stale declarations");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover stale profiles");
+    let issues = report
+      .discovery_issues
+      .iter()
+      .filter(|issue| issue.code == "profile_has_no_cookie_source")
+      .collect::<Vec<_>>();
+    assert_eq!(issues.len(), MAX_GECKO_DISCOVERY_ISSUES_PER_CODE + 1);
+    assert!(issues
+      .last()
+      .expect("overflow summary")
+      .message
+      .contains("additional 5 profile_has_no_cookie_source"));
+  }
+
+  #[test]
+  fn markerless_fallback_keeps_direct_profiles_when_profiles_container_is_unreadable() {
+    let temp = TempDir::new("gecko-markerless-partial-enumeration");
+    let real_context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&real_context);
+    seed_empty_gecko_database(&root.join("Restored Direct"));
+    std::fs::create_dir_all(root.join("Profiles")).expect("create Profiles container");
+    let profiles_container = root
+      .canonicalize()
+      .expect("canonical installation root")
+      .join("Profiles");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_read_dir: Some(profiles_container.clone()),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("partial discovery");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(report.profiles[0].name, "Restored Direct");
+    assert!(report.discovery_issues.iter().any(|issue| {
+      issue.code == "optional_profiles_enumeration_failed" && issue.path == profiles_container
+    }));
+  }
+
+  #[test]
+  fn discovered_persistent_source_remains_projected_if_it_disappears_before_query() {
+    let temp = TempDir::new("gecko-persistent-disappears");
+    let context = test_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    seed_empty_gecko_database(&profile);
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    assert!(discovery.profiles[0].persistent_source_discovered);
+
+    let mut removed = false;
+    let report = populate_gecko_sources(discovery, None, |persistent, domains| {
+      if !removed {
+        removed = true;
+        std::fs::remove_file(persistent).expect("remove discovered source");
+      }
+      mozilla::query_cookies_engine_outcome(persistent, domains)
+    });
+    assert_eq!(report.profiles[0].sources.len(), 1);
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.format, "mozilla_sqlite");
+    assert!(source.selected);
+    assert!(source
+      .error
+      .as_deref()
+      .is_some_and(|error| error.contains("Can't resolve database path")));
+  }
+
+  #[test]
+  fn generic_gecko_discovery_includes_session_only_profiles() {
+    let temp = TempDir::new("gecko-session-only");
+    let platform = PlatformId::current().expect("platform");
+    let context = test_context(temp.path().to_path_buf());
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, platform, "firefox").expect("Firefox");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id.contains("native") || root.root_id == "firefox")
+      .unwrap_or(&definition.roots[0]);
+    let root_path = context.resolve_template(&root.template).expect("root path");
+    let profile = root_path.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      root_path.join("profiles.ini"),
+      "[Profile0]\nName=session\nIsRelative=1\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid is still a discoverable source",
+    )
+    .expect("write session candidate");
+
+    let report = discover_gecko_with_context(&context, "firefox").expect("discover Gecko");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(
+      report.profiles[0].path,
+      profile.canonicalize().expect("canonical profile")
+    );
+    assert!(report.profiles[0].is_default);
+  }
+
+  #[test]
+  fn generic_gecko_report_preserves_persistent_and_session_source_outcomes() {
+    let temp = TempDir::new("gecko-report-sources");
+    let platform = PlatformId::current().expect("platform");
+    let context = test_context(temp.path().to_path_buf());
+    let registry = embedded_registry().expect("registry");
+    let definition = browser_definition(registry, platform, "firefox").expect("Firefox");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id.contains("native") || root.root_id == "firefox")
+      .unwrap_or(&definition.roots[0]);
+    let root_path = context.resolve_template(&root.template).expect("root path");
+    let profile = root_path.join("Profiles/default");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      root_path.join("profiles.ini"),
+      "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let db_path = profile.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db_path).expect("open fixture database");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+           host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+           name TEXT, value TEXT, isHttpOnly INTEGER, sameSite INTEGER
+         );
+         INSERT INTO moz_cookies VALUES ('.z.example.com', '/', 1, 0, 'persistent-z', 'value', 1, 0);
+         INSERT INTO moz_cookies VALUES ('.a.example.com', '/', 1, 0, 'persistent-a', 'value', 1, 0);",
+      )
+      .expect("seed fixture database");
+    drop(connection);
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"invalid session store",
+    )
+    .expect("write invalid session candidate");
+    std::fs::write(
+      profile.join("sessionstore.js"),
+      r#"{"windows":[{"cookies":[{"host":".z.example.com","path":"/","name":"session-z","value":"value"},{"host":".a.example.com","path":"/","name":"session-a","value":"value"},{"host":".example.com","path":"/","name":"missing-value"}]}]}"#,
+    )
+    .expect("write valid session candidate");
+
+    let report = gecko_report_with_context(&context, "firefox", None).expect("report");
+    assert!(report.discovery_issues.is_empty());
+    assert_eq!(report.profiles.len(), 1);
+    let sources = &report.profiles[0].sources;
+    assert_eq!(sources.len(), 3);
+    assert_eq!(sources[0].format, "mozilla_sqlite");
+    assert_eq!(sources[0].rows_seen, 2);
+    assert_eq!(
+      sources[0].acquisition_strategy,
+      Some(DatabaseAcquisitionStrategy::LiveReadOnly)
+    );
+    assert_eq!(sources[0].acquisition_attempts, 1);
+    assert_eq!(sources[0].cookies[0].name, "persistent-a");
+    assert_eq!(sources[0].cookies[1].name, "persistent-z");
+    assert_eq!(sources[1].format, "firefox_session_jsonlz4");
+    assert!(!sources[1].selected);
+    assert!(sources[1].error.is_some());
+    assert_eq!(sources[2].format, "firefox_session_json");
+    assert!(sources[2].selected);
+    assert_eq!(sources[2].rows_seen, 3);
+    assert_eq!(sources[2].rows_skipped, 1);
+    assert_eq!(sources[2].diagnostics.len(), 1);
+    assert_eq!(sources[2].cookies[0].name, "session-a");
+    assert_eq!(sources[2].cookies[1].name, "session-z");
   }
 
   fn write_local_state(root: &Path, value: serde_json::Value) {
