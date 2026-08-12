@@ -296,7 +296,11 @@ impl DiscoveryContext<RealDiscoveryFs> {
 
 impl<F> DiscoveryContext<F> {
   fn env_path(&self, name: &str) -> Option<PathBuf> {
-    self.env.get(OsStr::new(name)).map(PathBuf::from)
+    self
+      .env
+      .get(OsStr::new(name))
+      .filter(|value| !value.is_empty())
+      .map(PathBuf::from)
   }
 
   fn config_home(&self) -> PathBuf {
@@ -1095,6 +1099,22 @@ mod tests {
     }
   }
 
+  fn test_context_for(
+    platform: PlatformId,
+    home: PathBuf,
+    env: impl IntoIterator<Item = (&'static str, PathBuf)>,
+  ) -> DiscoveryContext<RealDiscoveryFs> {
+    DiscoveryContext {
+      platform,
+      home,
+      env: env
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), value.into_os_string()))
+        .collect(),
+      fs: RealDiscoveryFs,
+    }
+  }
+
   fn channel_root(context: &DiscoveryContext<RealDiscoveryFs>, channel: &str) -> PathBuf {
     let registry = embedded_registry().expect("registry");
     let definition = browser_definition(registry, context.platform, "chrome").expect("chrome");
@@ -1223,6 +1243,124 @@ mod tests {
     assert_eq!(
       definition.capabilities.declared_persistent_formats,
       ["chromium_sqlite"]
+    );
+  }
+
+  #[test]
+  fn chrome_channels_use_real_side_by_side_directories_on_every_os() {
+    let temp = TempDir::new("channel-roots");
+    let cases = [
+      (
+        PlatformId::Windows,
+        vec![
+          ("stable", "LocalAppData/Google/Chrome/User Data"),
+          ("beta", "LocalAppData/Google/Chrome Beta/User Data"),
+          ("dev", "LocalAppData/Google/Chrome Dev/User Data"),
+          ("canary", "LocalAppData/Google/Chrome SxS/User Data"),
+        ],
+      ),
+      (
+        PlatformId::Macos,
+        vec![
+          ("stable", "Library/Application Support/Google/Chrome"),
+          ("beta", "Library/Application Support/Google/Chrome Beta"),
+          ("dev", "Library/Application Support/Google/Chrome Dev"),
+          ("canary", "Library/Application Support/Google/Chrome Canary"),
+        ],
+      ),
+      (
+        PlatformId::Linux,
+        vec![
+          ("stable", ".config/google-chrome"),
+          ("beta", ".config/google-chrome-beta"),
+          ("dev", ".config/google-chrome-unstable"),
+        ],
+      ),
+    ];
+
+    for (platform, expected) in cases {
+      let home = temp.path().join(platform.as_str());
+      let context = test_context_for(
+        platform,
+        home.clone(),
+        (platform == PlatformId::Windows).then(|| ("LOCALAPPDATA", home.join("LocalAppData"))),
+      );
+      for (channel, relative) in &expected {
+        let root = channel_root(&context, channel);
+        assert_eq!(root, home.join(relative));
+        seed_cookie(
+          &root.join("Default"),
+          true,
+          &format!("{channel}-cookie"),
+          "value",
+        );
+      }
+
+      let discovery = discover_browser_with_context(&context, "chrome").expect("discover channels");
+      assert_eq!(
+        discovery
+          .installations
+          .iter()
+          .map(|installation| installation.channel.as_str())
+          .collect::<Vec<_>>(),
+        expected
+          .iter()
+          .map(|(channel, _)| *channel)
+          .collect::<Vec<_>>()
+      );
+    }
+  }
+
+  #[test]
+  fn linux_config_home_precedence_is_chrome_then_xdg_then_default() {
+    let temp = TempDir::new("linux-config-home");
+    let home = temp.path().join("home");
+    let chrome_config = temp.path().join("chrome-config");
+    let xdg_config = temp.path().join("xdg-config");
+
+    let chrome_context = test_context_for(
+      PlatformId::Linux,
+      home.clone(),
+      [
+        ("CHROME_CONFIG_HOME", chrome_config.clone()),
+        ("XDG_CONFIG_HOME", xdg_config.clone()),
+      ],
+    );
+    let chrome_root = channel_root(&chrome_context, "stable");
+    assert_eq!(chrome_root, chrome_config.join("google-chrome"));
+    seed_cookie(&chrome_root.join("Default"), true, "chrome", "value");
+    let discovery =
+      discover_browser_with_context(&chrome_context, "chrome").expect("Chrome override");
+    assert_eq!(
+      discovery.profiles()[0].path,
+      chrome_root.join("Default").canonicalize().unwrap()
+    );
+
+    let xdg_context = test_context_for(
+      PlatformId::Linux,
+      home.clone(),
+      [("XDG_CONFIG_HOME", xdg_config.clone())],
+    );
+    let xdg_root = channel_root(&xdg_context, "stable");
+    assert_eq!(xdg_root, xdg_config.join("google-chrome"));
+
+    let default_context = test_context_for(PlatformId::Linux, home.clone(), []);
+    assert_eq!(
+      channel_root(&default_context, "stable"),
+      home.join(".config/google-chrome")
+    );
+
+    let empty_override_context = test_context_for(
+      PlatformId::Linux,
+      home.clone(),
+      [
+        ("CHROME_CONFIG_HOME", PathBuf::new()),
+        ("XDG_CONFIG_HOME", xdg_config.clone()),
+      ],
+    );
+    assert_eq!(
+      channel_root(&empty_override_context, "stable"),
+      xdg_config.join("google-chrome")
     );
   }
 
