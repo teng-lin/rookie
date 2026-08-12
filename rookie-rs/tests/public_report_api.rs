@@ -5,7 +5,8 @@
 //! process environment, so every test here holds [`ENV_LOCK`] for its duration.
 
 use rookie_cookies::report::{
-  ExtractionReport, IssueSeverityCode, ProfileDescriptor, ReportStatusCode, SourceStatusCode,
+  ExtractionReport, IssueCode, IssueSeverityCode, ProfileDescriptor, ReportStatusCode,
+  SourceStatusCode,
 };
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -265,13 +266,11 @@ fn a_registered_browser_with_no_installation_reports_no_sources() {
   assert_eq!(report.summary.browsers_not_detected, 1);
   assert_eq!(report.summary.profiles_discovered, 0);
 
-  let codes = report
-    .issues
-    .iter()
-    .map(|issue| issue.code.as_str())
-    .collect::<Vec<_>>();
-  assert_eq!(codes, ["browser_not_detected"]);
+  assert_eq!(report.issues.len(), 1);
   let issue = &report.issues[0];
+  // Branch the way a consumer would, against the published vocabulary value
+  // rather than a bare string.
+  assert_eq!(issue.code, IssueCode::browser_not_detected());
   assert_eq!(issue.severity, IssueSeverityCode::info());
   assert_eq!(
     issue.browser_id.as_ref().map(|id| id.as_str()),
@@ -292,7 +291,7 @@ fn browser_profiles_returns_an_empty_list_for_a_known_absent_browser() {
 fn load_report_summarizes_uninstalled_browsers_in_counters_only() {
   let _home = SyntheticHome::new("load-report");
 
-  let registered = rookie_cookies::supported_browsers().expect("registered browsers");
+  let registered = rookie_cookies::supported_browsers();
   let report = rookie_cookies::load_report(None).expect("an empty machine is not an error");
 
   assert_eq!(report.status, ReportStatusCode::no_sources());

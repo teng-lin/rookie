@@ -62,16 +62,29 @@ pub fn version() -> String {
 /// cookies and which cipher tiers this build could decrypt. Use
 /// [`browser_profiles`] to find out what is actually installed.
 ///
+/// Unlike its three siblings this is infallible, because it has no request to
+/// reject and nothing to read. An OS with no registry entries has no registered
+/// browsers, which is an empty list rather than an error. The only other way it
+/// could fail is a malformed compile-time registry, which is a crate bug, not a
+/// condition a caller can act on: it is asserted in debug builds and logged in
+/// release.
+///
 /// # Examples
 ///
 /// ```no_run
-/// for browser in rookie_cookies::supported_browsers()? {
+/// for browser in rookie_cookies::supported_browsers() {
 ///   println!("{} ({})", browser.id, browser.display_name);
 /// }
-/// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
-pub fn supported_browsers() -> Result<Vec<report::BrowserDescriptor>> {
-  browser::report_build::supported_browser_descriptors()
+pub fn supported_browsers() -> Vec<report::BrowserDescriptor> {
+  match browser::report_build::supported_browser_descriptors() {
+    Ok(browsers) => browsers,
+    Err(error) => {
+      debug_assert!(false, "embedded browser registry is unusable: {error:#}");
+      log::error!("rookie_cookies::supported_browsers: embedded registry is unusable: {error:#}");
+      Vec::new()
+    }
+  }
 }
 
 /// Returns the discovered profiles of one registered browser.
@@ -153,6 +166,12 @@ pub fn browser_report(
 /// # Arguments
 ///
 /// * `domains` - An optional list for getting specific domains only
+///
+/// # Errors
+///
+/// There is no browser ID to reject here, so this fails only if the registry
+/// itself cannot be read. A browser that fails discovery or extraction does not
+/// abort the others; it becomes an issue on the returned report.
 ///
 /// # Examples
 ///

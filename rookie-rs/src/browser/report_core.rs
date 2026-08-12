@@ -16,7 +16,12 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Upper bound on retained samples per aggregated issue.
-pub(crate) const MAX_ISSUE_SAMPLES: usize = 8;
+///
+/// [`ExtractionIssue::occurrences`] counts every occurrence, but
+/// [`ExtractionIssue::samples`] keeps at most this many, so a corrupt database
+/// cannot dictate report size. A caller comparing the two lengths needs this
+/// value to tell "all samples retained" from "truncated".
+pub const MAX_ISSUE_SAMPLES: usize = 8;
 
 fn validate_open_identifier(kind: &str, value: &str) -> Result<()> {
   let mut bytes = value.bytes();
@@ -201,6 +206,23 @@ vocabulary!(AcquisitionStrategyCode {
   stable_file_image => "stable_file_image",
   ese_database => "ese_database",
   not_attempted => "not_attempted",
+});
+
+// The codes the report layer itself raises. Discovery-stage codes are supplied
+// by each engine's registry and are deliberately not enumerated here: they
+// change as engines are added, so a caller matches those with `as_str` or
+// `FromStr` instead.
+vocabulary!(IssueCode {
+  browser_not_detected => "browser_not_detected",
+  browser_discovery_failed => "browser_discovery_failed",
+  profile_has_no_cookie_source => "profile_has_no_cookie_source",
+  source_extraction_failed => "source_extraction_failed",
+  source_read_retried => "source_read_retried",
+  column_read_failed => "column_read_failed",
+  decrypt_failed => "decrypt_failed",
+  decode_failed => "decode_failed",
+  provider_unavailable => "provider_unavailable",
+  provider_failed => "provider_failed",
 });
 
 impl CookieSourceRoleId {

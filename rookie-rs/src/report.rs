@@ -16,11 +16,19 @@
 //! [`as_str`](BrowserId::as_str) or against a frozen vocabulary value such as
 //! [`ReportStatusCode::complete`], and always keep a fallback arm.
 //!
+//! A profile's cookie stream is its **selected** sources that **succeeded**,
+//! concatenated in role and precedence order. Both halves matter: a source that
+//! was attempted and rejected in favour of another candidate can still report
+//! `succeeded`, so filtering on status alone would double-count a profile whose
+//! engine attempted more than one candidate.
+//!
 //! ```no_run
+//! use rookie_cookies::report::SourceStatusCode;
+//!
 //! let report = rookie_cookies::browser_report("chrome", None, None)?;
 //! for profile in &report.profiles {
 //!   for source in &profile.sources {
-//!     if source.status == rookie_cookies::report::SourceStatusCode::succeeded() {
+//!     if source.selected && source.status == SourceStatusCode::succeeded() {
 //!       println!("{} {} cookies", source.source.path, source.cookies.len());
 //!     }
 //!   }
@@ -39,5 +47,5 @@ pub use crate::browser::report_core::{
   CookieSourceRoleId, EngineId, ExtractionIssue, ExtractionReport, ExtractionStageCode,
   ExtractionStats, InstallationId, IssueCode, IssueSeverityCode, ProfileDescriptor,
   ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, ReportStatusCode, SourceExtraction,
-  SourceStatusCode,
+  SourceStatusCode, MAX_ISSUE_SAMPLES,
 };

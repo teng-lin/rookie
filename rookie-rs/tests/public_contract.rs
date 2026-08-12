@@ -155,7 +155,8 @@ fn public_function_signatures_remain_compatible() {
 fn generic_report_api_signatures_are_the_section_5_8_surface() {
   type BrowserReportFn = fn(&str, Option<&str>, Option<Vec<String>>) -> Result<ExtractionReport>;
 
-  let _: fn() -> Result<Vec<BrowserDescriptor>> = rookie_cookies::supported_browsers;
+  // Section 5.8 freezes this one as infallible; the other three return `Result`.
+  let _: fn() -> Vec<BrowserDescriptor> = rookie_cookies::supported_browsers;
   let _: fn(&str) -> Result<Vec<ProfileDescriptor>> = rookie_cookies::browser_profiles;
   let _: BrowserReportFn = rookie_cookies::browser_report;
   let _: fn(Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::load_report;
@@ -190,11 +191,49 @@ fn report_identifiers_are_open_string_newtypes() {
   assert_eq!(ReportStatusCode::partial().as_str(), "partial");
   assert_eq!(ReportStatusCode::failed().as_str(), "failed");
   assert_eq!(ReportStatusCode::no_sources().as_str(), "no_sources");
+
+  // The codes a consumer most often branches on need constructors too, or the
+  // module docs' "compare against a frozen vocabulary value" advice is
+  // unfollowable for issues.
+  assert_eq!(
+    IssueCode::browser_not_detected().as_str(),
+    "browser_not_detected"
+  );
+  assert_eq!(
+    IssueCode::provider_unavailable().as_str(),
+    "provider_unavailable"
+  );
+  assert_eq!(IssueCode::provider_failed().as_str(), "provider_failed");
+  assert_eq!(IssueCode::decrypt_failed().as_str(), "decrypt_failed");
+  assert_eq!(IssueCode::decode_failed().as_str(), "decode_failed");
+  assert_eq!(
+    IssueCode::column_read_failed().as_str(),
+    "column_read_failed"
+  );
+  assert_eq!(
+    IssueCode::source_extraction_failed().as_str(),
+    "source_extraction_failed"
+  );
+  assert_eq!(
+    IssueCode::source_read_retried().as_str(),
+    "source_read_retried"
+  );
+  assert_eq!(
+    IssueCode::browser_discovery_failed().as_str(),
+    "browser_discovery_failed"
+  );
+  assert_eq!(
+    IssueCode::profile_has_no_cookie_source().as_str(),
+    "profile_has_no_cookie_source"
+  );
+
+  // Bounded samples are only interpretable if the bound is public.
+  assert_eq!(rookie_cookies::report::MAX_ISSUE_SAMPLES, 8);
 }
 
 #[test]
 fn supported_browsers_describes_registration_without_touching_the_filesystem() {
-  let browsers = rookie_cookies::supported_browsers().expect("registered browsers");
+  let browsers = rookie_cookies::supported_browsers();
   assert!(
     !browsers.is_empty(),
     "every supported OS registers at least one browser"
