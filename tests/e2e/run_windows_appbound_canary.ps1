@@ -82,9 +82,6 @@ foreach ($requiredVariable in @(
 }
 
 $server = $null
-$walGuard = $null
-$walGuardReady = $null
-$walGuardStop = $null
 Remove-Item $env:ROOKIE_E2E_REQUEST_LOG -Force -ErrorAction SilentlyContinue
 $server = Start-Process python `
   -ArgumentList "tests/e2e/cookie_server.py" -PassThru
@@ -145,41 +142,12 @@ try {
     --expected-prefix v20 --require-app-bound-key
   if ($LASTEXITCODE -ne 0) { throw "strict v20 profile check failed" }
 
-  # Enable WAL and pin a read snapshot before Chrome writes rookie_wal. Chrome
-  # may close or checkpoint its cookie-store connection immediately after a
-  # small write; the pinned reader prevents that checkpoint from moving
-  # rookie_wal into the main database, making the invariant deterministic.
-  $walGuardReady = Join-Path $env:RUNNER_TEMP "rookie-wal-$PID.ready"
-  $walGuardStop = Join-Path $env:RUNNER_TEMP "rookie-wal-$PID.stop"
-  Remove-Item $walGuardReady, $walGuardStop -Force -ErrorAction SilentlyContinue
-
-  $guardStart = [Diagnostics.ProcessStartInfo]::new()
-  $guardStart.FileName = (Resolve-Path ".\.venv\Scripts\python.exe").Path
-  $guardStart.UseShellExecute = $false
-  [void]$guardStart.ArgumentList.Add(
-    (Resolve-Path "tests/e2e/hold_sqlite_snapshot.py").Path
-  )
-  [void]$guardStart.ArgumentList.Add($cookiesDb)
-  [void]$guardStart.ArgumentList.Add("--ready-file")
-  [void]$guardStart.ArgumentList.Add($walGuardReady)
-  [void]$guardStart.ArgumentList.Add("--stop-file")
-  [void]$guardStart.ArgumentList.Add($walGuardStop)
-  $walGuard = [Diagnostics.Process]::Start($guardStart)
-
-  $walGuardIsReady = $false
-  for ($i = 1; $i -le 60; $i++) {
-    if (Test-Path $walGuardReady) {
-      $walGuardIsReady = $true
-      break
-    }
-    if ($walGuard.HasExited) {
-      throw "SQLite snapshot guard exited before becoming ready"
-    }
-    Start-Sleep -Milliseconds 500
-  }
-  if (-not $walGuardIsReady) {
-    throw "SQLite snapshot guard did not become ready"
-  }
+  # Chrome leaves this fresh database in DELETE mode after the first shutdown.
+  # Enable WAL while it is closed, then release every SQLite lock before Chrome
+  # reopens with its exclusive connection. WAL validation below raw-copies the
+  # live files, matching rookie-cookies' lock-free acquisition strategy.
+  & .\.venv\Scripts\python.exe tests/e2e/prepare_sqlite_wal.py "$cookiesDb"
+  if ($LASTEXITCODE -ne 0) { throw "could not prepare Chrome Cookies WAL" }
 
   # Reopen the same default profile and leave Chrome running. /wal sets a
   # unique cookie that every extraction surface must recover.
@@ -262,20 +230,6 @@ try {
   # Profiles and Local State are never uploaded.
   Get-Process chrome -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
-  if ($null -ne $walGuard) {
-    if (-not $walGuard.HasExited) {
-      Set-Content -Path $walGuardStop -Value "stop"
-      if (-not $walGuard.WaitForExit(5000)) {
-        Stop-Process -Id $walGuard.Id -Force -ErrorAction SilentlyContinue
-      }
-    }
-    $walGuard.Dispose()
-  }
-  foreach ($guardPath in @($walGuardReady, $walGuardStop)) {
-    if (-not [string]::IsNullOrWhiteSpace($guardPath)) {
-      Remove-Item $guardPath -Force -ErrorAction SilentlyContinue
-    }
-  }
   if ($null -ne $server) {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
   }

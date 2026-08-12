@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import filecmp
 import json
 import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -55,6 +57,53 @@ def cookie_rows(db_path: Path, cookie_name: str) -> list[tuple[object, ...]]:
         connection.close()
 
 
+def wal_snapshot_cookie_rows(
+    db_path: Path, cookie_name: str
+) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
+    """Read a verified raw DB+WAL copy without locking the live database."""
+    wal_path = Path(f"{db_path}-wal")
+    for attempt in range(1, 4):
+        try:
+            with tempfile.TemporaryDirectory(prefix="rookie-wal-snapshot-") as root:
+                root_path = Path(root)
+                main_only_dir = root_path / "main-only"
+                snapshot_dir = root_path / "snapshot"
+                main_only_dir.mkdir()
+                snapshot_dir.mkdir()
+
+                snapshot_db = snapshot_dir / "Cookies"
+                main_only_db = main_only_dir / "Cookies"
+                snapshot_wal = Path(f"{snapshot_db}-wal")
+                shutil.copyfile(db_path, snapshot_db)
+                shutil.copyfile(snapshot_db, main_only_db)
+                shutil.copyfile(wal_path, snapshot_wal)
+                if snapshot_wal.stat().st_size == 0:
+                    raise ValueError(f"Cookies WAL is empty: {wal_path}")
+
+                # A checkpoint is the only WAL-mode operation that changes the
+                # main file. Comparing it after both copies brackets the raw
+                # snapshot without acquiring a SQLite lock from Chrome.
+                if not filecmp.cmp(db_path, snapshot_db, shallow=False):
+                    if attempt < 3:
+                        time.sleep(0.02 * attempt)
+                        continue
+                    raise ValueError(
+                        "Cookies database was checkpointed during three snapshots"
+                    )
+
+                return (
+                    cookie_rows(main_only_db, cookie_name),
+                    cookie_rows(snapshot_db, cookie_name),
+                )
+        except FileNotFoundError:
+            if attempt < 3:
+                time.sleep(0.02 * attempt)
+                continue
+            raise ValueError(f"Cookies WAL is missing: {wal_path}") from None
+
+    raise AssertionError("the bounded WAL snapshot loop always returns")
+
+
 def main() -> int:
     configure_utf8_output()
     parser = argparse.ArgumentParser()
@@ -82,13 +131,7 @@ def main() -> int:
 
         db_path = cookie_db(args.user_data_dir)
         if args.require_wal_only:
-            wal_path = Path(f"{db_path}-wal")
-            if not wal_path.is_file() or wal_path.stat().st_size == 0:
-                raise ValueError(f"Cookies WAL is missing or empty: {wal_path}")
-            with tempfile.TemporaryDirectory(prefix="rookie-main-db-") as temp_dir:
-                main_db_copy = Path(temp_dir) / "Cookies"
-                shutil.copyfile(db_path, main_db_copy)
-                main_rows = cookie_rows(main_db_copy, args.cookie_name)
+            main_rows, rows = wal_snapshot_cookie_rows(db_path, args.cookie_name)
             if main_rows:
                 raise ValueError(
                     f"{args.cookie_name!r} is already present in the main Cookies DB"
@@ -97,8 +140,8 @@ def main() -> int:
                 f"{args.cookie_name} is absent from the main DB copy and must be read "
                 "through the live WAL"
             )
-
-        rows = cookie_rows(db_path, args.cookie_name)
+        else:
+            rows = cookie_rows(db_path, args.cookie_name)
         print(f"{args.cookie_name} encrypted_value diagnostics: {rows}")
         expected_hex = args.expected_prefix.encode("ascii").hex().upper()
         if not rows:
