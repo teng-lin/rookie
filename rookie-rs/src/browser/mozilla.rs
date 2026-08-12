@@ -211,6 +211,7 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   pub(crate) persistent_cookies: Vec<Cookie>,
   pub(crate) persistent_rows_seen: usize,
   pub(crate) persistent_rows_skipped: usize,
+  pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
   pub(crate) persistent_acquisition_attempts: u32,
   pub(crate) persistent_error: Option<String>,
   pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
@@ -228,6 +229,7 @@ pub(crate) fn query_cookies_engine_outcome(
     query_persistent_cookies(connection, domains)
   }) {
     Ok(database) => {
+      outcome.persistent_acquisition_strategy = Some(database.strategy());
       outcome.persistent_acquisition_attempts = database.attempts();
       let persistent = database.into_value();
       outcome.persistent_rows_seen = persistent.rows_seen;
@@ -236,9 +238,12 @@ pub(crate) fn query_cookies_engine_outcome(
       outcome.persistent_cookies = persistent.cookies;
     }
     Err(error) => {
-      outcome.persistent_acquisition_attempts = error
-        .downcast_ref::<sqlite::BrowserDatabaseFailure>()
-        .map_or(1, |failure| failure.attempts);
+      if let Some(failure) = error.downcast_ref::<sqlite::BrowserDatabaseFailure>() {
+        outcome.persistent_acquisition_strategy = failure.strategy;
+        outcome.persistent_acquisition_attempts = failure.attempts;
+      } else {
+        outcome.persistent_acquisition_attempts = 1;
+      }
       outcome.persistent_error = Some(format!("{error:#}"));
     }
   }
@@ -918,6 +923,11 @@ mod tests {
     assert_eq!(outcome.persistent_rows_seen, 2);
     assert_eq!(outcome.persistent_rows_skipped, 1);
     assert_eq!(outcome.persistent_cookies.len(), 1);
+    assert_eq!(
+      outcome.persistent_acquisition_strategy,
+      Some(sqlite::DatabaseAcquisitionStrategy::LiveReadOnly)
+    );
+    assert_eq!(outcome.persistent_acquisition_attempts, 1);
     assert!(outcome.persistent_error.is_some());
   }
 
@@ -1239,7 +1249,7 @@ mod tests {
       )
       .expect("insert WAL row");
 
-    let mut cookies = firefox_based(db, None).expect("decode");
+    let mut cookies = firefox_based(db.clone(), None).expect("decode");
 
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
@@ -1249,6 +1259,14 @@ mod tests {
       in_wal.value, "fresh",
       "the WAL row must decode, not just appear"
     );
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert_eq!(
+      outcome.persistent_acquisition_strategy,
+      Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot)
+    );
+    assert_eq!(outcome.persistent_acquisition_attempts, 1);
+    assert_eq!(outcome.persistent_cookies.len(), 2);
   }
 
   #[test]
