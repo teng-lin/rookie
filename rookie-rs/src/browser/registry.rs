@@ -806,6 +806,15 @@ fn discover_browser_with_context<F: DiscoveryFs>(
         continue;
       }
     };
+    // A non-NotFound wildcard expansion failure means this configured root
+    // could not be examined. If it produced no candidates, count it as a
+    // detected-but-failed root so bare profile listing does not mistake the
+    // prevented discovery for a supported browser with no profiles. Missing
+    // optional parents stay silent because `expand_registry_glob` emits no
+    // issue for NotFound.
+    if expansion.paths.is_empty() && !expansion.issues.is_empty() {
+      discovery.detected_roots += 1;
+    }
     for issue in expansion.issues.drain(..) {
       discovery.issues.push(DiscoveryIssue {
         code: "installation_glob_expand_failed",
@@ -1976,6 +1985,53 @@ mod tests {
   }
 
   #[test]
+  fn failed_wildcard_only_root_makes_listing_fail_but_report_keeps_issue() {
+    let temp = TempDir::new("glob-expansion-only-failure");
+    let home = temp.path().join("home");
+    let local_app_data = home.join("LocalAppData");
+    let real_context = test_context_for(
+      PlatformId::Windows,
+      home,
+      [("LOCALAPPDATA", local_app_data.clone())],
+    );
+    let issue = GlobExpansionIssue {
+      path: local_app_data.join("Octo Browser/tmp/inaccessible"),
+      message: "injected wildcard candidate failure".to_owned(),
+    };
+    let mut fs = TestDiscoveryFs::default();
+    fs.glob_expansions.insert(
+      (local_app_data, "Octo Browser/tmp/*".to_owned()),
+      GlobExpansion {
+        paths: Vec::new(),
+        issues: vec![issue],
+      },
+    );
+    let context = with_test_fs(real_context, fs);
+
+    let listing = discover_browser_with_context(&context, "octo_browser")
+      .expect("retain wildcard expansion issue");
+    let error = profiles_for_listing("octo_browser", listing)
+      .expect_err("blocked wildcard root must not look like an empty installation");
+    assert!(error
+      .to_string()
+      .contains("every detected octo_browser installation failed"));
+
+    let report = extract_chromium_with_provider(
+      &context,
+      "octo_browser",
+      None,
+      None,
+      &CountingProvider::default(),
+    )
+    .expect("report retains discovery issue");
+    assert!(report.installations.is_empty());
+    assert!(report
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "installation_glob_expand_failed"));
+  }
+
+  #[test]
   fn missing_optional_wildcard_roots_are_silent() {
     let temp = TempDir::new("missing-wildcard-roots");
     let home = temp.path().join("home");
@@ -1993,6 +2049,7 @@ mod tests {
         discovery.issues.is_empty(),
         "{browser_id} missing root is silent"
       );
+      assert!(profiles_for_listing(browser_id, discovery).is_ok());
     }
   }
 
