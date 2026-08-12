@@ -7,6 +7,10 @@ export interface CookieObject {
   domain: string
   path: string
   secure: boolean
+  /**
+   * Unix expiry time. Source values above `i64::MAX` are omitted rather than
+   * wrapping into a negative JavaScript number.
+   */
   expires?: number
   name: string
   value: string
@@ -19,6 +23,13 @@ export interface FirefoxProfileObject {
   isDefault: boolean
 }
 export declare function version(): string
+/**
+ * Serialize cookies in Netscape cookie-file format.
+ *
+ * Tabs, carriage returns, and line feeds in cookie-controlled fields are
+ * encoded as `%09`, `%0D`, and `%0A`, matching the Rust, CLI, and Python APIs.
+ */
+export declare function toNetscape(cookies: Array<CookieObject>): string
 export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
 export declare function firefox(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function zen(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

@@ -1925,6 +1925,7 @@ dependencies = [
  "rookie-cookies",
  "rusqlite",
  "serde_json",
+ "tracing",
  "tracing-subscriber",
 ]
 

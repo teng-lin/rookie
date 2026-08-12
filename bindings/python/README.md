@@ -22,3 +22,16 @@ for profile in firefox_profiles():
 
 cookies = firefox_profile("work", ["example.com"])
 ```
+
+## Netscape export
+
+```python
+from rookie_cookies import chrome, to_netscape
+
+output = to_netscape(chrome())
+```
+
+The serializer prevents extra columns or forged records by encoding tabs,
+carriage returns, and line feeds in cookie-controlled fields as `%09`, `%0D`,
+and `%0A`. Every other character is preserved. Its output is byte-identical to
+the Rust, CLI, and Node serializers for the same cookies.
