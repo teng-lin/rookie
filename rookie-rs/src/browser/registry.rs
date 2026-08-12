@@ -4074,7 +4074,9 @@ mod tests {
     let named_source = seed(data.join(format!(
       "WebKit/WebsiteDataStore/{}/WebsiteData/Cookies",
       NAMED_PROFILE_UUID.to_ascii_lowercase()
-    )));
+    )))
+    .canonicalize()
+    .expect("canonical named Safari source");
 
     let all = safari_report_with_context(&context, "safari", None, None).expect("full report");
     assert_eq!(all.profiles.len(), 2);
@@ -5161,7 +5163,7 @@ mod tests {
 
   #[cfg(target_os = "macos")]
   #[test]
-  fn macos_missing_key_configuration_surfaces_as_profile_error_not_silent_empty() {
+  fn macos_missing_key_configuration_surfaces_as_row_issue_not_silent_empty() {
     let temp = TempDir::new("macos-missing-key-config");
     let home = temp.path().join("home");
     let context = test_context_for(PlatformId::Macos, home, []);
@@ -5204,21 +5206,31 @@ mod tests {
         extraction.cookies.is_empty(),
         "{browser_id} must not report undecryptable rows as cookies"
       );
-      let failure = extraction
-        .failure
-        .as_ref()
-        .unwrap_or_else(|| panic!("{browser_id} must surface an error, not silently empty output"));
-      let error = match failure {
-        ChromiumProfileFailure::Extraction(message) => message.as_str(),
-        ChromiumProfileFailure::NoSource => {
-          panic!("{browser_id} must surface an extraction error, not NoSource")
-        }
-      };
-      assert!(
-        error.contains(browser_id) && error.contains("no macOS keychain identity"),
-        "{browser_id} error must name the browser and its cause, got {error:?}"
+      assert_eq!(
+        extraction.stats,
+        ChromiumExtractionStats {
+          rows_seen: 1,
+          cookies_emitted: 0,
+          rows_skipped: 1,
+        },
+        "{browser_id} must count the row rejected by the missing provider"
       );
-      assert!(error.contains("v10 key provider failed"));
+      assert_eq!(
+        extraction.failure, None,
+        "a rejected row does not make the successfully queried source fail"
+      );
+      assert_eq!(
+        extraction.row_issues.len(),
+        1,
+        "{browser_id} must surface the rejected row instead of silently returning empty output"
+      );
+      let issue = &extraction.row_issues[0];
+      assert_eq!(
+        issue.code,
+        crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed
+      );
+      assert_eq!(issue.occurrences, 1);
+      assert_eq!(issue.samples, vec!["row 1".to_owned()]);
     }
   }
 
