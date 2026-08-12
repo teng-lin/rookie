@@ -38,16 +38,34 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # NOTE: deliberately NO `ref:` override — this lets the checkout use
-          # whatever ref actually triggered the dispatch, so the verification
-          # step below can catch a wrong-ref dispatch instead of silently
-          # "fixing" it into always checking out the named tag (that's the
-          # tautology bug in publish-npm.yml's original preflight — don't
-          # reproduce it).
+          # The commit the dispatch ref already resolved to. This is what
+          # `actions/checkout` uses when given no `ref:` — it fetches
+          # `github.sha` itself rather than re-resolving the ref name — so
+          # stating it makes the existing pinning explicit and auditable here
+          # rather than changing it.
+          #
+          # NOTE: this is deliberately NOT `ref: refs/tags/${{ inputs.tag }}`.
+          # Overriding with the *input* would make the verification step below
+          # a tautology (the bug in publish-npm.yml's original preflight —
+          # don't reproduce it). `github.sha` is the dispatch ref's own commit,
+          # so the ref-type and ref-name checks still catch a wrong-ref
+          # dispatch.
+          ref: ${{ github.sha }}
 
+      # Unlike the crate and PyPI workflows, which derive `v$VERSION` from a
+      # version input, this one takes the tag verbatim — so the `v<version>`
+      # shape has to be asserted rather than constructed. Matching the dispatch
+      # ref alone is satisfied by *any* tag dispatched with its own name, and a
+      # non-`v` tag falls outside the `v*` ruleset that keeps a release tag
+      # immutable, which is what closes the tag-move window the re-check below
+      # cannot cover.
       - name: Verify release tag
         shell: bash
         run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag must be v<major>.<minor>.<patch>[-prerelease], got '$RELEASE_TAG'"
+            exit 1
+          fi
           test "$GITHUB_REF_TYPE" = "tag"
           test "$GITHUB_REF_NAME" = "$RELEASE_TAG"
         env:
@@ -73,16 +91,65 @@ jobs:
         run: Move-Item target/${{ matrix.target }}/release/rookie-cookies.exe rookie-cookies-cli-${{ matrix.target }}.exe
         if: contains(matrix.platform, 'windows')
 
+      # `gh release upload` addresses a release by tag name, not by commit, so
+      # the verified-tag binding only holds while the tag still resolves to the
+      # commit this run built. Re-resolve it here and fail closed if it moved.
+      #
+      # Resolve through `git/ref/tags/...`, not `commits/<tag>`: the latter
+      # takes an ambiguous ref, so a branch sharing the tag's name could answer
+      # in its place — and a branch is not covered by the `v*` tag ruleset this
+      # check leans on. An annotated tag resolves to a tag object, which has to
+      # be peeled to reach the commit.
+      - name: Re-verify release tag still points at the built commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolve_tag_commit() {
+            local object
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '"\(.object.type) \(.object.sha)"')" || return 1
+            if test "${object% *}" = "tag"; then
+              gh api "repos/$GITHUB_REPOSITORY/git/tags/${object#* }" --jq .object.sha || return 1
+            else
+              printf '%s\n' "${object#* }"
+            fi
+          }
+
+          # Retry only the lookup: a transient API failure here would otherwise
+          # discard an already-finished cross-platform build. A tag that is
+          # genuinely gone still fails closed, just three attempts later.
+          tag_sha=""
+          for attempt in 1 2 3; do
+            if tag_sha="$(resolve_tag_commit)"; then
+              break
+            fi
+            tag_sha=""
+            test "$attempt" -eq 3 || sleep $((attempt * 5))
+          done
+
+          if test -z "$tag_sha"; then
+            echo "::error::could not resolve $RELEASE_TAG after 3 attempts"
+            exit 1
+          fi
+          if test "$tag_sha" != "$GITHUB_SHA"; then
+            echo "::error::$RELEASE_TAG now resolves to $tag_sha, but this run built $GITHUB_SHA"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+
       - name: Upload Unix
         run: gh release upload "$RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }} --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ inputs.tag }}
         if: contains(matrix.platform, 'macos') || contains(matrix.platform, 'ubuntu')
 
       - name: Upload Windows
         run: gh release upload "$env:RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }}.exe --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ inputs.tag }}
         if: contains(matrix.platform, 'windows')

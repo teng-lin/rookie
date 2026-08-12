@@ -6,12 +6,24 @@
 - PyPI: `rookie-cookies` wheels and source distribution
 - npm: `rookie-cookies` plus four native platform packages
 
-Registry releases are immutable and the npm publication is not atomic. The
-release workflows therefore run only by manual dispatch from an existing
-`v<version>` tag. The npm workflow definition is dispatched from reviewed
-`main` and explicitly checks out that tag for every source-consuming job.
-Publish each registry in the order below and verify it before starting the
-next one.
+Registry releases are immutable and the npm publication is not atomic. Every
+release workflow therefore runs only by manual dispatch, and every one refuses
+to publish unless it can verify the `v<version>` tag first. The ref you dispatch
+from is *not* the same for all of them:
+
+- `publish-crate.yml` and `publish-py.yml` are dispatched from the `v<version>`
+  tag and fail unless the run's ref is that tag.
+- `publish-npm.yml` is dispatched from reviewed `main` and fails unless the
+  run's ref is `main`. Every source-consuming job explicitly checks out
+  `refs/tags/v<version>`, and the preflight job asserts that the tag is an
+  ancestor of `origin/main`.
+- `publish-cli.yml` is dispatched from the `v<version>` tag, like the crate and
+  PyPI workflows. See "Publish CLI binaries" for the extra check it needs.
+
+Dispatching from the wrong ref fails the run rather than publishing anything, so
+copy the exact commands from the sections below instead of assuming one
+convention covers every workflow. Publish each registry in the order below and
+verify it before starting the next one.
 
 ## One-time setup
 
@@ -123,11 +135,42 @@ Create the GitHub release only after all three registry checks pass.
 
 After the GitHub release exists, dispatch `publish-cli.yml` from the matching
 tag to build and attach the `rookie-cookies` CLI binary for macOS (arm64 and
-x86_64), Linux x86_64, and Windows x86_64:
+x86_64), Linux x86_64, and Windows x86_64.
+
+`workflow_dispatch` runs the copy of the workflow file stored *at the dispatched
+ref*. Dispatching from `v$VERSION` therefore runs that tag's own copy of
+`publish-cli.yml`, not the copy on `main`. Confirm the tag's copy is a hardened
+one before dispatching, by looking for the re-verification step that only the
+hardened definition carries:
+
+```console
+git fetch origin "+refs/tags/v$VERSION:refs/tags/v$VERSION"
+git grep "Re-verify release tag" "v$VERSION" -- .github/workflows/publish-cli.yml
+```
+
+The explicit `refs/tags/...:refs/tags/...` destination is what creates the local
+tag; a source-only refspec leaves it in `FETCH_HEAD` only, so the `git grep`
+against `v$VERSION` would fail in a fresh clone. The leading `+` forces the
+local tag to match the remote, so a stale local tag cannot make this check read
+the wrong workflow copy for the tag `gh workflow run --ref` will actually
+dispatch.
+
+Check for that marker rather than diffing the tag's copy against `main`'s. CLI
+publishing is the last step of a release, often days after the tag was cut, so
+any unrelated later commit to `publish-cli.yml` on `main` makes such a diff
+non-empty even for a fully hardened tag — a byte-identity check would route
+operators to the manual path for no reason. The marker is the newest piece of
+hardening, so a tag that carries it also carries the tag verification step, the
+`release` environment gate, and the SHA-pinned action references.
+
+If the grep prints a match, dispatch the run:
 
 ```console
 gh workflow run publish-cli.yml --ref "v$VERSION" -f tag="v$VERSION"
 ```
+
+If it prints nothing, do not dispatch — follow "Retrying a tag that predates
+the hardened workflow" below.
 
 Always dispatch with `--ref "v$VERSION"` so the run's ref is the immutable
 tag. The workflow's first step after checkout verifies that `GITHUB_REF_TYPE`
@@ -135,11 +178,94 @@ is `tag` and `GITHUB_REF_NAME` matches the `tag` input, and fails fast before
 any build if the dispatch ref does not match the requested tag — this closes
 off dispatching from `main` (or any other ref) with an arbitrary `tag` value
 and having binaries built from unreviewed source silently overwrite that
-release's assets. Because that check makes it structurally impossible for the
-upload steps to run against anything other than the verified tag's commit,
-the existing `--clobber` on those uploads is safe: it only ever re-uploads a
-binary rebuilt from that same tag, e.g. to retry a single failed platform leg
-without regenerating the others.
+release's assets.
+
+That same step also asserts the tag is shaped `v<major>.<minor>.<patch>`, with
+an optional pre-release suffix. This workflow takes the tag verbatim, where
+`publish-crate.yml` and `publish-py.yml` build `v$VERSION` from a version input
+and so enforce the prefix by construction. Matching the dispatch ref alone
+would not: dispatching from a tag named `nightly` with `tag=nightly` satisfies
+it, and every later check — including the re-verification below — would agree,
+because they only ever compare the tag against itself. A tag outside `v*` is
+also outside the ruleset that blocks tag updates, which is precisely what holds
+the residual window described below shut.
+
+The checkout states `ref: ${{ github.sha }}`, the commit the dispatch ref
+resolved to. That is what `actions/checkout` already uses when given no `ref:`
+— it fetches the run's `github.sha` directly rather than re-resolving the ref
+name — so the line closes no gap; it makes the existing pinning explicit and
+auditable in the workflow file. What it must *not* become is `refs/tags/${{
+inputs.tag }}`: checking out the input would make the verification step that
+follows a tautology.
+
+Pinning the source is not the same as pinning the upload target. A step
+immediately before the uploads re-resolves `v$VERSION` through the API and fails
+the job if it no longer points at that same commit.
+
+Residual limitations: `gh release upload` addresses a release by tag name, not
+by commit, so nothing in the upload itself carries the verified commit. The
+binding rests on that re-check, which cannot see a tag moved in the window
+between the re-check and the upload. The `v*` tag ruleset from "One-time setup"
+— block updates, block deletion — is what actually keeps that window closed. Do
+not relax it. The re-check also binds the tag to a commit, not the *release* to
+the tag: a release's `tag_name` is separately editable through the API, so a
+release retargeted to a different tag would still receive these binaries. Both
+gaps need repository write access, the access the tag ruleset already assumes is
+limited to release maintainers.
+
+### `--clobber` deletes the existing asset before uploading
+
+The upload steps pass `--clobber` so one failed platform leg can be rebuilt and
+re-attached without regenerating the others. `--clobber` is **not** an atomic
+replace: `gh release upload` deletes the existing asset first and uploads the
+new one afterwards. If that upload then fails — network error, expired token,
+cancelled run, a build that produced a truncated file — the original asset is
+permanently gone. GitHub keeps no copy of a deleted release asset and does not
+roll the deletion back.
+
+Before re-running a leg against a release that already carries assets, download
+the current ones so a failed re-upload stays recoverable:
+
+```console
+gh release download "v$VERSION" --dir "release-assets-v$VERSION"
+```
+
+`gh release download` fails rather than overwriting when a target file already
+exists, so download into a fresh directory; add `--clobber` only when you mean
+to replace an earlier copy of that backup.
+
+### Retrying a tag that predates the hardened workflow
+
+If the marker grep above found nothing, the tag stores an older definition of
+`publish-cli.yml`. Dispatching from that tag runs the *old* definition: its tag
+verification step, the `release` environment approval gate, and the SHA-pinned
+action references now on `main` do not apply to that run, whatever `main`
+contains today. Nothing in the dispatch surfaces this — the run simply looks
+like a normal one.
+
+Handle it one of two ways:
+
+1. Preferred: cut a new patch release from current `main`, so the new tag
+   carries the hardened workflow, and publish the CLI binaries from that tag.
+2. If binaries must be attached to the existing release, build them locally from
+   the exact tag and upload them by hand. Read the `--clobber` warning above
+   first; the manual upload below deliberately omits `--clobber`, so it fails
+   loudly instead of destroying an existing asset.
+
+```console
+git fetch origin "+refs/tags/v$VERSION:refs/tags/v$VERSION"
+git switch --detach "v$VERSION"
+git status --porcelain # must print nothing
+export TARGET=x86_64-unknown-linux-gnu
+cargo build --release --locked --target "$TARGET" \
+  --package rookie-cookies-cli --bin rookie-cookies
+mv "target/$TARGET/release/rookie-cookies" "rookie-cookies-cli-$TARGET"
+gh release upload "v$VERSION" "rookie-cookies-cli-$TARGET"
+```
+
+Each platform binary must be built on its own host. Use the workflow's matrix as
+the reference for target names, for the `.exe` suffix on Windows asset names,
+and for the `--features appbound` flag the Windows build adds.
 
 This workflow only triggers on `workflow_dispatch`, so it cannot be exercised
 by normal pull request CI. Review its YAML carefully and dispatch-test it
