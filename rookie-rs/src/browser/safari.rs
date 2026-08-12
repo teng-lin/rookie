@@ -406,6 +406,7 @@ fn c_str(bs: &[u8]) -> Result<String> {
 }
 
 const SAFARI_TABS_RELATIVE_PATH: &str = "Safari/SafariTabs.db";
+const SAFARI_PROFILE_TYPE: i64 = 1;
 const SAFARI_PROFILE_SUBTYPE: i64 = 2;
 const DEFAULT_PROFILE_SENTINEL: &str = "DefaultProfile";
 
@@ -499,7 +500,7 @@ fn named_profile(library: &Path, uuid: String, title: String) -> SafariProfile {
     name: profile_name(&title, &uuid),
     uuid: Some(uuid),
     cookie_candidates: vec![library.join(format!(
-      "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/{lower_uuid}/Cookies/Cookies.binarycookies"
+      "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/{lower_uuid}/WebsiteData/Cookies/Cookies.binarycookies"
     ))],
   }
 }
@@ -512,10 +513,11 @@ fn named_profiles_from_database(library: &Path) -> Result<Vec<(String, String)>>
   sqlite::with_browser_database(database, |connection| {
     let mut statement = connection.prepare(
       "SELECT external_uuid, title FROM bookmarks \
-       WHERE subtype = ?1 AND external_uuid != ?2 \
+       WHERE type = ?1 AND subtype = ?2 AND external_uuid != ?3 \
        ORDER BY external_uuid COLLATE BINARY, title COLLATE BINARY",
     )?;
     let mut rows = statement.query(rusqlite::params![
+      SAFARI_PROFILE_TYPE,
       SAFARI_PROFILE_SUBTYPE,
       DEFAULT_PROFILE_SENTINEL
     ])?;
@@ -625,6 +627,21 @@ fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&Pat
   Ok(None)
 }
 
+fn sort_cookies(cookies: &mut [Cookie]) {
+  cookies.sort_by(|left, right| {
+    left
+      .domain
+      .cmp(&right.domain)
+      .then_with(|| left.path.cmp(&right.path))
+      .then_with(|| left.name.cmp(&right.name))
+      .then_with(|| left.expires.cmp(&right.expires))
+      .then_with(|| left.secure.cmp(&right.secure))
+      .then_with(|| left.http_only.cmp(&right.http_only))
+      .then_with(|| left.same_site.cmp(&right.same_site))
+      .then_with(|| left.value.cmp(&right.value))
+  });
+}
+
 #[allow(dead_code)] // retained as the private Safari-to-generic adapter
 pub(crate) fn safari_outcome(
   library: &Path,
@@ -633,30 +650,32 @@ pub(crate) fn safari_outcome(
   let (profiles, discovery_warning) = discover_safari_profiles(library);
   let profiles = profiles
     .into_iter()
-    .map(
+    .filter_map(
       |profile| match first_existing_cookie_candidate(&profile.cookie_candidates) {
         Ok(Some(path)) => match safari_based(path.clone(), domains.clone()) {
-          Ok(cookies) => SafariProfileExtraction {
-            profile,
-            cookies,
-            error: None,
-          },
-          Err(error) => SafariProfileExtraction {
+          Ok(mut cookies) => {
+            sort_cookies(&mut cookies);
+            Some(SafariProfileExtraction {
+              profile,
+              cookies,
+              error: None,
+            })
+          }
+          Err(error) => Some(SafariProfileExtraction {
             profile,
             cookies: Vec::new(),
             error: Some(format!("{error:#}")),
-          },
+          }),
         },
-        Ok(None) => SafariProfileExtraction {
-          profile,
-          cookies: Vec::new(),
-          error: Some("no Safari cookie source exists for profile".to_owned()),
-        },
-        Err(error) => SafariProfileExtraction {
+        // A discovered Safari profile without a cookie-bearing source is
+        // normal absence (for example a newly-created profile), not an
+        // extraction failure. It is omitted from the generic outcome.
+        Ok(None) => None,
+        Err(error) => Some(SafariProfileExtraction {
           profile,
           cookies: Vec::new(),
           error: Some(format!("{error:#}")),
-        },
+        }),
       },
     )
     .collect();
@@ -1127,12 +1146,14 @@ mod tests {
       .expect("create database parent");
     let connection = rusqlite::Connection::open(&database).expect("open SafariTabs fixture");
     connection
-      .execute_batch("CREATE TABLE bookmarks (external_uuid TEXT, title TEXT, subtype INTEGER)")
+      .execute_batch(
+        "CREATE TABLE bookmarks (external_uuid TEXT, title TEXT, type INTEGER, subtype INTEGER)",
+      )
       .expect("create bookmarks");
     for (uuid, title) in rows {
       connection
         .execute(
-          "INSERT INTO bookmarks (external_uuid, title, subtype) VALUES (?1, ?2, 2)",
+          "INSERT INTO bookmarks (external_uuid, title, type, subtype) VALUES (?1, ?2, 1, 2)",
           rusqlite::params![uuid, title],
         )
         .expect("insert bookmark profile");
@@ -1145,10 +1166,20 @@ mod tests {
     let first = "A0B1C2D3-1111-2222-3333-444444444444";
     let second = "B0B1C2D3-1111-2222-3333-444444444444";
     let third = "C0B1C2D3-1111-2222-3333-444444444444";
+    let non_profile = "D0B1C2D3-1111-2222-3333-444444444444";
     write_tabs_database(
       &library,
       &[(third, "Work-2"), (second, "Work"), (first, "Work")],
     );
+    let connection = rusqlite::Connection::open(safari_tabs_database_path(&library))
+      .expect("reopen SafariTabs fixture");
+    connection
+      .execute(
+        "INSERT INTO bookmarks (external_uuid, title, type, subtype) VALUES (?1, ?2, 2, 2)",
+        rusqlite::params![non_profile, "Not a profile"],
+      )
+      .expect("insert non-profile bookmark with matching subtype");
+    drop(connection);
 
     let (profiles, warning) = discover_safari_profiles(&library);
     assert!(warning.is_none());
@@ -1160,9 +1191,10 @@ mod tests {
       vec!["default", "Work", "Work-2", "Work-2-2"]
     );
     assert_eq!(profiles[1].uuid.as_deref(), Some(first));
-    assert!(profiles[1].cookie_candidates[0]
-      .to_string_lossy()
-      .contains(&first.to_ascii_lowercase()));
+    assert!(profiles[1].cookie_candidates[0].ends_with(format!(
+      "WebsiteDataStore/{}/WebsiteData/Cookies/Cookies.binarycookies",
+      first.to_ascii_lowercase()
+    )));
     fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
   }
 
@@ -1205,6 +1237,52 @@ mod tests {
     assert_eq!(profiles[0].name, "default");
     assert_eq!(profiles[1].uuid.as_deref(), Some(second));
     assert_eq!(profiles[2].uuid.as_deref(), Some(first));
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn generic_outcome_omits_sourceless_profiles_and_sorts_cookie_rows() {
+    let library = temp_library("generic-outcome");
+    let uuid = "A0B1C2D3-1111-2222-3333-444444444444";
+    write_tabs_database(&library, &[(uuid, "Empty")]);
+
+    let modern = default_profile(&library).cookie_candidates.remove(0);
+    fs::create_dir_all(modern.parent().expect("cookie parent")).expect("create cookie parent");
+    let later = build_cookie_record(&FixtureCookie {
+      domain: ".z.example",
+      name: "later",
+      path: "/",
+      value: "2",
+      flags: 0,
+      expires: 0.0,
+    });
+    let earlier = build_cookie_record(&FixtureCookie {
+      domain: ".a.example",
+      name: "earlier",
+      path: "/",
+      value: "1",
+      flags: 0,
+      expires: 0.0,
+    });
+    fs::write(&modern, build_file(&[build_page(&[later, earlier])]))
+      .expect("write default cookie source");
+
+    let outcome = safari_outcome(&library, None);
+    assert_eq!(
+      outcome.profiles.len(),
+      1,
+      "sourceless named profile omitted"
+    );
+    assert_eq!(outcome.profiles[0].profile.name, "default");
+    assert_eq!(
+      outcome.profiles[0]
+        .cookies
+        .iter()
+        .map(|cookie| cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["earlier", "later"]
+    );
+    assert!(outcome.profiles[0].error.is_none());
     fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
   }
 }
