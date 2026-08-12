@@ -1,6 +1,7 @@
 import test from "ava";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -518,6 +519,210 @@ test("generated report exports and declarations survive patching", (t) => {
   t.false(types.includes("bigint"), "no declaration may use BigInt");
 });
 
+// Executes the real scripts/patch-loader.js against a disposable copy of the
+// generated artifacts, so the guards inside it are exercised rather than merely
+// inspected. The committed files are never touched.
+function runPatchLoader(mutate = (sources) => sources) {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-patch-loader-"));
+  try {
+    mkdirSync(join(dir, "scripts"));
+    const sources = mutate({
+      loader: readFileSync(new URL("../index.js", import.meta.url), "utf8"),
+      types: readFileSync(new URL("../index.d.ts", import.meta.url), "utf8"),
+    });
+    writeFileSync(join(dir, "index.js"), sources.loader);
+    writeFileSync(join(dir, "index.d.ts"), sources.types);
+    copyFileSync(
+      fileURLToPath(new URL("../scripts/patch-loader.js", import.meta.url)),
+      join(dir, "scripts", "patch-loader.js"),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [join(dir, "scripts", "patch-loader.js")],
+      { encoding: "utf8" },
+    );
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      loader: readFileSync(join(dir, "index.js"), "utf8"),
+      types: readFileSync(join(dir, "index.d.ts"), "utf8"),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("patch-loader reproduces the committed artifacts exactly", (t) => {
+  const result = runPatchLoader();
+
+  t.is(result.status, 0, result.stderr);
+  t.is(
+    result.loader,
+    readFileSync(new URL("../index.js", import.meta.url), "utf8"),
+    "committed index.js must be exactly what patch-loader produces",
+  );
+  t.is(
+    result.types,
+    readFileSync(new URL("../index.d.ts", import.meta.url), "utf8"),
+    "committed index.d.ts must be exactly what patch-loader produces",
+  );
+});
+
+test("patch-loader rejects truncation that would drop the report declarations", (t) => {
+  const result = runPatchLoader(({ loader, types }) => ({
+    loader,
+    types: types.slice(
+      0,
+      types.indexOf("export declare function supportedBrowsers("),
+    ),
+  }));
+
+  t.not(result.status, 0, "patch-loader must fail rather than emit a short file");
+  t.regex(result.stderr, /missing export declare function supportedBrowsers\(/);
+});
+
+test("patch-loader rejects the historical slice-at-load regression", (t) => {
+  // Slicing the generated types at a common declaration such as `load`
+  // discarded every API generated after it, which is where firefoxProfiles and
+  // now all four report functions live.
+  const result = runPatchLoader(({ loader, types }) => {
+    const load = types.indexOf("export declare function load(");
+    return { loader, types: types.slice(0, types.indexOf("\n", load) + 1) };
+  });
+
+  t.not(result.status, 0);
+  t.regex(result.stderr, /Generated declarations were truncated/);
+});
+
+test("patch-loader rejects an unrecognized napi destructure line", (t) => {
+  const result = runPatchLoader(({ loader, types }) => ({
+    loader: loader.replace(
+      /^const \{ version,.*$/m,
+      "const { renamed } = nativeBinding",
+    ),
+    types,
+  }));
+
+  t.not(result.status, 0);
+  t.regex(result.stderr, /could not find the napi-generated/);
+});
+
+test.serial("report extraction runs off the event loop", async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "rookie-node-loop-"));
+  const fixture = firefoxFixtureRoot(temp);
+  // The settle order is the discriminating signal: a synchronous binding
+  // resolves its promise as an already-settled microtask, which drains ahead of
+  // the timer macrotask, so `winner` becomes "report". The tick count only
+  // corroborates -- it can still be non-zero under a blocking call, since the
+  // loop catches up once the call returns. Enough profiles that extraction
+  // outlasts the timer on any plausible machine.
+  const profileCount = 200;
+  writeFirefoxProfileTree(fixture.root, profileCount);
+
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [fileURLToPath(new URL("event-loop-child.mjs", import.meta.url))],
+      { env: { ...process.env, ...fixture.environment } },
+    );
+    const { winner, ticks, durationMs, profiles, cookiesEmitted } =
+      JSON.parse(stdout);
+
+    t.is(profiles, profileCount, "the fixture must produce real extraction work");
+    t.is(cookiesEmitted, profileCount);
+    t.is(
+      winner,
+      "timer",
+      `a concurrent timer must settle before the report (report took ${durationMs}ms)`,
+    );
+    t.true(
+      ticks > 0,
+      `the event loop must advance during extraction (ticks=${ticks}, ${durationMs}ms)`,
+    );
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test.serial("report objects use camelCase keys at every depth", async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "rookie-node-issues-"));
+  const fixture = firefoxFixtureRoot(temp);
+  const healthy = join(fixture.root, "Profiles", "default-release");
+  const corrupt = join(fixture.root, "Profiles", "work");
+  mkdirSync(healthy, { recursive: true });
+  mkdirSync(corrupt, { recursive: true });
+  writeFileSync(
+    join(fixture.root, "profiles.ini"),
+    `[InstallTest]
+Default=Profiles/default-release
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=Profiles/default-release
+Default=1
+
+[Profile1]
+Name=work
+IsRelative=1
+Path=Profiles/work
+`,
+  );
+  installFirefoxDatabase(
+    join(healthy, "cookies.sqlite"),
+    new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+  );
+  writeFileSync(join(corrupt, "cookies.sqlite"), "this is not a sqlite database");
+
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [fileURLToPath(new URL("issues-child.mjs", import.meta.url))],
+      {
+        env: {
+          ...process.env,
+          ...fixture.environment,
+          // Keep Chromium-family roots inside the fixture so the absent-browser
+          // half of this test cannot discover a real installation.
+          XDG_CONFIG_HOME: join(temp, ".config"),
+        },
+      },
+    );
+    const observed = JSON.parse(stdout);
+
+    for (const key of [...observed.firefoxKeys, ...observed.absentKeys]) {
+      t.false(key.includes("_"), `report key ${key} must be camelCase`);
+    }
+    for (const key of ["pathLossy", "acquisitionStrategy", "countersSaturated"]) {
+      t.true(observed.firefoxKeys.includes(key), `expected key ${key}`);
+    }
+
+    // A failing source proves the nested issue objects are converted too.
+    t.truthy(observed.sourceIssue, "the corrupt profile must produce a source issue");
+    t.deepEqual(observed.sourceIssueKeys, [
+      "code",
+      "stage",
+      "severity",
+      "occurrences",
+      "samples",
+      "message",
+    ]);
+    t.is(observed.sourceIssue.severity, "error");
+    t.is(typeof observed.sourceIssue.occurrences, "number");
+
+    // browserId is the rename most at risk and is only ever populated on a
+    // request-scoped issue, so it needs its own scenario.
+    t.is(observed.absentStatus, "no_sources");
+    t.truthy(observed.requestIssue, "an absent browser must report an issue");
+    t.is(observed.requestIssue.browserId, "chrome");
+    t.true(observed.requestIssueKeys.includes("browserId"));
+    t.false(observed.requestIssueKeys.includes("browser_id"));
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("public JavaScript examples await async extraction APIs", (t) => {
   const documents = [
     ["README.md", new URL("../../../README.md", import.meta.url), true],
@@ -623,6 +828,24 @@ function firefoxFixtureRoot(temp) {
     root: join(temp, ".mozilla", "firefox"),
     environment: { HOME: temp },
   };
+}
+
+function writeFirefoxProfileTree(root, count) {
+  const encoded = readFileSync(
+    new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+    "ascii",
+  ).replace(/\s/g, "");
+  const database = Buffer.from(encoded, "base64");
+
+  let ini = "[InstallTest]\nDefault=Profiles/p0\n\n";
+  for (let index = 0; index < count; index += 1) {
+    const directory = join(root, "Profiles", `p${index}`);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "cookies.sqlite"), database);
+    ini += `[Profile${index}]\nName=p${index}\nIsRelative=1\nPath=Profiles/p${index}\n`;
+    ini += index === 0 ? "Default=1\n\n" : "\n";
+  }
+  writeFileSync(join(root, "profiles.ini"), ini);
 }
 
 function installFirefoxDatabase(path, fixtureUrl) {
