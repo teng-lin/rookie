@@ -3,6 +3,11 @@ extern crate napi_derive;
 
 use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
 use rookie_cookies::enums::Cookie;
+use rookie_cookies::report::{
+  BrowserCapabilitiesDescriptor, BrowserDescriptor, CookieSourceDescriptor, CookieSourceIdentity,
+  ExtractionIssue, ExtractionReport, ExtractionStats, ProfileDescriptor, ProfileExtraction,
+  ProfileIdentity, ReportStats, SourceExtraction,
+};
 use rookie_cookies::MozillaProfile;
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -27,6 +32,174 @@ pub struct FirefoxProfileObject {
   pub name: String,
   pub path: String,
   pub is_default: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Report objects
+//
+// The camelCase counterparts of `rookie_cookies::report`. Every identifier and
+// code stays an open string, so a value this build has never heard of is still
+// representable; compare against a known string and keep a fallback branch.
+//
+// Every counter is declared `u32` so it arrives as an ordinary JavaScript
+// number. A `u64` would be generated as a `BigInt`, which no existing consumer
+// of this package expects, and the Rust contract already saturates counters
+// into `u32` and reports that through `countersSaturated`.
+// ---------------------------------------------------------------------------
+
+/// What a registered browser claims it can do on this platform.
+#[napi(object)]
+pub struct BrowserCapabilitiesObject {
+  pub persistent_formats: Vec<String>,
+  pub session_formats: Vec<String>,
+  pub declared_decryption_tiers: Vec<String>,
+  /// The declared tiers narrowed to the key providers this build actually
+  /// compiled and enabled.
+  pub available_decryption_tiers: Vec<String>,
+}
+
+/// A browser registered for the running OS. Registration is not detection.
+#[napi(object)]
+pub struct BrowserDescriptorObject {
+  pub id: String,
+  pub aliases: Vec<String>,
+  pub display_name: String,
+  pub engine: String,
+  pub capabilities: BrowserCapabilitiesObject,
+}
+
+/// Stable identity of one discovered profile.
+///
+/// `profileId` is the selection key; `path` is a display value that may be
+/// lossy on a non-UTF-8 filesystem, which `pathLossy` reports.
+#[napi(object)]
+pub struct ProfileIdentityObject {
+  pub browser_id: String,
+  pub installation_id: String,
+  pub profile_id: String,
+  pub display_name: String,
+  pub path: String,
+  pub path_lossy: bool,
+}
+
+/// A cookie source a profile exposes, before any extraction is attempted.
+#[napi(object)]
+pub struct CookieSourceDescriptorObject {
+  pub role: String,
+  pub format: String,
+  pub path: String,
+  pub path_lossy: bool,
+  /// Widened from the Rust `u16` so it arrives as an ordinary number.
+  pub precedence: u32,
+}
+
+/// Identity of the source an extraction attempted.
+#[napi(object)]
+pub struct CookieSourceIdentityObject {
+  pub role: String,
+  pub format: String,
+  pub path: String,
+  pub path_lossy: bool,
+  /// Widened from the Rust `u16` so it arrives as an ordinary number.
+  pub precedence: u32,
+}
+
+/// One discovered profile and its cookie sources.
+#[napi(object)]
+pub struct ProfileDescriptorObject {
+  pub profile: ProfileIdentityObject,
+  pub is_default: bool,
+  pub sources: Vec<CookieSourceDescriptorObject>,
+}
+
+/// Row accounting for one source or profile.
+///
+/// A count that exceeded `u32` is clamped and sets `countersSaturated`.
+#[napi(object)]
+pub struct ExtractionStatsObject {
+  pub rows_seen: u32,
+  pub cookies_emitted: u32,
+  pub rows_skipped: u32,
+  pub acquisition_attempts: u32,
+  pub counters_saturated: bool,
+}
+
+/// Request-wide totals, including browsers that were registered but absent.
+#[napi(object)]
+pub struct ReportStatsObject {
+  pub registered_browsers: u32,
+  pub browsers_detected: u32,
+  pub browsers_not_detected: u32,
+  pub installations_discovered: u32,
+  pub profiles_discovered: u32,
+  pub sources_succeeded: u32,
+  pub sources_failed: u32,
+  pub rows_seen: u32,
+  pub cookies_emitted: u32,
+  pub rows_skipped: u32,
+  pub counters_saturated: bool,
+}
+
+/// A diagnostic attached to the request, a profile, or a source.
+///
+/// Repeated row-level problems are aggregated by code and stage: `occurrences`
+/// counts them all while `samples` keeps a bounded excerpt.
+///
+/// `use_nullable` keeps the optional context fields present and `null` rather
+/// than absent, so an unset one reads the same here as the `None` Python emits
+/// and the `null` the CLI's serde output emits. napi's default would omit the
+/// key entirely and make Node the only surface where it disappears.
+/// [`CookieObject`] deliberately keeps the default: its shape predates the
+/// report DTOs and is frozen by the compatibility contract.
+#[napi(object, use_nullable = true)]
+pub struct ExtractionIssueObject {
+  pub code: String,
+  pub stage: String,
+  pub severity: String,
+  pub occurrences: u32,
+  pub samples: Vec<String>,
+  pub browser_id: Option<String>,
+  pub installation_id: Option<String>,
+  pub profile_id: Option<String>,
+  pub message: String,
+}
+
+/// One attempted cookie source and the cookies it produced.
+///
+/// A profile-wide cookie stream is the concatenation of its `selected` sources
+/// whose `status` is `succeeded`, in the order they appear. Both halves matter:
+/// a source that was attempted and rejected in favour of another candidate can
+/// still report `succeeded`.
+#[napi(object)]
+pub struct SourceExtractionObject {
+  pub source: CookieSourceIdentityObject,
+  pub status: String,
+  pub selected: bool,
+  pub acquisition_strategy: String,
+  pub cookies: Vec<CookieObject>,
+  pub stats: ExtractionStatsObject,
+  pub issues: Vec<ExtractionIssueObject>,
+}
+
+/// One profile's sources, totals, and profile-scoped diagnostics.
+#[napi(object)]
+pub struct ProfileExtractionObject {
+  pub profile: ProfileIdentityObject,
+  pub sources: Vec<SourceExtractionObject>,
+  pub stats: ExtractionStatsObject,
+  pub issues: Vec<ExtractionIssueObject>,
+}
+
+/// A grouped extraction result.
+///
+/// `issues` holds only request-wide, registry, discovery, and installation
+/// problems; anything narrower is attached to its profile or source.
+#[napi(object)]
+pub struct ExtractionReportObject {
+  pub status: String,
+  pub summary: ReportStatsObject,
+  pub profiles: Vec<ProfileExtractionObject>,
+  pub issues: Vec<ExtractionIssueObject>,
 }
 
 #[napi]
@@ -84,6 +257,156 @@ fn profiles_to_js(profiles: Vec<MozillaProfile>) -> Vec<FirefoxProfileObject> {
       is_default: profile.is_default,
     })
     .collect()
+}
+
+fn identifiers_to_js(values: Vec<impl AsRef<str>>) -> Vec<String> {
+  values
+    .into_iter()
+    .map(|value| value.as_ref().to_owned())
+    .collect()
+}
+
+fn capabilities_to_js(capabilities: BrowserCapabilitiesDescriptor) -> BrowserCapabilitiesObject {
+  BrowserCapabilitiesObject {
+    persistent_formats: identifiers_to_js(capabilities.persistent_formats),
+    session_formats: identifiers_to_js(capabilities.session_formats),
+    declared_decryption_tiers: identifiers_to_js(capabilities.declared_decryption_tiers),
+    available_decryption_tiers: identifiers_to_js(capabilities.available_decryption_tiers),
+  }
+}
+
+fn browser_descriptor_to_js(browser: BrowserDescriptor) -> BrowserDescriptorObject {
+  BrowserDescriptorObject {
+    id: browser.id.as_str().to_owned(),
+    aliases: browser.aliases,
+    display_name: browser.display_name,
+    engine: browser.engine.as_str().to_owned(),
+    capabilities: capabilities_to_js(browser.capabilities),
+  }
+}
+
+fn profile_identity_to_js(profile: ProfileIdentity) -> ProfileIdentityObject {
+  ProfileIdentityObject {
+    browser_id: profile.browser_id.as_str().to_owned(),
+    installation_id: profile.installation_id.as_str().to_owned(),
+    profile_id: profile.profile_id.as_str().to_owned(),
+    display_name: profile.display_name,
+    path: profile.path,
+    path_lossy: profile.path_lossy,
+  }
+}
+
+fn source_descriptor_to_js(source: CookieSourceDescriptor) -> CookieSourceDescriptorObject {
+  CookieSourceDescriptorObject {
+    role: source.role.as_str().to_owned(),
+    format: source.format.as_str().to_owned(),
+    path: source.path,
+    path_lossy: source.path_lossy,
+    precedence: u32::from(source.precedence),
+  }
+}
+
+fn source_identity_to_js(source: CookieSourceIdentity) -> CookieSourceIdentityObject {
+  CookieSourceIdentityObject {
+    role: source.role.as_str().to_owned(),
+    format: source.format.as_str().to_owned(),
+    path: source.path,
+    path_lossy: source.path_lossy,
+    precedence: u32::from(source.precedence),
+  }
+}
+
+fn profile_descriptor_to_js(profile: ProfileDescriptor) -> ProfileDescriptorObject {
+  ProfileDescriptorObject {
+    profile: profile_identity_to_js(profile.profile),
+    is_default: profile.is_default,
+    sources: profile
+      .sources
+      .into_iter()
+      .map(source_descriptor_to_js)
+      .collect(),
+  }
+}
+
+fn extraction_stats_to_js(stats: ExtractionStats) -> ExtractionStatsObject {
+  ExtractionStatsObject {
+    rows_seen: stats.rows_seen,
+    cookies_emitted: stats.cookies_emitted,
+    rows_skipped: stats.rows_skipped,
+    acquisition_attempts: stats.acquisition_attempts,
+    counters_saturated: stats.counters_saturated,
+  }
+}
+
+fn report_stats_to_js(stats: ReportStats) -> ReportStatsObject {
+  ReportStatsObject {
+    registered_browsers: stats.registered_browsers,
+    browsers_detected: stats.browsers_detected,
+    browsers_not_detected: stats.browsers_not_detected,
+    installations_discovered: stats.installations_discovered,
+    profiles_discovered: stats.profiles_discovered,
+    sources_succeeded: stats.sources_succeeded,
+    sources_failed: stats.sources_failed,
+    rows_seen: stats.rows_seen,
+    cookies_emitted: stats.cookies_emitted,
+    rows_skipped: stats.rows_skipped,
+    counters_saturated: stats.counters_saturated,
+  }
+}
+
+fn issues_to_js(issues: Vec<ExtractionIssue>) -> Vec<ExtractionIssueObject> {
+  issues
+    .into_iter()
+    .map(|issue| ExtractionIssueObject {
+      code: issue.code.as_str().to_owned(),
+      stage: issue.stage.as_str().to_owned(),
+      severity: issue.severity.as_str().to_owned(),
+      occurrences: issue.occurrences,
+      samples: issue.samples,
+      browser_id: issue.browser_id.map(|id| id.as_str().to_owned()),
+      installation_id: issue.installation_id.map(|id| id.as_str().to_owned()),
+      profile_id: issue.profile_id.map(|id| id.as_str().to_owned()),
+      message: issue.message,
+    })
+    .collect()
+}
+
+fn source_extraction_to_js(source: SourceExtraction) -> Result<SourceExtractionObject> {
+  Ok(SourceExtractionObject {
+    source: source_identity_to_js(source.source),
+    status: source.status.as_str().to_owned(),
+    selected: source.selected,
+    acquisition_strategy: source.acquisition_strategy.as_str().to_owned(),
+    cookies: cookies_to_js(source.cookies)?,
+    stats: extraction_stats_to_js(source.stats),
+    issues: issues_to_js(source.issues),
+  })
+}
+
+fn profile_extraction_to_js(profile: ProfileExtraction) -> Result<ProfileExtractionObject> {
+  Ok(ProfileExtractionObject {
+    profile: profile_identity_to_js(profile.profile),
+    sources: profile
+      .sources
+      .into_iter()
+      .map(source_extraction_to_js)
+      .collect::<Result<Vec<_>>>()?,
+    stats: extraction_stats_to_js(profile.stats),
+    issues: issues_to_js(profile.issues),
+  })
+}
+
+fn report_to_js(report: ExtractionReport) -> Result<ExtractionReportObject> {
+  Ok(ExtractionReportObject {
+    status: report.status.as_str().to_owned(),
+    summary: report_stats_to_js(report.summary),
+    profiles: report
+      .profiles
+      .into_iter()
+      .map(profile_extraction_to_js)
+      .collect::<Result<Vec<_>>>()?,
+    issues: issues_to_js(report.issues),
+  })
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> &str {
@@ -275,6 +598,141 @@ impl Task for FirefoxBasedTask {
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn firefox_based(db_path: String, domains: Option<Vec<String>>) -> AsyncTask<FirefoxBasedTask> {
   AsyncTask::new(FirefoxBasedTask { db_path, domains })
+}
+
+// ---------------------------------------------------------------------------
+// Generic report APIs
+//
+// These cover every installation and profile of a browser and keep failures
+// visible, unlike the named selectors above, which keep their historical
+// single-source, flat-array behaviour.
+// ---------------------------------------------------------------------------
+
+pub struct SupportedBrowsersTask;
+
+impl Task for SupportedBrowsersTask {
+  type Output = Vec<BrowserDescriptor>;
+  type JsValue = Vec<BrowserDescriptorObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| Ok(rookie_cookies::supported_browsers()))
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output.into_iter().map(browser_descriptor_to_js).collect())
+  }
+}
+
+/// Lists the browsers registered for the running OS.
+///
+/// Registration is not detection: a listed browser need not be installed.
+#[napi(ts_return_type = "Promise<Array<BrowserDescriptorObject>>")]
+pub fn supported_browsers() -> AsyncTask<SupportedBrowsersTask> {
+  AsyncTask::new(SupportedBrowsersTask)
+}
+
+pub struct BrowserProfilesTask {
+  browser_id: String,
+}
+
+impl Task for BrowserProfilesTask {
+  type Output = Vec<ProfileDescriptor>;
+  type JsValue = Vec<ProfileDescriptorObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::browser_profiles(&self.browser_id)
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output.into_iter().map(profile_descriptor_to_js).collect())
+  }
+}
+
+/// Lists the discovered profiles of one registered browser.
+///
+/// Rejects on an unknown `browserId`, or when every detected installation root
+/// failed enumeration. A known browser with nothing installed resolves to an
+/// empty array.
+#[napi(ts_return_type = "Promise<Array<ProfileDescriptorObject>>")]
+pub fn browser_profiles(browser_id: String) -> AsyncTask<BrowserProfilesTask> {
+  AsyncTask::new(BrowserProfilesTask { browser_id })
+}
+
+pub struct BrowserReportTask {
+  browser_id: String,
+  profile_id: Option<String>,
+  domains: Option<Vec<String>>,
+}
+
+impl Task for BrowserReportTask {
+  type Output = ExtractionReport;
+  type JsValue = ExtractionReportObject;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::browser_report(
+        &self.browser_id,
+        self.profile_id.as_deref(),
+        self.domains.take(),
+      )
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    report_to_js(output)
+  }
+}
+
+/// Extracts cookies from one browser as a grouped report.
+///
+/// Only a bad request rejects: an unknown `browserId`, or a `profileId` this
+/// browser did not yield. Extraction problems resolve as a report whose
+/// `status` and `issues` describe them.
+#[napi(ts_return_type = "Promise<ExtractionReportObject>")]
+pub fn browser_report(
+  browser_id: String,
+  profile_id: Option<String>,
+  domains: Option<Vec<String>>,
+) -> AsyncTask<BrowserReportTask> {
+  AsyncTask::new(BrowserReportTask {
+    browser_id,
+    profile_id,
+    domains,
+  })
+}
+
+pub struct LoadReportTask {
+  domains: Option<Vec<String>>,
+}
+
+impl Task for LoadReportTask {
+  type Output = ExtractionReport;
+  type JsValue = ExtractionReportObject;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::load_report(self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    report_to_js(output)
+  }
+}
+
+/// Extracts cookies from every registered browser as one grouped report.
+///
+/// This is the report-shaped counterpart to `load`, not a replacement: `load`
+/// keeps its historical browser set and flat output. A browser that fails does
+/// not abort the others; it becomes an issue on the returned report.
+#[napi(ts_return_type = "Promise<ExtractionReportObject>")]
+pub fn load_report(domains: Option<Vec<String>>) -> AsyncTask<LoadReportTask> {
+  AsyncTask::new(LoadReportTask { domains })
 }
 
 // Windows only browsers
