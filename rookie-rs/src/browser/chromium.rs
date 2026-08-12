@@ -167,6 +167,8 @@ fn decode_chromium_cookie_value(
 enum ChromiumCookieValueError {
   Decrypt(anyhow::Error),
   Decode(ChromiumCookieDecodeError),
+  ProviderUnavailable(anyhow::Error),
+  ProviderFailed(anyhow::Error),
 }
 
 impl ChromiumCookieValueError {
@@ -174,6 +176,8 @@ impl ChromiumCookieValueError {
     match self {
       Self::Decrypt(_) => ChromiumRowIssueCode::Decrypt,
       Self::Decode(_) => ChromiumRowIssueCode::Decode,
+      Self::ProviderUnavailable(_) => ChromiumRowIssueCode::ProviderUnavailable,
+      Self::ProviderFailed(_) => ChromiumRowIssueCode::ProviderFailed,
     }
   }
 }
@@ -181,7 +185,9 @@ impl ChromiumCookieValueError {
 impl fmt::Display for ChromiumCookieValueError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Decrypt(error) => error.fmt(formatter),
+      Self::Decrypt(error) | Self::ProviderUnavailable(error) | Self::ProviderFailed(error) => {
+        error.fmt(formatter)
+      }
       Self::Decode(error) => error.fmt(formatter),
     }
   }
@@ -198,6 +204,10 @@ pub(crate) enum ChromiumRowIssueCode {
   ColumnRead(&'static str),
   Decrypt,
   Decode,
+  /// The row's cipher tier has no provider compiled or enabled in this build.
+  ProviderUnavailable,
+  /// A compiled provider was applicable but its key retrieval failed.
+  ProviderFailed,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -230,6 +240,8 @@ pub(crate) struct ChromiumEngineExtractionOutcome {
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) stats: ChromiumExtractionStats,
   pub(crate) issues: Vec<ChromiumRowIssue>,
+  pub(crate) acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
+  pub(crate) acquisition_attempts: u32,
   pub(crate) legacy_error: Option<anyhow::Error>,
 }
 
@@ -326,12 +338,12 @@ fn decrypt_encrypted_value_with_outcomes(
       (prefix.as_slice(), candidates)
     }
     ChromiumKeyRoute::NotApplicable { tier } => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
         "Chromium {tier} key provider is not applicable"
       )));
     }
     ChromiumKeyRoute::Failure { tier, failure } => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderFailed(anyhow!(
         "Chromium {tier} key provider failed: {}",
         failure.message()
       )));
@@ -344,7 +356,7 @@ fn decrypt_encrypted_value_with_outcomes(
         .map_err(ChromiumCookieValueError::Decode);
     }
     ChromiumKeyRoute::V12SecretPortal => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
         "Chromium v12 SecretPortal encryption is recognized but unsupported"
       )));
     }
@@ -455,23 +467,23 @@ fn decrypt_encrypted_value_with_outcomes(
       (prefix.as_slice(), candidates)
     }
     ChromiumKeyRoute::NotApplicable { tier } => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
         "Chromium {tier} key provider is not applicable"
       )));
     }
     ChromiumKeyRoute::Failure { tier, failure } => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderFailed(anyhow!(
         "Chromium {tier} key provider failed: {}",
         failure.message()
       )));
     }
     ChromiumKeyRoute::LegacyDpapi => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
         "Legacy Chromium DPAPI cookies are not decryptable on this platform"
       )));
     }
     ChromiumKeyRoute::V12SecretPortal => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
+      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
         "Chromium v12 SecretPortal encryption is recognized but unsupported"
       )));
     }
@@ -1016,7 +1028,12 @@ fn query_cookies_from_database(
     database.strategy(),
     database.attempts()
   );
-  Ok(database.into_value())
+  let strategy = database.strategy();
+  let attempts = database.attempts();
+  let mut outcome = database.into_value();
+  outcome.acquisition_strategy = Some(strategy);
+  outcome.acquisition_attempts = attempts;
+  Ok(outcome)
 }
 
 /// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape

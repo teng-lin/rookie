@@ -11,8 +11,31 @@ pub fn internet_explorer_based(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
+  internet_explorer_outcome(db_path, domains, force_kill).map(|outcome| outcome.cookies)
+}
+
+/// Record accounting for the private cross-engine report. The legacy
+/// [`internet_explorer_based`] projection deliberately discards it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InternetExplorerExtractionStats {
+  pub(crate) records_seen: usize,
+  pub(crate) records_skipped: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct InternetExplorerExtraction {
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) stats: InternetExplorerExtractionStats,
+}
+
+pub(crate) fn internet_explorer_outcome(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<InternetExplorerExtraction> {
   let db = open_database(&db_path, force_kill)?;
   let mut cookies = Vec::new();
+  let mut stats = InternetExplorerExtractionStats::default();
 
   for table in db
     .iter_tables()
@@ -35,6 +58,7 @@ pub fn internet_explorer_based(
     let mut skipped_records = 0_usize;
 
     for (record_index, record) in records.enumerate() {
+      stats.records_seen += 1;
       let cookie = record
         .map_err(anyhow::Error::from)
         .and_then(|record| read_cookie_record(&record, columns))
@@ -45,6 +69,7 @@ pub fn internet_explorer_based(
         Ok(None) => {}
         Err(error) => {
           skipped_records += 1;
+          stats.records_skipped += 1;
           log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
         }
       }
@@ -55,7 +80,7 @@ pub fn internet_explorer_based(
     }
   }
 
-  Ok(cookies)
+  Ok(InternetExplorerExtraction { cookies, stats })
 }
 
 fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {

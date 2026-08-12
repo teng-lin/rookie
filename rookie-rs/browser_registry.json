@@ -916,6 +916,26 @@
           ],
           "declared_decryption_tiers": []
         }
+      },
+      {
+        "canonical_id": "safari",
+        "aliases": [],
+        "display_name": "Safari",
+        "engine": "safari",
+        "roots": [
+          {
+            "root_id": "safari-user-library",
+            "template": "{home}/Library",
+            "channel": "stable",
+            "discovery": "safari_default_profile",
+            "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": ["safari_binarycookies"],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": []
+        }
       }
     ],
     "linux": [

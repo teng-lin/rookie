@@ -26,7 +26,31 @@ const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
 /// 4. get N cookies from each page, iterate
 /// 5. parse each cookie
 /// 6. add each cookie based on domain filter
+// Only the macOS public surface calls this; other targets compile the parser
+// under `cfg(test)` for fixtures alone.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  safari_based_outcome(db_path, domains).map(|outcome| outcome.cookies)
+}
+
+/// Row accounting for the private cross-engine report. The legacy
+/// [`safari_based`] projection deliberately discards it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SafariExtractionStats {
+  pub(crate) records_seen: usize,
+  pub(crate) records_skipped: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct SafariFileExtraction {
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) stats: SafariExtractionStats,
+}
+
+pub(crate) fn safari_based_outcome(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+) -> Result<SafariFileExtraction> {
   let mut file = File::open(&db_path).context(format!(
     "Failed to open {}\n\
       Make sure you have full disk access for the current process.\n\
@@ -41,19 +65,17 @@ pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Ve
     db_path.display()
   ))?;
   let bs = read_stable_cookie_file(&mut file, &db_path)?;
-  let cookies = parse_content(&bs)?;
+  let (cookies, stats) = parse_content(&bs)?;
 
   // Filter cookies by domain if domains are specified
-  if let Some(domain_filters) = &domains {
-    let filtered_cookies: Vec<Cookie> = cookies
+  let cookies = match &domains {
+    Some(domain_filters) => cookies
       .into_iter()
       .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
-      .collect();
-
-    Ok(filtered_cookies)
-  } else {
-    Ok(cookies)
-  }
+      .collect(),
+    None => cookies,
+  };
+  Ok(SafariFileExtraction { cookies, stats })
 }
 
 const STABLE_READ_ATTEMPTS: usize = 3;
@@ -209,7 +231,7 @@ fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Res
 /// Parse one page and retain any valid records. The optional error is the last
 /// malformed record encountered and is promoted only if the whole file yields
 /// no cookies.
-fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
+fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
   if slice(bs, 0, 4)? != [0x00, 0x00, 0x01, 0x00] {
     bail!("bad page header");
   }
@@ -228,7 +250,9 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
   let mut cookies: Vec<Cookie> = vec![];
   let mut last_error = None;
   let mut error_count = 0usize;
+  let mut stats = SafariExtractionStats::default();
   for (index, raw_offset) in parsed_table.into_iter().enumerate() {
+    stats.records_seen += 1;
     let result = (|| {
       let offset = usize::try_from(raw_offset)
         .context("Safari cookie offset does not fit in memory address space")?;
@@ -243,6 +267,7 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
       Ok(cookie) => cookies.push(cookie),
       Err(error) => {
         error_count += 1;
+        stats.records_skipped += 1;
         if error_count <= MAX_LOGGED_RECORD_ERRORS_PER_PAGE {
           log::warn!("Skipping malformed Safari cookie record {index}: {error:#}");
         } else if error_count == MAX_LOGGED_RECORD_ERRORS_PER_PAGE + 1 {
@@ -263,7 +288,7 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, Option<anyhow::Error>)> {
     }
   }
 
-  Ok((cookies, last_error))
+  Ok((cookies, stats, last_error))
 }
 
 fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<Cookie> {
@@ -302,7 +327,7 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<Cookie> {
   Ok(cookie)
 }
 
-fn parse_content(bs: &[u8]) -> Result<Vec<Cookie>> {
+fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats)> {
   // Magic bytes: "COOK" = 0x636F6F6B
   if slice(bs, 0, 4)? != [0x63, 0x6f, 0x6f, 0x6b] {
     bail!("not a cookie file");
@@ -317,6 +342,7 @@ fn parse_content(bs: &[u8]) -> Result<Vec<Cookie>> {
     .ok_or_else(|| anyhow!("Safari page data offset overflow"))?;
   let mut cookies: Vec<Cookie> = vec![];
   let mut last_error = None;
+  let mut stats = SafariExtractionStats::default();
 
   for (index, raw_length) in page_lengths.into_iter().enumerate() {
     let length = usize::try_from(raw_length)
@@ -335,8 +361,10 @@ fn parse_content(bs: &[u8]) -> Result<Vec<Cookie>> {
       .with_context(|| format!("Failed to read Safari page {index}"))
       .and_then(parse_page)
     {
-      Ok((page_cookies, page_error)) => {
+      Ok((page_cookies, page_stats, page_error)) => {
         cookies.extend(page_cookies);
+        stats.records_seen += page_stats.records_seen;
+        stats.records_skipped += page_stats.records_skipped;
         if let Some(error) = page_error {
           last_error = Some(error);
         }
@@ -355,7 +383,7 @@ fn parse_content(bs: &[u8]) -> Result<Vec<Cookie>> {
     }
   }
 
-  Ok(cookies)
+  Ok((cookies, stats))
 }
 
 fn slice(bs: &[u8], off: usize, len: usize) -> Result<&[u8]> {
@@ -423,21 +451,6 @@ pub(crate) struct SafariProfile {
   pub(crate) name: String,
   pub(crate) uuid: Option<String>,
   pub(crate) cookie_candidates: Vec<PathBuf>,
-}
-
-#[allow(dead_code)] // consumed by the private cross-engine report in Milestone 4E
-#[derive(Debug)]
-pub(crate) struct SafariProfileExtraction {
-  pub(crate) profile: SafariProfile,
-  pub(crate) cookies: Vec<Cookie>,
-  pub(crate) error: Option<String>,
-}
-
-#[allow(dead_code)] // consumed by the private cross-engine report in Milestone 4E
-#[derive(Debug, Default)]
-pub(crate) struct SafariExtractionOutcome {
-  pub(crate) profiles: Vec<SafariProfileExtraction>,
-  pub(crate) discovery_warning: Option<String>,
 }
 
 fn is_canonical_uuid(value: &str) -> bool {
@@ -613,7 +626,7 @@ pub(crate) fn discover_safari_profiles(library: &Path) -> (Vec<SafariProfile>, O
 /// Crate-private generic adapter. It is intentionally separate from the
 /// legacy API so a broken named profile cannot hide cookies selected by the
 /// historical default-path-first `safari()` function.
-fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&PathBuf>> {
+pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&PathBuf>> {
   for path in candidates {
     match fs::metadata(path) {
       Ok(_) => return Ok(Some(path)),
@@ -625,64 +638,6 @@ fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&Pat
     }
   }
   Ok(None)
-}
-
-fn sort_cookies(cookies: &mut [Cookie]) {
-  cookies.sort_by(|left, right| {
-    left
-      .domain
-      .cmp(&right.domain)
-      .then_with(|| left.path.cmp(&right.path))
-      .then_with(|| left.name.cmp(&right.name))
-      .then_with(|| left.expires.cmp(&right.expires))
-      .then_with(|| left.secure.cmp(&right.secure))
-      .then_with(|| left.http_only.cmp(&right.http_only))
-      .then_with(|| left.same_site.cmp(&right.same_site))
-      .then_with(|| left.value.cmp(&right.value))
-  });
-}
-
-#[allow(dead_code)] // retained as the private Safari-to-generic adapter
-pub(crate) fn safari_outcome(
-  library: &Path,
-  domains: Option<Vec<String>>,
-) -> SafariExtractionOutcome {
-  let (profiles, discovery_warning) = discover_safari_profiles(library);
-  let profiles = profiles
-    .into_iter()
-    .filter_map(
-      |profile| match first_existing_cookie_candidate(&profile.cookie_candidates) {
-        Ok(Some(path)) => match safari_based(path.clone(), domains.clone()) {
-          Ok(mut cookies) => {
-            sort_cookies(&mut cookies);
-            Some(SafariProfileExtraction {
-              profile,
-              cookies,
-              error: None,
-            })
-          }
-          Err(error) => Some(SafariProfileExtraction {
-            profile,
-            cookies: Vec::new(),
-            error: Some(format!("{error:#}")),
-          }),
-        },
-        // A discovered Safari profile without a cookie-bearing source is
-        // normal absence (for example a newly-created profile), not an
-        // extraction failure. It is omitted from the generic outcome.
-        Ok(None) => None,
-        Err(error) => Some(SafariProfileExtraction {
-          profile,
-          cookies: Vec::new(),
-          error: Some(format!("{error:#}")),
-        }),
-      },
-    )
-    .collect();
-  SafariExtractionOutcome {
-    profiles,
-    discovery_warning,
-  }
 }
 
 #[cfg(test)]
@@ -839,7 +794,7 @@ mod tests {
 
   #[test]
   fn golden_binarycookies_fixture_round_trips_cookie_fields() {
-    let cookies = parse_content(&golden_fixture()).expect("parse golden fixture");
+    let (cookies, _stats) = parse_content(&golden_fixture()).expect("parse golden fixture");
     assert_eq!(cookies.len(), 1);
 
     let cookie = &cookies[0];
@@ -875,7 +830,7 @@ mod tests {
       usize::try_from(LittleEndian::read_u32(&page[8..12])).expect("first record offset");
     LittleEndian::write_u32(&mut page[first_record..first_record + 4], u32::MAX);
 
-    let cookies = parse_content(&build_file(&[page])).expect("retain good record");
+    let (cookies, _stats) = parse_content(&build_file(&[page])).expect("retain good record");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good");
     assert_eq!(cookies[0].value, "kept");
@@ -894,7 +849,8 @@ mod tests {
       expires: 0.0,
     })]);
 
-    let cookies = parse_content(&build_file(&[bad_page, good_page])).expect("retain good page");
+    let (cookies, _stats) =
+      parse_content(&build_file(&[bad_page, good_page])).expect("retain good page");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-page");
   }
@@ -960,7 +916,7 @@ mod tests {
     }
     page.extend_from_slice(&good);
 
-    let (cookies, error) = parse_page(&page).expect("page framing remains valid");
+    let (cookies, _stats, error) = parse_page(&page).expect("page framing remains valid");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-before-limit");
     let error = error.expect("recovery limit should be reported");
@@ -1239,52 +1195,6 @@ mod tests {
     assert_eq!(profiles[0].name, "default");
     assert_eq!(profiles[1].uuid.as_deref(), Some(second));
     assert_eq!(profiles[2].uuid.as_deref(), Some(first));
-    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
-  }
-
-  #[test]
-  fn generic_outcome_omits_sourceless_profiles_and_sorts_cookie_rows() {
-    let library = temp_library("generic-outcome");
-    let uuid = "A0B1C2D3-1111-2222-3333-444444444444";
-    write_tabs_database(&library, &[(uuid, "Empty")]);
-
-    let modern = default_profile(&library).cookie_candidates.remove(0);
-    fs::create_dir_all(modern.parent().expect("cookie parent")).expect("create cookie parent");
-    let later = build_cookie_record(&FixtureCookie {
-      domain: ".z.example",
-      name: "later",
-      path: "/",
-      value: "2",
-      flags: 0,
-      expires: 0.0,
-    });
-    let earlier = build_cookie_record(&FixtureCookie {
-      domain: ".a.example",
-      name: "earlier",
-      path: "/",
-      value: "1",
-      flags: 0,
-      expires: 0.0,
-    });
-    fs::write(&modern, build_file(&[build_page(&[later, earlier])]))
-      .expect("write default cookie source");
-
-    let outcome = safari_outcome(&library, None);
-    assert_eq!(
-      outcome.profiles.len(),
-      1,
-      "sourceless named profile omitted"
-    );
-    assert_eq!(outcome.profiles[0].profile.name, "default");
-    assert_eq!(
-      outcome.profiles[0]
-        .cookies
-        .iter()
-        .map(|cookie| cookie.name.as_str())
-        .collect::<Vec<_>>(),
-      vec!["earlier", "later"]
-    );
-    assert!(outcome.profiles[0].error.is_none());
     fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
   }
 }

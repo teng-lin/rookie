@@ -181,6 +181,7 @@ impl SessionStoreFormat {
 }
 
 const SESSION_STORE_READ_ATTEMPTS: usize = 2;
+const SESSION_CANDIDATE_PRECEDENCE_STEP: u16 = 10;
 const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
 
 #[derive(Debug)]
@@ -214,6 +215,10 @@ struct SessionCandidateFailure {
 pub(crate) struct MozillaSessionSourceOutcome {
   pub(crate) path: PathBuf,
   pub(crate) format: &'static str,
+  /// Declared candidate precedence from [`session_candidates`], retained so a
+  /// report orders attempted candidates by declaration rather than by which
+  /// ones happened to exist.
+  pub(crate) precedence: u16,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) rows_seen: usize,
@@ -271,7 +276,8 @@ pub(crate) fn query_cookies_engine_outcome(
   }
 
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
-  for (path, format) in session_candidates(cookies_dir) {
+  for (index, (path, format)) in session_candidates(cookies_dir).into_iter().enumerate() {
+    let precedence = SESSION_CANDIDATE_PRECEDENCE_STEP * (index as u16 + 1);
     match parse_session_candidate(&path, &format, domains) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
@@ -279,6 +285,7 @@ pub(crate) fn query_cookies_engine_outcome(
         outcome.session_sources.push(MozillaSessionSourceOutcome {
           path,
           format: format.format_id(),
+          precedence,
           selected: true,
           cookies: success.parsed.cookies,
           rows_seen: success.parsed.rows_seen,
@@ -296,6 +303,7 @@ pub(crate) fn query_cookies_engine_outcome(
       Err(failure) => outcome.session_sources.push(MozillaSessionSourceOutcome {
         path,
         format: format.format_id(),
+        precedence,
         selected: false,
         cookies: Vec::new(),
         rows_seen: 0,

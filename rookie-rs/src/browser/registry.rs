@@ -64,11 +64,11 @@ struct BrowserCapabilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BrowserCapabilityDescriptor {
-  declared_persistent_formats: Vec<String>,
-  declared_session_formats: Vec<String>,
-  declared_decryption_tiers: Vec<String>,
-  available_decryption_tiers: Vec<String>,
+pub(crate) struct BrowserCapabilityDescriptor {
+  pub(crate) declared_persistent_formats: Vec<String>,
+  pub(crate) declared_session_formats: Vec<String>,
+  pub(crate) declared_decryption_tiers: Vec<String>,
+  pub(crate) available_decryption_tiers: Vec<String>,
 }
 
 fn capability_descriptor(
@@ -97,6 +97,77 @@ fn capability_descriptor(
     declared_decryption_tiers: definition.capabilities.declared_decryption_tiers.clone(),
     available_decryption_tiers,
   }
+}
+
+impl BrowserEngine {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Chromium => "chromium",
+      Self::Gecko => "gecko",
+      Self::Safari => "safari",
+      Self::InternetExplorer => "internet_explorer",
+    }
+  }
+}
+
+/// Flattened registry definition for the private report descriptors. It copies
+/// owned data so the report layer never borrows from the embedded registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegisteredBrowser {
+  pub(crate) canonical_id: String,
+  pub(crate) aliases: Vec<String>,
+  pub(crate) display_name: String,
+  pub(crate) engine: &'static str,
+  pub(crate) capabilities: BrowserCapabilityDescriptor,
+}
+
+fn registered_browser(definition: &BrowserDefinition, platform: PlatformId) -> RegisteredBrowser {
+  RegisteredBrowser {
+    canonical_id: definition.canonical_id.clone(),
+    aliases: definition.aliases.clone(),
+    display_name: definition.display_name.clone(),
+    engine: definition.engine.as_str(),
+    capabilities: capability_descriptor(definition, platform),
+  }
+}
+
+/// Registered browsers for the running OS, in registry order. This never scans
+/// the filesystem: registration is not detection.
+pub(crate) fn registered_browsers() -> Result<Vec<RegisteredBrowser>> {
+  let platform = PlatformId::current()?;
+  registered_browsers_for(platform)
+}
+
+fn registered_browsers_for(platform: PlatformId) -> Result<Vec<RegisteredBrowser>> {
+  let registry = embedded_registry()?;
+  Ok(
+    registry
+      .platforms
+      .get(platform.as_str())
+      .map(|definitions| {
+        definitions
+          .iter()
+          .map(|definition| registered_browser(definition, platform))
+          .collect()
+      })
+      .unwrap_or_default(),
+  )
+}
+
+/// Resolves an ID or alias to its registered browser, or fails for an unknown
+/// identifier. Unknown IDs are a request error, never a report issue.
+pub(crate) fn resolve_registered_browser(browser_id: &str) -> Result<RegisteredBrowser> {
+  let platform = PlatformId::current()?;
+  resolve_registered_browser_for(platform, browser_id)
+}
+
+fn resolve_registered_browser_for(
+  platform: PlatformId,
+  browser_id: &str,
+) -> Result<RegisteredBrowser> {
+  let registry = embedded_registry()?;
+  let definition = browser_definition(registry, platform, browser_id)?;
+  Ok(registered_browser(definition, platform))
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +300,7 @@ fn validate_alias(value: &str) -> std::result::Result<(), String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlatformId {
+pub(crate) enum PlatformId {
   Windows,
   Macos,
   Linux,
@@ -280,7 +351,7 @@ struct GlobExpansionIssue {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RealDiscoveryFs;
+pub(crate) struct RealDiscoveryFs;
 
 impl DiscoveryFs for RealDiscoveryFs {
   fn exists(&self, path: &Path) -> bool {
@@ -367,7 +438,7 @@ impl DiscoveryFs for RealDiscoveryFs {
   }
 }
 
-struct DiscoveryContext<F> {
+pub(crate) struct DiscoveryContext<F> {
   platform: PlatformId,
   home: PathBuf,
   env: BTreeMap<OsString, OsString>,
@@ -1025,6 +1096,8 @@ pub(crate) struct ChromiumProfileExtraction {
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) stats: ChromiumExtractionStats,
   pub(crate) row_issues: Vec<ChromiumRowIssue>,
+  pub(crate) acquisition: SourceAcquisition,
+  pub(crate) acquisition_attempts: u32,
   pub(crate) error: Option<String>,
 }
 
@@ -1111,6 +1184,8 @@ where
           cookies: Vec::new(),
           stats: ChromiumExtractionStats::default(),
           row_issues: Vec::new(),
+          acquisition: SourceAcquisition::NotAttempted,
+          acquisition_attempts: 0,
           error: Some("profile has no selected persistent source".to_owned()),
         });
         continue;
@@ -1123,16 +1198,23 @@ where
             cookies: outcome.cookies,
             stats: outcome.stats,
             row_issues: outcome.issues,
+            acquisition: outcome.acquisition_strategy.into(),
+            acquisition_attempts: outcome.acquisition_attempts,
             error: outcome.legacy_error.map(|error| error.to_string()),
           });
         }
-        Err(error) => profile_extractions.push(ChromiumProfileExtraction {
-          profile,
-          cookies: Vec::new(),
-          stats: ChromiumExtractionStats::default(),
-          row_issues: Vec::new(),
-          error: Some(error.to_string()),
-        }),
+        Err(error) => {
+          let failure = error.downcast_ref::<crate::common::sqlite::BrowserDatabaseFailure>();
+          profile_extractions.push(ChromiumProfileExtraction {
+            profile,
+            cookies: Vec::new(),
+            stats: ChromiumExtractionStats::default(),
+            row_issues: Vec::new(),
+            acquisition: failure.and_then(|failure| failure.strategy).into(),
+            acquisition_attempts: failure.map_or(1, |failure| failure.attempts),
+            error: Some(error.to_string()),
+          });
+        }
       }
     }
     report.installations.push(ChromiumInstallationExtraction {
@@ -1241,6 +1323,23 @@ fn profiles_for_listing(
   Ok(discovery.profiles())
 }
 
+/// Private generic Chromium report seam covering every registered
+/// Chromium-family browser. Legacy named wrappers keep their frozen selectors.
+pub(crate) fn chromium_registry_report(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+) -> Result<ChromiumRegistryReport> {
+  let context = DiscoveryContext::system()?;
+  extract_chromium_with_provider(
+    &context,
+    browser_id,
+    profile_id,
+    domains,
+    &SystemChromiumKeyProvider,
+  )
+}
+
 /// Private Milestone 3C ID-based selector/report seam.
 pub(crate) fn chrome_profile(
   profile_id: &str,
@@ -1256,20 +1355,45 @@ pub(crate) fn chrome_profile(
   )
 }
 
+pub(crate) const SOURCE_ROLE_PERSISTENT: &str = "persistent";
+pub(crate) const SOURCE_ROLE_SESSION: &str = "session";
+/// A profile never merges two persistent alternatives, so the authoritative
+/// persistent source always carries the first declared precedence.
+pub(crate) const PERSISTENT_SOURCE_PRECEDENCE: u16 = 10;
+
 /// Source-level outcome shared by the non-Chromium adapters. It is deliberately
 /// crate-private: 4E owns the final cross-engine DTO freeze.
 #[derive(Debug)]
 pub(crate) struct EngineSourceExtraction {
   pub(crate) path: PathBuf,
+  pub(crate) role: &'static str,
   pub(crate) format: &'static str,
+  pub(crate) precedence: u16,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
-  pub(crate) acquisition_strategy: Option<DatabaseAcquisitionStrategy>,
+  pub(crate) acquisition: SourceAcquisition,
   pub(crate) acquisition_attempts: u32,
   pub(crate) diagnostics: Vec<String>,
   pub(crate) error: Option<String>,
+}
+
+/// How a source was made readable. Non-SQLite engines never acquire through the
+/// browser-database layer, so their strategies are separate variants rather
+/// than an absent [`DatabaseAcquisitionStrategy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceAcquisition {
+  Database(DatabaseAcquisitionStrategy),
+  StableFileImage,
+  EseDatabase,
+  NotAttempted,
+}
+
+impl From<Option<DatabaseAcquisitionStrategy>> for SourceAcquisition {
+  fn from(strategy: Option<DatabaseAcquisitionStrategy>) -> Self {
+    strategy.map_or(Self::NotAttempted, Self::Database)
+  }
 }
 
 #[derive(Debug)]
@@ -1289,19 +1413,94 @@ pub(crate) struct EngineProfileExtraction {
 pub(crate) struct EngineExtractionOutcome {
   pub(crate) profiles: Vec<EngineProfileExtraction>,
   pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+  pub(crate) installations_discovered: usize,
 }
 
+pub(crate) const GECKO_PERSISTENT_SOURCE: &str = "cookies.sqlite";
+
+/// Section 7 session candidates in authoritative order. Their declared
+/// precedence is their position here, which is the same order
+/// [`mozilla::query_cookies_engine_outcome`] attempts them in.
+pub(crate) const GECKO_SESSION_CANDIDATES: [(&str, &str); 5] = [
+  (
+    "sessionstore-backups/recovery.jsonlz4",
+    "firefox_session_jsonlz4",
+  ),
+  (
+    "sessionstore-backups/recovery.baklz4",
+    "firefox_session_jsonlz4",
+  ),
+  ("sessionstore.jsonlz4", "firefox_session_jsonlz4"),
+  ("sessionstore.js", "firefox_session_json"),
+  (
+    "sessionstore-backups/previous.jsonlz4",
+    "firefox_session_jsonlz4",
+  ),
+];
+
 fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
-  context.fs.exists(&path.join("cookies.sqlite"))
-    || [
-      "sessionstore-backups/recovery.jsonlz4",
-      "sessionstore-backups/recovery.baklz4",
-      "sessionstore.jsonlz4",
-      "sessionstore.js",
-      "sessionstore-backups/previous.jsonlz4",
-    ]
-    .iter()
-    .any(|relative| context.fs.exists(&path.join(relative)))
+  context.fs.exists(&path.join(GECKO_PERSISTENT_SOURCE))
+    || GECKO_SESSION_CANDIDATES
+      .iter()
+      .any(|(relative, _)| context.fs.exists(&path.join(relative)))
+}
+
+fn source_candidate(
+  path: PathBuf,
+  role: &'static str,
+  format: &'static str,
+  precedence: u16,
+) -> EngineSourceExtraction {
+  EngineSourceExtraction {
+    path,
+    role,
+    format,
+    precedence,
+    selected: false,
+    cookies: Vec::new(),
+    rows_seen: 0,
+    rows_skipped: 0,
+    acquisition: SourceAcquisition::NotAttempted,
+    acquisition_attempts: 0,
+    diagnostics: Vec::new(),
+    error: None,
+  }
+}
+
+/// Discovery-only Gecko listing seam: existing cookie-bearing candidates
+/// without acquiring or querying any of them.
+fn gecko_profiles_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+) -> Result<EngineExtractionOutcome> {
+  let mut outcome = discover_gecko_with_context(context, browser_id)?;
+  for profile in &mut outcome.profiles {
+    if profile.persistent_source_discovered {
+      profile.sources.push(source_candidate(
+        profile.path.join(GECKO_PERSISTENT_SOURCE),
+        SOURCE_ROLE_PERSISTENT,
+        "mozilla_sqlite",
+        PERSISTENT_SOURCE_PRECEDENCE,
+      ));
+    }
+    for (index, (relative, format)) in GECKO_SESSION_CANDIDATES.into_iter().enumerate() {
+      let path = profile.path.join(relative);
+      if context.fs.exists(&path) {
+        profile.sources.push(source_candidate(
+          path,
+          SOURCE_ROLE_SESSION,
+          format,
+          PERSISTENT_SOURCE_PRECEDENCE * (index as u16 + 1),
+        ));
+      }
+    }
+  }
+  Ok(outcome)
+}
+
+pub(crate) fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  gecko_profiles_with_context(&context, browser_id)
 }
 
 const MAX_GECKO_DISCOVERY_ISSUES_PER_CODE: usize = 32;
@@ -1419,6 +1618,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         continue;
       }
     };
+    outcome.installations_discovered += 1;
     let installation_id = installation_id(
       &definition.canonical_id,
       &root.root_id,
@@ -1534,7 +1734,15 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       });
     }
   }
-  outcome.profiles.sort_by(|left, right| {
+  sort_engine_profiles(&mut outcome.profiles);
+  Ok(outcome)
+}
+
+/// Section 5.5 ordering: installations by registry priority then normalized
+/// path, then profiles default-first, by locale-independent lowercase name, raw
+/// name, and finally normalized path.
+fn sort_engine_profiles(profiles: &mut [EngineProfileExtraction]) {
+  profiles.sort_by(|left, right| {
     left
       .installation_priority
       .cmp(&right.installation_priority)
@@ -1547,7 +1755,6 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       .then_with(|| left.name.cmp(&right.name))
       .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
   });
-  Ok(outcome)
 }
 
 /// Crate-private generic Gecko report seam. It deliberately does not call the
@@ -1590,12 +1797,14 @@ where
       sort_cookies(&mut extraction.persistent_cookies);
       profile.sources.push(EngineSourceExtraction {
         path: persistent,
+        role: SOURCE_ROLE_PERSISTENT,
         format: mozilla::PERSISTENT_FORMAT_ID,
+        precedence: PERSISTENT_SOURCE_PRECEDENCE,
         selected: true,
         rows_seen: extraction.persistent_rows_seen,
         rows_skipped: extraction.persistent_rows_skipped,
         cookies: extraction.persistent_cookies,
-        acquisition_strategy: extraction.persistent_acquisition_strategy,
+        acquisition: extraction.persistent_acquisition_strategy.into(),
         acquisition_attempts: extraction.persistent_acquisition_attempts,
         // `diagnostics` carries acquisition retry notes, which a report renders
         // as a warning meaning "retried, then succeeded". A rejected row is
@@ -1612,12 +1821,14 @@ where
         sort_cookies(&mut source.cookies);
         EngineSourceExtraction {
           path: source.path,
+          role: SOURCE_ROLE_SESSION,
           format: source.format,
+          precedence: source.precedence,
           selected: source.selected,
           rows_seen: source.rows_seen,
           rows_skipped: source.rows_skipped,
           cookies: source.cookies,
-          acquisition_strategy: None,
+          acquisition: SourceAcquisition::StableFileImage,
           acquisition_attempts: source.acquisition_attempts,
           diagnostics: source.diagnostics,
           error: source.error,
@@ -1633,6 +1844,492 @@ pub(crate) fn gecko_report(
 ) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
   gecko_report_with_context(&context, browser_id, domains.as_deref())
+}
+
+/// Resolves the installation roots an engine adapter should walk, in the fixed
+/// registry order of priority then root ID.
+fn engine_roots<'a>(
+  registry: &'a Registry,
+  platform: PlatformId,
+  browser_id: &str,
+  engine: BrowserEngine,
+) -> Result<(&'a BrowserDefinition, Vec<&'a InstallationRoot>)> {
+  let definition = browser_definition(registry, platform, browser_id)?;
+  if definition.engine != engine {
+    bail!("browser {browser_id:?} is not a {engine:?} browser")
+  }
+  let mut roots: Vec<&InstallationRoot> = definition.roots.iter().collect();
+  roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
+  Ok((definition, roots))
+}
+
+#[cfg(any(target_os = "macos", test))]
+const SAFARI_COOKIE_FILE: &str = "Cookies.binarycookies";
+
+/// Crate-private generic Safari seam. Named profiles come from PR #137's
+/// database-first discovery; this adapter only reshapes them, so legacy
+/// `safari()` first-match selection is untouched.
+#[cfg(any(target_os = "macos", test))]
+fn discover_safari_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+) -> Result<EngineExtractionOutcome> {
+  use super::safari;
+
+  let registry = embedded_registry()?;
+  let (definition, roots) = engine_roots(
+    registry,
+    context.platform,
+    browser_id,
+    BrowserEngine::Safari,
+  )?;
+  let mut seen_profiles = HashSet::new();
+  let mut outcome = EngineExtractionOutcome::default();
+
+  for root in roots {
+    if root.discovery != DiscoveryStrategy::SafariDefaultProfile {
+      continue;
+    }
+    let Some(resolved_root) = context.resolve_template(&root.template) else {
+      continue;
+    };
+    // Non-Chromium registry templates never glob, so the suffix is literal.
+    let root_path = resolved_root.base.join(resolved_root.suffix);
+    if !context.fs.is_dir(&root_path) {
+      continue;
+    }
+    let canonical_root = match context.fs.canonicalize(&root_path) {
+      Ok(path) => path,
+      Err(error) => {
+        outcome.discovery_issues.push(DiscoveryIssue {
+          code: "installation_canonicalize_failed",
+          path: root_path,
+          message: error.to_string(),
+        });
+        continue;
+      }
+    };
+    outcome.installations_discovered += 1;
+    let installation_id = installation_id(
+      &definition.canonical_id,
+      &root.root_id,
+      &root.channel,
+      &normalized_path_bytes(&canonical_root),
+    );
+
+    let (profiles, discovery_warning) = safari::discover_safari_profiles(&canonical_root);
+    if let Some(message) = discovery_warning {
+      outcome.discovery_issues.push(DiscoveryIssue {
+        code: "safari_profile_discovery_degraded",
+        path: canonical_root.clone(),
+        message,
+      });
+    }
+
+    for profile in profiles {
+      let selected = match safari::first_existing_cookie_candidate(&profile.cookie_candidates) {
+        Ok(Some(path)) => path.clone(),
+        // A discovered profile with no cookie source is normal absence, not an
+        // extraction failure, so it is not listed as a report profile.
+        Ok(None) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "profile_has_no_cookie_source",
+            path: canonical_root.join(&profile.name),
+            message: "Safari profile has no cookie source".to_owned(),
+          });
+          continue;
+        }
+        Err(error) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "profile_source_inspection_failed",
+            path: canonical_root.join(&profile.name),
+            message: format!("{error:#}"),
+          });
+          continue;
+        }
+      };
+      let precedence = profile
+        .cookie_candidates
+        .iter()
+        .position(|candidate| candidate == &selected)
+        .map_or(PERSISTENT_SOURCE_PRECEDENCE, |index| {
+          PERSISTENT_SOURCE_PRECEDENCE * (index as u16 + 1)
+        });
+      let source_directory = selected
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| canonical_root.clone());
+      let profile_path = match context.fs.canonicalize(&source_directory) {
+        Ok(path) => path,
+        Err(error) => {
+          outcome.discovery_issues.push(DiscoveryIssue {
+            code: "profile_canonicalize_failed",
+            path: source_directory,
+            message: error.to_string(),
+          });
+          continue;
+        }
+      };
+      if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
+        outcome.discovery_issues.push(DiscoveryIssue {
+          code: "duplicate_profile",
+          path: profile_path,
+          message: "profile is already owned by an earlier registry root".to_owned(),
+        });
+        continue;
+      }
+      let locator = profile_path
+        .strip_prefix(&canonical_root)
+        .map(ProfileLocator::Relative)
+        .unwrap_or(ProfileLocator::Absolute(&profile_path));
+      let source_path = profile_path.join(SAFARI_COOKIE_FILE);
+      let source = EngineSourceExtraction {
+        path: source_path,
+        role: SOURCE_ROLE_PERSISTENT,
+        format: "safari_binarycookies",
+        precedence,
+        selected: true,
+        cookies: Vec::new(),
+        rows_seen: 0,
+        rows_skipped: 0,
+        acquisition: SourceAcquisition::StableFileImage,
+        acquisition_attempts: 1,
+        diagnostics: Vec::new(),
+        error: None,
+      };
+      outcome.profiles.push(EngineProfileExtraction {
+        profile_id: profile_id(&installation_id, locator),
+        installation_id: installation_id.clone(),
+        installation_priority: root.priority,
+        installation_path: canonical_root.clone(),
+        name: profile.name,
+        path: profile_path,
+        is_default: profile.uuid.is_none(),
+        persistent_source_discovered: true,
+        sources: vec![source],
+      });
+    }
+  }
+  sort_engine_profiles(&mut outcome.profiles);
+  Ok(outcome)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn safari_report_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  domains: Option<&[String]>,
+) -> Result<EngineExtractionOutcome> {
+  let mut outcome = discover_safari_with_context(context, browser_id)?;
+  for profile in &mut outcome.profiles {
+    for source in &mut profile.sources {
+      match super::safari::safari_based_outcome(
+        source.path.clone(),
+        domains.map(<[String]>::to_vec),
+      ) {
+        Ok(extraction) => {
+          source.rows_seen = extraction.stats.records_seen;
+          source.rows_skipped = extraction.stats.records_skipped;
+          source.cookies = extraction.cookies;
+        }
+        Err(error) => source.error = Some(format!("{error:#}")),
+      }
+    }
+  }
+  Ok(outcome)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn safari_report(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  safari_report_with_context(&context, browser_id, domains.as_deref())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn safari_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  discover_safari_with_context(&context, browser_id)
+}
+
+#[cfg(any(target_os = "windows", test))]
+const INTERNET_EXPLORER_COOKIE_FILE: &str = "WebCacheV01.dat";
+
+/// Row accounting an Internet Explorer extractor must report. The extractor is
+/// injected because the ESE reader only compiles on Windows.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) struct InternetExplorerRows {
+  pub(crate) cookies: Vec<Cookie>,
+  pub(crate) records_seen: usize,
+  pub(crate) records_skipped: usize,
+}
+
+/// Crate-private generic Internet Explorer seam. The WebCache root is flat, so
+/// each detected root contributes exactly one default profile.
+#[cfg(any(target_os = "windows", test))]
+fn discover_internet_explorer_with_context<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+) -> Result<EngineExtractionOutcome> {
+  let registry = embedded_registry()?;
+  let (definition, roots) = engine_roots(
+    registry,
+    context.platform,
+    browser_id,
+    BrowserEngine::InternetExplorer,
+  )?;
+  let mut seen_profiles = HashSet::new();
+  let mut outcome = EngineExtractionOutcome::default();
+
+  for root in roots {
+    if root.discovery != DiscoveryStrategy::InternetExplorerWebCache {
+      continue;
+    }
+    let Some(resolved_root) = context.resolve_template(&root.template) else {
+      continue;
+    };
+    // Non-Chromium registry templates never glob, so the suffix is literal.
+    let root_path = resolved_root.base.join(resolved_root.suffix);
+    if !context.fs.is_dir(&root_path) {
+      continue;
+    }
+    let canonical_root = match context.fs.canonicalize(&root_path) {
+      Ok(path) => path,
+      Err(error) => {
+        outcome.discovery_issues.push(DiscoveryIssue {
+          code: "installation_canonicalize_failed",
+          path: root_path,
+          message: error.to_string(),
+        });
+        continue;
+      }
+    };
+    outcome.installations_discovered += 1;
+    let source_path = canonical_root.join(INTERNET_EXPLORER_COOKIE_FILE);
+    if !context.fs.exists(&source_path) {
+      outcome.discovery_issues.push(DiscoveryIssue {
+        code: "profile_has_no_cookie_source",
+        path: canonical_root,
+        message: "WebCache root has no cookie database".to_owned(),
+      });
+      continue;
+    }
+    if !seen_profiles.insert(normalized_path_bytes(&canonical_root)) {
+      outcome.discovery_issues.push(DiscoveryIssue {
+        code: "duplicate_profile",
+        path: canonical_root,
+        message: "profile is already owned by an earlier registry root".to_owned(),
+      });
+      continue;
+    }
+    let installation_id = installation_id(
+      &definition.canonical_id,
+      &root.root_id,
+      &root.channel,
+      &normalized_path_bytes(&canonical_root),
+    );
+    let source = EngineSourceExtraction {
+      path: source_path,
+      role: SOURCE_ROLE_PERSISTENT,
+      format: "internet_explorer_ese",
+      precedence: PERSISTENT_SOURCE_PRECEDENCE,
+      selected: true,
+      cookies: Vec::new(),
+      rows_seen: 0,
+      rows_skipped: 0,
+      acquisition: SourceAcquisition::EseDatabase,
+      acquisition_attempts: 1,
+      diagnostics: Vec::new(),
+      error: None,
+    };
+    outcome.profiles.push(EngineProfileExtraction {
+      profile_id: profile_id(&installation_id, ProfileLocator::Relative(Path::new(""))),
+      installation_id,
+      installation_priority: root.priority,
+      installation_path: canonical_root.clone(),
+      name: "default".to_owned(),
+      path: canonical_root,
+      is_default: true,
+      persistent_source_discovered: true,
+      sources: vec![source],
+    });
+  }
+  sort_engine_profiles(&mut outcome.profiles);
+  Ok(outcome)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn internet_explorer_report_with_context<F, Q>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  domains: Option<&[String]>,
+  mut query: Q,
+) -> Result<EngineExtractionOutcome>
+where
+  F: DiscoveryFs,
+  Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
+{
+  let mut outcome = discover_internet_explorer_with_context(context, browser_id)?;
+  for profile in &mut outcome.profiles {
+    for source in &mut profile.sources {
+      match query(&source.path, domains) {
+        Ok(rows) => {
+          source.rows_seen = rows.records_seen;
+          source.rows_skipped = rows.records_skipped;
+          source.cookies = rows.cookies;
+        }
+        Err(error) => source.error = Some(format!("{error:#}")),
+      }
+    }
+  }
+  Ok(outcome)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn internet_explorer_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  discover_internet_explorer_with_context(&context, browser_id)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn internet_explorer_report(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+) -> Result<EngineExtractionOutcome> {
+  let context = DiscoveryContext::system()?;
+  internet_explorer_report_with_context(
+    &context,
+    browser_id,
+    domains.as_deref(),
+    |path, domains| {
+      super::internet_explorer::internet_explorer_outcome(
+        path.to_path_buf(),
+        domains.map(<[String]>::to_vec),
+        false,
+      )
+      .map(|extraction| InternetExplorerRows {
+        cookies: extraction.cookies,
+        records_seen: extraction.stats.records_seen,
+        records_skipped: extraction.stats.records_skipped,
+      })
+    },
+  )
+}
+
+/// Context-injected engine seams for the cross-engine report tests. They keep
+/// fixtures on temporary roots instead of mutating the process environment.
+#[cfg(test)]
+pub(crate) mod test_seams {
+  use super::*;
+
+  pub(crate) fn context(platform: PlatformId, home: PathBuf) -> DiscoveryContext<RealDiscoveryFs> {
+    let mut env = BTreeMap::new();
+    if platform == PlatformId::Windows {
+      env.insert(
+        OsString::from("LOCALAPPDATA"),
+        home.join("LocalAppData").into_os_string(),
+      );
+      env.insert(
+        OsString::from("APPDATA"),
+        home.join("AppData").into_os_string(),
+      );
+    }
+    DiscoveryContext {
+      platform,
+      home,
+      env,
+      fs: RealDiscoveryFs,
+    }
+  }
+
+  pub(crate) fn current_context(home: PathBuf) -> DiscoveryContext<RealDiscoveryFs> {
+    context(
+      PlatformId::current().expect("supported test platform"),
+      home,
+    )
+  }
+
+  pub(crate) fn root_path(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    root_id: &str,
+  ) -> PathBuf {
+    let registry = embedded_registry().expect("registry");
+    let definition =
+      browser_definition(registry, context.platform, browser_id).expect("registered browser");
+    let root = definition
+      .roots
+      .iter()
+      .find(|root| root.root_id == root_id)
+      .expect("registry root");
+    let resolved = context
+      .resolve_template(&root.template)
+      .expect("resolved root");
+    resolved.base.join(resolved.suffix)
+  }
+
+  pub(crate) fn chromium_report(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    profile_id: Option<&str>,
+    domains: Option<Vec<String>>,
+    keys: ChromiumKeyOutcomes,
+  ) -> Result<ChromiumRegistryReport> {
+    struct FixedKeys(ChromiumKeyOutcomes);
+    impl ChromiumKeyProvider<BrowserInstallation> for FixedKeys {
+      fn retrieve(&self, _installation: &BrowserInstallation) -> ChromiumKeyOutcomes {
+        self.0.clone()
+      }
+    }
+    extract_chromium_with_provider(context, browser_id, profile_id, domains, &FixedKeys(keys))
+  }
+
+  pub(crate) fn chromium_profiles(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+  ) -> Result<Vec<ChromiumProfile>> {
+    profiles_for_listing(
+      browser_id,
+      discover_browser_with_context(context, browser_id)?,
+    )
+  }
+
+  pub(crate) fn gecko_report(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    domains: Option<&[String]>,
+  ) -> Result<EngineExtractionOutcome> {
+    gecko_report_with_context(context, browser_id, domains)
+  }
+
+  pub(crate) fn gecko_profiles(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+  ) -> Result<EngineExtractionOutcome> {
+    gecko_profiles_with_context(context, browser_id)
+  }
+
+  pub(crate) fn safari_report(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    domains: Option<&[String]>,
+  ) -> Result<EngineExtractionOutcome> {
+    safari_report_with_context(context, browser_id, domains)
+  }
+
+  pub(crate) fn internet_explorer_report<Q>(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    domains: Option<&[String]>,
+    query: Q,
+  ) -> Result<EngineExtractionOutcome>
+  where
+    Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
+  {
+    internet_explorer_report_with_context(context, browser_id, domains, query)
+  }
 }
 
 #[cfg(test)]
@@ -2218,8 +2915,8 @@ mod tests {
     assert_eq!(sources[0].format, "mozilla_sqlite");
     assert_eq!(sources[0].rows_seen, 2);
     assert_eq!(
-      sources[0].acquisition_strategy,
-      Some(DatabaseAcquisitionStrategy::LiveReadOnly)
+      sources[0].acquisition,
+      SourceAcquisition::Database(DatabaseAcquisitionStrategy::LiveReadOnly)
     );
     assert_eq!(sources[0].acquisition_attempts, 1);
     assert_eq!(sources[0].cookies[0].name, "persistent-a");
