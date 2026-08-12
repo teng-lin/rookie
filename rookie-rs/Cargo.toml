@@ -47,6 +47,7 @@ zeroize = "1"
 
 [dev-dependencies]
 tracing-subscriber = "0.3.18"
+byteorder = "1"
 
 [features]
 default = ["appbound"]
@@ -55,6 +56,7 @@ appbound = []
 [target.'cfg(unix)'.dependencies]
 pbkdf2 = "0.12"
 sha1 = "0.10"
+byteorder = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "3"
@@ -63,7 +65,6 @@ zvariant = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 pbkdf2 = "0.12"
 sha1 = "0.10"
-byteorder = "1"
 
 [target.'cfg(windows)'.dependencies]
 base64 = "0.22"
