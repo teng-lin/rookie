@@ -533,12 +533,26 @@ fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Resul
 fn finish_profile(mut engine: EngineExtractionOutcome) -> ProfileExtraction {
   sort_source_outcomes(&mut engine.sources);
   let mut stats = StatsAccumulator::default();
+  // Engines raise profile and source issues without context because the
+  // enclosing profile is implied by where they sit. That holds only while the
+  // report keeps its shape: a consumer that flattens every issue into one list
+  // -- which the CLI and bindings do -- cannot tell which profile an issue came
+  // from. The identity is known here, so stamp it once.
+  let identity = &engine.profile;
+  let stamp = |issue: ExtractionIssue| {
+    issue.with_context(
+      Some(&identity.browser_id),
+      Some(&identity.installation_id),
+      Some(&identity.profile_id),
+    )
+  };
   let sources = engine
     .sources
     .into_iter()
     .map(|mut source| {
       sort_cookies(&mut source.cookies);
       stats.add(&source.stats);
+      let issues = source.issues.into_iter().map(stamp).collect();
       SourceExtraction {
         source: source.source,
         status: source_status(source.failed),
@@ -546,15 +560,16 @@ fn finish_profile(mut engine: EngineExtractionOutcome) -> ProfileExtraction {
         acquisition_strategy: source.acquisition_strategy,
         cookies: source.cookies,
         stats: source.stats,
-        issues: source.issues,
+        issues,
       }
     })
     .collect::<Vec<_>>();
+  let issues = engine.issues.into_iter().map(stamp).collect();
   ProfileExtraction {
     profile: engine.profile,
     sources,
     stats: stats.into_stats(),
-    issues: engine.issues,
+    issues,
   }
 }
 
@@ -1283,6 +1298,57 @@ mod tests {
       issues[0].samples,
       vec!["name column, row 1", "value column, row 7"]
     );
+  }
+  /// Profile and source issues carry no context from the engines, because the
+  /// enclosing profile is implied structurally. Consumers that flatten every
+  /// issue into one list -- the CLI and the bindings do -- lose that, so the
+  /// identity is stamped on before the report leaves the builder.
+  #[test]
+  fn profile_and_source_issues_carry_their_profile_context() {
+    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    profile.issues.push(issue(
+      "profile_extraction_failed",
+      ExtractionStageCode::acquisition(),
+      IssueSeverityCode::error(),
+      "profile level",
+    ));
+    let mut source = engine_source(
+      "cookies.sqlite",
+      "persistent",
+      10,
+      true,
+      Some("source level"),
+    );
+    source.error_stage = SourceFailureStage::Parse;
+    profile.sources.push(engine_source_outcome(source));
+
+    let report = assemble(1, vec![outcome(vec![profile], false)]);
+    let expected = &report.profiles[0].profile;
+    let (browser, installation, profile_id) = (
+      expected.browser_id.clone(),
+      expected.installation_id.clone(),
+      expected.profile_id.clone(),
+    );
+
+    let mut checked = 0;
+    for issue in report.profiles[0]
+      .issues
+      .iter()
+      .chain(report.profiles[0].sources.iter().flat_map(|s| &s.issues))
+    {
+      assert_eq!(issue.browser_id.as_ref(), Some(&browser));
+      assert_eq!(issue.installation_id.as_ref(), Some(&installation));
+      assert_eq!(issue.profile_id.as_ref(), Some(&profile_id));
+      checked += 1;
+    }
+    assert_eq!(checked, 2, "both the profile and source issue are stamped");
+
+    // Top-level issues stay browser-scoped: they are raised before any
+    // installation or profile identity exists.
+    assert!(report
+      .issues
+      .iter()
+      .all(|issue| issue.installation_id.is_none() && issue.profile_id.is_none()));
   }
 }
 
