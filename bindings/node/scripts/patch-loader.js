@@ -43,7 +43,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
+  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
 )
 
 const exportStart = loader.search(
@@ -110,6 +110,10 @@ module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
 module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
 module.exports.firefoxProfile = asyncNative(firefoxProfile, 'firefoxProfile')
 module.exports.firefoxBased = asyncNative(firefoxBased, 'firefoxBased')
+module.exports.supportedBrowsers = asyncNative(supportedBrowsers, 'supportedBrowsers')
+module.exports.browserProfiles = asyncNative(browserProfiles, 'browserProfiles')
+module.exports.browserReport = asyncNative(browserReport, 'browserReport')
+module.exports.loadReport = asyncNative(loadReport, 'loadReport')
 
 if (testWorkerPanic) {
   module.exports.__testWorkerPanic = asyncNative(testWorkerPanic, 'testWorkerPanic')
@@ -154,10 +158,29 @@ export declare function chromiumBased(dbPath: string, domains?: Array<string> | 
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 `
 
+// Everything napi generates ahead of the facade must survive the slice above.
+// Declarations added after a common one such as `load` are the ones a naive
+// slice silently drops, so each new export is listed here as well.
 for (const declaration of [
   'export declare function toNetscape(',
   'export declare function firefoxProfiles(',
-  'export declare function firefoxProfile('
+  'export declare function firefoxProfile(',
+  'export declare function supportedBrowsers(',
+  'export declare function browserProfiles(',
+  'export declare function browserReport(',
+  'export declare function loadReport(',
+  'export interface BrowserCapabilitiesObject',
+  'export interface BrowserDescriptorObject',
+  'export interface ProfileIdentityObject',
+  'export interface CookieSourceDescriptorObject',
+  'export interface CookieSourceIdentityObject',
+  'export interface ProfileDescriptorObject',
+  'export interface ExtractionStatsObject',
+  'export interface ReportStatsObject',
+  'export interface ExtractionIssueObject',
+  'export interface SourceExtractionObject',
+  'export interface ProfileExtractionObject',
+  'export interface ExtractionReportObject'
 ]) {
   if (!types.includes(declaration)) {
     throw new Error(`Generated declarations were truncated: missing ${declaration}`)

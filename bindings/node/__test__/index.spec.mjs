@@ -49,6 +49,35 @@ const EXPECTED_EXPORTS = [
   "internetExplorer",
   "safari",
   "chromiumBased",
+  "supportedBrowsers",
+  "browserProfiles",
+  "browserReport",
+  "loadReport",
+];
+
+// The generic report APIs, and the object declarations they return. napi-rs
+// emits these after `load`, which is exactly where a naive slice in
+// patch-loader.js used to discard everything that followed.
+const REPORT_FUNCTIONS = [
+  "supportedBrowsers",
+  "browserProfiles",
+  "browserReport",
+  "loadReport",
+];
+
+const REPORT_INTERFACES = [
+  "BrowserCapabilitiesObject",
+  "BrowserDescriptorObject",
+  "ProfileIdentityObject",
+  "CookieSourceDescriptorObject",
+  "CookieSourceIdentityObject",
+  "ProfileDescriptorObject",
+  "ExtractionStatsObject",
+  "ReportStatsObject",
+  "ExtractionIssueObject",
+  "SourceExtractionObject",
+  "ProfileExtractionObject",
+  "ExtractionReportObject",
 ];
 
 function constructFacade(platform, omittedNativeExport) {
@@ -189,6 +218,9 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     ["internetExplorer", () => rookieCookies.internetExplorer(42)],
     ["safari", () => rookieCookies.safari(42)],
     ["chromiumBased", () => rookieCookies.chromiumBased(42)],
+    ["browserProfiles", () => rookieCookies.browserProfiles(42)],
+    ["browserReport", () => rookieCookies.browserReport(42)],
+    ["loadReport", () => rookieCookies.loadReport(42)],
   ];
 
   for (const [name, call] of invalidCalls) {
@@ -284,6 +316,208 @@ test("generated Firefox profile exports and declarations survive patching", (t) 
   t.false(types.includes("testWorkerPanic"));
 });
 
+test("supportedBrowsers describes registered browsers in camelCase", async (t) => {
+  const browsers = await rookieCookies.supportedBrowsers();
+
+  t.true(Array.isArray(browsers));
+  t.true(browsers.length > 0, "the running OS must register at least one browser");
+
+  for (const browser of browsers) {
+    t.is(typeof browser.id, "string");
+    t.is(typeof browser.displayName, "string");
+    t.is(typeof browser.engine, "string");
+    t.true(Array.isArray(browser.aliases));
+    for (const tiers of Object.values(browser.capabilities)) {
+      t.true(Array.isArray(tiers));
+      t.true(tiers.every((tier) => typeof tier === "string"));
+    }
+    t.deepEqual(Object.keys(browser.capabilities).sort(), [
+      "availableDecryptionTiers",
+      "declaredDecryptionTiers",
+      "persistentFormats",
+      "sessionFormats",
+    ]);
+  }
+
+  const firefox = browsers.find(({ id }) => id === "firefox");
+  t.truthy(firefox, "firefox must be registered on every supported OS");
+  t.deepEqual(firefox.capabilities.persistentFormats, ["mozilla_sqlite"]);
+});
+
+test("unknown browser identifiers reject rather than resolving empty", async (t) => {
+  await t.throwsAsync(rookieCookies.browserProfiles("not_a_browser"));
+  await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
+});
+
+test("loadReport resolves a report whose counters are plain numbers", async (t) => {
+  const report = await rookieCookies.loadReport(["example.invalid"]);
+
+  t.is(typeof report.status, "string");
+  t.true(Array.isArray(report.profiles));
+  t.true(Array.isArray(report.issues));
+  t.true(
+    report.summary.registeredBrowsers > 0,
+    "every registered browser is summarized even when absent",
+  );
+
+  for (const [name, value] of Object.entries(report.summary)) {
+    const expected = name === "countersSaturated" ? "boolean" : "number";
+    t.is(typeof value, expected, `summary.${name} must be a ${expected}`);
+    // A u64 binding would arrive as a BigInt, which JSON.stringify rejects and
+    // no existing consumer of this package handles.
+    t.not(typeof value, "bigint", `summary.${name} must not be a BigInt`);
+  }
+
+  t.notThrows(() => JSON.stringify(report));
+});
+
+test.serial("report APIs expose per-source cookie provenance", async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "rookie-node-report-"));
+  const fixture = firefoxFixtureRoot(temp);
+  const defaultProfile = join(fixture.root, "Profiles", "default-release");
+  const workProfile = join(fixture.root, "Profiles", "work");
+  mkdirSync(defaultProfile, { recursive: true });
+  mkdirSync(workProfile, { recursive: true });
+  writeFileSync(
+    join(fixture.root, "profiles.ini"),
+    `[InstallTest]
+Default=Profiles/default-release
+
+[Profile0]
+Name=default-release
+IsRelative=1
+Path=Profiles/default-release
+Default=1
+
+[Profile1]
+Name=work
+IsRelative=1
+Path=Profiles/work
+`,
+  );
+  installFirefoxDatabase(
+    join(defaultProfile, "cookies.sqlite"),
+    new URL("fixtures/firefox-empty.sqlite.base64", import.meta.url),
+  );
+  installFirefoxDatabase(
+    join(workProfile, "cookies.sqlite"),
+    new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+  );
+
+  try {
+    // As with the legacy Firefox profile test, a child process carries the
+    // fixture environment into N-API's background thread reliably.
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [fileURLToPath(new URL("report-child.mjs", import.meta.url))],
+      { env: { ...process.env, ...fixture.environment } },
+    );
+    const { profiles, report, leafTypes } = JSON.parse(stdout);
+
+    t.deepEqual(
+      profiles.map(({ profile, isDefault }) => ({
+        displayName: profile.displayName,
+        isDefault,
+      })),
+      [
+        { displayName: "default-release", isDefault: true },
+        { displayName: "work", isDefault: false },
+      ],
+    );
+    const work = profiles.find(
+      ({ profile }) => profile.displayName === "work",
+    );
+    t.regex(work.profile.profileId, /^[0-9a-f]{64}$/);
+    t.regex(work.profile.installationId, /^[0-9a-f]{64}$/);
+    t.false(work.profile.pathLossy);
+    t.deepEqual(
+      work.sources.map(({ role, format, precedence }) => ({
+        role,
+        format,
+        precedence,
+      })),
+      [{ role: "persistent", format: "mozilla_sqlite", precedence: 10 }],
+    );
+
+    t.is(report.status, "complete");
+    t.deepEqual(report.issues, []);
+    t.is(report.profiles.length, 1, "profileId must restrict the report");
+    const [extracted] = report.profiles;
+    t.is(extracted.profile.profileId, work.profile.profileId);
+    t.is(extracted.sources.length, 1);
+
+    const [source] = extracted.sources;
+    t.true(source.selected);
+    t.is(source.status, "succeeded");
+    t.is(source.source.role, "persistent");
+    t.is(typeof source.acquisitionStrategy, "string");
+    t.deepEqual(source.cookies, [
+      {
+        domain: ".example.test",
+        path: "/",
+        secure: false,
+        expires: 1700000000,
+        name: "selected",
+        value: "secondary",
+        httpOnly: false,
+        sameSite: 0,
+      },
+    ]);
+    t.deepEqual(source.stats, {
+      rowsSeen: 1,
+      cookiesEmitted: 1,
+      rowsSkipped: 0,
+      acquisitionAttempts: 1,
+      countersSaturated: false,
+    });
+    t.is(report.summary.cookiesEmitted, 1);
+    t.is(report.summary.sourcesFailed, 0);
+
+    // Collected inside the child, before serialization could hide a BigInt.
+    t.deepEqual(leafTypes, ["boolean", "number", "string"]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("generated report exports and declarations survive patching", (t) => {
+  const loader = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
+
+  const destructure = loader.match(/^const \{ version,.* \} = nativeBinding$/m);
+  t.truthy(destructure, "the patched loader must destructure the native binding");
+
+  const facadeIndex = types.indexOf("/** rookie-cookies cross-platform facade */");
+  t.not(facadeIndex, -1, "the types facade marker must survive patching");
+
+  for (const name of REPORT_FUNCTIONS) {
+    t.regex(destructure[0], new RegExp(`\\b${name}\\b`), `${name} must be destructured`);
+    t.is(
+      (loader.match(new RegExp(`^module\\.exports\\.${name} = `, "gm")) || []).length,
+      1,
+      `${name} must be exported exactly once`,
+    );
+
+    const declaration = `export declare function ${name}(`;
+    t.true(types.includes(declaration), `${name} must be declared`);
+    t.true(
+      types.indexOf(declaration) < facadeIndex,
+      `${name} must be declared ahead of the appended facade`,
+    );
+  }
+
+  for (const name of REPORT_INTERFACES) {
+    t.is(
+      (types.match(new RegExp(`^export interface ${name} \\{$`, "gm")) || []).length,
+      1,
+      `${name} must be declared exactly once`,
+    );
+  }
+
+  // Counters are declared u32 precisely so no report field becomes a BigInt.
+  t.false(types.includes("bigint"), "no declaration may use BigInt");
+});
+
 test("public JavaScript examples await async extraction APIs", (t) => {
   const documents = [
     ["README.md", new URL("../../../README.md", import.meta.url), true],
@@ -330,6 +564,7 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "internetExplorer",
     "safari",
     "chromiumBased",
+    ...REPORT_FUNCTIONS,
   ];
   const callPattern = new RegExp(`\\b(?:${asyncApis.join("|")})\\s*\\(`, "g");
   let checkedCalls = 0;
