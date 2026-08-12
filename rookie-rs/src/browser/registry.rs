@@ -826,6 +826,20 @@ fn profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path
   context.fs.exists(&path.join("Network/Cookies")) || context.fs.exists(&path.join("Cookies"))
 }
 
+// Tencent-derived forks (QQ Browser, Sogou Explorer) write their profile
+// settings to `Preferences_02` and never create a plain `Preferences`.
+const CHROMIUM_PROFILE_MARKER_FILES: [&str; 2] = ["Preferences", "Preferences_02"];
+
+// Chromium creates these alongside real profiles, and none of them holds a
+// user cookie store.
+const CHROMIUM_NON_PROFILE_DIRECTORIES: [&str; 3] = ["System Profile", "Guest Profile", "Snapshot"];
+
+fn has_profile_marker_file<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
+  CHROMIUM_PROFILE_MARKER_FILES
+    .iter()
+    .any(|marker| context.fs.exists(&path.join(marker)))
+}
+
 fn discover_installation_profiles<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   installation: &mut BrowserInstallation,
@@ -865,7 +879,10 @@ fn discover_installation_profiles<F: DiscoveryFs>(
       .file_name()
       .map(|name| name.to_string_lossy().into_owned())
       .unwrap_or_default();
-    if marker_names.contains(&name) || name.starts_with("Profile ") {
+    let name_marked = marker_names.contains(&name) || name.starts_with("Profile ");
+    let file_marked = !CHROMIUM_NON_PROFILE_DIRECTORIES.contains(&name.as_str())
+      && has_profile_marker_file(context, child);
+    if name_marked || file_marked {
       marked.push(child.clone());
     }
   }
@@ -4383,7 +4400,18 @@ mod tests {
           "vivaldi",
         ]
         .as_slice(),
-        ["coccoc", "duckduckgo"].as_slice(),
+        [
+          "browser_from_vought",
+          "coccoc",
+          "dc_browser",
+          "duckduckgo",
+          "qq_browser",
+          "sogou",
+          "speed_360",
+          "speed_360x",
+          "yandex",
+        ]
+        .as_slice(),
       ),
       (
         PlatformId::Macos,
@@ -5811,5 +5839,365 @@ mod tests {
       .issues
       .iter()
       .any(|issue| issue.code == "duplicate_profile"));
+  }
+
+  fn windows_context(home: PathBuf) -> DiscoveryContext<RealDiscoveryFs> {
+    let local_app_data = home.join("LocalAppData");
+    let roaming_app_data = home.join("AppData");
+    test_context_for(
+      PlatformId::Windows,
+      home,
+      [
+        ("LOCALAPPDATA", local_app_data),
+        ("APPDATA", roaming_app_data),
+      ],
+    )
+  }
+
+  fn profile_directory_names(profiles: &[ChromiumProfile]) -> Vec<&str> {
+    profiles
+      .iter()
+      .map(|profile| profile.directory_name.as_str())
+      .collect()
+  }
+
+  #[test]
+  fn windows_batch_browsers_declare_frozen_ids_aliases_and_roots() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let cases = [
+      (
+        "browser_from_vought",
+        "Browser from Vought",
+        ["vought"].as_slice(),
+        [
+          (
+            "browser-from-vought-roaming",
+            "{roaming_app_data}/Browser from Vought",
+          ),
+          (
+            "browser-from-vought-local",
+            "{local_app_data}/Browser from Vought",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "dc_browser",
+        "DC Browser",
+        ["dc"].as_slice(),
+        [
+          ("dc-browser-local", "{local_app_data}/DCBrowser/User Data"),
+          (
+            "dc-browser-roaming",
+            "{roaming_app_data}/DCBrowser/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "qq_browser",
+        "QQ Browser",
+        ["qq"].as_slice(),
+        [
+          (
+            "qq-browser-local",
+            "{local_app_data}/Tencent/QQBrowser/User Data",
+          ),
+          (
+            "qq-browser-roaming",
+            "{roaming_app_data}/Tencent/QQBrowser/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "sogou",
+        "Sogou Explorer",
+        [].as_slice(),
+        [
+          (
+            "sogou-local",
+            "{local_app_data}/Sogou/SogouExplorer/User Data",
+          ),
+          (
+            "sogou-roaming",
+            "{roaming_app_data}/Sogou/SogouExplorer/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "speed_360",
+        "360 Browser",
+        ["360"].as_slice(),
+        [
+          (
+            "speed-360-local",
+            "{local_app_data}/360chrome/Chrome/User Data",
+          ),
+          (
+            "speed-360-roaming",
+            "{roaming_app_data}/360chrome/Chrome/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "speed_360x",
+        "360X Browser",
+        ["360x"].as_slice(),
+        [
+          (
+            "speed-360x-local",
+            "{local_app_data}/360ChromeX/Chrome/User Data",
+          ),
+          (
+            "speed-360x-roaming",
+            "{roaming_app_data}/360ChromeX/Chrome/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "yandex",
+        "Yandex Browser",
+        [].as_slice(),
+        [
+          (
+            "yandex-local",
+            "{local_app_data}/Yandex/YandexBrowser/User Data",
+          ),
+          (
+            "yandex-roaming",
+            "{roaming_app_data}/Yandex/YandexBrowser/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+    ];
+
+    for (canonical_id, display_name, aliases, roots) in cases {
+      let definition = browser_definition(registry, PlatformId::Windows, canonical_id)
+        .expect("Windows batch definition");
+      assert_eq!(definition.canonical_id, canonical_id);
+      assert_eq!(definition.display_name, display_name);
+      assert_eq!(definition.engine, BrowserEngine::Chromium);
+      assert_eq!(
+        definition
+          .aliases
+          .iter()
+          .map(String::as_str)
+          .collect::<Vec<_>>(),
+        aliases
+      );
+      assert_eq!(
+        definition
+          .roots
+          .iter()
+          .map(|root| (root.root_id.as_str(), root.template.as_str()))
+          .collect::<Vec<_>>(),
+        roots
+      );
+      assert!(definition.roots.iter().all(
+        |root| root.channel == "stable" && root.discovery == DiscoveryStrategy::ChromiumUserData
+      ));
+      assert_eq!(
+        definition
+          .roots
+          .iter()
+          .map(|root| root.priority)
+          .collect::<Vec<_>>(),
+        [10u16, 20]
+      );
+      assert_eq!(
+        definition.capabilities.declared_persistent_formats,
+        ["chromium_sqlite"]
+      );
+      assert!(definition.capabilities.declared_session_formats.is_empty());
+      assert_eq!(
+        definition.capabilities.declared_decryption_tiers,
+        ["legacy_dpapi", "v10"]
+      );
+      for alias in aliases {
+        assert_eq!(
+          browser_definition(registry, PlatformId::Windows, alias)
+            .expect("alias resolves to the canonical definition")
+            .canonical_id,
+          canonical_id
+        );
+      }
+      for platform in [PlatformId::Macos, PlatformId::Linux] {
+        assert!(browser_definition(registry, platform, canonical_id).is_err());
+      }
+    }
+  }
+
+  #[test]
+  fn windows_batch_standard_layouts_use_local_state_profile_metadata() {
+    let temp = TempDir::new("windows-batch-standard");
+    let context = windows_context(temp.path().join("home"));
+    for (browser_id, root_id) in [
+      ("yandex", "yandex-local"),
+      ("speed_360", "speed-360-local"),
+      ("speed_360x", "speed-360x-local"),
+      ("dc_browser", "dc-browser-local"),
+    ] {
+      let root = browser_root(&context, browser_id, root_id);
+      seed_cookie(&root.join("Default"), true, "personal", "one");
+      seed_cookie(&root.join("Profile 1"), false, "work", "two");
+      write_local_state(
+        &root,
+        serde_json::json!({
+          "profile": {
+            "last_used": "Profile 1",
+            "last_active_profiles": ["Profile 1"],
+            "info_cache": {
+              "Default": {"name": "Personal"},
+              "Profile 1": {"name": "Work"}
+            }
+          }
+        }),
+      );
+
+      let discovery = discover_browser_with_context(&context, browser_id).expect("discover");
+      assert_eq!(discovery.installations.len(), 1);
+      let installation = &discovery.installations[0];
+      assert_eq!(installation.root_id, root_id);
+      assert_eq!(
+        installation.local_state_path,
+        installation.path.join("Local State")
+      );
+      let profiles = discovery.profiles();
+      assert_eq!(
+        profile_directory_names(&profiles),
+        ["Default", "Profile 1"],
+        "{browser_id} profile order"
+      );
+      assert_eq!(profiles[0].display_name, "Personal");
+      assert!(profiles[0].is_default);
+      assert!(profiles[0].persistent_candidates[0].selected);
+      assert_eq!(profiles[1].display_name, "Work");
+      assert!(profiles[1].is_last_used);
+      assert_eq!(profiles[1].active_order, Some(0));
+      assert_eq!(profiles[1].persistent_candidates[1].precedence, 20);
+      assert!(profiles[1].persistent_candidates[1].selected);
+    }
+  }
+
+  #[test]
+  fn preferences_and_preferences_02_are_generic_chromium_profile_markers() {
+    let temp = TempDir::new("preferences-markers");
+    let context = windows_context(temp.path().join("home"));
+    for (browser_id, root_id, marker) in [
+      ("qq_browser", "qq-browser-local", "Preferences_02"),
+      ("sogou", "sogou-local", "Preferences_02"),
+      ("chrome", "chrome-stable-local", "Preferences"),
+    ] {
+      let root = browser_root(&context, browser_id, root_id);
+      seed_cookie(&root.join("Default"), true, "default", "one");
+      let vendor_profile = root.join("UserData 1");
+      seed_cookie(&vendor_profile, true, "vendor", "two");
+      std::fs::write(vendor_profile.join(marker), b"{}").expect("write profile marker");
+
+      let profiles = discover_browser_with_context(&context, browser_id)
+        .expect("discover marker variant")
+        .profiles();
+      assert_eq!(
+        profile_directory_names(&profiles),
+        ["Default", "UserData 1"],
+        "{browser_id} marked by {marker}"
+      );
+    }
+  }
+
+  #[test]
+  fn marker_files_do_not_promote_chromium_service_directories() {
+    let temp = TempDir::new("marker-skips");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(&context, "qq_browser", "qq-browser-local");
+    seed_cookie(&root.join("Default"), true, "default", "one");
+    for skipped in ["System Profile", "Guest Profile", "Snapshot"] {
+      let path = root.join(skipped);
+      seed_cookie(&path, true, "skipped", "value");
+      std::fs::write(path.join("Preferences_02"), b"{}").expect("write profile marker");
+    }
+
+    let discovery = discover_browser_with_context(&context, "qq_browser").expect("discover");
+    assert_eq!(profile_directory_names(&discovery.profiles()), ["Default"]);
+    assert!(discovery.issues.is_empty());
+  }
+
+  #[test]
+  fn browser_from_vought_falls_back_to_the_flat_installation_root() {
+    let temp = TempDir::new("vought-flat");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(
+      &context,
+      "browser_from_vought",
+      "browser-from-vought-roaming",
+    );
+    seed_cookie(&root, false, "vought", "value");
+
+    let discovery = discover_browser_with_context(&context, "vought").expect("discover via alias");
+    assert_eq!(discovery.installations.len(), 1);
+    assert_eq!(
+      discovery.installations[0].root_id,
+      "browser-from-vought-roaming"
+    );
+    let profiles = discovery.profiles();
+    assert_eq!(profile_directory_names(&profiles), ["."]);
+    assert!(profiles[0].is_default);
+    assert_eq!(profiles[0].display_name, "stable");
+    assert!(profiles[0].persistent_candidates[1].selected);
+  }
+
+  #[test]
+  fn windows_batch_browsers_extract_plaintext_cookies_through_their_selectors() {
+    let temp = TempDir::new("windows-batch-plaintext");
+    let context = windows_context(temp.path().join("home"));
+    let cases = [
+      ("yandex", "yandex-local", "yandex", false),
+      ("speed_360", "speed-360-local", "360", false),
+      ("speed_360x", "speed-360x-local", "360x", false),
+      ("dc_browser", "dc-browser-local", "dc", false),
+      ("qq_browser", "qq-browser-local", "qq", false),
+      ("sogou", "sogou-local", "sogou", false),
+      (
+        "browser_from_vought",
+        "browser-from-vought-roaming",
+        "vought",
+        true,
+      ),
+    ];
+
+    for (browser_id, root_id, selector, flat) in cases {
+      let root = browser_root(&context, browser_id, root_id);
+      let profile = if flat { root } else { root.join("Default") };
+      seed_cookie(&profile, !flat, browser_id, "plaintext-value");
+
+      let provider = CountingProvider::default();
+      let report = extract_chromium_with_provider(&context, selector, None, None, &provider)
+        .expect("plaintext report");
+      assert_eq!(report.installations.len(), 1, "{browser_id} installations");
+      let profiles = &report.installations[0].profiles;
+      assert_eq!(profiles.len(), 1, "{browser_id} profiles");
+      assert_eq!(profiles[0].cookies.len(), 1);
+      assert_eq!(profiles[0].cookies[0].name, browser_id);
+      assert_eq!(profiles[0].cookies[0].value, "plaintext-value");
+      assert!(profiles[0].error.is_none());
+      assert_eq!(profiles[0].stats.rows_seen, 1);
+      assert_eq!(profiles[0].stats.cookies_emitted, 1);
+      assert_eq!(profiles[0].stats.rows_skipped, 0);
+      assert_eq!(
+        provider
+          .calls
+          .borrow()
+          .values()
+          .copied()
+          .collect::<Vec<_>>(),
+        [1],
+        "{browser_id} key provider calls"
+      );
+    }
   }
 }

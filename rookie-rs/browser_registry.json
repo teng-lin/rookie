@@ -102,6 +102,40 @@
         }
       },
       {
+        "canonical_id": "browser_from_vought",
+        "aliases": [
+          "vought"
+        ],
+        "display_name": "Browser from Vought",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "browser-from-vought-roaming",
+            "template": "{roaming_app_data}/Browser from Vought",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "browser-from-vought-local",
+            "template": "{local_app_data}/Browser from Vought",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
         "canonical_id": "chrome",
         "aliases": [],
         "display_name": "Google Chrome",
@@ -220,6 +254,40 @@
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "dc_browser",
+        "aliases": [
+          "dc"
+        ],
+        "display_name": "DC Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "dc-browser-local",
+            "template": "{local_app_data}/DCBrowser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "dc-browser-roaming",
+            "template": "{roaming_app_data}/DCBrowser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
           }
         ],
         "capabilities": {
@@ -460,6 +528,140 @@
         }
       },
       {
+        "canonical_id": "qq_browser",
+        "aliases": [
+          "qq"
+        ],
+        "display_name": "QQ Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "qq-browser-local",
+            "template": "{local_app_data}/Tencent/QQBrowser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "qq-browser-roaming",
+            "template": "{roaming_app_data}/Tencent/QQBrowser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "sogou",
+        "aliases": [],
+        "display_name": "Sogou Explorer",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "sogou-local",
+            "template": "{local_app_data}/Sogou/SogouExplorer/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "sogou-roaming",
+            "template": "{roaming_app_data}/Sogou/SogouExplorer/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "speed_360",
+        "aliases": [
+          "360"
+        ],
+        "display_name": "360 Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "speed-360-local",
+            "template": "{local_app_data}/360chrome/Chrome/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "speed-360-roaming",
+            "template": "{roaming_app_data}/360chrome/Chrome/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "speed_360x",
+        "aliases": [
+          "360x"
+        ],
+        "display_name": "360X Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "speed-360x-local",
+            "template": "{local_app_data}/360ChromeX/Chrome/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "speed-360x-roaming",
+            "template": "{roaming_app_data}/360ChromeX/Chrome/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
         "canonical_id": "vivaldi",
         "aliases": [],
         "display_name": "Vivaldi",
@@ -475,6 +677,38 @@
           {
             "root_id": "vivaldi-roaming",
             "template": "{roaming_app_data}/Vivaldi/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10"
+          ]
+        }
+      },
+      {
+        "canonical_id": "yandex",
+        "aliases": [],
+        "display_name": "Yandex Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "yandex-local",
+            "template": "{local_app_data}/Yandex/YandexBrowser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "yandex-roaming",
+            "template": "{roaming_app_data}/Yandex/YandexBrowser/User Data",
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 20
