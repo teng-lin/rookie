@@ -63,7 +63,7 @@ jobs:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Build
-        run: cargo build ${{ matrix.args }} --target ${{ matrix.target }} --package rookie-cookies-cli --bin rookie-cookies --release
+        run: cargo build ${{ matrix.args }} --target ${{ matrix.target }} --package rookie-cookies-cli --bin rookie-cookies --release --locked
 
       - name: Rename Unix
         run: mv target/${{ matrix.target }}/release/rookie-cookies rookie-cookies-cli-${{ matrix.target }}

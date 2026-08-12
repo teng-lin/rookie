@@ -62,7 +62,7 @@ jobs:
         run: npm install --no-save playwright
 
       - name: Pre-build the e2e test binary (avoid running cargo inside dbus session)
-        run: cargo test --test e2e_chrome --no-run
+        run: cargo test --test e2e_chrome --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         # `maturin develop` needs an active venv. We pre-build the abi3 wheel
@@ -74,7 +74,7 @@ jobs:
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
         # napi-rs cross-compiles to a platform-specific .node alongside
@@ -123,7 +123,7 @@ jobs:
 
             # Four bindings, one seeded profile — assert that rust, python,
             # node, and the CLI binary all agree on rookie_ci=bar.
-            cargo test --test e2e_chrome -- --ignored --nocapture
+            cargo test --test e2e_chrome --locked -- --ignored --nocapture
             .venv/bin/python tests/e2e/assert_chrome_cookie.py
             node tests/e2e/assert_chrome_cookie.mjs
 
@@ -163,7 +163,7 @@ jobs:
           npx playwright install firefox
 
       - name: Pre-build the e2e test binary
-        run: cargo test --test e2e_firefox --no-run
+        run: cargo test --test e2e_firefox --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -172,7 +172,7 @@ jobs:
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
         run: |
@@ -205,7 +205,7 @@ jobs:
           ls -la "$ROOKIE_E2E_FIREFOX_PROFILE/" || true
           test -f "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
-          cargo test --test e2e_firefox -- --ignored --nocapture
+          cargo test --test e2e_firefox --locked -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_firefox_cookie.py
           node tests/e2e/assert_firefox_cookie.mjs
           .venv/bin/python tests/e2e/assert_cli_cookie.py \
@@ -222,7 +222,7 @@ jobs:
           DB="$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
           # Rust
-          cargo run --release --example from_path -p rookie-cookies -- "$DB" \
+          cargo run --release --locked --example from_path -p rookie-cookies -- "$DB" \
             | tee /tmp/rookie-example-rust.out
           grep 'rookie_ci' /tmp/rookie-example-rust.out
           grep '"bar"' /tmp/rookie-example-rust.out
@@ -261,7 +261,7 @@ jobs:
           npx playwright install firefox
 
       - name: Pre-build the e2e test binary
-        run: cargo test --test e2e_firefox --no-run
+        run: cargo test --test e2e_firefox --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -270,7 +270,7 @@ jobs:
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
         run: |
@@ -304,7 +304,7 @@ jobs:
           ls -la "$ROOKIE_E2E_FIREFOX_PROFILE/" || true
           test -f "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
-          cargo test --test e2e_firefox -- --ignored --nocapture
+          cargo test --test e2e_firefox --locked -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_firefox_cookie.py
           node tests/e2e/assert_firefox_cookie.mjs
           .venv/bin/python tests/e2e/assert_cli_cookie.py \
@@ -334,7 +334,7 @@ jobs:
         run: npm install --no-save playwright
 
       - name: Pre-build the e2e test binary
-        run: cargo test --test e2e_chrome --no-run
+        run: cargo test --test e2e_chrome --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -343,7 +343,7 @@ jobs:
           cd bindings/python && ../../.venv/bin/maturin develop --release
 
       - name: Pre-build the rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
         run: |
@@ -378,7 +378,7 @@ jobs:
           test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies" \
             || test -f "$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
 
-          cargo test --test e2e_chrome -- --ignored --nocapture
+          cargo test --test e2e_chrome --locked -- --ignored --nocapture
           .venv/bin/python tests/e2e/assert_chrome_cookie.py
           node tests/e2e/assert_chrome_cookie.mjs
 
@@ -414,7 +414,7 @@ jobs:
           npx playwright --version
 
       - name: Pre-build the e2e test binary
-        run: cargo test --test e2e_firefox --no-run
+        run: cargo test --test e2e_firefox --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -427,7 +427,7 @@ jobs:
           Pop-Location
 
       - name: Pre-build the rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
         run: |
@@ -466,7 +466,7 @@ jobs:
             }
             Get-ChildItem "$env:ROOKIE_E2E_FIREFOX_PROFILE" | Format-Table
 
-            cargo test --test e2e_firefox -- --ignored --nocapture
+            cargo test --test e2e_firefox --locked -- --ignored --nocapture
             & .\.venv\Scripts\python.exe tests/e2e/assert_firefox_cookie.py
             node tests/e2e/assert_firefox_cookie.mjs
             & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py "$cookiesDb"
@@ -567,7 +567,7 @@ jobs:
           "ROOKIE_E2E_REQUEST_LOG=$requestLog" | Out-File $env:GITHUB_ENV -Append
 
       - name: Pre-build the App-Bound e2e test binary
-        run: cargo test --test e2e_chrome --no-run
+        run: cargo test --test e2e_chrome --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -580,7 +580,7 @@ jobs:
           Pop-Location
 
       - name: Pre-build the App-Bound rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the App-Bound Node binding
         run: |
@@ -665,7 +665,7 @@ jobs:
           Write-Host "Administrator: $isAdmin"
 
       - name: Pre-build the e2e test binary
-        run: cargo test --test e2e_chrome --no-run
+        run: cargo test --test e2e_chrome --no-run --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -678,7 +678,7 @@ jobs:
           Pop-Location
 
       - name: Pre-build the rookie-cookies CLI
-        run: cargo build -p rookie-cookies-cli --release
+        run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
         run: |
@@ -700,7 +700,7 @@ jobs:
           & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
             "$env:ROOKIE_E2E_USER_DATA_DIR" --cookie-name rookie_ci `
             --expected-prefix v10 --require-dpapi-key
-          cargo test --test e2e_chrome `
+          cargo test --test e2e_chrome --locked `
             extracts_seeded_cookie_from_chrome_dpapi_profile -- --ignored --nocapture
           & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
           node tests/e2e/assert_chrome_cookie.mjs
@@ -774,7 +774,7 @@ jobs:
 
             Write-Host "Identity before rookie-cookies extraction:"
             whoami /user
-            cargo test --test e2e_chrome -- --ignored --nocapture
+            cargo test --test e2e_chrome --locked -- --ignored --nocapture
             & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
             node tests/e2e/assert_chrome_cookie.mjs
             & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `

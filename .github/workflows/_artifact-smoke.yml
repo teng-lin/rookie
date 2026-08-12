@@ -75,7 +75,7 @@ jobs:
           if [[ -n "$CLI_FEATURES" ]]; then
             read -r -a feature_args <<< "$CLI_FEATURES"
           fi
-          cargo build --release --target "$RUST_TARGET" \
+          cargo build --release --target "$RUST_TARGET" --locked \
             --package rookie-cookies-cli --bin rookie-cookies "${feature_args[@]}"
       - name: Build Python wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
@@ -102,21 +102,24 @@ jobs:
         working-directory: bindings/node
         run: |
           mkdir -p .cargo-cache/git/db .cargo-cache/registry/cache .cargo-cache/registry/index
+          # Mount the whole workspace root (not just rookie-rs/ + bindings/node/) so
+          # cargo can see the workspace Cargo.toml, the committed Cargo.lock, and
+          # every workspace member (cli/, bindings/python/) it needs to parse to
+          # resolve the graph — `--locked` requires all of this to be visible.
           docker run --rm --user 0:0 \
             -e ROOKIE_RUST_TARGET="$RUST_TARGET" \
-            -v "$GITHUB_WORKSPACE/rookie-rs:/rookie-rs" \
+            -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/git/db:/usr/local/cargo/git/db" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/cache:/usr/local/cargo/registry/cache" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/index:/usr/local/cargo/registry/index" \
-            -v "$GITHUB_WORKSPACE/bindings/node:/build" \
-            -w /build \
+            -w /workspace/bindings/node \
             ghcr.io/napi-rs/napi-rs/nodejs-rust@sha256:6f910fc8a723a1eeab2483d2302e8c1fabe36e54c51eb0da27fafd5c3083e08c \
             sh -lc '
               export RUSTUP_HOME=/tmp/rookie-rustup
               export RUSTUP_TOOLCHAIN=stable
               rustup set auto-self-update disable
               rustup toolchain install stable --profile minimal
-              npm run build -- --target "$ROOKIE_RUST_TARGET"
+              npm run build -- --target "$ROOKIE_RUST_TARGET" -- --locked
             '
       - name: Assemble release-shaped packages and provenance
         run: python tests/artifact_smoke/package_release_artifacts.py --target "${{ inputs.rust-target }}" --npm-platform "${{ inputs.npm-platform }}" --source-sha "${{ github.sha }}"

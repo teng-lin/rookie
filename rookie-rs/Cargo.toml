@@ -4,7 +4,6 @@ include = [
     "build.rs",
     "src/**/*",
     "Cargo.toml",
-    "Cargo.lock",
     "../MIT-LICENSE.txt",
     "../README.md",
     "examples/**/*",

@@ -44,9 +44,9 @@ jobs:
           python scripts/check-release.py "$RELEASE_VERSION"
 
       - name: Verify crate package
-        run: cargo publish --dry-run -p rookie-cookies --features appbound
+        run: cargo publish --dry-run --locked -p rookie-cookies --features appbound
 
       - name: Publish crate
-        run: cargo publish -p rookie-cookies --features appbound
+        run: cargo publish --locked -p rookie-cookies --features appbound
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
