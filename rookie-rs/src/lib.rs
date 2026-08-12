@@ -1199,9 +1199,12 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   use std::sync::atomic::{AtomicU64, Ordering};
+  #[cfg(unix)]
   use std::sync::{Mutex, MutexGuard};
 
+  #[cfg(unix)]
   static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
   /// RAII guard that restores `HOME` to its prior value when dropped.
@@ -1210,12 +1213,14 @@ mod tests {
   /// tests never observe an intermediate value for `HOME`. The temp
   /// directory is also removed in `Drop`, guaranteeing cleanup even when
   /// the test panics before reaching the end of the function.
+  #[cfg(unix)]
   struct HomeGuard<'a> {
     old_home: Option<std::ffi::OsString>,
     home_dir: std::path::PathBuf,
     _lock: MutexGuard<'a, ()>,
   }
 
+  #[cfg(unix)]
   impl<'a> HomeGuard<'a> {
     /// Create a new guard: acquires `lock`, sets `HOME` to `home_dir`,
     /// and arranges to restore the old value on drop.
@@ -1235,6 +1240,7 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   impl Drop for HomeGuard<'_> {
     fn drop(&mut self) {
       // Restore HOME before releasing the mutex lock.
@@ -1250,6 +1256,7 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   fn seed_test_cookies(db_path: &std::path::Path, cookie_name: &str, cookie_value: &str) {
     let conn = rusqlite::Connection::open(db_path).expect("open sqlite db");
     conn
