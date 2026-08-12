@@ -9,10 +9,14 @@ use rookie_cookies::config::{
   get_browser_config, try_get_browser_config, Browser, BrowsersMap, Config, CONFIG,
 };
 use rookie_cookies::enums::{Cookie, CookieToString, SAME_SITE_UNSPECIFIED};
+use rookie_cookies::report::{
+  BrowserDescriptor, ExtractionReport, IssueCode, ProfileDescriptor, ReportStatusCode,
+};
 use rookie_cookies::MozillaProfile;
 use rookie_cookies::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 type BrowserFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 
@@ -145,6 +149,89 @@ fn public_function_signatures_remain_compatible() {
 
   #[cfg(target_os = "windows")]
   let _: ChromiumBasedFn = rookie_cookies::chromium_based;
+}
+
+#[test]
+fn generic_report_api_signatures_are_the_section_5_8_surface() {
+  type BrowserReportFn = fn(&str, Option<&str>, Option<Vec<String>>) -> Result<ExtractionReport>;
+
+  let _: fn() -> Result<Vec<BrowserDescriptor>> = rookie_cookies::supported_browsers;
+  let _: fn(&str) -> Result<Vec<ProfileDescriptor>> = rookie_cookies::browser_profiles;
+  let _: BrowserReportFn = rookie_cookies::browser_report;
+  let _: fn(Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::load_report;
+}
+
+#[test]
+fn report_identifiers_are_open_string_newtypes() {
+  // A code this build has never emitted still round-trips, so a downstream
+  // match on a future engine's diagnostics keeps compiling and parsing.
+  let code = IssueCode::from_str("future_engine_issue").expect("open vocabulary");
+  assert_eq!(code.as_str(), "future_engine_issue");
+  assert_eq!(code.to_string(), "future_engine_issue");
+  assert_eq!(AsRef::<str>::as_ref(&code), "future_engine_issue");
+  assert_eq!(
+    serde_json::from_value::<IssueCode>(serde_json::json!("future_engine_issue"))
+      .expect("deserialize"),
+    code
+  );
+  assert_eq!(
+    serde_json::to_value(&code).expect("serialize"),
+    serde_json::json!("future_engine_issue")
+  );
+
+  for invalid in ["", "Uppercase", "1leading", "has-dash", "has space"] {
+    assert!(
+      IssueCode::from_str(invalid).is_err(),
+      "{invalid:?} must be rejected"
+    );
+  }
+
+  assert_eq!(ReportStatusCode::complete().as_str(), "complete");
+  assert_eq!(ReportStatusCode::partial().as_str(), "partial");
+  assert_eq!(ReportStatusCode::failed().as_str(), "failed");
+  assert_eq!(ReportStatusCode::no_sources().as_str(), "no_sources");
+}
+
+#[test]
+fn supported_browsers_describes_registration_without_touching_the_filesystem() {
+  let browsers = rookie_cookies::supported_browsers().expect("registered browsers");
+  assert!(
+    !browsers.is_empty(),
+    "every supported OS registers at least one browser"
+  );
+
+  let mut names = HashSet::new();
+  for browser in &browsers {
+    assert!(
+      names.insert(browser.id.to_string()),
+      "duplicate canonical id"
+    );
+    assert!(!browser.display_name.is_empty());
+    assert!(!browser.engine.as_str().is_empty());
+    for alias in &browser.aliases {
+      assert!(names.insert(alias.clone()), "alias collides with an id");
+    }
+    // A declared tier is a capability claim; only a provider compiled into
+    // this build makes it available.
+    let declared = browser
+      .capabilities
+      .declared_decryption_tiers
+      .iter()
+      .collect::<HashSet<_>>();
+    for tier in &browser.capabilities.available_decryption_tiers {
+      assert!(
+        declared.contains(tier),
+        "{} advertises undeclared tier {tier}",
+        browser.id
+      );
+    }
+    assert!(!browser.capabilities.persistent_formats.is_empty());
+    let _ = &browser.capabilities.session_formats;
+  }
+
+  assert!(browsers
+    .iter()
+    .any(|browser| browser.id.as_str() == "chrome"));
 }
 
 #[test]
