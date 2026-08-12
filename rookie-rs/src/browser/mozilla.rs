@@ -164,11 +164,18 @@ enum SessionStoreFormat {
   LegacyJson,
 }
 
+/// Source-format identifiers this engine can emit. They are declared once here
+/// and asserted against the registry's declared capabilities, so an emitted
+/// format can never drift away from what a browser definition claims.
+pub(crate) const PERSISTENT_FORMAT_ID: &str = "mozilla_sqlite";
+pub(crate) const SESSION_JSONLZ4_FORMAT_ID: &str = "firefox_session_jsonlz4";
+pub(crate) const SESSION_JSON_FORMAT_ID: &str = "firefox_session_json";
+
 impl SessionStoreFormat {
   fn format_id(self) -> &'static str {
     match self {
-      Self::JsonLz4 => "firefox_session_jsonlz4",
-      Self::LegacyJson => "firefox_session_json",
+      Self::JsonLz4 => SESSION_JSONLZ4_FORMAT_ID,
+      Self::LegacyJson => SESSION_JSON_FORMAT_ID,
     }
   }
 }
@@ -187,6 +194,16 @@ struct SessionCookieParseOutcome {
 #[derive(Debug)]
 struct SessionCandidateSuccess {
   parsed: SessionCookieParseOutcome,
+  attempts: u32,
+  transient_errors: Vec<String>,
+}
+
+/// Failure counterpart of [`SessionCandidateSuccess`]. Retry diagnostics are
+/// carried on both paths so a candidate that never succeeded still reports why
+/// each attempt failed.
+#[derive(Debug)]
+struct SessionCandidateFailure {
+  error: anyhow::Error,
   attempts: u32,
   transient_errors: Vec<String>,
 }
@@ -213,7 +230,12 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   pub(crate) persistent_rows_skipped: usize,
   pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
   pub(crate) persistent_acquisition_attempts: u32,
+  /// Set only when the persistent source could not be read at all. A source
+  /// that produced rows is never reported through this field, so a caller can
+  /// distinguish total failure from partial success.
   pub(crate) persistent_error: Option<String>,
+  /// Set when individual rows failed while the source itself was readable.
+  pub(crate) persistent_row_error: Option<String>,
   pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
 }
 
@@ -234,7 +256,7 @@ pub(crate) fn query_cookies_engine_outcome(
       let persistent = database.into_value();
       outcome.persistent_rows_seen = persistent.rows_seen;
       outcome.persistent_rows_skipped = persistent.rows_skipped;
-      outcome.persistent_error = persistent.last_row_error.map(|error| format!("{error:#}"));
+      outcome.persistent_row_error = persistent.last_row_error.map(|error| format!("{error:#}"));
       outcome.persistent_cookies = persistent.cookies;
     }
     Err(error) => {
@@ -267,17 +289,17 @@ pub(crate) fn query_cookies_engine_outcome(
         });
         break;
       }
-      Err(error) if is_missing_session_file(&error) => {}
-      Err(error) => outcome.session_sources.push(MozillaSessionSourceOutcome {
+      Err(failure) if is_missing_session_file(&failure.error) => {}
+      Err(failure) => outcome.session_sources.push(MozillaSessionSourceOutcome {
         path,
         format: format.format_id(),
         selected: false,
         cookies: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
-        acquisition_attempts: SESSION_STORE_READ_ATTEMPTS as u32,
-        diagnostics: Vec::new(),
-        error: Some(format!("{error:#}")),
+        acquisition_attempts: failure.attempts,
+        diagnostics: failure.transient_errors,
+        error: Some(format!("{:#}", failure.error)),
       }),
     }
   }
@@ -316,8 +338,12 @@ fn get_authoritative_session_cookies(
   for (path, format) in session_candidates(cookies_dir) {
     match parse_session_candidate(&path, &format, domains.as_deref()) {
       Ok(success) => return success.parsed.cookies,
-      Err(error) if is_missing_session_file(&error) => continue,
-      Err(error) => log::warn!("Failed to parse Firefox session store {:?}: {error}", path),
+      Err(failure) if is_missing_session_file(&failure.error) => continue,
+      Err(failure) => log::warn!(
+        "Failed to parse Firefox session store {:?}: {}",
+        path,
+        failure.error
+      ),
     }
   }
 
@@ -328,33 +354,47 @@ fn parse_session_candidate(
   path: &Path,
   format: &SessionStoreFormat,
   domains: Option<&[String]>,
-) -> Result<SessionCandidateSuccess> {
-  parse_session_candidate_with(|| match format {
+) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure> {
+  parse_session_candidate_with(path, || match format {
     SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(path, domains),
     SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(path, domains),
   })
 }
 
-fn parse_session_candidate_with<F>(mut parse: F) -> Result<SessionCandidateSuccess>
+fn parse_session_candidate_with<F>(
+  path: &Path,
+  mut parse: F,
+) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure>
 where
   F: FnMut() -> Result<SessionCookieParseOutcome>,
 {
   let mut last_error = None;
+  let mut attempts = 0;
   let mut transient_errors = Vec::new();
   for attempt in 1..=SESSION_STORE_READ_ATTEMPTS {
+    attempts = attempt as u32;
     match parse() {
       Ok(parsed) => {
         return Ok(SessionCandidateSuccess {
           parsed,
-          attempts: attempt as u32,
+          attempts,
           transient_errors,
         })
       }
-      Err(error) if is_missing_session_file(&error) => return Err(error),
+      Err(error) if is_missing_session_file(&error) => {
+        return Err(SessionCandidateFailure {
+          error,
+          attempts,
+          transient_errors,
+        })
+      }
       Err(error) => {
         let diagnostic = format!("session acquisition/parse attempt {attempt} failed: {error:#}");
         if attempt < SESSION_STORE_READ_ATTEMPTS {
-          log::debug!("Retrying Firefox session store after {diagnostic}");
+          log::debug!(
+            "Retrying Firefox session store {} after {diagnostic}",
+            path.display()
+          );
           transient_errors.push(diagnostic);
         }
         last_error = Some(error);
@@ -362,7 +402,11 @@ where
     }
   }
 
-  Err(last_error.expect("session store parser always attempts at least once"))
+  Err(SessionCandidateFailure {
+    error: last_error.expect("session store parser always attempts at least once"),
+    attempts,
+    transient_errors,
+  })
 }
 
 fn is_missing_session_file(error: &anyhow::Error) -> bool {
@@ -711,9 +755,30 @@ fn resolve_default_path(profiles: &[ProfileSection], installs: &[String]) -> Opt
 /// callers read cookies from a profile the browser does not open by default.
 pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>> {
   let conf = load_profiles_ini(profiles_path)?;
+  Ok(profiles_from_ini(&conf, profiles_path))
+}
+
+/// [`list_profiles`] for callers that already hold the file's contents, so
+/// discovery can route the read through its injected filesystem seam instead of
+/// reaching for the real one.
+pub(crate) fn list_profiles_from_str(
+  contents: &str,
+  profiles_path: &Path,
+) -> Result<Vec<MozillaProfile>> {
+  let conf = Ini::load_from_str_opt(
+    contents,
+    ParseOption {
+      enabled_escape: false,
+      ..Default::default()
+    },
+  )?;
+  Ok(profiles_from_ini(&conf, profiles_path))
+}
+
+fn profiles_from_ini(conf: &Ini, profiles_path: &Path) -> Vec<MozillaProfile> {
   let base = profiles_path.parent().unwrap_or_else(|| Path::new(""));
-  let sections = profile_sections(&conf);
-  let installs = install_defaults(&conf);
+  let sections = profile_sections(conf);
+  let installs = install_defaults(conf);
   let default_path = resolve_default_path(&sections, &installs);
 
   // Exactly one entry carries the flag: two sections may declare the same
@@ -752,7 +817,7 @@ pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>>
     });
   }
 
-  Ok(profiles)
+  profiles
 }
 
 fn is_known_section(sections: &[ProfileSection], candidate: &str) -> bool {
@@ -928,7 +993,23 @@ mod tests {
       Some(sqlite::DatabaseAcquisitionStrategy::LiveReadOnly)
     );
     assert_eq!(outcome.persistent_acquisition_attempts, 1);
+    // A rejected row is a partial success: the source itself was readable, so
+    // only the row-level field is set.
+    assert!(outcome.persistent_row_error.is_some());
+    assert!(outcome.persistent_error.is_none());
+  }
+
+  #[test]
+  fn engine_outcome_separates_total_failure_from_a_rejected_row() {
+    let dir = unique_tmpdir("ff-engine-total-failure");
+    let db = dir.join("cookies.sqlite");
+    std::fs::create_dir_all(&dir).expect("create profile dir");
+    std::fs::write(&db, b"not a sqlite database").expect("write unreadable db");
+
+    let outcome = query_cookies_engine_outcome(&db, None);
     assert!(outcome.persistent_error.is_some());
+    assert!(outcome.persistent_row_error.is_none());
+    assert!(outcome.persistent_cookies.is_empty());
   }
 
   #[test]
@@ -1005,9 +1086,59 @@ mod tests {
   }
 
   #[test]
+  fn legacy_json_row_diagnostics_are_bounded_like_the_lz4_path() {
+    let dir = unique_tmpdir("ff-engine-legacy-diagnostic-bound");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let malformed = (0..MAX_SESSION_COOKIE_DIAGNOSTICS + 3)
+      .map(|index| format!(r#"{{"host":".example.com","name":"bad-{index}"}}"#))
+      .collect::<Vec<_>>()
+      .join(",");
+    std::fs::write(
+      dir.join("sessionstore.js"),
+      format!(r#"{{"windows":[{{"cookies":[{malformed}]}}]}}"#),
+    )
+    .expect("write legacy session store");
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    let source = &outcome.session_sources[0];
+    assert_eq!(source.format, SESSION_JSON_FORMAT_ID);
+    assert_eq!(source.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
+    assert_eq!(source.rows_skipped, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
+    assert!(source.cookies.is_empty());
+    assert_eq!(source.diagnostics.len(), MAX_SESSION_COOKIE_DIAGNOSTICS);
+  }
+
+  #[test]
+  fn failed_session_candidate_retains_its_retry_diagnostics() {
+    let dir = unique_tmpdir("ff-engine-failed-retry-diagnostics");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    std::fs::create_dir_all(dir.join("sessionstore-backups")).expect("create session dir");
+    std::fs::write(
+      dir.join("sessionstore-backups/recovery.jsonlz4"),
+      b"not a valid lz4 session store",
+    )
+    .expect("write invalid session candidate");
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    let source = &outcome.session_sources[0];
+    assert!(!source.selected);
+    assert!(source.error.is_some());
+    assert_eq!(
+      source.acquisition_attempts,
+      SESSION_STORE_READ_ATTEMPTS as u32
+    );
+    // Every attempt before the last one is retained; the final failure is the
+    // source error rather than a duplicate diagnostic.
+    assert_eq!(source.diagnostics.len(), SESSION_STORE_READ_ATTEMPTS - 1);
+    assert!(source.diagnostics[0].contains("attempt 1"));
+  }
+
+  #[test]
   fn successful_session_retry_retains_attempt_and_transient_diagnostic() {
     let mut attempts = 0;
-    let success = parse_session_candidate_with(|| {
+    let success = parse_session_candidate_with(Path::new("recovery.jsonlz4"), || {
       attempts += 1;
       if attempts == 1 {
         bail!("Firefox session store changed while it was being read")
