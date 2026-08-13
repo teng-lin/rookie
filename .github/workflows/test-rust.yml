@@ -30,8 +30,8 @@ jobs:
         run: |
           version=$(python -c 'import tomllib; print(tomllib.load(open("rookie-rs/Cargo.toml", "rb"))["package"]["version"])')
           python scripts/check-release.py "$version"
-      - name: Test portable CLI assertion helper
-        run: python -m unittest tests/e2e/test_assert_cli_cookie.py -v
+      - name: Test E2E Python helpers
+        run: python -m unittest discover -s tests/e2e -p 'test_*.py' -v
 
   lint-and-test:
     # Clippy and the test suite share a checkout, toolchain and cache, so they
