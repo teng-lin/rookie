@@ -1583,6 +1583,53 @@ mod engine_chain_tests {
     assert_eq!(report.profiles[0].profile.browser_id.as_str(), "safari");
   }
 
+  /// `~/Library` belongs to macOS, not to Safari. Another browser's data under
+  /// it must not make Safari report itself detected and then degraded.
+  #[test]
+  fn a_library_without_safari_data_is_not_a_safari_installation() {
+    use crate::browser::registry::PlatformId;
+
+    let temp = TempDir::new("safari-absent");
+    let context = test_seams::context(PlatformId::Macos, temp.path().to_path_buf());
+    let library = test_seams::primary_root_path(&context, "safari");
+    std::fs::create_dir_all(library.join("Application Support/Firefox/Profiles/other"))
+      .expect("create an unrelated browser tree under the library root");
+
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+    let browser = BrowserId::known("safari");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.summary.browsers_detected, 0);
+    assert_eq!(report.summary.installations_discovered, 0);
+    assert_eq!(report.status, ReportStatusCode::no_sources());
+  }
+
+  /// The detection gate must still admit the pre-sandbox layout, whose cookie
+  /// jar sits beside the Safari container rather than inside it.
+  #[test]
+  fn a_pre_sandbox_cookie_jar_is_still_a_safari_installation() {
+    use crate::browser::registry::PlatformId;
+
+    let temp = TempDir::new("safari-legacy");
+    let context = test_seams::context(PlatformId::Macos, temp.path().to_path_buf());
+    let cookies = test_seams::primary_root_path(&context, "safari").join("Cookies");
+    std::fs::create_dir_all(&cookies).expect("create the pre-sandbox cookie directory");
+    std::fs::write(
+      cookies.join("Cookies.binarycookies"),
+      b"cook\x00\x00\x00\x00",
+    )
+    .expect("seed Safari cookie file");
+
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+    let browser = BrowserId::known("safari");
+    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let report = assemble(1, vec![outcome]);
+
+    assert_eq!(report.summary.installations_discovered, 1);
+    assert_eq!(report.summary.profiles_discovered, 1);
+  }
+
   #[test]
   fn a_real_internet_explorer_profile_reaches_the_frozen_report() {
     use crate::browser::registry::{InternetExplorerRows, PlatformId};

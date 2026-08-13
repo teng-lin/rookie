@@ -2252,6 +2252,34 @@ fn engine_roots<'a>(
 #[cfg(any(target_os = "macos", test))]
 const SAFARI_COOKIE_FILE: &str = "Cookies.binarycookies";
 
+/// Safari's registry root is `{home}/Library`, which every macOS account owns
+/// whether or not Safari is installed, so the root alone proves nothing. Every
+/// location profile discovery reads descends from one of these two Safari-owned
+/// paths: the sandbox container for modern versions, the bare cookie jar for
+/// pre-sandbox ones.
+#[cfg(any(target_os = "macos", test))]
+const SAFARI_INSTALLATION_MARKERS: [&str; 2] = [
+  "Containers/com.apple.Safari",
+  "Cookies/Cookies.binarycookies",
+];
+
+/// Only provable absence of every marker rejects the root. A marker that
+/// cannot be inspected -- the usual shape of a Full Disk Access denial -- keeps
+/// Safari detected so the report explains the denial instead of claiming
+/// Safari is not installed.
+#[cfg(any(target_os = "macos", test))]
+fn has_safari_installation_marker<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  library: &Path,
+) -> bool {
+  SAFARI_INSTALLATION_MARKERS.iter().any(|marker| {
+    !matches!(
+      context.fs.metadata(&library.join(marker)),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+  })
+}
+
 /// Crate-private generic Safari seam. Named profiles come from PR #137's
 /// database-first discovery; this adapter only reshapes them, so legacy
 /// `safari()` first-match selection is untouched.
@@ -2282,7 +2310,7 @@ fn discover_safari_with_context<F: DiscoveryFs>(
     };
     // Non-Chromium registry templates never glob, so the suffix is literal.
     let root_path = resolved_root.base.join(resolved_root.suffix);
-    if !context.fs.is_dir(&root_path) {
+    if !context.fs.is_dir(&root_path) || !has_safari_installation_marker(context, &root_path) {
       continue;
     }
     let Some(canonical_root) =

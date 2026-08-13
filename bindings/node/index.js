@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
+const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -382,6 +382,10 @@ module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
 module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
 module.exports.firefoxProfile = asyncNative(firefoxProfile, 'firefoxProfile')
 module.exports.firefoxBased = asyncNative(firefoxBased, 'firefoxBased')
+module.exports.supportedBrowsers = asyncNative(supportedBrowsers, 'supportedBrowsers')
+module.exports.browserProfiles = asyncNative(browserProfiles, 'browserProfiles')
+module.exports.browserReport = asyncNative(browserReport, 'browserReport')
+module.exports.loadReport = asyncNative(loadReport, 'loadReport')
 
 if (testWorkerPanic) {
   module.exports.__testWorkerPanic = asyncNative(testWorkerPanic, 'testWorkerPanic')

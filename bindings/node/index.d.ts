@@ -22,6 +22,149 @@ export interface FirefoxProfileObject {
   path: string
   isDefault: boolean
 }
+/** What a registered browser claims it can do on this platform. */
+export interface BrowserCapabilitiesObject {
+  persistentFormats: Array<string>
+  sessionFormats: Array<string>
+  declaredDecryptionTiers: Array<string>
+  /**
+   * The declared tiers narrowed to the key providers this build actually
+   * compiled and enabled.
+   */
+  availableDecryptionTiers: Array<string>
+}
+/** A browser registered for the running OS. Registration is not detection. */
+export interface BrowserDescriptorObject {
+  id: string
+  aliases: Array<string>
+  displayName: string
+  engine: string
+  capabilities: BrowserCapabilitiesObject
+}
+/**
+ * Stable identity of one discovered profile.
+ *
+ * `profileId` is the selection key; `path` is a display value that may be
+ * lossy on a non-UTF-8 filesystem, which `pathLossy` reports.
+ */
+export interface ProfileIdentityObject {
+  browserId: string
+  installationId: string
+  profileId: string
+  displayName: string
+  path: string
+  pathLossy: boolean
+}
+/** A cookie source a profile exposes, before any extraction is attempted. */
+export interface CookieSourceDescriptorObject {
+  role: string
+  format: string
+  path: string
+  pathLossy: boolean
+  /** Widened from the Rust `u16` so it arrives as an ordinary number. */
+  precedence: number
+}
+/** Identity of the source an extraction attempted. */
+export interface CookieSourceIdentityObject {
+  role: string
+  format: string
+  path: string
+  pathLossy: boolean
+  /** Widened from the Rust `u16` so it arrives as an ordinary number. */
+  precedence: number
+}
+/** One discovered profile and its cookie sources. */
+export interface ProfileDescriptorObject {
+  profile: ProfileIdentityObject
+  isDefault: boolean
+  sources: Array<CookieSourceDescriptorObject>
+}
+/**
+ * Row accounting for one source or profile.
+ *
+ * A count that exceeded `u32` is clamped and sets `countersSaturated`.
+ */
+export interface ExtractionStatsObject {
+  rowsSeen: number
+  cookiesEmitted: number
+  rowsSkipped: number
+  acquisitionAttempts: number
+  countersSaturated: boolean
+}
+/** Request-wide totals, including browsers that were registered but absent. */
+export interface ReportStatsObject {
+  registeredBrowsers: number
+  browsersDetected: number
+  browsersNotDetected: number
+  installationsDiscovered: number
+  profilesDiscovered: number
+  sourcesSucceeded: number
+  sourcesFailed: number
+  rowsSeen: number
+  cookiesEmitted: number
+  rowsSkipped: number
+  countersSaturated: boolean
+}
+/**
+ * A diagnostic attached to the request, a profile, or a source.
+ *
+ * Repeated row-level problems are aggregated by code and stage: `occurrences`
+ * counts them all while `samples` keeps a bounded excerpt.
+ *
+ * `use_nullable` keeps the optional context fields present and `null` rather
+ * than absent, so an unset one reads the same here as the `None` Python emits
+ * and the `null` the CLI's serde output emits. napi's default would omit the
+ * key entirely and make Node the only surface where it disappears.
+ * [`CookieObject`] deliberately keeps the default: its shape predates the
+ * report DTOs and is frozen by the compatibility contract.
+ */
+export interface ExtractionIssueObject {
+  code: string
+  stage: string
+  severity: string
+  occurrences: number
+  samples: Array<string>
+  browserId: string | null
+  installationId: string | null
+  profileId: string | null
+  message: string
+}
+/**
+ * One attempted cookie source and the cookies it produced.
+ *
+ * A profile-wide cookie stream is the concatenation of its `selected` sources
+ * whose `status` is `succeeded`, in the order they appear. Both halves matter:
+ * a source that was attempted and rejected in favour of another candidate can
+ * still report `succeeded`.
+ */
+export interface SourceExtractionObject {
+  source: CookieSourceIdentityObject
+  status: string
+  selected: boolean
+  acquisitionStrategy: string
+  cookies: Array<CookieObject>
+  stats: ExtractionStatsObject
+  issues: Array<ExtractionIssueObject>
+}
+/** One profile's sources, totals, and profile-scoped diagnostics. */
+export interface ProfileExtractionObject {
+  profile: ProfileIdentityObject
+  sources: Array<SourceExtractionObject>
+  stats: ExtractionStatsObject
+  issues: Array<ExtractionIssueObject>
+}
+/**
+ * A grouped extraction result.
+ *
+ * `issues` holds only request-wide, registry, discovery, and installation
+ * problems; anything narrower is attached to its profile or source.
+ */
+export interface ExtractionReportObject {
+  status: string
+  summary: ReportStatsObject
+  profiles: Array<ProfileExtractionObject>
+  issues: Array<ExtractionIssueObject>
+}
 export declare function version(): string
 /**
  * Serialize cookies in Netscape cookie-file format.
@@ -46,6 +189,36 @@ export declare function load(domains?: Array<string> | undefined | null): Promis
 export declare function firefoxProfiles(): Promise<Array<FirefoxProfileObject>>
 export declare function firefoxProfile(profile: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/**
+ * Lists the browsers registered for the running OS.
+ *
+ * Registration is not detection: a listed browser need not be installed.
+ */
+export declare function supportedBrowsers(): Promise<Array<BrowserDescriptorObject>>
+/**
+ * Lists the discovered profiles of one registered browser.
+ *
+ * Rejects on an unknown `browserId`, or when every detected installation root
+ * failed enumeration. A known browser with nothing installed resolves to an
+ * empty array.
+ */
+export declare function browserProfiles(browserId: string): Promise<Array<ProfileDescriptorObject>>
+/**
+ * Extracts cookies from one browser as a grouped report.
+ *
+ * Only a bad request rejects: an unknown `browserId`, or a `profileId` this
+ * browser did not yield. Extraction problems resolve as a report whose
+ * `status` and `issues` describe them.
+ */
+export declare function browserReport(browserId: string, profileId?: string | undefined | null, domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
+/**
+ * Extracts cookies from every registered browser as one grouped report.
+ *
+ * This is the report-shaped counterpart to `load`, not a replacement: `load`
+ * keeps its historical browser set and flat output. A browser that fails does
+ * not abort the others; it becomes an issue on the returned report.
+ */
+export declare function loadReport(domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
 /** rookie-cookies cross-platform facade */
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

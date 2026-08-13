@@ -399,75 +399,16 @@ fn help_and_version_are_successful_stdout_contracts() {
     );
   }
 
-  #[cfg(target_os = "linux")]
-  let expected_browsers = [
-    "arc",
-    "brave",
-    "cachy",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "librewolf",
-    "opera",
-    "\"opera gx\"",
-    "vivaldi",
-    "zen",
-  ];
-  #[cfg(target_os = "macos")]
-  let expected_browsers = [
-    "arc",
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "librewolf",
-    "opera",
-    "\"opera gx\"",
-    "safari",
-    "vivaldi",
-    "zen",
-  ];
-  #[cfg(target_os = "windows")]
-  let expected_browsers = [
-    "arc",
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "internet_explorer",
-    "librewolf",
-    "opera",
-    "\"opera gx\"",
-    "vivaldi",
-    "zen",
-  ];
-  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-  let expected_browsers = [
-    "arc",
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "librewolf",
-    "opera",
-    "\"opera gx\"",
-    "vivaldi",
-    "zen",
-  ];
+  // `--browser` accepts registered IDs in report/list mode, so its accepted set
+  // is no longer a closed clap value list. The deterministic legacy set is
+  // pinned on the invalid-value diagnostic in `generic_modes.rs` instead.
   let browser_help = help_stdout
     .lines()
     .find(|line| line.contains("--browser"))
     .expect("browser help line");
   assert!(
-    browser_help.contains(&format!(
-      "[possible values: {}]",
-      expected_browsers.join(", ")
-    )),
-    "browser values are not in deterministic order: {browser_help}"
+    browser_help.contains("--list-browsers"),
+    "browser help must point at the registered IDs: {browser_help}"
   );
 
   let version = run_rookie(&["--version"]);
