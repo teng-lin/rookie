@@ -3,9 +3,11 @@
 //
 // Env vars:
 //   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
+//   ROOKIE_E2E_COOKIE_DB      optional — explicit DB override for chromiumBased
 //   ROOKIE_E2E_DOMAIN         optional — domain filter (default: 127.0.0.1)
 //   ROOKIE_E2E_COOKIE_NAME    optional — expected name (default: rookie_ci)
 //   ROOKIE_E2E_COOKIE_VALUE   optional — expected value (default: bar)
+//   ROOKIE_E2E_DISCOVERY_*    optional — separate name/value for chrome discovery
 //
 // Requires `npm run build` to have produced the
 // platform-specific .node binary alongside bindings/node/index.js.
@@ -25,18 +27,20 @@ const domain = process.env.ROOKIE_E2E_DOMAIN ?? "127.0.0.1";
 const expectedName = process.env.ROOKIE_E2E_COOKIE_NAME ?? "rookie_ci";
 const expectedValue = process.env.ROOKIE_E2E_COOKIE_VALUE ?? "bar";
 
-const defaultDir = join(userDataDir, "Default");
-let dbPath;
-for (const rel of ["Network/Cookies", "Cookies"]) {
-  const p = join(defaultDir, rel);
-  if (existsSync(p)) {
-    dbPath = p;
-    break;
-  }
-}
+let dbPath = process.env.ROOKIE_E2E_COOKIE_DB;
 if (!dbPath) {
-  console.error(`no cookie db under ${defaultDir}`);
-  process.exit(1);
+  const defaultDir = join(userDataDir, "Default");
+  for (const rel of ["Network/Cookies", "Cookies"]) {
+    const p = join(defaultDir, rel);
+    if (existsSync(p)) {
+      dbPath = p;
+      break;
+    }
+  }
+  if (!dbPath) {
+    console.error(`no cookie db under ${defaultDir}`);
+    process.exit(1);
+  }
 }
 
 let cookies;
@@ -49,22 +53,27 @@ if (process.platform === "win32") {
   cookies = await rookieCookies.chromiumBased(dbPath, [domain]);
 }
 
-const results = [["chromiumBased", cookies]];
+const results = [["chromiumBased", cookies, expectedName, expectedValue]];
 if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
-  results.push(["chrome", await rookieCookies.chrome([domain])]);
+  results.push([
+    "chrome",
+    await rookieCookies.chrome([domain]),
+    process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
+    process.env.ROOKIE_E2E_DISCOVERY_COOKIE_VALUE ?? expectedValue,
+  ]);
 }
 
-for (const [surface, result] of results) {
-  const seeded = result.find((c) => c.name === expectedName);
+for (const [surface, result, surfaceName, surfaceValue] of results) {
+  const seeded = result.find((c) => c.name === surfaceName);
   if (!seeded) {
     console.error(
-      `${surface}: seeded cookie '${expectedName}' not found among ${result.length} cookies for ${domain}`,
+      `${surface}: seeded cookie '${surfaceName}' not found among ${result.length} cookies for ${domain}`,
     );
     process.exit(1);
   }
-  if (seeded.value !== expectedValue) {
+  if (seeded.value !== surfaceValue) {
     console.error(
-      `${surface}: cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
+      `${surface}: cookie value mismatch: expected '${surfaceValue}', got '${seeded.value}'`,
     );
     process.exit(1);
   }
