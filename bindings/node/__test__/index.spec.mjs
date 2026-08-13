@@ -753,10 +753,13 @@ Path=Profiles/work
     t.deepEqual(observed.sourceIssueKeys, issueKeys);
     t.is(observed.sourceIssue.severity, "error");
     t.is(typeof observed.sourceIssue.occurrences, "number");
-    t.is(observed.sourceIssue.browserId, null, "an unset context field must be null, not absent");
+    // Every issue carries its browser since #154 attributed issue context, so
+    // this is a populated field rather than the null-vs-absent case. The
+    // request-scoped assertions below still cover unset context arriving as
+    // null rather than being dropped, which is the napi-specific risk.
+    t.is(observed.sourceIssue.browserId, "firefox");
 
-    // browserId is the rename most at risk and is only ever populated on a
-    // request-scoped issue, so it needs its own scenario.
+    // browserId is the rename most at risk, so it needs its own scenario.
     t.is(observed.absentStatus, "no_sources");
     t.truthy(observed.requestIssue, "an absent browser must report an issue");
     t.deepEqual(observed.requestIssueKeys, issueKeys);
