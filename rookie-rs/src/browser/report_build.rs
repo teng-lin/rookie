@@ -1595,7 +1595,7 @@ mod engine_chain_tests {
     std::fs::create_dir_all(library.join("Application Support/Firefox/Profiles/other"))
       .expect("create an unrelated browser tree under the library root");
 
-    let engine = test_seams::safari_report(&context, "safari", None).expect("safari report");
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let browser = BrowserId::known("safari");
     let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
@@ -1621,7 +1621,7 @@ mod engine_chain_tests {
     )
     .expect("seed Safari cookie file");
 
-    let engine = test_seams::safari_report(&context, "safari", None).expect("safari report");
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let browser = BrowserId::known("safari");
     let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
