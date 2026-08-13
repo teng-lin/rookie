@@ -826,6 +826,25 @@ fn profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path
   context.fs.exists(&path.join("Network/Cookies")) || context.fs.exists(&path.join("Cookies"))
 }
 
+// Tencent-derived forks (QQ Browser, Sogou Explorer) write their profile
+// settings to `Preferences_02` and never create a plain `Preferences`.
+const CHROMIUM_PROFILE_MARKER_FILES: [&str; 2] = ["Preferences", "Preferences_02"];
+
+// Names Chromium reserves next to real profiles in `profile_manager.cc`.
+// Neither holds a user cookie store.
+const CHROMIUM_NON_PROFILE_DIRECTORIES: [&str; 2] = ["System Profile", "Guest Profile"];
+
+fn has_profile_marker_file<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
+  CHROMIUM_PROFILE_MARKER_FILES.iter().any(|marker| {
+    let marker = path.join(marker);
+    context.fs.exists(&marker) && !context.fs.is_dir(&marker)
+  })
+}
+
+fn is_chromium_service_directory(name: &str) -> bool {
+  CHROMIUM_NON_PROFILE_DIRECTORIES.contains(&name)
+}
+
 fn discover_installation_profiles<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   installation: &mut BrowserInstallation,
@@ -856,7 +875,14 @@ fn discover_installation_profiles<F: DiscoveryFs>(
   let mut marker_names: BTreeSet<String> = local_state.display_names.keys().cloned().collect();
   marker_names.insert("Default".to_owned());
 
+  // A source-bearing installation root is itself a flat profile. Name markers
+  // are authoritative and keep their documented precedence over it, but a file
+  // marker is only a heuristic and must never promote a sibling directory into
+  // shadowing the real flat profile.
+  let root_has_source = profile_has_source(context, &installation.path);
+
   let mut marked = Vec::new();
+  let mut markerless_candidates = Vec::new();
   for child in &children {
     if !context.fs.is_dir(child) {
       continue;
@@ -866,32 +892,51 @@ fn discover_installation_profiles<F: DiscoveryFs>(
       .map(|name| name.to_string_lossy().into_owned())
       .unwrap_or_default();
     if marker_names.contains(&name) || name.starts_with("Profile ") {
-      marked.push(child.clone());
+      marked.push((child.clone(), true));
+      continue;
+    }
+    let has_source = profile_has_source(context, child);
+    if is_chromium_service_directory(&name) {
+      // Reserved names are never user profiles, but a directory that would
+      // otherwise have been treated as one must not vanish without a trace.
+      if has_source || has_profile_marker_file(context, child) {
+        issues.push(DiscoveryIssue::new(
+          "profile_excluded_service_directory",
+          child.clone(),
+          "reserved Chromium service directory is not treated as a profile",
+        ));
+      }
+      continue;
+    }
+    if !root_has_source && has_profile_marker_file(context, child) {
+      marked.push((child.clone(), false));
+    }
+    if has_source {
+      markerless_candidates.push(child.clone());
     }
   }
 
   let mut source_bearing_marked = Vec::new();
-  for profile_path in marked {
+  for (profile_path, name_marked) in marked {
     if profile_has_source(context, &profile_path) {
       source_bearing_marked.push(profile_path);
-    } else {
+    } else if name_marked {
+      // Only a declared profile is expected to carry a cookie source. A file
+      // marker is a heuristic, so a miss must not surface as report noise.
       issues.push(DiscoveryIssue::new(
         "profile_has_no_cookie_source",
         profile_path,
-        "profile marker has no Chromium cookie source".to_owned(),
+        "profile marker has no Chromium cookie source",
       ));
     }
   }
 
   let profile_paths = if !source_bearing_marked.is_empty() {
     source_bearing_marked
-  } else if profile_has_source(context, &installation.path) {
+  } else if root_has_source {
     vec![installation.path.clone()]
   } else {
-    children
-      .into_iter()
-      .filter(|child| context.fs.is_dir(child) && profile_has_source(context, child))
-      .collect()
+    markerless_candidates
   };
 
   for profile_path in profile_paths {
@@ -4715,7 +4760,18 @@ mod tests {
           "vivaldi",
         ]
         .as_slice(),
-        ["coccoc", "duckduckgo"].as_slice(),
+        [
+          "browser_from_vought",
+          "coccoc",
+          "dc_browser",
+          "duckduckgo",
+          "qq_browser",
+          "sogou",
+          "speed_360",
+          "speed_360x",
+          "yandex",
+        ]
+        .as_slice(),
       ),
       (
         PlatformId::Macos,
@@ -6153,5 +6209,524 @@ mod tests {
       .issues
       .iter()
       .any(|issue| issue.code == "duplicate_profile"));
+  }
+
+  fn windows_context(home: PathBuf) -> DiscoveryContext<RealDiscoveryFs> {
+    let local_app_data = home.join("LocalAppData");
+    let roaming_app_data = home.join("AppData");
+    test_context_for(
+      PlatformId::Windows,
+      home,
+      [
+        ("LOCALAPPDATA", local_app_data),
+        ("APPDATA", roaming_app_data),
+      ],
+    )
+  }
+
+  fn profile_directory_names(profiles: &[ChromiumProfile]) -> Vec<&str> {
+    profiles
+      .iter()
+      .map(|profile| profile.directory_name.as_str())
+      .collect()
+  }
+
+  #[test]
+  fn windows_batch_browsers_declare_frozen_ids_aliases_and_roots() {
+    let registry = embedded_registry().expect("valid embedded registry");
+    let cases = [
+      (
+        "browser_from_vought",
+        "Browser from Vought",
+        ["vought"].as_slice(),
+        [
+          (
+            "browser-from-vought-roaming",
+            "{roaming_app_data}/Browser from Vought",
+          ),
+          (
+            "browser-from-vought-local",
+            "{local_app_data}/Browser from Vought",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "dc_browser",
+        "DC Browser",
+        ["dc"].as_slice(),
+        [
+          ("dc-browser-local", "{local_app_data}/DCBrowser/User Data"),
+          (
+            "dc-browser-roaming",
+            "{roaming_app_data}/DCBrowser/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "qq_browser",
+        "QQ Browser",
+        ["qq"].as_slice(),
+        [
+          (
+            "qq-browser-local",
+            "{local_app_data}/Tencent/QQBrowser/User Data",
+          ),
+          (
+            "qq-browser-roaming",
+            "{roaming_app_data}/Tencent/QQBrowser/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "sogou",
+        "Sogou Explorer",
+        [].as_slice(),
+        [
+          (
+            "sogou-local",
+            "{local_app_data}/Sogou/SogouExplorer/User Data",
+          ),
+          (
+            "sogou-roaming",
+            "{roaming_app_data}/Sogou/SogouExplorer/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "speed_360",
+        "360 Browser",
+        ["360"].as_slice(),
+        [
+          (
+            "speed-360-local",
+            "{local_app_data}/360chrome/Chrome/User Data",
+          ),
+          (
+            "speed-360-roaming",
+            "{roaming_app_data}/360chrome/Chrome/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "speed_360x",
+        "360X Browser",
+        ["360x"].as_slice(),
+        [
+          (
+            "speed-360x-local",
+            "{local_app_data}/360ChromeX/Chrome/User Data",
+          ),
+          (
+            "speed-360x-roaming",
+            "{roaming_app_data}/360ChromeX/Chrome/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+      (
+        "yandex",
+        "Yandex Browser",
+        [].as_slice(),
+        [
+          (
+            "yandex-local",
+            "{local_app_data}/Yandex/YandexBrowser/User Data",
+          ),
+          (
+            "yandex-roaming",
+            "{roaming_app_data}/Yandex/YandexBrowser/User Data",
+          ),
+        ]
+        .as_slice(),
+      ),
+    ];
+
+    for (canonical_id, display_name, aliases, roots) in cases {
+      let definition = browser_definition(registry, PlatformId::Windows, canonical_id)
+        .expect("Windows batch definition");
+      assert_eq!(definition.canonical_id, canonical_id);
+      assert_eq!(definition.display_name, display_name);
+      assert_eq!(definition.engine, BrowserEngine::Chromium);
+      assert_eq!(
+        definition
+          .aliases
+          .iter()
+          .map(String::as_str)
+          .collect::<Vec<_>>(),
+        aliases
+      );
+      assert_eq!(
+        definition
+          .roots
+          .iter()
+          .map(|root| (root.root_id.as_str(), root.template.as_str()))
+          .collect::<Vec<_>>(),
+        roots
+      );
+      assert!(definition.roots.iter().all(
+        |root| root.channel == "stable" && root.discovery == DiscoveryStrategy::ChromiumUserData
+      ));
+      assert_eq!(
+        definition
+          .roots
+          .iter()
+          .map(|root| root.priority)
+          .collect::<Vec<_>>(),
+        [10u16, 20]
+      );
+      assert_eq!(
+        definition.capabilities.declared_persistent_formats,
+        ["chromium_sqlite"]
+      );
+      assert!(definition.capabilities.declared_session_formats.is_empty());
+      assert_eq!(
+        definition.capabilities.declared_decryption_tiers,
+        ["legacy_dpapi", "v10"]
+      );
+      for alias in aliases {
+        assert_eq!(
+          browser_definition(registry, PlatformId::Windows, alias)
+            .expect("alias resolves to the canonical definition")
+            .canonical_id,
+          canonical_id
+        );
+      }
+      // This batch is Windows-only, except that 6B separately registered
+      // Yandex on macOS. Everything else must stay absent from the other
+      // platforms rather than being registered without researched roots.
+      if canonical_id != "yandex" {
+        for platform in [PlatformId::Macos, PlatformId::Linux] {
+          assert!(
+            browser_definition(registry, platform, canonical_id).is_err(),
+            "{canonical_id} must stay Windows-only"
+          );
+        }
+      }
+      assert!(browser_definition(registry, PlatformId::Linux, canonical_id).is_err());
+    }
+  }
+
+  #[test]
+  fn windows_batch_standard_layouts_use_local_state_profile_metadata() {
+    let temp = TempDir::new("windows-batch-standard");
+    let context = windows_context(temp.path().join("home"));
+    for (browser_id, root_id) in [
+      ("yandex", "yandex-local"),
+      ("speed_360", "speed-360-local"),
+      ("speed_360x", "speed-360x-local"),
+      ("dc_browser", "dc-browser-local"),
+      // The Tencent-derived forks need the same Local State handling as the
+      // standard layouts, and are the likeliest to diverge.
+      ("qq_browser", "qq-browser-local"),
+      ("sogou", "sogou-local"),
+    ] {
+      let root = browser_root(&context, browser_id, root_id);
+      seed_cookie(&root.join("Default"), true, "personal", "one");
+      seed_cookie(&root.join("Profile 1"), false, "work", "two");
+      write_local_state(
+        &root,
+        serde_json::json!({
+          "profile": {
+            "last_used": "Profile 1",
+            "last_active_profiles": ["Profile 1"],
+            "info_cache": {
+              "Default": {"name": "Personal"},
+              "Profile 1": {"name": "Work"}
+            }
+          }
+        }),
+      );
+
+      let discovery = discover_browser_with_context(&context, browser_id).expect("discover");
+      assert_eq!(discovery.installations.len(), 1);
+      let installation = &discovery.installations[0];
+      assert_eq!(installation.root_id, root_id);
+      assert_eq!(
+        installation.local_state_path,
+        installation.path.join("Local State")
+      );
+      let profiles = discovery.profiles();
+      assert_eq!(
+        profile_directory_names(&profiles),
+        ["Default", "Profile 1"],
+        "{browser_id} profile order"
+      );
+      assert_eq!(profiles[0].display_name, "Personal");
+      assert!(profiles[0].is_default);
+      assert!(profiles[0].persistent_candidates[0].selected);
+      assert_eq!(profiles[1].display_name, "Work");
+      assert!(profiles[1].is_last_used);
+      assert_eq!(profiles[1].active_order, Some(0));
+      assert_eq!(profiles[1].persistent_candidates[1].precedence, 20);
+      assert!(profiles[1].persistent_candidates[1].selected);
+    }
+  }
+
+  #[test]
+  fn preferences_and_preferences_02_are_generic_chromium_profile_markers() {
+    let temp = TempDir::new("preferences-markers");
+    let context = windows_context(temp.path().join("home"));
+    for (browser_id, root_id, marker) in [
+      ("qq_browser", "qq-browser-local", "Preferences_02"),
+      ("sogou", "sogou-local", "Preferences_02"),
+      ("chrome", "chrome-stable-local", "Preferences"),
+    ] {
+      let root = browser_root(&context, browser_id, root_id);
+      seed_cookie(&root.join("Default"), true, "default", "one");
+      let vendor_profile = root.join("UserData 1");
+      seed_cookie(&vendor_profile, true, "vendor", "two");
+      std::fs::write(vendor_profile.join(marker), b"{}").expect("write profile marker");
+
+      let profiles = discover_browser_with_context(&context, browser_id)
+        .expect("discover marker variant")
+        .profiles();
+      assert_eq!(
+        profile_directory_names(&profiles),
+        ["Default", "UserData 1"],
+        "{browser_id} marked by {marker}"
+      );
+    }
+  }
+
+  #[test]
+  fn marker_files_do_not_promote_chromium_service_directories() {
+    let temp = TempDir::new("marker-skips");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(&context, "qq_browser", "qq-browser-local");
+    seed_cookie(&root.join("Default"), true, "default", "one");
+    for skipped in CHROMIUM_NON_PROFILE_DIRECTORIES {
+      let path = root.join(skipped);
+      seed_cookie(&path, true, "skipped", "value");
+      std::fs::write(path.join("Preferences_02"), b"{}").expect("write profile marker");
+    }
+
+    let discovery = discover_browser_with_context(&context, "qq_browser").expect("discover");
+    assert_eq!(profile_directory_names(&discovery.profiles()), ["Default"]);
+    // Excluding a directory is still a decision the report has to account for:
+    // a real profile that collides with a reserved name must not disappear
+    // without any signal that something was skipped.
+    let excluded = discovery
+      .issues
+      .iter()
+      .filter(|issue| issue.code == "profile_excluded_service_directory")
+      .map(|issue| {
+        issue
+          .path
+          .file_name()
+          .expect("excluded directory name")
+          .to_string_lossy()
+          .into_owned()
+      })
+      .collect::<BTreeSet<_>>();
+    assert_eq!(
+      excluded,
+      CHROMIUM_NON_PROFILE_DIRECTORIES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
+    );
+    assert!(discovery
+      .issues
+      .iter()
+      .all(|issue| issue.code == "profile_excluded_service_directory"));
+  }
+
+  #[test]
+  fn service_directories_are_excluded_from_the_markerless_fallback_too() {
+    let temp = TempDir::new("marker-skips-markerless");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(&context, "chrome", "chrome-stable-local");
+    // No marked profile anywhere, so discovery reaches the markerless branch.
+    for skipped in CHROMIUM_NON_PROFILE_DIRECTORIES {
+      seed_cookie(&root.join(skipped), true, "skipped", "value");
+    }
+    seed_cookie(&root.join("Restored Account"), true, "restored", "value");
+
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover");
+    assert_eq!(
+      profile_directory_names(&discovery.profiles()),
+      ["Restored Account"]
+    );
+    assert_eq!(
+      discovery
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "profile_excluded_service_directory")
+        .count(),
+      CHROMIUM_NON_PROFILE_DIRECTORIES.len()
+    );
+  }
+
+  #[test]
+  fn declared_profiles_outrank_the_service_directory_exclusion() {
+    let temp = TempDir::new("marker-skips-declared");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(&context, "chrome", "chrome-stable-local");
+    seed_cookie(&root.join("Guest Profile"), true, "declared", "value");
+    // Local State is authoritative: if it declares a profile, the reserved-name
+    // heuristic must not override it.
+    write_local_state(
+      &root,
+      serde_json::json!({
+        "profile": {"info_cache": {"Guest Profile": {"name": "Real Profile"}}}
+      }),
+    );
+
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover");
+    assert_eq!(
+      profile_directory_names(&discovery.profiles()),
+      ["Guest Profile"]
+    );
+    assert_eq!(discovery.profiles()[0].display_name, "Real Profile");
+    assert!(discovery
+      .issues
+      .iter()
+      .all(|issue| issue.code != "profile_excluded_service_directory"));
+  }
+
+  #[test]
+  fn file_markers_never_shadow_a_source_bearing_flat_root() {
+    let temp = TempDir::new("flat-root-shadow");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(
+      &context,
+      "browser_from_vought",
+      "browser-from-vought-roaming",
+    );
+    seed_cookie(&root, false, "flat", "real-profile");
+    // A sibling directory carrying its own marker and cookie store must not
+    // displace the flat profile that the installation root itself is.
+    let vendor = root.join("Vendor Data");
+    seed_cookie(&vendor, false, "vendor", "value");
+    std::fs::write(vendor.join("Preferences"), b"{}").expect("write vendor marker");
+
+    let discovery = discover_browser_with_context(&context, "vought").expect("discover flat root");
+    let profiles = discovery.profiles();
+    assert_eq!(profile_directory_names(&profiles), ["."]);
+    assert!(profiles[0].is_default);
+    assert!(profiles[0].persistent_candidates[1].selected);
+  }
+
+  #[test]
+  fn file_marked_directories_without_a_source_stay_silent() {
+    let temp = TempDir::new("marker-no-source");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(&context, "qq_browser", "qq-browser-local");
+    seed_cookie(&root.join("Default"), true, "default", "one");
+    let cache = root.join("Some Cache");
+    std::fs::create_dir_all(&cache).expect("create cache directory");
+    std::fs::write(cache.join("Preferences"), b"{}").expect("write marker");
+
+    let discovery = discover_browser_with_context(&context, "qq_browser").expect("discover");
+    assert_eq!(profile_directory_names(&discovery.profiles()), ["Default"]);
+    // A file marker is a heuristic; a miss must not become report noise the way
+    // a declared-but-empty profile legitimately does.
+    assert!(discovery.issues.is_empty());
+  }
+
+  #[test]
+  fn both_installation_roots_are_discovered_and_ordered_by_priority() {
+    let temp = TempDir::new("windows-batch-two-roots");
+    let context = windows_context(temp.path().join("home"));
+    let local = browser_root(&context, "yandex", "yandex-local");
+    let roaming = browser_root(&context, "yandex", "yandex-roaming");
+    seed_cookie(&local.join("Default"), true, "local", "one");
+    seed_cookie(&roaming.join("Default"), true, "roaming", "two");
+
+    let discovery = discover_browser_with_context(&context, "yandex").expect("discover both roots");
+    assert_eq!(discovery.installations.len(), 2);
+    assert_eq!(
+      discovery
+        .installations
+        .iter()
+        .map(|installation| installation.root_id.as_str())
+        .collect::<Vec<_>>(),
+      ["yandex-local", "yandex-roaming"],
+      "priority 10 must sort before priority 20"
+    );
+    assert_ne!(
+      discovery.installations[0].installation_id,
+      discovery.installations[1].installation_id
+    );
+    assert_eq!(discovery.profiles().len(), 2);
+  }
+
+  #[test]
+  fn browser_from_vought_falls_back_to_the_flat_installation_root() {
+    let temp = TempDir::new("vought-flat");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(
+      &context,
+      "browser_from_vought",
+      "browser-from-vought-roaming",
+    );
+    seed_cookie(&root, false, "vought", "value");
+
+    let discovery = discover_browser_with_context(&context, "vought").expect("discover via alias");
+    assert_eq!(discovery.installations.len(), 1);
+    assert_eq!(
+      discovery.installations[0].root_id,
+      "browser-from-vought-roaming"
+    );
+    let profiles = discovery.profiles();
+    assert_eq!(profile_directory_names(&profiles), ["."]);
+    assert!(profiles[0].is_default);
+    assert_eq!(profiles[0].display_name, "stable");
+    assert!(profiles[0].persistent_candidates[1].selected);
+  }
+
+  #[test]
+  fn windows_batch_browsers_extract_plaintext_cookies_through_their_selectors() {
+    let temp = TempDir::new("windows-batch-plaintext");
+    let context = windows_context(temp.path().join("home"));
+    let cases = [
+      ("yandex", "yandex-local", "yandex", false),
+      ("speed_360", "speed-360-local", "360", false),
+      ("speed_360x", "speed-360x-local", "360x", false),
+      ("dc_browser", "dc-browser-local", "dc", false),
+      ("qq_browser", "qq-browser-local", "qq", false),
+      ("sogou", "sogou-local", "sogou", false),
+      (
+        "browser_from_vought",
+        "browser-from-vought-roaming",
+        "vought",
+        true,
+      ),
+    ];
+
+    for (browser_id, root_id, selector, flat) in cases {
+      let root = browser_root(&context, browser_id, root_id);
+      let profile = if flat { root } else { root.join("Default") };
+      seed_cookie(&profile, !flat, browser_id, "plaintext-value");
+
+      let provider = CountingProvider::default();
+      let report = extract_chromium_with_provider(&context, selector, None, None, &provider)
+        .expect("plaintext report");
+      assert_eq!(report.installations.len(), 1, "{browser_id} installations");
+      let profiles = &report.installations[0].profiles;
+      assert_eq!(profiles.len(), 1, "{browser_id} profiles");
+      assert_eq!(profiles[0].cookies.len(), 1);
+      assert_eq!(profiles[0].cookies[0].name, browser_id);
+      assert_eq!(profiles[0].cookies[0].value, "plaintext-value");
+      assert!(profiles[0].failure.is_none());
+      assert_eq!(profiles[0].stats.rows_seen, 1);
+      assert_eq!(profiles[0].stats.cookies_emitted, 1);
+      assert_eq!(profiles[0].stats.rows_skipped, 0);
+      assert_eq!(
+        provider
+          .calls
+          .borrow()
+          .values()
+          .copied()
+          .collect::<Vec<_>>(),
+        [1],
+        "{browser_id} key provider calls"
+      );
+    }
   }
 }
