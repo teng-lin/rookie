@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ def load_module(name: str, filename: str):
 
 
 INSPECT = load_module("inspect_chromium_profile", "inspect_chromium_profile.py")
+STAGE_SCRIPT = Path(__file__).with_name("stage_sqlite_wal_fixture.py")
 
 
 class InspectChromiumProfileTests(unittest.TestCase):
@@ -80,6 +82,35 @@ class InspectChromiumProfileTests(unittest.TestCase):
         finally:
             writer.close()
 
+        self.assertEqual(main_rows, [])
+        self.assertEqual(
+            snapshot_rows,
+            [("127.0.0.1", "wal-only", "763230", 31)],
+        )
+
+    def test_stager_leaves_renamed_cookie_only_in_wal(self) -> None:
+        fixture = Path(self.tempdir.name) / "WAL fixture" / "Cookies"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(STAGE_SCRIPT),
+                str(self.database),
+                str(fixture),
+                "--source-cookie",
+                "baseline",
+                "--fixture-cookie",
+                "wal-only",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Staged 'wal-only'", completed.stdout)
+
+        main_rows, snapshot_rows = INSPECT.wal_snapshot_cookie_rows(
+            fixture, "wal-only"
+        )
         self.assertEqual(main_rows, [])
         self.assertEqual(
             snapshot_rows,

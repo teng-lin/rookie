@@ -25,6 +25,9 @@ mod helpers {
   use std::path::PathBuf;
 
   pub fn resolve_db_path() -> PathBuf {
+    if let Some(path) = env::var_os("ROOKIE_E2E_COOKIE_DB") {
+      return PathBuf::from(path);
+    }
     let user_data_dir =
       env::var("ROOKIE_E2E_USER_DATA_DIR").expect("ROOKIE_E2E_USER_DATA_DIR must be set");
     // Modern Chrome writes to Default/Network/Cookies; older builds wrote
@@ -64,6 +67,26 @@ mod helpers {
       .unwrap_or_else(|| {
         panic!(
           "seeded cookie `{}` not found among {} cookies for domain {}",
+          expected_name,
+          cookies.len(),
+          domain
+        )
+      });
+    assert_eq!(seeded.value, expected_value, "cookie value mismatch");
+  }
+
+  #[cfg(target_os = "windows")]
+  pub fn assert_discovered(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
+    let expected_name =
+      env::var("ROOKIE_E2E_DISCOVERY_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
+    let expected_value =
+      env::var("ROOKIE_E2E_DISCOVERY_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_string());
+    let seeded = cookies
+      .iter()
+      .find(|cookie| cookie.name == expected_name)
+      .unwrap_or_else(|| {
+        panic!(
+          "discovered cookie `{}` not found among {} cookies for domain {}",
           expected_name,
           cookies.len(),
           domain
@@ -309,7 +332,7 @@ fn extracts_seeded_cookie_through_default_chrome_discovery() {
   let domain = helpers::domain();
   let cookies = rookie_cookies::chrome(Some(vec![domain.clone()]))
     .unwrap_or_else(|error| panic!("rookie_cookies::chrome failed: {error}"));
-  helpers::assert_seeded(&cookies, &domain);
+  helpers::assert_discovered(&cookies, &domain);
 }
 
 #[cfg(target_os = "windows")]

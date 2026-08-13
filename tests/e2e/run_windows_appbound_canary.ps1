@@ -82,7 +82,9 @@ foreach ($requiredVariable in @(
 }
 
 $server = $null
+$walFixtureUserData = Join-Path $env:RUNNER_TEMP "rookie-appbound-wal-$PID"
 Remove-Item $env:ROOKIE_E2E_REQUEST_LOG -Force -ErrorAction SilentlyContinue
+Remove-Item $walFixtureUserData -Recurse -Force -ErrorAction SilentlyContinue
 $server = Start-Process python `
   -ArgumentList "tests/e2e/cookie_server.py" -PassThru
 try {
@@ -114,7 +116,6 @@ try {
     "--disable-background-networking",
     "--disable-component-update",
     "--disable-sync",
-    "--enable-features=EnableWALModeByDefault",
     "http://127.0.0.1:8765/set"
   ) | Out-Null
   Wait-ForChrome
@@ -143,10 +144,19 @@ try {
     --expected-prefix v20 --require-app-bound-key
   if ($LASTEXITCODE -ne 0) { throw "strict v20 profile check failed" }
 
+  # Current Chrome deliberately opens its cookie store in rollback-journal
+  # mode, so it cannot itself provide a deterministic WAL-only row. Copy the
+  # real database and stage its real App-Bound encrypted value under a new name
+  # in a WAL. The stager exits without checkpointing, leaving both files
+  # unlocked for the product's raw snapshot path.
+  $walCookiesDb = Join-Path $walFixtureUserData "Default\Network\Cookies"
+  & .\.venv\Scripts\python.exe tests/e2e/stage_sqlite_wal_fixture.py `
+    "$cookiesDb" "$walCookiesDb" --source-cookie rookie_ci `
+    --fixture-cookie rookie_wal
+  if ($LASTEXITCODE -ne 0) { throw "could not stage App-Bound WAL fixture" }
+
   # Reopen the same default profile and leave Chrome running. /wal sets a
-  # unique cookie that every extraction surface must recover. Chrome's own SQL
-  # feature must select WAL: without it Chrome deliberately selects a rollback
-  # journal when its exclusive cookie-store connection opens.
+  # second real cookie as a browser-liveness signal during extraction.
   Start-Process -FilePath $env:ROOKIE_E2E_CHROME_PATH -ArgumentList @(
     "--no-first-run",
     "--new-window",
@@ -154,7 +164,6 @@ try {
     "--disable-background-networking",
     "--disable-component-update",
     "--disable-sync",
-    "--enable-features=EnableWALModeByDefault",
     "http://127.0.0.1:8765/wal"
   ) | Out-Null
   Wait-ForChrome
@@ -164,36 +173,17 @@ try {
   $script:liveBrowserPid = $liveBrowser.Id
   $script:liveBrowserStartTime = $liveBrowser.StartTime
 
-  $walPath = "$cookiesDb-wal"
-  $walReady = $false
-  for ($i = 1; $i -le 60; $i++) {
-    if ((Test-Path $walPath) -and (Get-Item $walPath).Length -gt 0) {
-      $walReady = $true
-      break
-    }
-    Start-Sleep -Milliseconds 500
-  }
-  if (-not $walReady) {
-    throw "live Chrome Cookies WAL is missing or empty"
-  }
-  Write-Host "Live Cookies WAL length: $((Get-Item $walPath).Length)"
+  & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
+    "$walFixtureUserData" --cookie-name rookie_wal `
+    --expected-prefix v20 --require-wal-only
+  if ($LASTEXITCODE -ne 0) { throw "strict WAL-only v20 fixture check failed" }
 
-  $walValidated = $false
-  for ($i = 1; $i -le 60; $i++) {
-    & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
-      "$env:ROOKIE_E2E_USER_DATA_DIR" --cookie-name rookie_wal `
-      --expected-prefix v20 --require-wal-only
-    if ($LASTEXITCODE -eq 0) {
-      $walValidated = $true
-      break
-    }
-    Start-Sleep -Milliseconds 500
-  }
-  if (-not $walValidated) { throw "strict WAL-only v20 profile check failed" }
-
+  $env:ROOKIE_E2E_COOKIE_DB = $walCookiesDb
   $env:ROOKIE_E2E_COOKIE_NAME = "rookie_wal"
-  $env:ROOKIE_E2E_COOKIE_VALUE = "live"
+  $env:ROOKIE_E2E_COOKIE_VALUE = "bar"
   $env:ROOKIE_E2E_CHECK_BROWSER_DISCOVERY = "1"
+  $env:ROOKIE_E2E_DISCOVERY_COOKIE_NAME = "rookie_ci"
+  $env:ROOKIE_E2E_DISCOVERY_COOKIE_VALUE = "bar"
 
   Write-Host "Identity before elevated extraction:"
   whoami /user
@@ -215,10 +205,12 @@ try {
   Assert-ChromeAlive
 
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-    "$cookiesDb" --key-path "$localState"
+    "$walCookiesDb" --key-path "$localState"
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound extraction failed" }
   Assert-ChromeAlive
 
+  $env:ROOKIE_E2E_COOKIE_NAME = "rookie_ci"
+  $env:ROOKIE_E2E_COOKIE_VALUE = "bar"
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py --browser chrome
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound Chrome discovery failed" }
   Assert-ChromeAlive
@@ -230,4 +222,5 @@ try {
   if ($null -ne $server) {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
   }
+  Remove-Item $walFixtureUserData -Recurse -Force -ErrorAction SilentlyContinue
 }
