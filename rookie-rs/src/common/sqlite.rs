@@ -405,18 +405,17 @@ fn database_uses_wal(database: &Path) -> Result<bool> {
 /// `Ok(None)` means a writer appended a WAL during acquisition. The caller
 /// must switch to the DB+WAL snapshot path rather than retrying immutably.
 fn snapshot_static_single_file(database: &Path) -> Result<Option<VerifiedStaticSingleFile>> {
-  snapshot_static_single_file_using(database, |source, copy, _attempt| {
-    fs::copy(source, copy).with_context(|| format!("Can't copy database {}", source.display()))?;
-    Ok(())
-  })
+  snapshot_static_single_file_with_hooks(database, |_, _| Ok(()), |_, _| Ok(()))
 }
 
-fn snapshot_static_single_file_using<Copy>(
+fn snapshot_static_single_file_with_hooks<BeforeCopy, AfterCopy>(
   database: &Path,
-  mut copy_main: Copy,
+  mut before_copy: BeforeCopy,
+  mut after_copy: AfterCopy,
 ) -> Result<Option<VerifiedStaticSingleFile>>
 where
-  Copy: FnMut(&Path, &Path, u32) -> Result<()>,
+  BeforeCopy: FnMut(&Path, u32) -> Result<()>,
+  AfterCopy: FnMut(&Path, u32) -> Result<()>,
 {
   let snapshot = TempDir::new()?;
   let name = database
@@ -429,7 +428,10 @@ where
       return Ok(None);
     }
 
-    copy_main(database, &copy, attempt)?;
+    before_copy(database, attempt)?;
+    copy_file_sequentially(database, &copy)
+      .with_context(|| format!("Can't copy database {}", database.display()))?;
+    after_copy(database, attempt)?;
     let main_stayed_stable = files_are_identical(database, &copy)?;
     if has_nonempty_wal(database)? {
       return Ok(None);
@@ -458,6 +460,23 @@ where
     "Can't take a coherent static snapshot of {}: its main file is changing repeatedly",
     database.display()
   ))
+}
+
+/// Copies a file in increasing byte-offset order.
+///
+/// SQLite checkpoints transfer pages into the main database in ascending page
+/// order (<https://sqlite.org/wal.html#ckpt>). The static-snapshot proof relies
+/// on both this copy and [`files_are_identical`] scanning in that same order:
+/// if the copy straddles a checkpoint, the later comparison must disagree on
+/// every earlier page that the checkpoint passed before the copy observed a
+/// later updated page. A platform copy primitive has no such ordering contract,
+/// so `fs::copy` is intentionally not used at this boundary.
+fn copy_file_sequentially(source: &Path, destination: &Path) -> io::Result<u64> {
+  let mut source = io::BufReader::new(fs::File::open(source)?);
+  let mut destination = io::BufWriter::new(fs::File::create(destination)?);
+  let copied = io::copy(&mut source, &mut destination)?;
+  io::Write::flush(&mut destination)?;
+  Ok(copied)
 }
 
 /// Opens an already-acquired static single-file copy as immutable.
@@ -642,7 +661,7 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // file with a WAL rewound to offset 0 (<https://sqlite.org/wal.html> section
   // 2.1) and drops rows, as `an_unverified_copy_loses_rows_when_a_checkpoint_intervenes`
   // shows — so the verification is what makes it correct, not the order.
-  fs::copy(database, &copy)
+  copy_file_sequentially(database, &copy)
     .with_context(|| format!("Can't copy database {}", database.display()))?;
 
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
@@ -650,7 +669,7 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // one could be believed as-is, pinning a stale frame count.
   let wal = sidecar(database, "-wal");
   let wal_copy = sidecar(&copy, "-wal");
-  match fs::copy(&wal, &wal_copy) {
+  match copy_file_sequentially(&wal, &wal_copy) {
     Ok(_) => {}
     // The browser checkpointed and removed its WAL, either before this attempt
     // or in the moment between. Discard any WAL an earlier attempt left here,
@@ -1452,15 +1471,18 @@ mod tests {
     let (path, writer) = checkpointed_database(directory.path());
     let canonical = path.canonicalize().expect("canonicalize");
 
-    let verified = snapshot_static_single_file_using(&canonical, |source, copy, attempt| {
-      fs::copy(source, copy).expect("copy main file");
-      if attempt == 1 {
-        writer
-          .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
-          .expect("append WAL during static copy");
-      }
-      Ok(())
-    })
+    let verified = snapshot_static_single_file_with_hooks(
+      &canonical,
+      |_, _| Ok(()),
+      |_, attempt| {
+        if attempt == 1 {
+          writer
+            .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
+            .expect("append WAL during static copy");
+        }
+        Ok(())
+      },
+    )
     .expect("classify raced snapshot");
 
     assert!(
@@ -1481,15 +1503,18 @@ mod tests {
     let (path, writer) = checkpointed_database(directory.path());
     let canonical = path.canonicalize().expect("canonicalize");
 
-    let result = snapshot_static_single_file_using(&canonical, |source, copy, attempt| {
-      assert_eq!(attempt, 1, "journal-mode changes must fail closed");
-      let mode: String = writer
-        .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
-        .expect("switch to rollback journal during acquisition");
-      assert_eq!(mode, "delete");
-      fs::copy(source, copy).expect("copy rollback-journal main file");
-      Ok(())
-    });
+    let result = snapshot_static_single_file_with_hooks(
+      &canonical,
+      |_, attempt| {
+        assert_eq!(attempt, 1, "journal-mode changes must fail closed");
+        let mode: String = writer
+          .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+          .expect("switch to rollback journal during acquisition");
+        assert_eq!(mode, "delete");
+        Ok(())
+      },
+      |_, _| Ok(()),
+    );
     let error = match result {
       Ok(_) => panic!("a rollback-journal copy must not become immutable"),
       Err(error) => error,
