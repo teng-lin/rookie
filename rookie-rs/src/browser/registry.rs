@@ -3487,6 +3487,52 @@ mod tests {
     )
   }
 
+  type ParityRootChannel = (String, String);
+
+  fn legacy_parity_root_channels(
+    platform: &str,
+    browser: &crate::config::Browser,
+  ) -> Option<BTreeSet<ParityRootChannel>> {
+    if !browser.paths.iter().any(|path| path.contains("{channel}")) {
+      // A frozen config with static paths does not express which channel owns
+      // which root. Keep those entries in path parity, but do not invent a
+      // relationship that config.json cannot represent.
+      return None;
+    }
+    let default_channels = [String::new()];
+    let channels = browser.channels.as_deref().unwrap_or(&default_channels);
+    Some(
+      browser
+        .paths
+        .iter()
+        .flat_map(|template| {
+          channels.iter().map(move |channel| {
+            (
+              parity_path(platform, &template.replace("{channel}", channel)),
+              parity_channel(channel),
+            )
+          })
+        })
+        .collect(),
+    )
+  }
+
+  fn registry_parity_root_channels(
+    platform: &str,
+    definition: &BrowserDefinition,
+  ) -> BTreeSet<ParityRootChannel> {
+    definition
+      .roots
+      .iter()
+      .map(|root| {
+        (
+          parity_path(platform, &root.template),
+          parity_channel(&root.channel),
+        )
+      })
+      .collect()
+  }
+
   fn canonical_legacy_id(id: &str) -> &str {
     if id == "ie" {
       "internet_explorer"
@@ -3512,6 +3558,36 @@ mod tests {
         (
           (*key).to_owned(),
           (parity_lines(legacy_only), parity_lines(registry_only)),
+        )
+      })
+      .collect()
+  }
+
+  fn parity_root_channel_lines(values: &str) -> BTreeSet<ParityRootChannel> {
+    values
+      .lines()
+      .filter(|value| !value.is_empty())
+      .map(|value| {
+        let (channel, path) = value
+          .split_once('\t')
+          .expect("root/channel parity entries use CHANNEL<TAB>PATH");
+        (path.to_owned(), channel.to_owned())
+      })
+      .collect()
+  }
+
+  fn parity_root_channel_divergences(
+    entries: &[(&str, &str, &str)],
+  ) -> BTreeMap<String, (BTreeSet<ParityRootChannel>, BTreeSet<ParityRootChannel>)> {
+    entries
+      .iter()
+      .map(|(key, legacy_only, registry_only)| {
+        (
+          (*key).to_owned(),
+          (
+            parity_root_channel_lines(legacy_only),
+            parity_root_channel_lines(registry_only),
+          ),
         )
       })
       .collect()
@@ -3646,10 +3722,123 @@ mod tests {
         "beta\ncanary\ndev\nstable",
       ),
     ]);
+    let expected_root_channel_divergences = parity_root_channel_divergences(&[
+      (
+        "linux/brave",
+        concat!(
+          "beta\t/home/.config/BraveSoftware/Brave-Browser-beta\n",
+          "dev\t/home/.config/BraveSoftware/Brave-Browser-dev\n",
+          "nightly\t/home/.config/BraveSoftware/Brave-Browser-nightly\n",
+          "beta\t/home/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser-beta\n",
+          "dev\t/home/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser-dev\n",
+          "nightly\t/home/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser-nightly\n",
+          "beta\t/home/snap/brave/*/.config/BraveSoftware/Brave-Browser\n",
+          "dev\t/home/snap/brave/*/.config/BraveSoftware/Brave-Browser\n",
+          "nightly\t/home/snap/brave/*/.config/BraveSoftware/Brave-Browser\n",
+          "stable\t/home/snap/brave/*/.config/BraveSoftware/Brave-Browser",
+        ),
+        concat!(
+          "beta\t/home/.config/BraveSoftware/Brave-Browser-Beta\n",
+          "dev\t/home/.config/BraveSoftware/Brave-Browser-Dev\n",
+          "nightly\t/home/.config/BraveSoftware/Brave-Browser-Nightly\n",
+          "stable\t/home/snap/brave/current/.config/BraveSoftware/Brave-Browser",
+        ),
+      ),
+      (
+        "linux/chrome",
+        concat!(
+          "dev\t/home/.config/google-chrome-dev\n",
+          "nightly\t/home/.config/google-chrome-nightly\n",
+          "beta\t/home/.var/app/com.google.Chrome/config/google-chrome-beta\n",
+          "dev\t/home/.var/app/com.google.Chrome/config/google-chrome-dev\n",
+          "nightly\t/home/.var/app/com.google.Chrome/config/google-chrome-nightly",
+        ),
+        "dev\t/home/.config/google-chrome-unstable",
+      ),
+      (
+        "linux/edge",
+        concat!(
+          "beta\t/home/.var/app/com.microsoft.Edge/config/microsoft-edge-beta\n",
+          "dev\t/home/.var/app/com.microsoft.Edge/config/microsoft-edge-dev\n",
+          "nightly\t/home/.var/app/com.microsoft.Edge/config/microsoft-edge-nightly",
+        ),
+        "",
+      ),
+      (
+        "macos/brave",
+        concat!(
+          "beta\t/home/Library/Application Support/BraveSoftware/Brave-Browser-beta\n",
+          "dev\t/home/Library/Application Support/BraveSoftware/Brave-Browser-dev\n",
+          "nightly\t/home/Library/Application Support/BraveSoftware/Brave-Browser-nightly",
+        ),
+        concat!(
+          "beta\t/home/Library/Application Support/BraveSoftware/Brave-Browser-Beta\n",
+          "dev\t/home/Library/Application Support/BraveSoftware/Brave-Browser-Dev\n",
+          "nightly\t/home/Library/Application Support/BraveSoftware/Brave-Browser-Nightly",
+        ),
+      ),
+      (
+        "macos/chrome",
+        concat!(
+          "beta\t/home/Library/Application Support/Google/Chrome-beta\n",
+          "dev\t/home/Library/Application Support/Google/Chrome-dev\n",
+          "nightly\t/home/Library/Application Support/Google/Chrome-nightly",
+        ),
+        concat!(
+          "beta\t/home/Library/Application Support/Google/Chrome Beta\n",
+          "canary\t/home/Library/Application Support/Google/Chrome Canary\n",
+          "dev\t/home/Library/Application Support/Google/Chrome Dev",
+        ),
+      ),
+      (
+        "windows/chrome",
+        concat!(
+          "beta\t/local/google/chrome-beta/user data\n",
+          "dev\t/local/google/chrome-dev/user data\n",
+          "nightly\t/local/google/chrome-nightly/user data\n",
+          "beta\t/roaming/google/chrome-beta/user data\n",
+          "dev\t/roaming/google/chrome-dev/user data\n",
+          "nightly\t/roaming/google/chrome-nightly/user data",
+        ),
+        concat!(
+          "beta\t/local/google/chrome beta/user data\n",
+          "dev\t/local/google/chrome dev/user data\n",
+          "canary\t/local/google/chrome sxs/user data\n",
+          "beta\t/roaming/google/chrome beta/user data\n",
+          "dev\t/roaming/google/chrome dev/user data\n",
+          "canary\t/roaming/google/chrome sxs/user data",
+        ),
+      ),
+      (
+        "windows/edge",
+        concat!(
+          "beta\t/local/microsoft/edge-beta/user data\n",
+          "dev\t/local/microsoft/edge-dev/user data\n",
+          "nightly\t/local/microsoft/edge-nightly/user data\n",
+          "beta\t/roaming/microsoft/edge-beta/user data\n",
+          "dev\t/roaming/microsoft/edge-dev/user data\n",
+          "nightly\t/roaming/microsoft/edge-nightly/user data",
+        ),
+        concat!(
+          "beta\t/local/microsoft/edge beta/user data\n",
+          "dev\t/local/microsoft/edge dev/user data\n",
+          "canary\t/local/microsoft/edge sxs/user data\n",
+          "beta\t/roaming/microsoft/edge beta/user data\n",
+          "dev\t/roaming/microsoft/edge dev/user data\n",
+          "canary\t/roaming/microsoft/edge sxs/user data",
+        ),
+      ),
+      (
+        "windows/opera_gx",
+        "stable\t/local/opera software/opera gx \nstable\t/roaming/opera software/opera gx ",
+        "",
+      ),
+    ]);
     let mut registry_only = BTreeSet::new();
     let mut config_only = BTreeSet::new();
     let mut path_divergences = BTreeMap::new();
     let mut channel_divergences = BTreeMap::new();
+    let mut root_channel_divergences = BTreeMap::new();
     let mut shared = 0;
 
     for platform in ["windows", "macos", "linux"] {
@@ -3724,7 +3913,23 @@ mod tests {
             }
             if let Some(legacy_channels) = legacy_channels {
               if legacy_channels != registry_channels {
-                channel_divergences.insert(key, (legacy_channels, registry_channels));
+                channel_divergences.insert(key.clone(), (legacy_channels, registry_channels));
+              }
+            }
+            if let Some(legacy_root_channels) =
+              legacy_parity_root_channels(platform, legacy_browser)
+            {
+              let registry_root_channels = registry_parity_root_channels(platform, definition);
+              let legacy_only = legacy_root_channels
+                .difference(&registry_root_channels)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+              let registry_only = registry_root_channels
+                .difference(&legacy_root_channels)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+              if !legacy_only.is_empty() || !registry_only.is_empty() {
+                root_channel_divergences.insert(key, (legacy_only, registry_only));
               }
             }
           }
@@ -3741,6 +3946,57 @@ mod tests {
     assert_eq!(config_only, expected_config_only);
     assert_eq!(path_divergences, expected_path_divergences);
     assert_eq!(channel_divergences, expected_channel_divergences);
+    assert_eq!(
+      root_channel_divergences, expected_root_channel_divergences,
+      "resolved root/channel ownership changed"
+    );
+  }
+
+  #[test]
+  fn root_channel_parity_rejects_swapped_labels_even_when_independent_sets_match() {
+    let legacy = crate::config::Browser {
+      paths: vec!["{home}/Browser{channel}/Default/Network/Cookies".to_owned()],
+      channels: Some(vec![String::new(), " Beta".to_owned()]),
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+    let registry: Registry = serde_json::from_str(
+      r#"{
+        "schema_version": 1,
+        "platforms": {
+          "linux": [{
+            "canonical_id": "browser",
+            "aliases": [],
+            "display_name": "Browser",
+            "engine": "chromium",
+            "roots": [
+              {"root_id":"one", "template":"{home}/Browser", "channel":"beta", "discovery":"chromium_user_data", "priority":10},
+              {"root_id":"two", "template":"{home}/Browser Beta", "channel":"stable", "discovery":"chromium_user_data", "priority":20}
+            ],
+            "capabilities": {
+              "declared_persistent_formats": ["chromium_sqlite"],
+              "declared_session_formats": [],
+              "declared_decryption_tiers": []
+            }
+          }]
+        }
+      }"#,
+    )
+    .expect("synthetic registry");
+    let definition = &registry.platforms["linux"][0];
+    let (legacy_paths, legacy_channels) = legacy_parity_paths("linux", &legacy);
+    let (registry_paths, registry_channels) = registry_parity_paths("linux", definition);
+    assert_eq!(legacy_paths, registry_paths);
+    assert_eq!(
+      legacy_channels.expect("semantic channels"),
+      registry_channels
+    );
+    assert_ne!(
+      legacy_parity_root_channels("linux", &legacy).expect("semantic root/channel pairs"),
+      registry_parity_root_channels("linux", definition),
+      "pairwise parity must detect channel labels swapped across roots"
+    );
   }
 
   fn registry_with_credentials(platform: &str, tiers: &str, credentials: &str) -> String {
