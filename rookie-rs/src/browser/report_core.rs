@@ -321,11 +321,12 @@ pub struct ExtractionStats {
   /// excluded are not counted, so `rows_seen - rows_skipped == cookies_emitted`
   /// holds and a consumer can read "how much did this source lose?" directly.
   ///
-  /// The SQL engines get this from their `WHERE` clause. Safari is the known
-  /// deviation: it applies the domain filter after parsing the whole file, so
-  /// it still counts every record. Correcting that means moving the filter into
-  /// the record loop, which is low-level Safari parsing that Milestone 4E
-  /// explicitly does not reimplement.
+  /// SQL engines reduce candidates in their `WHERE` clause and enforce the
+  /// final host boundary before incrementing these counters. Safari is the
+  /// known deviation: it applies the domain filter after parsing the whole
+  /// file, so it still counts every record. Correcting that means moving the
+  /// filter into the record loop, which is low-level Safari parsing that
+  /// Milestone 4E explicitly does not reimplement.
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,

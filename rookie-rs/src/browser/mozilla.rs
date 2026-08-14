@@ -62,17 +62,22 @@ fn query_persistent_cookies(
     .map(|domains| {
       domains
         .iter()
+        .filter_map(|domain| utils::normalized_domain_for_match(domain))
         .map(|domain| format!("%{}%", escape_like_pattern(domain)))
         .collect()
     })
     .unwrap_or_default();
 
-  if !domain_filters.is_empty() {
-    let predicates = (1..=domain_filters.len())
-      .map(|index| format!("host LIKE ?{index} ESCAPE '\\'"))
-      .collect::<Vec<_>>()
-      .join(" OR ");
-    query += &format!("WHERE ({predicates})");
+  if domains.is_some() {
+    if domain_filters.is_empty() {
+      query += "WHERE 0";
+    } else {
+      let predicates = (1..=domain_filters.len())
+        .map(|index| format!("host LIKE ?{index} ESCAPE '\\'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+      query += &format!("WHERE ({predicates})");
+    }
   }
 
   query += ";";
@@ -85,12 +90,15 @@ fn query_persistent_cookies(
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
-    rows_seen += 1;
     let host = row
       .get::<_, Option<String>>(0)
       .ok()
       .flatten()
       .unwrap_or_default();
+    if !utils::some_domain_in_host(domains, &host) {
+      continue;
+    }
+    rows_seen += 1;
     let path = row
       .get::<_, Option<String>>(1)
       .ok()
@@ -1496,45 +1504,151 @@ mod tests {
   }
 
   #[test]
-  fn firefox_based_preserves_legacy_substring_domain_filtering() {
-    let dir = unique_tmpdir("ff-domain-filter-substring");
+  fn firefox_based_enforces_consistent_domain_boundaries_and_fail_closed_filters() {
+    let dir = unique_tmpdir("ff-domain-filter-boundary");
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(
       &db,
       &[
-        (".example.com", "/", false, 0, "boundary", "yes", false, 0),
+        ("example.com", "/", false, 0, "p-exact", "yes", false, 0),
         (
-          "notexample.com",
+          ".sub.example.com",
           "/",
           false,
           0,
-          "prefix",
-          "legacy",
+          "p-subdomain",
+          "yes",
           false,
           0,
         ),
         (
-          "example.com.evil",
+          "example.com.",
           "/",
           false,
           0,
-          "suffix",
-          "legacy",
+          "p-trailing-dot",
+          "yes",
           false,
           0,
         ),
-        ("other.test", "/", false, 0, "unrelated", "no", false, 0),
+        ("notexample.com", "/", false, 0, "p-prefix", "no", false, 0),
+        (
+          "example.com.evil.net",
+          "/",
+          false,
+          0,
+          "p-suffix",
+          "no",
+          false,
+          0,
+        ),
+        ("other.test", "/", false, 0, "p-unrelated", "no", false, 0),
       ],
     );
 
-    let mut cookies = firefox_based(db, Some(vec!["example.com".to_string()])).expect("decode");
+    let session_cookie = |host: &str, name: &str| {
+      serde_json::json!({
+        "host": host,
+        "path": "/",
+        "name": name,
+        "value": "fixture"
+      })
+    };
+    let session = serde_json::json!({
+      "windows": [{
+        "cookies": [
+          session_cookie("example.com", "s-exact"),
+          session_cookie(".sub.example.com", "s-subdomain"),
+          session_cookie("example.com.", "s-trailing-dot"),
+          session_cookie("notexample.com", "s-prefix"),
+          session_cookie("example.com.evil.net", "s-suffix"),
+          session_cookie("other.test", "s-unrelated")
+        ]
+      }]
+    });
+    std::fs::write(dir.join("sessionstore.js"), session.to_string()).expect("session fixture");
+
+    let mut cookies =
+      firefox_based(db.clone(), Some(vec!["example.com".to_string()])).expect("decode");
     cookies.sort_by(|a, b| a.name.cmp(&b.name));
-    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    let names = cookies
+      .iter()
+      .map(|cookie| cookie.name.as_str())
+      .collect::<Vec<_>>();
     assert_eq!(
       names,
-      vec!["boundary", "prefix", "suffix"],
-      "persistent Firefox filtering is the legacy SQL LIKE %domain% contract"
+      vec![
+        "p-exact",
+        "p-subdomain",
+        "p-trailing-dot",
+        "s-exact",
+        "s-subdomain",
+        "s-trailing-dot"
+      ],
+      "persistent and session cookies must use the same host boundary"
     );
+
+    let connection = rusqlite::Connection::open(&db).expect("open cookie database");
+    connection
+      .execute(
+        "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
+          VALUES ('notexample.com', '/', 0, 0, X'DEADBEEF', 'off-scope', 0, 0)",
+        [],
+      )
+      .expect("insert malformed off-scope candidate");
+    let dotted_domains = vec![".example.com.".to_string()];
+    let mut dotted = query_persistent_cookies(&connection, Some(&dotted_domains))
+      .expect("leading and trailing dots must not narrow the SQL candidate set");
+    dotted.cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let dotted_names = dotted
+      .cookies
+      .iter()
+      .map(|cookie| cookie.name.as_str())
+      .collect::<Vec<_>>();
+    assert_eq!(
+      dotted_names,
+      vec!["p-exact", "p-subdomain", "p-trailing-dot"]
+    );
+    assert_eq!(dotted.rows_seen, 3);
+    assert_eq!(dotted.rows_skipped, 0);
+
+    let mixed_domains = vec!["".to_string(), "example.com".to_string()];
+    let mut mixed = query_persistent_cookies(&connection, Some(&mixed_domains))
+      .expect("a blank entry must not broaden a valid allowlist");
+    mixed.cookies.sort_by(|a, b| a.name.cmp(&b.name));
+    let mixed_names = mixed
+      .cookies
+      .iter()
+      .map(|cookie| cookie.name.as_str())
+      .collect::<Vec<_>>();
+    assert_eq!(
+      mixed_names,
+      vec!["p-exact", "p-subdomain", "p-trailing-dot"]
+    );
+
+    let empty_domains = Vec::new();
+    let empty_database = rusqlite::Connection::open_in_memory().expect("open empty database");
+    assert!(
+      query_persistent_cookies(&empty_database, Some(&empty_domains)).is_err(),
+      "an empty allowlist must not bypass schema validation"
+    );
+
+    drop(connection);
+    for invalid in ["", " \t ", ".", "%", "_"] {
+      let cookies = firefox_based(db.clone(), Some(vec![invalid.to_string()]))
+        .expect("invalid filter must be a successful empty result");
+      assert!(
+        cookies.is_empty(),
+        "filter {invalid:?} must not expose persistent or session cookies: {cookies:?}"
+      );
+    }
+
+    let empty = firefox_based(db.clone(), Some(Vec::new()))
+      .expect("an explicit empty allowlist must validate sources and match nothing");
+    assert!(empty.is_empty());
+
+    let unfiltered = firefox_based(db, None).expect("unfiltered query");
+    assert_eq!(unfiltered.len(), 12);
   }
 
   #[test]
