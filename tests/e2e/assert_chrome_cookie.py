@@ -51,7 +51,7 @@ def main() -> int:
         key_path = user_data_dir / "Local State"
         cookies = rookie_cookies.chromium_based(str(key_path), str(db_path), [domain])
     else:
-        cookies = rookie_cookies.chromium_based(str(db_path), [domain])
+        cookies = rookie_cookies.chromium_based(str(db_path), [domain], "chrome")
 
     expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")

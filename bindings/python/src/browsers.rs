@@ -1,4 +1,4 @@
-use crate::to_dict;
+use crate::{detailed_to_dict, to_dict};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
@@ -191,6 +191,19 @@ pub fn firefox_based(
   to_dict(py, cookies)
 }
 
+/// Extract cookies and Firefox container/origin context from an explicit path.
+#[pyfunction]
+#[pyo3(signature = (db_path, domains=None))]
+pub fn firefox_based_detailed(
+  py: Python<'_>,
+  db_path: String,
+  domains: Option<Vec<String>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  let cookies =
+    py.detach(|| rookie_core::firefox_based_detailed(PathBuf::from(&db_path), domains))?;
+  detailed_to_dict(py, cookies)
+}
+
 /// Load Cookies from a browser
 ///
 /// :param domains: Optional list of domains to load cookies from
@@ -251,6 +264,27 @@ pub fn chromium_based(
   to_dict(py, cookies)
 }
 
+/// Extract detailed cookies from an explicit Chromium database on Windows.
+#[pyfunction]
+#[pyo3(signature = (key_path, db_path, domains=None))]
+#[cfg(target_os = "windows")]
+pub fn chromium_based_detailed(
+  py: Python<'_>,
+  key_path: String,
+  db_path: String,
+  domains: Option<Vec<String>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  let cookies = py.detach(|| {
+    rookie_core::chromium_based_detailed(
+      PathBuf::from(&key_path),
+      PathBuf::from(&db_path),
+      domains,
+      false,
+    )
+  })?;
+  detailed_to_dict(py, cookies)
+}
+
 /// Extract Cookies from Safari browser
 ///
 /// :param domains: Optional list of domains to extract only from them
@@ -269,23 +303,45 @@ pub fn safari(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<P
 /// :param domains: Optional list of domains to extract only from them
 /// :return: A list of dictionaries of cookies
 #[pyfunction]
-#[pyo3(signature = (db_path, domains=None))]
+#[pyo3(signature = (db_path, domains=None, browser_id=None))]
 #[cfg(unix)]
 pub fn chromium_based(
   py: Python<'_>,
   db_path: String,
   domains: Option<Vec<String>>,
+  browser_id: Option<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  use rookie_core::config::Browser;
-
-  let config = Browser {
-    channels: None,
-    paths: vec![db_path.clone()],
-    unix_crypt_name: Some("chrome".to_string()),
-    osx_key_service: None,
-    osx_key_user: None,
-  };
-  let cookies =
-    py.detach(|| rookie_core::chromium_based(&config, PathBuf::from(&db_path), domains, false))?;
+  let cookies = py.detach(|| {
+    rookie_core::chromium_based_with_browser_id(
+      browser_id.as_deref(),
+      PathBuf::from(&db_path),
+      domains,
+      false,
+    )
+  })?;
   to_dict(py, cookies)
+}
+
+/// Extract detailed cookies from an explicit Chromium database on Unix.
+///
+/// ``browser_id`` selects the Linux keyring or macOS Keychain identity. It may
+/// be omitted only when every database row is plaintext.
+#[pyfunction]
+#[pyo3(signature = (db_path, domains=None, browser_id=None))]
+#[cfg(unix)]
+pub fn chromium_based_detailed(
+  py: Python<'_>,
+  db_path: String,
+  domains: Option<Vec<String>>,
+  browser_id: Option<String>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  let cookies = py.detach(|| {
+    rookie_core::chromium_based_detailed_with_browser_id(
+      browser_id.as_deref(),
+      PathBuf::from(&db_path),
+      domains,
+      false,
+    )
+  })?;
+  detailed_to_dict(py, cookies)
 }

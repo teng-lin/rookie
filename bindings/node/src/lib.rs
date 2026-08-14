@@ -2,7 +2,7 @@
 extern crate napi_derive;
 
 use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
-use rookie_cookies::enums::Cookie;
+use rookie_cookies::enums::{Cookie, DetailedCookie};
 use rookie_cookies::report::{
   BrowserCapabilitiesDescriptor, BrowserDescriptor, CookieSourceDescriptor, CookieSourceIdentity,
   ExtractionIssue, ExtractionReport, ExtractionStats, ProfileDescriptor, ProfileExtraction,
@@ -25,6 +25,28 @@ pub struct CookieObject {
   pub value: String,
   pub http_only: bool,
   pub same_site: i64,
+}
+
+/// Browser context that distinguishes partitioned/container cookies.
+#[napi(object, use_nullable = true)]
+pub struct CookieContextObject {
+  pub top_frame_site_key: Option<String>,
+  pub has_cross_site_ancestor: Option<bool>,
+  pub source_scheme: Option<i64>,
+  pub source_port: Option<i64>,
+  pub is_persistent: Option<bool>,
+  pub origin_attributes: Option<String>,
+  pub user_context_id: Option<u32>,
+  pub partition_key: Option<String>,
+  pub private_browsing_id: Option<u32>,
+}
+
+/// Cookie plus browser-specific identity context. The nested `cookie` has the
+/// unchanged legacy `CookieObject` shape.
+#[napi(object)]
+pub struct DetailedCookieObject {
+  pub cookie: CookieObject,
+  pub context: CookieContextObject,
 }
 
 #[napi(object)]
@@ -223,6 +245,38 @@ fn cookies_to_js(cookies: Vec<Cookie>) -> Result<Vec<CookieObject>> {
   }
 
   Ok(js_cookies)
+}
+
+fn detailed_cookies_to_js(cookies: Vec<DetailedCookie>) -> Result<Vec<DetailedCookieObject>> {
+  cookies
+    .into_iter()
+    .map(|detailed| {
+      let cookie = detailed.cookie;
+      Ok(DetailedCookieObject {
+        cookie: CookieObject {
+          domain: cookie.domain,
+          path: cookie.path,
+          secure: cookie.secure,
+          http_only: cookie.http_only,
+          same_site: cookie.same_site,
+          expires: cookie.expires.and_then(|value| i64::try_from(value).ok()),
+          name: cookie.name,
+          value: cookie.value,
+        },
+        context: CookieContextObject {
+          top_frame_site_key: detailed.context.top_frame_site_key,
+          has_cross_site_ancestor: detailed.context.has_cross_site_ancestor,
+          source_scheme: detailed.context.source_scheme,
+          source_port: detailed.context.source_port,
+          is_persistent: detailed.context.is_persistent,
+          origin_attributes: detailed.context.origin_attributes,
+          user_context_id: detailed.context.user_context_id,
+          partition_key: detailed.context.partition_key,
+          private_browsing_id: detailed.context.private_browsing_id,
+        },
+      })
+    })
+    .collect()
 }
 
 /// Serialize cookies in Netscape cookie-file format.
@@ -600,6 +654,36 @@ pub fn firefox_based(db_path: String, domains: Option<Vec<String>>) -> AsyncTask
   AsyncTask::new(FirefoxBasedTask { db_path, domains })
 }
 
+pub struct FirefoxBasedDetailedTask {
+  db_path: String,
+  domains: Option<Vec<String>>,
+}
+
+impl Task for FirefoxBasedDetailedTask {
+  type Output = Vec<DetailedCookie>;
+  type JsValue = Vec<DetailedCookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::firefox_based_detailed(PathBuf::from(&self.db_path), self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    detailed_cookies_to_js(output)
+  }
+}
+
+/// Extracts cookies with Firefox container and origin context preserved.
+#[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
+pub fn firefox_based_detailed(
+  db_path: String,
+  domains: Option<Vec<String>>,
+) -> AsyncTask<FirefoxBasedDetailedTask> {
+  AsyncTask::new(FirefoxBasedDetailedTask { db_path, domains })
+}
+
 // ---------------------------------------------------------------------------
 // Generic report APIs
 //
@@ -898,6 +982,49 @@ pub fn chromium_based(
   })
 }
 
+#[cfg(target_os = "windows")]
+pub struct ChromiumBasedDetailedWinTask {
+  key_path: String,
+  db_path: String,
+  domains: Option<Vec<String>>,
+}
+
+#[cfg(target_os = "windows")]
+impl Task for ChromiumBasedDetailedWinTask {
+  type Output = Vec<DetailedCookie>;
+  type JsValue = Vec<DetailedCookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::chromium_based_detailed(
+        PathBuf::from(&self.key_path),
+        PathBuf::from(&self.db_path),
+        self.domains.take(),
+        false,
+      )
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    detailed_cookies_to_js(output)
+  }
+}
+
+#[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
+#[cfg(target_os = "windows")]
+pub fn chromium_based_detailed(
+  key_path: String,
+  db_path: String,
+  domains: Option<Vec<String>>,
+) -> AsyncTask<ChromiumBasedDetailedWinTask> {
+  AsyncTask::new(ChromiumBasedDetailedWinTask {
+    key_path,
+    db_path,
+    domains,
+  })
+}
+
 // MacOS browsers
 
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
@@ -934,6 +1061,7 @@ impl Task for SafariTask {
 pub struct ChromiumBasedUnixTask {
   db_path: String,
   domains: Option<Vec<String>>,
+  browser_id: Option<String>,
 }
 
 #[cfg(unix)]
@@ -943,18 +1071,13 @@ impl Task for ChromiumBasedUnixTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
-      use rookie_cookies::config::Browser;
-
-      let db_path = self.db_path.as_str();
-      let config = Browser {
-        channels: None,
-        paths: vec![db_path.to_string()],
-        unix_crypt_name: Some("chrome".to_string()),
-        osx_key_service: None,
-        osx_key_user: None,
-      };
-      rookie_cookies::chromium_based(&config, PathBuf::from(db_path), self.domains.take(), false)
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      rookie_cookies::chromium_based_with_browser_id(
+        self.browser_id.as_deref(),
+        PathBuf::from(&self.db_path),
+        self.domains.take(),
+        false,
+      )
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
     })
   }
 
@@ -968,8 +1091,57 @@ impl Task for ChromiumBasedUnixTask {
 pub fn chromium_based(
   db_path: String,
   domains: Option<Vec<String>>,
+  browser_id: Option<String>,
 ) -> AsyncTask<ChromiumBasedUnixTask> {
-  AsyncTask::new(ChromiumBasedUnixTask { db_path, domains })
+  AsyncTask::new(ChromiumBasedUnixTask {
+    db_path,
+    domains,
+    browser_id,
+  })
+}
+
+#[cfg(unix)]
+pub struct ChromiumBasedDetailedUnixTask {
+  db_path: String,
+  domains: Option<Vec<String>>,
+  browser_id: Option<String>,
+}
+
+#[cfg(unix)]
+impl Task for ChromiumBasedDetailedUnixTask {
+  type Output = Vec<DetailedCookie>;
+  type JsValue = Vec<DetailedCookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::chromium_based_detailed_with_browser_id(
+        self.browser_id.as_deref(),
+        PathBuf::from(&self.db_path),
+        self.domains.take(),
+        false,
+      )
+      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    detailed_cookies_to_js(output)
+  }
+}
+
+// Extracts Chromium partition/source context from an explicit Unix path.
+#[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
+#[cfg(unix)]
+pub fn chromium_based_detailed(
+  db_path: String,
+  domains: Option<Vec<String>>,
+  browser_id: Option<String>,
+) -> AsyncTask<ChromiumBasedDetailedUnixTask> {
+  AsyncTask::new(ChromiumBasedDetailedUnixTask {
+    db_path,
+    domains,
+    browser_id,
+  })
 }
 
 // Compiled only by the Node regression-test build. Keeping this out of normal

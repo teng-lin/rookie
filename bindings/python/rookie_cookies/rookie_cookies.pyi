@@ -1,7 +1,34 @@
 from sys import platform
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 CookieList = List[Dict[str, Any]]
+
+class CookieObject(TypedDict):
+    domain: str
+    path: str
+    secure: bool
+    expires: Optional[int]
+    name: str
+    value: str
+    http_only: bool
+    same_site: int
+
+class CookieContext(TypedDict):
+    top_frame_site_key: Optional[str]
+    has_cross_site_ancestor: Optional[bool]
+    source_scheme: Optional[int]
+    source_port: Optional[int]
+    is_persistent: Optional[bool]
+    origin_attributes: Optional[str]
+    user_context_id: Optional[int]
+    partition_key: Optional[str]
+    private_browsing_id: Optional[int]
+
+class DetailedCookie(TypedDict):
+    cookie: CookieObject
+    context: CookieContext
+
+DetailedCookieList = List[DetailedCookie]
 FirefoxProfile = Dict[str, Any]
 FirefoxProfileList = List[FirefoxProfile]
 BrowserDescriptor = Dict[str, Any]
@@ -73,6 +100,12 @@ def firefox_based(db_path: str, domains: Optional[List[str]] = None) -> CookieLi
     """
     ...
 
+def firefox_based_detailed(
+    db_path: str, domains: Optional[List[str]] = None
+) -> DetailedCookieList:
+    """Extract cookies with Firefox container and origin context preserved."""
+    ...
+
 def brave(domains: Optional[List[str]] = None) -> CookieList:
     """
     Extract Cookies from Brave browser
@@ -113,15 +146,32 @@ if platform == "win32":
         :return: A list of dictionaries of cookies
         """
         ...
+    def chromium_based_detailed(
+        key_path: str, db_path: str, domains: Optional[List[str]] = None
+    ) -> DetailedCookieList:
+        """Extract Chromium cookies with partition/source context on Windows."""
+        ...
 else:
-    def chromium_based(db_path: str, domains: Optional[List[str]] = None) -> CookieList:
+    def chromium_based(
+        db_path: str,
+        domains: Optional[List[str]] = None,
+        browser_id: Optional[str] = None,
+    ) -> CookieList:
         """
         Extract Cookies from Chromium-based browsers on Unix
 
         :param db_path: Path to the database file
         :param domains: Optional list of domains to extract only from them
+        :param browser_id: Canonical browser identity for encrypted profiles
         :return: A list of dictionaries of cookies
         """
+        ...
+    def chromium_based_detailed(
+        db_path: str,
+        domains: Optional[List[str]] = None,
+        browser_id: Optional[str] = None,
+    ) -> DetailedCookieList:
+        """Extract Chromium cookies with partition/source context on Unix."""
         ...
 
 def chromium(domains: Optional[List[str]] = None) -> CookieList:

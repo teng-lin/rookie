@@ -14,9 +14,11 @@ from .rookie_cookies import (
     chrome_profiles,
     chromium,
     chromium_based,
+    chromium_based_detailed,
     edge,
     firefox,
     firefox_based,
+    firefox_based_detailed,
     firefox_profile,
     firefox_profiles,
     librewolf,
@@ -42,10 +44,12 @@ __all__ = [
     "chrome_profiles",
     "chromium",
     "chromium_based",
+    "chromium_based_detailed",
     "create_cookie",
     "edge",
     "firefox",
     "firefox_based",
+    "firefox_based_detailed",
     "firefox_profile",
     "firefox_profiles",
     "librewolf",
@@ -63,6 +67,7 @@ __all__ = [
 
 
 CookieList = List[Dict[str, Any]]
+DetailedCookieList = List[Dict[str, Any]]
 FirefoxProfile = Dict[str, Any]
 FirefoxProfileList = List[FirefoxProfile]
 BrowserDescriptor = Dict[str, Any]

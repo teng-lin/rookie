@@ -68,6 +68,35 @@ fn main() {
 }
 ```
 
+## Partition and container context
+
+The original `Cookie` type intentionally remains a compatibility projection.
+Use the additive detailed path APIs when cookies that share
+`(domain, path, name)` must remain distinguishable by Chromium CHIPS partition
+or Firefox container:
+
+```rust
+use std::path::PathBuf;
+
+fn main() -> rookie_cookies::Result<()> {
+    let cookies = rookie_cookies::firefox_based_detailed(
+        PathBuf::from("/path/to/cookies.sqlite"),
+        None,
+    )?;
+    for record in cookies {
+        println!("{} {:?}", record.cookie.name, record.context);
+    }
+    Ok(())
+}
+```
+
+On Unix, explicit Chromium paths should use
+`chromium_based_detailed_with_browser_id(Some("brave"), ...)` (or the legacy
+projection `chromium_based_with_browser_id`). The ID is resolved through the
+browser registry to Brave's Linux crypt name or macOS Keychain service/account.
+Omitting it is allowed only for a plaintext-only database; encrypted rows fail
+explicitly instead of being attempted with Chrome's identity.
+
 ## Logging
 
 Logging level can be controlled by changing `RUST_LOG` ENV variable

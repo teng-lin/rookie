@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
+import { DatabaseSync } from "node:sqlite";
 
 import rookieCookies, {
   firefoxBased,
@@ -46,10 +47,12 @@ const EXPECTED_EXPORTS = [
   "firefoxProfiles",
   "firefoxProfile",
   "firefoxBased",
+  "firefoxBasedDetailed",
   "octoBrowser",
   "internetExplorer",
   "safari",
   "chromiumBased",
+  "chromiumBasedDetailed",
   "supportedBrowsers",
   "browserProfiles",
   "chromeProfiles",
@@ -71,6 +74,8 @@ const REPORT_FUNCTIONS = [
 ];
 
 const REPORT_INTERFACES = [
+  "CookieContextObject",
+  "DetailedCookieObject",
   "BrowserCapabilitiesObject",
   "BrowserDescriptorObject",
   "ProfileIdentityObject",
@@ -202,12 +207,73 @@ test("firefoxBased throws on a non-sqlite file", async (t) => {
   await t.throwsAsync(firefoxBased(dbPath));
 });
 
+test("firefoxBasedDetailed preserves colliding container identities", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-detailed-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    const database = new DatabaseSync(dbPath);
+    database.exec(`
+      CREATE TABLE moz_cookies (
+        host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER, name TEXT,
+        value TEXT, isHttpOnly INTEGER, sameSite INTEGER, originAttributes TEXT
+      );
+      INSERT INTO moz_cookies VALUES
+        ('.example.com', '/', 1, 0, 'session', 'work', 1, 1, '^userContextId=2'),
+        ('.example.com', '/', 1, 0, 'session', 'personal', 1, 1, '^userContextId=1');
+    `);
+    database.close();
+
+    const records = await rookieCookies.firefoxBasedDetailed(dbPath);
+    t.is(records.length, 2);
+    t.deepEqual(
+      Object.fromEntries(records.map(({ cookie, context }) => [
+        cookie.value,
+        context.userContextId,
+      ])),
+      { work: 2, personal: 1 },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("identity-less encrypted Chromium paths reject explicitly on Unix", async (t) => {
+  if (process.platform === "win32") {
+    t.pass();
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-identity-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    const database = new DatabaseSync(dbPath);
+    database.exec(`
+      CREATE TABLE cookies (
+        host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+        name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+        samesite INTEGER
+      );
+      INSERT INTO cookies VALUES (
+        '.example.com', '/', 1, 0, 'session', '',
+        X'763131656E63727970746564', 1, 0
+      );
+    `);
+    database.close();
+
+    await t.throwsAsync(rookieCookies.chromiumBased(dbPath), {
+      message: /no browser key identity.*browser_id/s,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("bad async API arguments reject instead of throwing synchronously", async (t) => {
   const invalidCalls = [
     ["anyBrowser", () => rookieCookies.anyBrowser(42)],
     ["firefox", () => rookieCookies.firefox(42)],
     ["firefoxProfile", () => rookieCookies.firefoxProfile(42)],
     ["firefoxBased", () => rookieCookies.firefoxBased(42)],
+    ["firefoxBasedDetailed", () => rookieCookies.firefoxBasedDetailed(42)],
     ["zen", () => rookieCookies.zen(42)],
     ["librewolf", () => rookieCookies.librewolf(42)],
     ["chrome", () => rookieCookies.chrome(42)],
@@ -223,6 +289,7 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     ["internetExplorer", () => rookieCookies.internetExplorer(42)],
     ["safari", () => rookieCookies.safari(42)],
     ["chromiumBased", () => rookieCookies.chromiumBased(42)],
+    ["chromiumBasedDetailed", () => rookieCookies.chromiumBasedDetailed(42)],
     ["browserProfiles", () => rookieCookies.browserProfiles(42)],
     ["chromeProfile", () => rookieCookies.chromeProfile(42)],
     ["browserReport", () => rookieCookies.browserReport(42)],
@@ -817,11 +884,13 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "chromium",
     "vivaldi",
     "firefoxBased",
+    "firefoxBasedDetailed",
     "load",
     "octoBrowser",
     "internetExplorer",
     "safari",
     "chromiumBased",
+    "chromiumBasedDetailed",
     ...REPORT_FUNCTIONS,
   ];
   const callPattern = new RegExp(`\\b(?:${asyncApis.join("|")})\\s*\\(`, "g");

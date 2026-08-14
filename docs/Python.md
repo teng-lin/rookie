@@ -51,6 +51,30 @@ Every DTO is a dictionary with snake_case keys, and every identifier or code is
 an open snake_case string rather than a closed set, so keep a fallback when
 matching one.
 
+## Explicit paths and cookie context
+
+`firefox_based_detailed()` and `chromium_based_detailed()` return an unchanged
+cookie dictionary under `cookie` plus a separate `context` dictionary. Context
+retains Chromium partition and source fields and Firefox's raw
+`originAttributes` plus parsed container, partition, and private-browsing IDs.
+
+```python
+import rookie_cookies
+
+records = rookie_cookies.chromium_based_detailed(
+    "/path/to/Brave/Default/Network/Cookies",
+    ["example.com"],
+    browser_id="brave",
+)
+for record in records:
+    print(record["cookie"]["name"], record["context"]["top_frame_site_key"])
+```
+
+On Linux and macOS, pass a canonical `browser_id` from
+`supported_browsers()`. It selects the correct Linux keyring crypt name or
+macOS Keychain service/account. The argument may be omitted only for a
+plaintext-only database; encrypted rows raise an explicit error.
+
 ## Logging
 
 Logging level can be controlled by using the `logging` module

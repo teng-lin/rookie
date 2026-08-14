@@ -13,8 +13,8 @@ pub use browser::internet_explorer::internet_explorer_based;
 #[cfg(target_os = "macos")]
 pub use browser::safari::safari_based;
 pub use browser::{
-  chromium::chromium_based,
-  mozilla::{firefox_based, MozillaProfile},
+  chromium::{chromium_based, chromium_based_detailed},
+  mozilla::{firefox_based, firefox_based_detailed, MozillaProfile},
 };
 
 // Private
@@ -40,6 +40,46 @@ fn browser_config(name: &str) -> Result<&config::Browser> {
   config::try_get_browser_config(name).ok_or_else(|| {
     anyhow::anyhow!("browser configuration {name:?} is unavailable for this platform")
   })
+}
+
+/// Extracts an explicit Chromium cookie database using registry-resolved key
+/// identity on Unix.
+///
+/// `browser_id` should be a canonical ID (or registered alias) from
+/// [`supported_browsers`]. It controls Linux keyring and macOS Keychain lookup;
+/// the database path is never guessed to be Chrome. `None` is accepted only
+/// for databases containing plaintext rows exclusively.
+#[cfg(unix)]
+pub fn chromium_based_with_browser_id(
+  browser_id: Option<&str>,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<Vec<Cookie>> {
+  match browser_id {
+    Some(browser_id) => {
+      let config = browser::registry::chromium_key_credentials(browser_id)?;
+      chromium_based(&config, db_path, domains, force_kill)
+    }
+    None => browser::chromium::chromium_based_plaintext_only(db_path, domains, force_kill),
+  }
+}
+
+/// Detailed counterpart to [`chromium_based_with_browser_id`].
+#[cfg(unix)]
+pub fn chromium_based_detailed_with_browser_id(
+  browser_id: Option<&str>,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<Vec<enums::DetailedCookie>> {
+  match browser_id {
+    Some(browser_id) => {
+      let config = browser::registry::chromium_key_credentials(browser_id)?;
+      chromium_based_detailed(&config, db_path, domains, force_kill)
+    }
+    None => browser::chromium::chromium_based_detailed_plaintext_only(db_path, domains, force_kill),
+  }
 }
 
 /// Returns the rookie-cookies version.
@@ -1021,6 +1061,84 @@ mod tests {
       error.to_string(),
       "browser configuration \"not-a-browser\" is unavailable for this platform"
     );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn explicit_path_rejects_encrypted_rows_without_browser_identity() {
+    let directory = crate::utils::TempDir::new().expect("temp directory");
+    let db = directory.path().join("Cookies");
+    seed_explicit_path_cookie(&db, "", b"v11encrypted");
+
+    let error = chromium_based_with_browser_id(None, db.clone(), None, false)
+      .expect_err("encrypted rows require a browser identity");
+    assert!(error.to_string().contains("no browser key identity"));
+    assert!(error.to_string().contains("browser_id"));
+
+    let detailed_error = chromium_based_detailed_with_browser_id(None, db, None, false)
+      .expect_err("detailed encrypted rows require a browser identity");
+    assert!(detailed_error
+      .to_string()
+      .contains("no browser key identity"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn explicit_path_without_identity_remains_available_for_plaintext_only_databases() {
+    let directory = crate::utils::TempDir::new().expect("temp directory");
+    let db = directory.path().join("Cookies");
+    seed_explicit_path_cookie(&db, "plaintext", b"");
+
+    let cookies = chromium_based_with_browser_id(None, db.clone(), None, false)
+      .expect("plaintext-only databases need no key identity");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].value, "plaintext");
+
+    let detailed = chromium_based_detailed_with_browser_id(None, db, None, false)
+      .expect("detailed plaintext-only databases need no key identity");
+    assert_eq!(detailed.len(), 1);
+    assert_eq!(detailed[0].cookie.value, "plaintext");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn explicit_path_identity_check_covers_the_profile_before_domain_filtering() {
+    let directory = crate::utils::TempDir::new().expect("temp directory");
+    let db = directory.path().join("Cookies");
+    seed_explicit_path_cookie(&db, "plaintext", b"");
+    let connection = rusqlite::Connection::open(&db).expect("reopen fixture");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.other.test', '/', 0, 0, 'encrypted', '', ?1, 0, 0)",
+        rusqlite::params![b"v11encrypted"],
+      )
+      .expect("seed encrypted row outside the requested domain");
+    drop(connection);
+
+    let error =
+      chromium_based_with_browser_id(None, db, Some(vec!["example.test".to_string()]), false)
+        .expect_err("the whole encrypted profile requires an identity");
+    assert!(error.to_string().contains("no browser key identity"));
+  }
+
+  #[cfg(unix)]
+  fn seed_explicit_path_cookie(db: &std::path::Path, value: &str, encrypted_value: &[u8]) {
+    let connection = rusqlite::Connection::open(db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER
+         );",
+      )
+      .expect("create cookie schema");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'session', ?1, ?2, 0, 0)",
+        rusqlite::params![value, encrypted_value],
+      )
+      .expect("seed cookie row");
   }
 
   fn named_cookie(name: &str) -> Cookie {

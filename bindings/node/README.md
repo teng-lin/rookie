@@ -119,6 +119,25 @@ value and keep a fallback branch rather than switching exhaustively. Every
 counter is an ordinary JavaScript number, never a `BigInt`; a count that would
 overflow is clamped and sets `countersSaturated`.
 
+## Detailed cookies and explicit Chromium paths
+
+```typescript
+import { chromiumBasedDetailed, firefoxBasedDetailed } from "rookie-cookies";
+
+const chromiumRecords = await chromiumBasedDetailed(
+  "/path/to/Brave/Default/Network/Cookies",
+  ["example.com"],
+  "brave",
+);
+const firefoxRecords = await firefoxBasedDetailed("/path/to/cookies.sqlite");
+```
+
+Each record contains the unchanged `CookieObject` under `cookie` and a
+`context` object with nullable partition/container fields. On Unix,
+`chromiumBased()` likewise accepts the canonical browser ID as its third
+argument. Omit it only for plaintext-only databases; encrypted rows reject
+instead of silently using Chrome's key identity.
+
 ## Netscape export
 
 ```typescript

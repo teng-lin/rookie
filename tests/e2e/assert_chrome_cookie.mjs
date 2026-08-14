@@ -49,8 +49,8 @@ if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
   cookies = await rookieCookies.chromiumBased(keyPath, dbPath, [domain]);
 } else {
-  // Unix binding takes (dbPath, domains)
-  cookies = await rookieCookies.chromiumBased(dbPath, [domain]);
+  // Unix binding takes (dbPath, domains, browserId)
+  cookies = await rookieCookies.chromiumBased(dbPath, [domain], "chrome");
 }
 
 const results = [["chromiumBased", cookies, expectedName, expectedValue]];

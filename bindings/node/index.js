@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
+const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -379,11 +379,13 @@ module.exports.octoBrowser = platformNative(octoBrowser, 'octoBrowser', 'win32',
 module.exports.internetExplorer = platformNative(internetExplorer, 'internetExplorer', 'win32', 'Windows')
 module.exports.safari = platformNative(safari, 'safari', 'darwin', 'macOS')
 module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
+module.exports.chromiumBasedDetailed = asyncNative(chromiumBasedDetailed, 'chromiumBasedDetailed')
 module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
 module.exports.firefoxProfile = asyncNative(firefoxProfile, 'firefoxProfile')
 module.exports.chromeProfiles = asyncNative(chromeProfiles, 'chromeProfiles')
 module.exports.chromeProfile = asyncNative(chromeProfile, 'chromeProfile')
 module.exports.firefoxBased = asyncNative(firefoxBased, 'firefoxBased')
+module.exports.firefoxBasedDetailed = asyncNative(firefoxBasedDetailed, 'firefoxBasedDetailed')
 module.exports.supportedBrowsers = asyncNative(supportedBrowsers, 'supportedBrowsers')
 module.exports.browserProfiles = asyncNative(browserProfiles, 'browserProfiles')
 module.exports.browserReport = asyncNative(browserReport, 'browserReport')
