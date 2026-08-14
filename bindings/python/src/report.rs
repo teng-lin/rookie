@@ -52,7 +52,7 @@ pub fn chrome_profiles(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
 
 /// Extract one selected Google Chrome profile as a grouped report
 ///
-/// :param profile: Profile ID, display name, directory name, or full path from chrome_profiles
+/// :param profile: Profile ID, display name, directory name, or a full path whose path_lossy flag is false
 /// :param domains: Optional list of domains to extract only from them
 /// :return: An extraction report dictionary retaining source provenance and issues
 #[pyfunction]

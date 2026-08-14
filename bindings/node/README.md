@@ -47,8 +47,10 @@ if (profiles.length > 0) {
 }
 ```
 
-Profile IDs and full paths are unambiguous. A repeated display or directory
-name rejects instead of silently choosing a channel.
+Profile IDs and non-lossy full paths are unambiguous. When
+`profile.pathLossy` is true, the display path cannot round-trip as a selector,
+so use the profile ID. A repeated display or directory name rejects instead of
+silently choosing a channel.
 
 ## Reports
 

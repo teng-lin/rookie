@@ -38,8 +38,9 @@ if profiles:
 ```
 
 Missing or malformed hints fall back to the generic order. A selector may also
-be a display name, directory name, or full path; ambiguous names raise instead
-of silently choosing a channel.
+be a display name, directory name, or a full path when
+`descriptor["profile"]["path_lossy"]` is false; lossy paths require the profile
+ID. Ambiguous names raise instead of silently choosing a channel.
 
 ## Browser registry and reports
 

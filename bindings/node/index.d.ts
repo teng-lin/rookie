@@ -213,9 +213,10 @@ export declare function chromeProfiles(): Promise<Array<ProfileDescriptorObject>
 /**
  * Extracts one selected Google Chrome profile as a grouped report.
  *
- * `profile` accepts the opaque ID, display name, directory name, or full path
- * returned by `chromeProfiles`. Ambiguous names reject rather than silently
- * choosing an installation or channel.
+ * `profile` accepts the opaque ID, display name, directory name, or a full
+ * path returned by `chromeProfiles` when the descriptor's
+ * `profile.pathLossy` is false. A lossy path requires its opaque ID. Ambiguous
+ * names reject rather than silently choosing an installation or channel.
  */
 export declare function chromeProfile(profile: string, domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
 /**

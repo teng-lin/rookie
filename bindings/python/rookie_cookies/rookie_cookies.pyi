@@ -250,7 +250,8 @@ def chrome_profile(
     Extract one selected Google Chrome profile as a grouped report.
 
     :param profile: Profile ID, display name, directory name, or full path from
-        chrome_profiles
+        chrome_profiles when ``descriptor["profile"]["path_lossy"]`` is false.
+        Use the profile ID for a lossy display path.
     :param domains: Optional list of domains to extract only from them
     :return: A report retaining profile identity, source provenance, and typed
         discovery/extraction issues

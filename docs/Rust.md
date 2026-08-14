@@ -49,9 +49,10 @@ the last-used profile appears first, followed by the other active profiles. If
 the hints are missing, stale, or malformed, the order safely falls back to the
 generic default-first registry order.
 
-`chrome_profile()` accepts a profile ID, display name, directory name, or full
-path. It returns a grouped report rather than a flat cookie vector, preserving
-the profile identity, selected source, counters, and typed issues.
+`chrome_profile()` accepts a profile ID, display name, directory name, or a full
+path when `profile.path_lossy` is false. Lossy display paths require the opaque
+profile ID. It returns a grouped report rather than a flat cookie vector,
+preserving the profile identity, selected source, counters, and typed issues.
 
 ```rust
 fn main() {

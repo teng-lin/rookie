@@ -39,8 +39,9 @@ For Chrome, `chrome_profiles()` lists the preferred active profile first while
 leaving `browser_profiles("chrome")` and the legacy `chrome()` selector
 unchanged. Activity hints are advisory and safely fall back to default-first
 ordering. `chrome_profile(profile, domains=None)` accepts an ID, display name,
-directory name, or full path and returns the same provenance-preserving report
-shape as `browser_report`.
+directory name, or a full path when
+`descriptor["profile"]["path_lossy"]` is false; lossy paths require the opaque
+ID. It returns the same provenance-preserving report shape as `browser_report`.
 
 The CLI intentionally keeps the generic frozen grammar: use
 `--list-profiles --browser chrome`, then pass its opaque `profile_id` to

@@ -249,7 +249,8 @@ chrome_profile(
 
 `chrome_profiles()` uses the Chrome-specific active preference above without
 changing `browser_profiles("chrome")`. `chrome_profile()` accepts the opaque
-profile ID, display name, directory name, or full path and returns the grouped
+profile ID, display name, directory name, or a full path whose `path_lossy` flag
+is false; a lossy display path requires the opaque ID. It returns the grouped
 report so profile/source provenance and typed partial failures are retained.
 The existing flat `chrome()` function is unchanged.
 

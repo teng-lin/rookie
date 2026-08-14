@@ -124,9 +124,10 @@ pub fn browser_profiles(browser_id: &str) -> Result<Vec<report::ProfileDescripto
 /// activity hints safely fall back to the generic discovery order.
 ///
 /// Each result retains its stable profile/installation IDs and ordered cookie
-/// source descriptors. Pass a profile ID, display name, directory name, or full
-/// path to [`chrome_profile`]. IDs and full paths are recommended when multiple
-/// installations contain same-named profiles.
+/// source descriptors. Pass a profile ID, display name, directory name, or a
+/// full path to [`chrome_profile`]. A full path is selectable only when
+/// `profile.path_lossy` is false; otherwise use the opaque profile ID. IDs are
+/// also recommended when multiple installations contain same-named profiles.
 ///
 /// # Examples
 ///
@@ -145,9 +146,11 @@ pub fn chrome_profiles() -> Result<Vec<report::ProfileDescriptor>> {
 /// Unlike the legacy [`chrome`] function, this registry-backed selector keeps
 /// the selected profile identity, cookie-source provenance, partial failures,
 /// and typed discovery issues. `profile` may be the opaque profile ID returned
-/// by [`chrome_profiles`], a display name, a directory name, or a full path.
-/// Ambiguous names are rejected instead of silently selecting the wrong
-/// channel or installation.
+/// by [`chrome_profiles`], a display name, a directory name, or a non-lossy
+/// full path. When a descriptor has `profile.path_lossy == true`, its display
+/// path cannot round-trip through this UTF-8 selector and its opaque ID is
+/// required. Ambiguous names are rejected instead of silently selecting the
+/// wrong channel or installation.
 ///
 /// # Examples
 ///

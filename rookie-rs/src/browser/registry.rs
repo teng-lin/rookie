@@ -1578,11 +1578,12 @@ fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
 }
 
 /// Selects one Chrome profile by opaque ID, display name, directory name, or
-/// full path.
+/// full path when that path is valid UTF-8.
 ///
 /// Names can repeat across channels and installations, so an ambiguous match
 /// is rejected instead of silently trusting an advisory activity hint. The
-/// opaque profile ID and full path remain unambiguous selectors.
+/// opaque profile ID is always lossless; callers must use it when a descriptor
+/// marks its display path as lossy.
 pub(crate) fn select_chrome_profile(profile: &str) -> Result<ChromiumProfile> {
   let profiles = chrome_profiles()?;
   select_chromium_profile(&profiles, profile).cloned()
@@ -1603,6 +1604,17 @@ fn select_chromium_profile<'a>(
     return Ok(profile);
   }
 
+  let lossy_paths = profiles
+    .iter()
+    .filter(|profile| profile.path.to_str().is_none() && profile.path.to_string_lossy() == selector)
+    .collect::<Vec<_>>();
+  if !lossy_paths.is_empty() {
+    bail!(
+      "Chrome profile path {selector:?} is a lossy display value and cannot be used as a selector; select by profile ID: [{}]",
+      describe_chromium_profiles(lossy_paths.into_iter())
+    )
+  }
+
   let wanted = Path::new(selector);
   let matches = profiles
     .iter()
@@ -1619,7 +1631,7 @@ fn select_chromium_profile<'a>(
       describe_chromium_profiles(profiles.iter())
     ),
     _ => bail!(
-      "{} Chrome profiles match {selector:?}; select one by profile ID or full path: [{}]",
+      "{} Chrome profiles match {selector:?}; select one by profile ID or a non-lossy full path: [{}]",
       matches.len(),
       describe_chromium_profiles(matches.iter().copied())
     ),
@@ -1647,7 +1659,29 @@ fn profiles_for_listing(
   if discovery.all_detected_roots_failed() {
     bail!("every detected {browser_id} installation failed profile enumeration")
   }
-  Ok(discovery.profiles())
+  let profiles = discovery.profiles();
+  if profiles.is_empty() {
+    let lost_profiles = discovery
+      .issues
+      .iter()
+      .filter(|issue| {
+        issue.code.starts_with("profile_")
+          && !matches!(
+            issue.code,
+            "duplicate_profile" | "profile_has_no_cookie_source"
+          )
+      })
+      .take(MAX_DISCOVERY_ISSUE_SAMPLES)
+      .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
+      .collect::<Vec<_>>();
+    if !lost_profiles.is_empty() {
+      bail!(
+        "every discovered {browser_id} profile failed discovery: {}",
+        lost_profiles.join("; ")
+      )
+    }
+  }
+  Ok(profiles)
 }
 
 /// Chromium listing that keeps its discovery diagnostics.
@@ -6609,6 +6643,34 @@ mod tests {
     assert!(select_chromium_profile(&profiles, "").is_err());
   }
 
+  #[cfg(unix)]
+  #[test]
+  fn lossy_chrome_profile_paths_require_the_opaque_profile_id() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = TempDir::new("lossy-profile-selector");
+    let context = test_context(temp.path().to_path_buf());
+    let root = channel_root(&context, "stable");
+    seed_cookie(&root.join("Default"), true, "default", "one");
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover Chrome");
+    let mut profiles = discovery.profiles();
+    let profile_id = profiles[0].profile_id.clone();
+    profiles[0].path = PathBuf::from(OsString::from_vec(b"/profile/invalid-\xff".to_vec()));
+    let lossy_path = profiles[0].path.to_string_lossy().into_owned();
+
+    let error = select_chromium_profile(&profiles, &lossy_path)
+      .expect_err("a lossy display path cannot round-trip");
+    assert!(error.to_string().contains("lossy display value"));
+    assert!(error.to_string().contains(&profile_id));
+    assert_eq!(
+      select_chromium_profile(&profiles, &profile_id)
+        .expect("opaque ID remains lossless")
+        .profile_id,
+      profile_id
+    );
+  }
+
   #[test]
   fn same_named_profiles_in_two_channels_have_stable_unique_ids() {
     let temp = TempDir::new("channels");
@@ -6864,6 +6926,37 @@ mod tests {
       .iter()
       .any(|issue| issue.code == "installation_enumeration_failed"));
     assert!(provider.calls.borrow().is_empty());
+  }
+
+  #[test]
+  fn listing_fails_when_every_chromium_profile_is_lost_after_enumeration() {
+    let temp = TempDir::new("profile-discovery-failure");
+    let real_context = test_context(temp.path().to_path_buf());
+    let root = channel_root(&real_context, "stable");
+    let profile = root.join("Default");
+    seed_cookie(&profile, true, "default", "value");
+    let denied_profile = profile.canonicalize().expect("canonical profile");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_canonicalize: vec![denied_profile],
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery =
+      discover_browser_with_context(&context, "chrome").expect("retain profile failure");
+    assert!(!discovery.all_detected_roots_failed());
+    assert!(discovery.profiles().is_empty());
+    assert!(discovery
+      .issues
+      .iter()
+      .any(|issue| issue.code == "profile_canonicalize_failed"));
+    let error = profiles_for_listing("chrome", discovery)
+      .expect_err("lost profiles must not look like an absent browser");
+    assert!(error
+      .to_string()
+      .contains("every discovered chrome profile failed discovery"));
   }
 
   #[test]
