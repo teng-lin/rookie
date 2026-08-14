@@ -1668,7 +1668,7 @@ fn profiles_for_listing(
         issue.code.starts_with("profile_")
           && !matches!(
             issue.code,
-            "duplicate_profile" | "profile_has_no_cookie_source"
+            "profile_excluded_service_directory" | "profile_has_no_cookie_source"
           )
       })
       .take(MAX_DISCOVERY_ISSUE_SAMPLES)
@@ -7598,6 +7598,32 @@ mod tests {
       .issues
       .iter()
       .all(|issue| issue.code == "profile_excluded_service_directory"));
+  }
+
+  #[test]
+  fn service_directory_exclusions_do_not_make_an_empty_listing_fail() {
+    let temp = TempDir::new("marker-skips-only-service-directories");
+    let context = windows_context(temp.path().join("home"));
+    let root = browser_root(&context, "chrome", "chrome-stable-local");
+    for skipped in CHROMIUM_NON_PROFILE_DIRECTORIES {
+      let path = root.join(skipped);
+      seed_cookie(&path, true, "skipped", "value");
+      std::fs::write(path.join("Preferences_02"), b"{}").expect("write profile marker");
+    }
+
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover");
+    assert!(discovery.profiles().is_empty());
+    assert_eq!(
+      discovery
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "profile_excluded_service_directory")
+        .count(),
+      CHROMIUM_NON_PROFILE_DIRECTORIES.len()
+    );
+    assert!(profiles_for_listing("chrome", discovery)
+      .expect("reserved service directories are not lost user profiles")
+      .is_empty());
   }
 
   #[test]
