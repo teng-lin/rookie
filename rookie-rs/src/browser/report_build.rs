@@ -751,6 +751,13 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
 pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<ProfileDescriptor>> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let outcome = collect_report(&browser, None, false, None)?;
+  profile_descriptors_from_outcome(browser_id, outcome)
+}
+
+fn profile_descriptors_from_outcome(
+  browser_id: &str,
+  outcome: BrowserOutcome,
+) -> Result<Vec<ProfileDescriptor>> {
   // An empty list must mean "looked, found nothing". Roots that all failed to
   // enumerate are one way to lose everything; profiles that were all found and
   // then all failed is another, and both would otherwise be indistinguishable
@@ -1493,6 +1500,70 @@ mod engine_chain_tests {
 
     assert_eq!(report.status, ReportStatusCode::no_sources());
     assert_eq!(report.summary.installations_discovered, 0);
+  }
+
+  #[test]
+  fn unreadable_non_chromium_roots_are_detected_failures_at_public_boundaries() {
+    use crate::browser::registry::PlatformId;
+
+    for (name, platform, browser_id) in [
+      ("gecko", PlatformId::Linux, "firefox"),
+      ("safari", PlatformId::Macos, "safari"),
+      (
+        "internet-explorer",
+        PlatformId::Windows,
+        "internet_explorer",
+      ),
+    ] {
+      let temp = TempDir::new(&format!("{name}-metadata-denied-report"));
+      let context = test_seams::context(platform, temp.path().to_path_buf());
+      let root = test_seams::primary_root_path(&context, browser_id);
+      let engine =
+        test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root.clone())
+          .expect("discovery retains the metadata failure");
+      assert_eq!(engine.installations_detected, 1, "{name}");
+      assert_eq!(engine.installations_discovered, 0, "{name}");
+      assert_eq!(engine.installations_enumerated, 0, "{name}");
+      assert!(engine.all_detected_roots_failed(), "{name}");
+
+      let browser = BrowserId::known(browser_id);
+      let outcome = engine_browser_outcome(&browser, engine).expect("adapt engine discovery");
+      assert!(outcome.detected, "{name}");
+      assert!(outcome.discovery_failed, "{name}");
+      let report = assemble(1, vec![outcome]);
+      assert_eq!(report.status, ReportStatusCode::failed(), "{name}");
+      assert_eq!(report.summary.browsers_detected, 1, "{name}");
+      let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code.as_str() == "installation_metadata_failed")
+        .expect("stable root metadata issue");
+      assert!(issue.is_error(), "{name}");
+      assert_eq!(
+        issue.samples,
+        [root.to_string_lossy().into_owned()],
+        "{name}"
+      );
+      assert!(
+        report
+          .issues
+          .iter()
+          .all(|issue| issue.code.as_str() != "browser_not_detected"),
+        "{name}"
+      );
+
+      let engine = test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root)
+        .expect("repeat deterministic discovery for listing");
+      let outcome = engine_browser_outcome(&browser, engine).expect("adapt listing discovery");
+      let error = profile_descriptors_from_outcome(browser_id, outcome)
+        .expect_err("an unreadable root must not become an empty profile list");
+      assert!(
+        error
+          .to_string()
+          .contains(&format!("every detected {browser_id} installation failed")),
+        "{name}: {error:#}"
+      );
+    }
   }
 
   /// A session-only profile is admitted only because a session candidate

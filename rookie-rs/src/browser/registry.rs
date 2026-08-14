@@ -1702,8 +1702,8 @@ pub(crate) struct EngineExtractionOutcome {
   /// Duplicates and roots that failed to canonicalize are excluded, matching
   /// what the Chromium adapter reports.
   pub(crate) installations_discovered: usize,
-  /// Roots that existed on disk, including ones that then failed to
-  /// canonicalize or were owned by an earlier root.
+  /// Roots that existed on disk or could not be inspected, including ones that
+  /// then failed to canonicalize or were owned by an earlier root.
   pub(crate) installations_detected: usize,
   /// Roots whose profile enumeration completed, even when it found nothing.
   pub(crate) installations_enumerated: usize,
@@ -1914,6 +1914,42 @@ fn canonical_installation_root<F: DiscoveryFs>(
   Some(canonical_root)
 }
 
+/// Admits a literal non-Chromium installation root without erasing why it
+/// could not be inspected. A missing path, a non-directory occupying it, or a
+/// non-directory ancestor is ordinary absence; every other metadata error
+/// means a root was applicable but inaccessible, so it must participate in the
+/// failed-discovery counters.
+///
+/// Valid directories are counted later by [`canonical_installation_root`].
+/// Keeping that increment in one place prevents a successfully admitted root
+/// from being counted twice.
+fn installation_root_is_directory<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  root_path: &Path,
+  outcome: &mut EngineExtractionOutcome,
+) -> bool {
+  match context.fs.metadata(root_path) {
+    Ok(metadata) => metadata.is_dir(),
+    Err(error)
+      if matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+      ) =>
+    {
+      false
+    }
+    Err(error) => {
+      outcome.installations_detected += 1;
+      outcome.discovery_issues.push(DiscoveryIssue::new(
+        "installation_metadata_failed",
+        root_path.to_path_buf(),
+        error.to_string(),
+      ));
+      false
+    }
+  }
+}
+
 fn discover_gecko_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
@@ -1937,7 +1973,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       continue;
     };
     let root_path = resolved_root.base.join(resolved_root.suffix);
-    if !context.fs.is_dir(&root_path) {
+    if !installation_root_is_directory(context, &root_path, &mut outcome) {
       continue;
     }
     let Some(canonical_root) =
@@ -2310,7 +2346,9 @@ fn discover_safari_with_context<F: DiscoveryFs>(
     };
     // Non-Chromium registry templates never glob, so the suffix is literal.
     let root_path = resolved_root.base.join(resolved_root.suffix);
-    if !context.fs.is_dir(&root_path) || !has_safari_installation_marker(context, &root_path) {
+    if !installation_root_is_directory(context, &root_path, &mut outcome)
+      || !has_safari_installation_marker(context, &root_path)
+    {
       continue;
     }
     let Some(canonical_root) =
@@ -2552,7 +2590,7 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
     };
     // Non-Chromium registry templates never glob, so the suffix is literal.
     let root_path = resolved_root.base.join(resolved_root.suffix);
-    if !context.fs.is_dir(&root_path) {
+    if !installation_root_is_directory(context, &root_path, &mut outcome) {
       continue;
     }
     let Some(canonical_root) =
@@ -2691,6 +2729,46 @@ pub(crate) fn internet_explorer_report(
 pub(crate) mod test_seams {
   use super::*;
 
+  struct MetadataDeniedFs {
+    denied: PathBuf,
+  }
+
+  impl DiscoveryFs for MetadataDeniedFs {
+    fn exists(&self, path: &Path) -> bool {
+      RealDiscoveryFs.exists(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+      RealDiscoveryFs.is_dir(path)
+    }
+
+    fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+      if path == self.denied {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::PermissionDenied,
+          "injected installation metadata denial",
+        ));
+      }
+      RealDiscoveryFs.metadata(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
+      RealDiscoveryFs.read_dir(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+      RealDiscoveryFs.canonicalize(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> Result<String> {
+      RealDiscoveryFs.read_to_string(path)
+    }
+
+    fn expand_registry_glob(&self, base: &Path, suffix: &str) -> Result<GlobExpansion> {
+      RealDiscoveryFs.expand_registry_glob(base, suffix)
+    }
+  }
+
   pub(crate) fn context(platform: PlatformId, home: PathBuf) -> DiscoveryContext<RealDiscoveryFs> {
     let mut env = BTreeMap::new();
     if platform == PlatformId::Windows {
@@ -2716,6 +2794,33 @@ pub(crate) mod test_seams {
       PlatformId::current().expect("supported test platform"),
       home,
     )
+  }
+
+  /// Runs the production non-Chromium discovery adapter with one deterministic
+  /// metadata denial. Cross-engine report tests use this instead of relying on
+  /// host permissions, which can be bypassed by CI users with elevated access.
+  pub(crate) fn non_chromium_discovery_with_denied_root(
+    context: &DiscoveryContext<RealDiscoveryFs>,
+    browser_id: &str,
+    denied: PathBuf,
+  ) -> Result<EngineExtractionOutcome> {
+    let denied_context = DiscoveryContext {
+      platform: context.platform,
+      home: context.home.clone(),
+      env: context.env.clone(),
+      fs: MetadataDeniedFs { denied },
+    };
+    let registry = embedded_registry()?;
+    match browser_definition(registry, context.platform, browser_id)?.engine {
+      BrowserEngine::Gecko => discover_gecko_with_context(&denied_context, browser_id),
+      BrowserEngine::Safari => discover_safari_with_context(&denied_context, browser_id),
+      BrowserEngine::InternetExplorer => {
+        discover_internet_explorer_with_context(&denied_context, browser_id)
+      }
+      BrowserEngine::Chromium => {
+        bail!("metadata-denial seam only supports non-Chromium engines")
+      }
+    }
   }
 
   pub(crate) fn root_path(
@@ -5825,6 +5930,124 @@ mod tests {
       .iter()
       .any(|issue| issue.code == "installation_metadata_failed" && issue.path == root));
     assert!(profiles_for_listing("chrome", discovery).is_err());
+  }
+
+  #[test]
+  fn missing_non_chromium_roots_are_silent() {
+    let temp = TempDir::new("missing-non-chromium-roots");
+
+    let gecko_context = test_context_for(PlatformId::Linux, temp.path().join("linux-home"), []);
+    let gecko =
+      discover_gecko_with_context(&gecko_context, "firefox").expect("missing Gecko roots");
+    assert_eq!(gecko.installations_detected, 0);
+    assert!(gecko.discovery_issues.is_empty());
+    assert!(!gecko.all_detected_roots_failed());
+
+    let safari_context = test_context_for(PlatformId::Macos, temp.path().join("macos-home"), []);
+    let safari =
+      discover_safari_with_context(&safari_context, "safari").expect("missing Safari root");
+    assert_eq!(safari.installations_detected, 0);
+    assert!(safari.discovery_issues.is_empty());
+    assert!(!safari.all_detected_roots_failed());
+
+    let windows_home = temp.path().join("windows-home");
+    let ie_context = test_context_for(
+      PlatformId::Windows,
+      windows_home.clone(),
+      [
+        ("APPDATA", windows_home.join("AppData")),
+        ("LOCALAPPDATA", windows_home.join("LocalAppData")),
+      ],
+    );
+    let ie = discover_internet_explorer_with_context(&ie_context, "internet_explorer")
+      .expect("missing IE roots");
+    assert_eq!(ie.installations_detected, 0);
+    assert!(ie.discovery_issues.is_empty());
+    assert!(!ie.all_detected_roots_failed());
+  }
+
+  #[test]
+  fn a_non_directory_root_ancestor_is_silent_absence() {
+    let temp = TempDir::new("non-directory-root-ancestor");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("create home");
+    std::fs::write(home.join(".mozilla"), b"not a directory")
+      .expect("place a file at the expected parent directory");
+    let context = test_context_for(PlatformId::Linux, home, []);
+
+    let discovery =
+      discover_gecko_with_context(&context, "firefox").expect("non-directory means absent");
+    assert_eq!(discovery.installations_detected, 0);
+    assert_eq!(discovery.installations_discovered, 0);
+    assert_eq!(discovery.installations_enumerated, 0);
+    assert!(discovery.discovery_issues.is_empty());
+    assert!(!discovery.all_detected_roots_failed());
+  }
+
+  #[test]
+  fn later_valid_gecko_root_survives_an_earlier_metadata_failure() {
+    let temp = TempDir::new("gecko-root-metadata-partial-failure");
+    let real_context = test_context_for(PlatformId::Linux, temp.path().join("home"), []);
+    let denied = browser_root(&real_context, "firefox", "firefox-snap");
+    let valid = browser_root(&real_context, "firefox", "firefox-native");
+    seed_empty_gecko_database(&valid.join("Profiles/default"));
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_metadata: Some(denied.clone()),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery =
+      discover_gecko_with_context(&context, "firefox").expect("retain the valid Gecko root");
+    assert_eq!(discovery.installations_detected, 2);
+    assert_eq!(discovery.installations_discovered, 1);
+    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.profiles.len(), 1);
+    assert!(!discovery.all_detected_roots_failed());
+    assert!(discovery
+      .discovery_issues
+      .iter()
+      .any(|issue| { issue.code == "installation_metadata_failed" && issue.path == denied }));
+  }
+
+  #[test]
+  fn later_valid_ie_root_survives_an_earlier_metadata_failure() {
+    let temp = TempDir::new("ie-root-metadata-partial-failure");
+    let home = temp.path().join("home");
+    let real_context = test_context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let denied = browser_root(&real_context, "internet_explorer", "ie-webcache-roaming");
+    let valid = browser_root(&real_context, "internet_explorer", "ie-webcache-local");
+    std::fs::create_dir_all(&valid).expect("create the later IE root");
+    std::fs::write(valid.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+      .expect("seed the later IE root");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_metadata: Some(denied.clone()),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
+      .expect("retain the valid IE root");
+    assert_eq!(discovery.installations_detected, 2);
+    assert_eq!(discovery.installations_discovered, 1);
+    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.profiles.len(), 1);
+    assert!(!discovery.all_detected_roots_failed());
+    assert!(discovery
+      .discovery_issues
+      .iter()
+      .any(|issue| { issue.code == "installation_metadata_failed" && issue.path == denied }));
   }
 
   #[test]
