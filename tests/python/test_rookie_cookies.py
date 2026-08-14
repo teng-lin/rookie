@@ -255,6 +255,7 @@ def _firefox_root(temp: Path):
 def _seed_firefox_database(path: Path, rows) -> None:
     connection = sqlite3.connect(str(path))
     try:
+        connection.execute("PRAGMA user_version = 16")
         connection.execute(
             """
             CREATE TABLE moz_cookies (
@@ -273,7 +274,7 @@ def _seed_firefox_database(path: Path, rows) -> None:
             """
             INSERT INTO moz_cookies (
               host, path, isSecure, expiry, name, value, isHttpOnly, sameSite
-            ) VALUES (?, '/', 0, 1700000000, ?, ?, 0, 0)
+            ) VALUES (?, '/', 0, 1700000000000, ?, ?, 0, 0)
             """,
             rows,
         )

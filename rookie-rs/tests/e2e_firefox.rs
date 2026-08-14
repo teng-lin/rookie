@@ -21,6 +21,7 @@
 fn extracts_seeded_cookie_from_firefox_profile() {
   use std::env;
   use std::path::PathBuf;
+  use std::time::{SystemTime, UNIX_EPOCH};
 
   let profile_dir =
     env::var("ROOKIE_E2E_FIREFOX_PROFILE").expect("ROOKIE_E2E_FIREFOX_PROFILE must be set");
@@ -52,4 +53,13 @@ fn extracts_seeded_cookie_from_firefox_profile() {
       )
     });
   assert_eq!(seeded.value, expected_value, "cookie value mismatch");
+  let now = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .expect("system time after Unix epoch")
+    .as_secs();
+  let expires = seeded.expires.expect("Max-Age cookie must be persistent");
+  assert!(
+    expires > now && expires <= now + 7_200,
+    "Firefox expiry must be Unix seconds near the seeded Max-Age, got {expires} at {now}"
+  );
 }

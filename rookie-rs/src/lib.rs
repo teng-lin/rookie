@@ -1394,8 +1394,10 @@ mod tests {
   fn seed_test_cookies(db_path: &std::path::Path, cookie_name: &str, cookie_value: &str) {
     let conn = rusqlite::Connection::open(db_path).expect("open sqlite db");
     conn
-      .execute(
-        "CREATE TABLE cookies (
+      .execute_batch(
+        "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+        INSERT INTO meta (key, value) VALUES ('version', '23');
+        CREATE TABLE cookies (
           host_key TEXT NOT NULL,
           path TEXT NOT NULL,
           is_secure INTEGER NOT NULL,
@@ -1405,10 +1407,9 @@ mod tests {
           encrypted_value BLOB,
           is_httponly INTEGER NOT NULL,
           samesite INTEGER NOT NULL
-        )",
-        [],
+        );",
       )
-      .expect("create table cookies");
+      .expect("create Chromium schema");
     conn
       .execute(
         "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)

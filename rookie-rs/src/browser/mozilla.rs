@@ -9,6 +9,10 @@ use std::{
   path::{Path, PathBuf},
 };
 
+// Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
+// expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
+const FIREFOX_MILLISECOND_EXPIRY_SCHEMA_VERSION: u32 = 16;
+
 /// Returns cookies from mozilla based browsers
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let database = sqlite::with_browser_database(db_path.clone(), |connection| {
@@ -49,10 +53,25 @@ struct PersistentCookieQuery {
   last_row_error: Option<anyhow::Error>,
 }
 
+fn mozilla_schema_version(connection: &rusqlite::Connection) -> Result<u32> {
+  let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+  u32::try_from(version).map_err(|_| anyhow!("Invalid Firefox cookie schema version {version}"))
+}
+
+fn persistent_cookie_expiry(timestamp: u64, schema_version: u32) -> Option<u64> {
+  let timestamp = if schema_version >= FIREFOX_MILLISECOND_EXPIRY_SCHEMA_VERSION {
+    timestamp / 1000
+  } else {
+    timestamp
+  };
+  date::mozilla_timestamp(timestamp)
+}
+
 fn query_persistent_cookies(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
 ) -> Result<PersistentCookieQuery> {
+  let schema_version = mozilla_schema_version(connection)?;
   let mut query = "
         SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies
     "
@@ -114,7 +133,7 @@ fn query_persistent_cookies(
       .ok()
       .flatten()
       .and_then(|value| u64::try_from(value).ok())
-      .and_then(date::mozilla_timestamp);
+      .and_then(|value| persistent_cookie_expiry(value, schema_version));
 
     let name: String = match row.get(4) {
       Ok(val) => val,
@@ -930,10 +949,17 @@ mod tests {
   // (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
   type CookieRow<'a> = (&'a str, &'a str, bool, u64, &'a str, &'a str, bool, i64);
 
+  fn set_mozilla_schema_version(connection: &rusqlite::Connection, version: u32) {
+    connection
+      .pragma_update(None, "user_version", version)
+      .expect("set Firefox schema version");
+  }
+
   // Minimal moz_cookies fixture mirroring the columns firefox_based reads.
   // Real Firefox schema has more columns, but rookie-cookies only selects these.
   fn seed_moz_cookies(db: &Path, rows: &[CookieRow<'_>]) {
     let conn = rusqlite::Connection::open(db).expect("open writable sqlite");
+    set_mozilla_schema_version(&conn, 15);
     conn
       .execute(
         "CREATE TABLE moz_cookies (
@@ -1428,7 +1454,92 @@ mod tests {
   }
 
   #[test]
-  fn firefox_based_reads_cookies_committed_to_an_active_wal() {
+  fn persistent_expiry_uses_seconds_before_schema_16_and_milliseconds_after() {
+    let old_dir = unique_tmpdir("ff-expiry-seconds-schema");
+    let old_db = old_dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &old_db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        1_700_000_000,
+        "old",
+        "seconds",
+        false,
+        0,
+      )],
+    );
+
+    let new_dir = unique_tmpdir("ff-expiry-milliseconds-schema");
+    let new_db = new_dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &new_db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        1_700_000_000_999,
+        "new",
+        "milliseconds",
+        false,
+        0,
+      )],
+    );
+    let connection = rusqlite::Connection::open(&new_db).expect("open writable sqlite");
+    set_mozilla_schema_version(&connection, 16);
+    drop(connection);
+
+    let old = firefox_based(old_db, None).expect("read seconds-era profile");
+    let new = firefox_based(new_db, None).expect("read milliseconds-era profile");
+    assert_eq!(old[0].expires, Some(1_700_000_000));
+    assert_eq!(new[0].expires, Some(1_700_000_000));
+  }
+
+  #[test]
+  fn schema_16_conversion_is_confined_to_persistent_cookies() {
+    let dir = unique_tmpdir("ff-persistent-only-expiry-conversion");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        1_700_000_000_999,
+        "persistent",
+        "milliseconds",
+        false,
+        0,
+      )],
+    );
+    let connection = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    set_mozilla_schema_version(&connection, 16);
+    drop(connection);
+    write_session_jsonlz4(
+      &dir.join("sessionstore-backups/recovery.jsonlz4"),
+      serde_json::json!([{
+        "host": ".example.com",
+        "path": "/",
+        "name": "sessionstore",
+        "value": "legacy-seconds",
+        "expiry": 1_800_000_000_u64
+      }]),
+    );
+
+    let mut cookies = firefox_based(db, None).expect("read persistent and session cookies");
+    cookies.sort_by(|left, right| left.name.cmp(&right.name));
+    assert_eq!(cookies[0].name, "persistent");
+    assert_eq!(cookies[0].expires, Some(1_700_000_000));
+    assert_eq!(cookies[1].name, "sessionstore");
+    // Sessionstore has no cookies.sqlite schema marker. Preserve its existing
+    // legacy-seconds interpretation rather than applying the DB conversion.
+    assert_eq!(cookies[1].value, "legacy-seconds");
+    assert_eq!(cookies[1].expires, Some(1_800_000_000));
+  }
+
+  #[test]
+  fn firefox_schema_version_and_rows_come_from_the_acquired_wal_snapshot() {
     // Self-cleaning, unlike `unique_tmpdir`; held to the end of the test.
     let dir = crate::utils::TempDir::new().expect("temp dir");
     let db = dir.path().join("cookies.sqlite");
@@ -1448,18 +1559,27 @@ mod tests {
 
     // Switch the database to WAL and keep the writer connected, so the second
     // cookie stays in the -wal the way it does while Firefox is running.
-    let writer = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    let mut writer = rusqlite::Connection::open(&db).expect("open writable sqlite");
     let mode: String = writer
       .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
       .expect("enable WAL");
     assert_eq!(mode, "wal");
-    writer
+    let transaction = writer.transaction().expect("begin WAL update");
+    set_mozilla_schema_version(&transaction, 16);
+    transaction
+      .execute(
+        "UPDATE moz_cookies SET expiry = 1700000000000 WHERE name = 'checkpointed'",
+        [],
+      )
+      .expect("migrate checkpointed expiry to milliseconds");
+    transaction
       .execute(
         "INSERT INTO moz_cookies (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
-          VALUES ('.example.com', '/', 0, 0, 'in-wal', 'fresh', 0, 0)",
+          VALUES ('.example.com', '/', 0, 1800000000999, 'in-wal', 'fresh', 0, 0)",
         [],
       )
       .expect("insert WAL row");
+    transaction.commit().expect("commit schema and row update");
 
     let mut cookies = firefox_based(db.clone(), None).expect("decode");
 
@@ -1471,6 +1591,12 @@ mod tests {
       in_wal.value, "fresh",
       "the WAL row must decode, not just appear"
     );
+    assert_eq!(in_wal.expires, Some(1_800_000_000));
+    let checkpointed = cookies
+      .iter()
+      .find(|cookie| cookie.name == "checkpointed")
+      .expect("checkpointed");
+    assert_eq!(checkpointed.expires, Some(1_700_000_000));
 
     let outcome = query_cookies_engine_outcome(&db, None);
     assert_eq!(

@@ -218,6 +218,47 @@ fn netscape_output_is_exact() {
 }
 
 #[test]
+fn modern_firefox_expiry_is_converted_before_json_and_netscape_export() {
+  let dir = unique_tmpdir("cli-firefox-millisecond-expiry");
+  let db = dir.path().join("cookies.sqlite");
+  seed_firefox_cookies(
+    &db,
+    &[(
+      ".example.com",
+      "/",
+      false,
+      1_700_000_000_999,
+      "modern",
+      "value",
+      false,
+      0,
+    )],
+  );
+  let connection = rusqlite::Connection::open(&db).expect("open writable sqlite");
+  connection
+    .pragma_update(None, "user_version", 16)
+    .expect("select millisecond Firefox schema");
+  drop(connection);
+
+  let json = parsed_json(&run_rookie(&[
+    "--path",
+    db.to_str().unwrap(),
+    "--format",
+    "json",
+  ]));
+  assert_eq!(json[0]["expires"], 1_700_000_000_u64);
+
+  let netscape = run_rookie(&["--path", db.to_str().unwrap(), "--format", "netscape"]);
+  assert_success(&netscape);
+  let netscape = String::from_utf8(netscape.stdout).expect("UTF-8 Netscape output");
+  assert!(
+    netscape.contains("\t1700000000\tmodern\tvalue\n"),
+    "unexpected Netscape output: {netscape:?}"
+  );
+  assert!(!netscape.contains("1700000000999"));
+}
+
+#[test]
 fn netscape_output_escapes_malicious_fields_exactly() {
   let dir = unique_tmpdir("cli-netscape-injection");
   let db = dir.path().join("cookies.sqlite");
