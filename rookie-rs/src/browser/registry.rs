@@ -1915,9 +1915,10 @@ fn canonical_installation_root<F: DiscoveryFs>(
 }
 
 /// Admits a literal non-Chromium installation root without erasing why it
-/// could not be inspected. A missing path (or a non-directory occupying it) is
-/// ordinary absence; every other metadata error means a root was applicable
-/// but inaccessible, so it must participate in the failed-discovery counters.
+/// could not be inspected. A missing path, a non-directory occupying it, or a
+/// non-directory ancestor is ordinary absence; every other metadata error
+/// means a root was applicable but inaccessible, so it must participate in the
+/// failed-discovery counters.
 ///
 /// Valid directories are counted later by [`canonical_installation_root`].
 /// Keeping that increment in one place prevents a successfully admitted root
@@ -1929,7 +1930,14 @@ fn installation_root_is_directory<F: DiscoveryFs>(
 ) -> bool {
   match context.fs.metadata(root_path) {
     Ok(metadata) => metadata.is_dir(),
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+    Err(error)
+      if matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+      ) =>
+    {
+      false
+    }
     Err(error) => {
       outcome.installations_detected += 1;
       outcome.discovery_issues.push(DiscoveryIssue::new(
@@ -5956,6 +5964,24 @@ mod tests {
     assert_eq!(ie.installations_detected, 0);
     assert!(ie.discovery_issues.is_empty());
     assert!(!ie.all_detected_roots_failed());
+  }
+
+  #[test]
+  fn a_non_directory_root_ancestor_is_silent_absence() {
+    let temp = TempDir::new("non-directory-root-ancestor");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("create home");
+    std::fs::write(home.join(".mozilla"), b"not a directory")
+      .expect("place a file at the expected parent directory");
+    let context = test_context_for(PlatformId::Linux, home, []);
+
+    let discovery =
+      discover_gecko_with_context(&context, "firefox").expect("non-directory means absent");
+    assert_eq!(discovery.installations_detected, 0);
+    assert_eq!(discovery.installations_discovered, 0);
+    assert_eq!(discovery.installations_enumerated, 0);
+    assert!(discovery.discovery_issues.is_empty());
+    assert!(!discovery.all_detected_roots_failed());
   }
 
   #[test]
