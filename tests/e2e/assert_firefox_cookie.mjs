@@ -43,6 +43,17 @@ if (seeded.value !== expectedValue) {
   );
   process.exit(1);
 }
+const now = Math.floor(Date.now() / 1000);
+if (
+  !Number.isInteger(seeded.expires) ||
+  seeded.expires <= now ||
+  seeded.expires > now + 7_200
+) {
+  console.error(
+    `Firefox expiry must be Unix seconds near the seeded Max-Age: got ${seeded.expires} at ${now}`,
+  );
+  process.exit(1);
+}
 
 console.log(
   `rookie-cookies (${process.platform}, firefox): ${expectedName}=${expectedValue} verified (${cookies.length} cookies for ${domain})`,

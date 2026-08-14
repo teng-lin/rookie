@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import rookie_cookies
@@ -48,6 +49,16 @@ def main() -> int:
         print(
             f"cookie value mismatch: expected {expected_value!r}, "
             f"got {seeded['value']!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    now = int(time.time())
+    expires = seeded.get("expires")
+    if not isinstance(expires, int) or not now < expires <= now + 7_200:
+        print(
+            "Firefox expiry must be Unix seconds near the seeded Max-Age: "
+            f"got {expires!r} at {now}",
             file=sys.stderr,
         )
         return 1

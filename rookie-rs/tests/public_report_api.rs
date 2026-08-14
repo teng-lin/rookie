@@ -165,7 +165,9 @@ fn seed_chromium_profile(root: &Path, profile: &str, name: &str, value: &str) {
   let connection = rusqlite::Connection::open(&database).expect("open cookie database");
   connection
     .execute_batch(
-      "CREATE TABLE cookies (
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '23');
+      CREATE TABLE cookies (
         host_key TEXT NOT NULL,
         path TEXT NOT NULL,
         is_secure INTEGER NOT NULL,

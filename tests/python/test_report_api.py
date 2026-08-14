@@ -448,6 +448,10 @@ def _seed_chromium_profile(root: Path, profile: str, value, rows: int = 1) -> No
     connection = sqlite3.connect(str(database))
     try:
         connection.execute(
+            "CREATE TABLE meta (key TEXT NOT NULL UNIQUE PRIMARY KEY, value TEXT)"
+        )
+        connection.execute("INSERT INTO meta VALUES ('version', '23')")
+        connection.execute(
             """
             CREATE TABLE cookies (
               host_key TEXT NOT NULL,
