@@ -165,9 +165,11 @@ impl Deref for SqliteReader {
 ///
 /// Only rollback-journal databases are opened live. Before this function
 /// returns, it selects exclusive locking before the first database access,
-/// begins a read transaction, and reads the schema. The early locking mode
-/// prevents a rollback-to-WAL race from creating shared-memory sidecars; the
-/// pinned transaction then prevents further mode changes. An active
+/// begins a read transaction, and reads the schema. If a rollback-to-WAL race
+/// has already won, SQLite must acquire an exclusive main-file lock before it
+/// opens the WAL; a read-only connection cannot acquire that lock, so it fails
+/// before creating either WAL sidecar. If rollback mode still holds, the
+/// pinned transaction prevents further mode changes. An active
 /// rollback-journal writer therefore either permits that coherent read or
 /// returns SQLite's typed busy/locked error; this path never raw-copies or
 /// immutably opens the live database.
@@ -228,10 +230,11 @@ where
 
     // `open_live_read_only` sets exclusive locking mode before its first
     // database access. If the source changed to WAL after the initial header
-    // check, that prevents SQLite from creating a live `-shm`; after the read
-    // transaction is pinned, the main-file lock prevents another journal-mode
-    // transition while this recheck runs. Discard the probe and reacquire the
-    // source through the private DB+WAL path whenever it changed underneath us.
+    // check, SQLite must upgrade the read-only main file to an exclusive lock
+    // before opening `-wal`; that fails before either live sidecar is created.
+    // If rollback mode still holds, the pinned transaction prevents another
+    // journal-mode transition while this recheck runs. Discard the probe and
+    // reacquire through the private DB+WAL path whenever the source changed.
     if database_requires_wal_snapshot(&path).map_err(|error| DatabaseAcquisitionFailure {
       strategy: None,
       error,
@@ -1513,6 +1516,28 @@ mod tests {
         assert!(
           !sidecar(database, suffix).exists(),
           "clean transition fixture retained {suffix}"
+        );
+      }
+
+      // Pin the premise that makes the raced live probe safe: once the header
+      // says WAL, a read-only exclusive-mode connection must fail its first
+      // schema read before SQLite opens or creates either live sidecar.
+      let error = open_live_read_only(database)
+        .expect_err("a clean WAL database cannot be opened by the live rollback path");
+      let sqlite_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<rusqlite::Error>())
+        .unwrap_or_else(|| panic!("expected a typed SQLite lock failure, got {error:#}"));
+      match sqlite_error {
+        rusqlite::Error::SqliteFailure(code, _) => {
+          assert_eq!(code.extended_code, rusqlite::ffi::SQLITE_IOERR_LOCK);
+        }
+        other => panic!("expected SQLITE_IOERR_LOCK, got {other}"),
+      }
+      for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(
+          !sidecar(database, suffix).exists(),
+          "failed direct live probe created source sidecar {suffix}"
         );
       }
       Ok(())
