@@ -8,11 +8,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- WAL-mode cookie databases with no pending WAL are now read through a
-  verified private single-file snapshot. Read-only extraction no longer
-  creates `-wal`/`-shm` sidecars in a live profile and works when the source
-  directory is genuinely read-only, without hiding WAL frames behind an
-  unsafe immutable open.
+- WAL-mode cookie databases with no pending WAL are now read through the
+  verified private DB+WAL snapshot path. Read-only extraction no longer creates
+  `-wal`/`-shm` sidecars in a live profile and works when the source directory
+  is genuinely read-only, without hiding WAL frames behind an unsafe immutable
+  open.
 - Node extraction now converts native worker panics and invalid JavaScript
   arguments into rejected Promises instead of aborting Node or throwing before
   callers can attach Promise handlers. JavaScript examples now consistently

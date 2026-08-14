@@ -105,14 +105,17 @@ pub struct SqliteReader {
   strategy: DatabaseAcquisitionStrategy,
 }
 
-/// An already-acquired, static single-file database that was copied while its
-/// WAL stayed empty and its source main file stayed byte-for-byte stable.
+/// An already-acquired, static single-file database that was verified as
+/// WAL-free across its acquisition window (or copied only after a checkpoint
+/// completely drained the WAL).
 ///
 /// The fields deliberately stay private to this module. A path being in a
 /// temporary directory is not proof that `immutable=1` is safe: the
 /// acquisition operation must establish the invariant before it can construct
-/// this value; accepting an arbitrary path here would make an immutable read
-/// capable of silently ignoring committed WAL frames.
+/// this value. The first platform acquisition that can provide that proof will
+/// add the constructor alongside its verification, rather than accepting an
+/// arbitrary path here.
+#[allow(dead_code)]
 pub(crate) struct VerifiedStaticSingleFile {
   path: PathBuf,
   snapshot: TempDir,
@@ -155,10 +158,10 @@ impl Deref for SqliteReader {
 ///
 /// A WAL-mode database with no pending WAL is still not opened in place:
 /// SQLite may create `-wal`/`-shm` files merely to read it, which mutates a live
-/// profile and fails on genuinely read-only media. Instead, the main file is
-/// copied while the source main file and empty-WAL invariant are verified, and
-/// that private single-file snapshot is opened as immutable. If a WAL appears
-/// during the copy, acquisition switches to the DB+WAL snapshot path.
+/// profile and fails on genuinely read-only media. Instead, every WAL-mode
+/// source goes through the same verified private DB+WAL snapshot path. When no
+/// WAL exists, SQLite may create empty sidecars only inside that private,
+/// writable directory. The copy is never opened with `immutable=1`.
 ///
 /// Only rollback-journal databases are opened live. Before this function
 /// returns, it begins a read transaction and reads the schema, pinning a
@@ -185,26 +188,13 @@ fn acquire_browser_database(
     strategy: None,
     error,
   })?;
-  let reader = if has_wal {
-    acquire_verified_wal_snapshot(&path)?
-  } else if database_uses_wal(&path).map_err(|error| DatabaseAcquisitionFailure {
-    strategy: None,
-    error,
-  })? {
-    match snapshot_static_single_file(&path).map_err(|error| DatabaseAcquisitionFailure {
-      strategy: Some(DatabaseAcquisitionStrategy::VerifiedStaticSingleFile),
+  let uses_wal = has_wal
+    || database_uses_wal(&path).map_err(|error| DatabaseAcquisitionFailure {
+      strategy: None,
       error,
-    })? {
-      Some(verified) => {
-        open_verified_static_single_file(verified).map_err(|error| DatabaseAcquisitionFailure {
-          strategy: Some(DatabaseAcquisitionStrategy::VerifiedStaticSingleFile),
-          error,
-        })?
-      }
-      // A writer appended a WAL after the first check. Snapshot the pair; an
-      // immutable retry here would lose precisely the new committed frames.
-      None => acquire_verified_wal_snapshot(&path)?,
-    }
+    })?;
+  let reader = if uses_wal {
+    acquire_verified_wal_snapshot(&path)?
   } else {
     let strategy = DatabaseAcquisitionStrategy::LiveReadOnly;
     SqliteReader {
@@ -398,93 +388,13 @@ fn database_uses_wal(database: &Path) -> Result<bool> {
   Ok(header[18] == SQLITE_WAL_FORMAT_VERSION && header[19] == SQLITE_WAL_FORMAT_VERSION)
 }
 
-/// Copies a WAL-mode main file into a private directory only when the source
-/// stays WAL-free and byte-for-byte stable across the complete copy window,
-/// and the copied header still identifies a WAL-mode database.
-///
-/// `Ok(None)` means a writer appended a WAL during acquisition. The caller
-/// must switch to the DB+WAL snapshot path rather than retrying immutably.
-fn snapshot_static_single_file(database: &Path) -> Result<Option<VerifiedStaticSingleFile>> {
-  snapshot_static_single_file_with_hooks(database, |_, _| Ok(()), |_, _| Ok(()))
-}
-
-fn snapshot_static_single_file_with_hooks<BeforeCopy, AfterCopy>(
-  database: &Path,
-  mut before_copy: BeforeCopy,
-  mut after_copy: AfterCopy,
-) -> Result<Option<VerifiedStaticSingleFile>>
-where
-  BeforeCopy: FnMut(&Path, u32) -> Result<()>,
-  AfterCopy: FnMut(&Path, u32) -> Result<()>,
-{
-  let snapshot = TempDir::new()?;
-  let name = database
-    .file_name()
-    .ok_or_else(|| anyhow!("Database path has no file name: {}", database.display()))?;
-  let copy = snapshot.path().join(name);
-
-  for attempt in 1..=SNAPSHOT_ATTEMPTS {
-    if has_nonempty_wal(database)? {
-      return Ok(None);
-    }
-
-    before_copy(database, attempt)?;
-    copy_file_sequentially(database, &copy)
-      .with_context(|| format!("Can't copy database {}", database.display()))?;
-    after_copy(database, attempt)?;
-    let main_stayed_stable = files_are_identical(database, &copy)?;
-    if has_nonempty_wal(database)? {
-      return Ok(None);
-    }
-    if main_stayed_stable {
-      if !database_uses_wal(&copy)? {
-        return Err(anyhow!(
-          "Can't take an immutable snapshot of {}: its journal mode changed during acquisition",
-          database.display()
-        ));
-      }
-      return Ok(Some(VerifiedStaticSingleFile {
-        path: copy,
-        snapshot,
-      }));
-    }
-
-    log::debug!(
-      "the main file changed while taking a static snapshot of {} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})",
-      database.display()
-    );
-    std::thread::sleep(RETRY_BACKOFF * attempt);
-  }
-
-  Err(anyhow!(
-    "Can't take a coherent static snapshot of {}: its main file is changing repeatedly",
-    database.display()
-  ))
-}
-
-/// Copies a file in increasing byte-offset order.
-///
-/// SQLite checkpoints transfer pages into the main database in ascending page
-/// order (<https://sqlite.org/wal.html#ckpt>). The static-snapshot proof relies
-/// on both this copy and [`files_are_identical`] scanning in that same order:
-/// if the copy straddles a checkpoint, the later comparison must disagree on
-/// every earlier page that the checkpoint passed before the copy observed a
-/// later updated page. A platform copy primitive has no such ordering contract,
-/// so `fs::copy` is intentionally not used at this boundary.
-fn copy_file_sequentially(source: &Path, destination: &Path) -> io::Result<u64> {
-  let mut source = io::BufReader::new(fs::File::open(source)?);
-  let mut destination = io::BufWriter::new(fs::File::create(destination)?);
-  let copied = io::copy(&mut source, &mut destination)?;
-  io::Write::flush(&mut destination)?;
-  Ok(copied)
-}
-
 /// Opens an already-acquired static single-file copy as immutable.
 ///
 /// Taking the opaque proof by value keeps ownership of the private snapshot
 /// directory with the returned reader. In particular, this function does not
-/// accept a bare path. A DB+WAL snapshot is not eligible even when both files
-/// are static.
+/// accept a bare path and cannot be used by [`connect`]'s live no-WAL branch.
+/// A DB+WAL snapshot is not eligible even when both files are static.
+#[allow(dead_code)]
 pub(crate) fn open_verified_static_single_file(
   verified: VerifiedStaticSingleFile,
 ) -> Result<SqliteReader> {
@@ -521,6 +431,7 @@ fn pin_read_snapshot(connection: &Connection, path: &Path) -> Result<()> {
 /// Rejects sidecars at the immutable boundary even though the opaque proof is
 /// the primary eligibility check. This makes it impossible for a DB+WAL pair
 /// to start ignoring its WAL because of an acquisition wiring mistake.
+#[allow(dead_code)]
 fn ensure_single_file(database: &Path) -> Result<()> {
   for suffix in ["-wal", "-shm", "-journal"] {
     let sidecar = sidecar(database, suffix);
@@ -559,13 +470,18 @@ const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 /// rather than assumed.
 ///
 /// The main file is copied first and compared against the live source only
-/// after the WAL copy, so the comparison brackets *both* copies: a checkpoint
-/// anywhere in the window leaves the source different from the image taken at
-/// the start, and the attempt is discarded. In WAL mode a checkpoint is the
-/// only thing that writes the main file, so a source that never moved means the
-/// copied WAL is still the only thing between it and the browser's current
-/// state. Ordinary commits only append to the `-wal`, and frames appended after
-/// it was copied are simply unseen, which reads as an earlier instant.
+/// after the WAL copy. A checkpoint that completes across that window changes
+/// the source and discards the attempt. A checkpoint paused across both reads
+/// can make them agree on the same partial main file, but its WAL still exists
+/// and is copied beside that file; SQLite replays the copied committed frames
+/// over the partial checkpoint. If no WAL is copied, a checkpoint could not
+/// have remained partial through the WAL-copy step, so an incomplete main copy
+/// cannot pass the later comparison. Query-level corruption/I/O checks remain
+/// the final retry boundary for an incoherent copied pair.
+///
+/// The copied header must remain WAL-mode. This rejects a source that switched
+/// to rollback journaling after routing but before or during copying, because a
+/// raw main-file copy is not safe across a rollback-journal transaction.
 ///
 /// The comparison is exact rather than a size and mtime check, because a
 /// checkpoint can rewrite same-sized pages inside one filesystem timestamp
@@ -574,6 +490,12 @@ const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   for attempt in 1..=SNAPSHOT_ATTEMPTS {
     let copy = copy_database(database, directory)?;
+    if !database_uses_wal(&copy)? {
+      return Err(anyhow!(
+        "Can't take a WAL snapshot of {}: its copied journal mode is not WAL",
+        database.display()
+      ));
+    }
     if files_are_identical(database, &copy)? {
       return Ok(copy);
     }
@@ -661,7 +583,7 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // file with a WAL rewound to offset 0 (<https://sqlite.org/wal.html> section
   // 2.1) and drops rows, as `an_unverified_copy_loses_rows_when_a_checkpoint_intervenes`
   // shows — so the verification is what makes it correct, not the order.
-  copy_file_sequentially(database, &copy)
+  fs::copy(database, &copy)
     .with_context(|| format!("Can't copy database {}", database.display()))?;
 
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
@@ -669,7 +591,7 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // one could be believed as-is, pinning a stale frame count.
   let wal = sidecar(database, "-wal");
   let wal_copy = sidecar(&copy, "-wal");
-  match copy_file_sequentially(&wal, &wal_copy) {
+  match fs::copy(&wal, &wal_copy) {
     Ok(_) => {}
     // The browser checkpointed and removed its WAL, either before this attempt
     // or in the moment between. Discard any WAL an earlier attempt left here,
@@ -704,8 +626,8 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
 /// harmless; under-copying would drop cookies.
 ///
 /// Only a missing sidecar means "no WAL". Any other stat failure is reported,
-/// because answering `false` would route to the `immutable` read that ignores
-/// the WAL and returns a short cookie list as though it were complete.
+/// because answering `false` could otherwise route a WAL-mode source into the
+/// live rollback-journal path.
 pub(crate) fn has_nonempty_wal(database: &Path) -> Result<bool> {
   let wal = sidecar(database, "-wal");
   match fs::metadata(&wal) {
@@ -1318,6 +1240,21 @@ mod tests {
     assert!(sidecar(&copy, "-wal").exists(), "the WAL must come along");
   }
 
+  #[test]
+  fn verified_wal_snapshot_rejects_a_rollback_journal_main_file() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, _writer) = rollback_database(directory.path());
+    let snapshot = TempDir::new().expect("snapshot dir");
+
+    let error = snapshot_database(&path, snapshot.path())
+      .expect_err("a rollback-journal main file cannot enter the WAL snapshot path");
+
+    assert!(
+      error.to_string().contains("copied journal mode is not WAL"),
+      "unexpected error: {error:#}"
+    );
+  }
+
   /// Shows why [`snapshot_database`] verifies its copy rather than trusting a
   /// copy order: taking the main file, letting a checkpoint land, then taking
   /// the WAL silently loses rows. Characterizes SQLite, so it cannot fail from
@@ -1389,11 +1326,11 @@ mod tests {
     );
     assert_eq!(
       reader.strategy(),
-      DatabaseAcquisitionStrategy::VerifiedStaticSingleFile
+      DatabaseAcquisitionStrategy::VerifiedWalSnapshot
     );
     assert!(
       reader.is_autocommit(),
-      "an immutable private snapshot needs no live read transaction"
+      "a private WAL snapshot needs no live read transaction"
     );
   }
 
@@ -1417,7 +1354,7 @@ mod tests {
     assert_eq!(cookie_names(&reader), vec!["checkpointed"]);
     assert_eq!(
       reader.strategy(),
-      DatabaseAcquisitionStrategy::VerifiedStaticSingleFile
+      DatabaseAcquisitionStrategy::VerifiedWalSnapshot
     );
     for suffix in ["-wal", "-shm", "-journal"] {
       assert!(
@@ -1461,70 +1398,8 @@ mod tests {
     assert_eq!(cookie_names(&reader), vec!["checkpointed"]);
     assert_eq!(
       reader.strategy(),
-      DatabaseAcquisitionStrategy::VerifiedStaticSingleFile
-    );
-  }
-
-  #[test]
-  fn a_wal_appearing_during_static_copy_switches_out_of_immutable_mode() {
-    let directory = TempDir::new().expect("temp dir");
-    let (path, writer) = checkpointed_database(directory.path());
-    let canonical = path.canonicalize().expect("canonicalize");
-
-    let verified = snapshot_static_single_file_with_hooks(
-      &canonical,
-      |_, _| Ok(()),
-      |_, attempt| {
-        if attempt == 1 {
-          writer
-            .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
-            .expect("append WAL during static copy");
-        }
-        Ok(())
-      },
-    )
-    .expect("classify raced snapshot");
-
-    assert!(
-      verified.is_none(),
-      "a newly non-empty WAL must disqualify immutable acquisition"
-    );
-    let reader = connect(path).expect("fall back to DB+WAL snapshot");
-    assert_eq!(
-      reader.strategy(),
       DatabaseAcquisitionStrategy::VerifiedWalSnapshot
     );
-    assert_eq!(cookie_names(&reader), vec!["checkpointed", "in-wal"]);
-  }
-
-  #[test]
-  fn a_rollback_journal_transition_disqualifies_the_immutable_copy() {
-    let directory = TempDir::new().expect("temp dir");
-    let (path, writer) = checkpointed_database(directory.path());
-    let canonical = path.canonicalize().expect("canonicalize");
-
-    let result = snapshot_static_single_file_with_hooks(
-      &canonical,
-      |_, attempt| {
-        assert_eq!(attempt, 1, "journal-mode changes must fail closed");
-        let mode: String = writer
-          .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
-          .expect("switch to rollback journal during acquisition");
-        assert_eq!(mode, "delete");
-        Ok(())
-      },
-      |_, _| Ok(()),
-    );
-    let error = match result {
-      Ok(_) => panic!("a rollback-journal copy must not become immutable"),
-      Err(error) => error,
-    };
-
-    assert!(
-      error.to_string().contains("journal mode changed"),
-      "unexpected error: {error:#}"
-    );
-    assert!(!database_uses_wal(&canonical).expect("read changed header"));
   }
 
   #[test]
