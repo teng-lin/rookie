@@ -56,11 +56,12 @@ pub fn chromium_based_with_browser_id(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  match browser_id {
-    Some(browser_id) => {
-      let config = browser::registry::chromium_key_credentials(browser_id)?;
-      chromium_based(&config, db_path, domains, force_kill)
-    }
+  match browser_id
+    .map(browser::registry::chromium_key_credentials)
+    .transpose()?
+    .flatten()
+  {
+    Some(config) => chromium_based(&config, db_path, domains, force_kill),
     None => browser::chromium::chromium_based_plaintext_only(db_path, domains, force_kill),
   }
 }
@@ -73,11 +74,12 @@ pub fn chromium_based_detailed_with_browser_id(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<enums::DetailedCookie>> {
-  match browser_id {
-    Some(browser_id) => {
-      let config = browser::registry::chromium_key_credentials(browser_id)?;
-      chromium_based_detailed(&config, db_path, domains, force_kill)
-    }
+  match browser_id
+    .map(browser::registry::chromium_key_credentials)
+    .transpose()?
+    .flatten()
+  {
+    Some(config) => chromium_based_detailed(&config, db_path, domains, force_kill),
     None => browser::chromium::chromium_based_detailed_plaintext_only(db_path, domains, force_kill),
   }
 }
@@ -1098,6 +1100,27 @@ mod tests {
       .expect("detailed plaintext-only databases need no key identity");
     assert_eq!(detailed.len(), 1);
     assert_eq!(detailed[0].cookie.value, "plaintext");
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn registered_chromium_without_keychain_identity_is_plaintext_only() {
+    for browser_id in ["coccoc", "yandex"] {
+      let directory = crate::utils::TempDir::new().expect("temp directory");
+      let db = directory.path().join("Cookies");
+      seed_explicit_path_cookie(&db, "plaintext", b"");
+      let cookies = chromium_based_with_browser_id(Some(browser_id), db, None, false)
+        .expect("registered browser without credentials can read plaintext");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].value, "plaintext");
+    }
+
+    let directory = crate::utils::TempDir::new().expect("temp directory");
+    let db = directory.path().join("Cookies");
+    seed_explicit_path_cookie(&db, "", b"v10encrypted");
+    let error = chromium_based_with_browser_id(Some("coccoc"), db, None, false)
+      .expect_err("registered browser without credentials cannot read encrypted rows");
+    assert!(error.to_string().contains("no browser key identity"));
   }
 
   #[cfg(unix)]

@@ -38,9 +38,10 @@ pub struct CookieContext {
   pub source_port: Option<i64>,
   /// Chromium's stored persistence bit, when that column exists.
   pub is_persistent: Option<bool>,
-  /// Firefox's complete `originAttributes` suffix.
+  /// Firefox's complete `originAttributes` value.
   ///
-  /// The raw value is retained so attributes introduced by a future Firefox
+  /// Persistent-cookie suffixes are retained verbatim. Session-store objects
+  /// are retained as JSON, so attributes introduced by a future Firefox
   /// release survive even when this crate does not yet parse them.
   pub origin_attributes: Option<String>,
   /// Firefox Multi-Account Containers identity (`userContextId`).

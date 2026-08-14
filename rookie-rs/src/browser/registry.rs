@@ -1446,7 +1446,7 @@ fn registry_key_credentials(browser_id: &str) -> Result<crate::config::Browser> 
   Ok(provider_input(definition.key_credentials.as_ref()))
 }
 
-pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<crate::config::Browser> {
+pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<Option<crate::config::Browser>> {
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   {
     let registry = embedded_registry()?;
@@ -1458,7 +1458,10 @@ pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<crate::config
         definition.engine.as_str()
       );
     }
-    let credentials = provider_input(definition.key_credentials.as_ref());
+    let Some(key_credentials) = definition.key_credentials.as_ref() else {
+      return Ok(None);
+    };
+    let credentials = provider_input(Some(key_credentials));
     #[cfg(target_os = "linux")]
     if credentials.unix_crypt_name.is_none() {
       bail!("browser id {browser_id:?} has no Linux crypt-name identity");
@@ -1467,7 +1470,7 @@ pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<crate::config
     if credentials.osx_key_service.is_none() || credentials.osx_key_user.is_none() {
       bail!("browser id {browser_id:?} has no macOS Keychain identity");
     }
-    Ok(credentials)
+    Ok(Some(credentials))
   }
 
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -3324,12 +3327,16 @@ mod tests {
     // proves the code that reads it maps the right field onto the right
     // provider input. A swapped service/account or a wrong platform branch
     // would satisfy parity and still break retrieval.
-    let chrome = chromium_key_credentials("chrome").expect("Chrome credentials");
+    let chrome = chromium_key_credentials("chrome")
+      .expect("resolve Chrome")
+      .expect("Chrome credentials");
 
     #[cfg(target_os = "linux")]
     {
       assert_eq!(chrome.unix_crypt_name.as_deref(), Some("chrome"));
-      let brave = chromium_key_credentials("brave").expect("Brave credentials");
+      let brave = chromium_key_credentials("brave")
+        .expect("resolve Brave")
+        .expect("Brave credentials");
       assert_eq!(brave.unix_crypt_name.as_deref(), Some("brave"));
       // Linux definitions carry no Keychain credentials, so mapping the macOS
       // branch here would be a silent cross-platform leak.
@@ -3346,9 +3353,20 @@ mod tests {
       );
       assert_eq!(chrome.osx_key_user.as_deref(), Some("Chrome"));
       assert_eq!(chrome.unix_crypt_name, None);
-      let brave = chromium_key_credentials("brave").expect("Brave credentials");
+      let brave = chromium_key_credentials("brave")
+        .expect("resolve Brave")
+        .expect("Brave credentials");
       assert_eq!(brave.osx_key_service.as_deref(), Some("Brave Safe Storage"));
       assert_eq!(brave.osx_key_user.as_deref(), Some("Brave"));
+
+      for browser_id in ["coccoc", "yandex"] {
+        assert!(
+          chromium_key_credentials(browser_id)
+            .expect("resolve registered plaintext-only Chromium browser")
+            .is_none(),
+          "{browser_id} must resolve without inventing Keychain credentials"
+        );
+      }
     }
 
     // An unknown browser is an error rather than silently credential-less.

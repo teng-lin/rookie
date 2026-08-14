@@ -13,8 +13,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
-import { DatabaseSync } from "node:sqlite";
-
 import rookieCookies, {
   firefoxBased,
   safari,
@@ -211,17 +209,10 @@ test("firefoxBasedDetailed preserves colliding container identities", async (t) 
   const dir = mkdtempSync(join(tmpdir(), "rookie-node-detailed-"));
   const dbPath = join(dir, "cookies.sqlite");
   try {
-    const database = new DatabaseSync(dbPath);
-    database.exec(`
-      CREATE TABLE moz_cookies (
-        host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER, name TEXT,
-        value TEXT, isHttpOnly INTEGER, sameSite INTEGER, originAttributes TEXT
-      );
-      INSERT INTO moz_cookies VALUES
-        ('.example.com', '/', 1, 0, 'session', 'work', 1, 1, '^userContextId=2'),
-        ('.example.com', '/', 1, 0, 'session', 'personal', 1, 1, '^userContextId=1');
-    `);
-    database.close();
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/firefox-context.sqlite.base64", import.meta.url),
+    );
 
     const records = await rookieCookies.firefoxBasedDetailed(dbPath);
     t.is(records.length, 2);
@@ -245,19 +236,10 @@ test("identity-less encrypted Chromium paths reject explicitly on Unix", async (
   const dir = mkdtempSync(join(tmpdir(), "rookie-node-identity-"));
   const dbPath = join(dir, "Cookies");
   try {
-    const database = new DatabaseSync(dbPath);
-    database.exec(`
-      CREATE TABLE cookies (
-        host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
-        name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
-        samesite INTEGER
-      );
-      INSERT INTO cookies VALUES (
-        '.example.com', '/', 1, 0, 'session', '',
-        X'763131656E63727970746564', 1, 0
-      );
-    `);
-    database.close();
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-encrypted.sqlite.base64", import.meta.url),
+    );
 
     await t.throwsAsync(rookieCookies.chromiumBased(dbPath), {
       message: /no browser key identity.*browser_id/s,
@@ -330,11 +312,11 @@ IsRelative=1
 Path=Profiles/work
 `,
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(defaultProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-empty.sqlite.base64", import.meta.url),
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(workProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
   );
@@ -483,11 +465,11 @@ IsRelative=1
 Path=Profiles/work
 `,
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(defaultProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-empty.sqlite.base64", import.meta.url),
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(workProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
   );
@@ -775,7 +757,7 @@ IsRelative=1
 Path=Profiles/work
 `,
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(healthy, "cookies.sqlite"),
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
   );
@@ -970,7 +952,7 @@ function writeFirefoxProfileTree(root, count) {
   writeFileSync(join(root, "profiles.ini"), ini);
 }
 
-function installFirefoxDatabase(path, fixtureUrl) {
+function installDatabaseFixture(path, fixtureUrl) {
   const encoded = readFileSync(fixtureUrl, "ascii").replace(/\s/g, "");
   writeFileSync(path, Buffer.from(encoded, "base64"));
 }

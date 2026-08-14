@@ -785,15 +785,42 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
 
 fn create_detailed_cookie(json_cookie: &Value) -> Result<DetailedCookie> {
   let cookie = create_cookie(json_cookie)?;
-  let origin_attributes = json_cookie
-    .get("originAttributes")
-    .and_then(Value::as_str)
-    .map(str::to_owned);
 
   Ok(DetailedCookie {
     cookie,
-    context: firefox_cookie_context(origin_attributes),
+    context: firefox_session_cookie_context(json_cookie.get("originAttributes")),
   })
+}
+
+fn firefox_session_cookie_context(origin_attributes: Option<&Value>) -> CookieContext {
+  let Some(origin_attributes) = origin_attributes else {
+    return CookieContext::default();
+  };
+  if let Some(origin_attributes) = origin_attributes.as_str() {
+    return firefox_cookie_context(Some(origin_attributes.to_owned()));
+  }
+  let Some(attributes) = origin_attributes.as_object() else {
+    return CookieContext::default();
+  };
+
+  let unsigned_attribute = |name: &str| {
+    attributes.get(name).and_then(|value| {
+      value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    })
+  };
+  CookieContext {
+    origin_attributes: Some(Value::Object(attributes.clone()).to_string()),
+    user_context_id: unsigned_attribute("userContextId"),
+    partition_key: attributes
+      .get("partitionKey")
+      .and_then(Value::as_str)
+      .map(str::to_owned),
+    private_browsing_id: unsigned_attribute("privateBrowsingId"),
+    ..CookieContext::default()
+  }
 }
 
 /// A profile declared by a Mozilla-family browser's `profiles.ini`.
@@ -1237,6 +1264,66 @@ mod tests {
       "name": name,
       "value": "fixture"
     })
+  }
+
+  #[test]
+  fn detailed_session_cookies_preserve_object_origin_attribute_collisions() {
+    let dir = unique_tmpdir("ff-session-origin-attribute-objects");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let cookies = serde_json::json!([
+      {
+        "host": ".example.com",
+        "path": "/",
+        "name": "session",
+        "value": "work",
+        "originAttributes": {
+          "userContextId": 2,
+          "partitionKey": "(https,work.example)",
+          "privateBrowsingId": 0,
+          "futureAttribute": "retained"
+        }
+      },
+      {
+        "host": ".example.com",
+        "path": "/",
+        "name": "session",
+        "value": "personal",
+        "originAttributes": {
+          "userContextId": 1,
+          "partitionKey": "(https,personal.example)",
+          "privateBrowsingId": 1
+        }
+      }
+    ]);
+    write_session_jsonlz4(&dir.join("sessionstore-backups/recovery.jsonlz4"), cookies);
+
+    let detailed = firefox_based_detailed(db, None).expect("extract detailed session cookies");
+    assert_eq!(detailed.len(), 2);
+    let contexts = detailed
+      .iter()
+      .map(|cookie| (cookie.cookie.value.as_str(), &cookie.context))
+      .collect::<std::collections::HashMap<_, _>>();
+    let work = contexts.get("work").expect("work container");
+    assert_eq!(work.user_context_id, Some(2));
+    assert_eq!(work.partition_key.as_deref(), Some("(https,work.example)"));
+    assert_eq!(work.private_browsing_id, Some(0));
+    let raw: Value = serde_json::from_str(
+      work
+        .origin_attributes
+        .as_deref()
+        .expect("raw session origin attributes"),
+    )
+    .expect("raw object remains JSON");
+    assert_eq!(raw["futureAttribute"], "retained");
+
+    let personal = contexts.get("personal").expect("personal container");
+    assert_eq!(personal.user_context_id, Some(1));
+    assert_eq!(
+      personal.partition_key.as_deref(),
+      Some("(https,personal.example)")
+    );
+    assert_eq!(personal.private_browsing_id, Some(1));
   }
 
   #[test]
