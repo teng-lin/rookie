@@ -1,5 +1,5 @@
 use crate::common::{date, enums::*, sqlite, utils};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use ini::{Ini, ParseOption};
 use lz4_flex::block::decompress_size_prepended;
 use serde_json::Value;
@@ -216,13 +216,20 @@ fn query_persistent_cookies_mode(
       same_site,
     };
     if detailed {
+      let origin_attributes = match row.get::<_, Option<String>>(8) {
+        Ok(origin_attributes) => origin_attributes,
+        Err(error) => {
+          log::warn!("Failed to read originAttributes from Firefox cookie row: {error}");
+          last_row_error = Some(anyhow!(
+            "failed to read originAttributes from Firefox cookie row: {error}"
+          ));
+          rows_skipped += 1;
+          continue;
+        }
+      };
       detailed_cookies.push(DetailedCookie {
         cookie,
-        context: firefox_cookie_context(
-          row
-            .get::<_, Option<String>>(8)
-            .context("failed to read originAttributes from Firefox cookie row")?,
-        ),
+        context: firefox_cookie_context(origin_attributes),
       });
     } else {
       cookies.push(cookie);
@@ -1245,6 +1252,51 @@ mod tests {
     let error = firefox_based_detailed(db, None)
       .expect_err("malformed detailed context must not silently become absent");
     assert!(format!("{error:#}").contains("originAttributes"));
+  }
+
+  #[test]
+  fn malformed_origin_attributes_skip_only_their_row() {
+    let dir = unique_tmpdir("firefox-mixed-detailed-context");
+    let db = dir.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER, name TEXT,
+          value TEXT, isHttpOnly INTEGER, sameSite INTEGER, originAttributes BLOB
+        );
+        INSERT INTO moz_cookies VALUES
+          ('.example.com', '/', 0, 0, 'before', 'first', 0, 0, '^userContextId=1'),
+          ('.example.com', '/', 0, 0, 'malformed', 'discarded', 0, 0, X'FF'),
+          ('.example.com', '/', 0, 0, 'after', 'last', 0, 0, '^userContextId=2');",
+      )
+      .expect("seed mixed origin attributes");
+    drop(connection);
+
+    let legacy = firefox_based(db.clone(), None).expect("legacy projection keeps every row");
+    assert_eq!(legacy.len(), 3);
+
+    let persistent = sqlite::with_browser_database(db.clone(), |connection| {
+      query_persistent_cookies_mode(connection, None, true)
+    })
+    .expect("query detailed rows")
+    .into_value();
+    assert_eq!(persistent.rows_seen, 3);
+    assert_eq!(persistent.rows_skipped, 1);
+    assert_eq!(persistent.detailed_cookies.len(), 2);
+    assert!(persistent.last_row_error.is_some());
+    assert_eq!(
+      persistent
+        .detailed_cookies
+        .iter()
+        .map(|cookie| cookie.cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["before", "after"]
+    );
+
+    let public_result =
+      firefox_based_detailed(db, None).expect("public detailed extraction returns the valid rows");
+    assert_eq!(public_result.len(), 2);
   }
 
   fn write_session_jsonlz4(path: &Path, cookies: Value) {

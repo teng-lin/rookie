@@ -323,6 +323,28 @@ pub(crate) enum ChromiumRowIssueCode {
   ProviderFailed,
 }
 
+#[derive(Debug)]
+struct ChromiumContextColumnError {
+  column: &'static str,
+  source: rusqlite::Error,
+}
+
+impl fmt::Display for ChromiumContextColumnError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      formatter,
+      "failed to read {} from Chromium cookie row: {}",
+      self.column, self.source
+    )
+  }
+}
+
+impl std::error::Error for ChromiumContextColumnError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    Some(&self.source)
+  }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ChromiumRowIssue {
   pub(crate) code: ChromiumRowIssueCode,
@@ -407,6 +429,32 @@ impl ChromiumEngineExtractionOutcome {
       }),
     }
   }
+}
+
+fn chromium_cookie_context(
+  row: &rusqlite::Row<'_>,
+) -> std::result::Result<CookieContext, ChromiumContextColumnError> {
+  let read = |column, source| ChromiumContextColumnError { column, source };
+  Ok(CookieContext {
+    top_frame_site_key: row
+      .get::<_, Option<String>>(9)
+      .map_err(|error| read("top_frame_site_key", error))?,
+    has_cross_site_ancestor: row
+      .get::<_, Option<i64>>(10)
+      .map_err(|error| read("has_cross_site_ancestor", error))?
+      .map(|value| value != 0),
+    source_scheme: row
+      .get::<_, Option<i64>>(11)
+      .map_err(|error| read("source_scheme", error))?,
+    source_port: row
+      .get::<_, Option<i64>>(12)
+      .map_err(|error| read("source_port", error))?,
+    is_persistent: row
+      .get::<_, Option<i64>>(13)
+      .map_err(|error| read("is_persistent", error))?
+      .map(|value| value != 0),
+    ..CookieContext::default()
+  })
 }
 
 /// Decrypt cookie value using aes GCM
@@ -1462,29 +1510,19 @@ fn query_cookies_from_connection_mode(
       same_site,
     };
     if projection == CookieProjection::Detailed {
-      extraction.detailed_cookies.push(DetailedCookie {
-        cookie,
-        context: CookieContext {
-          top_frame_site_key: row
-            .get::<_, Option<String>>(9)
-            .context("failed to read top_frame_site_key from Chromium cookie row")?,
-          has_cross_site_ancestor: row
-            .get::<_, Option<i64>>(10)
-            .context("failed to read has_cross_site_ancestor from Chromium cookie row")?
-            .map(|value| value != 0),
-          source_scheme: row
-            .get::<_, Option<i64>>(11)
-            .context("failed to read source_scheme from Chromium cookie row")?,
-          source_port: row
-            .get::<_, Option<i64>>(12)
-            .context("failed to read source_port from Chromium cookie row")?,
-          is_persistent: row
-            .get::<_, Option<i64>>(13)
-            .context("failed to read is_persistent from Chromium cookie row")?
-            .map(|value| value != 0),
-          ..CookieContext::default()
-        },
-      });
+      let context = match chromium_cookie_context(row) {
+        Ok(context) => context,
+        Err(error) => {
+          log::warn!("{error}");
+          let column = error.column;
+          last_row_error = Some(error.into());
+          extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead(column), row_number);
+          continue;
+        }
+      };
+      extraction
+        .detailed_cookies
+        .push(DetailedCookie { cookie, context });
     } else {
       extraction.cookies.push(cookie);
     }
@@ -1720,6 +1758,72 @@ mod tests {
     let error = query_detailed_cookies(&provider, &(), db, None, false)
       .expect_err("malformed detailed context must not silently become absent");
     assert!(format!("{error:#}").contains("top_frame_site_key"));
+  }
+
+  #[test]
+  fn malformed_detailed_context_skips_only_its_row() {
+    let dir = unique_tmpdir("chromium-mixed-detailed-context");
+    let db = dir.join("Cookies");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+          host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+          name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+          samesite INTEGER, top_frame_site_key BLOB
+        );
+        INSERT INTO cookies VALUES
+          ('.example.com', '/', 0, 0, 'before', 'first', X'', 0, 0,
+           'https://before.example'),
+          ('.example.com', '/', 0, 0, 'malformed', 'discarded', X'', 0, 0, X'FF'),
+          ('.example.com', '/', 0, 0, 'after', 'last', X'', 0, 0,
+           'https://after.example');",
+      )
+      .expect("seed mixed context rows");
+    drop(connection);
+
+    let provider = LegacySharedKeyProvider::new(Vec::new());
+    let legacy = query_cookies(&provider, &(), db.clone(), None, false)
+      .expect("legacy projection keeps every row");
+    assert_eq!(legacy.len(), 3);
+
+    let extraction = query_cookies_engine_outcome_mode(
+      ChromiumKeyOutcomes::from_legacy_shared(Vec::new()),
+      db.clone(),
+      None,
+      false,
+      CookieProjection::Detailed,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("malformed optional context remains a row-level failure");
+    assert_eq!(
+      extraction.stats,
+      ChromiumExtractionStats {
+        rows_seen: 3,
+        cookies_emitted: 2,
+        rows_skipped: 1,
+      }
+    );
+    assert_eq!(extraction.issues.len(), 1);
+    assert_eq!(
+      extraction.issues[0].code,
+      ChromiumRowIssueCode::ColumnRead("top_frame_site_key")
+    );
+    assert!(extraction.legacy_error.is_none());
+    let detailed = extraction
+      .into_detailed_result()
+      .expect("valid detailed rows keep the extraction successful");
+    assert_eq!(
+      detailed
+        .iter()
+        .map(|cookie| cookie.cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["before", "after"]
+    );
+
+    let public_result = query_detailed_cookies(&provider, &(), db, None, false)
+      .expect("public detailed extraction returns the valid rows");
+    assert_eq!(public_result.len(), 2);
   }
 
   fn synthetic_acquisition_error(
