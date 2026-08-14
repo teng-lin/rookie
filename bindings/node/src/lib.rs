@@ -661,6 +661,68 @@ pub fn browser_profiles(browser_id: String) -> AsyncTask<BrowserProfilesTask> {
   AsyncTask::new(BrowserProfilesTask { browser_id })
 }
 
+pub struct ChromeProfilesTask;
+
+impl Task for ChromeProfilesTask {
+  type Output = Vec<ProfileDescriptor>;
+  type JsValue = Vec<ProfileDescriptorObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::chrome_profiles()
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output.into_iter().map(profile_descriptor_to_js).collect())
+  }
+}
+
+/// Lists Google Chrome profiles with the preferred active profile first.
+///
+/// Missing, stale, or malformed activity hints retain the generic
+/// default-first discovery order.
+#[napi(ts_return_type = "Promise<Array<ProfileDescriptorObject>>")]
+pub fn chrome_profiles() -> AsyncTask<ChromeProfilesTask> {
+  AsyncTask::new(ChromeProfilesTask)
+}
+
+pub struct ChromeProfileTask {
+  profile: String,
+  domains: Option<Vec<String>>,
+}
+
+impl Task for ChromeProfileTask {
+  type Output = ExtractionReport;
+  type JsValue = ExtractionReportObject;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::chrome_profile(&self.profile, self.domains.take())
+        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    report_to_js(output)
+  }
+}
+
+/// Extracts one selected Google Chrome profile as a grouped report.
+///
+/// `profile` accepts the opaque ID, display name, directory name, or a full
+/// path returned by `chromeProfiles` when the descriptor's
+/// `profile.pathLossy` is false. A lossy path requires its opaque ID. Ambiguous
+/// names reject rather than silently choosing an installation or channel.
+#[napi(ts_return_type = "Promise<ExtractionReportObject>")]
+pub fn chrome_profile(
+  profile: String,
+  domains: Option<Vec<String>>,
+) -> AsyncTask<ChromeProfileTask> {
+  AsyncTask::new(ChromeProfileTask { profile, domains })
+}
+
 pub struct BrowserReportTask {
   browser_id: String,
   profile_id: Option<String>,

@@ -35,6 +35,18 @@ for profile in report["profiles"]:
 detection) and `browser_profiles(browser_id)` lists what is actually installed,
 including the `profile_id` that `browser_report(browser_id, profile_id)` takes.
 
+For Chrome, `chrome_profiles()` lists the preferred active profile first while
+leaving `browser_profiles("chrome")` and the legacy `chrome()` selector
+unchanged. Activity hints are advisory and safely fall back to default-first
+ordering. `chrome_profile(profile, domains=None)` accepts an ID, display name,
+directory name, or a full path when
+`descriptor["profile"]["path_lossy"]` is false; lossy paths require the opaque
+ID. It returns the same provenance-preserving report shape as `browser_report`.
+
+The CLI intentionally keeps the generic frozen grammar: use
+`--list-profiles --browser chrome`, then pass its opaque `profile_id` to
+`--report --browser chrome --profile PROFILE_ID`.
+
 Every DTO is a dictionary with snake_case keys, and every identifier or code is
 an open snake_case string rather than a closed set, so keep a fallback when
 matching one.

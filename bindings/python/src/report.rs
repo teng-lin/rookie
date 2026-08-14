@@ -36,6 +36,36 @@ pub fn browser_profiles(py: Python<'_>, browser_id: String) -> PyResult<Vec<Py<P
     .collect()
 }
 
+/// List Google Chrome profiles with the last-used/active profile first
+///
+/// Activity hints are advisory. Missing or invalid hints retain the generic
+/// default-first discovery order.
+///
+/// :return: A list of profile descriptor dictionaries
+#[pyfunction]
+pub fn chrome_profiles(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+  py.detach(rookie_core::chrome_profiles)?
+    .into_iter()
+    .map(|profile| profile_descriptor_dict(py, profile))
+    .collect()
+}
+
+/// Extract one selected Google Chrome profile as a grouped report
+///
+/// :param profile: Profile ID, display name, directory name, or a full path whose path_lossy flag is false
+/// :param domains: Optional list of domains to extract only from them
+/// :return: An extraction report dictionary retaining source provenance and issues
+#[pyfunction]
+#[pyo3(signature = (profile, domains=None))]
+pub fn chrome_profile(
+  py: Python<'_>,
+  profile: String,
+  domains: Option<Vec<String>>,
+) -> PyResult<Py<PyAny>> {
+  let report = py.detach(|| rookie_core::chrome_profile(&profile, domains))?;
+  report_dict(py, report)
+}
+
 /// Extract cookies from one browser as a grouped report
 ///
 /// :param browser_id: A canonical browser ID or alias from supported_browsers

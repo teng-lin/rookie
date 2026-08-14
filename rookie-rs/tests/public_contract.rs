@@ -163,6 +163,13 @@ fn generic_report_api_signatures_are_the_section_5_8_surface() {
 }
 
 #[test]
+fn additive_chrome_profile_apis_do_not_change_the_legacy_selector_signature() {
+  let _: BrowserFn = rookie_cookies::chrome;
+  let _: fn() -> Result<Vec<ProfileDescriptor>> = rookie_cookies::chrome_profiles;
+  let _: fn(&str, Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::chrome_profile;
+}
+
+#[test]
 fn report_identifiers_are_open_string_newtypes() {
   // A code this build has never emitted still round-trips, so a downstream
   // match on a future engine's diagnostics keeps compiling and parsing.

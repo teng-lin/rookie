@@ -754,6 +754,68 @@ pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<Profil
   profile_descriptors_from_outcome(browser_id, outcome)
 }
 
+/// Chrome-specific listing whose first entry follows the advisory `Local
+/// State` activity hints. The generic `browser_profiles("chrome")` path keeps
+/// its frozen default-first order.
+pub(crate) fn chrome_profile_descriptors() -> Result<Vec<ProfileDescriptor>> {
+  let browser_id = BrowserId::known("chrome");
+  registry::chrome_profiles()?
+    .into_iter()
+    .map(|profile| chromium_profile_descriptor(&browser_id, profile))
+    .collect()
+}
+
+/// Resolves a human-facing Chrome profile selector and then uses the same
+/// report pipeline as an opaque-ID `browser_report` request. Re-discovery is
+/// deliberate: the report must retain current typed discovery/source outcomes
+/// rather than flattening the selected source into the legacy cookie vector.
+pub(crate) fn chrome_profile_report(
+  profile: &str,
+  domains: Option<Vec<String>>,
+) -> Result<ExtractionReport> {
+  let profile = registry::select_chrome_profile(profile)?;
+  browser_extraction_report("chrome", Some(&profile.profile_id), domains)
+}
+
+fn chromium_profile_descriptor(
+  browser_id: &BrowserId,
+  profile: registry::ChromiumProfile,
+) -> Result<ProfileDescriptor> {
+  let identity = profile_identity(
+    browser_id,
+    &profile.installation_id,
+    &profile.profile_id,
+    &profile.display_name,
+    &profile.path,
+  )?;
+  let mut sources = profile
+    .persistent_candidates
+    .into_iter()
+    .filter(|candidate| candidate.exists)
+    .map(|candidate| {
+      let source = source_identity(
+        &candidate.path,
+        SOURCE_ROLE_PERSISTENT,
+        "chromium_sqlite",
+        candidate.precedence,
+      );
+      CookieSourceDescriptor {
+        role: source.role,
+        format: source.format,
+        path: source.path,
+        path_lossy: source.path_lossy,
+        precedence: source.precedence,
+      }
+    })
+    .collect::<Vec<_>>();
+  sort_source_descriptors(&mut sources);
+  Ok(ProfileDescriptor {
+    profile: identity,
+    is_default: profile.is_default,
+    sources,
+  })
+}
+
 fn profile_descriptors_from_outcome(
   browser_id: &str,
   outcome: BrowserOutcome,

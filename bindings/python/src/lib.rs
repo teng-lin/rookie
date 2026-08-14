@@ -5,7 +5,10 @@ use rookie_core::enums::Cookie;
 mod browsers;
 mod report;
 use browsers::*;
-use report::{browser_profiles, browser_report, load_report, supported_browsers};
+use report::{
+  browser_profiles, browser_report, chrome_profile, chrome_profiles, load_report,
+  supported_browsers,
+};
 
 #[pyfunction]
 fn version() -> PyResult<String> {
@@ -48,6 +51,8 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add("MAX_ISSUE_SAMPLES", rookie_core::report::MAX_ISSUE_SAMPLES)?;
   m.add_function(wrap_pyfunction!(supported_browsers, m)?)?;
   m.add_function(wrap_pyfunction!(browser_profiles, m)?)?;
+  m.add_function(wrap_pyfunction!(chrome_profiles, m)?)?;
+  m.add_function(wrap_pyfunction!(chrome_profile, m)?)?;
   m.add_function(wrap_pyfunction!(browser_report, m)?)?;
   m.add_function(wrap_pyfunction!(load_report, m)?)?;
 
