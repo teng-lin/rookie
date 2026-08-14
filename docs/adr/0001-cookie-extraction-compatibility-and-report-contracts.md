@@ -30,7 +30,12 @@ For the current release line:
 - `load()` retains its browser set, per-browser selectors, and concatenation order.
 - New browsers do not enter legacy `load()`.
 - New all-profile discovery is never flattened behind an existing function.
-- Existing source-specific domain matching and SQL parameter binding remain unchanged. Persistent Chromium/Mozilla SQLite sources keep parameterized `LIKE '%<requested-domain>%'`; Safari and Firefox session sources keep their boundary-aware, case-insensitive host matcher. Initial reports use the semantics of each source adapter and do not silently unify them.
+- Existing SQL parameter binding remains unchanged. Persistent
+  Chromium/Mozilla SQLite sources keep parameterized `LIKE` queries as
+  candidate reducers, then enforce the same boundary-aware, case-insensitive
+  host matcher used by Safari and Firefox session sources. This announced
+  release-boundary security correction makes `None` unfiltered while an
+  explicit empty filter matches nothing.
 - Legacy cookie row order remains unspecified and unsorted.
 - Failures must not collapse into plausible successful empty output. Human error text is not stable.
 

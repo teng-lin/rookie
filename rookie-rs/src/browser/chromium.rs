@@ -1,4 +1,4 @@
-use crate::common::{date, enums::*, sqlite};
+use crate::common::{date, enums::*, sqlite, utils};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -1061,17 +1061,22 @@ fn query_cookies_from_connection(
     .map(|domains| {
       domains
         .iter()
+        .filter_map(|domain| utils::normalized_domain_for_match(domain))
         .map(|domain| format!("%{}%", escape_like_pattern(domain)))
         .collect()
     })
     .unwrap_or_default();
 
-  if !domain_filters.is_empty() {
-    let predicates = (1..=domain_filters.len())
-      .map(|index| format!("host_key LIKE ?{index} ESCAPE '\\'"))
-      .collect::<Vec<_>>()
-      .join(" OR ");
-    query += &format!("WHERE ({predicates})");
+  if domains.is_some() {
+    if domain_filters.is_empty() {
+      query += "WHERE 0";
+    } else {
+      let predicates = (1..=domain_filters.len())
+        .map(|index| format!("host_key LIKE ?{index} ESCAPE '\\'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+      query += &format!("WHERE ({predicates})");
+    }
   }
   query += ";";
 
@@ -1082,13 +1087,16 @@ fn query_cookies_from_connection(
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
-    extraction.stats.rows_seen += 1;
-    let row_number = extraction.stats.rows_seen;
     let host_key = row
       .get::<_, Option<String>>(0)
       .ok()
       .flatten()
       .unwrap_or_default();
+    if !utils::some_domain_in_host(domains, &host_key) {
+      continue;
+    }
+    extraction.stats.rows_seen += 1;
+    let row_number = extraction.stats.rows_seen;
     let path = row
       .get::<_, Option<String>>(1)
       .ok()
@@ -2407,18 +2415,30 @@ mod tests {
   }
 
   #[test]
-  fn query_cookies_preserves_legacy_substring_domain_filtering() {
-    let dir = unique_tmpdir("chr-domain-filter-substring");
+  fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
+    let dir = unique_tmpdir("chr-domain-filter-boundary");
     let db = dir.join("Cookies");
     seed_chromium_cookies(
       &db,
       &[
+        ("example.com", "/", false, 0, "exact", "yes", b"", false, 0),
         (
-          ".example.com",
+          ".sub.example.com",
           "/",
           false,
           0,
-          "boundary",
+          "subdomain",
+          "yes",
+          b"",
+          false,
+          0,
+        ),
+        (
+          "example.com.",
+          "/",
+          false,
+          0,
+          "trailing-dot",
           "yes",
           b"",
           false,
@@ -2430,18 +2450,18 @@ mod tests {
           false,
           0,
           "prefix",
-          "legacy",
+          "no",
           b"",
           false,
           0,
         ),
         (
-          "example.com.evil",
+          "example.com.evil.net",
           "/",
           false,
           0,
           "suffix",
-          "legacy",
+          "no",
           b"",
           false,
           0,
@@ -2460,16 +2480,84 @@ mod tests {
       ],
     );
 
-    let mut cookies =
-      query_cookies_with_legacy_keys(vec![], db, Some(vec!["example.com".to_string()]), false)
-        .expect("decode");
-    cookies.sort_by(|a, b| a.name.cmp(&b.name));
-    let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
-    assert_eq!(
-      names,
-      vec!["boundary", "prefix", "suffix"],
-      "persistent Chromium filtering is the legacy SQL LIKE %domain% contract"
+    let connection = rusqlite::Connection::open(&db).expect("open cookie database");
+    connection
+      .execute(
+        "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, \
+          encrypted_value, is_httponly, samesite) \
+          VALUES ('notexample.com', '/', 0, 0, X'DEADBEEF', 'off-scope', X'', 0, 0)",
+        [],
+      )
+      .expect("insert malformed off-scope candidate");
+    let outcomes = ChromiumKeyOutcomes::from_legacy_shared(vec![]);
+    let names = |outcome: &ChromiumEngineExtractionOutcome| {
+      let mut names = outcome
+        .cookies
+        .iter()
+        .map(|cookie| cookie.name.clone())
+        .collect::<Vec<_>>();
+      names.sort();
+      names
+    };
+
+    let domains = vec!["example.com".to_string()];
+    let outcome = query_cookies_from_connection(&connection, &outcomes, Some(&domains))
+      .expect("filter exact host and subdomains");
+    assert_eq!(names(&outcome), vec!["exact", "subdomain", "trailing-dot"]);
+    assert_eq!(outcome.stats.rows_seen, 3);
+    assert_eq!(outcome.stats.rows_skipped, 0);
+    assert_eq!(outcome.stats.cookies_emitted, 3);
+
+    let dotted_domains = vec![".example.com.".to_string()];
+    let dotted = query_cookies_from_connection(&connection, &outcomes, Some(&dotted_domains))
+      .expect("leading and trailing dots must not narrow the SQL candidate set");
+    assert_eq!(names(&dotted), vec!["exact", "subdomain", "trailing-dot"]);
+
+    let mixed_domains = vec!["".to_string(), "example.com".to_string()];
+    let mixed = query_cookies_from_connection(&connection, &outcomes, Some(&mixed_domains))
+      .expect("a blank entry must not broaden a valid allowlist");
+    assert_eq!(names(&mixed), vec!["exact", "subdomain", "trailing-dot"]);
+
+    for invalid in ["", " \t ", ".", "%", "_"] {
+      let domains = vec![invalid.to_string()];
+      let outcome = query_cookies_from_connection(&connection, &outcomes, Some(&domains))
+        .expect("invalid filter must be a successful empty result");
+      assert!(
+        outcome.cookies.is_empty(),
+        "filter {invalid:?} must not expose cookies: {:?}",
+        outcome.cookies
+      );
+      assert_eq!(outcome.stats.rows_seen, 0, "filter {invalid:?}");
+      assert_eq!(outcome.stats.rows_skipped, 0, "filter {invalid:?}");
+    }
+
+    let empty_domains = Vec::new();
+    let empty = query_cookies_from_connection(&connection, &outcomes, Some(&empty_domains))
+      .expect("an explicit empty allowlist must validate the schema and match nothing");
+    assert!(empty.cookies.is_empty());
+    assert_eq!(empty.stats.rows_seen, 0);
+
+    let empty_database = rusqlite::Connection::open_in_memory().expect("open empty database");
+    assert!(
+      query_cookies_from_connection(&empty_database, &outcomes, Some(&empty_domains)).is_err(),
+      "an empty allowlist must not bypass schema validation"
     );
+
+    let unfiltered =
+      query_cookies_from_connection(&connection, &outcomes, None).expect("unfiltered query");
+    assert_eq!(
+      names(&unfiltered),
+      vec![
+        "exact",
+        "prefix",
+        "subdomain",
+        "suffix",
+        "trailing-dot",
+        "unrelated"
+      ]
+    );
+    assert_eq!(unfiltered.stats.rows_seen, 7);
+    assert_eq!(unfiltered.stats.rows_skipped, 1);
   }
 
   #[cfg(unix)]

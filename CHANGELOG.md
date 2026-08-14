@@ -13,6 +13,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   callers can attach Promise handlers. JavaScript examples now consistently
   await the asynchronous extraction API.
 
+### Security
+
+- Persistent Chromium and Mozilla domain filters now enforce exact-host and
+  subdomain boundaries after their SQL candidate query. Explicitly empty
+  filters and blank domain entries no longer expose the entire cookie store.
+
 ## [0.5.8] - 2026-08-11
 
 ### Added
