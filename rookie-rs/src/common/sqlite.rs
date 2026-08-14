@@ -399,7 +399,8 @@ fn database_uses_wal(database: &Path) -> Result<bool> {
 }
 
 /// Copies a WAL-mode main file into a private directory only when the source
-/// stays WAL-free and byte-for-byte stable across the complete copy window.
+/// stays WAL-free and byte-for-byte stable across the complete copy window,
+/// and the copied header still identifies a WAL-mode database.
 ///
 /// `Ok(None)` means a writer appended a WAL during acquisition. The caller
 /// must switch to the DB+WAL snapshot path rather than retrying immutably.
@@ -434,6 +435,12 @@ where
       return Ok(None);
     }
     if main_stayed_stable {
+      if !database_uses_wal(&copy)? {
+        return Err(anyhow!(
+          "Can't take an immutable snapshot of {}: its journal mode changed during acquisition",
+          database.display()
+        ));
+      }
       return Ok(Some(VerifiedStaticSingleFile {
         path: copy,
         snapshot,
@@ -1466,6 +1473,33 @@ mod tests {
       DatabaseAcquisitionStrategy::VerifiedWalSnapshot
     );
     assert_eq!(cookie_names(&reader), vec!["checkpointed", "in-wal"]);
+  }
+
+  #[test]
+  fn a_rollback_journal_transition_disqualifies_the_immutable_copy() {
+    let directory = TempDir::new().expect("temp dir");
+    let (path, writer) = checkpointed_database(directory.path());
+    let canonical = path.canonicalize().expect("canonicalize");
+
+    let result = snapshot_static_single_file_using(&canonical, |source, copy, attempt| {
+      assert_eq!(attempt, 1, "journal-mode changes must fail closed");
+      let mode: String = writer
+        .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+        .expect("switch to rollback journal during acquisition");
+      assert_eq!(mode, "delete");
+      fs::copy(source, copy).expect("copy rollback-journal main file");
+      Ok(())
+    });
+    let error = match result {
+      Ok(_) => panic!("a rollback-journal copy must not become immutable"),
+      Err(error) => error,
+    };
+
+    assert!(
+      error.to_string().contains("journal mode changed"),
+      "unexpected error: {error:#}"
+    );
+    assert!(!database_uses_wal(&canonical).expect("read changed header"));
   }
 
   #[test]
