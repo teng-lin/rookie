@@ -43,7 +43,19 @@ Legacy wrappers may share acquisition, row parsing, and decryption internals wit
 
 ### 2. Registry and capability vocabulary
 
-`rookie-rs/browser_registry.json` is the private, versioned source of truth for the new generic pipeline. It is grouped by target OS, embedded at compile time with `include_str!`, and deserialized once. `rookie-rs/config.json` remains frozen as the public compatibility artifact used by legacy selectors.
+`rookie-rs/browser_registry.json` is the versioned source of truth for the public generic pipeline. It is grouped by target OS, embedded at compile time with `include_str!`, and deserialized once. `rookie-rs/config.json` remains frozen as the public compatibility artifact used by legacy selectors.
+
+The files therefore have a directional, not byte-for-byte, parity contract.
+The registry owns corrected installation roots, channels, XDG-aware locations,
+and registry-only browsers. The legacy config owns the historical paths that
+existing named selectors still probe. A union-based test normalizes legacy
+cookie-file templates to installation roots, covers all three platforms, and
+requires every config-only browser, registry-only browser, path difference,
+and channel difference to appear in an exact reviewed inventory. This prevents
+new drift without copying known-bad legacy spellings (for example
+`Chrome-nightly`, `Edge-nightly`, or `google-chrome-dev`) into the registry.
+Linux `opera_gx` remains an explicit config-only exemption: its legacy entry
+has no paths and is not advertised by generic discovery.
 
 Canonical existing IDs are:
 
@@ -103,6 +115,13 @@ Generic profile ordering is:
 1. installation registry priority, then normalized path;
 2. default profile first;
 3. locale-independent lowercase display name, raw display name, then normalized path.
+
+The additive Chrome convenience listing is the only ordering exception. It
+places `Local State.profile.last_used` first, then the remaining entries in
+`last_active_profiles` order, while preserving generic order for profiles with
+no usable hint. The hints are advisory: missing, stale, or malformed metadata
+falls back to the generic default-first result, and ambiguous human-readable
+selectors remain errors rather than silently choosing a channel.
 
 Generic report cookies sort by `(domain, path, name, expires, secure, http_only, same_site, value)`. Exact duplicates retain extraction order. Duplicate cookie keys from different profiles remain in separate profile groups.
 
@@ -221,9 +240,20 @@ browser_report(
   domains: Option<Vec<String>>,
 ) -> Result<ExtractionReport>
 load_report(domains: Option<Vec<String>>) -> Result<ExtractionReport>
+chrome_profiles() -> Result<Vec<ProfileDescriptor>>
+chrome_profile(
+  profile: &str,
+  domains: Option<Vec<String>>,
+) -> Result<ExtractionReport>
 ```
 
-The complete report/profile surface ships through Rust, Python, Node, and CLI together after private cross-engine semantics are frozen.
+`chrome_profiles()` uses the Chrome-specific active preference above without
+changing `browser_profiles("chrome")`. `chrome_profile()` accepts the opaque
+profile ID, display name, directory name, or full path and returns the grouped
+report so profile/source provenance and typed partial failures are retained.
+The existing flat `chrome()` function is unchanged.
+
+The complete report/profile surface ships through Rust, Python, Node, and CLI together on the frozen cross-engine semantics.
 
 CLI rules are:
 

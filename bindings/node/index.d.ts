@@ -204,6 +204,21 @@ export declare function supportedBrowsers(): Promise<Array<BrowserDescriptorObje
  */
 export declare function browserProfiles(browserId: string): Promise<Array<ProfileDescriptorObject>>
 /**
+ * Lists Google Chrome profiles with the preferred active profile first.
+ *
+ * Missing, stale, or malformed activity hints retain the generic
+ * default-first discovery order.
+ */
+export declare function chromeProfiles(): Promise<Array<ProfileDescriptorObject>>
+/**
+ * Extracts one selected Google Chrome profile as a grouped report.
+ *
+ * `profile` accepts the opaque ID, display name, directory name, or full path
+ * returned by `chromeProfiles`. Ambiguous names reject rather than silently
+ * choosing an installation or channel.
+ */
+export declare function chromeProfile(profile: string, domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
+/**
  * Extracts cookies from one browser as a grouped report.
  *
  * Only a bad request rejects: an unknown `browserId`, or a `profileId` this

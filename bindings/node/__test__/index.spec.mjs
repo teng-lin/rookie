@@ -52,6 +52,8 @@ const EXPECTED_EXPORTS = [
   "chromiumBased",
   "supportedBrowsers",
   "browserProfiles",
+  "chromeProfiles",
+  "chromeProfile",
   "browserReport",
   "loadReport",
 ];
@@ -62,6 +64,8 @@ const EXPECTED_EXPORTS = [
 const REPORT_FUNCTIONS = [
   "supportedBrowsers",
   "browserProfiles",
+  "chromeProfiles",
+  "chromeProfile",
   "browserReport",
   "loadReport",
 ];
@@ -220,6 +224,7 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     ["safari", () => rookieCookies.safari(42)],
     ["chromiumBased", () => rookieCookies.chromiumBased(42)],
     ["browserProfiles", () => rookieCookies.browserProfiles(42)],
+    ["chromeProfile", () => rookieCookies.chromeProfile(42)],
     ["browserReport", () => rookieCookies.browserReport(42)],
     ["loadReport", () => rookieCookies.loadReport(42)],
   ];

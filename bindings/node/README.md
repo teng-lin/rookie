@@ -30,6 +30,26 @@ for (const profile of await firefoxProfiles()) {
 const cookies = await firefoxProfile("work", ["example.com"]);
 ```
 
+## Chrome profiles
+
+`chrome()` keeps its legacy default-first selection. `chromeProfiles()` instead
+uses Chrome's advisory activity hints and safely falls back to generic order
+when they are missing or invalid. `chromeProfile()` returns a grouped report,
+so profile/source provenance and typed issues remain visible.
+
+```typescript
+import { chromeProfile, chromeProfiles } from "rookie-cookies";
+
+const profiles = await chromeProfiles();
+if (profiles.length > 0) {
+  const report = await chromeProfile(profiles[0].profile.profileId, ["example.com"]);
+  console.log(report.status);
+}
+```
+
+Profile IDs and full paths are unambiguous. A repeated display or directory
+name rejects instead of silently choosing a channel.
+
 ## Reports
 
 The named functions above return a flat cookie array from one source. The

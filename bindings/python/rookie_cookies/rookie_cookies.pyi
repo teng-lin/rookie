@@ -232,6 +232,33 @@ def browser_profiles(browser_id: str) -> ProfileDescriptorList:
     """
     ...
 
+def chrome_profiles() -> ProfileDescriptorList:
+    """
+    List discovered Google Chrome profiles with the preferred active profile
+    first.
+
+    Missing, stale, or malformed Local State activity hints safely retain the
+    generic default-first discovery order. Profile and source descriptor keys
+    are the same as for ``browser_profiles``.
+    """
+    ...
+
+def chrome_profile(
+    profile: str, domains: Optional[List[str]] = None
+) -> ExtractionReport:
+    """
+    Extract one selected Google Chrome profile as a grouped report.
+
+    :param profile: Profile ID, display name, directory name, or full path from
+        chrome_profiles
+    :param domains: Optional list of domains to extract only from them
+    :return: A report retaining profile identity, source provenance, and typed
+        discovery/extraction issues
+    :raises RuntimeError: The selector is missing or ambiguous, or discovery
+        changed before extraction. The message is diagnostic, not stable.
+    """
+    ...
+
 def browser_report(
     browser_id: str,
     profile_id: Optional[str] = None,

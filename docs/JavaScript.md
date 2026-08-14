@@ -37,3 +37,13 @@ Cookies stay attached to the source they came from, alongside that source's
 status, acquisition strategy, counters, and diagnostics. See
 [the Node binding README](../bindings/node/README.md#reports) for the object
 shapes and the rules for reading them.
+
+For Chrome, `chromeProfiles()` puts the preferred active profile first without
+changing `browserProfiles("chrome")` or legacy `chrome()`. Missing or invalid
+activity hints safely fall back to default-first order. Pass a returned profile
+ID, display name, directory name, or full path to `chromeProfile()`; it returns
+the grouped report so source provenance and typed issues remain visible.
+
+The CLI keeps the generic contract: list with
+`--list-profiles --browser chrome`, then select by opaque ID with
+`--report --browser chrome --profile PROFILE_ID`.

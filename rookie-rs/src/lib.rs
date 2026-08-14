@@ -114,6 +114,61 @@ pub fn browser_profiles(browser_id: &str) -> Result<Vec<report::ProfileDescripto
   browser::report_build::browser_profile_descriptors(browser_id)
 }
 
+/// Returns every discovered Google Chrome profile, preferring the active one.
+///
+/// This is an additive registry-backed API. It does not change [`chrome`],
+/// whose legacy first/default-profile selector remains frozen, or the generic
+/// default-first ordering of [`browser_profiles`]. When Chrome's `Local State`
+/// names a last-used profile, that profile is listed first; the remaining
+/// active profiles follow in their declared order. Missing, stale, or malformed
+/// activity hints safely fall back to the generic discovery order.
+///
+/// Each result retains its stable profile/installation IDs and ordered cookie
+/// source descriptors. Pass a profile ID, display name, directory name, or full
+/// path to [`chrome_profile`]. IDs and full paths are recommended when multiple
+/// installations contain same-named profiles.
+///
+/// # Examples
+///
+/// ```no_run
+/// for profile in rookie_cookies::chrome_profiles()? {
+///   println!("{} {}", profile.profile.profile_id, profile.profile.display_name);
+/// }
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn chrome_profiles() -> Result<Vec<report::ProfileDescriptor>> {
+  browser::report_build::chrome_profile_descriptors()
+}
+
+/// Extracts one selected Google Chrome profile as a grouped report.
+///
+/// Unlike the legacy [`chrome`] function, this registry-backed selector keeps
+/// the selected profile identity, cookie-source provenance, partial failures,
+/// and typed discovery issues. `profile` may be the opaque profile ID returned
+/// by [`chrome_profiles`], a display name, a directory name, or a full path.
+/// Ambiguous names are rejected instead of silently selecting the wrong
+/// channel or installation.
+///
+/// # Examples
+///
+/// ```no_run
+/// let profiles = rookie_cookies::chrome_profiles()?;
+/// if let Some(preferred) = profiles.first() {
+///   let report = rookie_cookies::chrome_profile(
+///     preferred.profile.profile_id.as_str(),
+///     Some(vec!["example.com".to_owned()]),
+///   )?;
+///   println!("{}", report.status);
+/// }
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn chrome_profile(
+  profile: &str,
+  domains: Option<Vec<String>>,
+) -> Result<report::ExtractionReport> {
+  browser::report_build::chrome_profile_report(profile, domains)
+}
+
 /// Extracts cookies from one browser as a grouped report.
 ///
 /// Unlike the named selectors, this covers every installation and profile of

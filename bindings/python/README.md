@@ -23,6 +23,24 @@ for profile in firefox_profiles():
 cookies = firefox_profile("work", ["example.com"])
 ```
 
+## Chrome profiles
+
+`chrome()` keeps its legacy default-first selection. Use the additive APIs to
+prefer Chrome's advisory active-profile hints while retaining report metadata:
+
+```python
+from rookie_cookies import chrome_profile, chrome_profiles
+
+profiles = chrome_profiles()
+if profiles:
+    report = chrome_profile(profiles[0]["profile"]["profile_id"], ["example.com"])
+    print(report["status"])
+```
+
+Missing or malformed hints fall back to the generic order. A selector may also
+be a display name, directory name, or full path; ambiguous names raise instead
+of silently choosing a channel.
+
 ## Browser registry and reports
 
 ```python

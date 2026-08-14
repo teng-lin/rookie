@@ -34,6 +34,8 @@ class RookieCookiesHelpersTest(unittest.TestCase):
                 "MAX_ISSUE_SAMPLES",
                 "browser_profiles",
                 "browser_report",
+                "chrome_profile",
+                "chrome_profiles",
                 "create_cookie",
                 "firefox_profile",
                 "firefox_profiles",

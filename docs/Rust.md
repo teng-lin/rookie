@@ -41,6 +41,32 @@ fn main() {
 }
 ```
 
+## Chrome profiles
+
+`chrome()` remains the legacy default-first selector. The additive
+`chrome_profiles()` listing uses Chrome's advisory `Local State` activity hints:
+the last-used profile appears first, followed by the other active profiles. If
+the hints are missing, stale, or malformed, the order safely falls back to the
+generic default-first registry order.
+
+`chrome_profile()` accepts a profile ID, display name, directory name, or full
+path. It returns a grouped report rather than a flat cookie vector, preserving
+the profile identity, selected source, counters, and typed issues.
+
+```rust
+fn main() {
+    let profiles = rookie_cookies::chrome_profiles().unwrap();
+    if let Some(preferred) = profiles.first() {
+        let report = rookie_cookies::chrome_profile(
+            preferred.profile.profile_id.as_str(),
+            Some(vec!["example.com".to_owned()]),
+        )
+        .unwrap();
+        println!("{}", report.status);
+    }
+}
+```
+
 ## Logging
 
 Logging level can be controlled by changing `RUST_LOG` ENV variable

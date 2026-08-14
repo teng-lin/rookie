@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
+const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -381,6 +381,8 @@ module.exports.safari = platformNative(safari, 'safari', 'darwin', 'macOS')
 module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
 module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
 module.exports.firefoxProfile = asyncNative(firefoxProfile, 'firefoxProfile')
+module.exports.chromeProfiles = asyncNative(chromeProfiles, 'chromeProfiles')
+module.exports.chromeProfile = asyncNative(chromeProfile, 'chromeProfile')
 module.exports.firefoxBased = asyncNative(firefoxBased, 'firefoxBased')
 module.exports.supportedBrowsers = asyncNative(supportedBrowsers, 'supportedBrowsers')
 module.exports.browserProfiles = asyncNative(browserProfiles, 'browserProfiles')

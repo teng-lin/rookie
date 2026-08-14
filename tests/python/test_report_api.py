@@ -107,6 +107,62 @@ class BrowserProfilesTest(unittest.TestCase):
             sorted(profile["is_default"] for profile in profiles), [False, True]
         )
 
+    def test_chrome_profiles_prefers_last_used_without_changing_generic_order(
+        self,
+    ) -> None:
+        with _synthetic_home() as home:
+            root = _seed_chrome(home)
+            (root / "Local State").write_text(
+                json.dumps(
+                    {
+                        "profile": {
+                            "last_used": "Profile 1",
+                            "last_active_profiles": ["Profile 1", "Default"],
+                            "info_cache": {
+                                "Default": {"name": "Personal"},
+                                "Profile 1": {"name": "Work"},
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            generic = rookie_cookies.browser_profiles("chrome")
+            preferred = rookie_cookies.chrome_profiles()
+            report = rookie_cookies.chrome_profile("Work")
+
+        self.assertEqual(generic[0]["profile"]["display_name"], "Personal")
+        self.assertEqual(preferred[0]["profile"]["display_name"], "Work")
+        self.assertEqual(len(report["profiles"]), 1)
+        self.assertEqual(report["profiles"][0]["profile"]["display_name"], "Work")
+        self.assertEqual(
+            report["profiles"][0]["sources"][0]["cookies"][0]["value"],
+            "profile-value",
+        )
+
+    def test_chrome_profile_keeps_invalid_activity_hint_as_a_typed_warning(
+        self,
+    ) -> None:
+        with _synthetic_home() as home:
+            root = _seed_chrome(home)
+            (root / "Local State").write_text("{", encoding="utf-8")
+            profiles = rookie_cookies.chrome_profiles()
+            report = rookie_cookies.chrome_profile(
+                profiles[0]["profile"]["profile_id"]
+            )
+
+        self.assertEqual(
+            [profile["profile"]["display_name"] for profile in profiles],
+            ["Default", "Profile 1"],
+        )
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(len(report["profiles"]), 1)
+        self.assertEqual(report["summary"]["browsers_detected"], 1)
+        issues = {issue["code"]: issue for issue in report["issues"]}
+        self.assertNotIn("browser_not_detected", issues)
+        self.assertEqual(issues["local_state_invalid"]["severity"], "warning")
+        self.assertEqual(issues["local_state_invalid"]["stage"], "discovery")
+
 
 class BrowserReportTest(unittest.TestCase):
     def test_unknown_browser_id_raises(self) -> None:
