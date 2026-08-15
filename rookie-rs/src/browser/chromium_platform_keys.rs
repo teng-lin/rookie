@@ -379,32 +379,27 @@ fn retrieve_macos_key_outcomes<B>(config: &Browser, backend: &B) -> ChromiumKeyO
 where
   B: MacosKeychainBackend,
 {
-  let mut passwords: Vec<Zeroizing<String>> = Vec::new();
-  let mut push_password = |password: Zeroizing<String>| {
-    if !passwords
-      .iter()
-      .any(|existing| existing.as_str() == password.as_str())
-    {
-      passwords.push(password);
+  let v10 = match (&config.osx_key_service, &config.osx_key_user) {
+    (Some(service), Some(user)) if !service.is_empty() && !user.is_empty() => {
+      match backend.password(service, user) {
+        Ok(password) => {
+          ChromiumKeyOutcome::success(vec![
+            create_pbkdf2_key(&password, b"saltysalt", 1003).to_vec()
+          ])
+          .expect("a successful macOS Keychain lookup yields one candidate")
+        }
+        Err(error) => {
+          let diagnostic = format!("macOS Keychain lookup failed: {error:#}");
+          log::warn!("{diagnostic}");
+          ChromiumKeyOutcome::failure(diagnostic)
+        }
+      }
     }
+    (None, None) => ChromiumKeyOutcome::NotApplicable,
+    _ => ChromiumKeyOutcome::failure(
+      "macOS Keychain configuration requires non-empty service and account values",
+    ),
   };
-
-  if let (Some(service), Some(user)) = (&config.osx_key_service, &config.osx_key_user) {
-    match backend.password(service, user) {
-      Ok(password) => push_password(password),
-      Err(error) => log::debug!("Failed to retrieve password from OSX Keychain: {error}"),
-    }
-  }
-  for password in ["mock_password", "peanuts", ""] {
-    push_password(Zeroizing::new(password.to_string()));
-  }
-
-  let candidates = passwords
-    .into_iter()
-    .map(|password| create_pbkdf2_key(&password, b"saltysalt", 1003).to_vec())
-    .collect();
-  let v10 = ChromiumKeyOutcome::success(candidates)
-    .expect("macOS v10 always has compatibility fallback candidates");
 
   ChromiumKeyOutcomes {
     v10,
@@ -885,7 +880,7 @@ mod tests {
 
   #[cfg(target_os = "macos")]
   #[test]
-  fn macos_keeps_current_ordered_deduped_candidates_in_v10_only() {
+  fn macos_uses_only_the_password_returned_by_keychain() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
       result: Ok(Zeroizing::new("keychain".to_string())),
@@ -894,10 +889,7 @@ mod tests {
     assert_eq!(backend.calls.get(), 1);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
-      ["keychain", "mock_password", "peanuts", ""]
-        .into_iter()
-        .map(|password| create_pbkdf2_key(password, b"saltysalt", 1003).to_vec())
-        .collect::<Vec<_>>()
+      [create_pbkdf2_key("keychain", b"saltysalt", 1003).to_vec()]
     );
     assert!(matches!(
       outcomes.route(ChromiumCipherVersion::V11),
@@ -911,30 +903,51 @@ mod tests {
 
   #[cfg(target_os = "macos")]
   #[test]
-  fn macos_keychain_failure_preserves_fallback_v10_candidates() {
+  fn macos_keychain_failure_is_a_typed_provider_failure() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("keychain unavailable")),
     };
     let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
     assert_eq!(backend.calls.get(), 1);
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V10)
+    else {
+      panic!("Keychain failure must not silently install fallback candidates");
+    };
+    assert!(failure.message().contains("keychain unavailable"));
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn macos_mock_password_is_used_only_when_the_configured_backend_returns_it() {
+    let backend = FakeMacosBackend {
+      calls: Cell::new(0),
+      result: Ok(Zeroizing::new("mock_password".to_string())),
+    };
+    let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
     assert_eq!(
-      candidate_bytes(&outcomes, ChromiumCipherVersion::V10).len(),
-      3
+      candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
+      [create_pbkdf2_key("mock_password", b"saltysalt", 1003).to_vec()]
     );
   }
 
   #[cfg(target_os = "macos")]
   #[test]
-  fn macos_deduplicates_keychain_password_against_fallbacks() {
+  fn macos_without_keychain_identity_has_no_implicit_candidates() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok(Zeroizing::new("peanuts".to_string())),
+      result: Ok(Zeroizing::new("must not be read".to_string())),
     };
-    let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
-    assert_eq!(
-      candidate_bytes(&outcomes, ChromiumCipherVersion::V10).len(),
-      3
-    );
+    let config = Browser {
+      osx_key_service: None,
+      osx_key_user: None,
+      ..macos_config()
+    };
+    let outcomes = retrieve_macos_key_outcomes(&config, &backend);
+    assert_eq!(backend.calls.get(), 0);
+    assert!(matches!(
+      outcomes.route(ChromiumCipherVersion::V10),
+      ChromiumKeyRoute::NotApplicable { .. }
+    ));
   }
 }

@@ -311,13 +311,14 @@ jobs:
             "$ROOKIE_E2E_FIREFOX_PROFILE/cookies.sqlite"
 
   macos-chrome:
-    name: e2e macos × chrome (mock keychain)
+    name: e2e macos × chrome (real Keychain lookup)
     if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: macos-15
     timeout-minutes: 25
-    # Playwright keeps Chromium's --use-mock-keychain default on macOS.
-    # Chromium's fake keychain uses `mock_password`, so rookie-cookies can exercise
-    # Chrome cookie decryption in hosted CI without touching the real Keychain.
+    # Playwright keeps Chromium's --use-mock-keychain default on macOS, whose
+    # encrypted cookies use `mock_password`. The job seeds that value into an
+    # ephemeral real Keychain item, then rookie-cookies must retrieve it through
+    # `/usr/bin/security`; no production fallback candidate exists.
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
     steps:
@@ -356,9 +357,21 @@ jobs:
           set -euxo pipefail
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
 
+          /usr/bin/security delete-generic-password \
+            -a Chrome -s "Chrome Safe Storage" >/dev/null 2>&1 || true
+          /usr/bin/security add-generic-password -U \
+            -a Chrome -s "Chrome Safe Storage" -w mock_password
+          test "$(/usr/bin/security find-generic-password \
+            -a Chrome -s "Chrome Safe Storage" -w)" = mock_password
+
           python3 tests/e2e/cookie_server.py &
           SERVER_PID=$!
-          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          cleanup() {
+            kill "$SERVER_PID" 2>/dev/null || true
+            /usr/bin/security delete-generic-password \
+              -a Chrome -s "Chrome Safe Storage" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
 
           SERVER_READY=0
           for _ in $(seq 1 30); do

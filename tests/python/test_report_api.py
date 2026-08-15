@@ -20,8 +20,14 @@ import rookie_cookies
 
 _PLAINTEXT_VALUES = {"Default": "default-value", "Profile 1": "profile-value"}
 
-# A v10 Chromium blob no key can open, so the row is seen and then rejected.
+# A v10 Chromium blob that cannot produce a cookie. The precise rejection code
+# depends on whether the host's real platform key provider is available.
 _UNDECRYPTABLE = b"v10" + bytes(20)
+_CRYPTO_REJECTION_CODES = {
+    "decrypt_failed",
+    "provider_failed",
+    "provider_unavailable",
+}
 
 
 class SupportedBrowsersTest(unittest.TestCase):
@@ -363,15 +369,17 @@ class BrowserReportTest(unittest.TestCase):
         self.assertEqual(rejected["stats"]["cookies_emitted"], 0)
         self.assertEqual(rejected["stats"]["rows_skipped"], 1)
 
-        decrypt_failed = next(
-            issue for issue in rejected["issues"] if issue["code"] == "decrypt_failed"
+        crypto_rejection = next(
+            issue
+            for issue in rejected["issues"]
+            if issue["code"] in _CRYPTO_REJECTION_CODES
         )
-        self.assertEqual(decrypt_failed["severity"], "error")
-        self.assertEqual(decrypt_failed["stage"], "decrypt")
-        self.assertEqual(decrypt_failed["occurrences"], 1)
-        self.assertTrue(decrypt_failed["samples"])
-        self.assertTrue(all(isinstance(s, str) for s in decrypt_failed["samples"]))
-        self.assertIn("decrypt_failed", decrypt_failed["message"])
+        self.assertEqual(crypto_rejection["severity"], "error")
+        self.assertEqual(crypto_rejection["stage"], "decrypt")
+        self.assertEqual(crypto_rejection["occurrences"], 1)
+        self.assertTrue(crypto_rejection["samples"])
+        self.assertTrue(all(isinstance(s, str) for s in crypto_rejection["samples"]))
+        self.assertIn(crypto_rejection["code"], crypto_rejection["message"])
 
     def test_issue_samples_are_bounded_while_occurrences_counts_them_all(
         self,
@@ -385,7 +393,9 @@ class BrowserReportTest(unittest.TestCase):
         source = report["profiles"][0]["sources"][0]
         self.assertEqual(source["stats"]["rows_skipped"], rejected_rows)
 
-        issue = next(i for i in source["issues"] if i["code"] == "decrypt_failed")
+        issue = next(
+            i for i in source["issues"] if i["code"] in _CRYPTO_REJECTION_CODES
+        )
         self.assertEqual(issue["occurrences"], rejected_rows)
         self.assertTrue(issue["samples"])
         # A corrupt database cannot dictate report size. The exported cap is the

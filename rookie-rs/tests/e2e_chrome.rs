@@ -277,7 +277,7 @@ fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore]
-fn extracts_seeded_cookie_from_chrome_mock_keychain_profile() {
+fn extracts_seeded_cookie_through_real_macos_keychain_provider() {
   let db_path = helpers::resolve_db_path();
   let domain = helpers::domain();
 
@@ -285,8 +285,8 @@ fn extracts_seeded_cookie_from_chrome_mock_keychain_profile() {
     channels: None,
     paths: vec![db_path.to_string_lossy().into_owned()],
     unix_crypt_name: None,
-    osx_key_service: None,
-    osx_key_user: None,
+    osx_key_service: Some("Chrome Safe Storage".to_string()),
+    osx_key_user: Some("Chrome".to_string()),
   };
 
   let cookies =
