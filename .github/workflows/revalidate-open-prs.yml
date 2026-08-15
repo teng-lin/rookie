@@ -151,7 +151,7 @@ jobs:
           # rerun, trust only the newest attempt recorded by Actions.
           jobs_json="$(gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100&filter=all" \
-            --jq '[.[].jobs[] | {id, name, conclusion, run_attempt}]
+            | jq '[.[].jobs[] | {id, name, conclusion, run_attempt}]
                   | sort_by(.name, .run_attempt, .id)
                   | group_by(.name)
                   | map(last)')"
