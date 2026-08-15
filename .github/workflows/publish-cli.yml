@@ -51,6 +51,7 @@ jobs:
           # so the ref-type and ref-name checks still catch a wrong-ref
           # dispatch.
           ref: ${{ github.sha }}
+          fetch-depth: 0
 
       # Unlike the crate and PyPI workflows, which derive `v$VERSION` from a
       # version input, this one takes the tag verbatim — so the `v<version>`
@@ -62,12 +63,16 @@ jobs:
       - name: Verify release tag
         shell: bash
         run: |
+          set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::tag must be v<major>.<minor>.<patch>[-prerelease], got '$RELEASE_TAG'"
             exit 1
           fi
           test "$GITHUB_REF_TYPE" = "tag"
           test "$GITHUB_REF_NAME" = "$RELEASE_TAG"
+          release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
+          test "$release_sha" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$release_sha" origin/main
         env:
           RELEASE_TAG: ${{ inputs.tag }}
 
