@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
+use std::{os::windows::ffi::OsStrExt, path::Path};
 use windows::{
-  core::{HSTRING, PCWSTR, PWSTR},
+  core::{PCWSTR, PWSTR},
   Win32::{
     Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR},
     System::RestartManager::{
@@ -48,6 +49,15 @@ fn affected_process_count(result: u32, needed: u32, supplied: u32) -> Result<u32
   Ok(needed.max(supplied))
 }
 
+fn encode_restart_manager_path(file_path: &Path) -> Result<Vec<u16>> {
+  let mut encoded: Vec<u16> = file_path.as_os_str().encode_wide().collect();
+  if encoded.contains(&0) {
+    bail!("Restart Manager file path contains an interior NUL");
+  }
+  encoded.push(0);
+  Ok(encoded)
+}
+
 /// Inspect the processes locking `file_path` and optionally ask Restart Manager
 /// to shut them down.
 ///
@@ -60,10 +70,10 @@ fn affected_process_count(result: u32, needed: u32, supplied: u32) -> Result<u32
 /// `RmShutdown` can terminate applications when `force_kill` is true. Callers
 /// must only opt in when that disruptive behavior was explicitly requested.
 pub(crate) unsafe fn release_file_lock(
-  file_path: &str,
+  file_path: &Path,
   force_kill: bool,
 ) -> Result<FileLockStatus> {
-  let file_path = HSTRING::from(file_path);
+  let file_path = encode_restart_manager_path(file_path)?;
   let mut session = 0_u32;
   let mut session_key_buffer = [0_u16; (CCH_RM_SESSION_KEY as usize) + 1];
   check_restart_manager(
@@ -109,6 +119,72 @@ pub(crate) unsafe fn release_file_lock(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+  #[test]
+  fn restart_manager_path_preserves_unpaired_surrogate() {
+    let path_units = [
+      b'C' as u16,
+      b':' as u16,
+      b'\\' as u16,
+      0xd800,
+      b'.' as u16,
+      b'd' as u16,
+      b'b' as u16,
+    ];
+    let path = OsString::from_wide(&path_units);
+
+    let encoded = encode_restart_manager_path(Path::new(&path)).unwrap();
+
+    assert_eq!(
+      encoded,
+      path_units
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>()
+    );
+  }
+
+  #[test]
+  fn restart_manager_path_preserves_non_bmp_character_and_adds_one_terminator() {
+    let path_units = [
+      b'C' as u16,
+      b':' as u16,
+      b'\\' as u16,
+      0xd83d,
+      0xde00,
+      b'.' as u16,
+      b'd' as u16,
+      b'b' as u16,
+    ];
+    let path = OsString::from_wide(&path_units);
+
+    let encoded = encode_restart_manager_path(Path::new(&path)).unwrap();
+
+    assert_eq!(&encoded[..encoded.len() - 1], path_units);
+    assert_eq!(encoded.last(), Some(&0));
+    assert_eq!(encoded.iter().filter(|unit| **unit == 0).count(), 1);
+  }
+
+  #[test]
+  fn restart_manager_path_rejects_interior_nul() {
+    let path = OsString::from_wide(&[
+      b'C' as u16,
+      b':' as u16,
+      b'\\' as u16,
+      b'a' as u16,
+      0,
+      b'b' as u16,
+    ]);
+
+    let error = encode_restart_manager_path(Path::new(&path)).unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "Restart Manager file path contains an interior NUL"
+    );
+  }
 
   #[test]
   fn affected_process_count_accepts_unlocked_query() {
