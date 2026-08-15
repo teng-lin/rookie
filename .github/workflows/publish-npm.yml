@@ -29,6 +29,8 @@ jobs:
   preflight:
     name: Verify release metadata
     runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ steps.release.outputs.sha }}
     defaults:
       run:
         working-directory: .
@@ -42,7 +44,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Verify release tag and metadata
+        id: release
         run: |
+          set -euo pipefail
           # $GITHUB_REF_TYPE/$GITHUB_REF_NAME reflect the ref that triggered
           # this workflow_dispatch (i.e. the branch selected in the Actions
           # UI), not the `ref:` override passed to actions/checkout above —
@@ -56,8 +60,11 @@ jobs:
           # whether the tag was actually reviewed and merged into `main`.
           # `fetch-depth: 0` above fetches full history for all branches, so
           # `origin/main` is available here; assert real ancestry instead.
-          git merge-base --is-ancestor "v$RELEASE_VERSION^{}" origin/main
+          release_sha="$(git rev-parse "v$RELEASE_VERSION^{}")"
+          test "$(git rev-parse HEAD)" = "$release_sha"
+          git merge-base --is-ancestor "$release_sha" origin/main
           python scripts/check-release.py "$RELEASE_VERSION"
+          echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -100,7 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: refs/tags/v${{ inputs.version }}
+          ref: ${{ needs.preflight.outputs.release_sha }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -164,6 +171,7 @@ jobs:
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
     needs:
+      - preflight
       - build
     strategy:
       fail-fast: false
@@ -180,7 +188,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: refs/tags/v${{ inputs.version }}
+          ref: ${{ needs.preflight.outputs.release_sha }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -203,6 +211,7 @@ jobs:
   test-linux-x64-gnu-binding:
     name: Test bindings on Linux-x64-gnu - node@${{ matrix.node }}
     needs:
+      - preflight
       - build
     strategy:
       fail-fast: false
@@ -214,7 +223,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: refs/tags/v${{ inputs.version }}
+          ref: ${{ needs.preflight.outputs.release_sha }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -235,18 +244,19 @@ jobs:
         run: ls -R .
         shell: bash
       - name: Test bindings
-        run: docker run --rm -v $(pwd):/build -w /build node:${{ matrix.node }}-slim npm test
+        run: docker run --rm -v "$PWD:/build" -w /build "node:${{ matrix.node }}-slim" npm test
   package:
     name: Prepare immutable npm tarballs
     runs-on: ubuntu-latest
     needs:
+      - preflight
       - build
       - test-macOS-windows-binding
       - test-linux-x64-gnu-binding
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: refs/tags/v${{ inputs.version }}
+          ref: ${{ needs.preflight.outputs.release_sha }}
           persist-credentials: false
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -314,7 +324,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    needs: package
+    needs:
+      - preflight
+      - package
     steps:
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -334,6 +346,43 @@ jobs:
           for tarball in release-packages/*.tgz; do
             npm publish "./$tarball" --dry-run --access public --ignore-scripts
           done
+      - name: Re-verify release tag still points at the packaged commit
+        shell: bash
+        env:
+          EXPECTED_RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$RELEASE_VERSION" \
+            --jq '"\(.object.type) \(.object.sha)"')"
+          object_type="${object% *}"
+          object_sha="${object#* }"
+
+          # Peel annotated tags without trusting a mutable local ref. Limit
+          # the depth so malformed tag chains fail closed instead of looping.
+          for _ in 1 2 3 4 5; do
+            if test "$object_type" = commit; then
+              break
+            fi
+            if test "$object_type" != tag; then
+              echo "::error::v$RELEASE_VERSION resolves to unsupported object type '$object_type'"
+              exit 1
+            fi
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" \
+              --jq '"\(.object.type) \(.object.sha)"')"
+            object_type="${object% *}"
+            object_sha="${object#* }"
+          done
+
+          if test "$object_type" != commit; then
+            echo "::error::v$RELEASE_VERSION did not peel to a commit"
+            exit 1
+          fi
+          if test "$object_sha" != "$EXPECTED_RELEASE_SHA"; then
+            echo "::error::v$RELEASE_VERSION now resolves to $object_sha, but the packaged commit is $EXPECTED_RELEASE_SHA"
+            exit 1
+          fi
       - name: Publish
         shell: bash
         run: |
