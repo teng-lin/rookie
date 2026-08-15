@@ -21,8 +21,6 @@ pub use browser::{
 mod browser;
 pub use anyhow::{self, Result};
 use anyhow::{bail, Context};
-#[cfg(unix)]
-use config::Browser;
 use enums::Cookie;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -797,8 +795,14 @@ fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
   })
 }
 
+#[cfg(unix)]
+type ChromiumProbeIdentity = (
+  &'static str,
+  browser::chromium_platform_keys::ChromiumKeyCredentials,
+);
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn any_browser_chromium_configs() -> Result<Vec<(&'static str, Browser)>> {
+fn any_browser_chromium_configs() -> Result<Vec<ChromiumProbeIdentity>> {
   let configs = vec![
     (
       "chrome",
@@ -840,11 +844,14 @@ fn any_browser_chromium_configs() -> Result<Vec<(&'static str, Browser)>> {
 /// rows for an equal-size result, wins.
 #[cfg(unix)]
 fn best_chromium_probe<Probe>(
-  configs: &[(&'static str, Browser)],
+  configs: &[ChromiumProbeIdentity],
   mut probe: Probe,
 ) -> Result<Vec<Cookie>>
 where
-  Probe: FnMut(&'static str, &Browser) -> Result<browser::chromium::ChromiumProbeResult>,
+  Probe: FnMut(
+    &'static str,
+    &browser::chromium_platform_keys::ChromiumKeyCredentials,
+  ) -> Result<browser::chromium::ChromiumProbeResult>,
 {
   let mut best: Option<(&'static str, browser::chromium::ChromiumProbeResult)> = None;
   let mut failures = Vec::new();
@@ -921,9 +928,11 @@ pub fn any_browser(
       #[cfg(target_os = "linux")]
       {
         let configs = any_browser_chromium_configs()?;
-        let mut key_cache = browser::chromium_platform_keys::LinuxKeyOutcomeCache::new();
-        best_chromium_probe(&configs, |_name, config| {
-          let outcomes = key_cache.outcomes_for(config);
+        let mut key_session = browser::chromium_platform_keys::HostKeySession::new();
+        best_chromium_probe(&configs, |_name, credentials| {
+          let outcomes = key_session.retrieve(
+            browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
+          );
           browser::chromium::chromium_based_probe_with_key_outcomes(
             outcomes,
             cookies_path.clone(),
@@ -935,9 +944,13 @@ pub fn any_browser(
       #[cfg(target_os = "macos")]
       {
         let configs = any_browser_chromium_configs()?;
-        best_chromium_probe(&configs, |_name, config| {
-          browser::chromium::chromium_based_probe(
-            config,
+        let mut key_session = browser::chromium_platform_keys::HostKeySession::new();
+        best_chromium_probe(&configs, |_name, credentials| {
+          let outcomes = key_session.retrieve(
+            browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
+          );
+          browser::chromium::chromium_based_probe_with_key_outcomes(
+            outcomes,
             cookies_path.clone(),
             domains.clone(),
             false,
@@ -1461,12 +1474,13 @@ mod tests {
       .find(|(name, _)| *name == "arc")
       .expect("Arc configuration");
     #[cfg(target_os = "linux")]
-    assert_eq!(arc.unix_crypt_name.as_deref(), Some("arc"));
+    assert_eq!(arc.linux_crypt_name.as_deref(), Some("arc"));
 
     #[cfg(target_os = "macos")]
     {
-      assert_eq!(arc.osx_key_service.as_deref(), Some("Arc Safe Storage"));
-      assert_eq!(arc.osx_key_user.as_deref(), Some("Arc"));
+      let keychain = arc.macos_keychain.as_ref().expect("Arc Keychain identity");
+      assert_eq!(keychain.service, "Arc Safe Storage");
+      assert_eq!(keychain.account, "Arc");
     }
   }
 

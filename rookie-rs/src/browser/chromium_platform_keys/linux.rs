@@ -1,6 +1,7 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
 use super::create_pbkdf2_key;
 use super::shared::outcome_from_result;
+use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
 use crate::config::Browser;
 use anyhow::Result;
 use zeroize::Zeroizing;
@@ -43,12 +44,15 @@ where
   )
 }
 
-fn retrieve_linux_key_outcomes<B>(config: &Browser, backend: &B) -> ChromiumKeyOutcomes
+fn retrieve_linux_key_outcomes<B>(
+  credentials: &ChromiumKeyCredentials,
+  backend: &B,
+) -> ChromiumKeyOutcomes
 where
   B: LinuxKeyringBackend,
 {
-  let v11 = match config
-    .unix_crypt_name
+  let v11 = match credentials
+    .linux_crypt_name
     .as_deref()
     .filter(|name| !name.is_empty())
   {
@@ -69,7 +73,7 @@ where
 /// Caching the typed outcome (including failures) prevents repeated D-Bus
 /// calls and unlock prompts without discarding the diagnostics produced by the
 /// hardened keyring provider.
-pub(crate) struct LinuxKeyOutcomeCache {
+struct LinuxKeyOutcomeCache {
   v11_by_crypt_name: std::collections::HashMap<String, ChromiumKeyOutcome>,
 }
 
@@ -80,16 +84,20 @@ impl LinuxKeyOutcomeCache {
     }
   }
 
-  pub(crate) fn outcomes_for(&mut self, config: &Browser) -> ChromiumKeyOutcomes {
-    self.outcomes_for_with_backend(config, &SystemLinuxKeyringBackend)
+  fn outcomes_for(&mut self, credentials: &ChromiumKeyCredentials) -> ChromiumKeyOutcomes {
+    self.outcomes_for_with_backend(credentials, &SystemLinuxKeyringBackend)
   }
 
-  fn outcomes_for_with_backend<B>(&mut self, config: &Browser, backend: &B) -> ChromiumKeyOutcomes
+  fn outcomes_for_with_backend<B>(
+    &mut self,
+    credentials: &ChromiumKeyCredentials,
+    backend: &B,
+  ) -> ChromiumKeyOutcomes
   where
     B: LinuxKeyringBackend,
   {
-    let v11 = match config
-      .unix_crypt_name
+    let v11 = match credentials
+      .linux_crypt_name
       .as_deref()
       .filter(|name| !name.is_empty())
     {
@@ -109,6 +117,39 @@ impl LinuxKeyOutcomeCache {
   }
 }
 
+/// Host-selected Linux key session. Its cache is intentionally scoped to the
+/// caller-owned session so separate extraction requests cannot share keyring
+/// outcomes accidentally.
+pub(crate) struct HostKeySession {
+  cache: LinuxKeyOutcomeCache,
+}
+
+impl HostKeySession {
+  pub(crate) fn new() -> Self {
+    Self {
+      cache: LinuxKeyOutcomeCache::new(),
+    }
+  }
+
+  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
+    self.cache.outcomes_for(request.credentials)
+  }
+
+  #[cfg(test)]
+  fn retrieve_with_backend<B>(
+    &mut self,
+    request: ChromiumKeyRequest<'_>,
+    backend: &B,
+  ) -> ChromiumKeyOutcomes
+  where
+    B: LinuxKeyringBackend,
+  {
+    self
+      .cache
+      .outcomes_for_with_backend(request.credentials, backend)
+  }
+}
+
 pub(crate) struct LinuxPlatformKeyProvider<'a> {
   config: &'a Browser,
 }
@@ -121,7 +162,9 @@ impl<'a> LinuxPlatformKeyProvider<'a> {
 
 impl ChromiumKeyProvider<()> for LinuxPlatformKeyProvider<'_> {
   fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
-    retrieve_linux_key_outcomes(self.config, &SystemLinuxKeyringBackend)
+    let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
+    let mut session = HostKeySession::new();
+    session.retrieve(ChromiumKeyRequest::direct(&credentials))
   }
 }
 
@@ -160,13 +203,10 @@ mod tests {
     }
   }
 
-  fn linux_config(crypt_name: Option<&str>) -> Browser {
-    Browser {
-      paths: vec![],
-      channels: None,
-      unix_crypt_name: crypt_name.map(str::to_string),
-      osx_key_service: None,
-      osx_key_user: None,
+  fn linux_credentials(crypt_name: Option<&str>) -> ChromiumKeyCredentials {
+    ChromiumKeyCredentials {
+      linux_crypt_name: crypt_name.map(str::to_string),
+      macos_keychain: None,
     }
   }
 
@@ -179,7 +219,7 @@ mod tests {
         Zeroizing::new("second".to_string()),
       ]),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_config(Some("chrome")), &backend);
+    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(Some("chrome")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     assert_eq!(
@@ -210,7 +250,7 @@ mod tests {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("keyring unavailable")),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_config(Some("chrome")), &backend);
+    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(Some("chrome")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     assert!(matches!(
@@ -234,7 +274,7 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(vec![]),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_config(Some("chrome")), &backend);
+    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(Some("chrome")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     assert!(matches!(
@@ -256,7 +296,7 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(vec![Zeroizing::new("unused".to_string())]),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_config(None), &backend);
+    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(None), &backend);
 
     assert_eq!(backend.calls.get(), 0);
     assert!(matches!(
@@ -279,9 +319,9 @@ mod tests {
     };
     let mut cache = LinuxKeyOutcomeCache::new();
 
-    let chrome = cache.outcomes_for_with_backend(&linux_config(Some("chrome")), &backend);
-    let vivaldi = cache.outcomes_for_with_backend(&linux_config(Some("chrome")), &backend);
-    let brave = cache.outcomes_for_with_backend(&linux_config(Some("brave")), &backend);
+    let chrome = cache.outcomes_for_with_backend(&linux_credentials(Some("chrome")), &backend);
+    let vivaldi = cache.outcomes_for_with_backend(&linux_credentials(Some("chrome")), &backend);
+    let brave = cache.outcomes_for_with_backend(&linux_credentials(Some("brave")), &backend);
 
     assert_eq!(backend.calls.get(), 2, "one call per distinct crypt name");
     assert_eq!(
@@ -304,8 +344,8 @@ mod tests {
     };
     let mut cache = LinuxKeyOutcomeCache::new();
 
-    let first = cache.outcomes_for_with_backend(&linux_config(Some("chromium")), &backend);
-    let second = cache.outcomes_for_with_backend(&linux_config(Some("chromium")), &backend);
+    let first = cache.outcomes_for_with_backend(&linux_credentials(Some("chromium")), &backend);
+    let second = cache.outcomes_for_with_backend(&linux_credentials(Some("chromium")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     for outcomes in [&first, &second] {
@@ -315,5 +355,55 @@ mod tests {
       };
       assert_eq!(failure.message(), "locked keyring");
     }
+  }
+
+  #[test]
+  fn linux_host_session_cache_is_shared_within_a_session_but_not_between_sessions() {
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Ok(vec![Zeroizing::new("session secret".to_string())]),
+    };
+    let credentials = linux_credentials(Some("chrome"));
+    let request = ChromiumKeyRequest::direct(&credentials);
+
+    let mut first_session = HostKeySession::new();
+    first_session.retrieve_with_backend(request, &backend);
+    first_session.retrieve_with_backend(request, &backend);
+    assert_eq!(backend.calls.get(), 1, "one lookup inside a probe session");
+
+    let mut second_session = HostKeySession::new();
+    second_session.retrieve_with_backend(request, &backend);
+    assert_eq!(
+      backend.calls.get(),
+      2,
+      "a later probe run gets a fresh host session"
+    );
+
+    let failing_backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Err(anyhow::anyhow!("session keyring failure")),
+    };
+    let mut failing_session = HostKeySession::new();
+    for _ in 0..2 {
+      let outcomes = failing_session.retrieve_with_backend(request, &failing_backend);
+      let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V11)
+      else {
+        panic!("failed session lookup must stay typed");
+      };
+      assert_eq!(failure.message(), "session keyring failure");
+    }
+    assert_eq!(
+      failing_backend.calls.get(),
+      1,
+      "the session caches a failed lookup"
+    );
+
+    let mut retried_session = HostKeySession::new();
+    retried_session.retrieve_with_backend(request, &failing_backend);
+    assert_eq!(
+      failing_backend.calls.get(),
+      2,
+      "a fresh session retries a previously failed lookup"
+    );
   }
 }

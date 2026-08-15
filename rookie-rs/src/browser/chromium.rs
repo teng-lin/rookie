@@ -148,40 +148,10 @@ pub fn chromium_based_detailed(
   }
 }
 
-/// Runs one Unix Chromium identity and retains enough extraction quality data
-/// for `any_browser` to compare it with the other configured identities.
-#[cfg(all(unix, not(target_os = "linux")))]
-pub(crate) fn chromium_based_probe(
-  config: &Browser,
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  force_kill: bool,
-) -> Result<ChromiumProbeResult> {
-  #[cfg(target_os = "linux")]
-  {
-    let provider = LinuxPlatformKeyProvider::new(config);
-    let outcomes = retrieve_key_outcomes(&provider, &());
-    query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill)
-  }
-
-  #[cfg(target_os = "macos")]
-  {
-    let provider = MacosPlatformKeyProvider::new(config);
-    let outcomes = retrieve_key_outcomes(&provider, &());
-    query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill)
-  }
-
-  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-  {
-    let _ = (config, db_path, domains, force_kill);
-    anyhow::bail!("Chromium cookie extraction is unsupported on this Unix platform")
-  }
-}
-
-/// Runs a Chromium probe using key outcomes already retrieved by the
-/// per-call Linux cache. Failures remain typed outcomes, so probing cannot turn
-/// a keyring error into an empty candidate list.
-#[cfg(target_os = "linux")]
+/// Runs a Chromium probe using key outcomes already retrieved by the host key
+/// session. Failures remain typed outcomes, so probing cannot turn a provider
+/// error into an empty candidate list.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn chromium_based_probe_with_key_outcomes(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
