@@ -96,8 +96,8 @@ chrome = chromium_cookies_from_path(
 Chromium options accept at most one credential selector: `browser_id`,
 `local_state_path`, or `plaintext_only=True`. Omitting all three selects
 Automatic credentials. Automatic probes platform credentials on Linux and
-macOS; on Windows an explicit Chromium path returns the core
-`missing_local_state_file` error because it does not guess a browser
+macOS; on Windows an explicit Chromium path raises `RuntimeError` with the core
+`missing_local_state_file` diagnostic because it does not guess a browser
 installation.
 `chromium_cookies_from_path_detailed()` returns the same cookies with
 partition/source context.
