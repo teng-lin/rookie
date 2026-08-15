@@ -214,7 +214,7 @@ pub(crate) fn gecko_profiles(browser_id: &str) -> Result<Vec<MozillaProfile>> {
     .profiles
     .into_iter()
     .map(|profile| MozillaProfile {
-      name: profile.name,
+      name: profile.legacy_name,
       path: profile.path,
       is_default: profile.is_default,
     })
@@ -240,10 +240,14 @@ mod tests {
         profile_id: "a".repeat(64),
         installation_id: "b".repeat(64),
         installation_priority: 10,
+        legacy_installation_priority: 10,
         legacy_profile_order: 0,
         legacy_is_default: true,
+        legacy_eligible: true,
         installation_path: PathBuf::from("/browser"),
+        legacy_installation_path: PathBuf::from("/browser"),
         name: "default".to_owned(),
+        legacy_name: "default".to_owned(),
         path: PathBuf::from("/browser/default"),
         is_default: true,
         persistent_source_discovered: true,
