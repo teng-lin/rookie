@@ -88,7 +88,7 @@ fn release_windows_lock(locked_path: &Path) -> bool {
   // selected the disruptive policy. Restart Manager owns the registered path
   // for the duration of its internal session.
   unsafe {
-    match crate::windows::restart_manager::release_file_lock(&locked_path.to_string_lossy(), true) {
+    match crate::windows::restart_manager::release_file_lock(locked_path, true) {
       Ok(
         crate::windows::restart_manager::FileLockStatus::Unlocked
         | crate::windows::restart_manager::FileLockStatus::Released { .. },

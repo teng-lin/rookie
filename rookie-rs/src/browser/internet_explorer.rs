@@ -134,13 +134,10 @@ fn unsupported_table_skipped_inputs(record_count: usize) -> usize {
 
 fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {
   let display_path = db_path.display();
-  let path = db_path
-    .to_str()
-    .with_context(|| format!("WebCache database path is not valid UTF-8: {display_path}"))?;
 
   let lock_status = unsafe {
     // `force_kill` comes from the explicitly opted-in public extraction API.
-    crate::windows::restart_manager::release_file_lock(path, force_kill)
+    crate::windows::restart_manager::release_file_lock(db_path, force_kill)
   }
   .with_context(|| format!("Unable to inspect locks on WebCache database {display_path}"))?;
   let released_processes = require_unlocked_database(db_path, lock_status)?;
