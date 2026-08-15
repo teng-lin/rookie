@@ -695,6 +695,14 @@ impl ChromiumProfile {
       .find(|candidate| candidate.selected)
       .map(|candidate| candidate.path.as_path())
   }
+
+  fn selected_source_precedence(&self) -> Option<u16> {
+    self
+      .persistent_candidates
+      .iter()
+      .find(|candidate| candidate.selected)
+      .map(|candidate| candidate.precedence)
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,6 +714,9 @@ struct BrowserInstallation {
   path: PathBuf,
   local_state_path: PathBuf,
   priority: u16,
+  /// Zero-based registry template group used only by the compatibility named
+  /// APIs. Registry roots are ordered template-group first, channel second.
+  legacy_root_group: u16,
   profiles: Vec<ChromiumProfile>,
 }
 
@@ -718,6 +729,17 @@ pub(crate) struct DiscoveryIssue {
   /// carry 1; a bounded code folds its unsampled remainder into the first
   /// retained sample, so the per-code total is the sum across entries.
   pub(crate) occurrences: u32,
+}
+
+pub(crate) fn is_informational_discovery_issue(code: &str) -> bool {
+  matches!(
+    code,
+    "duplicate_installation"
+      | "duplicate_profile"
+      | "profile_has_no_cookie_source"
+      | "profile_excluded_service_directory"
+      | "safari_profile_discovery_degraded"
+  )
 }
 
 impl DiscoveryIssue {
@@ -1088,10 +1110,26 @@ fn discover_browser_with_context<F: DiscoveryFs>(
       .cmp(&right.priority)
       .then_with(|| left.root_id.cmp(&right.root_id))
   });
+  // The legacy path tables expanded one path template over every channel
+  // before moving to the next template. The registry represents that order as
+  // contiguous channel groups; a repeated channel starts the next group.
+  let mut legacy_root_group = 0u16;
+  let mut channels_in_group = HashSet::new();
+  let roots = roots
+    .into_iter()
+    .map(|root| {
+      if !channels_in_group.insert(root.channel.as_str()) {
+        legacy_root_group = legacy_root_group.saturating_add(1);
+        channels_in_group.clear();
+        channels_in_group.insert(root.channel.as_str());
+      }
+      (root, legacy_root_group)
+    })
+    .collect::<Vec<_>>();
   let mut discovery = ChromiumDiscovery::default();
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
-  for root in roots {
+  for (root, legacy_root_group) in roots {
     let Some(resolved_root) = context.resolve_template(&root.template) else {
       continue;
     };
@@ -1171,6 +1209,7 @@ fn discover_browser_with_context<F: DiscoveryFs>(
         local_state_path: canonical_path.join("Local State"),
         path: canonical_path,
         priority: root.priority,
+        legacy_root_group,
         profiles: Vec::new(),
       };
       match root.discovery {
@@ -1397,12 +1436,42 @@ where
   }
 
   let legacy_profile_id = match selection {
+    // Historical named selectors exhausted each root/template group over its
+    // channels, then Default sources, then Profile* sources. Source precedence
+    // is therefore meaningful only inside those two outer compatibility
+    // groups, not as a global preference over another root or profile group.
     ProfileSelection::LegacyFirstProfile => discovery
       .installations
       .iter()
-      .flat_map(|installation| &installation.profiles)
-      .next()
-      .map(|profile| profile.profile_id.clone()),
+      .flat_map(|installation| {
+        installation
+          .profiles
+          .iter()
+          .map(move |profile| (installation, profile))
+      })
+      .enumerate()
+      .filter_map(|(order, (installation, profile))| {
+        profile.selected_source_precedence().map(|precedence| {
+          let profile_group = match profile.directory_name.as_str() {
+            "." | "Default" => 0u8,
+            _ => 1,
+          };
+          (
+            installation.legacy_root_group,
+            profile_group,
+            precedence,
+            installation.priority,
+            order,
+            &profile.profile_id,
+          )
+        })
+      })
+      .min_by_key(
+        |(root_group, profile_group, precedence, priority, order, _)| {
+          (*root_group, *profile_group, *precedence, *priority, *order)
+        },
+      )
+      .map(|(_, _, _, _, _, profile_id)| profile_id.clone()),
     _ => None,
   };
 
@@ -1758,6 +1827,23 @@ fn describe_chromium_profiles<'a>(profiles: impl Iterator<Item = &'a ChromiumPro
     .join(", ")
 }
 
+fn lost_chromium_profile_error(browser_id: &str, issues: &[DiscoveryIssue]) -> Option<String> {
+  let lost_profiles = issues
+    .iter()
+    .filter(|issue| {
+      issue.code.starts_with("profile_") && !is_informational_discovery_issue(issue.code)
+    })
+    .take(MAX_DISCOVERY_ISSUE_SAMPLES)
+    .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
+    .collect::<Vec<_>>();
+  (!lost_profiles.is_empty()).then(|| {
+    format!(
+      "every discovered {browser_id} profile failed discovery: {}",
+      lost_profiles.join("; ")
+    )
+  })
+}
+
 fn profiles_for_listing(
   browser_id: &str,
   discovery: ChromiumDiscovery,
@@ -1767,24 +1853,8 @@ fn profiles_for_listing(
   }
   let profiles = discovery.profiles();
   if profiles.is_empty() {
-    let lost_profiles = discovery
-      .issues
-      .iter()
-      .filter(|issue| {
-        issue.code.starts_with("profile_")
-          && !matches!(
-            issue.code,
-            "profile_excluded_service_directory" | "profile_has_no_cookie_source"
-          )
-      })
-      .take(MAX_DISCOVERY_ISSUE_SAMPLES)
-      .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
-      .collect::<Vec<_>>();
-    if !lost_profiles.is_empty() {
-      bail!(
-        "every discovered {browser_id} profile failed discovery: {}",
-        lost_profiles.join("; ")
-      )
+    if let Some(error) = lost_chromium_profile_error(browser_id, &discovery.issues) {
+      bail!(error)
     }
   }
   Ok(profiles)
@@ -1863,6 +1933,9 @@ fn project_legacy_chromium_report(
     .flat_map(|installation| installation.profiles)
     .next()
   else {
+    if let Some(error) = lost_chromium_profile_error(browser_id, &report.discovery_issues) {
+      bail!(error)
+    }
     return Ok(None);
   };
   if let Some(error) = profile.legacy_error {
@@ -5459,7 +5532,7 @@ mod tests {
       (
         PlatformId::Linux,
         [
-          "arc", "brave", "chrome", "chromium", "edge", "opera", "opera_gx", "vivaldi",
+          "arc", "brave", "chrome", "chromium", "edge", "opera", "vivaldi",
         ]
         .as_slice(),
         [].as_slice(),
@@ -5496,10 +5569,11 @@ mod tests {
         "opera_gx"
       );
     }
-    let linux_opera_gx =
-      browser_definition(registry, PlatformId::Linux, "opera-gx").expect("Linux compatibility");
-    assert_eq!(linux_opera_gx.canonical_id, "opera_gx");
-    assert!(linux_opera_gx.roots.is_empty());
+    assert!(browser_definition(registry, PlatformId::Linux, "opera-gx").is_err());
+    assert!(registered_browsers_for(PlatformId::Linux)
+      .expect("Linux browser descriptors")
+      .iter()
+      .all(|browser| browser.canonical_id != "opera_gx"));
   }
 
   #[test]
@@ -5859,6 +5933,7 @@ mod tests {
         path: PathBuf::from("/nonexistent"),
         local_state_path: PathBuf::from("/nonexistent/Local State"),
         priority: 10,
+        legacy_root_group: 0,
         profiles: Vec::new(),
       };
 
@@ -7047,6 +7122,106 @@ mod tests {
   }
 
   #[test]
+  fn legacy_chromium_policy_exhausts_source_precedence_across_channels() {
+    let temp = TempDir::new("legacy-source-precedence");
+    let context = test_context_for(PlatformId::Linux, temp.path().join("home"), []);
+    let stable = channel_root(&context, "stable");
+    let beta = channel_root(&context, "beta");
+    seed_cookie(&stable.join("Default"), false, "stable-legacy", "one");
+    seed_cookie(&beta.join("Default"), true, "beta-network", "two");
+
+    let provider = CountingProvider::default();
+    let report = extract_chromium_with_provider_and_selection(
+      &context,
+      "chrome",
+      ProfileSelection::LegacyFirstProfile,
+      None,
+      &provider,
+    )
+    .expect("legacy extraction");
+    let extraction = report
+      .installations
+      .iter()
+      .flat_map(|installation| &installation.profiles)
+      .next()
+      .expect("selected profile");
+
+    assert_eq!(
+      extraction.profile.path,
+      beta.join("Default").canonicalize().unwrap()
+    );
+    assert_eq!(extraction.cookies.len(), 1);
+    assert_eq!(extraction.cookies[0].name, "beta-network");
+    assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
+  }
+
+  #[test]
+  fn legacy_chromium_policy_prefers_default_group_before_profile_source() {
+    let temp = TempDir::new("legacy-profile-group-precedence");
+    let context = test_context_for(PlatformId::Linux, temp.path().join("home"), []);
+    let stable = channel_root(&context, "stable");
+    let beta = channel_root(&context, "beta");
+    seed_cookie(&stable.join("Default"), false, "stable-default", "one");
+    seed_cookie(&beta.join("Profile 1"), true, "beta-profile-network", "two");
+
+    let provider = CountingProvider::default();
+    let report = extract_chromium_with_provider_and_selection(
+      &context,
+      "chrome",
+      ProfileSelection::LegacyFirstProfile,
+      None,
+      &provider,
+    )
+    .expect("legacy extraction");
+    let extraction = report
+      .installations
+      .iter()
+      .flat_map(|installation| &installation.profiles)
+      .next()
+      .expect("selected profile");
+
+    assert_eq!(
+      extraction.profile.path,
+      stable.join("Default").canonicalize().unwrap()
+    );
+    assert_eq!(extraction.cookies[0].name, "stable-default");
+    assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
+  }
+
+  #[test]
+  fn legacy_chromium_policy_prefers_native_root_group_before_flatpak_source() {
+    let temp = TempDir::new("legacy-root-group-precedence");
+    let context = test_context_for(PlatformId::Linux, temp.path().join("home"), []);
+    let native = channel_root(&context, "stable");
+    let flatpak = browser_root(&context, "chrome", "chrome-flatpak");
+    seed_cookie(&native.join("Default"), false, "native-legacy", "one");
+    seed_cookie(&flatpak.join("Default"), true, "flatpak-network", "two");
+
+    let provider = CountingProvider::default();
+    let report = extract_chromium_with_provider_and_selection(
+      &context,
+      "chrome",
+      ProfileSelection::LegacyFirstProfile,
+      None,
+      &provider,
+    )
+    .expect("legacy extraction");
+    let extraction = report
+      .installations
+      .iter()
+      .flat_map(|installation| &installation.profiles)
+      .next()
+      .expect("selected profile");
+
+    assert_eq!(
+      extraction.profile.path,
+      native.join("Default").canonicalize().unwrap()
+    );
+    assert_eq!(extraction.cookies[0].name, "native-legacy");
+    assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
+  }
+
+  #[test]
   fn corrupt_local_state_does_not_hide_source_bearing_profiles() {
     let temp = TempDir::new("bad-state");
     let context = test_context(temp.path().to_path_buf());
@@ -7149,6 +7324,20 @@ mod tests {
       .any(|issue| issue.code == "profile_canonicalize_failed"));
     let error = profiles_for_listing("chrome", discovery)
       .expect_err("lost profiles must not look like an absent browser");
+    assert!(error
+      .to_string()
+      .contains("every discovered chrome profile failed discovery"));
+
+    let report = extract_chromium_with_provider_and_selection(
+      &context,
+      "chrome",
+      ProfileSelection::LegacyFirstProfile,
+      None,
+      &CountingProvider::default(),
+    )
+    .expect("retain failed legacy discovery");
+    let error = project_legacy_chromium_report("chrome", report)
+      .expect_err("named extraction must surface lost profiles");
     assert!(error
       .to_string()
       .contains("every discovered chrome profile failed discovery"));

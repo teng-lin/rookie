@@ -511,6 +511,12 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   )
 )]
 pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  #[cfg(target_os = "linux")]
+  {
+    let _ = domains;
+    bail!("Opera GX is not supported on Linux")
+  }
+  #[cfg(any(target_os = "macos", target_os = "windows"))]
   named_browser("opera_gx", domains)
 }
 
@@ -1246,6 +1252,20 @@ mod tests {
         "arc",
       ]
     );
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  #[allow(deprecated)]
+  fn opera_gx_remains_explicitly_unsupported_and_unadvertised_on_linux() {
+    let error = opera_gx(None).expect_err("Opera GX has no Linux implementation");
+    assert!(error
+      .to_string()
+      .contains("Opera GX is not supported on Linux"));
+    assert!(supported_browsers()
+      .expect("supported browsers")
+      .iter()
+      .all(|browser| browser.id.as_str() != "opera_gx"));
   }
 
   fn source_test_path(tag: &str) -> (crate::utils::TempDir, std::path::PathBuf) {

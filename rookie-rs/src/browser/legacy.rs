@@ -50,14 +50,7 @@ fn discovery_failure(outcome: &EngineExtractionOutcome, browser_id: &str) -> Opt
   let failures = outcome
     .discovery_issues
     .iter()
-    .filter(|issue| {
-      !matches!(
-        issue.code,
-        "profile_has_no_cookie_source"
-          | "profile_excluded_service_directory"
-          | "safari_profile_discovery_degraded"
-      )
-    })
+    .filter(|issue| !registry::is_informational_discovery_issue(issue.code))
     .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
     .take(8)
     .collect::<Vec<_>>();
@@ -97,21 +90,32 @@ fn project_engine_outcome(
   };
 
   let mut cookies = Vec::new();
+  let mut selected_session_succeeded = false;
+  let mut failed_session_sources = Vec::new();
   for source in profile.sources {
-    if !source.selected {
-      continue;
-    }
     match source.role {
-      registry::SOURCE_ROLE_PERSISTENT => {
+      registry::SOURCE_ROLE_PERSISTENT if source.selected => {
         cookies.extend(selected_source_cookies(source, gecko)?);
       }
-      registry::SOURCE_ROLE_SESSION if source.error.is_none() => {
+      registry::SOURCE_ROLE_SESSION if source.selected && source.error.is_none() => {
         // Historical Firefox extraction logs an invalid session candidate and
         // continues to the first valid one; it does not fail the whole call.
+        selected_session_succeeded = true;
         cookies.extend(source.cookies);
+      }
+      registry::SOURCE_ROLE_SESSION if gecko => {
+        if let Some(error) = source.error {
+          failed_session_sources.push(format!("{}: {error}", source.path.display()));
+        }
       }
       _ => {}
     }
+  }
+  if cookies.is_empty() && !selected_session_succeeded && !failed_session_sources.is_empty() {
+    bail!(
+      "all existing Firefox session store candidates failed: {}",
+      failed_session_sources.join("; ")
+    )
   }
   Ok(cookies)
 }
@@ -175,7 +179,7 @@ mod tests {
   use super::*;
   use crate::browser::registry::{
     EngineProfileExtraction, SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE,
-    SOURCE_ROLE_PERSISTENT,
+    SOURCE_ROLE_PERSISTENT, SOURCE_ROLE_SESSION,
   };
   use std::path::PathBuf;
 
@@ -215,6 +219,25 @@ mod tests {
       error: error.map(str::to_owned),
       error_stage: SourceFailureStage::Acquisition,
       row_error: row_error.map(str::to_owned),
+    }
+  }
+
+  fn failed_session_source(path: &str, error: &str) -> EngineSourceExtraction {
+    EngineSourceExtraction {
+      path: PathBuf::from(path),
+      role: SOURCE_ROLE_SESSION,
+      format: "firefox_session_jsonlz4",
+      precedence: 20,
+      selected: false,
+      cookies: Vec::new(),
+      rows_seen: 0,
+      rows_skipped: 0,
+      acquisition: SourceAcquisition::StableFileImage,
+      acquisition_attempts: 1,
+      diagnostics: Vec::new(),
+      error: Some(error.to_owned()),
+      error_stage: SourceFailureStage::Parse,
+      row_error: None,
     }
   }
 
@@ -259,6 +282,8 @@ mod tests {
       "profile_has_no_cookie_source",
       "profile_excluded_service_directory",
       "safari_profile_discovery_degraded",
+      "duplicate_installation",
+      "duplicate_profile",
     ] {
       let error = project_engine_outcome("browser", empty_outcome_with_issue(code), false)
         .expect_err("empty discovery remains absence");
@@ -276,5 +301,33 @@ mod tests {
         .expect_err("real extraction failure");
       assert!(!is_browser_not_installed(&error));
     }
+  }
+
+  #[test]
+  fn total_session_failures_surface_when_persistent_extraction_is_empty() {
+    let mut outcome = profile_with(Some(persistent_source(None, None)));
+    outcome.profiles[0].sources.extend([
+      failed_session_source("/browser/default/recovery.jsonlz4", "invalid mozLz4"),
+      failed_session_source("/browser/default/sessionstore.js", "invalid JSON"),
+    ]);
+
+    let error = project_engine_outcome("firefox", outcome, true)
+      .expect_err("all existing session candidates failed");
+    let message = error.to_string();
+    assert!(message.contains("all existing Firefox session store candidates failed"));
+    assert!(message.contains("recovery.jsonlz4: invalid mozLz4"));
+    assert!(message.contains("sessionstore.js: invalid JSON"));
+
+    let mut selected_empty = failed_session_source("/browser/default/sessionstore.js", "unused");
+    selected_empty.selected = true;
+    selected_empty.error = None;
+    let mut recovered = profile_with(Some(persistent_source(None, None)));
+    recovered.profiles[0].sources.extend([
+      failed_session_source("/browser/default/recovery.jsonlz4", "invalid mozLz4"),
+      selected_empty,
+    ]);
+    assert!(project_engine_outcome("firefox", recovered, true)
+      .expect("an authoritative empty session source is still a success")
+      .is_empty());
   }
 }
