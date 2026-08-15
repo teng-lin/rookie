@@ -18,7 +18,7 @@ use rookie_core::report::{
 /// :return: A list of browser descriptor dictionaries
 #[pyfunction]
 pub fn supported_browsers(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-  py.detach(rookie_core::supported_browsers)
+  py.detach(rookie_core::supported_browsers)?
     .into_iter()
     .map(|browser| browser_descriptor_dict(py, browser))
     .collect()

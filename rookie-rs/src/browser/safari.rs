@@ -41,10 +41,13 @@ pub(crate) struct SafariExtractionStats {
   pub(crate) records_skipped: usize,
 }
 
-/// Marker attached to failures raised after acquisition succeeded, so the
-/// report layer can distinguish a corrupt file from an unreadable one.
+/// Context attached to failures raised after acquisition succeeded, so the
+/// report layer can distinguish a corrupt file from an unreadable one while
+/// retaining any record accounting recovered before the failure.
 #[derive(Debug)]
-pub(crate) struct SafariParseFailure;
+pub(crate) struct SafariParseFailure {
+  pub(crate) stats: SafariExtractionStats,
+}
 
 impl std::fmt::Display for SafariParseFailure {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,6 +59,8 @@ impl std::fmt::Display for SafariParseFailure {
 pub(crate) struct SafariFileExtraction {
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) stats: SafariExtractionStats,
+  /// Last row/page parse error when valid records were still recovered.
+  pub(crate) row_error: Option<String>,
   /// Stable-read attempts actually spent. The reader retries when the file
   /// changes mid-acquisition, so this is not always one.
   pub(crate) acquisition_attempts: u32,
@@ -81,19 +86,39 @@ pub(crate) fn safari_based_outcome(
   let (bs, acquisition_attempts) = read_stable_cookie_file(&mut file, &db_path)?;
   // Tagged so the report can name the stage that actually failed instead of
   // flattening every Safari failure into acquisition.
-  let (cookies, stats) = parse_content(&bs).map_err(|error| error.context(SafariParseFailure))?;
+  let (cookies, mut stats, row_error) = parse_content(&bs).map_err(|error| {
+    if error.downcast_ref::<SafariParseFailure>().is_some() {
+      error
+    } else {
+      error.context(SafariParseFailure {
+        stats: SafariExtractionStats::default(),
+      })
+    }
+  })?;
 
   // Filter cookies by domain if domains are specified
   let cookies = match &domains {
-    Some(domain_filters) => cookies
-      .into_iter()
-      .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
-      .collect(),
+    Some(domain_filters) => {
+      let parsed = cookies.len();
+      let cookies = cookies
+        .into_iter()
+        .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
+        .collect::<Vec<_>>();
+      // Report counters describe request-relevant records. Successfully
+      // decoded cookies excluded by the domain filter were never seen from
+      // the caller's perspective; malformed records remain counted because
+      // their domains could not necessarily be inspected.
+      stats.records_seen = stats
+        .records_seen
+        .saturating_sub(parsed.saturating_sub(cookies.len()));
+      cookies
+    }
     None => cookies,
   };
   Ok(SafariFileExtraction {
     cookies,
     stats,
+    row_error: row_error.map(|error| format!("{error:#}")),
     acquisition_attempts,
   })
 }
@@ -251,8 +276,8 @@ fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Res
 }
 
 /// Parse one page and retain any valid records. The optional error is the last
-/// malformed record encountered and is promoted only if the whole file yields
-/// no cookies.
+/// malformed record encountered. The caller preserves it as a row diagnostic
+/// even when another record on the page was valid.
 fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
   if slice(bs, 0, 4)? != [0x00, 0x00, 0x01, 0x00] {
     bail!("bad page header");
@@ -297,8 +322,12 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
         }
 
         if error_count >= MAX_RECOVERABLE_RECORD_ERRORS_PER_PAGE {
+          let remaining = count.saturating_sub(index + 1);
+          stats.records_seen += remaining;
+          stats.records_skipped += remaining;
           let error = error.context(format!(
-            "Safari page recovery limit reached after {error_count} malformed records"
+            "Safari page recovery limit reached after {error_count} malformed records; \
+             {remaining} remaining record(s) were skipped without parsing"
           ));
           log::warn!("Stopping malformed Safari page recovery: {error:#}");
           last_error = Some(error);
@@ -343,13 +372,30 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<Cookie> {
     name,
     path,
     value,
-    same_site: 0,
+    same_site: SAME_SITE_UNSPECIFIED,
     secure: is_secure,
   };
   Ok(cookie)
 }
 
-fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats)> {
+fn declared_page_record_count(page: &[u8]) -> Option<usize> {
+  page
+    .get(4..8)
+    .map(LittleEndian::read_u32)
+    .and_then(|count| usize::try_from(count).ok())
+}
+
+/// Account for a page that failed before record-level recovery could begin.
+/// When its declared count is unreadable, the page itself is one skipped input
+/// unit. This keeps the loss visible and preserves the report counter identity
+/// instead of silently claiming a complete extraction.
+fn record_page_failure(stats: &mut SafariExtractionStats, page: Option<&[u8]>) {
+  let skipped = page.and_then(declared_page_record_count).unwrap_or(1);
+  stats.records_seen = stats.records_seen.saturating_add(skipped);
+  stats.records_skipped = stats.records_skipped.saturating_add(skipped);
+}
+
+fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
   // Magic bytes: "COOK" = 0x636F6F6B
   if slice(bs, 0, 4)? != [0x63, 0x6f, 0x6f, 0x6b] {
     bail!("not a cookie file");
@@ -374,6 +420,7 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats)> {
       None => {
         let error = anyhow!("Safari page {index} end offset overflow");
         log::warn!("Skipping malformed Safari page {index}: {error:#}");
+        record_page_failure(&mut stats, bs.get(offset..));
         last_error = Some(error);
         break;
       }
@@ -393,6 +440,7 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats)> {
       }
       Err(error) => {
         log::warn!("Skipping malformed Safari page {index}: {error:#}");
+        record_page_failure(&mut stats, bs.get(offset..next_offset));
         last_error = Some(error);
       }
     }
@@ -401,11 +449,11 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats)> {
 
   if cookies.is_empty() {
     if let Some(error) = last_error {
-      return Err(error);
+      return Err(error.context(SafariParseFailure { stats }));
     }
   }
 
-  Ok((cookies, stats))
+  Ok((cookies, stats, last_error))
 }
 
 fn slice(bs: &[u8], off: usize, len: usize) -> Result<&[u8]> {
@@ -836,8 +884,12 @@ mod tests {
 
   #[test]
   fn golden_binarycookies_fixture_round_trips_cookie_fields() {
-    let (cookies, _stats) = parse_content(&golden_fixture()).expect("parse golden fixture");
+    let (cookies, stats, row_error) =
+      parse_content(&golden_fixture()).expect("parse golden fixture");
     assert_eq!(cookies.len(), 1);
+    assert_eq!(stats.records_seen, 1);
+    assert_eq!(stats.records_skipped, 0);
+    assert!(row_error.is_none());
 
     let cookie = &cookies[0];
     assert_eq!(cookie.domain, ".example.test");
@@ -847,6 +899,21 @@ mod tests {
     assert!(cookie.secure);
     assert!(cookie.http_only);
     assert_eq!(cookie.expires, Some(1_728_307_200));
+    assert_eq!(cookie.same_site, SAME_SITE_UNSPECIFIED);
+  }
+
+  #[test]
+  fn domain_filtered_cookies_are_excluded_from_request_row_counters() {
+    let directory = crate::utils::TempDir::new().expect("temporary Safari fixture directory");
+    let path = directory.path().join("Cookies.binarycookies");
+    fs::write(&path, golden_fixture()).expect("write Safari fixture");
+
+    let extraction =
+      safari_based_outcome(path, Some(vec!["not-the-cookie-domain.invalid".to_owned()]))
+        .expect("filter Safari fixture");
+    assert!(extraction.cookies.is_empty());
+    assert_eq!(extraction.stats.records_seen, 0);
+    assert_eq!(extraction.stats.records_skipped, 0);
   }
 
   #[test]
@@ -872,15 +939,37 @@ mod tests {
       usize::try_from(LittleEndian::read_u32(&page[8..12])).expect("first record offset");
     LittleEndian::write_u32(&mut page[first_record..first_record + 4], u32::MAX);
 
-    let (cookies, _stats) = parse_content(&build_file(&[page])).expect("retain good record");
+    let (cookies, stats, row_error) =
+      parse_content(&build_file(&[page])).expect("retain good record");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good");
     assert_eq!(cookies[0].value, "kept");
+    assert_eq!(stats.records_seen, 2);
+    assert_eq!(stats.records_skipped, 1);
+    assert!(row_error.is_some());
   }
 
   #[test]
   fn malformed_page_does_not_discard_cookie_from_another_page() {
-    let mut bad_page = build_page(&[]);
+    let bad_records = [
+      build_cookie_record(&FixtureCookie {
+        domain: ".bad-one.test",
+        name: "bad-one",
+        path: "/",
+        value: "discarded",
+        flags: 0,
+        expires: 0.0,
+      }),
+      build_cookie_record(&FixtureCookie {
+        domain: ".bad-two.test",
+        name: "bad-two",
+        path: "/",
+        value: "discarded",
+        flags: 0,
+        expires: 0.0,
+      }),
+    ];
+    let mut bad_page = build_page(&bad_records);
     bad_page[0] = 0xff;
     let good_page = build_page(&[build_cookie_record(&FixtureCookie {
       domain: ".good.test",
@@ -891,10 +980,33 @@ mod tests {
       expires: 0.0,
     })]);
 
-    let (cookies, _stats) =
+    let (cookies, stats, row_error) =
       parse_content(&build_file(&[bad_page, good_page])).expect("retain good page");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-page");
+    assert_eq!(stats.records_seen, 3);
+    assert_eq!(stats.records_skipped, 2);
+    assert!(row_error.is_some());
+  }
+
+  #[test]
+  fn page_too_short_for_a_record_count_is_still_counted_and_reported() {
+    let truncated_page = vec![0x00, 0x00, 0x01, 0x00];
+    let good_page = build_page(&[build_cookie_record(&FixtureCookie {
+      domain: ".example.com",
+      name: "good-page",
+      path: "/",
+      value: "kept",
+      flags: 0,
+      expires: 0.0,
+    })]);
+
+    let (cookies, stats, row_error) = parse_content(&build_file(&[truncated_page, good_page]))
+      .expect("a later valid page remains recoverable");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(stats.records_seen, 2);
+    assert_eq!(stats.records_skipped, 1);
+    assert!(row_error.is_some());
   }
 
   #[test]
@@ -928,6 +1040,11 @@ mod tests {
       format!("{error:#}").contains("cookie record 1"),
       "expected final record error, got {error:#}"
     );
+    let failure = error
+      .downcast_ref::<SafariParseFailure>()
+      .expect("parse failure retains record accounting");
+    assert_eq!(failure.stats.records_seen, 2);
+    assert_eq!(failure.stats.records_skipped, 2);
   }
 
   #[test]
@@ -940,7 +1057,7 @@ mod tests {
       flags: 0,
       expires: 0.0,
     });
-    let count = MAX_RECOVERABLE_RECORD_ERRORS_PER_PAGE + 1;
+    let count = MAX_RECOVERABLE_RECORD_ERRORS_PER_PAGE + 11;
     let records_start = 8 + count * 4 + 4;
     let mut page = vec![0; records_start];
     page[0..4].copy_from_slice(&[0x00, 0x00, 0x01, 0x00]);
@@ -958,12 +1075,18 @@ mod tests {
     }
     page.extend_from_slice(&good);
 
-    let (cookies, _stats, error) = parse_page(&page).expect("page framing remains valid");
+    let (cookies, stats, error) = parse_page(&page).expect("page framing remains valid");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-before-limit");
+    assert_eq!(stats.records_seen, count);
+    assert_eq!(stats.records_skipped, count - 1);
     let error = error.expect("recovery limit should be reported");
     assert!(
       format!("{error:#}").contains("recovery limit reached after 1024 malformed records"),
+      "unexpected recovery error: {error:#}"
+    );
+    assert!(
+      format!("{error:#}").contains("10 remaining record(s) were skipped without parsing"),
       "unexpected recovery error: {error:#}"
     );
   }

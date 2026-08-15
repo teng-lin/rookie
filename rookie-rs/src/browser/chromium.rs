@@ -405,6 +405,26 @@ impl ChromiumEngineExtractionOutcome {
     self.record_row_issue(code, row_number);
   }
 
+  fn total_row_failure(&self, error: anyhow::Error) -> anyhow::Error {
+    let issues = self
+      .issues
+      .iter()
+      .map(|issue| {
+        format!(
+          "{:?}: {} occurrence(s), samples [{}]",
+          issue.code,
+          issue.occurrences,
+          issue.samples.join(", ")
+        )
+      })
+      .collect::<Vec<_>>()
+      .join("; ");
+    error.context(format!(
+      "all {} Chromium cookie row(s) were skipped; row issues: {issues}",
+      self.stats.rows_seen
+    ))
+  }
+
   fn into_legacy_result(self) -> Result<Vec<Cookie>> {
     match self.legacy_error {
       Some(error) => Err(error),
@@ -1395,7 +1415,6 @@ fn query_cookies_from_connection_mode(
 
   let mut extraction = ChromiumEngineExtractionOutcome::default();
   let mut last_row_error: Option<anyhow::Error> = None;
-  let mut decoded_any_row = false;
   let mut stmt = connection.prepare(query.as_str())?;
   let query_domain_filters = if apply_sql_domain_filter {
     domain_filters.as_slice()
@@ -1405,22 +1424,38 @@ fn query_cookies_from_connection_mode(
   let mut rows = stmt.query(rusqlite::params_from_iter(query_domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
-    let host_key = row
-      .get::<_, Option<String>>(0)
-      .ok()
-      .flatten()
-      .unwrap_or_default();
+    let host_key = match row.get::<_, Option<String>>(0) {
+      Ok(host_key) => host_key.unwrap_or_default(),
+      Err(error) => {
+        extraction.stats.rows_seen += 1;
+        let row_number = extraction.stats.rows_seen;
+        log::warn!("Failed to read host_key from Chromium cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to read host_key from Chromium cookie row: {error}"
+        ));
+        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("host_key"), row_number);
+        continue;
+      }
+    };
     let encrypted_value = if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-      row
-        .get::<_, Option<Vec<u8>>>(6)
-        .context("failed to inspect encrypted_value in explicit-path Chromium cookie row")?
-        .unwrap_or_default()
+      match row.get::<_, Option<Vec<u8>>>(6) {
+        Ok(value) => value.unwrap_or_default(),
+        Err(error) => {
+          extraction.stats.rows_seen += 1;
+          let row_number = extraction.stats.rows_seen;
+          log::warn!("Failed to read encrypted_value from Chromium cookie row: {error}");
+          last_row_error = Some(anyhow!(
+            "failed to read encrypted_value from Chromium cookie row: {error}"
+          ));
+          extraction.record_skipped_row(
+            ChromiumRowIssueCode::ColumnRead("encrypted_value"),
+            row_number,
+          );
+          continue;
+        }
+      }
     } else {
-      row
-        .get::<_, Option<Vec<u8>>>(6)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+      Vec::new()
     };
     if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity
       && !encrypted_value.is_empty()
@@ -1432,20 +1467,26 @@ fn query_cookies_from_connection_mode(
     }
     extraction.stats.rows_seen += 1;
     let row_number = extraction.stats.rows_seen;
-    let path = row
-      .get::<_, Option<String>>(1)
-      .ok()
-      .flatten()
-      .unwrap_or_else(|| "/".to_string());
-    let is_secure = row
-      .get::<_, Option<bool>>(2)
-      .ok()
-      .flatten()
-      .unwrap_or(false);
-    let expires = row
-      .get::<_, Option<i64>>(3)
-      .ok()
-      .flatten()
+    macro_rules! read_optional_column {
+      ($index:expr, $type:ty, $name:literal) => {
+        match row.get::<_, Option<$type>>($index) {
+          Ok(value) => value,
+          Err(error) => {
+            log::warn!("Failed to read {} from Chromium cookie row: {error}", $name);
+            last_row_error = Some(anyhow!(
+              "failed to read {} from Chromium cookie row: {error}",
+              $name
+            ));
+            extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead($name), row_number);
+            continue;
+          }
+        }
+      };
+    }
+
+    let path = read_optional_column!(1, String, "path").unwrap_or_else(|| "/".to_string());
+    let is_secure = read_optional_column!(2, bool, "is_secure").unwrap_or(false);
+    let expires = read_optional_column!(3, i64, "expires_utc")
       .and_then(|value| u64::try_from(value).ok())
       .and_then(date::chromium_timestamp);
     let name: String = match row.get(4) {
@@ -1457,7 +1498,6 @@ fn query_cookies_from_connection_mode(
         continue;
       }
     };
-
     let value: String = match row.get(5) {
       Ok(val) => val,
       Err(err) => {
@@ -1467,12 +1507,13 @@ fn query_cookies_from_connection_mode(
         continue;
       }
     };
-    if encrypted_value.is_empty() && value.is_empty() {
-      // A valueless row read cleanly, so the extraction is not a total failure
-      // even though it contributes no cookie.
-      decoded_any_row = true;
-      continue;
-    }
+    let encrypted_value = if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
+      encrypted_value
+    } else {
+      read_optional_column!(6, Vec<u8>, "encrypted_value").unwrap_or_default()
+    };
+    let http_only = read_optional_column!(7, bool, "is_httponly").unwrap_or(false);
+    let same_site = read_optional_column!(8, i64, "samesite").unwrap_or(SAME_SITE_UNSPECIFIED);
     let decrypted_value = match decrypt_encrypted_value_with_outcomes(
       &host_key,
       value,
@@ -1489,16 +1530,6 @@ fn query_cookies_from_connection_mode(
         continue;
       }
     };
-    let http_only = row
-      .get::<_, Option<bool>>(7)
-      .ok()
-      .flatten()
-      .unwrap_or(false);
-    let same_site = row
-      .get::<_, Option<i64>>(8)
-      .ok()
-      .flatten()
-      .unwrap_or(SAME_SITE_UNSPECIFIED);
     let cookie = Cookie {
       domain: host_key,
       path,
@@ -1527,10 +1558,11 @@ fn query_cookies_from_connection_mode(
       extraction.cookies.push(cookie);
     }
     extraction.stats.cookies_emitted += 1;
-    decoded_any_row = true;
   }
-  if !decoded_any_row {
-    extraction.legacy_error = last_row_error;
+  if extraction.stats.rows_seen > 0 && extraction.stats.rows_skipped == extraction.stats.rows_seen {
+    if let Some(error) = last_row_error {
+      extraction.legacy_error = Some(extraction.total_row_failure(error));
+    }
   }
   Ok(extraction)
 }
@@ -2705,7 +2737,15 @@ mod tests {
       outcome.issues[0].code,
       ChromiumRowIssueCode::ColumnRead("name")
     );
-    assert!(outcome.legacy_error.is_some());
+    let diagnostic = format!(
+      "{:#}",
+      outcome
+        .legacy_error
+        .as_ref()
+        .expect("total row failure retains its diagnostic")
+    );
+    assert!(diagnostic.contains("ColumnRead(\"name\")"), "{diagnostic}");
+    assert!(diagnostic.contains("row 1"), "{diagnostic}");
 
     let result = query_cookies_with_legacy_keys(vec![], db, None, false);
     assert!(
@@ -2716,12 +2756,11 @@ mod tests {
   }
 
   #[test]
-  fn query_cookies_ok_when_a_valueless_row_reads_cleanly() {
+  fn query_cookies_emits_a_valid_empty_value() {
     let dir = unique_tmpdir("chr-valueless-plus-bad");
     let db = dir.join("Cookies");
-    // A valueless row (both value columns empty) is skipped but read cleanly,
-    // so it must keep the whole extraction from being reported as a failure
-    // even when another row does fail to decode.
+    // An empty value is valid cookie data and must not disappear merely
+    // because both the plaintext and encrypted storage columns are empty.
     seed_chromium_cookies(
       &db,
       &[(".example.com", "/", true, 0, "empty", "", b"", false, 0)],
@@ -2739,7 +2778,9 @@ mod tests {
 
     let cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
       .expect("valueless row is not a failure");
-    assert!(cookies.is_empty(), "{:?}", cookies);
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    assert_eq!(cookies[0].name, "empty");
+    assert_eq!(cookies[0].value, "");
   }
 
   #[test]
@@ -2799,6 +2840,63 @@ mod tests {
     assert_eq!(extraction.stats.rows_seen, 3);
     assert_eq!(extraction.stats.cookies_emitted, 1);
     assert_eq!(extraction.stats.rows_skipped, 2);
+  }
+
+  #[test]
+  fn query_cookies_skips_every_malformed_core_column_without_defaulting_metadata() {
+    let dir = unique_tmpdir("chr-malformed-core-columns");
+    let db = dir.join("Cookies");
+    let connection = rusqlite::Connection::open(&db).expect("open writable sqlite");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+          host_key, path, is_secure, expires_utc, name, value,
+          encrypted_value, is_httponly, samesite
+        );
+        INSERT INTO cookies VALUES
+          ('.example.com', '/', 1, 0, 'good', 'value', X'', 1, 1),
+          (X'FF', '/', 1, 0, 'bad-host', 'value', X'', 1, 1),
+          ('.example.com', X'FF', 1, 0, 'bad-path', 'value', X'', 1, 1),
+          ('.example.com', '/', X'FF', 0, 'bad-secure', 'value', X'', 1, 1),
+          ('.example.com', '/', 1, X'FF', 'bad-expires', 'value', X'', 1, 1),
+          ('.example.com', '/', 1, 0, X'FF', 'value', X'', 1, 1),
+          ('.example.com', '/', 1, 0, 'bad-value', X'FF', X'', 1, 1),
+          ('.example.com', '/', 1, 0, 'bad-http-only', 'value', X'', X'FF', 1),
+          ('.example.com', '/', 1, 0, 'bad-same-site', 'value', X'', 1, X'FF');",
+      )
+      .expect("seed malformed core columns");
+
+    let outcomes = ChromiumKeyOutcomes::from_legacy_shared(vec![]);
+    let extraction =
+      query_cookies_from_connection(&connection, &outcomes, None).expect("query cookies");
+    assert_eq!(
+      extraction.stats,
+      ChromiumExtractionStats {
+        rows_seen: 9,
+        cookies_emitted: 1,
+        rows_skipped: 8,
+      }
+    );
+    assert_eq!(extraction.cookies[0].name, "good");
+    assert!(extraction.legacy_error.is_none());
+    assert_eq!(
+      extraction
+        .issues
+        .iter()
+        .map(|issue| issue.code)
+        .collect::<Vec<_>>(),
+      vec![
+        ChromiumRowIssueCode::ColumnRead("host_key"),
+        ChromiumRowIssueCode::ColumnRead("path"),
+        ChromiumRowIssueCode::ColumnRead("is_secure"),
+        ChromiumRowIssueCode::ColumnRead("expires_utc"),
+        ChromiumRowIssueCode::ColumnRead("name"),
+        ChromiumRowIssueCode::ColumnRead("value"),
+        ChromiumRowIssueCode::ColumnRead("is_httponly"),
+        ChromiumRowIssueCode::ColumnRead("samesite"),
+      ]
+    );
   }
 
   #[test]

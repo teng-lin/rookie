@@ -48,6 +48,7 @@ zeroize = "1"
 [dev-dependencies]
 tracing-subscriber = "0.3.18"
 byteorder = "1"
+base64 = "0.22"
 
 [features]
 default = ["appbound"]

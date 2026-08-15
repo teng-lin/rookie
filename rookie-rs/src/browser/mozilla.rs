@@ -1,7 +1,7 @@
 use crate::common::{date, enums::*, sqlite, utils};
 use anyhow::{anyhow, bail, Result};
 use ini::{Ini, ParseOption};
-use lz4_flex::block::decompress_size_prepended;
+use lz4_flex::block::decompress_into;
 use serde_json::Value;
 use std::{
   fs,
@@ -12,6 +12,23 @@ use std::{
 // Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
 // expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
 const FIREFOX_MILLISECOND_EXPIRY_SCHEMA_VERSION: u32 = 16;
+
+// Session state is untrusted profile data. Keep both the on-disk read and the
+// mozLz4-advertised output below a size large enough for real Firefox profiles
+// while preventing one corrupt four-byte size prefix from requesting gigabytes.
+const MAX_SESSION_STORE_BYTES: usize = 64 * 1024 * 1024;
+
+// Sessionstore has no schema/version field that identifies an expiry unit, and
+// its unit cannot be inferred from cookies.sqlite: an observed Firefox 141
+// profile used seconds in schema-15 SQLite rows while its recovery.jsonlz4 used
+// milliseconds. Values through year 2286 remain plausible Unix seconds; values
+// from 10^12 through the same upper instant are plausible Unix milliseconds.
+// The scale gap is deliberately rejected instead of guessed. Missing/zero
+// expiry is always a genuine session cookie.
+const MAX_PLAUSIBLE_SESSION_EXPIRY_SECONDS: u64 = 9_999_999_999;
+const MIN_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 = 1_000_000_000_000;
+const MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 =
+  MAX_PLAUSIBLE_SESSION_EXPIRY_SECONDS * 1000 + 999;
 
 /// Returns cookies from mozilla based browsers
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
@@ -27,7 +44,13 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   let mut cookies = persistent.cookies;
 
   let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
-  cookies.extend(get_authoritative_session_cookies(domains, &parent_path));
+  match get_authoritative_session_outcome(domains.as_deref(), &parent_path) {
+    Ok(session) => cookies.extend(session.cookies),
+    Err(error) if cookies.is_empty() => return Err(error),
+    Err(error) => {
+      log::warn!("All Firefox session stores failed; returning persistent cookies only: {error:#}")
+    }
+  }
   if cookies.is_empty() {
     if let Some(error) = persistent.last_row_error {
       return Err(error);
@@ -49,10 +72,13 @@ pub fn firefox_based_detailed(
   let mut cookies = persistent.detailed_cookies;
 
   let parent_path = db_path.parent().unwrap_or(Path::new("")).to_path_buf();
-  cookies.extend(get_authoritative_session_detailed_cookies(
-    domains,
-    &parent_path,
-  ));
+  match get_authoritative_session_outcome(domains.as_deref(), &parent_path) {
+    Ok(session) => cookies.extend(session.detailed_cookies),
+    Err(error) if cookies.is_empty() => return Err(error),
+    Err(error) => log::warn!(
+      "All Firefox session stores failed; returning detailed persistent cookies only: {error:#}"
+    ),
+  }
   if cookies.is_empty() {
     if let Some(error) = persistent.last_row_error {
       return Err(error);
@@ -150,29 +176,43 @@ fn query_persistent_cookies_mode(
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
-    let host = row
-      .get::<_, Option<String>>(0)
-      .ok()
-      .flatten()
-      .unwrap_or_default();
+    macro_rules! optional_column {
+      ($index:expr, $name:literal, $type:ty, $default:expr) => {
+        match row.get::<_, Option<$type>>($index) {
+          Ok(value) => value.unwrap_or_else($default),
+          Err(error) => {
+            log::warn!("Failed to read {} from Firefox cookie row: {error}", $name);
+            last_row_error = Some(anyhow!(
+              "failed to read {} from Firefox cookie row: {error}",
+              $name
+            ));
+            rows_skipped += 1;
+            continue;
+          }
+        }
+      };
+    }
+
+    let host = match row.get::<_, Option<String>>(0) {
+      Ok(host) => host.unwrap_or_default(),
+      Err(error) => {
+        log::warn!("Failed to read host from Firefox cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to read host from Firefox cookie row: {error}"
+        ));
+        rows_seen += 1;
+        rows_skipped += 1;
+        continue;
+      }
+    };
     if !utils::some_domain_in_host(domains, &host) {
       continue;
     }
     rows_seen += 1;
-    let path = row
-      .get::<_, Option<String>>(1)
-      .ok()
-      .flatten()
-      .unwrap_or_else(|| "/".to_string());
-    let is_secure = row
-      .get::<_, Option<bool>>(2)
-      .ok()
-      .flatten()
-      .unwrap_or(false);
-    let expires = row
-      .get::<_, Option<i64>>(3)
-      .ok()
-      .flatten()
+    let path = optional_column!(1, "path", String, || "/".to_string());
+    let is_secure = optional_column!(2, "isSecure", bool, || false);
+    let expiry = optional_column!(3, "expiry", i64, || 0);
+    let expires = Some(expiry)
       .and_then(|value| u64::try_from(value).ok())
       .and_then(|value| persistent_cookie_expiry(value, schema_version));
 
@@ -195,16 +235,8 @@ fn query_persistent_cookies_mode(
         continue;
       }
     };
-    let http_only = row
-      .get::<_, Option<bool>>(6)
-      .ok()
-      .flatten()
-      .unwrap_or(false);
-    let same_site = row
-      .get::<_, Option<i64>>(7)
-      .ok()
-      .flatten()
-      .unwrap_or(SAME_SITE_UNSPECIFIED);
+    let http_only = optional_column!(6, "isHttpOnly", bool, || false);
+    let same_site = optional_column!(7, "sameSite", i64, || SAME_SITE_UNSPECIFIED);
     let cookie = Cookie {
       domain: host,
       path,
@@ -480,42 +512,37 @@ fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] 
   SESSION_CANDIDATES.map(|(relative, format)| (cookies_dir.join(relative), format))
 }
 
-fn get_authoritative_session_cookies(
-  domains: Option<Vec<String>>,
+fn get_authoritative_session_outcome(
+  domains: Option<&[String]>,
   cookies_dir: &Path,
-) -> Vec<Cookie> {
+) -> Result<SessionCookieParseOutcome> {
+  let mut failures = Vec::new();
   for (path, format) in session_candidates(cookies_dir) {
-    match parse_session_candidate(&path, &format, domains.as_deref()) {
-      Ok(success) => return success.parsed.cookies,
+    match parse_session_candidate(&path, &format, domains) {
+      Ok(success) => return Ok(success.parsed),
       Err(failure) if is_missing_session_file(&failure.error) => continue,
-      Err(failure) => log::warn!(
-        "Failed to parse Firefox session store {:?}: {}",
-        path,
-        failure.error
-      ),
+      Err(failure) => {
+        let diagnostic = format!("{}: {:#}", path.display(), failure.error);
+        log::warn!("Failed to parse Firefox session store: {diagnostic}");
+        failures.push(diagnostic);
+      }
     }
   }
 
-  Vec::new()
-}
-
-fn get_authoritative_session_detailed_cookies(
-  domains: Option<Vec<String>>,
-  cookies_dir: &Path,
-) -> Vec<DetailedCookie> {
-  for (path, format) in session_candidates(cookies_dir) {
-    match parse_session_candidate(&path, &format, domains.as_deref()) {
-      Ok(success) => return success.parsed.detailed_cookies,
-      Err(failure) if is_missing_session_file(&failure.error) => continue,
-      Err(failure) => log::warn!(
-        "Failed to parse Firefox session store {:?}: {}",
-        path,
-        failure.error
-      ),
-    }
+  if !failures.is_empty() {
+    bail!(
+      "all existing Firefox session store candidates failed: {}",
+      failures.join("; ")
+    );
   }
 
-  Vec::new()
+  Ok(SessionCookieParseOutcome {
+    cookies: Vec::new(),
+    detailed_cookies: Vec::new(),
+    rows_seen: 0,
+    rows_skipped: 0,
+    diagnostics: Vec::new(),
+  })
 }
 
 fn parse_session_candidate(
@@ -587,8 +614,21 @@ fn is_missing_session_file(error: &anyhow::Error) -> bool {
 fn read_stable_session_file(path: &Path) -> Result<Vec<u8>> {
   let mut file = fs::File::open(path)?;
   let before = file.metadata()?;
+  if before.len() > MAX_SESSION_STORE_BYTES as u64 {
+    bail!(
+      "Firefox session store is {} bytes; maximum supported size is {} bytes",
+      before.len(),
+      MAX_SESSION_STORE_BYTES
+    );
+  }
+  let expected_length = usize::try_from(before.len())
+    .map_err(|_| anyhow!("Firefox session store length does not fit in memory"))?;
   let mut bytes = Vec::new();
-  file.read_to_end(&mut bytes)?;
+  bytes
+    .try_reserve_exact(expected_length)
+    .map_err(|error| anyhow!("Unable to allocate Firefox session store buffer: {error}"))?;
+  bytes.resize(expected_length, 0);
+  file.read_exact(&mut bytes)?;
   let after = file.metadata()?;
 
   let length_changed =
@@ -599,6 +639,33 @@ fn read_stable_session_file(path: &Path) -> Result<Vec<u8>> {
   }
 
   Ok(bytes)
+}
+
+fn decompress_session_store(compressed: &[u8]) -> Result<Vec<u8>> {
+  let advertised = compressed
+    .get(..4)
+    .ok_or_else(|| anyhow!("Invalid compressed length prefix"))?;
+  let advertised = u32::from_le_bytes(
+    advertised
+      .try_into()
+      .expect("the slice was checked to contain four bytes"),
+  ) as usize;
+  if advertised > MAX_SESSION_STORE_BYTES {
+    bail!(
+      "Firefox mozLz4 output advertises {advertised} bytes; maximum supported size is {MAX_SESSION_STORE_BYTES} bytes"
+    );
+  }
+
+  let mut decompressed = Vec::new();
+  decompressed
+    .try_reserve_exact(advertised)
+    .map_err(|error| anyhow!("Unable to allocate Firefox mozLz4 output buffer: {error}"))?;
+  decompressed.resize(advertised, 0);
+  let written = decompress_into(&compressed[4..], &mut decompressed)?;
+  if written != advertised {
+    bail!("Firefox mozLz4 output length {written} does not match advertised length {advertised}");
+  }
+  Ok(decompressed)
 }
 
 #[cfg(test)]
@@ -655,8 +722,8 @@ fn clone_legacy_cookie(cookie: &Cookie) -> Cookie {
   }
 }
 
-fn parse_legacy_session_cookies(
-  path: &Path,
+fn parse_session_json(
+  json: &Value,
   domains: Option<&[String]>,
 ) -> Result<SessionCookieParseOutcome> {
   let mut outcome = SessionCookieParseOutcome {
@@ -666,30 +733,74 @@ fn parse_legacy_session_cookies(
     rows_skipped: 0,
     diagnostics: Vec::new(),
   };
-  let plain = String::from_utf8(read_stable_session_file(path)?)?;
-  let json: Value = serde_json::from_str(&plain)?;
   let windows = json
     .get("windows")
-    .ok_or(anyhow!("no windows in json"))?
+    .ok_or_else(|| anyhow!("Firefox session state has no windows array"))?
     .as_array()
-    .ok_or(anyhow!("windows are not array"))?;
+    .ok_or_else(|| anyhow!("Firefox session state windows is not an array"))?;
+
+  // Current Firefox stores the global SessionCookies collection at the root
+  // (`state.cookies`); legacy sessionstore.js files stored cookies per window.
+  // Accept exactly one layout and route both container formats through this
+  // walker so record decoding cannot diverge again.
+  let top_level_cookies = json
+    .get("cookies")
+    .map(|cookies| {
+      cookies
+        .as_array()
+        .ok_or_else(|| anyhow!("Firefox session state top-level cookies is not an array"))
+    })
+    .transpose()?;
+  let mut window_cookie_collections = Vec::new();
   for (window_index, window) in windows.iter().enumerate() {
-    let may_cookies_json = window.get("cookies");
-    if let Some(cookies_json) = may_cookies_json {
-      let cookies_json = cookies_json.as_array();
-      if let Some(cookies_json) = cookies_json {
-        for (cookie_index, json_cookie) in cookies_json.iter().enumerate() {
-          record_session_cookie(
-            &mut outcome,
-            json_cookie,
-            &format!("windows[{window_index}].cookies[{cookie_index}]"),
-            domains,
-          );
-        }
-      }
+    let window = window
+      .as_object()
+      .ok_or_else(|| anyhow!("Firefox session state windows[{window_index}] is not an object"))?;
+    let Some(cookies) = window.get("cookies") else {
+      continue;
+    };
+    let cookies = cookies.as_array().ok_or_else(|| {
+      anyhow!("Firefox session state windows[{window_index}].cookies is not an array")
+    })?;
+    window_cookie_collections.push((window_index, cookies));
+  }
+
+  if top_level_cookies.is_some() && !window_cookie_collections.is_empty() {
+    bail!("Firefox session state contains both top-level and per-window cookie layouts");
+  }
+
+  if let Some(cookies) = top_level_cookies {
+    for (cookie_index, json_cookie) in cookies.iter().enumerate() {
+      record_session_cookie(
+        &mut outcome,
+        json_cookie,
+        &format!("cookies[{cookie_index}]"),
+        domains,
+      );
+    }
+    return Ok(outcome);
+  }
+
+  for (window_index, cookies) in window_cookie_collections {
+    for (cookie_index, json_cookie) in cookies.iter().enumerate() {
+      record_session_cookie(
+        &mut outcome,
+        json_cookie,
+        &format!("windows[{window_index}].cookies[{cookie_index}]"),
+        domains,
+      );
     }
   }
   Ok(outcome)
+}
+
+fn parse_legacy_session_cookies(
+  path: &Path,
+  domains: Option<&[String]>,
+) -> Result<SessionCookieParseOutcome> {
+  let plain = String::from_utf8(read_stable_session_file(path)?)?;
+  let json: Value = serde_json::from_str(&plain)?;
+  parse_session_json(&json, domains)
 }
 
 #[cfg(test)]
@@ -708,13 +819,6 @@ fn parse_session_cookies_lz4(
   path: &Path,
   domains: Option<&[String]>,
 ) -> Result<SessionCookieParseOutcome> {
-  let mut outcome = SessionCookieParseOutcome {
-    cookies: Vec::new(),
-    detailed_cookies: Vec::new(),
-    rows_seen: 0,
-    rows_skipped: 0,
-    diagnostics: Vec::new(),
-  };
   let compressed = read_stable_session_file(path)?;
   if !compressed.starts_with(b"mozLz40\0") {
     bail!("Invalid mozLz40 header");
@@ -722,24 +826,30 @@ fn parse_session_cookies_lz4(
   let compressed = compressed
     .get(8..)
     .ok_or_else(|| anyhow!("Invalid compressed length"))?;
-  let decompressed = decompress_size_prepended(compressed)?;
+  let decompressed = decompress_session_store(compressed)?;
   let plain = String::from_utf8(decompressed)?;
   let json: Value = serde_json::from_str(&plain)?;
-  let Some(cookies_json) = json.get("cookies") else {
-    return Ok(outcome);
+  parse_session_json(&json, domains)
+}
+
+fn session_cookie_expiry(json_cookie: &Value) -> Result<Option<u64>> {
+  let Some(expiry) = json_cookie.get("expiry") else {
+    return Ok(None);
   };
-  let cookies_json = cookies_json
-    .as_array()
-    .ok_or(anyhow!("cookies is not list"))?;
-  for (cookie_index, json_cookie) in cookies_json.iter().enumerate() {
-    record_session_cookie(
-      &mut outcome,
-      json_cookie,
-      &format!("cookies[{cookie_index}]"),
-      domains,
-    );
+  let expiry = expiry
+    .as_u64()
+    .ok_or_else(|| anyhow!("session cookie expiry is not a non-negative integer"))?;
+  if expiry == 0 {
+    Ok(None)
+  } else if expiry <= MAX_PLAUSIBLE_SESSION_EXPIRY_SECONDS {
+    Ok(date::mozilla_timestamp(expiry))
+  } else if expiry < MIN_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS {
+    bail!("session cookie expiry {expiry} has ambiguous seconds/milliseconds scale")
+  } else if expiry <= MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS {
+    Ok(date::mozilla_timestamp(expiry / 1000))
+  } else {
+    bail!("session cookie expiry {expiry} is outside the supported timestamp range")
   }
-  Ok(outcome)
 }
 
 pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
@@ -767,11 +877,7 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
     .get("httponly")
     .and_then(|v| v.as_bool())
     .unwrap_or(false);
-  let expires = json_cookie
-    .get("expiry")
-    .and_then(|v| v.as_u64())
-    .unwrap_or(0);
-  let expires = date::mozilla_timestamp(expires);
+  let expires = session_cookie_expiry(json_cookie)?;
 
   let same_site = json_cookie
     .get("sameSite")
@@ -1107,7 +1213,9 @@ fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use base64::{engine::general_purpose::STANDARD, Engine as _};
   use lz4_flex::block::compress_prepend_size;
+  use sha2::{Digest, Sha256};
   use std::io::Write;
   use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1306,10 +1414,30 @@ mod tests {
     if let Some(parent) = path.parent() {
       std::fs::create_dir_all(parent).expect("create sessionstore directory");
     }
-    let json = serde_json::json!({ "cookies": cookies }).to_string();
+    let json = serde_json::json!({ "windows": [{ "tabs": [] }], "cookies": cookies }).to_string();
     let mut encoded = b"mozLz40\0".to_vec();
     encoded.extend(compress_prepend_size(json.as_bytes()));
     std::fs::write(path, encoded).expect("write sessionstore fixture");
+  }
+
+  fn write_session_value_jsonlz4(path: &Path, json: Value) {
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).expect("create sessionstore directory");
+    }
+    let mut encoded = b"mozLz40\0".to_vec();
+    encoded.extend(compress_prepend_size(json.to_string().as_bytes()));
+    std::fs::write(path, encoded).expect("write sessionstore fixture");
+  }
+
+  fn write_captured_session_fixture(path: &Path, encoded: &str) -> Vec<u8> {
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).expect("create captured fixture directory");
+    }
+    let bytes = STANDARD
+      .decode(encoded.trim())
+      .expect("decode captured Firefox fixture");
+    std::fs::write(path, &bytes).expect("write captured Firefox fixture");
+    bytes
   }
 
   fn session_cookie(name: &str) -> Value {
@@ -1319,6 +1447,167 @@ mod tests {
       "name": name,
       "value": "fixture"
     })
+  }
+
+  #[test]
+  fn moz_lz4_rejects_u32_max_advertised_output_before_allocation() {
+    let error = decompress_session_store(&u32::MAX.to_le_bytes())
+      .expect_err("a corrupt size prefix must be rejected without allocating it");
+    let message = format!("{error:#}");
+    assert!(message.contains("4294967295"), "{message}");
+    assert!(message.contains("maximum supported size"), "{message}");
+  }
+
+  #[test]
+  fn session_file_rejects_oversized_raw_input_before_reading_it() {
+    let dir = unique_tmpdir("ff-oversized-session");
+    let path = dir.join("sessionstore.jsonlz4");
+    let file = std::fs::File::create(&path).expect("create sparse fixture");
+    file
+      .set_len(MAX_SESSION_STORE_BYTES as u64 + 1)
+      .expect("extend sparse fixture");
+    let error = read_stable_session_file(&path).expect_err("oversized source must fail");
+    assert!(format!("{error:#}").contains("maximum supported size"));
+  }
+
+  #[test]
+  fn jsonlz4_and_legacy_share_one_walker_for_their_real_layouts() {
+    let dir = unique_tmpdir("ff-shared-session-shape");
+    let modern_state = serde_json::json!({
+      "windows": [{ "tabs": [] }],
+      "cookies": [session_cookie("first"), session_cookie("second")]
+    });
+    let legacy_state = serde_json::json!({
+      "windows": [
+        { "cookies": [session_cookie("first")] },
+        { "tabs": [], "cookies": [session_cookie("second")] }
+      ]
+    });
+    let lz4 = dir.join("state.jsonlz4");
+    write_session_value_jsonlz4(&lz4, modern_state);
+    let legacy = dir.join("sessionstore.js");
+    std::fs::write(&legacy, legacy_state.to_string()).expect("write legacy state");
+    for parsed in [
+      parse_session_cookies_lz4(&lz4, None).expect("parse compressed Firefox window state"),
+      parse_legacy_session_cookies(&legacy, None).expect("parse legacy Firefox window state"),
+    ] {
+      assert_eq!(parsed.rows_seen, 2);
+      assert_eq!(
+        parsed
+          .cookies
+          .iter()
+          .map(|cookie| cookie.name.as_str())
+          .collect::<Vec<_>>(),
+        vec!["first", "second"]
+      );
+    }
+  }
+
+  #[test]
+  fn captured_firefox_141_session_uses_root_cookies_and_millisecond_expiry() {
+    let dir = unique_tmpdir("firefox-141-captured-session");
+    let path = dir.join("recovery.jsonlz4");
+    let raw = write_captured_session_fixture(
+      &path,
+      include_str!("fixtures/firefox-141.0-recovery.jsonlz4.base64"),
+    );
+    assert_eq!(raw.len(), 1_111);
+    assert_eq!(
+      format!("{:x}", Sha256::digest(&raw)),
+      "359602096db47f6d54a0a1d454844abdb604df99c1b26973f22c9dda6ea8bc2d"
+    );
+
+    let parsed = parse_session_cookies_lz4(&path, None).expect("parse Firefox 141 capture");
+    assert_eq!(parsed.rows_seen, 5);
+    assert_eq!(parsed.rows_skipped, 0);
+    assert_eq!(parsed.cookies.len(), 5);
+    assert!(parsed
+      .cookies
+      .iter()
+      .all(|cookie| cookie.expires == Some(1_786_763_509)));
+    let mut user_context_ids = parsed
+      .detailed_cookies
+      .iter()
+      .map(|cookie| {
+        cookie
+          .context
+          .user_context_id
+          .expect("captured container id")
+      })
+      .collect::<Vec<_>>();
+    user_context_ids.sort_unstable();
+    assert_eq!(user_context_ids, vec![0, 1, 2, 3, 4]);
+  }
+
+  #[test]
+  fn captured_firefox_142_session_uses_root_cookies_without_expiry() {
+    let dir = unique_tmpdir("firefox-142-captured-session");
+    let path = dir.join("recovery.jsonlz4");
+    let raw = write_captured_session_fixture(
+      &path,
+      include_str!("fixtures/firefox-142.0-recovery.jsonlz4.base64"),
+    );
+    assert_eq!(raw.len(), 1_091);
+    assert_eq!(
+      format!("{:x}", Sha256::digest(&raw)),
+      "07e4925c9bb594204cafb652cf8f451eda09ad4877173767b81d5d4163434062"
+    );
+
+    let parsed = parse_session_cookies_lz4(&path, None).expect("parse Firefox 142 capture");
+    assert_eq!(parsed.rows_seen, 5);
+    assert_eq!(parsed.rows_skipped, 0);
+    assert_eq!(parsed.cookies.len(), 5);
+    assert!(parsed.cookies.iter().all(|cookie| cookie.expires.is_none()));
+    let mut user_context_ids = parsed
+      .detailed_cookies
+      .iter()
+      .map(|cookie| {
+        cookie
+          .context
+          .user_context_id
+          .expect("captured container id")
+      })
+      .collect::<Vec<_>>();
+    user_context_ids.sort_unstable();
+    assert_eq!(user_context_ids, vec![0, 1, 2, 3, 4]);
+  }
+
+  #[test]
+  fn jsonlz4_rejects_absent_or_ambiguous_cookie_structure() {
+    let rootless = serde_json::json!({ "cookies": [session_cookie("missing-windows")] });
+    assert!(parse_session_json(&rootless, None).is_err());
+    assert!(parse_session_json(&serde_json::json!({ "windows": {} }), None).is_err());
+    assert!(
+      parse_session_json(&serde_json::json!({ "windows": [{ "cookies": {} }] }), None).is_err()
+    );
+
+    let cookie_free = serde_json::json!({ "windows": [{ "tabs": [] }] });
+    let parsed = parse_session_json(&cookie_free, None).expect("cookie-free state is valid");
+    assert!(parsed.cookies.is_empty());
+
+    let ambiguous = serde_json::json!({
+      "windows": [{ "cookies": [session_cookie("legacy")] }],
+      "cookies": [session_cookie("ambiguous-top-level")]
+    });
+    assert!(parse_session_json(&ambiguous, None).is_err());
+  }
+
+  #[test]
+  fn session_expiry_classifier_preserves_seconds_converts_milliseconds_and_rejects_gap() {
+    let cookie = |expiry| serde_json::json!({ "expiry": expiry });
+    assert_eq!(session_cookie_expiry(&serde_json::json!({})).unwrap(), None);
+    assert_eq!(session_cookie_expiry(&cookie(0)).unwrap(), None);
+    assert_eq!(
+      session_cookie_expiry(&cookie(1_800_000_000)).unwrap(),
+      Some(1_800_000_000)
+    );
+    assert_eq!(
+      session_cookie_expiry(&cookie(1_800_000_000_999_u64)).unwrap(),
+      Some(1_800_000_000)
+    );
+    let ambiguous = session_cookie_expiry(&cookie(100_000_000_000_u64))
+      .expect_err("the scale gap must never be guessed");
+    assert!(format!("{ambiguous:#}").contains("ambiguous seconds/milliseconds scale"));
   }
 
   #[test]
@@ -1457,6 +1746,64 @@ mod tests {
   }
 
   #[test]
+  fn persistent_metadata_type_errors_are_counted_and_skipped_instead_of_defaulted() {
+    let dir = unique_tmpdir("ff-persistent-metadata-types");
+    let db = dir.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host, path, isSecure, expiry, name, value, isHttpOnly, sameSite
+        );
+        INSERT INTO moz_cookies VALUES (X'FF', '/', 0, 0, 'bad-host', 'v', 0, 0);
+        INSERT INTO moz_cookies VALUES ('.example.com', X'FF', 0, 0, 'bad-path', 'v', 0, 0);
+        INSERT INTO moz_cookies VALUES ('.example.com', '/', 'yes', 0, 'bad-secure', 'v', 0, 0);
+        INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 'tomorrow', 'bad-expiry', 'v', 0, 0);
+        INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 0, 'bad-http', 'v', 'yes', 0);
+        INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 0, 'bad-site', 'v', 0, X'FF');
+        INSERT INTO moz_cookies VALUES ('.example.com', '/', 0, 0, 'good', 'v', 0, 0);",
+      )
+      .expect("seed malformed metadata rows");
+    drop(connection);
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert_eq!(outcome.persistent_rows_seen, 7);
+    assert_eq!(outcome.persistent_rows_skipped, 6);
+    assert_eq!(outcome.persistent_cookies.len(), 1);
+    assert_eq!(outcome.persistent_cookies[0].name, "good");
+    assert!(outcome.persistent_row_error.is_some());
+    assert!(outcome.persistent_error.is_none());
+  }
+
+  #[test]
+  fn malformed_persistent_host_is_a_reported_total_row_failure() {
+    let dir = unique_tmpdir("ff-persistent-host-type-total");
+    let db = dir.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host, path, isSecure, expiry, name, value, isHttpOnly, sameSite
+        );
+        INSERT INTO moz_cookies VALUES (X'FF', '/', 0, 0, 'bad-host', 'v', 0, 0);",
+      )
+      .expect("seed malformed host");
+    drop(connection);
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert_eq!(outcome.persistent_rows_seen, 1);
+    assert_eq!(outcome.persistent_rows_skipped, 1);
+    assert!(outcome.persistent_cookies.is_empty());
+    assert!(outcome
+      .persistent_row_error
+      .as_deref()
+      .is_some_and(|error| error.contains("host")));
+    let error =
+      firefox_based(db, None).expect_err("all malformed rows must fail legacy extraction");
+    assert!(format!("{error:#}").contains("host"));
+  }
+
+  #[test]
   fn engine_outcome_separates_total_failure_from_a_rejected_row() {
     let dir = unique_tmpdir("ff-engine-total-failure");
     let db = dir.join("cookies.sqlite");
@@ -1490,6 +1837,121 @@ mod tests {
     assert_eq!(outcome.session_sources[1].format, "firefox_session_jsonlz4");
     assert!(outcome.session_sources[1].selected);
     assert_eq!(outcome.session_sources[1].cookies[0].name, "recovered");
+  }
+
+  #[test]
+  fn engine_outcome_retains_every_existing_session_candidate_when_all_fail() {
+    let dir = unique_tmpdir("ff-engine-all-session-failures");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    for (relative, _) in SESSION_CANDIDATES {
+      let path = dir.join(relative);
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create session directory");
+      }
+      std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
+    }
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert_eq!(outcome.session_sources.len(), SESSION_CANDIDATES.len());
+    assert!(outcome
+      .session_sources
+      .iter()
+      .all(|source| !source.selected));
+    assert!(outcome
+      .session_sources
+      .iter()
+      .all(|source| source.error.is_some()));
+  }
+
+  #[test]
+  fn legacy_extraction_preserves_persistent_cookies_when_every_session_candidate_fails() {
+    let dir = unique_tmpdir("ff-legacy-all-session-failures");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "persistent",
+        "still-present",
+        false,
+        0,
+      )],
+    );
+    for (relative, _) in SESSION_CANDIDATES {
+      let path = dir.join(relative);
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create session directory");
+      }
+      std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
+    }
+
+    let cookies = firefox_based(db.clone(), None)
+      .expect("persistent cookies remain usable when every session store fails");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "persistent");
+
+    let cookies = firefox_based_detailed(db, None)
+      .expect("detailed persistent cookies remain usable when every session store fails");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].cookie.name, "persistent");
+  }
+
+  #[test]
+  fn legacy_extraction_signals_all_session_failure_without_persistent_cookies() {
+    let dir = unique_tmpdir("ff-legacy-only-session-failures");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    for (relative, _) in SESSION_CANDIDATES {
+      let path = dir.join(relative);
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create session directory");
+      }
+      std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
+    }
+
+    let error = firefox_based(db.clone(), None)
+      .expect_err("total session-store failure without persistent cookies must be signaled");
+    assert!(format!("{error:#}").contains("all existing Firefox session store candidates failed"));
+    let error = firefox_based_detailed(db, None)
+      .expect_err("detailed extraction must signal total session-store failure");
+    assert!(format!("{error:#}").contains("all existing Firefox session store candidates failed"));
+  }
+
+  #[test]
+  fn ambiguous_session_expiry_is_a_skipped_row_with_a_diagnostic() {
+    let dir = unique_tmpdir("ff-session-expiry-scale-diagnostic");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let with_expiry = |name: &str, expiry: u64| {
+      serde_json::json!({
+        "host": ".example.com", "path": "/", "name": name,
+        "value": "fixture", "expiry": expiry
+      })
+    };
+    write_session_jsonlz4(
+      &dir.join("sessionstore-backups/recovery.jsonlz4"),
+      serde_json::json!([
+        with_expiry("session", 0),
+        with_expiry("seconds", 1_800_000_000),
+        with_expiry("milliseconds", 1_800_000_000_999_u64),
+        with_expiry("ambiguous", 100_000_000_000_u64)
+      ]),
+    );
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    let source = &outcome.session_sources[0];
+    assert!(source.selected);
+    assert_eq!(source.rows_seen, 4);
+    assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.cookies.len(), 3);
+    assert_eq!(source.cookies[0].expires, None);
+    assert_eq!(source.cookies[1].expires, Some(1_800_000_000));
+    assert_eq!(source.cookies[2].expires, Some(1_800_000_000));
+    assert!(source.diagnostics[0].contains("ambiguous seconds/milliseconds scale"));
   }
 
   #[test]
@@ -2310,7 +2772,7 @@ mod tests {
     std::fs::write(dir.join("sessionstore.js"), b"{\"other\": []}").unwrap();
     let err = get_session_cookies(None, dir).expect_err("should fail");
     assert!(
-      err.to_string().contains("no windows in json"),
+      err.to_string().contains("has no windows array"),
       "unexpected error: {}",
       err
     );
