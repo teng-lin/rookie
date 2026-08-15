@@ -66,7 +66,7 @@ pub(crate) fn chromium_based_plaintext_only(
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   query_cookies_engine_outcome_mode(
-    ChromiumKeyOutcomes::default(),
+    &ChromiumKeyOutcomes::default(),
     db_path,
     domains,
     force_kill,
@@ -84,7 +84,7 @@ pub(crate) fn chromium_based_detailed_plaintext_only(
   force_kill: bool,
 ) -> Result<Vec<DetailedCookie>> {
   query_cookies_engine_outcome_mode(
-    ChromiumKeyOutcomes::default(),
+    &ChromiumKeyOutcomes::default(),
     db_path,
     domains,
     force_kill,
@@ -1165,7 +1165,7 @@ pub(crate) fn query_cookies_with_key_outcomes(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  query_cookies_engine_outcome(outcomes, db_path, domains, force_kill)?.into_legacy_result()
+  query_cookies_engine_outcome(&outcomes, db_path, domains, force_kill)?.into_legacy_result()
 }
 
 #[allow(unused_variables)]
@@ -1176,7 +1176,7 @@ fn query_detailed_cookies_with_key_outcomes(
   force_kill: bool,
 ) -> Result<Vec<DetailedCookie>> {
   query_cookies_engine_outcome_mode(
-    outcomes,
+    &outcomes,
     db_path,
     domains,
     force_kill,
@@ -1193,12 +1193,12 @@ fn query_cookies_probe_with_key_outcomes(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<ChromiumProbeResult> {
-  query_cookies_engine_outcome(outcomes, db_path, domains, force_kill)?.into_probe_result()
+  query_cookies_engine_outcome(&outcomes, db_path, domains, force_kill)?.into_probe_result()
 }
 
 #[allow(unused_variables)]
 pub(crate) fn query_cookies_engine_outcome(
-  outcomes: ChromiumKeyOutcomes,
+  outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
@@ -1242,7 +1242,7 @@ impl std::error::Error for MissingBrowserKeyIdentity {}
 
 #[allow(unused_variables)]
 fn query_cookies_engine_outcome_mode(
-  outcomes: ChromiumKeyOutcomes,
+  outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
@@ -1257,7 +1257,7 @@ fn query_cookies_engine_outcome_mode(
       policy,
       |path| {
         query_cookies_from_database(
-          &outcomes,
+          outcomes,
           path.to_path_buf(),
           domains.as_deref(),
           projection,
@@ -1288,7 +1288,7 @@ fn query_cookies_engine_outcome_mode(
 
   #[cfg(not(target_os = "windows"))]
   query_cookies_from_database(
-    &outcomes,
+    outcomes,
     db_path,
     domains.as_deref(),
     projection,
@@ -1613,7 +1613,7 @@ mod tests {
     db_path: PathBuf,
   ) -> Result<ChromiumEngineExtractionOutcome> {
     let outcomes = ChromiumKeyOutcomes::from_legacy_shared(keys);
-    query_cookies_engine_outcome(outcomes, db_path, None, false)
+    query_cookies_engine_outcome(&outcomes, db_path, None, false)
   }
 
   fn host_bound_plaintext(host_key: &str, value: &[u8]) -> Vec<u8> {
@@ -1823,7 +1823,7 @@ mod tests {
     assert_eq!(legacy.len(), 3);
 
     let extraction = query_cookies_engine_outcome_mode(
-      ChromiumKeyOutcomes::from_legacy_shared(Vec::new()),
+      &ChromiumKeyOutcomes::from_legacy_shared(Vec::new()),
       db.clone(),
       None,
       false,
@@ -3761,7 +3761,7 @@ mod tests {
     assert_eq!(outcome.issues[0].occurrences, 1);
 
     let mut detailed = query_cookies_engine_outcome_mode(
-      ChromiumKeyOutcomes::from_legacy_shared(vec![key.to_vec()]),
+      &ChromiumKeyOutcomes::from_legacy_shared(vec![key.to_vec()]),
       db,
       None,
       false,

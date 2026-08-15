@@ -1388,7 +1388,7 @@ where
         });
         continue;
       };
-      match query_cookies_engine_outcome(key_outcomes.clone(), source, domains.clone(), false) {
+      match query_cookies_engine_outcome(&key_outcomes, source, domains.clone(), false) {
         Ok(mut outcome) => {
           sort_cookies(&mut outcome.cookies);
           profile_extractions.push(ChromiumProfileExtraction {

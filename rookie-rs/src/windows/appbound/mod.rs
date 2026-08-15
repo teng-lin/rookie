@@ -41,7 +41,7 @@ fn decrypt_ncrypt(key: &[u8], as_system: bool) -> Result<Zeroizing<Vec<u8>>> {
 ///
 /// Returns `None` if the key length is wrong for the cipher, the blob is too
 /// short to hold a nonce, or authentication fails.
-fn aead_decrypt<C>(key: &[u8], iv_and_ciphertext: &[u8]) -> Option<Vec<u8>>
+fn aead_decrypt<C>(key: &[u8], iv_and_ciphertext: &[u8]) -> Option<Zeroizing<Vec<u8>>>
 where
   C: KeyInit + Aead,
 {
@@ -50,6 +50,7 @@ where
   let cipher = C::new_from_slice(key).ok()?;
   cipher
     .decrypt(GenericArray::from_slice(iv), ciphertext)
+    .map(Zeroizing::new)
     .ok()
 }
 
@@ -103,7 +104,7 @@ fn parse_key_blob_content(blob: &[u8]) -> Result<&[u8]> {
 /// or the scheme's cipher rejected the payload. `Err` means a known scheme could
 /// not be attempted at all (e.g. a flag-3 payload too short to hold the wrapped
 /// key, or a CNG failure).
-fn derive_v20_master_key(content: &[u8]) -> Result<Option<Vec<u8>>> {
+fn derive_v20_master_key(content: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
   let Some((&flag, payload)) = content.split_first() else {
     return Ok(None);
   };
@@ -144,14 +145,14 @@ fn derive_v20_master_key(content: &[u8]) -> Result<Option<Vec<u8>>> {
 /// Legacy fallback for blobs that lack the modern framing header: treat the
 /// trailing 61 bytes as a flag-1 style `[flag | iv(12) | ciphertext(32) | tag(16)]`
 /// record and AES-256-GCM decrypt the `iv | ciphertext | tag` portion.
-fn derive_legacy_tail_key(user_decrypted: &[u8]) -> Option<Vec<u8>> {
+fn derive_legacy_tail_key(user_decrypted: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
   let start = user_decrypted.len().checked_sub(61)?;
   let iv_and_ciphertext = &user_decrypted[start + 1..]; // skip the flag byte
   aead_decrypt::<Aes256Gcm>(AES256_ELEVATION_KEY, iv_and_ciphertext)
 }
 
-pub fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
-  let mut keys: Vec<Vec<u8>> = Vec::new();
+pub fn get_keys(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  let mut keys: Vec<Zeroizing<Vec<u8>>> = Vec::new();
 
   let key_u8 = BASE64_STANDARD.decode(key64)?;
   if !key_u8.starts_with(b"APPB") {
@@ -162,7 +163,9 @@ pub fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
 
   // Candidate 1: some Chrome builds use the trailing 32 bytes as the key directly.
   if user_decrypted.len() >= 32 {
-    keys.push(user_decrypted[user_decrypted.len() - 32..].to_vec());
+    keys.push(Zeroizing::new(
+      user_decrypted[user_decrypted.len() - 32..].to_vec(),
+    ));
   }
 
   // Candidate 2: derive the wrapped v20 master key from the key blob. For a v20
@@ -312,8 +315,9 @@ mod tests {
     assert_eq!(
       derive_v20_master_key(&content)
         .expect("no error")
-        .expect("key"),
-      master
+        .expect("key")
+        .as_slice(),
+      master.as_slice()
     );
   }
 
@@ -326,8 +330,9 @@ mod tests {
     assert_eq!(
       derive_v20_master_key(&content)
         .expect("no error")
-        .expect("key"),
-      master
+        .expect("key")
+        .as_slice(),
+      master.as_slice()
     );
   }
 
@@ -347,7 +352,10 @@ mod tests {
     blob.push(1); // flag byte, skipped by the fallback
     blob.extend_from_slice(&iv);
     blob.extend_from_slice(&sealed);
-    assert_eq!(derive_legacy_tail_key(&blob).expect("key"), master);
+    assert_eq!(
+      derive_legacy_tail_key(&blob).expect("key").as_slice(),
+      master.as_slice()
+    );
   }
 
   #[test]

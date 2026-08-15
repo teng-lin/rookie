@@ -32,11 +32,11 @@ pub(crate) fn create_pbkdf2_key(
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn outcome_from_result(
-  result: Result<Vec<Vec<u8>>>,
+  result: Result<Vec<Zeroizing<Vec<u8>>>>,
   empty_failure: &'static str,
 ) -> ChromiumKeyOutcome {
   match result {
-    Ok(candidates) => ChromiumKeyOutcome::success(candidates)
+    Ok(candidates) => ChromiumKeyOutcome::success_zeroizing(candidates)
       .unwrap_or_else(|| ChromiumKeyOutcome::failure(empty_failure)),
     Err(error) => ChromiumKeyOutcome::failure(error.to_string()),
   }
@@ -67,10 +67,10 @@ fn local_state_key<'a>(local_state: &'a serde_json::Value, field: &str) -> Local
 
 #[cfg(target_os = "windows")]
 trait WindowsKeyBackend {
-  fn retrieve_v10(&self, encoded_key: &str) -> Result<Vec<Vec<u8>>>;
+  fn retrieve_v10(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>>;
   fn appbound_compiled(&self) -> bool;
   fn privileged(&self) -> bool;
-  fn retrieve_v20(&self, encoded_key: &str) -> Result<Vec<Vec<u8>>>;
+  fn retrieve_v20(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>>;
 }
 
 #[cfg(target_os = "windows")]
@@ -78,7 +78,7 @@ struct SystemWindowsKeyBackend;
 
 #[cfg(target_os = "windows")]
 impl WindowsKeyBackend for SystemWindowsKeyBackend {
-  fn retrieve_v10(&self, encoded_key: &str) -> Result<Vec<Vec<u8>>> {
+  fn retrieve_v10(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
     let wrapped: Vec<u8> = general_purpose::STANDARD
       .decode(encoded_key)
       .map_err(|error| {
@@ -113,7 +113,7 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
         wrapped_len
       );
     }
-    Ok(vec![v10_key.to_vec()])
+    Ok(vec![v10_key])
   }
 
   fn appbound_compiled(&self) -> bool {
@@ -124,7 +124,7 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
     privilege::user::privileged()
   }
 
-  fn retrieve_v20(&self, encoded_key: &str) -> Result<Vec<Vec<u8>>> {
+  fn retrieve_v20(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
     #[cfg(feature = "appbound")]
     {
       crate::windows::appbound::get_keys(encoded_key)
@@ -187,7 +187,7 @@ where
         "legacy v10/v11 cookies may also have failed to decrypt - check the v10 outcome separately"
       };
       match backend.retrieve_v20(encoded) {
-        Ok(candidates) => ChromiumKeyOutcome::success(candidates).unwrap_or_else(|| {
+        Ok(candidates) => ChromiumKeyOutcome::success_zeroizing(candidates).unwrap_or_else(|| {
           ChromiumKeyOutcome::failure(format!(
             "Chromium v20 provider returned no key candidates. This vendor may use \
              app-bound elevation keys rookie doesn't have (only Google Chrome's are \
@@ -246,9 +246,9 @@ impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
 #[cfg(target_os = "linux")]
 fn linux_v10_outcome() -> ChromiumKeyOutcome {
   let salt = b"saltysalt";
-  ChromiumKeyOutcome::success(vec![
-    create_pbkdf2_key("peanuts", salt, 1).to_vec(),
-    create_pbkdf2_key("", salt, 1).to_vec(),
+  ChromiumKeyOutcome::success_zeroizing(vec![
+    create_pbkdf2_key("peanuts", salt, 1),
+    create_pbkdf2_key("", salt, 1),
   ])
   .expect("Linux v10 has two fixed candidates")
 }
@@ -262,7 +262,7 @@ where
   let candidates = backend.passwords(crypt_name).map(|passwords| {
     passwords
       .into_iter()
-      .map(|password| create_pbkdf2_key(&password, salt, 1).to_vec())
+      .map(|password| create_pbkdf2_key(&password, salt, 1))
       .collect()
   });
   outcome_from_result(
@@ -382,12 +382,12 @@ where
   let v10 = match (&config.osx_key_service, &config.osx_key_user) {
     (Some(service), Some(user)) if !service.is_empty() && !user.is_empty() => {
       match backend.password(service, user) {
-        Ok(password) => {
-          ChromiumKeyOutcome::success(vec![
-            create_pbkdf2_key(&password, b"saltysalt", 1003).to_vec()
-          ])
-          .expect("a successful macOS Keychain lookup yields one candidate")
-        }
+        Ok(password) => ChromiumKeyOutcome::success_zeroizing(vec![create_pbkdf2_key(
+          &password,
+          b"saltysalt",
+          1003,
+        )])
+        .expect("a successful macOS Keychain lookup yields one candidate"),
         Err(error) => {
           let diagnostic = format!("macOS Keychain lookup failed: {error:#}");
           log::warn!("{diagnostic}");
@@ -494,15 +494,15 @@ mod tests {
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
       vec![
-        create_pbkdf2_key("peanuts", b"saltysalt", 1).to_vec(),
-        create_pbkdf2_key("", b"saltysalt", 1).to_vec(),
+        Vec::from(create_pbkdf2_key("peanuts", b"saltysalt", 1).as_slice()),
+        Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice()),
       ]
     );
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V11),
       vec![
-        create_pbkdf2_key("first", b"saltysalt", 1).to_vec(),
-        create_pbkdf2_key("second", b"saltysalt", 1).to_vec(),
+        Vec::from(create_pbkdf2_key("first", b"saltysalt", 1).as_slice()),
+        Vec::from(create_pbkdf2_key("second", b"saltysalt", 1).as_slice()),
       ]
     );
     assert_eq!(
@@ -603,7 +603,9 @@ mod tests {
     );
     assert_eq!(
       candidate_bytes(&brave, ChromiumCipherVersion::V11),
-      vec![create_pbkdf2_key("shared secret", b"saltysalt", 1).to_vec()]
+      vec![Vec::from(
+        create_pbkdf2_key("shared secret", b"saltysalt", 1).as_slice()
+      )]
     );
   }
 
@@ -635,13 +637,13 @@ mod tests {
     v20_calls: Cell<usize>,
     compiled: bool,
     privileged: bool,
-    v10_result: Result<Vec<Vec<u8>>>,
-    v20_result: Result<Vec<Vec<u8>>>,
+    v10_result: Result<Vec<Zeroizing<Vec<u8>>>>,
+    v20_result: Result<Vec<Zeroizing<Vec<u8>>>>,
   }
 
   #[cfg(target_os = "windows")]
   impl WindowsKeyBackend for FakeWindowsBackend {
-    fn retrieve_v10(&self, _encoded_key: &str) -> Result<Vec<Vec<u8>>> {
+    fn retrieve_v10(&self, _encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
       self.v10_calls.set(self.v10_calls.get() + 1);
       self
         .v10_result
@@ -658,7 +660,7 @@ mod tests {
       self.privileged
     }
 
-    fn retrieve_v20(&self, _encoded_key: &str) -> Result<Vec<Vec<u8>>> {
+    fn retrieve_v20(&self, _encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
       self.v20_calls.set(self.v20_calls.get() + 1);
       self
         .v20_result
@@ -678,8 +680,8 @@ mod tests {
       v20_calls: Cell::new(0),
       compiled: true,
       privileged: true,
-      v10_result,
-      v20_result,
+      v10_result: v10_result.map(|candidates| candidates.into_iter().map(Zeroizing::new).collect()),
+      v20_result: v20_result.map(|candidates| candidates.into_iter().map(Zeroizing::new).collect()),
     }
   }
 
@@ -889,7 +891,9 @@ mod tests {
     assert_eq!(backend.calls.get(), 1);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
-      [create_pbkdf2_key("keychain", b"saltysalt", 1003).to_vec()]
+      [Vec::from(
+        create_pbkdf2_key("keychain", b"saltysalt", 1003).as_slice()
+      )]
     );
     assert!(matches!(
       outcomes.route(ChromiumCipherVersion::V11),
@@ -927,7 +931,9 @@ mod tests {
     let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
-      [create_pbkdf2_key("mock_password", b"saltysalt", 1003).to_vec()]
+      [Vec::from(
+        create_pbkdf2_key("mock_password", b"saltysalt", 1003).as_slice()
+      )]
     );
   }
 
