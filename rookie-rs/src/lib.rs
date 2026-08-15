@@ -517,10 +517,10 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::opera_gx(Some(domains));
 /// ```
 #[cfg_attr(
-  target_os = "linux",
+  not(any(target_os = "macos", target_os = "windows")),
   deprecated(
     since = "0.5.9",
-    note = "Opera GX is not supported on Linux; this compatibility shim will be removed in 0.6"
+    note = "Opera GX is unsupported on this target; this compatibility shim will be removed in 0.7"
   )
 )]
 pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
@@ -530,7 +530,14 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     bail!("Opera GX is not supported on Linux")
   }
   #[cfg(any(target_os = "macos", target_os = "windows"))]
-  named_browser("opera_gx", domains)
+  {
+    named_browser("opera_gx", domains)
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+  {
+    let _ = domains;
+    bail!("Opera GX is not supported on {}", std::env::consts::OS)
+  }
 }
 
 /// Returns cookies from Octo Browser

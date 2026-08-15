@@ -59,6 +59,14 @@ fn assert_unsupported(error: rookie_cookies::anyhow::Error, source: CookieSource
 
 fn main() {
   assert!(rookie_cookies::config::try_get_browser_config("chrome").is_none());
+  let opera_gx = rookie_cookies::opera_gx(None)
+    .expect_err("the legacy Opera GX shim is explicit on unsupported targets");
+  assert!(
+    opera_gx
+      .to_string()
+      .contains(&format!("not supported on {}", std::env::consts::OS)),
+    "{opera_gx:#}"
+  );
 
   let directory = unique_directory();
   let chromium = chromium_database(&directory);

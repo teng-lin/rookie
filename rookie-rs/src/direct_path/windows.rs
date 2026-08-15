@@ -358,31 +358,13 @@ fn local_state_outcomes(
 #[cfg(test)]
 mod process_lock_tests {
   use super::*;
-  use std::fs::OpenOptions;
-  use std::os::windows::fs::OpenOptionsExt;
+  use std::os::windows::process::CommandExt;
   use std::process::{Child, Command, Stdio};
   use std::time::{Duration, Instant};
+  use windows::Win32::System::Threading::CREATE_NEW_CONSOLE;
 
   const CHILD_PATH_ENV: &str = "ROOKIE_DIRECT_PATH_LOCK_CHILD";
   const CHILD_READY_ENV: &str = "ROOKIE_DIRECT_PATH_LOCK_READY";
-  const CHILD_TEST_NAME: &str =
-    "direct_path::windows::process_lock_tests::hold_database_open_without_sharing";
-
-  #[test]
-  fn hold_database_open_without_sharing() {
-    let Some(path) = std::env::var_os(CHILD_PATH_ENV) else {
-      return;
-    };
-    let ready = std::env::var_os(CHILD_READY_ENV).expect("lock helper ready path");
-    let _handle = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .share_mode(0)
-      .open(PathBuf::from(path))
-      .expect("open child fixture without sharing");
-    std::fs::write(ready, b"ready").expect("signal exclusive handle is ready");
-    std::thread::sleep(Duration::from_secs(300));
-  }
 
   struct ChildGuard(Child);
 
@@ -396,13 +378,25 @@ mod process_lock_tests {
   }
 
   fn spawn_lock_holder(path: &Path, ready: &Path) -> ChildGuard {
-    let child = Command::new(std::env::current_exe().expect("current test executable"))
-      .args(["--exact", CHILD_TEST_NAME, "--nocapture"])
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$handle = [System.IO.File]::Open(
+  $env:ROOKIE_DIRECT_PATH_LOCK_CHILD,
+  [System.IO.FileMode]::Open,
+  [System.IO.FileAccess]::ReadWrite,
+  [System.IO.FileShare]::None
+)
+[System.IO.File]::WriteAllText($env:ROOKIE_DIRECT_PATH_LOCK_READY, 'ready')
+Start-Sleep -Seconds 300
+"#;
+    let child = Command::new("powershell.exe")
+      .args(["-NoProfile", "-NonInteractive", "-Command", script])
       .env(CHILD_PATH_ENV, path)
       .env(CHILD_READY_ENV, ready)
       .stdin(Stdio::null())
       .stdout(Stdio::null())
       .stderr(Stdio::null())
+      .creation_flags(CREATE_NEW_CONSOLE.0)
       .spawn()
       .expect("spawn exclusive-handle helper");
     let mut child = ChildGuard(child);
