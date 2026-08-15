@@ -732,6 +732,49 @@ jobs:
           & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
             "$cookiesDb" --key-path "$localState"
 
+      - name: Exercise row-level DPAPI across schema 23 and 24
+        env:
+          ROOKIE_E2E_DOMAIN: example.test
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $fixtures = @(
+            [PSCustomObject]@{
+              Kind = 'legacy-schema23'
+              Schema = 23
+              Name = 'rookie_ci_dpapi_23'
+              Value = 'row DPAPI schema 23'
+            },
+            [PSCustomObject]@{
+              Kind = 'legacy-schema24'
+              Schema = 24
+              Name = 'rookie_ci_dpapi_24'
+              Value = 'row DPAPI schema 24'
+            }
+          )
+
+          foreach ($fixture in $fixtures) {
+            $root = Join-Path $env:RUNNER_TEMP "rookie $($fixture.Kind) fixture 雪"
+            & .\.venv\Scripts\python.exe tests/e2e/create_windows_dpapi_fixture.py `
+              "$root" --fixture $fixture.Kind --cookie-name $fixture.Name `
+              --cookie-value $fixture.Value
+            & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
+              "$root" --cookie-name $fixture.Name --expected-prefix legacy-dpapi `
+              --expected-schema-version $fixture.Schema --require-dpapi-key
+
+            $env:ROOKIE_E2E_USER_DATA_DIR = $root
+            $env:ROOKIE_E2E_COOKIE_NAME = $fixture.Name
+            $env:ROOKIE_E2E_COOKIE_VALUE = $fixture.Value
+            cargo test --test e2e_chrome --locked `
+              extracts_seeded_cookie_from_chrome_dpapi_profile -- --ignored --nocapture
+            & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
+            node tests/e2e/assert_chrome_cookie.mjs
+            $cookiesDb = Join-Path $root "Default\Network\Cookies"
+            $localState = Join-Path $root "Local State"
+            & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
+              "$cookiesDb" --key-path "$localState"
+          }
+
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true

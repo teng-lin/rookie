@@ -1,6 +1,20 @@
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(unix)]
+mod unix;
+#[cfg(not(any(unix, windows)))]
+mod unsupported;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+use unix as platform;
+#[cfg(not(any(unix, windows)))]
+use unsupported as platform;
+#[cfg(windows)]
+use windows as platform;
+
 const CIPHER_VERSION_PREFIX_LEN: usize = 3;
 
 /// Encryption format selected by a Chromium cookie row.
@@ -287,6 +301,45 @@ pub(crate) enum ChromiumKeyRoute<'a> {
   LegacyDpapi,
   V12SecretPortal,
   Unknown([u8; CIPHER_VERSION_PREFIX_LEN]),
+}
+
+/// Result of asking the host cipher capability to decrypt an unversioned
+/// Chromium value.
+///
+/// Raw DPAPI is a row-level cipher on Windows, not a key-provider tier. Other
+/// targets report it as unavailable without pretending that decryption was
+/// attempted and failed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LegacyCipherOutcome {
+  #[cfg_attr(not(windows), allow(dead_code))]
+  Plaintext(Vec<u8>),
+  #[cfg_attr(windows, allow(dead_code))]
+  Unsupported(&'static str),
+}
+
+/// Exact candidate-key length required by the selected host cipher.
+///
+/// Unsupported targets deliberately expose `None`, allowing the shared row
+/// loop to report that keyed cookie decryption is unavailable without
+/// compiling a foreign cipher implementation.
+pub(crate) const CANDIDATE_KEY_LENGTH: Option<usize> = platform::CANDIDATE_KEY_LENGTH;
+
+/// Validates the target-specific envelope before any candidate is tried.
+pub(crate) fn validate_keyed_envelope(encrypted_value: &[u8]) -> anyhow::Result<()> {
+  platform::validate_keyed_envelope(encrypted_value)
+}
+
+/// Applies the selected host's keyed cipher primitive to one candidate.
+pub(crate) fn decrypt_keyed_candidate(
+  encrypted_value: &[u8],
+  key: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+  platform::decrypt_keyed_candidate(encrypted_value, key)
+}
+
+/// Applies the selected host's unversioned legacy cipher, when one exists.
+pub(crate) fn decrypt_legacy(encrypted_value: &[u8]) -> anyhow::Result<LegacyCipherOutcome> {
+  platform::decrypt_legacy(encrypted_value)
 }
 
 /// Injection seam for installation-scoped key retrieval.

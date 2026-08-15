@@ -26,9 +26,6 @@ path = "src/lib.rs"
 
 [dependencies]
 indoc = "2.0.5"
-aes = "0.8"
-aes-gcm = "0.10"
-cbc = "0.1"
 anyhow = "1"
 glob = "0.3"
 log = "0.4"
@@ -54,6 +51,8 @@ default = ["appbound"]
 appbound = []
 
 [target.'cfg(unix)'.dependencies]
+aes = "0.8"
+cbc = "0.1"
 pbkdf2 = "0.12"
 sha1 = "0.10"
 byteorder = "1"
@@ -66,6 +65,7 @@ pbkdf2 = "0.12"
 sha1 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
+aes-gcm = "0.10"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 libesedb = "0.2"
