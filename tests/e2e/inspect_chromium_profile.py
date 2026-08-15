@@ -57,6 +57,46 @@ def cookie_rows(db_path: Path, cookie_name: str) -> list[tuple[object, ...]]:
         connection.close()
 
 
+def cookie_schema_version(db_path: Path) -> int:
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        row = connection.execute(
+            "SELECT CAST(value AS TEXT) FROM meta WHERE key = 'version'"
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        raise ValueError("Cookies database has no meta.version")
+    try:
+        return int(row[0])
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid Chromium schema version {row[0]!r}") from error
+
+
+def validate_cookie_rows(
+    rows: list[tuple[object, ...]], cookie_name: str, expected_format: str
+) -> None:
+    if not rows:
+        raise ValueError(f"no {cookie_name!r} cookie row")
+    if expected_format == "legacy-dpapi":
+        if any(not isinstance(row[2], str) or row[2].startswith("76") for row in rows):
+            prefixes = sorted({str(row[2]) for row in rows})
+            raise ValueError(
+                f"{cookie_name!r} prefixes were {prefixes}, expected raw legacy DPAPI"
+            )
+    else:
+        expected_hex = expected_format.encode("ascii").hex().upper()
+        if any(row[2] != expected_hex for row in rows):
+            prefixes = sorted({str(row[2]) for row in rows})
+            raise ValueError(
+                f"{cookie_name!r} prefix was {prefixes}, "
+                f"expected only {expected_format!r}"
+            )
+    if any(not isinstance(row[3], int) or row[3] <= 3 for row in rows):
+        raise ValueError(f"{cookie_name!r} has a truncated encrypted value")
+
+
 def wal_snapshot_cookie_rows(
     db_path: Path, cookie_name: str
 ) -> tuple[list[tuple[object, ...]], list[tuple[object, ...]]]:
@@ -109,9 +149,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("user_data_dir", type=Path)
     parser.add_argument("--cookie-name", default="rookie_ci")
-    parser.add_argument("--expected-prefix", choices=("v10", "v20"), required=True)
+    parser.add_argument(
+        "--expected-prefix",
+        choices=("v10", "v20", "legacy-dpapi"),
+        required=True,
+    )
     parser.add_argument("--require-dpapi-key", action="store_true")
     parser.add_argument("--require-app-bound-key", action="store_true")
+    parser.add_argument("--expected-schema-version", type=int)
     parser.add_argument(
         "--require-wal-only",
         action="store_true",
@@ -130,6 +175,14 @@ def main() -> int:
             print(f"App-Bound Local State key present (decoded length: {len(key)})")
 
         db_path = cookie_db(args.user_data_dir)
+        if args.expected_schema_version is not None:
+            actual_schema_version = cookie_schema_version(db_path)
+            if actual_schema_version != args.expected_schema_version:
+                raise ValueError(
+                    f"Chromium schema version was {actual_schema_version}, "
+                    f"expected {args.expected_schema_version}"
+                )
+            print(f"Chromium schema version: {actual_schema_version}")
         if args.require_wal_only:
             main_rows, rows = wal_snapshot_cookie_rows(db_path, args.cookie_name)
             if main_rows:
@@ -143,17 +196,7 @@ def main() -> int:
         else:
             rows = cookie_rows(db_path, args.cookie_name)
         print(f"{args.cookie_name} encrypted_value diagnostics: {rows}")
-        expected_hex = args.expected_prefix.encode("ascii").hex().upper()
-        if not rows:
-            raise ValueError(f"no {args.cookie_name!r} cookie row")
-        if any(row[2] != expected_hex for row in rows):
-            prefixes = sorted({row[2] for row in rows})
-            raise ValueError(
-                f"{args.cookie_name!r} prefix was {prefixes}, "
-                f"expected only {args.expected_prefix!r}"
-            )
-        if any(not isinstance(row[3], int) or row[3] <= 3 for row in rows):
-            raise ValueError(f"{args.cookie_name!r} has a truncated encrypted value")
+        validate_cookie_rows(rows, args.cookie_name, args.expected_prefix)
         print(f"{args.cookie_name} uses {args.expected_prefix} encryption in {db_path}")
     except (
         FileNotFoundError,

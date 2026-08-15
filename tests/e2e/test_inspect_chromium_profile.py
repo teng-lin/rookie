@@ -40,6 +40,8 @@ class InspectChromiumProfileTests(unittest.TestCase):
                 "host_key TEXT NOT NULL, name TEXT NOT NULL, "
                 "encrypted_value BLOB NOT NULL)"
             )
+            connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+            connection.execute("INSERT INTO meta VALUES ('version', '24')")
             connection.execute(
                 "INSERT INTO cookies VALUES (?, ?, ?)",
                 ("127.0.0.1", "baseline", b"v20" + bytes(28)),
@@ -116,6 +118,25 @@ class InspectChromiumProfileTests(unittest.TestCase):
             snapshot_rows,
             [("127.0.0.1", "wal-only", "763230", 31)],
         )
+
+    def test_cipher_format_validation_distinguishes_versioned_and_raw_dpapi(self) -> None:
+        self.assertEqual(INSPECT.cookie_schema_version(self.database), 24)
+        INSPECT.validate_cookie_rows(
+            [(".example.test", "versioned", "763130", 31)],
+            "versioned",
+            "v10",
+        )
+        INSPECT.validate_cookie_rows(
+            [(".example.test", "legacy", "010000", 64)],
+            "legacy",
+            "legacy-dpapi",
+        )
+        with self.assertRaisesRegex(ValueError, "expected raw legacy DPAPI"):
+            INSPECT.validate_cookie_rows(
+                [(".example.test", "wrong", "763130", 31)],
+                "wrong",
+                "legacy-dpapi",
+            )
 
 
 if __name__ == "__main__":

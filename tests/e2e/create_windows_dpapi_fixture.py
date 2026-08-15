@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a deterministic-shape Chromium v10 fixture for the current Windows user."""
+"""Create deterministic Chromium DPAPI fixtures for the current Windows user."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import base64
 import ctypes
 from ctypes import wintypes
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -83,18 +84,45 @@ process.stdout.write(
     return base64.b64decode(result.stdout, validate=True)
 
 
+def encrypted_cookie_value(
+    fixture: str, node: str | None, key: bytes, domain: str, value: str
+) -> tuple[int, bytes, str]:
+    """Return schema version, ciphertext, and its non-secret format label."""
+    if fixture == "v10":
+        if node is None:
+            raise RuntimeError("node is required to generate AES-256-GCM ciphertext")
+        return 23, encrypt_v10(node, key, value), "v10"
+
+    plaintext = value.encode("utf-8")
+    if fixture == "legacy-schema24":
+        plaintext = hashlib.sha256(domain.encode("utf-8")).digest() + plaintext
+        schema_version = 24
+    else:
+        schema_version = 23
+    ciphertext = protect_for_current_user(plaintext)
+    if ciphertext.startswith(b"v"):
+        raise RuntimeError("row-level DPAPI fixture unexpectedly resembles a versioned cipher")
+    return schema_version, ciphertext, "legacy-dpapi"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--domain", default=".example.test")
     parser.add_argument("--cookie-name", default="rookie_ci")
     parser.add_argument("--cookie-value", default="bar")
+    parser.add_argument(
+        "--fixture",
+        choices=("v10", "legacy-schema23", "legacy-schema24"),
+        default="v10",
+        help="cookie cipher/schema fixture to create (default: v10)",
+    )
     args = parser.parse_args()
 
     if sys.platform != "win32":
         parser.error("this fixture requires Windows DPAPI")
     node = shutil.which("node")
-    if node is None:
+    if args.fixture == "v10" and node is None:
         parser.error("node is required to generate AES-256-GCM ciphertext")
     output = args.output.resolve()
     if output.exists() and any(output.iterdir()):
@@ -119,7 +147,13 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    encrypted_value = encrypt_v10(node, aes_key, args.cookie_value)
+    schema_version, encrypted_value, encrypted_format = encrypted_cookie_value(
+        args.fixture,
+        node,
+        aes_key,
+        args.domain,
+        args.cookie_value,
+    )
     cookies_db = network / "Cookies"
     with sqlite3.connect(cookies_db) as connection:
         connection.executescript(
@@ -128,7 +162,6 @@ def main() -> int:
               key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY,
               value LONGVARCHAR
             );
-            INSERT INTO meta (key, value) VALUES ('version', '23');
             CREATE TABLE cookies (
               host_key TEXT NOT NULL,
               path TEXT NOT NULL,
@@ -141,6 +174,10 @@ def main() -> int:
               samesite INTEGER NOT NULL
             );
             """
+        )
+        connection.execute(
+            "INSERT INTO meta (key, value) VALUES ('version', ?)",
+            (str(schema_version),),
         )
         connection.execute(
             """
@@ -165,7 +202,9 @@ def main() -> int:
                 "cookies_db": str(cookies_db),
                 "domain": args.domain,
                 "cookie_name": args.cookie_name,
-                "encrypted_prefix": "v10",
+                "encrypted_prefix": "v10" if encrypted_format == "v10" else None,
+                "encrypted_format": encrypted_format,
+                "schema_version": schema_version,
             },
             indent=2,
         )

@@ -5,8 +5,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use super::chromium_crypto::{
-  detect_cipher_version, retrieve_key_outcomes, ChromiumCipherVersion, ChromiumKeyOutcomes,
-  ChromiumKeyProvider, ChromiumKeyRoute,
+  self, detect_cipher_version, retrieve_key_outcomes, ChromiumCipherVersion, ChromiumKeyOutcomes,
+  ChromiumKeyProvider, ChromiumKeyRoute, LegacyCipherOutcome,
 };
 #[cfg(target_os = "linux")]
 use super::chromium_platform_keys::LinuxPlatformKeyProvider;
@@ -19,12 +19,6 @@ use crate::config::Browser;
 
 #[cfg(target_os = "windows")]
 use crate::windows;
-
-#[cfg(target_os = "windows")]
-use aes_gcm::{
-  aead::{generic_array::GenericArray, Aead, KeyInit},
-  Aes256Gcm,
-};
 
 /// Returns cookies from chromium based browser
 #[cfg(target_os = "windows")]
@@ -447,8 +441,7 @@ fn chromium_cookie_context(
   })
 }
 
-/// Decrypt cookie value using aes GCM
-#[cfg(all(windows, test))]
+#[cfg(test)]
 fn decrypt_encrypted_value(
   host_key: &str,
   value: String,
@@ -460,17 +453,6 @@ fn decrypt_encrypted_value(
   decrypt_encrypted_value_with_outcomes(host_key, value, encrypted_value, &outcomes, schema_version)
 }
 
-#[cfg(windows)]
-fn decrypt_windows_gcm_candidate(nonce: &[u8], ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-  let cipher = Aes256Gcm::new_from_slice(key)
-    .map_err(|_| anyhow!("Chromium AES-GCM candidate key has an invalid length"))?;
-  let nonce = GenericArray::from_slice(nonce);
-  cipher
-    .decrypt(nonce, ciphertext)
-    .map_err(|_| anyhow!("Chromium AES-GCM authentication failed"))
-}
-
-#[cfg(windows)]
 fn decrypt_encrypted_value_with_outcomes(
   host_key: &str,
   value: String,
@@ -478,6 +460,47 @@ fn decrypt_encrypted_value_with_outcomes(
   outcomes: &ChromiumKeyOutcomes,
   schema_version: u32,
 ) -> std::result::Result<String, ChromiumCookieValueError> {
+  decrypt_encrypted_value_with_cipher_adapter(
+    host_key,
+    value,
+    encrypted_value,
+    outcomes,
+    schema_version,
+    CipherAdapter {
+      candidate_key_length: chromium_crypto::CANDIDATE_KEY_LENGTH,
+      validate_keyed_envelope: chromium_crypto::validate_keyed_envelope,
+      decrypt_candidate: chromium_crypto::decrypt_keyed_candidate,
+      decrypt_legacy: chromium_crypto::decrypt_legacy,
+    },
+  )
+}
+
+struct CipherAdapter<Validate, Candidate, Legacy> {
+  candidate_key_length: Option<usize>,
+  validate_keyed_envelope: Validate,
+  decrypt_candidate: Candidate,
+  decrypt_legacy: Legacy,
+}
+
+fn decrypt_encrypted_value_with_cipher_adapter<Validate, Candidate, Legacy>(
+  host_key: &str,
+  value: String,
+  encrypted_value: &[u8],
+  outcomes: &ChromiumKeyOutcomes,
+  schema_version: u32,
+  adapter: CipherAdapter<Validate, Candidate, Legacy>,
+) -> std::result::Result<String, ChromiumCookieValueError>
+where
+  Validate: Fn(&[u8]) -> Result<()>,
+  Candidate: Fn(&[u8], &[u8]) -> Result<Vec<u8>>,
+  Legacy: Fn(&[u8]) -> Result<LegacyCipherOutcome>,
+{
+  let CipherAdapter {
+    candidate_key_length,
+    validate_keyed_envelope,
+    decrypt_candidate,
+    decrypt_legacy,
+  } = adapter;
   if !value.is_empty() {
     return Ok(value);
   }
@@ -510,140 +533,15 @@ fn decrypt_encrypted_value_with_outcomes(
       )));
     }
     ChromiumKeyRoute::LegacyDpapi => {
-      let plaintext = crate::windows::dpapi::decrypt(encrypted_value)
-        .context("Failed to decrypt legacy Chromium DPAPI cookie")
-        .map_err(ChromiumCookieValueError::Decrypt)?;
-      return decode_chromium_cookie_value(host_key, plaintext, schema_version)
-        .map_err(ChromiumCookieValueError::Decode);
-    }
-    ChromiumKeyRoute::V12SecretPortal => {
-      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
-        "Chromium v12 SecretPortal encryption is recognized but unsupported"
-      )));
-    }
-    ChromiumKeyRoute::Unknown(prefix) => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
-        "Unknown Chromium cipher prefix: {prefix:?}"
-      )));
-    }
-  };
-
-  if encrypted_value.len() < 15 {
-    return Err(ChromiumCookieValueError::Decrypt(anyhow!(
-      "Chromium encrypted value is {} bytes, shorter than the version and nonce header",
-      encrypted_value.len()
-    )));
-  }
-
-  let nonce = &encrypted_value[3..15]; // iv
-  let ciphertext = &encrypted_value[15..];
-  let mut last_decode_error = None;
-
-  for key in candidates {
-    if key.as_bytes().len() != 32 {
-      log::warn!(
-        "Skipping {key_type:?} candidate key with invalid length {}",
-        key.as_bytes().len()
-      );
-      continue;
-    }
-
-    match decrypt_windows_gcm_candidate(nonce, ciphertext, key.as_bytes()) {
-      Ok(plaintext) => match decode_chromium_cookie_value(host_key, plaintext, schema_version) {
-        Ok(text) => return Ok(text),
-        Err(error) => {
-          log::debug!("Failed to decode decrypted Chromium value: {error}");
-          last_decode_error = Some(error);
+      return match decrypt_legacy(encrypted_value).map_err(ChromiumCookieValueError::Decrypt)? {
+        LegacyCipherOutcome::Plaintext(plaintext) => {
+          decode_chromium_cookie_value(host_key, plaintext, schema_version)
+            .map_err(ChromiumCookieValueError::Decode)
         }
-      },
-      Err(error) => {
-        log::debug!("Failed to decrypt with a key: {error}");
-      }
-    }
-  }
-
-  match last_decode_error {
-    Some(error) => Err(ChromiumCookieValueError::Decode(error)),
-    None => Err(ChromiumCookieValueError::Decrypt(anyhow!(
-      "decrypt_encrypted_value failed"
-    ))),
-  }
-}
-
-/// Decrypt cookie value using aes cbc
-#[cfg(all(unix, test))]
-fn decrypt_encrypted_value(
-  host_key: &str,
-  value: String,
-  encrypted_value: &[u8],
-  keys: &[Vec<u8>],
-  schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieValueError> {
-  let outcomes = ChromiumKeyOutcomes::from_legacy_shared(keys.to_vec());
-  decrypt_encrypted_value_with_outcomes(host_key, value, encrypted_value, &outcomes, schema_version)
-}
-
-#[cfg(unix)]
-fn decrypt_unix_cbc_candidate(encrypted_value: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-  use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-
-  type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-
-  let key_array: [u8; 16] = key
-    .try_into()
-    .map_err(|_| anyhow!("Chromium AES-CBC candidate key has an invalid length"))?;
-  let iv: [u8; 16] = [b' '; 16];
-  let cipher = Aes128CbcDec::new(&key_array.into(), &iv.into());
-  let mut ciphertext = encrypted_value[3..].to_vec();
-  cipher
-    .decrypt_padded_mut::<Pkcs7>(&mut ciphertext)
-    .map(|plaintext| plaintext.to_vec())
-    .map_err(|_| anyhow!("Chromium AES-CBC padding validation failed"))
-}
-
-#[cfg(unix)]
-fn decrypt_encrypted_value_with_outcomes(
-  host_key: &str,
-  value: String,
-  encrypted_value: &[u8],
-  outcomes: &ChromiumKeyOutcomes,
-  schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieValueError> {
-  if !value.is_empty() {
-    return Ok(value);
-  }
-  if encrypted_value.is_empty() {
-    return Ok("".into());
-  }
-
-  let cipher_version = detect_cipher_version(encrypted_value)
-    .map_err(|error| ChromiumCookieValueError::Decrypt(anyhow!(error)))?;
-  let (key_type, candidates) = match outcomes.route(cipher_version) {
-    ChromiumKeyRoute::Candidates { tier, candidates } => {
-      log::debug!("Chromium cipher tier: {tier}");
-      let prefix = match cipher_version {
-        ChromiumCipherVersion::V10 => b"v10",
-        ChromiumCipherVersion::V11 => b"v11",
-        ChromiumCipherVersion::V20 => b"v20",
-        _ => unreachable!("candidate routes are only emitted for keyed tiers"),
+        LegacyCipherOutcome::Unsupported(message) => Err(
+          ChromiumCookieValueError::ProviderUnavailable(anyhow!(message)),
+        ),
       };
-      (prefix.as_slice(), candidates)
-    }
-    ChromiumKeyRoute::NotApplicable { tier } => {
-      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
-        "Chromium {tier} key provider is not applicable"
-      )));
-    }
-    ChromiumKeyRoute::Failure { tier, failure } => {
-      return Err(ChromiumCookieValueError::ProviderFailed(anyhow!(
-        "Chromium {tier} key provider failed: {}",
-        failure.message()
-      )));
-    }
-    ChromiumKeyRoute::LegacyDpapi => {
-      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
-        "Legacy Chromium DPAPI cookies are not decryptable on this platform"
-      )));
     }
     ChromiumKeyRoute::V12SecretPortal => {
       return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
@@ -656,10 +554,17 @@ fn decrypt_encrypted_value_with_outcomes(
       )));
     }
   };
+
+  let candidate_key_length = candidate_key_length.ok_or_else(|| {
+    ChromiumCookieValueError::ProviderUnavailable(anyhow!(
+      "Chromium keyed cookie decryption is unsupported on this platform"
+    ))
+  })?;
+  validate_keyed_envelope(encrypted_value).map_err(ChromiumCookieValueError::Decrypt)?;
   let mut last_decode_error = None;
 
   for key in candidates {
-    if key.as_bytes().len() != 16 {
+    if key.as_bytes().len() != candidate_key_length {
       log::warn!(
         "Skipping {key_type:?} candidate key with invalid length {}",
         key.as_bytes().len()
@@ -667,12 +572,13 @@ fn decrypt_encrypted_value_with_outcomes(
       continue;
     }
 
-    match decrypt_unix_cbc_candidate(encrypted_value, key.as_bytes()) {
+    match decrypt_candidate(encrypted_value, key.as_bytes()) {
       Ok(plaintext) => match decode_chromium_cookie_value(host_key, plaintext, schema_version) {
         Ok(decoded) => return Ok(decoded),
         Err(error) => {
-          // A wrong key can occasionally pass PKCS#7 validation. Do not accept
-          // its bytes as a cookie value; another key may decrypt valid UTF-8.
+          // A wrong key can occasionally pass the target cipher's integrity
+          // checks. Do not accept its bytes as a cookie value; another key may
+          // decrypt a correctly bound UTF-8 value.
           log::debug!("Failed to decode decrypted Chromium value: {error}");
           last_decode_error = Some(error);
         }
@@ -2899,6 +2805,229 @@ mod tests {
     assert!(c.secure);
     assert_eq!(c.same_site, 1);
     assert_eq!(c.expires, Some(1_700_000_000));
+  }
+
+  #[test]
+  fn shared_cipher_loop_preserves_plaintext_detect_route_and_adapter_precedence() {
+    let unavailable = ChromiumKeyOutcomes::default();
+    let plaintext = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      "plain".to_string(),
+      b"x",
+      &unavailable,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| {
+          panic!("plaintext must short-circuit envelope validation")
+        },
+        decrypt_candidate: |_: &[u8], _: &[u8]| {
+          panic!("plaintext must short-circuit candidate decryption")
+        },
+        decrypt_legacy: |_: &[u8]| panic!("plaintext must short-circuit legacy decryption"),
+      },
+    )
+    .expect("plaintext wins before cipher detection");
+    assert_eq!(plaintext, "plain");
+
+    let malformed = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v1",
+      &unavailable,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| {
+          panic!("malformed prefix must fail before envelope validation")
+        },
+        decrypt_candidate: |_: &[u8], _: &[u8]| {
+          panic!("malformed prefix must fail before candidate decryption")
+        },
+        decrypt_legacy: |_: &[u8]| panic!("malformed prefix must fail before legacy decryption"),
+      },
+    )
+    .expect_err("cipher detection precedes routing");
+    assert!(matches!(malformed, ChromiumCookieValueError::Decrypt(_)));
+    assert!(malformed.to_string().contains("shorter than the 3-byte"));
+
+    let no_provider = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v10payload",
+      &unavailable,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| {
+          panic!("provider routing must precede envelope validation")
+        },
+        decrypt_candidate: |_: &[u8], _: &[u8]| {
+          panic!("unavailable provider must not try a candidate")
+        },
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect_err("route reports the unavailable key tier");
+    assert!(matches!(
+      no_provider,
+      ChromiumCookieValueError::ProviderUnavailable(_)
+    ));
+
+    let keyed = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![vec![0x10; 4]])
+        .expect("nonempty candidate"),
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+    };
+    let unsupported = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v10payload",
+      &keyed,
+      23,
+      CipherAdapter {
+        candidate_key_length: None,
+        validate_keyed_envelope: |_: &[u8]| {
+          panic!("unsupported host must fail before envelope validation")
+        },
+        decrypt_candidate: |_: &[u8], _: &[u8]| panic!("unsupported host must not try a candidate"),
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect_err("unsupported host rejects a keyed route before parsing its envelope");
+    assert!(matches!(
+      unsupported,
+      ChromiumCookieValueError::ProviderUnavailable(_)
+    ));
+    assert_eq!(
+      unsupported.to_string(),
+      "Chromium keyed cookie decryption is unsupported on this platform"
+    );
+
+    let envelope_error = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v10payload",
+      &keyed,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| Err(anyhow!("synthetic envelope failure")),
+        decrypt_candidate: |_: &[u8], _: &[u8]| {
+          panic!("envelope validation must precede candidate decryption")
+        },
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect_err("invalid envelope stops before candidates");
+    assert!(matches!(
+      envelope_error,
+      ChromiumCookieValueError::Decrypt(_)
+    ));
+    assert_eq!(envelope_error.to_string(), "synthetic envelope failure");
+  }
+
+  #[test]
+  fn shared_cipher_loop_tries_candidates_then_decodes_and_keeps_decode_precedence() {
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![
+        vec![0x10; 4],
+        vec![0x20; 4],
+      ])
+      .expect("nonempty candidates"),
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+    };
+    let events = RefCell::new(Vec::new());
+    let decoded = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v10payload",
+      &outcomes,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| {
+          events.borrow_mut().push("validate");
+          Ok(())
+        },
+        decrypt_candidate: |_: &[u8], key: &[u8]| {
+          if key[0] == 0x10 {
+            events.borrow_mut().push("candidate-1");
+            Ok(vec![0xff])
+          } else {
+            events.borrow_mut().push("candidate-2");
+            Ok(b"decoded".to_vec())
+          }
+        },
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect("second candidate decodes after the first candidate's decode error");
+    assert_eq!(decoded, "decoded");
+    assert_eq!(
+      *events.borrow(),
+      vec!["validate", "candidate-1", "candidate-2"]
+    );
+
+    let calls = Cell::new(0);
+    let decode_error = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v10payload",
+      &outcomes,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| Ok(()),
+        decrypt_candidate: |_: &[u8], _: &[u8]| {
+          let call = calls.get() + 1;
+          calls.set(call);
+          if call == 1 {
+            Ok(vec![0xff])
+          } else {
+            Err(anyhow!("later primitive failure"))
+          }
+        },
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect_err("a prior decode error outranks later primitive failures");
+    assert!(matches!(
+      decode_error,
+      ChromiumCookieValueError::Decode(ChromiumCookieDecodeError::UnprefixedInvalidUtf8)
+    ));
+  }
+
+  #[test]
+  fn shared_cipher_loop_routes_fallible_legacy_plaintext_through_shared_decode() {
+    let host = ".example.com";
+    let expected = host_bound_plaintext(host, b"legacy value");
+    let events = RefCell::new(Vec::new());
+    let decoded = decrypt_encrypted_value_with_cipher_adapter(
+      host,
+      String::new(),
+      b"raw-dpapi-envelope",
+      &ChromiumKeyOutcomes::default(),
+      24,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| {
+          panic!("legacy route must not validate a keyed envelope")
+        },
+        decrypt_candidate: |_: &[u8], _: &[u8]| {
+          panic!("legacy route must not try a keyed candidate")
+        },
+        decrypt_legacy: |_: &[u8]| {
+          events.borrow_mut().push("legacy");
+          Ok(LegacyCipherOutcome::Plaintext(expected.clone()))
+        },
+      },
+    )
+    .expect("legacy plaintext is decoded by the shared host-binding policy");
+    assert_eq!(decoded, "legacy value");
+    assert_eq!(*events.borrow(), vec!["legacy"]);
   }
 
   #[cfg(unix)]
