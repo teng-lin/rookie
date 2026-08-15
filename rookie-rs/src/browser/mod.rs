@@ -1,5 +1,7 @@
 pub(crate) mod chromium;
 pub(crate) mod chromium_crypto;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod chromium_database_acquisition;
 pub(crate) mod chromium_platform_keys;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod internet_explorer_model;
