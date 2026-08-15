@@ -789,7 +789,7 @@ where
 #[cfg(target_os = "windows")]
 fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
   sniff_cookie_source_with_windows_recovery(path, |live_path| {
-    browser::chromium::with_windows_locked_database_recovery(live_path, |source_path| {
+    browser::chromium_database_acquisition::with_non_disruptive_recovery(live_path, |source_path| {
       sniff_sqlite_cookie_source(source_path.to_path_buf())
     })
   })
