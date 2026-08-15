@@ -84,34 +84,55 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch and verify the captured PR head
+        id: head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "pull/${{ matrix.pr.number }}/head"
+          actual_head="$(git rev-parse FETCH_HEAD)"
+          expected_head='${{ matrix.pr.sha }}'
+          if [[ "$actual_head" != "$expected_head" ]]; then
+            echo "::warning::PR #${{ matrix.pr.number }} moved from $expected_head to $actual_head; skipping this stale matrix leg"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A moving PR is normal while contributors are pushing fixes. Record the
+      # race in Actions-owned step metadata, then leave the job green without
+      # executing either revision. The trusted reporter checks this marker and
+      # the live PR head before it publishes any status.
+      - name: PR head moved during revalidation
+        if: steps.head.outputs.stale == 'true'
+        shell: bash
+        run: |
+          echo "PR #${{ matrix.pr.number }} moved; no verdict will be published for ${{ matrix.pr.sha }}"
+
       - name: Merge the PR into current main
+        if: steps.head.outputs.stale != 'true'
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git fetch --no-tags origin "pull/${{ matrix.pr.number }}/head"
-          actual_head="$(git rev-parse FETCH_HEAD)"
-          expected_head='${{ matrix.pr.sha }}'
-          if [[ "$actual_head" != "$expected_head" ]]; then
-            echo "::error::PR #${{ matrix.pr.number }} moved from $expected_head to $actual_head; rerun revalidation"
-            exit 1
-          fi
-          if ! git merge --no-edit --no-ff FETCH_HEAD; then
+          if ! git merge --no-edit --no-ff '${{ matrix.pr.sha }}'; then
             git merge --abort || true
             echo "::error::PR #${{ matrix.pr.number }} conflicts with current main"
             exit 1
           fi
 
       - name: Install Linux packages
-        if: matrix.os == 'ubuntu-latest'
+        if: steps.head.outputs.stale != 'true' && matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        if: steps.head.outputs.stale != 'true'
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: steps.head.outputs.stale != 'true'
         with:
           # The merged tree contains fork-controlled code. It may consume a
           # trusted cache, but must never persist cache entries for later jobs.
@@ -122,6 +143,7 @@ jobs:
       # longer matches the PR — for a fraction of the cost of the full suite,
       # which the PR's own checks already run.
       - name: Build the merged tree
+        if: steps.head.outputs.stale != 'true'
         run: cargo test --workspace --all-targets --locked --no-run
 
   report:
@@ -133,6 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
+      pull-requests: read
       statuses: write
     steps:
       # Do not accept a verdict file from the untrusted build. GitHub's jobs
@@ -151,7 +174,9 @@ jobs:
           # rerun, trust only the newest attempt recorded by Actions.
           jobs_json="$(gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100&filter=all" \
-            | jq '[.[].jobs[] | {id, name, conclusion, run_attempt}]
+            | jq '[.[].jobs[]
+                  | {id, name, conclusion, run_attempt,
+                     steps: [.steps[]? | {name, conclusion}]}]
                   | sort_by(.name, .run_attempt, .id)
                   | group_by(.name)
                   | map(last)')"
@@ -173,6 +198,12 @@ jobs:
               exit 1
             fi
 
+            current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq .head.sha)"
+            if test "$current_head" != "$sha"; then
+              echo "::notice::PR #$number moved from $sha to $current_head; skipping stale verdicts"
+              continue
+            fi
+
             for os in ubuntu-latest macos-latest windows-latest; do
               job_name="PR #$number vs main ($os)"
               match_count="$(jq --arg name "$job_name" \
@@ -184,10 +215,24 @@ jobs:
                   '.[] | select(.name == $name) | .conclusion' <<< "$jobs_json")"
               fi
 
+              stale_marker="$(jq -r --arg name "$job_name" \
+                '[.[] | select(.name == $name) | .steps[]?
+                  | select(.name == "PR head moved during revalidation")]
+                 | if length == 1 then .[0].conclusion else "missing" end' \
+                <<< "$jobs_json")"
+
+              # This protects the pathological move-away-then-back race: the
+              # live head can equal the captured SHA again even though this
+              # matrix leg deliberately skipped its build.
+              if test "$stale_marker" = success; then
+                echo "::notice::$job_name observed a moved head; skipping its stale verdict"
+                continue
+              fi
+
               if test "$main_is_current" != true; then
                 state=failure
                 description='main advanced; rerun revalidation'
-              elif test "$conclusion" = success; then
+              elif test "$conclusion" = success && test "$stale_marker" = skipped; then
                 state=success
                 description='Merges and builds against current main'
               else
