@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Browser {
@@ -99,6 +99,11 @@ fn compatibility_paths(platform: &str, root: &RegistryRoot) -> Vec<String> {
   }
 }
 
+fn dedup_preserving_order(values: &mut Vec<String>) {
+  let mut seen = HashSet::new();
+  values.retain(|value| seen.insert(value.clone()));
+}
+
 fn compatibility_browser(platform: &str, definition: &RegistryBrowser) -> Browser {
   let credentials = definition.key_credentials.as_ref();
   let keychain = credentials.and_then(|credentials| credentials.macos_keychain.as_ref());
@@ -107,13 +112,13 @@ fn compatibility_browser(platform: &str, definition: &RegistryBrowser) -> Browse
     .iter()
     .flat_map(|root| compatibility_paths(platform, root))
     .collect::<Vec<_>>();
-  paths.dedup();
+  dedup_preserving_order(&mut paths);
   let mut channels = definition
     .roots
     .iter()
     .map(|root| root.channel.clone())
     .collect::<Vec<_>>();
-  channels.dedup();
+  dedup_preserving_order(&mut channels);
   Browser {
     paths,
     channels: (!channels.is_empty()).then_some(channels),
@@ -213,5 +218,24 @@ mod tests {
   #[should_panic(expected = "browser configuration \"not-a-browser\" is unavailable for platform")]
   fn legacy_lookup_keeps_panicking_with_browser_context() {
     get_browser_config("not-a-browser");
+  }
+
+  #[test]
+  fn compatibility_projection_deduplicates_non_adjacent_values_in_order() {
+    let mut values = vec!["stable".to_owned(), "beta".to_owned(), "stable".to_owned()];
+    dedup_preserving_order(&mut values);
+    assert_eq!(values, ["stable", "beta"]);
+
+    let registry: RegistryProjection =
+      serde_json::from_str(include_str!("../browser_registry.json")).expect("valid registry");
+    let chrome = registry.platforms["linux"]
+      .iter()
+      .find(|browser| browser.canonical_id == "chrome")
+      .expect("Linux Chrome definition");
+    let browser = compatibility_browser("linux", chrome);
+    assert_eq!(
+      browser.channels.expect("Chrome channels"),
+      ["stable", "beta", "dev"]
+    );
   }
 }

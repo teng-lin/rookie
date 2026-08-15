@@ -2652,7 +2652,7 @@ pub(crate) fn gecko_report(
   gecko_report_with_context(&context, browser_id, profile_id, domains.as_deref())
 }
 
-fn select_legacy_gecko_profile(outcome: &mut EngineExtractionOutcome) {
+fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionOutcome) {
   // Generic Gecko reports remain display-name sorted. The compatibility
   // selector instead uses the default profile when it has cookies.sqlite,
   // then falls back in profiles.ini declaration order within each root.
@@ -2671,6 +2671,10 @@ fn select_legacy_gecko_profile(outcome: &mut EngineExtractionOutcome) {
       .then_with(|| left.legacy_profile_order.cmp(&right.legacy_profile_order))
       .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
   });
+}
+
+fn select_legacy_gecko_profile(outcome: &mut EngineExtractionOutcome) {
+  sort_legacy_gecko_profiles(outcome);
   outcome.profiles.truncate(1);
 }
 
@@ -2698,9 +2702,7 @@ pub(crate) fn legacy_gecko_outcome(
 pub(crate) fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
   let mut outcome = discover_gecko_with_context(&context, browser_id)?;
-  outcome
-    .profiles
-    .retain(|profile| profile.persistent_source_discovered);
+  sort_legacy_gecko_profiles(&mut outcome);
   Ok(outcome)
 }
 
@@ -4871,6 +4873,18 @@ mod tests {
         .collect::<Vec<_>>(),
       ["Alpha", "Zulu"],
       "generic report ordering remains display-name based"
+    );
+
+    let mut listing = discover_gecko_with_context(&context, "firefox").expect("rediscover");
+    sort_legacy_gecko_profiles(&mut listing);
+    assert_eq!(
+      listing
+        .profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>(),
+      ["Zulu", "Alpha"],
+      "legacy listing follows profiles.ini declaration order"
     );
 
     select_legacy_gecko_profile(&mut outcome);
