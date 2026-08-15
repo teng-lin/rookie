@@ -307,11 +307,30 @@ jobs:
             tar -tzf "$tarball" | grep -qx "package/MIT-LICENSE.txt" \
               || { echo "MIT-LICENSE.txt missing from $tarball" >&2; exit 1; }
           done
+      - name: Record release and Windows scan checksums
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          release_root="../../release-packages/npm"
+          scan_dir="$release_root/scan"
+          windows_binary="rookie_cookies.win32-x64-msvc.node"
+          mkdir -p "$scan_dir"
+          cp "npm/win32-x64-msvc/$windows_binary" "$scan_dir/$windows_binary"
+          mapfile -t tarballs < <(find "$release_root" -maxdepth 1 -name '*.tgz' -type f | sort)
+          test "${#tarballs[@]}" -eq 5
+          python ../../scripts/write-release-scan-manifest.py \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$RELEASE_SHA" \
+            --root "$release_root" \
+            --output "$scan_dir/release-scan-manifest.json" \
+            "${tarballs[@]}" "$scan_dir/$windows_binary"
       - name: Upload release tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-release-${{ inputs.version }}
-          path: release-packages/npm/*.tgz
+          path: release-packages/npm/
           if-no-files-found: error
           retention-days: 7
 

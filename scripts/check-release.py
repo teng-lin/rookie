@@ -52,7 +52,7 @@ def target_dependency_versions(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("version", help="expected release version, for example 0.5.8")
+    parser.add_argument("version", help="expected release version, for example 1.2.3")
     args = parser.parse_args()
 
     expected = args.version

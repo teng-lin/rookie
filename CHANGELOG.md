@@ -6,6 +6,28 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-08-15
+
+### Added
+
+- Structured browser, profile, and extraction-report APIs now reach Rust,
+  Python, Node.js, and the CLI with matching status, issue, counter, and cookie
+  provenance semantics.
+- The private browser registry now exposes the maintained platform variants,
+  including Cốc Cốc and Yandex on macOS, Cốc Cốc, DuckDuckGo, Yandex, and Octo
+  Browser on Windows, and Cachy Browser on Linux. Legacy named selectors remain
+  source compatible.
+- Detailed extraction preserves Chromium partition keys and Firefox container
+  identities without changing the legacy `Cookie` wire shape.
+
+### Changed
+
+- Browser discovery is installation- and profile-aware across Chromium, Gecko,
+  Safari, and Internet Explorer sources. Active Chromium profiles are preferred
+  without hiding other discovered profiles.
+- Extraction failures now remain typed and visible through reports and legacy
+  APIs instead of collapsing into successful empty results.
+
 ### Fixed
 
 - WAL-mode cookie databases with no pending WAL are now read through the
@@ -17,12 +39,34 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arguments into rejected Promises instead of aborting Node or throwing before
   callers can attach Promise handlers. JavaScript examples now consistently
   await the asynchronous extraction API.
+- Firefox session recovery accepts the browser-produced root cookie layout,
+  bounds raw and decompressed session files, retains failed candidates, and
+  handles seconds and milliseconds without coupling session data to the SQLite
+  schema version.
+- Chromium and Firefox schema-aware decoding now preserves valid metadata while
+  counting and reporting malformed rows. Chromium v24 host-bound values are
+  verified before their digest prefix is stripped.
+- Safari and Internet Explorer parsing now retains partial results, reports
+  malformed pages or records, and preserves security and SameSite semantics.
+- macOS Keychain and Linux Secret Service/KWallet failures are explicit; KDE 6
+  is supported and successful passwords are not discarded by cleanup errors.
 
 ### Security
 
 - Persistent Chromium and Mozilla domain filters now enforce exact-host and
   subdomain boundaries after their SQL candidate query. Explicitly empty
   filters and blank domain entries no longer expose the entire cookie store.
+- Chromium key candidates remain zeroizing from derivation through final use,
+  and profile extraction no longer multiplies ordinary heap copies of master
+  keys.
+- Windows App-Bound impersonation restores any pre-existing thread identity and
+  treats restoration failure as fatal.
+- Release workflows bind every published artifact to one reviewed tag commit,
+  recheck that tag immediately before publication, and require the tagged
+  commit to be part of `main` history.
+- Pull-request revalidation builds untrusted code without write credentials and
+  reports statuses from a separate trusted job bound to the exact reviewed
+  head SHA.
 
 ## [0.5.8] - 2026-08-11
 

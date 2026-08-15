@@ -65,7 +65,7 @@ run the checks below. The release metadata checker requires Python 3.11 or
 newer.
 
 ```console
-export VERSION=0.5.8
+export VERSION=0.5.9
 python3 scripts/check-release.py "$VERSION"
 cargo test --workspace --all-targets
 cargo test --workspace --doc
@@ -114,6 +114,35 @@ binary, and publishes these prepared native tarballs before the root package:
 - `rookie-cookies-linux-x64-gnu`
 - `rookie-cookies-win32-x64-msvc`
 
+### Checksum-identified Windows scan
+
+Issue [#191](https://github.com/teng-lin/rookie-cookies/issues/191) tracks an
+unresolved historical ESET detection. The npm package job now places these
+additional files in its `npm-release-<version>` workflow artifact before the
+environment-gated publish job runs:
+
+- `scan/rookie_cookies.win32-x64-msvc.node`, copied byte-for-byte from the
+  Windows package assembled by the workflow;
+- `scan/release-scan-manifest.json`, recording the release version, immutable
+  tag commit, byte length, and SHA-256 for that native module and all five npm
+  tarballs.
+
+For a checksum-identified scan, pause before approving the npm `publish` job,
+download that workflow artifact onto a disposable, fully patched Windows VM,
+and verify every manifest digest before scanning the `.node` file. Do not load
+or execute the native module during this check. Record the following on #191:
+
+- workflow run, version, tag commit, artifact filename, byte length, and
+  SHA-256 from the manifest;
+- ESET product, engine, and signature/database versions;
+- the exact detection name, or an explicit clean result;
+- any ESET false-positive submission and final vendor disposition.
+
+This repository cannot substitute a different antivirus result for that ESET
+evidence. Do not claim the historical detection is cleared, or close #191,
+until a current checksum-identified scan is recorded or ESET has reclassified
+the exact sample.
+
 ## Verify
 
 Confirm the exact versions on each registry, then smoke-test clean installs:
@@ -136,6 +165,11 @@ Create the GitHub release only after all three registry checks pass.
 After the GitHub release exists, dispatch `publish-cli.yml` from the matching
 tag to build and attach the `rookie-cookies` CLI binary for macOS (arm64 and
 x86_64), Linux x86_64, and Windows x86_64.
+
+Each CLI asset is uploaded with a same-named `.sha256` sidecar. Verify the
+Windows executable against that sidecar before its separate ESET scan and add
+the result to #191; the npm native module and CLI executable are distinct
+artifacts and neither scan stands in for the other.
 
 `workflow_dispatch` runs the copy of the workflow file stored *at the dispatched
 ref*. Dispatching from `v$VERSION` therefore runs that tag's own copy of
