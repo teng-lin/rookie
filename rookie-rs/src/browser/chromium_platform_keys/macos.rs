@@ -1,5 +1,6 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
 use super::create_pbkdf2_key;
+use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
 use crate::config::Browser;
 use anyhow::Result;
 use zeroize::Zeroizing;
@@ -16,13 +17,16 @@ impl MacosKeychainBackend for SystemMacosKeychainBackend {
   }
 }
 
-fn retrieve_macos_key_outcomes<B>(config: &Browser, backend: &B) -> ChromiumKeyOutcomes
+fn retrieve_macos_key_outcomes<B>(
+  request: ChromiumKeyRequest<'_>,
+  backend: &B,
+) -> ChromiumKeyOutcomes
 where
   B: MacosKeychainBackend,
 {
-  let v10 = match (&config.osx_key_service, &config.osx_key_user) {
-    (Some(service), Some(user)) if !service.is_empty() && !user.is_empty() => {
-      match backend.password(service, user) {
+  let v10 = match request.credentials.macos_keychain.as_ref() {
+    Some(credentials) if !credentials.service.is_empty() && !credentials.account.is_empty() => {
+      match backend.password(&credentials.service, &credentials.account) {
         Ok(password) => ChromiumKeyOutcome::success_zeroizing(vec![create_pbkdf2_key(
           &password,
           b"saltysalt",
@@ -36,8 +40,12 @@ where
         }
       }
     }
-    (None, None) => ChromiumKeyOutcome::NotApplicable,
-    _ => ChromiumKeyOutcome::failure(
+    None if request.browser_id.is_some() => ChromiumKeyOutcome::failure(format!(
+      "no macOS keychain identity is known for browser {:?}, so its encrypted cookies cannot be decrypted",
+      request.browser_id.expect("registered request has a browser ID")
+    )),
+    None => ChromiumKeyOutcome::NotApplicable,
+    Some(_) => ChromiumKeyOutcome::failure(
       "macOS Keychain configuration requires non-empty service and account values",
     ),
   };
@@ -46,6 +54,18 @@ where
     v10,
     v11: ChromiumKeyOutcome::NotApplicable,
     v20: ChromiumKeyOutcome::NotApplicable,
+  }
+}
+
+pub(crate) struct HostKeySession;
+
+impl HostKeySession {
+  pub(crate) fn new() -> Self {
+    Self
+  }
+
+  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
+    retrieve_macos_key_outcomes(request, &SystemMacosKeychainBackend)
   }
 }
 
@@ -61,7 +81,9 @@ impl<'a> MacosPlatformKeyProvider<'a> {
 
 impl ChromiumKeyProvider<()> for MacosPlatformKeyProvider<'_> {
   fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
-    retrieve_macos_key_outcomes(self.config, &SystemMacosKeychainBackend)
+    let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
+    let mut session = HostKeySession::new();
+    session.retrieve(ChromiumKeyRequest::direct(&credentials))
   }
 }
 
@@ -69,6 +91,7 @@ impl ChromiumKeyProvider<()> for MacosPlatformKeyProvider<'_> {
 mod tests {
   use super::*;
   use crate::browser::chromium_crypto::{ChromiumCipherVersion, ChromiumKeyRoute};
+  use crate::browser::chromium_platform_keys::MacosKeychainCredentials;
   use std::cell::Cell;
 
   fn candidate_bytes(
@@ -100,14 +123,18 @@ mod tests {
     }
   }
 
-  fn macos_config() -> Browser {
-    Browser {
-      paths: vec![],
-      channels: None,
-      unix_crypt_name: None,
-      osx_key_service: Some("Chrome Safe Storage".to_string()),
-      osx_key_user: Some("Chrome".to_string()),
+  fn macos_credentials() -> ChromiumKeyCredentials {
+    ChromiumKeyCredentials {
+      linux_crypt_name: None,
+      macos_keychain: Some(MacosKeychainCredentials {
+        service: "Chrome Safe Storage".to_string(),
+        account: "Chrome".to_string(),
+      }),
     }
+  }
+
+  fn request(credentials: &ChromiumKeyCredentials) -> ChromiumKeyRequest<'_> {
+    ChromiumKeyRequest::direct(credentials)
   }
 
   #[test]
@@ -116,7 +143,8 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(Zeroizing::new("keychain".to_string())),
     };
-    let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
+    let credentials = macos_credentials();
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
     assert_eq!(backend.calls.get(), 1);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
@@ -140,7 +168,8 @@ mod tests {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("keychain unavailable")),
     };
-    let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
+    let credentials = macos_credentials();
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
     assert_eq!(backend.calls.get(), 1);
     let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V10)
     else {
@@ -155,7 +184,8 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(Zeroizing::new("mock_password".to_string())),
     };
-    let outcomes = retrieve_macos_key_outcomes(&macos_config(), &backend);
+    let credentials = macos_credentials();
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
       [Vec::from(
@@ -170,16 +200,80 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(Zeroizing::new("must not be read".to_string())),
     };
-    let config = Browser {
-      osx_key_service: None,
-      osx_key_user: None,
-      ..macos_config()
-    };
-    let outcomes = retrieve_macos_key_outcomes(&config, &backend);
+    let credentials = ChromiumKeyCredentials::default();
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
     assert_eq!(backend.calls.get(), 0);
     assert!(matches!(
       outcomes.route(ChromiumCipherVersion::V10),
       ChromiumKeyRoute::NotApplicable { .. }
     ));
+  }
+
+  #[test]
+  fn macos_registered_missing_identity_is_failure_but_direct_empty_is_not_applicable() {
+    let backend = FakeMacosBackend {
+      calls: Cell::new(0),
+      result: Ok(Zeroizing::new("must not be read".to_string())),
+    };
+    let credentials = ChromiumKeyCredentials::default();
+
+    let registered = retrieve_macos_key_outcomes(
+      ChromiumKeyRequest::for_installation(
+        "coccoc",
+        &credentials,
+        std::path::Path::new("Local State"),
+        None,
+      ),
+      &backend,
+    );
+    let ChromiumKeyOutcome::Failure(failure) = registered.v10 else {
+      panic!("registered missing identity must fail explicitly");
+    };
+    assert!(failure.message().contains("coccoc"));
+
+    let direct_config = Browser {
+      paths: Vec::new(),
+      channels: None,
+      unix_crypt_name: None,
+      osx_key_service: None,
+      osx_key_user: None,
+    };
+    let direct = MacosPlatformKeyProvider::new(&direct_config).retrieve(&());
+    assert_eq!(direct.v10, ChromiumKeyOutcome::NotApplicable);
+    assert_eq!(backend.calls.get(), 0);
+  }
+
+  #[test]
+  fn macos_direct_partial_or_blank_identity_fails_without_calling_keychain() {
+    for (service, account) in [
+      (Some("Chrome Safe Storage"), None),
+      (None, Some("Chrome")),
+      (Some(""), Some("Chrome")),
+      (Some("Chrome Safe Storage"), Some("")),
+    ] {
+      let config = Browser {
+        paths: Vec::new(),
+        channels: None,
+        unix_crypt_name: None,
+        osx_key_service: service.map(str::to_owned),
+        osx_key_user: account.map(str::to_owned),
+      };
+      let credentials = ChromiumKeyCredentials::from_legacy_browser(&config);
+      let backend = FakeMacosBackend {
+        calls: Cell::new(0),
+        result: Ok(Zeroizing::new("must not be read".to_string())),
+      };
+
+      let outcomes =
+        retrieve_macos_key_outcomes(ChromiumKeyRequest::direct(&credentials), &backend);
+      let ChromiumKeyOutcome::Failure(failure) = outcomes.v10 else {
+        panic!("partial or blank direct identity must fail explicitly");
+      };
+      assert_eq!(
+        failure.message(),
+        "macOS Keychain configuration requires non-empty service and account values"
+      );
+      assert_eq!(backend.calls.get(), 0);
+    }
   }
 }

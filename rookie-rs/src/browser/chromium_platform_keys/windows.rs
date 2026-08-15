@@ -1,5 +1,6 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
 use super::shared::outcome_from_result;
+use super::{ChromiumKeyRequest, LocalStateInput};
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine as _};
 use zeroize::Zeroizing;
@@ -165,6 +166,61 @@ where
   }
 }
 
+trait LocalStateReader {
+  fn read_to_string(&self, path: &std::path::Path) -> Result<String>;
+}
+
+struct SystemLocalStateReader;
+
+impl LocalStateReader for SystemLocalStateReader {
+  fn read_to_string(&self, path: &std::path::Path) -> Result<String> {
+    std::fs::read_to_string(path).map_err(anyhow::Error::from)
+  }
+}
+
+fn host_key_outcomes<R>(request: ChromiumKeyRequest<'_>, reader: &R) -> ChromiumKeyOutcomes
+where
+  R: LocalStateReader,
+{
+  let parsed;
+  let local_state = match request.local_state {
+    LocalStateInput::Parsed(local_state) => local_state,
+    LocalStateInput::Path(path) => {
+      parsed = reader
+        .read_to_string(path)
+        .and_then(|contents| serde_json::from_str(&contents).map_err(anyhow::Error::from));
+      match &parsed {
+        Ok(local_state) => local_state,
+        Err(error) => {
+          return ChromiumKeyOutcomes {
+            v10: ChromiumKeyOutcome::failure(format!(
+              "failed to read installation Local State: {error}"
+            )),
+            v11: ChromiumKeyOutcome::NotApplicable,
+            v20: ChromiumKeyOutcome::failure(format!(
+              "failed to read installation Local State: {error}"
+            )),
+          }
+        }
+      }
+    }
+    LocalStateInput::NotApplicable => return ChromiumKeyOutcomes::default(),
+  };
+  retrieve_windows_key_outcomes(local_state, &SystemWindowsKeyBackend)
+}
+
+pub(crate) struct HostKeySession;
+
+impl HostKeySession {
+  pub(crate) fn new() -> Self {
+    Self
+  }
+
+  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
+    host_key_outcomes(request, &SystemLocalStateReader)
+  }
+}
+
 pub(crate) struct WindowsPlatformKeyProvider<'a> {
   local_state: &'a serde_json::Value,
 }
@@ -177,7 +233,12 @@ impl<'a> WindowsPlatformKeyProvider<'a> {
 
 impl ChromiumKeyProvider<()> for WindowsPlatformKeyProvider<'_> {
   fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
-    retrieve_windows_key_outcomes(self.local_state, &SystemWindowsKeyBackend)
+    let credentials = super::ChromiumKeyCredentials::default();
+    let mut session = HostKeySession::new();
+    session.retrieve(ChromiumKeyRequest::for_parsed_local_state(
+      &credentials,
+      self.local_state,
+    ))
   }
 }
 
@@ -186,6 +247,22 @@ mod tests {
   use super::*;
   use crate::browser::chromium_crypto::{ChromiumCipherVersion, ChromiumKeyRoute, ChromiumKeyTier};
   use std::cell::Cell;
+
+  struct CountingLocalStateReader {
+    calls: Cell<usize>,
+    result: Result<String>,
+  }
+
+  impl LocalStateReader for CountingLocalStateReader {
+    fn read_to_string(&self, _path: &std::path::Path) -> Result<String> {
+      self.calls.set(self.calls.get() + 1);
+      self
+        .result
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+  }
 
   struct FakeWindowsBackend {
     v10_calls: Cell<usize>,
@@ -245,6 +322,75 @@ mod tests {
         "app_bound_encrypted_key": v20
       }
     })
+  }
+
+  #[test]
+  fn parsed_local_state_wins_without_a_session_read() {
+    let credentials = super::super::ChromiumKeyCredentials::default();
+    let local_state = serde_json::json!({});
+    let reader = CountingLocalStateReader {
+      calls: Cell::new(0),
+      result: Err(anyhow::anyhow!("Local State path must not be read")),
+    };
+    let outcomes = host_key_outcomes(
+      ChromiumKeyRequest::for_installation(
+        "chrome",
+        &credentials,
+        std::path::Path::new("must-not-be-read/Local State"),
+        Some(&local_state),
+      ),
+      &reader,
+    );
+
+    assert_eq!(reader.calls.get(), 0);
+    assert_eq!(outcomes, ChromiumKeyOutcomes::default());
+  }
+
+  #[test]
+  fn local_state_path_is_read_once_and_failures_keep_independent_tier_outcomes() {
+    let credentials = super::super::ChromiumKeyCredentials::default();
+    let path = std::path::Path::new("Local State");
+
+    let success_reader = CountingLocalStateReader {
+      calls: Cell::new(0),
+      result: Ok("{}".to_string()),
+    };
+    let success = host_key_outcomes(
+      ChromiumKeyRequest::for_installation("chrome", &credentials, path, None),
+      &success_reader,
+    );
+    assert_eq!(success_reader.calls.get(), 1);
+    assert_eq!(success, ChromiumKeyOutcomes::default());
+
+    for (reader, expected) in [
+      (
+        CountingLocalStateReader {
+          calls: Cell::new(0),
+          result: Err(anyhow::anyhow!("read denied")),
+        },
+        "failed to read installation Local State: read denied",
+      ),
+      (
+        CountingLocalStateReader {
+          calls: Cell::new(0),
+          result: Ok("{".to_string()),
+        },
+        "failed to read installation Local State: EOF while parsing an object at line 1 column 1",
+      ),
+    ] {
+      let outcomes = host_key_outcomes(
+        ChromiumKeyRequest::for_installation("chrome", &credentials, path, None),
+        &reader,
+      );
+      assert_eq!(reader.calls.get(), 1);
+      for outcome in [&outcomes.v10, &outcomes.v20] {
+        let ChromiumKeyOutcome::Failure(failure) = outcome else {
+          panic!("Local State failures must fail both Windows key tiers");
+        };
+        assert_eq!(failure.message(), expected);
+      }
+      assert_eq!(outcomes.v11, ChromiumKeyOutcome::NotApplicable);
+    }
   }
 
   #[test]
