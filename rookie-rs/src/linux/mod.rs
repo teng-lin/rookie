@@ -96,13 +96,38 @@ where
   )
 }
 
-fn kwallet_call<T>(connection: &Connection, method: &str, args: T) -> zbus::Result<Arc<Message>>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KWalletEndpoint {
+  version: u8,
+  service: &'static str,
+  path: &'static str,
+}
+
+const KWALLET_ENDPOINTS: [KWalletEndpoint; 2] = [
+  KWalletEndpoint {
+    version: 6,
+    service: "org.kde.kwalletd6",
+    path: "/modules/kwalletd6",
+  },
+  KWalletEndpoint {
+    version: 5,
+    service: "org.kde.kwalletd5",
+    path: "/modules/kwalletd5",
+  },
+];
+
+fn kwallet_call<T>(
+  connection: &Connection,
+  endpoint: KWalletEndpoint,
+  method: &str,
+  args: T,
+) -> zbus::Result<Arc<Message>>
 where
   T: serde::ser::Serialize + zvariant::DynamicType,
 {
   connection.call_method(
-    Some("org.kde.kwalletd5"),
-    "/modules/kwalletd5",
+    Some(endpoint.service),
+    endpoint.path,
     Some("org.kde.KWallet"),
     method,
     &args,
@@ -239,16 +264,9 @@ trait KWalletBackend {
   fn close(&self, handle: i32) -> Result<()>;
 }
 
-struct DbusKWalletBackend {
-  connection: Connection,
-}
-
-impl DbusKWalletBackend {
-  fn connect() -> Result<Self> {
-    Ok(Self {
-      connection: Connection::session().context("failed to connect to the session D-Bus")?,
-    })
-  }
+struct DbusKWalletBackend<'a> {
+  connection: &'a Connection,
+  endpoint: KWalletEndpoint,
 }
 
 fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
@@ -259,18 +277,23 @@ fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
   }
 }
 
-impl KWalletBackend for DbusKWalletBackend {
+impl KWalletBackend for DbusKWalletBackend<'_> {
   fn network_wallet(&self) -> Result<String> {
-    let message = kwallet_call(&self.connection, "networkWallet", ())
-      .context("KWallet networkWallet failed")?;
+    let message = kwallet_call(self.connection, self.endpoint, "networkWallet", ())
+      .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
     message
       .body()
       .context("KWallet networkWallet returned an invalid response")
   }
 
   fn open(&self, wallet: &str) -> Result<i32> {
-    let message = kwallet_call(&self.connection, "open", (wallet, 0_i64, APP_ID))
-      .context("KWallet open failed")?;
+    let message = kwallet_call(
+      self.connection,
+      self.endpoint,
+      "open",
+      (wallet, 0_i64, APP_ID),
+    )
+    .with_context(|| format!("KWallet {} open failed", self.endpoint.version))?;
     let handle: i32 = message
       .body()
       .context("KWallet open returned an invalid response")?;
@@ -282,19 +305,25 @@ impl KWalletBackend for DbusKWalletBackend {
 
   fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<String> {
     let message = kwallet_call(
-      &self.connection,
+      self.connection,
+      self.endpoint,
       "readPassword",
       (handle, folder, key, APP_ID),
     )
-    .context("KWallet readPassword failed")?;
+    .with_context(|| format!("KWallet {} readPassword failed", self.endpoint.version))?;
     message
       .body()
       .context("KWallet readPassword returned an invalid response")
   }
 
   fn close(&self, handle: i32) -> Result<()> {
-    let message = kwallet_call(&self.connection, "close", (handle, false, APP_ID))
-      .context("KWallet close failed")?;
+    let message = kwallet_call(
+      self.connection,
+      self.endpoint,
+      "close",
+      (handle, false, APP_ID),
+    )
+    .with_context(|| format!("KWallet {} close failed", self.endpoint.version))?;
     let code: i32 = message
       .body()
       .context("KWallet close returned an invalid response")?;
@@ -342,8 +371,32 @@ impl<B: KWalletBackend + ?Sized> Drop for KWalletHandle<'_, B> {
 }
 
 fn get_password_kdewallet(crypt_name: &str) -> Result<String> {
-  let backend = DbusKWalletBackend::connect()?;
-  get_password_kdewallet_with_backend(&backend, crypt_name)
+  let connection = Connection::session().context("failed to connect to the session D-Bus")?;
+  get_password_kdewallet_with_fallback(|endpoint| {
+    let backend = DbusKWalletBackend {
+      connection: &connection,
+      endpoint,
+    };
+    get_password_kdewallet_with_backend(&backend, crypt_name)
+  })
+}
+
+fn get_password_kdewallet_with_fallback<F>(mut attempt: F) -> Result<String>
+where
+  F: FnMut(KWalletEndpoint) -> Result<String>,
+{
+  let mut failures = Vec::new();
+  for endpoint in KWALLET_ENDPOINTS {
+    match attempt(endpoint) {
+      Ok(password) if password.is_empty() => failures.push(format!(
+        "KWallet {}: readPassword returned no matching entry",
+        endpoint.version
+      )),
+      Ok(password) => return Ok(password),
+      Err(error) => failures.push(format!("KWallet {}: {error:#}", endpoint.version)),
+    }
+  }
+  bail!("all KWallet versions failed: {}", failures.join("; "))
 }
 
 fn get_password_kdewallet_with_backend<B>(backend: &B, crypt_name: &str) -> Result<String>
@@ -356,7 +409,11 @@ where
   let handle = backend.open(&wallet)?;
   let handle = KWalletHandle::new(backend, handle);
   let password = handle.read_password(&folder, &key)?;
-  handle.close()?;
+  if let Err(error) = handle.close() {
+    // The password has already been copied out of the wallet. A non-forced
+    // close is cleanup, so losing that successful read would be misleading.
+    log::warn!("Failed to close KWallet handle after a successful read: {error:#}");
+  }
   Ok(password)
 }
 
@@ -577,6 +634,21 @@ mod tests {
   }
 
   #[test]
+  fn kwallet_preserves_a_successful_read_when_close_fails() {
+    let backend = FakeKWallet {
+      read_result: RefCell::new(Some(Ok("password".to_string()))),
+      close_result: RefCell::new(Some(Err(anyhow!("close denied")))),
+      calls: RefCell::new(vec![]),
+    };
+
+    assert_eq!(
+      get_password_kdewallet_with_backend(&backend, "chrome").unwrap(),
+      "password"
+    );
+    assert_eq!(backend.calls.borrow().last().unwrap(), "close:42");
+  }
+
+  #[test]
   fn kwallet_raii_closes_the_exact_handle_when_reading_fails() {
     let backend = FakeKWallet {
       read_result: RefCell::new(Some(Err(anyhow!("read denied")))),
@@ -596,5 +668,62 @@ mod tests {
     assert!(ensure_kwallet_return_code("close", 0).is_ok());
     assert!(ensure_kwallet_return_code("close", 1).is_err());
     assert!(ensure_kwallet_return_code("close", -1).is_err());
+  }
+
+  #[test]
+  fn kwallet_tries_version_6_before_falling_back_to_version_5() {
+    let attempted = RefCell::new(Vec::new());
+    let password = get_password_kdewallet_with_fallback(|endpoint| {
+      attempted.borrow_mut().push(endpoint.version);
+      if endpoint.version == 6 {
+        Err(anyhow!("service unavailable"))
+      } else {
+        Ok("password".to_string())
+      }
+    })
+    .unwrap();
+
+    assert_eq!(password, "password");
+    assert_eq!(attempted.into_inner(), [6, 5]);
+  }
+
+  #[test]
+  fn kwallet_does_not_contact_version_5_after_version_6_succeeds() {
+    let attempted = RefCell::new(Vec::new());
+    let password = get_password_kdewallet_with_fallback(|endpoint| {
+      attempted.borrow_mut().push(endpoint.version);
+      Ok("password".to_string())
+    })
+    .unwrap();
+
+    assert_eq!(password, "password");
+    assert_eq!(attempted.into_inner(), [6]);
+  }
+
+  #[test]
+  fn kwallet_falls_back_when_version_6_has_no_matching_entry() {
+    let attempted = RefCell::new(Vec::new());
+    let password = get_password_kdewallet_with_fallback(|endpoint| {
+      attempted.borrow_mut().push(endpoint.version);
+      if endpoint.version == 6 {
+        Ok(String::new())
+      } else {
+        Ok("legacy-password".to_string())
+      }
+    })
+    .unwrap();
+
+    assert_eq!(password, "legacy-password");
+    assert_eq!(attempted.into_inner(), [6, 5]);
+  }
+
+  #[test]
+  fn kwallet_empty_results_are_reported_as_missing_entries() {
+    let error = get_password_kdewallet_with_fallback(|_| Ok(String::new()))
+      .expect_err("empty reads from every endpoint must not become a password")
+      .to_string();
+
+    assert!(error.contains("KWallet 6: readPassword returned no matching entry"));
+    assert!(error.contains("KWallet 5: readPassword returned no matching entry"));
   }
 }
