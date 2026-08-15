@@ -64,23 +64,51 @@ fn discovery_failure(outcome: &EngineExtractionOutcome, browser_id: &str) -> Opt
 
 fn selected_source_cookies(
   source: EngineSourceExtraction,
-  gecko_legacy_rows: bool,
+  policy: LegacyEnginePolicy,
 ) -> Result<Vec<Cookie>> {
   if let Some(error) = source.error {
     bail!(error)
   }
-  if gecko_legacy_rows && source.cookies.is_empty() {
-    if let Some(error) = source.row_error {
-      bail!(error)
-    }
+  if policy.rejects_all_row_failures() && source.cookies.is_empty() && source.rows_skipped > 0 {
+    bail!(source
+      .row_error
+      .unwrap_or_else(|| policy.all_rows_rejected_fallback().to_owned()))
   }
   Ok(source.cookies)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyEnginePolicy {
+  Gecko,
+  Safari,
+  #[cfg(any(target_os = "windows", test))]
+  InternetExplorer,
+}
+
+impl LegacyEnginePolicy {
+  fn rejects_all_row_failures(self) -> bool {
+    match self {
+      Self::Gecko => true,
+      Self::Safari => false,
+      #[cfg(any(target_os = "windows", test))]
+      Self::InternetExplorer => true,
+    }
+  }
+
+  fn all_rows_rejected_fallback(self) -> &'static str {
+    match self {
+      Self::Gecko => "all Firefox cookie database rows failed to decode",
+      Self::Safari => "all Safari cookie records failed to decode",
+      #[cfg(any(target_os = "windows", test))]
+      Self::InternetExplorer => "all Internet Explorer WebCache records failed to decode",
+    }
+  }
 }
 
 fn project_engine_outcome(
   browser_id: &str,
   outcome: EngineExtractionOutcome,
-  gecko: bool,
+  policy: LegacyEnginePolicy,
 ) -> Result<Vec<Cookie>> {
   if let Some(error) = discovery_failure(&outcome, browser_id) {
     bail!(error)
@@ -95,7 +123,7 @@ fn project_engine_outcome(
   for source in profile.sources {
     match source.role {
       registry::SOURCE_ROLE_PERSISTENT if source.selected => {
-        cookies.extend(selected_source_cookies(source, gecko)?);
+        cookies.extend(selected_source_cookies(source, policy)?);
       }
       registry::SOURCE_ROLE_SESSION if source.selected && source.error.is_none() => {
         // Historical Firefox extraction logs an invalid session candidate and
@@ -103,7 +131,7 @@ fn project_engine_outcome(
         selected_session_succeeded = true;
         cookies.extend(source.cookies);
       }
-      registry::SOURCE_ROLE_SESSION if gecko => {
+      registry::SOURCE_ROLE_SESSION if policy == LegacyEnginePolicy::Gecko => {
         if let Some(error) = source.error {
           failed_session_sources.push(format!("{}: {error}", source.path.display()));
         }
@@ -132,19 +160,19 @@ pub(crate) fn browser_cookies(
     "gecko" => project_engine_outcome(
       &browser.canonical_id,
       registry::legacy_gecko_outcome(&browser.canonical_id, domains)?,
-      true,
+      LegacyEnginePolicy::Gecko,
     ),
     #[cfg(target_os = "macos")]
     "safari" => project_engine_outcome(
       &browser.canonical_id,
       registry::legacy_safari_outcome(&browser.canonical_id, domains)?,
-      false,
+      LegacyEnginePolicy::Safari,
     ),
     #[cfg(target_os = "windows")]
     "internet_explorer" => project_engine_outcome(
       &browser.canonical_id,
       registry::legacy_internet_explorer_outcome(&browser.canonical_id, domains)?,
-      false,
+      LegacyEnginePolicy::InternetExplorer,
     ),
     engine => bail!(
       "browser {:?} uses unsupported engine {engine:?}",
@@ -189,6 +217,7 @@ mod tests {
         profile_id: "a".repeat(64),
         installation_id: "b".repeat(64),
         installation_priority: 10,
+        legacy_profile_order: 0,
         installation_path: PathBuf::from("/browser"),
         name: "default".to_owned(),
         path: PathBuf::from("/browser/default"),
@@ -258,8 +287,12 @@ mod tests {
 
   #[test]
   fn ordinary_absence_stays_typed_for_load() {
-    let error = project_engine_outcome("firefox", EngineExtractionOutcome::default(), true)
-      .expect_err("absence");
+    let error = project_engine_outcome(
+      "firefox",
+      EngineExtractionOutcome::default(),
+      LegacyEnginePolicy::Gecko,
+    )
+    .expect_err("absence");
     assert!(is_browser_not_installed(&error));
   }
 
@@ -269,8 +302,12 @@ mod tests {
       "mozilla_profiles_ini_invalid",
       "safari_profile_enumeration_failed",
     ] {
-      let error = project_engine_outcome("browser", empty_outcome_with_issue(code), false)
-        .expect_err("discovery failures must surface");
+      let error = project_engine_outcome(
+        "browser",
+        empty_outcome_with_issue(code),
+        LegacyEnginePolicy::Safari,
+      )
+      .expect_err("discovery failures must surface");
       assert!(!is_browser_not_installed(&error), "{code}");
       assert!(error.to_string().contains("injected discovery failure"));
     }
@@ -285,8 +322,12 @@ mod tests {
       "duplicate_installation",
       "duplicate_profile",
     ] {
-      let error = project_engine_outcome("browser", empty_outcome_with_issue(code), false)
-        .expect_err("empty discovery remains absence");
+      let error = project_engine_outcome(
+        "browser",
+        empty_outcome_with_issue(code),
+        LegacyEnginePolicy::Safari,
+      )
+      .expect_err("empty discovery remains absence");
       assert!(is_browser_not_installed(&error), "{code}");
     }
   }
@@ -297,10 +338,43 @@ mod tests {
       persistent_source(Some("database is corrupt"), None),
       persistent_source(None, Some("every row failed")),
     ] {
-      let error = project_engine_outcome("firefox", profile_with(Some(source)), true)
-        .expect_err("real extraction failure");
+      let error = project_engine_outcome(
+        "firefox",
+        profile_with(Some(source)),
+        LegacyEnginePolicy::Gecko,
+      )
+      .expect_err("real extraction failure");
       assert!(!is_browser_not_installed(&error));
     }
+  }
+
+  #[test]
+  fn internet_explorer_all_row_failure_remains_an_error() {
+    let error = project_engine_outcome(
+      "internet_explorer",
+      profile_with(Some(persistent_source(
+        None,
+        Some("every WebCache row failed"),
+      ))),
+      LegacyEnginePolicy::InternetExplorer,
+    )
+    .expect_err("all rejected WebCache rows must fail the legacy projection");
+
+    assert!(error.to_string().contains("every WebCache row failed"));
+    assert!(!is_browser_not_installed(&error));
+
+    let mut source = persistent_source(None, None);
+    source.rows_seen = 1;
+    source.rows_skipped = 1;
+    let error = project_engine_outcome(
+      "internet_explorer",
+      profile_with(Some(source)),
+      LegacyEnginePolicy::InternetExplorer,
+    )
+    .expect_err("skipped WebCache rows need an error even without a detailed row message");
+    assert!(error
+      .to_string()
+      .contains("all Internet Explorer WebCache records failed to decode"));
   }
 
   #[test]
@@ -311,7 +385,7 @@ mod tests {
       failed_session_source("/browser/default/sessionstore.js", "invalid JSON"),
     ]);
 
-    let error = project_engine_outcome("firefox", outcome, true)
+    let error = project_engine_outcome("firefox", outcome, LegacyEnginePolicy::Gecko)
       .expect_err("all existing session candidates failed");
     let message = error.to_string();
     assert!(message.contains("all existing Firefox session store candidates failed"));
@@ -326,8 +400,10 @@ mod tests {
       failed_session_source("/browser/default/recovery.jsonlz4", "invalid mozLz4"),
       selected_empty,
     ]);
-    assert!(project_engine_outcome("firefox", recovered, true)
-      .expect("an authoritative empty session source is still a success")
-      .is_empty());
+    assert!(
+      project_engine_outcome("firefox", recovered, LegacyEnginePolicy::Gecko)
+        .expect("an authoritative empty session source is still a success")
+        .is_empty()
+    );
   }
 }

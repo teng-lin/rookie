@@ -591,6 +591,21 @@ struct ResolvedRoot {
   suffix: String,
 }
 
+fn environment_value<'a>(
+  platform: PlatformId,
+  env: &'a BTreeMap<OsString, OsString>,
+  name: &str,
+) -> Option<&'a OsString> {
+  if platform == PlatformId::Windows {
+    env
+      .iter()
+      .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+      .map(|(_, value)| value)
+  } else {
+    env.get(OsStr::new(name))
+  }
+}
+
 impl DiscoveryContext<RealDiscoveryFs> {
   fn system() -> Result<Self> {
     let platform = PlatformId::current()?;
@@ -600,16 +615,15 @@ impl DiscoveryContext<RealDiscoveryFs> {
 
   fn from_system_env(platform: PlatformId, env: BTreeMap<OsString, OsString>) -> Result<Self> {
     let home_key = if platform == PlatformId::Windows {
-      OsStr::new("USERPROFILE")
+      "USERPROFILE"
     } else {
-      OsStr::new("HOME")
+      "HOME"
     };
-    let home = env
-      .get(home_key)
+    let home = environment_value(platform, &env, home_key)
       .filter(|value| !value.is_empty())
       .map(PathBuf::from);
     if platform != PlatformId::Windows && home.is_none() {
-      bail!("{} is not set", home_key.to_string_lossy())
+      bail!("{home_key} is not set")
     }
     Ok(Self {
       platform,
@@ -622,9 +636,7 @@ impl DiscoveryContext<RealDiscoveryFs> {
 
 impl<F> DiscoveryContext<F> {
   fn env_path(&self, name: &str) -> Option<PathBuf> {
-    self
-      .env
-      .get(OsStr::new(name))
+    environment_value(self.platform, &self.env, name)
       .filter(|value| !value.is_empty())
       .map(PathBuf::from)
   }
@@ -1449,29 +1461,24 @@ where
           .iter()
           .map(move |profile| (installation, profile))
       })
-      .enumerate()
-      .filter_map(|(order, (installation, profile))| {
+      .filter_map(|(installation, profile)| {
         profile.selected_source_precedence().map(|precedence| {
           let profile_group = match profile.directory_name.as_str() {
             "." | "Default" => 0u8,
             _ => 1,
           };
-          (
+          let rank = (
             installation.legacy_root_group,
             profile_group,
             precedence,
             installation.priority,
-            order,
-            &profile.profile_id,
-          )
+            normalized_path_bytes(&profile.path),
+          );
+          (rank, &profile.profile_id)
         })
       })
-      .min_by_key(
-        |(root_group, profile_group, precedence, priority, order, _)| {
-          (*root_group, *profile_group, *precedence, *priority, *order)
-        },
-      )
-      .map(|(_, _, _, _, _, profile_id)| profile_id.clone()),
+      .min_by(|(left, _), (right, _)| left.cmp(right))
+      .map(|(_, profile_id)| profile_id.clone()),
     _ => None,
   };
 
@@ -2026,6 +2033,9 @@ pub(crate) struct EngineProfileExtraction {
   pub(crate) profile_id: String,
   pub(crate) installation_id: String,
   pub(crate) installation_priority: u16,
+  /// Discovery order within one installation, retained for compatibility
+  /// selectors even though generic reports use display-name ordering.
+  pub(crate) legacy_profile_order: usize,
   pub(crate) installation_path: PathBuf,
   pub(crate) name: String,
   pub(crate) path: PathBuf,
@@ -2087,8 +2097,8 @@ fn select_engine_profiles(
         .retain(|profile| profile.profile_id == profile_id);
     }
     ProfileSelection::LegacyFirstProfile => {
-      // Historical Gecko selectors required `cookies.sqlite`; session-only
-      // profiles are report-capable but are not candidates for that API.
+      // Compatibility selectors require a persistent source; session-only
+      // profiles remain report-capable but are not candidates for those APIs.
       outcome
         .profiles
         .retain(|profile| profile.persistent_source_discovered);
@@ -2426,7 +2436,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
       outcome.installations_enumerated += 1;
     }
 
-    for declared_profile in usable {
+    for (legacy_profile_order, declared_profile) in usable.into_iter().enumerate() {
       let profile_path = match context.fs.canonicalize(&declared_profile.path) {
         Ok(path) => path,
         Err(error) => {
@@ -2456,6 +2466,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         profile_id: profile_id(&installation_id, locator),
         installation_id: installation_id.clone(),
         installation_priority: root.priority,
+        legacy_profile_order,
         installation_path: canonical_root.clone(),
         name: declared_profile.name,
         persistent_source_discovered: context.fs.exists(&profile_path.join("cookies.sqlite")),
@@ -2641,6 +2652,28 @@ pub(crate) fn gecko_report(
   gecko_report_with_context(&context, browser_id, profile_id, domains.as_deref())
 }
 
+fn select_legacy_gecko_profile(outcome: &mut EngineExtractionOutcome) {
+  // Generic Gecko reports remain display-name sorted. The compatibility
+  // selector instead uses the default profile when it has cookies.sqlite,
+  // then falls back in profiles.ini declaration order within each root.
+  outcome
+    .profiles
+    .retain(|profile| profile.persistent_source_discovered);
+  outcome.profiles.sort_by(|left, right| {
+    left
+      .installation_priority
+      .cmp(&right.installation_priority)
+      .then_with(|| {
+        normalized_path_bytes(&left.installation_path)
+          .cmp(&normalized_path_bytes(&right.installation_path))
+      })
+      .then_with(|| (!left.is_default).cmp(&(!right.is_default)))
+      .then_with(|| left.legacy_profile_order.cmp(&right.legacy_profile_order))
+      .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
+  });
+  outcome.profiles.truncate(1);
+}
+
 /// Extracts the first persistent Gecko profile through the authoritative
 /// discovery engine. Session-only profiles remain available to reports but do
 /// not silently change the historical named-API contract.
@@ -2650,11 +2683,7 @@ pub(crate) fn legacy_gecko_outcome(
 ) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
   let mut outcome = discover_gecko_with_context(&context, browser_id)?;
-  select_engine_profiles(
-    &mut outcome,
-    browser_id,
-    ProfileSelection::LegacyFirstProfile,
-  )?;
+  select_legacy_gecko_profile(&mut outcome);
   Ok(populate_gecko_sources_with_order(
     outcome,
     domains.as_deref(),
@@ -2791,7 +2820,7 @@ fn discover_safari_with_context<F: DiscoveryFs>(
       ));
     }
 
-    for profile in profiles {
+    for (legacy_profile_order, profile) in profiles.into_iter().enumerate() {
       let selected = match safari::first_existing_cookie_candidate(&profile.cookie_candidates) {
         Ok(Some(path)) => path.clone(),
         // A discovered profile with no cookie source is normal absence, not an
@@ -2870,6 +2899,7 @@ fn discover_safari_with_context<F: DiscoveryFs>(
         profile_id: profile_id(&installation_id, locator),
         installation_id: installation_id.clone(),
         installation_priority: root.priority,
+        legacy_profile_order,
         installation_path: canonical_root.clone(),
         name: profile.name,
         path: profile_path,
@@ -2970,6 +3000,18 @@ pub(crate) fn safari_report(
   safari_report_with_context(&context, browser_id, profile_id, domains.as_deref())
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn select_legacy_safari_profile(
+  outcome: &mut EngineExtractionOutcome,
+  browser_id: &str,
+) -> Result<()> {
+  // The historical named wrapper probed only Safari's two default cookie
+  // locations. Named profiles remain report-capable, but must never become a
+  // fallback when both default locations are absent.
+  outcome.profiles.retain(|profile| profile.is_default);
+  select_engine_profiles(outcome, browser_id, ProfileSelection::LegacyFirstProfile)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn legacy_safari_outcome(
   browser_id: &str,
@@ -2977,11 +3019,7 @@ pub(crate) fn legacy_safari_outcome(
 ) -> Result<EngineExtractionOutcome> {
   let context = DiscoveryContext::system()?;
   let mut outcome = discover_safari_with_context(&context, browser_id)?;
-  select_engine_profiles(
-    &mut outcome,
-    browser_id,
-    ProfileSelection::LegacyFirstProfile,
-  )?;
+  select_legacy_safari_profile(&mut outcome, browser_id)?;
   Ok(populate_safari_sources(
     outcome,
     domains.as_deref(),
@@ -3091,6 +3129,7 @@ fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       profile_id: profile_id(&installation_id, ProfileLocator::Relative(Path::new(""))),
       installation_id,
       installation_priority: root.priority,
+      legacy_profile_order: 0,
       installation_path: canonical_root.clone(),
       name: "default".to_owned(),
       path: canonical_root,
@@ -3588,16 +3627,16 @@ mod tests {
     let roaming_app_data = temp.path().join("AppData");
     let env = BTreeMap::from([
       (
-        OsString::from("LOCALAPPDATA"),
+        OsString::from("LocalAppData"),
         local_app_data.clone().into_os_string(),
       ),
       (
-        OsString::from("APPDATA"),
+        OsString::from("AppData"),
         roaming_app_data.clone().into_os_string(),
       ),
     ]);
     let context = DiscoveryContext::from_system_env(PlatformId::Windows, env)
-      .expect("Windows registry discovery does not require USERPROFILE");
+      .expect("Windows registry discovery uses case-insensitive env without USERPROFILE");
     assert!(context.home.is_none());
 
     let chrome_root = channel_root(&context, "stable");
@@ -4807,6 +4846,42 @@ mod tests {
   }
 
   #[test]
+  fn legacy_gecko_fallback_preserves_profiles_ini_declaration_order() {
+    let temp = TempDir::new("gecko-legacy-declaration-order");
+    let context = test_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "firefox");
+    std::fs::create_dir_all(root.join("Profiles/unusable-default"))
+      .expect("create source-less default profile");
+    test_seams::seed_gecko_profile(&root.join("Profiles/first-declared"));
+    test_seams::seed_gecko_profile(&root.join("Profiles/second-declared"));
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=Default\nIsRelative=1\nPath=Profiles/unusable-default\nDefault=1\n\
+       [Profile1]\nName=Zulu\nIsRelative=1\nPath=Profiles/first-declared\n\
+       [Profile2]\nName=Alpha\nIsRelative=1\nPath=Profiles/second-declared\n",
+    )
+    .expect("write profiles.ini");
+
+    let mut outcome = discover_gecko_with_context(&context, "firefox").expect("discover");
+    assert_eq!(
+      outcome
+        .profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>(),
+      ["Alpha", "Zulu"],
+      "generic report ordering remains display-name based"
+    );
+
+    select_legacy_gecko_profile(&mut outcome);
+    assert_eq!(outcome.profiles.len(), 1);
+    assert_eq!(outcome.profiles[0].name, "Zulu");
+    assert!(outcome.profiles[0]
+      .path
+      .ends_with("Profiles/first-declared"));
+  }
+
+  #[test]
   fn a_profile_selected_safari_report_reads_only_the_selected_profile() {
     const NAMED_PROFILE_UUID: &str = "01234567-89AB-CDEF-0123-456789ABCDEF";
 
@@ -4860,6 +4935,42 @@ mod tests {
     let unknown = safari_report_with_context(&context, "safari", Some("not-a-profile"), None)
       .expect_err("an unknown profile id is a request error");
     assert!(unknown.to_string().contains("unknown safari profile id"));
+  }
+
+  #[test]
+  fn legacy_safari_does_not_fall_back_to_a_named_profile() {
+    const NAMED_PROFILE_UUID: &str = "01234567-89AB-CDEF-0123-456789ABCDEF";
+
+    let temp = TempDir::new("safari-legacy-default-only");
+    let context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&context, "safari");
+    let data = library.join("Containers/com.apple.Safari/Data/Library");
+    std::fs::create_dir_all(data.join(format!("Safari/Profiles/{NAMED_PROFILE_UUID}")))
+      .expect("create named Safari profile marker");
+    let named_directory = data.join(format!(
+      "WebKit/WebsiteDataStore/{}/WebsiteData/Cookies",
+      NAMED_PROFILE_UUID.to_ascii_lowercase()
+    ));
+    std::fs::create_dir_all(&named_directory).expect("create named Safari cookie directory");
+    std::fs::write(
+      named_directory.join(SAFARI_COOKIE_FILE),
+      b"cook\x00\x00\x00\x00",
+    )
+    .expect("seed named Safari cookie store");
+
+    let mut outcome = discover_safari_with_context(&context, "safari").expect("discover Safari");
+    assert_eq!(outcome.profiles.len(), 1);
+    assert!(!outcome.profiles[0].is_default);
+
+    select_legacy_safari_profile(&mut outcome, "safari").expect("select legacy Safari profile");
+    assert!(outcome.profiles.is_empty());
+    let mut queries = 0;
+    let outcome = populate_safari_sources(outcome, None, |_, _| {
+      queries += 1;
+      bail!("named Safari profile must not be queried by the legacy selector")
+    });
+    assert!(outcome.profiles.is_empty());
+    assert_eq!(queries, 0);
   }
 
   #[test]
@@ -7218,6 +7329,57 @@ mod tests {
       native.join("Default").canonicalize().unwrap()
     );
     assert_eq!(extraction.cookies[0].name, "native-legacy");
+    assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
+  }
+
+  #[test]
+  fn legacy_chromium_profile_fallback_uses_directory_not_display_order() {
+    let temp = TempDir::new("legacy-profile-directory-order");
+    let context = test_context(temp.path().to_path_buf());
+    let root = channel_root(&context, "stable");
+    seed_cookie(&root.join("Profile 1"), true, "first-directory", "one");
+    seed_cookie(&root.join("Profile 2"), true, "second-directory", "two");
+    write_local_state(
+      &root,
+      serde_json::json!({
+        "profile": {
+          "info_cache": {
+            "Profile 1": {"name": "Personal"},
+            "Profile 2": {"name": "Business"}
+          }
+        }
+      }),
+    );
+
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover Chrome");
+    assert_eq!(
+      discovery
+        .profiles()
+        .iter()
+        .map(|profile| profile.directory_name.as_str())
+        .collect::<Vec<_>>(),
+      ["Profile 2", "Profile 1"],
+      "generic report ordering remains display-name based"
+    );
+
+    let provider = CountingProvider::default();
+    let report = extract_chromium_with_provider_and_selection(
+      &context,
+      "chrome",
+      ProfileSelection::LegacyFirstProfile,
+      None,
+      &provider,
+    )
+    .expect("legacy extraction");
+    let extraction = report
+      .installations
+      .iter()
+      .flat_map(|installation| &installation.profiles)
+      .next()
+      .expect("selected profile");
+
+    assert_eq!(extraction.profile.directory_name, "Profile 1");
+    assert_eq!(extraction.cookies[0].name, "first-directory");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 

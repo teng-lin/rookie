@@ -1018,6 +1018,7 @@ mod tests {
       profile_id: "c".repeat(64),
       installation_id: "d".repeat(64),
       installation_priority: 0,
+      legacy_profile_order: 0,
       installation_path: PathBuf::from("/firefox"),
       name: "default".to_owned(),
       path: PathBuf::from("/firefox/Profiles/default"),
