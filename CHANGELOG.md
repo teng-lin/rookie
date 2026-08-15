@@ -6,6 +6,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (0.6.0):** The npm packages now require Node.js 22 or newer and
+  are tested on Node.js 22, 24, and 26. Node.js 18 and 20 are no longer
+  supported. The Node-API v4 ABI target is unchanged.
+
 ## [0.5.9] - 2026-08-15
 
 ### Added
