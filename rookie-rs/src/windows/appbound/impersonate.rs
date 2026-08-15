@@ -246,18 +246,24 @@ pub struct ImpersonationGuard {
 
 impl Drop for ImpersonationGuard {
   fn drop(&mut self) {
-    let restore_result = unsafe {
-      match self.previous_thread_token.as_ref() {
-        Some(token) => SetThreadToken(None, token.0),
-        None => RevertToSelf(),
-      }
-    };
+    let restore_result = restore_thread_identity(self.previous_thread_token.as_ref());
     if let Err(err) = restore_result {
       // Continuing under SYSTEM (or another unexpected identity) is less safe
       // than terminating. In particular, service and RPC hosts may reuse this
       // thread for an unrelated caller after the guard is dropped.
       log::error!("Failed to restore the caller's Windows thread identity: {err}");
       std::process::abort();
+    }
+  }
+}
+
+fn restore_thread_identity(
+  previous_thread_token: Option<&HandleGuard>,
+) -> windows::core::Result<()> {
+  unsafe {
+    match previous_thread_token {
+      Some(token) => SetThreadToken(None, token.0),
+      None => RevertToSelf(),
     }
   }
 }
@@ -279,13 +285,55 @@ fn capture_thread_token() -> Result<Option<HandleGuard>> {
   }
 }
 
-fn impersonate_with_token(duplicated_token: HandleGuard) -> Result<ImpersonationGuard> {
-  // Save any client identity before replacing it. RevertToSelf only restores
-  // the process token, so it cannot correctly unwind nested impersonation.
-  let previous_thread_token = capture_thread_token()?;
+/// Temporarily removes a caller's thread impersonation so privileged process
+/// operations run under the process identity. If acquisition fails, dropping
+/// this guard restores the captured caller token before the error escapes.
+struct SuspendedThreadIdentity {
+  previous_thread_token: Option<HandleGuard>,
+  _thread_affinity: PhantomData<Rc<()>>,
+}
+
+impl SuspendedThreadIdentity {
+  fn suspend() -> Result<Self> {
+    let previous_thread_token = capture_thread_token()?;
+    if previous_thread_token.is_some() {
+      unsafe {
+        RevertToSelf()?;
+      }
+    }
+    Ok(Self {
+      previous_thread_token,
+      _thread_affinity: PhantomData,
+    })
+  }
+
+  fn into_previous_thread_token(mut self) -> Option<HandleGuard> {
+    self.previous_thread_token.take()
+  }
+}
+
+impl Drop for SuspendedThreadIdentity {
+  fn drop(&mut self) {
+    let Some(previous_thread_token) = self.previous_thread_token.as_ref() else {
+      return;
+    };
+    if let Err(err) = restore_thread_identity(Some(previous_thread_token)) {
+      // The caller identity was removed successfully, so returning through an
+      // error path without restoring it would run embedder code as the process.
+      log::error!("Failed to restore a suspended Windows thread identity: {err}");
+      std::process::abort();
+    }
+  }
+}
+
+fn impersonate_with_suspended_identity(
+  duplicated_token: HandleGuard,
+  suspended_identity: SuspendedThreadIdentity,
+) -> Result<ImpersonationGuard> {
   unsafe {
     ImpersonateLoggedOnUser(duplicated_token.0)?;
   }
+  let previous_thread_token = suspended_identity.into_previous_thread_token();
   Ok(ImpersonationGuard {
     _duplicated_token: duplicated_token,
     previous_thread_token,
@@ -293,7 +341,17 @@ fn impersonate_with_token(duplicated_token: HandleGuard) -> Result<Impersonation
   })
 }
 
+#[cfg(test)]
+fn impersonate_with_token(duplicated_token: HandleGuard) -> Result<ImpersonationGuard> {
+  let suspended_identity = SuspendedThreadIdentity::suspend()?;
+  impersonate_with_suspended_identity(duplicated_token, suspended_identity)
+}
+
 pub fn start_impersonate() -> Result<ImpersonationGuard> {
+  // Service and RPC threads may already impersonate an unprivileged client.
+  // Suspend that identity before process enumeration and LSASS access so the
+  // process token (with temporary SeDebugPrivilege) governs those checks.
+  let suspended_identity = SuspendedThreadIdentity::suspend()?;
   let lsass_handle = {
     let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
       .lock()
@@ -305,7 +363,7 @@ pub fn start_impersonate() -> Result<ImpersonationGuard> {
     lsass_handle
   };
   let duplicated_token = HandleGuard(get_system_token(lsass_handle.0)?);
-  impersonate_with_token(duplicated_token)
+  impersonate_with_suspended_identity(duplicated_token, suspended_identity)
 }
 
 #[cfg(test)]
@@ -400,6 +458,33 @@ mod tests {
       current_thread_token_id(),
       original_id,
       "dropping token B must restore token A, not the process identity"
+    );
+  }
+
+  #[test]
+  fn suspended_identity_uses_process_identity_then_restores_the_caller() {
+    let original = duplicate_current_process_token();
+    let original_id = token_id(original.0);
+
+    unsafe {
+      ImpersonateLoggedOnUser(original.0).expect("impersonate caller token");
+    }
+    let _cleanup = ThreadIdentityCleanup;
+    assert_eq!(current_thread_token_id(), original_id);
+
+    let suspended = SuspendedThreadIdentity::suspend().expect("suspend caller identity");
+    assert!(
+      capture_thread_token()
+        .expect("query suspended thread token")
+        .is_none(),
+      "privileged acquisition must run under the process identity"
+    );
+    drop(suspended);
+
+    assert_eq!(
+      current_thread_token_id(),
+      original_id,
+      "the suspended caller token must be restored on exit"
     );
   }
 }

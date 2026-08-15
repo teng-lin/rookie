@@ -388,6 +388,10 @@ where
   let mut failures = Vec::new();
   for endpoint in KWALLET_ENDPOINTS {
     match attempt(endpoint) {
+      Ok(password) if password.is_empty() => failures.push(format!(
+        "KWallet {}: readPassword returned no matching entry",
+        endpoint.version
+      )),
       Ok(password) => return Ok(password),
       Err(error) => failures.push(format!("KWallet {}: {error:#}", endpoint.version)),
     }
@@ -694,5 +698,32 @@ mod tests {
 
     assert_eq!(password, "password");
     assert_eq!(attempted.into_inner(), [6]);
+  }
+
+  #[test]
+  fn kwallet_falls_back_when_version_6_has_no_matching_entry() {
+    let attempted = RefCell::new(Vec::new());
+    let password = get_password_kdewallet_with_fallback(|endpoint| {
+      attempted.borrow_mut().push(endpoint.version);
+      if endpoint.version == 6 {
+        Ok(String::new())
+      } else {
+        Ok("legacy-password".to_string())
+      }
+    })
+    .unwrap();
+
+    assert_eq!(password, "legacy-password");
+    assert_eq!(attempted.into_inner(), [6, 5]);
+  }
+
+  #[test]
+  fn kwallet_empty_results_are_reported_as_missing_entries() {
+    let error = get_password_kdewallet_with_fallback(|_| Ok(String::new()))
+      .expect_err("empty reads from every endpoint must not become a password")
+      .to_string();
+
+    assert!(error.contains("KWallet 6: readPassword returned no matching entry"));
+    assert!(error.contains("KWallet 5: readPassword returned no matching entry"));
   }
 }
