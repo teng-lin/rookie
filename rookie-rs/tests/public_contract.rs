@@ -22,6 +22,7 @@ use std::str::FromStr;
 
 type BrowserFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 
+#[cfg_attr(target_os = "linux", allow(deprecated))]
 const COMMON_BROWSER_SELECTORS: &[(&str, BrowserFn)] = &[
   ("arc", rookie_cookies::arc),
   ("brave", rookie_cookies::brave),

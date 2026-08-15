@@ -462,11 +462,15 @@ test.serial("registry-only browsers are reachable through browserReport", async 
       },
     );
     const results = JSON.parse(stdout);
+    const expectedBrowsers =
+      process.platform === "win32"
+        ? ["coccoc", "duckduckgo", "yandex"]
+        : process.platform === "darwin"
+          ? ["coccoc", "yandex"]
+          : [];
+    t.deepEqual(Object.keys(results).sort(), expectedBrowsers);
     for (const [browser, status] of Object.entries(results)) {
       t.is(status, "no_sources", browser);
-    }
-    if (process.platform === "darwin" || process.platform === "win32") {
-      t.true(Object.keys(results).length > 0);
     }
   } finally {
     rmSync(temp, { recursive: true, force: true });
