@@ -28,7 +28,6 @@ const LEGACY_BROWSERS: &[&str] = &[
   "firefox",
   "librewolf",
   "opera",
-  "opera gx",
   "vivaldi",
   "zen",
 ];
@@ -42,7 +41,7 @@ const LEGACY_BROWSERS: &[&str] = &[
   "firefox",
   "librewolf",
   "opera",
-  "opera gx",
+  "opera_gx",
   "safari",
   "vivaldi",
   "zen",
@@ -57,8 +56,9 @@ const LEGACY_BROWSERS: &[&str] = &[
   "firefox",
   "internet_explorer",
   "librewolf",
+  "octo_browser",
   "opera",
-  "opera gx",
+  "opera_gx",
   "vivaldi",
   "zen",
 ];
@@ -72,7 +72,6 @@ const LEGACY_BROWSERS: &[&str] = &[
   "firefox",
   "librewolf",
   "opera",
-  "opera gx",
   "vivaldi",
   "zen",
 ];
@@ -695,7 +694,10 @@ fn a_registry_only_browser_without_report_points_at_report() {
   let legacy: Vec<&str> = LEGACY_BROWSERS.to_vec();
   let registry_only: Vec<String> = registered_tokens()
     .into_iter()
-    .filter(|token| !legacy.contains(&token.as_str()))
+    .filter(|token| {
+      !legacy.contains(&token.as_str())
+        && !(legacy.contains(&"opera_gx") && matches!(token.as_str(), "opera gx" | "opera-gx"))
+    })
     .collect();
   if registry_only.is_empty() {
     // Every registered ID on this platform is also a legacy key, so the
@@ -747,6 +749,21 @@ fn report_mode_rejects_ids_that_are_not_registered() {
 }
 
 #[test]
+fn registry_only_browser_batch_is_reachable_when_registered() {
+  let registered = registered_tokens();
+  let root = unique_tmpdir("registry-only-batch");
+  for browser in ["coccoc", "duckduckgo", "yandex"] {
+    if registered.iter().any(|token| token == browser) {
+      let report = parsed_json(&run_isolated(
+        root.path(),
+        &["--report", "--browser", browser],
+      ));
+      assert_eq!(report["status"], "no_sources", "{browser}");
+    }
+  }
+}
+
+#[test]
 fn report_modes_keep_stdout_machine_readable_under_info_logging() {
   let root = unique_tmpdir("report-logging");
   seed_multi_profile_firefox(root.path());
@@ -773,6 +790,15 @@ fn report_modes_keep_stdout_machine_readable_under_info_logging() {
     );
     serde_json::from_str::<serde_json::Value>(&stdout)
       .unwrap_or_else(|err| panic!("{args:?} emitted invalid JSON: {err}"));
+  }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn legacy_opera_gx_aliases_remain_accepted() {
+  for selector in ["opera_gx", "opera-gx", "opera gx"] {
+    let out = run_rookie(&["--browser", selector]);
+    assert_ne!(out.status.code(), Some(USAGE_ERROR_EXIT_CODE), "{selector}");
   }
 }
 

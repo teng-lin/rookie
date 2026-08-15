@@ -55,7 +55,9 @@ and channel difference to appear in an exact reviewed inventory. This prevents
 new drift without copying known-bad legacy spellings (for example
 `Chrome-nightly`, `Edge-nightly`, or `google-chrome-dev`) into the registry.
 Linux `opera_gx` remains an explicit config-only exemption: its legacy entry
-has no paths and is not advertised by generic discovery.
+has no paths and is not advertised by generic discovery. The Rust function is
+retained as a deprecated 0.5 compatibility shim that returns an explicit
+unsupported-platform error; it is not exposed by the Linux CLI or bindings.
 
 Canonical existing IDs are:
 

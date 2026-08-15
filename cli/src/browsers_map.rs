@@ -23,13 +23,18 @@ fn browsers_map() -> BTreeMap<&'static str, BrowserFn> {
   map.insert("zen", rookie_cookies::zen as BrowserFn);
 
   #[cfg(target_os = "windows")]
-  map.insert(
-    "internet_explorer",
-    rookie_cookies::internet_explorer as BrowserFn,
-  );
+  {
+    map.insert(
+      "internet_explorer",
+      rookie_cookies::internet_explorer as BrowserFn,
+    );
+    map.insert("octo_browser", rookie_cookies::octo_browser as BrowserFn);
+  }
   map.insert("librewolf", rookie_cookies::librewolf as BrowserFn);
   map.insert("opera", rookie_cookies::opera as BrowserFn);
-  map.insert("opera gx", rookie_cookies::opera_gx as BrowserFn);
+
+  #[cfg(any(target_os = "macos", target_os = "windows"))]
+  map.insert("opera_gx", rookie_cookies::opera_gx as BrowserFn);
 
   #[cfg(target_os = "macos")]
   map.insert("safari", rookie_cookies::safari as BrowserFn);

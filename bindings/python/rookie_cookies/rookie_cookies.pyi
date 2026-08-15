@@ -210,15 +210,6 @@ def vivaldi(domains: Optional[List[str]] = None) -> CookieList:
     """
     ...
 
-def opera_gx(domains: Optional[List[str]] = None) -> CookieList:
-    """
-    Extract Cookies from Opera GX browser
-
-    :param domains: Optional list of domains to extract only from them
-    :return: A list of dictionaries of cookies
-    """
-    ...
-
 def librewolf(domains: Optional[List[str]] = None) -> CookieList:
     """
     Extract Cookies from LibreWolf browser
@@ -365,8 +356,16 @@ if platform == "win32":
         """
         ...
 
+    def opera_gx(domains: Optional[List[str]] = None) -> CookieList:
+        """Extract Cookies from Opera GX browser."""
+        ...
+
 # MacOS
 if platform == "darwin":
+    def opera_gx(domains: Optional[List[str]] = None) -> CookieList:
+        """Extract Cookies from Opera GX browser."""
+        ...
+
     def safari(domains: Optional[List[str]] = None) -> CookieList:
         """
         Extract Cookies from Safari browser
@@ -374,4 +373,10 @@ if platform == "darwin":
         :param domains: Optional list of domains to extract only from them
         :return: A list of dictionaries of cookies
         """
+        ...
+
+# Linux
+if platform.startswith("linux"):
+    def cachy(domains: Optional[List[str]] = None) -> CookieList:
+        """Extract Cookies from Cachy Browser."""
         ...

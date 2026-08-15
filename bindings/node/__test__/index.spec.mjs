@@ -33,6 +33,7 @@ const EXPECTED_EXPORTS = [
   "firefox",
   "zen",
   "librewolf",
+  "cachy",
   "chrome",
   "brave",
   "arc",
@@ -142,6 +143,15 @@ test("the generated facade validates required native exports", (t) => {
 });
 
 test("platform exports are required only on their supported OS", async (t) => {
+  t.throws(() => constructFacade("linux", "cachy"), {
+    message: /native binding function: cachy/,
+  });
+  t.throws(() => constructFacade("darwin", "operaGx"), {
+    message: /native binding function: operaGx/,
+  });
+  t.throws(() => constructFacade("win32", "operaGx"), {
+    message: /native binding function: operaGx/,
+  });
   t.throws(() => constructFacade("win32", "octoBrowser"), {
     message: /native binding function: octoBrowser/,
   });
@@ -152,6 +162,12 @@ test("platform exports are required only on their supported OS", async (t) => {
   const linux = constructFacade("linux", "octoBrowser");
   await t.throwsAsync(linux.octoBrowser(), {
     message: /only available on Windows/,
+  });
+  await t.throwsAsync(constructFacade("darwin", "cachy").cachy(), {
+    message: /only available on Linux/,
+  });
+  await t.throwsAsync(constructFacade("linux", "operaGx").operaGx(), {
+    message: /only available on macOS and Windows/,
   });
 });
 
@@ -281,6 +297,7 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     ["firefoxBasedDetailed", () => rookieCookies.firefoxBasedDetailed(42)],
     ["zen", () => rookieCookies.zen(42)],
     ["librewolf", () => rookieCookies.librewolf(42)],
+    ["cachy", () => rookieCookies.cachy(42)],
     ["chrome", () => rookieCookies.chrome(42)],
     ["brave", () => rookieCookies.brave(42)],
     ["arc", () => rookieCookies.arc(42)],
@@ -425,6 +442,35 @@ test("supportedBrowsers describes registered browsers in camelCase", async (t) =
 test("unknown browser identifiers reject rather than resolving empty", async (t) => {
   await t.throwsAsync(rookieCookies.browserProfiles("not_a_browser"));
   await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
+});
+
+test.serial("registry-only browsers are reachable through browserReport", async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "rookie-node-registry-only-"));
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [fileURLToPath(new URL("registry-only-child.mjs", import.meta.url))],
+      {
+        env: {
+          ...process.env,
+          HOME: temp,
+          USERPROFILE: temp,
+          APPDATA: join(temp, "AppData", "Roaming"),
+          LOCALAPPDATA: join(temp, "AppData", "Local"),
+          XDG_CONFIG_HOME: join(temp, ".config"),
+        },
+      },
+    );
+    const results = JSON.parse(stdout);
+    for (const [browser, status] of Object.entries(results)) {
+      t.is(status, "no_sources", browser);
+    }
+    if (process.platform === "darwin" || process.platform === "win32") {
+      t.true(Object.keys(results).length > 0);
+    }
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test.serial("loadReport resolves a report whose counters are plain numbers", async (t) => {
@@ -880,6 +926,7 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "firefoxProfile",
     "zen",
     "librewolf",
+    "cachy",
     "chrome",
     "brave",
     "arc",

@@ -88,17 +88,25 @@ console.log(cookies);
 | Cachy | ✓ | — | — |
 | Chrome | ✓ | ✓ | ✓ |
 | Chromium | ✓ | ✓ | ✓ |
+| Cốc Cốc | — | ✓ | ✓ |
+| DuckDuckGo | — | — | ✓ |
 | Edge | ✓ | ✓ | ✓ |
 | Firefox | ✓ | ✓ | ✓ |
 | Internet Explorer | — | — | ✓ |
 | LibreWolf | ✓ | ✓ | ✓ |
+| Octo Browser | — | — | ✓ |
 | Opera | ✓ | ✓ | ✓ |
 | Opera GX | — | ✓ | ✓ |
 | Safari | — | ✓ | — |
 | Vivaldi | ✓ | ✓ | ✓ |
+| Yandex | — | ✓ | ✓ |
 | Zen | ✓ | ✓ | ✓ |
 
-Browser profile discovery is platform-specific. Every browser extractor also has a lower-level `*_based` or `from_path` form for explicit database/profile paths; see the language-specific documentation and examples.
+Registry-only browsers such as Cốc Cốc, DuckDuckGo, and Yandex are available
+through the generic report/profile APIs and CLI report mode. Browser profile
+discovery is platform-specific. Every legacy browser extractor also has a
+lower-level `*_based` or `from_path` form for explicit database/profile paths;
+see the language-specific documentation and examples.
 
 ## Testing
 

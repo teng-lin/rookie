@@ -202,7 +202,6 @@ export declare function brave(domains?: Array<string> | undefined | null): Promi
 export declare function arc(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function edge(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function opera(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function chromium(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function vivaldi(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
@@ -258,6 +257,10 @@ export declare function browserReport(browserId: string, profileId?: string | un
  */
 export declare function loadReport(domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
 /** rookie-cookies cross-platform facade */
+/** Linux-only browsers */
+export declare function cachy(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** macOS- and Windows-only browsers */
+export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

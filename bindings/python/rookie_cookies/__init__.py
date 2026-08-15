@@ -25,7 +25,6 @@ from .rookie_cookies import (
     load,
     load_report,
     opera,
-    opera_gx,
     supported_browsers,
     version,
     vivaldi,
@@ -56,7 +55,6 @@ __all__ = [
     "load",
     "load_report",
     "opera",
-    "opera_gx",
     "supported_browsers",
     "to_cookiejar",
     "to_netscape",
@@ -85,15 +83,24 @@ if platform == "win32":
     from .rookie_cookies import (
         octo_browser as octo_browser,
     )
+    from .rookie_cookies import opera_gx as opera_gx
 
-    __all__.extend(["internet_explorer", "octo_browser"])
+    __all__.extend(["internet_explorer", "octo_browser", "opera_gx"])
 
 
 # macOS
 if platform == "darwin":
+    from .rookie_cookies import opera_gx as opera_gx
     from .rookie_cookies import safari as safari
 
-    __all__.append("safari")
+    __all__.extend(["opera_gx", "safari"])
+
+
+# Linux
+if platform.startswith("linux"):
+    from .rookie_cookies import cachy as cachy
+
+    __all__.append("cachy")
 
 
 def create_cookie(

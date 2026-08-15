@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
+const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -350,12 +350,11 @@ function unsupportedPlatform(name, supportedPlatform) {
   ))
 }
 
-function platformNative(nativeFunction, name, nodePlatform, supportedPlatform) {
-  if (typeof nativeFunction === 'function') {
-    return asyncNative(nativeFunction, name)
-  }
-  if (platform === nodePlatform) {
+function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) {
+  const supported = Array.isArray(nodePlatforms) ? nodePlatforms : [nodePlatforms]
+  if (supported.includes(platform)) {
     requiredNative(nativeFunction, name)
+    return asyncNative(nativeFunction, name)
   }
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
@@ -366,12 +365,13 @@ module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
 module.exports.firefox = asyncNative(firefox, 'firefox')
 module.exports.zen = asyncNative(zen, 'zen')
 module.exports.librewolf = asyncNative(librewolf, 'librewolf')
+module.exports.cachy = platformNative(cachy, 'cachy', 'linux', 'Linux')
 module.exports.chrome = asyncNative(chrome, 'chrome')
 module.exports.brave = asyncNative(brave, 'brave')
 module.exports.arc = asyncNative(arc, 'arc')
 module.exports.edge = asyncNative(edge, 'edge')
 module.exports.opera = asyncNative(opera, 'opera')
-module.exports.operaGx = asyncNative(operaGx, 'operaGx')
+module.exports.operaGx = platformNative(operaGx, 'operaGx', ['darwin', 'win32'], 'macOS and Windows')
 module.exports.chromium = asyncNative(chromium, 'chromium')
 module.exports.vivaldi = asyncNative(vivaldi, 'vivaldi')
 module.exports.load = asyncNative(load, 'load')
