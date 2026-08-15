@@ -146,14 +146,25 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
 
       - name: Upload Unix
-        run: gh release upload "$RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }} --clobber
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="rookie-cookies-cli-${{ matrix.target }}"
+          shasum -a 256 "$artifact" > "$artifact.sha256"
+          gh release upload "$RELEASE_TAG" "$artifact" "$artifact.sha256" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
         if: contains(matrix.platform, 'macos') || contains(matrix.platform, 'ubuntu')
 
       - name: Upload Windows
-        run: gh release upload "$env:RELEASE_TAG" rookie-cookies-cli-${{ matrix.target }}.exe --clobber
+        shell: pwsh
+        run: |
+          $artifact = "rookie-cookies-cli-${{ matrix.target }}.exe"
+          $checksum = "$artifact.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 $artifact).Hash.ToLowerInvariant()
+          "$hash  $artifact" | Set-Content -Encoding ascii $checksum
+          gh release upload "$env:RELEASE_TAG" $artifact $checksum --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
