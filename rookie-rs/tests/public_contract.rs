@@ -8,7 +8,9 @@ use rookie_cookies::common::format;
 use rookie_cookies::config::{
   get_browser_config, try_get_browser_config, Browser, BrowsersMap, Config, CONFIG,
 };
-use rookie_cookies::enums::{Cookie, CookieToString, SAME_SITE_UNSPECIFIED};
+use rookie_cookies::enums::{
+  Cookie, CookieContext, CookieToString, DetailedCookie, SAME_SITE_UNSPECIFIED,
+};
 use rookie_cookies::report::{
   BrowserDescriptor, ExtractionReport, IssueCode, ProfileDescriptor, ReportStatusCode,
 };
@@ -106,16 +108,64 @@ fn public_cookie_and_config_types_remain_constructible() {
 }
 
 #[test]
+fn detailed_cookie_is_additive_and_projects_to_the_unchanged_cookie() {
+  let context = CookieContext::default();
+  assert_eq!(context.top_frame_site_key, None);
+  assert_eq!(context.origin_attributes, None);
+
+  let detailed: DetailedCookie = serde_json::from_value(serde_json::json!({
+    "cookie": {
+      "domain": ".example.test",
+      "path": "/",
+      "secure": false,
+      "expires": null,
+      "name": "session",
+      "value": "value",
+      "http_only": true,
+      "same_site": 1
+    },
+    "context": {
+      "top_frame_site_key": "https://top.example",
+      "has_cross_site_ancestor": false,
+      "source_scheme": 2,
+      "source_port": 443,
+      "is_persistent": true,
+      "origin_attributes": null,
+      "user_context_id": null,
+      "partition_key": null,
+      "private_browsing_id": null
+    }
+  }))
+  .expect("deserialize detailed cookie");
+  assert_eq!(detailed.cookie().name, "session");
+  let projected = detailed.into_cookie();
+  assert_eq!(projected.name, "session");
+  assert_eq!(vec![projected].to_string(), "session=value");
+}
+
+#[test]
 fn public_function_signatures_remain_compatible() {
   type FirefoxProfileFn = fn(&str, Option<Vec<String>>) -> Result<Vec<Cookie>>;
   type AnyBrowserFn = fn(&str, Option<Vec<String>>, Option<&str>) -> Result<Vec<Cookie>>;
 
   #[cfg(unix)]
   type ChromiumBasedFn = fn(&Browser, PathBuf, Option<Vec<String>>, bool) -> Result<Vec<Cookie>>;
+  #[cfg(unix)]
+  type ChromiumBasedDetailedFn =
+    fn(&Browser, PathBuf, Option<Vec<String>>, bool) -> Result<Vec<DetailedCookie>>;
+  #[cfg(unix)]
+  type ChromiumBasedWithBrowserIdFn =
+    fn(Option<&str>, PathBuf, Option<Vec<String>>, bool) -> Result<Vec<Cookie>>;
+  #[cfg(unix)]
+  type ChromiumBasedDetailedWithBrowserIdFn =
+    fn(Option<&str>, PathBuf, Option<Vec<String>>, bool) -> Result<Vec<DetailedCookie>>;
   #[cfg(target_os = "windows")]
   type InternetExplorerBasedFn = fn(PathBuf, Option<Vec<String>>, bool) -> Result<Vec<Cookie>>;
   #[cfg(target_os = "windows")]
   type ChromiumBasedFn = fn(PathBuf, PathBuf, Option<Vec<String>>, bool) -> Result<Vec<Cookie>>;
+  #[cfg(target_os = "windows")]
+  type ChromiumBasedDetailedFn =
+    fn(PathBuf, PathBuf, Option<Vec<String>>, bool) -> Result<Vec<DetailedCookie>>;
 
   for (_, function) in COMMON_BROWSER_SELECTORS
     .iter()
@@ -132,6 +182,8 @@ fn public_function_signatures_remain_compatible() {
   let _: FirefoxProfileFn = rookie_cookies::firefox_profile;
   let _: fn() -> Result<Vec<MozillaProfile>> = rookie_cookies::firefox_profiles;
   let _: fn(PathBuf, Option<Vec<String>>) -> Result<Vec<Cookie>> = rookie_cookies::firefox_based;
+  let _: fn(PathBuf, Option<Vec<String>>) -> Result<Vec<DetailedCookie>> =
+    rookie_cookies::firefox_based_detailed;
   let _: AnyBrowserFn = rookie_cookies::any_browser;
   let _: fn(&MozillaProfile) -> (&String, &PathBuf, bool) = read_mozilla_profile_fields;
   let _: fn(Vec<rookie_cookies::common::enums::Cookie>) -> String =
@@ -147,8 +199,21 @@ fn public_function_signatures_remain_compatible() {
   #[cfg(unix)]
   let _: ChromiumBasedFn = rookie_cookies::chromium_based;
 
+  #[cfg(unix)]
+  let _: ChromiumBasedDetailedFn = rookie_cookies::chromium_based_detailed;
+
+  #[cfg(unix)]
+  let _: ChromiumBasedWithBrowserIdFn = rookie_cookies::chromium_based_with_browser_id;
+
+  #[cfg(unix)]
+  let _: ChromiumBasedDetailedWithBrowserIdFn =
+    rookie_cookies::chromium_based_detailed_with_browser_id;
+
   #[cfg(target_os = "windows")]
   let _: ChromiumBasedFn = rookie_cookies::chromium_based;
+
+  #[cfg(target_os = "windows")]
+  let _: ChromiumBasedDetailedFn = rookie_cookies::chromium_based_detailed;
 }
 
 #[test]

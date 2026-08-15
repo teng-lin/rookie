@@ -49,3 +49,27 @@ remain visible.
 The CLI keeps the generic contract: list with
 `--list-profiles --browser chrome`, then select by opaque ID with
 `--report --browser chrome --profile PROFILE_ID`.
+
+## Explicit paths and cookie context
+
+Use `firefoxBasedDetailed()` or `chromiumBasedDetailed()` when partition or
+container identity matters. Detailed records contain the unchanged legacy
+cookie object and a separate context object:
+
+```js
+import { chromiumBasedDetailed } from "rookie-cookies";
+
+const records = await chromiumBasedDetailed(
+  "/path/to/Brave/Default/Network/Cookies",
+  ["example.com"],
+  "brave",
+);
+for (const { cookie, context } of records) {
+  console.log(cookie.name, context.topFrameSiteKey);
+}
+```
+
+The third Unix argument is a canonical browser ID from `supportedBrowsers()`.
+It resolves the correct Linux keyring crypt name or macOS Keychain
+service/account. It may be omitted only for a plaintext-only database;
+encrypted rows reject explicitly.

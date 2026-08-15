@@ -43,7 +43,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, testWorkerPanic } = nativeBinding'
+  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
 )
 
 const exportStart = loader.search(
@@ -107,11 +107,13 @@ module.exports.octoBrowser = platformNative(octoBrowser, 'octoBrowser', 'win32',
 module.exports.internetExplorer = platformNative(internetExplorer, 'internetExplorer', 'win32', 'Windows')
 module.exports.safari = platformNative(safari, 'safari', 'darwin', 'macOS')
 module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
+module.exports.chromiumBasedDetailed = asyncNative(chromiumBasedDetailed, 'chromiumBasedDetailed')
 module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
 module.exports.firefoxProfile = asyncNative(firefoxProfile, 'firefoxProfile')
 module.exports.chromeProfiles = asyncNative(chromeProfiles, 'chromeProfiles')
 module.exports.chromeProfile = asyncNative(chromeProfile, 'chromeProfile')
 module.exports.firefoxBased = asyncNative(firefoxBased, 'firefoxBased')
+module.exports.firefoxBasedDetailed = asyncNative(firefoxBasedDetailed, 'firefoxBasedDetailed')
 module.exports.supportedBrowsers = asyncNative(supportedBrowsers, 'supportedBrowsers')
 module.exports.browserProfiles = asyncNative(browserProfiles, 'browserProfiles')
 module.exports.browserReport = asyncNative(browserReport, 'browserReport')
@@ -149,7 +151,7 @@ generatedNames.delete('testWorkerPanic')
 // napi only generates these on the platform that owns them; the facade
 // re-declares them for every platform, so they are absent from `generatedNames`
 // on most builds and cannot be required of it.
-const platformFunctions = ['octoBrowser', 'internetExplorer', 'safari', 'chromiumBased']
+const platformFunctions = ['octoBrowser', 'internetExplorer', 'safari', 'chromiumBased', 'chromiumBasedDetailed']
 const publishedFunctions = [...loader.matchAll(/^module\.exports\.(\w+) = /gm)]
   .map((match) => match[1])
   .filter((name) => !name.startsWith('__') && !platformFunctions.includes(name))
@@ -172,7 +174,7 @@ if (facadeIndex !== -1) {
 }
 
 types = types.replace(
-  /^export declare function (?:octoBrowser|internetExplorer|safari|chromiumBased|testWorkerPanic)\([^\n]*\):[^\n]*\n?/gm,
+  /^export declare function (?:octoBrowser|internetExplorer|safari|chromiumBased|chromiumBasedDetailed|testWorkerPanic)\([^\n]*\):[^\n]*\n?/gm,
   ''
 )
 types = types.replace(
@@ -189,9 +191,11 @@ export declare function internetExplorer(domains?: Array<string> | undefined | n
 /** macOS-only browsers */
 export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
-export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>
+export declare function chromiumBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<DetailedCookieObject>>
 /** Windows browsers */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function chromiumBasedDetailed(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
 `
 
 // Everything napi generated must still be declared. The platform-specific

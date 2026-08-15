@@ -29,6 +29,7 @@ if (!existsSync(dbPath)) {
 }
 
 const cookies = await rookieCookies.firefoxBased(dbPath, [domain]);
+const detailed = await rookieCookies.firefoxBasedDetailed(dbPath, [domain]);
 
 const seeded = cookies.find((c) => c.name === expectedName);
 if (!seeded) {
@@ -52,6 +53,12 @@ if (
   console.error(
     `Firefox expiry must be Unix seconds near the seeded Max-Age: got ${seeded.expires} at ${now}`,
   );
+  process.exit(1);
+}
+
+const detailedSeeded = detailed.find(({ cookie }) => cookie.name === expectedName);
+if (!detailedSeeded || !("originAttributes" in detailedSeeded.context)) {
+  console.error("detailed Firefox binding omitted the seeded cookie context");
   process.exit(1);
 }
 

@@ -33,6 +33,7 @@ def main() -> int:
         return 1
 
     cookies = rookie_cookies.firefox_based(str(db_path), [domain])
+    detailed = rookie_cookies.firefox_based_detailed(str(db_path), [domain])
 
     expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
@@ -61,6 +62,14 @@ def main() -> int:
             f"got {expires!r} at {now}",
             file=sys.stderr,
         )
+        return 1
+
+    detailed_seeded = next(
+        (record for record in detailed if record["cookie"]["name"] == expected_name),
+        None,
+    )
+    if detailed_seeded is None or "origin_attributes" not in detailed_seeded["context"]:
+        print("detailed Firefox binding omitted the seeded cookie context", file=sys.stderr)
         return 1
 
     print(

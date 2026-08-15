@@ -36,7 +36,9 @@ class RookieCookiesHelpersTest(unittest.TestCase):
                 "browser_report",
                 "chrome_profile",
                 "chrome_profiles",
+                "chromium_based_detailed",
                 "create_cookie",
+                "firefox_based_detailed",
                 "firefox_profile",
                 "firefox_profiles",
                 "load_report",
@@ -89,6 +91,94 @@ class RookieCookiesHelpersTest(unittest.TestCase):
 
         self.assertIsNone(cookie.expires)
         self.assertTrue(cookie.discard)
+
+    def test_firefox_context_distinguishes_container_collisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "cookies.sqlite"
+            with sqlite3.connect(db_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE moz_cookies (
+                        host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+                        name TEXT, value TEXT, isHttpOnly INTEGER,
+                        sameSite INTEGER, originAttributes TEXT
+                    );
+                    INSERT INTO moz_cookies VALUES
+                        ('.example.test', '/', 1, 0, 'session', 'work', 1, 1,
+                         '^userContextId=2&partitionKey=%28https%2Cwork.example%29'),
+                        ('.example.test', '/', 1, 0, 'session', 'personal', 1, 1,
+                         '^userContextId=1&partitionKey=%28https%2Cpersonal.example%29');
+                    """
+                )
+
+            records = rookie_cookies.firefox_based_detailed(str(db_path))
+
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(sorted(record) == ["context", "cookie"] for record in records))
+        contexts = {
+            record["cookie"]["value"]: record["context"] for record in records
+        }
+        self.assertEqual(contexts["work"]["user_context_id"], 2)
+        self.assertEqual(contexts["work"]["partition_key"], "(https,work.example)")
+        self.assertEqual(contexts["personal"]["user_context_id"], 1)
+        self.assertEqual(
+            contexts["personal"]["origin_attributes"],
+            "^userContextId=1&partitionKey=%28https%2Cpersonal.example%29",
+        )
+
+    @unittest.skipIf(sys.platform == "win32", "Windows uses an explicit Local State path")
+    def test_encrypted_chromium_path_without_identity_is_explicit_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "Cookies"
+            with sqlite3.connect(db_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE meta (
+                        key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY,
+                        value LONGVARCHAR
+                    );
+                    INSERT INTO meta (key, value) VALUES ('version', '23');
+                    CREATE TABLE cookies (
+                        host_key TEXT, path TEXT, is_secure INTEGER,
+                        expires_utc INTEGER, name TEXT, value TEXT,
+                        encrypted_value BLOB, is_httponly INTEGER,
+                        samesite INTEGER
+                    );
+                    INSERT INTO cookies VALUES (
+                        '.example.com', '/', 1, 0, 'session', '',
+                        X'763131656E63727970746564', 1, 0
+                    );
+                    """
+                )
+
+            with self.assertRaisesRegex(
+                RuntimeError, r"no browser key identity.*browser_id"
+            ):
+                rookie_cookies.chromium_based(str(db_path))
+
+    @unittest.skipIf(sys.platform == "win32", "Windows uses an explicit Local State path")
+    def test_chromium_browser_ids_are_registry_identities_not_profile_selectors(
+        self,
+    ) -> None:
+        missing_db = str(Path(tempfile.gettempdir()) / "rookie-python-missing-Cookies")
+        profile_like_id = "0" * 64
+        invalid_identities = [
+            ("definitely-not-a-browser", r'unknown browser id "definitely-not-a-browser"'),
+            (
+                "firefox",
+                r'browser id "firefox" resolves to the gecko engine, not Chromium',
+            ),
+            (profile_like_id, rf'unknown browser id "{profile_like_id}"'),
+        ]
+
+        for browser_id, message in invalid_identities:
+            for extract in (
+                rookie_cookies.chromium_based,
+                rookie_cookies.chromium_based_detailed,
+            ):
+                with self.subTest(browser_id=browser_id, extract=extract.__name__):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        extract(missing_db, browser_id=browser_id)
 
     def test_clear_session_cookies_preserves_persistent_cookies(self) -> None:
         session_cookie = dict(COOKIE)

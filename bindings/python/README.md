@@ -75,6 +75,25 @@ Every identifier and code (`status`, `engine`, `role`, `format`, `severity`, …
 is an open snake_case string, so compare against a known value and keep a
 fallback: a build newer than your code can return one you have not seen.
 
+## Detailed cookies and explicit Chromium paths
+
+```python
+from rookie_cookies import chromium_based_detailed, firefox_based_detailed
+
+chromium_records = chromium_based_detailed(
+    "/path/to/Brave/Default/Network/Cookies",
+    ["example.com"],
+    browser_id="brave",
+)
+firefox_records = firefox_based_detailed("/path/to/cookies.sqlite")
+```
+
+Each record contains the familiar cookie dictionary under `cookie` and a
+separate `context` dictionary. Existing functions and cookie dictionaries are
+unchanged. On Unix, `chromium_based()` also accepts `browser_id` as its third
+argument. Omit it only for plaintext-only databases; encrypted rows fail rather
+than using an assumed Chrome identity.
+
 ## Netscape export
 
 ```python

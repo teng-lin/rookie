@@ -36,6 +36,31 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   Ok(cookies)
 }
 
+/// Returns cookies from a Mozilla profile with container and origin attributes
+/// preserved.
+pub fn firefox_based_detailed(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+) -> Result<Vec<DetailedCookie>> {
+  let database = sqlite::with_browser_database(db_path.clone(), |connection| {
+    query_persistent_cookies_mode(connection, domains.as_deref(), true)
+  })?;
+  let persistent = database.into_value();
+  let mut cookies = persistent.detailed_cookies;
+
+  let parent_path = db_path.parent().unwrap_or(Path::new("")).to_path_buf();
+  cookies.extend(get_authoritative_session_detailed_cookies(
+    domains,
+    &parent_path,
+  ));
+  if cookies.is_empty() {
+    if let Some(error) = persistent.last_row_error {
+      return Err(error);
+    }
+  }
+  Ok(cookies)
+}
+
 /// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
 /// character itself so a caller-supplied domain is matched as literal text,
 /// not interpreted as a wildcard pattern. Pair with an `ESCAPE '\'` clause.
@@ -48,6 +73,7 @@ fn escape_like_pattern(input: &str) -> String {
 
 struct PersistentCookieQuery {
   cookies: Vec<Cookie>,
+  detailed_cookies: Vec<DetailedCookie>,
   rows_seen: usize,
   rows_skipped: usize,
   last_row_error: Option<anyhow::Error>,
@@ -71,11 +97,25 @@ fn query_persistent_cookies(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
 ) -> Result<PersistentCookieQuery> {
+  query_persistent_cookies_mode(connection, domains, false)
+}
+
+fn query_persistent_cookies_mode(
+  connection: &rusqlite::Connection,
+  domains: Option<&[String]>,
+  detailed: bool,
+) -> Result<PersistentCookieQuery> {
   let schema_version = mozilla_schema_version(connection)?;
-  let mut query = "
-        SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies
-    "
-  .to_string();
+  let columns = sqlite_table_columns(connection, "moz_cookies")?;
+  let origin_attributes = if columns.contains("originAttributes") {
+    "originAttributes"
+  } else {
+    "NULL AS originAttributes"
+  };
+  let mut query = format!(
+    "SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite, \
+     {origin_attributes} FROM moz_cookies "
+  );
 
   let domain_filters: Vec<String> = domains
     .map(|domains| {
@@ -102,6 +142,7 @@ fn query_persistent_cookies(
   query += ";";
 
   let mut cookies: Vec<Cookie> = vec![];
+  let mut detailed_cookies: Vec<DetailedCookie> = vec![];
   let mut last_row_error: Option<anyhow::Error> = None;
   let mut rows_seen = 0;
   let mut rows_skipped = 0;
@@ -165,24 +206,78 @@ fn query_persistent_cookies(
       .flatten()
       .unwrap_or(SAME_SITE_UNSPECIFIED);
     let cookie = Cookie {
-      domain: host.to_string(),
-      path: path.to_string(),
+      domain: host,
+      path,
       secure: is_secure,
       expires,
-      name: name.to_string(),
+      name,
       value,
       http_only,
       same_site,
     };
-    cookies.push(cookie);
+    if detailed {
+      let origin_attributes = match row.get::<_, Option<String>>(8) {
+        Ok(origin_attributes) => origin_attributes,
+        Err(error) => {
+          log::warn!("Failed to read originAttributes from Firefox cookie row: {error}");
+          last_row_error = Some(anyhow!(
+            "failed to read originAttributes from Firefox cookie row: {error}"
+          ));
+          rows_skipped += 1;
+          continue;
+        }
+      };
+      detailed_cookies.push(DetailedCookie {
+        cookie,
+        context: firefox_cookie_context(origin_attributes),
+      });
+    } else {
+      cookies.push(cookie);
+    }
   }
 
   Ok(PersistentCookieQuery {
     cookies,
+    detailed_cookies,
     rows_seen,
     rows_skipped,
     last_row_error,
   })
+}
+
+fn sqlite_table_columns(
+  connection: &rusqlite::Connection,
+  table: &str,
+) -> Result<std::collections::HashSet<String>> {
+  let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+  let columns = statement
+    .query_map([], |row| row.get::<_, String>(1))?
+    .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+  Ok(columns)
+}
+
+fn firefox_cookie_context(origin_attributes: Option<String>) -> CookieContext {
+  let mut context = CookieContext {
+    origin_attributes,
+    ..CookieContext::default()
+  };
+  let Some(attributes) = context.origin_attributes.as_deref() else {
+    return context;
+  };
+  for (name, value) in url::form_urlencoded::parse(
+    attributes
+      .strip_prefix('^')
+      .unwrap_or(attributes)
+      .as_bytes(),
+  ) {
+    match name.as_ref() {
+      "userContextId" => context.user_context_id = value.parse().ok(),
+      "partitionKey" => context.partition_key = Some(value.into_owned()),
+      "privateBrowsingId" => context.private_browsing_id = value.parse().ok(),
+      _ => {}
+    }
+  }
+  context
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +337,7 @@ const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
 #[derive(Debug)]
 struct SessionCookieParseOutcome {
   cookies: Vec<Cookie>,
+  detailed_cookies: Vec<DetailedCookie>,
   rows_seen: usize,
   rows_skipped: usize,
   diagnostics: Vec<String>,
@@ -403,6 +499,25 @@ fn get_authoritative_session_cookies(
   Vec::new()
 }
 
+fn get_authoritative_session_detailed_cookies(
+  domains: Option<Vec<String>>,
+  cookies_dir: &Path,
+) -> Vec<DetailedCookie> {
+  for (path, format) in session_candidates(cookies_dir) {
+    match parse_session_candidate(&path, &format, domains.as_deref()) {
+      Ok(success) => return success.parsed.detailed_cookies,
+      Err(failure) if is_missing_session_file(&failure.error) => continue,
+      Err(failure) => log::warn!(
+        "Failed to parse Firefox session store {:?}: {}",
+        path,
+        failure.error
+      ),
+    }
+  }
+
+  Vec::new()
+}
+
 fn parse_session_candidate(
   path: &Path,
   format: &SessionStoreFormat,
@@ -509,8 +624,13 @@ fn record_session_cookie(
     return;
   }
   outcome.rows_seen += 1;
-  match create_cookie(json_cookie) {
-    Ok(cookie) => outcome.cookies.push(cookie),
+  match create_detailed_cookie(json_cookie) {
+    Ok(detailed_cookie) => {
+      outcome
+        .cookies
+        .push(clone_legacy_cookie(&detailed_cookie.cookie));
+      outcome.detailed_cookies.push(detailed_cookie);
+    }
     Err(error) => {
       outcome.rows_skipped += 1;
       if outcome.diagnostics.len() < MAX_SESSION_COOKIE_DIAGNOSTICS {
@@ -522,12 +642,26 @@ fn record_session_cookie(
   }
 }
 
+fn clone_legacy_cookie(cookie: &Cookie) -> Cookie {
+  Cookie {
+    domain: cookie.domain.clone(),
+    path: cookie.path.clone(),
+    secure: cookie.secure,
+    expires: cookie.expires,
+    name: cookie.name.clone(),
+    value: cookie.value.clone(),
+    http_only: cookie.http_only,
+    same_site: cookie.same_site,
+  }
+}
+
 fn parse_legacy_session_cookies(
   path: &Path,
   domains: Option<&[String]>,
 ) -> Result<SessionCookieParseOutcome> {
   let mut outcome = SessionCookieParseOutcome {
     cookies: Vec::new(),
+    detailed_cookies: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
     diagnostics: Vec::new(),
@@ -576,6 +710,7 @@ fn parse_session_cookies_lz4(
 ) -> Result<SessionCookieParseOutcome> {
   let mut outcome = SessionCookieParseOutcome {
     cookies: Vec::new(),
+    detailed_cookies: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
     diagnostics: Vec::new(),
@@ -643,7 +778,7 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
     .and_then(|v| v.as_i64())
     .unwrap_or(SAME_SITE_UNSPECIFIED);
 
-  let cookie = Cookie {
+  Ok(Cookie {
     domain: host.to_string(),
     expires,
     http_only,
@@ -652,8 +787,50 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
     path: path.to_string(),
     same_site,
     secure,
+  })
+}
+
+fn create_detailed_cookie(json_cookie: &Value) -> Result<DetailedCookie> {
+  let cookie = create_cookie(json_cookie)?;
+
+  Ok(DetailedCookie {
+    cookie,
+    context: firefox_session_cookie_context(json_cookie.get("originAttributes")),
+  })
+}
+
+fn firefox_session_cookie_context(origin_attributes: Option<&Value>) -> CookieContext {
+  let Some(origin_attributes) = origin_attributes else {
+    return CookieContext::default();
   };
-  Ok(cookie)
+  if let Some(origin_attributes) = origin_attributes.as_str() {
+    return firefox_cookie_context(Some(origin_attributes.to_owned()));
+  }
+  let Some(attributes) = origin_attributes.as_object() else {
+    return CookieContext {
+      origin_attributes: Some(origin_attributes.to_string()),
+      ..CookieContext::default()
+    };
+  };
+
+  let unsigned_attribute = |name: &str| {
+    attributes.get(name).and_then(|value| {
+      value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    })
+  };
+  CookieContext {
+    origin_attributes: Some(Value::Object(attributes.clone()).to_string()),
+    user_context_id: unsigned_attribute("userContextId"),
+    partition_key: attributes
+      .get("partitionKey")
+      .and_then(Value::as_str)
+      .map(str::to_owned),
+    private_browsing_id: unsigned_attribute("privateBrowsingId"),
+    ..CookieContext::default()
+  }
 }
 
 /// A profile declared by a Mozilla-family browser's `profiles.ini`.
@@ -986,6 +1163,145 @@ mod tests {
     }
   }
 
+  #[test]
+  fn detailed_cookies_preserve_container_collisions() {
+    let dir = unique_tmpdir("firefox-container-collision");
+    let db = dir.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host TEXT NOT NULL, path TEXT NOT NULL, isSecure INTEGER NOT NULL,
+          expiry INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+          isHttpOnly INTEGER NOT NULL, sameSite INTEGER NOT NULL,
+          originAttributes TEXT
+        );
+        INSERT INTO moz_cookies VALUES
+          ('.example.com', '/', 1, 0, 'session', 'work', 1, 1,
+           '^userContextId=2&partitionKey=%28https%2Cwork.example%29&privateBrowsingId=0'),
+          ('.example.com', '/', 1, 0, 'session', 'personal', 1, 1,
+           '^userContextId=1&partitionKey=%28https%2Cpersonal.example%29&privateBrowsingId=1');",
+      )
+      .expect("seed container cookies");
+    drop(connection);
+
+    let cookies = firefox_based_detailed(db, None).expect("extract detailed cookies");
+    assert_eq!(cookies.len(), 2);
+    assert_eq!(cookies[0].cookie.name, cookies[1].cookie.name);
+    assert_eq!(cookies[0].cookie.domain, cookies[1].cookie.domain);
+    assert_eq!(cookies[0].cookie.path, cookies[1].cookie.path);
+    let contexts = cookies
+      .iter()
+      .map(|cookie| {
+        (
+          cookie.cookie.value.as_str(),
+          (
+            cookie.context.user_context_id,
+            cookie.context.partition_key.as_deref(),
+            cookie.context.private_browsing_id,
+          ),
+        )
+      })
+      .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+      contexts.get("work"),
+      Some(&(Some(2), Some("(https,work.example)"), Some(0)))
+    );
+    assert_eq!(
+      contexts.get("personal"),
+      Some(&(Some(1), Some("(https,personal.example)"), Some(1)))
+    );
+    assert!(cookies.iter().any(|cookie| {
+      cookie.context.origin_attributes.as_deref()
+        == Some("^userContextId=2&partitionKey=%28https%2Cwork.example%29&privateBrowsingId=0")
+    }));
+  }
+
+  #[test]
+  fn detailed_query_keeps_legacy_firefox_schemas_readable() {
+    let dir = unique_tmpdir("firefox-legacy-detailed-schema");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(
+      &db,
+      &[(".example.com", "/", false, 0, "legacy", "value", false, 0)],
+    );
+
+    let cookies =
+      firefox_based_detailed(db, None).expect("missing originAttributes column remains compatible");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].context, CookieContext::default());
+  }
+
+  #[test]
+  fn malformed_origin_attributes_errors_without_changing_legacy_projection() {
+    let dir = unique_tmpdir("firefox-malformed-detailed-context");
+    let db = dir.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER, name TEXT,
+          value TEXT, isHttpOnly INTEGER, sameSite INTEGER, originAttributes BLOB
+        );
+        INSERT INTO moz_cookies VALUES
+          ('.example.com', '/', 0, 0, 'legacy', 'value', 0, 0, X'FF');",
+      )
+      .expect("seed malformed context");
+    drop(connection);
+
+    let legacy =
+      firefox_based(db.clone(), None).expect("legacy projection does not inspect detailed columns");
+    assert_eq!(legacy.len(), 1);
+    let error = firefox_based_detailed(db, None)
+      .expect_err("malformed detailed context must not silently become absent");
+    assert!(format!("{error:#}").contains("originAttributes"));
+  }
+
+  #[test]
+  fn malformed_origin_attributes_skip_only_their_row() {
+    let dir = unique_tmpdir("firefox-mixed-detailed-context");
+    let db = dir.join("cookies.sqlite");
+    let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+          host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER, name TEXT,
+          value TEXT, isHttpOnly INTEGER, sameSite INTEGER, originAttributes BLOB
+        );
+        INSERT INTO moz_cookies VALUES
+          ('.example.com', '/', 0, 0, 'before', 'first', 0, 0, '^userContextId=1'),
+          ('.example.com', '/', 0, 0, 'malformed', 'discarded', 0, 0, X'FF'),
+          ('.example.com', '/', 0, 0, 'after', 'last', 0, 0, '^userContextId=2');",
+      )
+      .expect("seed mixed origin attributes");
+    drop(connection);
+
+    let legacy = firefox_based(db.clone(), None).expect("legacy projection keeps every row");
+    assert_eq!(legacy.len(), 3);
+
+    let persistent = sqlite::with_browser_database(db.clone(), |connection| {
+      query_persistent_cookies_mode(connection, None, true)
+    })
+    .expect("query detailed rows")
+    .into_value();
+    assert_eq!(persistent.rows_seen, 3);
+    assert_eq!(persistent.rows_skipped, 1);
+    assert_eq!(persistent.detailed_cookies.len(), 2);
+    assert!(persistent.last_row_error.is_some());
+    assert_eq!(
+      persistent
+        .detailed_cookies
+        .iter()
+        .map(|cookie| cookie.cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["before", "after"]
+    );
+
+    let public_result =
+      firefox_based_detailed(db, None).expect("public detailed extraction returns the valid rows");
+    assert_eq!(public_result.len(), 2);
+  }
+
   fn write_session_jsonlz4(path: &Path, cookies: Value) {
     if let Some(parent) = path.parent() {
       std::fs::create_dir_all(parent).expect("create sessionstore directory");
@@ -1003,6 +1319,83 @@ mod tests {
       "name": name,
       "value": "fixture"
     })
+  }
+
+  #[test]
+  fn detailed_session_cookies_preserve_object_origin_attribute_collisions() {
+    let dir = unique_tmpdir("ff-session-origin-attribute-objects");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    let cookies = serde_json::json!([
+      {
+        "host": ".example.com",
+        "path": "/",
+        "name": "session",
+        "value": "work",
+        "originAttributes": {
+          "userContextId": 2,
+          "partitionKey": "(https,work.example)",
+          "privateBrowsingId": 0,
+          "futureAttribute": "retained"
+        }
+      },
+      {
+        "host": ".example.com",
+        "path": "/",
+        "name": "session",
+        "value": "personal",
+        "originAttributes": {
+          "userContextId": 1,
+          "partitionKey": "(https,personal.example)",
+          "privateBrowsingId": 1
+        }
+      }
+    ]);
+    write_session_jsonlz4(&dir.join("sessionstore-backups/recovery.jsonlz4"), cookies);
+
+    let detailed = firefox_based_detailed(db, None).expect("extract detailed session cookies");
+    assert_eq!(detailed.len(), 2);
+    let contexts = detailed
+      .iter()
+      .map(|cookie| (cookie.cookie.value.as_str(), &cookie.context))
+      .collect::<std::collections::HashMap<_, _>>();
+    let work = contexts.get("work").expect("work container");
+    assert_eq!(work.user_context_id, Some(2));
+    assert_eq!(work.partition_key.as_deref(), Some("(https,work.example)"));
+    assert_eq!(work.private_browsing_id, Some(0));
+    let raw: Value = serde_json::from_str(
+      work
+        .origin_attributes
+        .as_deref()
+        .expect("raw session origin attributes"),
+    )
+    .expect("raw object remains JSON");
+    assert_eq!(raw["futureAttribute"], "retained");
+
+    let personal = contexts.get("personal").expect("personal container");
+    assert_eq!(personal.user_context_id, Some(1));
+    assert_eq!(
+      personal.partition_key.as_deref(),
+      Some("(https,personal.example)")
+    );
+    assert_eq!(personal.private_browsing_id, Some(1));
+  }
+
+  #[test]
+  fn detailed_session_context_preserves_arbitrary_origin_attribute_json() {
+    for origin_attributes in [
+      serde_json::json!(["future", {"shape": true}]),
+      serde_json::json!(42),
+      serde_json::json!(false),
+      Value::Null,
+    ] {
+      let context = firefox_session_cookie_context(Some(&origin_attributes));
+      let raw = origin_attributes.to_string();
+      assert_eq!(context.origin_attributes.as_deref(), Some(raw.as_str()));
+      assert_eq!(context.user_context_id, None);
+      assert_eq!(context.partition_key, None);
+      assert_eq!(context.private_browsing_id, None);
+    }
   }
 
   #[test]
@@ -1252,6 +1645,7 @@ mod tests {
       }
       Ok(SessionCookieParseOutcome {
         cookies: Vec::new(),
+        detailed_cookies: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
         diagnostics: Vec::new(),
@@ -1490,10 +1884,17 @@ mod tests {
     set_mozilla_schema_version(&connection, 16);
     drop(connection);
 
-    let old = firefox_based(old_db, None).expect("read seconds-era profile");
-    let new = firefox_based(new_db, None).expect("read milliseconds-era profile");
+    let old = firefox_based(old_db.clone(), None).expect("read seconds-era profile");
+    let new = firefox_based(new_db.clone(), None).expect("read milliseconds-era profile");
     assert_eq!(old[0].expires, Some(1_700_000_000));
     assert_eq!(new[0].expires, Some(1_700_000_000));
+
+    let old_detailed =
+      firefox_based_detailed(old_db, None).expect("read detailed seconds-era profile");
+    let new_detailed =
+      firefox_based_detailed(new_db, None).expect("read detailed milliseconds-era profile");
+    assert_eq!(old_detailed[0].cookie.expires, Some(1_700_000_000));
+    assert_eq!(new_detailed[0].cookie.expires, Some(1_700_000_000));
   }
 
   #[test]
@@ -1527,7 +1928,7 @@ mod tests {
       }]),
     );
 
-    let mut cookies = firefox_based(db, None).expect("read persistent and session cookies");
+    let mut cookies = firefox_based(db.clone(), None).expect("read persistent and session cookies");
     cookies.sort_by(|left, right| left.name.cmp(&right.name));
     assert_eq!(cookies[0].name, "persistent");
     assert_eq!(cookies[0].expires, Some(1_700_000_000));
@@ -1536,6 +1937,15 @@ mod tests {
     // legacy-seconds interpretation rather than applying the DB conversion.
     assert_eq!(cookies[1].value, "legacy-seconds");
     assert_eq!(cookies[1].expires, Some(1_800_000_000));
+
+    let mut detailed =
+      firefox_based_detailed(db, None).expect("read detailed persistent and session cookies");
+    detailed.sort_by(|left, right| left.cookie.name.cmp(&right.cookie.name));
+    assert_eq!(detailed[0].cookie.name, "persistent");
+    assert_eq!(detailed[0].cookie.expires, Some(1_700_000_000));
+    assert_eq!(detailed[1].cookie.name, "sessionstore");
+    assert_eq!(detailed[1].cookie.value, "legacy-seconds");
+    assert_eq!(detailed[1].cookie.expires, Some(1_800_000_000));
   }
 
   #[test]

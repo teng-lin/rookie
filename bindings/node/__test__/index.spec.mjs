@@ -13,7 +13,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
-
 import rookieCookies, {
   firefoxBased,
   safari,
@@ -46,10 +45,12 @@ const EXPECTED_EXPORTS = [
   "firefoxProfiles",
   "firefoxProfile",
   "firefoxBased",
+  "firefoxBasedDetailed",
   "octoBrowser",
   "internetExplorer",
   "safari",
   "chromiumBased",
+  "chromiumBasedDetailed",
   "supportedBrowsers",
   "browserProfiles",
   "chromeProfiles",
@@ -71,6 +72,8 @@ const REPORT_FUNCTIONS = [
 ];
 
 const REPORT_INTERFACES = [
+  "CookieContextObject",
+  "DetailedCookieObject",
   "BrowserCapabilitiesObject",
   "BrowserDescriptorObject",
   "ProfileIdentityObject",
@@ -202,12 +205,80 @@ test("firefoxBased throws on a non-sqlite file", async (t) => {
   await t.throwsAsync(firefoxBased(dbPath));
 });
 
+test("firefoxBasedDetailed preserves colliding container identities", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-detailed-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/firefox-context.sqlite.base64", import.meta.url),
+    );
+
+    const records = await rookieCookies.firefoxBasedDetailed(dbPath);
+    t.is(records.length, 2);
+    t.deepEqual(
+      Object.fromEntries(records.map(({ cookie, context }) => [
+        cookie.value,
+        context.userContextId,
+      ])),
+      { work: 2, personal: 1 },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("identity-less encrypted Chromium paths reject explicitly on Unix", async (t) => {
+  if (process.platform === "win32") {
+    t.pass();
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-identity-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-encrypted.sqlite.base64", import.meta.url),
+    );
+
+    await t.throwsAsync(rookieCookies.chromiumBased(dbPath), {
+      message: /no browser key identity.*browser_id/s,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("explicit Chromium browser IDs are registry identities, not profile selectors", async (t) => {
+  if (process.platform === "win32") {
+    t.pass();
+    return;
+  }
+  const missingDb = join(tmpdir(), "rookie-node-missing-key-identity-Cookies");
+  const profileLikeId = "0".repeat(64);
+  const invalidIdentities = [
+    ["definitely-not-a-browser", /unknown browser id "definitely-not-a-browser"/],
+    ["firefox", /browser id "firefox" resolves to the gecko engine, not Chromium/],
+    [profileLikeId, new RegExp(`unknown browser id "${profileLikeId}"`)],
+  ];
+
+  for (const [browserId, message] of invalidIdentities) {
+    for (const extract of [
+      rookieCookies.chromiumBased,
+      rookieCookies.chromiumBasedDetailed,
+    ]) {
+      await t.throwsAsync(extract(missingDb, undefined, browserId), { message });
+    }
+  }
+});
+
 test("bad async API arguments reject instead of throwing synchronously", async (t) => {
   const invalidCalls = [
     ["anyBrowser", () => rookieCookies.anyBrowser(42)],
     ["firefox", () => rookieCookies.firefox(42)],
     ["firefoxProfile", () => rookieCookies.firefoxProfile(42)],
     ["firefoxBased", () => rookieCookies.firefoxBased(42)],
+    ["firefoxBasedDetailed", () => rookieCookies.firefoxBasedDetailed(42)],
     ["zen", () => rookieCookies.zen(42)],
     ["librewolf", () => rookieCookies.librewolf(42)],
     ["chrome", () => rookieCookies.chrome(42)],
@@ -223,6 +294,7 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     ["internetExplorer", () => rookieCookies.internetExplorer(42)],
     ["safari", () => rookieCookies.safari(42)],
     ["chromiumBased", () => rookieCookies.chromiumBased(42)],
+    ["chromiumBasedDetailed", () => rookieCookies.chromiumBasedDetailed(42)],
     ["browserProfiles", () => rookieCookies.browserProfiles(42)],
     ["chromeProfile", () => rookieCookies.chromeProfile(42)],
     ["browserReport", () => rookieCookies.browserReport(42)],
@@ -263,11 +335,11 @@ IsRelative=1
 Path=Profiles/work
 `,
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(defaultProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-empty.sqlite.base64", import.meta.url),
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(workProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
   );
@@ -416,11 +488,11 @@ IsRelative=1
 Path=Profiles/work
 `,
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(defaultProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-empty.sqlite.base64", import.meta.url),
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(workProfile, "cookies.sqlite"),
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
   );
@@ -708,7 +780,7 @@ IsRelative=1
 Path=Profiles/work
 `,
   );
-  installFirefoxDatabase(
+  installDatabaseFixture(
     join(healthy, "cookies.sqlite"),
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
   );
@@ -817,11 +889,13 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "chromium",
     "vivaldi",
     "firefoxBased",
+    "firefoxBasedDetailed",
     "load",
     "octoBrowser",
     "internetExplorer",
     "safari",
     "chromiumBased",
+    "chromiumBasedDetailed",
     ...REPORT_FUNCTIONS,
   ];
   const callPattern = new RegExp(`\\b(?:${asyncApis.join("|")})\\s*\\(`, "g");
@@ -901,7 +975,7 @@ function writeFirefoxProfileTree(root, count) {
   writeFileSync(join(root, "profiles.ini"), ini);
 }
 
-function installFirefoxDatabase(path, fixtureUrl) {
+function installDatabaseFixture(path, fixtureUrl) {
   const encoded = readFileSync(fixtureUrl, "ascii").replace(/\s/g, "");
   writeFileSync(path, Buffer.from(encoded, "base64"));
 }

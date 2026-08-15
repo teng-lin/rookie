@@ -1,7 +1,7 @@
 use log::LevelFilter;
 use pyo3::{prelude::*, types::PyDict};
 use pyo3_log::{Caching, Logger};
-use rookie_core::enums::Cookie;
+use rookie_core::enums::{Cookie, DetailedCookie};
 mod browsers;
 mod report;
 use browsers::*;
@@ -42,7 +42,9 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_function(wrap_pyfunction!(vivaldi, m)?)?;
   m.add_function(wrap_pyfunction!(arc, m)?)?;
   m.add_function(wrap_pyfunction!(chromium_based, m)?)?;
+  m.add_function(wrap_pyfunction!(chromium_based_detailed, m)?)?;
   m.add_function(wrap_pyfunction!(firefox_based, m)?)?;
+  m.add_function(wrap_pyfunction!(firefox_based_detailed, m)?)?;
   m.add_function(wrap_pyfunction!(load, m)?)?;
   m.add_function(wrap_pyfunction!(any_browser, m)?)?;
 
@@ -68,6 +70,45 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
   m.add_function(wrap_pyfunction!(version, m)?)?;
   Ok(())
+}
+
+pub(crate) fn detailed_to_dict(
+  py: Python<'_>,
+  cookies: Vec<DetailedCookie>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  cookies
+    .into_iter()
+    .map(|detailed| {
+      let dict = PyDict::new(py);
+      let cookie_dict = PyDict::new(py);
+      let cookie = detailed.cookie;
+      cookie_dict.set_item("domain", cookie.domain)?;
+      cookie_dict.set_item("path", cookie.path)?;
+      cookie_dict.set_item("secure", cookie.secure)?;
+      cookie_dict.set_item("http_only", cookie.http_only)?;
+      cookie_dict.set_item("same_site", cookie.same_site)?;
+      cookie_dict.set_item("expires", cookie.expires)?;
+      cookie_dict.set_item("name", cookie.name)?;
+      cookie_dict.set_item("value", cookie.value)?;
+
+      let context = PyDict::new(py);
+      context.set_item("top_frame_site_key", detailed.context.top_frame_site_key)?;
+      context.set_item(
+        "has_cross_site_ancestor",
+        detailed.context.has_cross_site_ancestor,
+      )?;
+      context.set_item("source_scheme", detailed.context.source_scheme)?;
+      context.set_item("source_port", detailed.context.source_port)?;
+      context.set_item("is_persistent", detailed.context.is_persistent)?;
+      context.set_item("origin_attributes", detailed.context.origin_attributes)?;
+      context.set_item("user_context_id", detailed.context.user_context_id)?;
+      context.set_item("partition_key", detailed.context.partition_key)?;
+      context.set_item("private_browsing_id", detailed.context.private_browsing_id)?;
+      dict.set_item("cookie", cookie_dict)?;
+      dict.set_item("context", context)?;
+      Ok(dict.into())
+    })
+    .collect()
 }
 
 pub(crate) fn to_dict(py: Python<'_>, cookies: Vec<Cookie>) -> PyResult<Vec<Py<PyAny>>> {

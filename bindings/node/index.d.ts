@@ -17,6 +17,26 @@ export interface CookieObject {
   httpOnly: boolean
   sameSite: number
 }
+/** Browser context that distinguishes partitioned/container cookies. */
+export interface CookieContextObject {
+  topFrameSiteKey: string | null
+  hasCrossSiteAncestor: boolean | null
+  sourceScheme: number | null
+  sourcePort: number | null
+  isPersistent: boolean | null
+  originAttributes: string | null
+  userContextId: number | null
+  partitionKey: string | null
+  privateBrowsingId: number | null
+}
+/**
+ * Cookie plus browser-specific identity context. The nested `cookie` has the
+ * unchanged legacy `CookieObject` shape.
+ */
+export interface DetailedCookieObject {
+  cookie: CookieObject
+  context: CookieContextObject
+}
 export interface FirefoxProfileObject {
   name: string
   path: string
@@ -189,6 +209,8 @@ export declare function load(domains?: Array<string> | undefined | null): Promis
 export declare function firefoxProfiles(): Promise<Array<FirefoxProfileObject>>
 export declare function firefoxProfile(profile: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** Extracts cookies with Firefox container and origin context preserved. */
+export declare function firefoxBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
 /**
  * Lists the browsers registered for the running OS.
  *
@@ -242,6 +264,8 @@ export declare function internetExplorer(domains?: Array<string> | undefined | n
 /** macOS-only browsers */
 export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
-export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>
+export declare function chromiumBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<DetailedCookieObject>>
 /** Windows browsers */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function chromiumBasedDetailed(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
