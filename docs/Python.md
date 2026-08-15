@@ -2,6 +2,9 @@
 
 ## Install
 
+CPython 3.11 or newer is required. Wheels use the `cp311-abi3` stable ABI and
+are tested on CPython 3.11–3.14.
+
 ```console
 pip3 install -U rookie-cookies
 ```
@@ -52,6 +55,34 @@ an open snake_case string rather than a closed set, so keep a fallback when
 matching one.
 
 ## Explicit paths and cookie context
+
+For a path whose browser engine is not known in advance, use
+`cookies_from_path(path, domains=None)`. For Chromium, the canonical options
+dictionary accepts `domains` and at most one optional credential selector:
+`browser_id`, `local_state_path`, or `plaintext_only=True`. Zero selectors
+selects Automatic. Automatic probes platform credentials on Linux and macOS;
+on Windows an explicit Chromium path raises the core
+`missing_local_state_file` error because it does not guess a browser
+installation.
+
+```python
+import rookie_cookies
+
+cookies = rookie_cookies.cookies_from_path("/path/to/cookies.sqlite")
+records = rookie_cookies.chromium_cookies_from_path_detailed(
+    "/path/to/Chrome/Default/Network/Cookies",
+    {"browser_id": "chrome", "domains": ["example.com"]},
+)
+```
+
+Unknown options, wrong types, or competing selectors raise `ValueError` before
+the database is touched. Extraction failures raise `RuntimeError` with the Rust
+error chain preserved.
+
+The older functions below remain behavior-compatible in 0.6.x, but
+`any_browser()`, the Chromium `*_based` pair, and flat `firefox_based()` are
+deprecated for removal no earlier than 0.7. `firefox_based_detailed()` is not
+deprecated.
 
 `firefox_based_detailed()` and `chromium_based_detailed()` return an unchanged
 cookie dictionary under `cookie` plus a separate `context` dictionary. Context

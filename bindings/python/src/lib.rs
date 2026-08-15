@@ -45,6 +45,9 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_function(wrap_pyfunction!(arc, m)?)?;
   m.add_function(wrap_pyfunction!(chromium_based, m)?)?;
   m.add_function(wrap_pyfunction!(chromium_based_detailed, m)?)?;
+  m.add_function(wrap_pyfunction!(cookies_from_path, m)?)?;
+  m.add_function(wrap_pyfunction!(chromium_cookies_from_path, m)?)?;
+  m.add_function(wrap_pyfunction!(chromium_cookies_from_path_detailed, m)?)?;
   m.add_function(wrap_pyfunction!(firefox_based, m)?)?;
   m.add_function(wrap_pyfunction!(firefox_based_detailed, m)?)?;
   m.add_function(wrap_pyfunction!(load, m)?)?;

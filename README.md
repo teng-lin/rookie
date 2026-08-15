@@ -46,7 +46,9 @@ for cookie in cookies:
     print(cookie["domain"], cookie["name"])
 ```
 
-The binding is tested on CPython 3.11–3.14. The published wheel uses Python's stable `abi3` interface, so one wheel can serve multiple supported CPython versions on each platform.
+The binding requires CPython 3.11 or newer and is tested on CPython 3.11–3.14.
+Published wheels use the `cp311-abi3` stable ABI tag, so one wheel serves every
+supported CPython version on each platform.
 
 ## Rust
 
@@ -80,6 +82,18 @@ import { chrome } from "rookie-cookies";
 
 const cookies = await chrome(["example.com"]);
 console.log(cookies);
+```
+
+## CLI explicit paths
+
+`--path` classifies Firefox or Chromium databases automatically. To select
+Chromium credentials explicitly, add exactly one of `--browser-id`,
+`--key-path`, or `--plaintext-only`. `--key-path` always means a Windows
+Chromium `Local State` file in 0.6; no process-shutdown option is exposed.
+
+```console
+rookie-cookies --path /path/to/Cookies --browser-id chrome
+rookie-cookies --path /path/to/cookies.sqlite
 ```
 
 ## Supported browsers

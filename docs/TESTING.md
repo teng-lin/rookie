@@ -78,6 +78,12 @@ python3 tests/e2e/assert_cli_cookie.py path/to/Cookies \
 python3 tests/e2e/assert_cli_cookie.py --browser chrome
 ```
 
+The CLI's credential selectors (`--key-path`, `--browser-id`, and
+`--plaintext-only`) require an explicit `--path` and are mutually exclusive.
+`--key-path` means a Windows Chromium `Local State` file on every host; a
+Firefox path plus any credential selector is therefore a typed extraction
+error rather than a silently ignored option.
+
 Set `ROOKIE_E2E_CLI` to test a binary outside `target/release`. The expected
 cookie can be changed with `ROOKIE_E2E_COOKIE_NAME` and
 `ROOKIE_E2E_COOKIE_VALUE`.

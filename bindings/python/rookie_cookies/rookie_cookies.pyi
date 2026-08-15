@@ -28,6 +28,12 @@ class DetailedCookie(TypedDict):
     cookie: CookieObject
     context: CookieContext
 
+class ChromiumPathOptions(TypedDict, total=False):
+    domains: list[str]
+    browser_id: str
+    local_state_path: str
+    plaintext_only: bool
+
 DetailedCookieList = List[DetailedCookie]
 FirefoxProfile = Dict[str, Any]
 FirefoxProfileList = List[FirefoxProfile]
@@ -43,6 +49,24 @@ MAX_ISSUE_SAMPLES: int
 ``occurrences`` counts every occurrence while ``samples`` keeps at most this
 many, so comparing the two tells a truncated excerpt from a complete one.
 """
+
+def cookies_from_path(
+    path: str, domains: list[str] | None = None
+) -> CookieList:
+    """Classify an explicit cookie source and extract its cookies."""
+    ...
+
+def chromium_cookies_from_path(
+    path: str, options: ChromiumPathOptions | None = None
+) -> CookieList:
+    """Extract an explicit Chromium cookie database."""
+    ...
+
+def chromium_cookies_from_path_detailed(
+    path: str, options: ChromiumPathOptions | None = None
+) -> DetailedCookieList:
+    """Extract an explicit Chromium database with cookie context."""
+    ...
 
 def version() -> str:
     """
@@ -94,6 +118,9 @@ def firefox_based(db_path: str, domains: Optional[List[str]] = None) -> CookieLi
     """
     Extract Cookies from Firefox-based browsers
 
+    .. deprecated:: 0.6
+       Use ``cookies_from_path``. Earliest removal is 0.7.
+
     :param db_path: Path to the database file
     :param domains: Optional list of domains to extract only from them
     :return: A list of dictionaries of cookies
@@ -140,6 +167,9 @@ if platform == "win32":
         """
         Extract Cookies from Chromium-based browsers on Windows
 
+        .. deprecated:: 0.6
+           Use ``chromium_cookies_from_path``. Earliest removal is 0.7.
+
         :param key_path: Path to the browser's Local State file
         :param db_path: Path to the database file
         :param domains: Optional list of domains to extract only from them
@@ -149,7 +179,7 @@ if platform == "win32":
     def chromium_based_detailed(
         key_path: str, db_path: str, domains: Optional[List[str]] = None
     ) -> DetailedCookieList:
-        """Extract Chromium cookies with partition/source context on Windows."""
+        """Deprecated: use ``chromium_cookies_from_path_detailed`` before 0.7."""
         ...
 else:
     def chromium_based(
@@ -159,6 +189,9 @@ else:
     ) -> CookieList:
         """
         Extract Cookies from Chromium-based browsers on Unix
+
+        .. deprecated:: 0.6
+           Use ``chromium_cookies_from_path``. Earliest removal is 0.7.
 
         :param db_path: Path to the database file
         :param domains: Optional list of domains to extract only from them
@@ -171,7 +204,7 @@ else:
         domains: Optional[List[str]] = None,
         browser_id: Optional[str] = None,
     ) -> DetailedCookieList:
-        """Extract Chromium cookies with partition/source context on Unix."""
+        """Deprecated: use ``chromium_cookies_from_path_detailed`` before 0.7."""
         ...
 
 def chromium(domains: Optional[List[str]] = None) -> CookieList:
@@ -233,6 +266,10 @@ def any_browser(
 ) -> CookieList:
     """
     Extract Cookies from any browser.
+
+    .. deprecated:: 0.6
+       Use ``cookies_from_path`` or ``chromium_cookies_from_path``. Earliest
+       removal is 0.7.
 
     :param db_path: Path to browser database file.
     :param domains: Optional list of domains to extract cookies only from these domains.

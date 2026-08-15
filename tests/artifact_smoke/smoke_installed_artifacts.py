@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import email
 import hashlib
 import json
 import os
@@ -136,10 +137,28 @@ def validate_provenance(
 def validate_wheel(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         members = archive.namelist()
-    if not any(name.endswith(".dist-info/METADATA") for name in members):
-        raise RuntimeError(f"wheel has no package metadata: {wheel}")
+        metadata_members = [
+            name for name in members if name.endswith(".dist-info/METADATA")
+        ]
+        wheel_members = [name for name in members if name.endswith(".dist-info/WHEEL")]
+        if len(metadata_members) != 1 or len(wheel_members) != 1:
+            raise RuntimeError(
+                f"wheel must contain exactly one METADATA and WHEEL file: {wheel}"
+            )
+        metadata = email.message_from_bytes(archive.read(metadata_members[0]))
+        wheel_metadata = email.message_from_bytes(archive.read(wheel_members[0]))
     if not any(name.endswith((".so", ".pyd")) for name in members):
         raise RuntimeError(f"wheel has no native extension: {wheel}")
+    if metadata.get("Requires-Python") != ">=3.11":
+        raise RuntimeError(
+            f"wheel Requires-Python was {metadata.get('Requires-Python')!r}, expected '>=3.11'"
+        )
+    tags = wheel_metadata.get_all("Tag", [])
+    if not tags or any(not tag.startswith("cp311-abi3-") for tag in tags):
+        raise RuntimeError(f"wheel metadata has unexpected ABI tags: {tags}")
+    filename_tags = wheel.name.removesuffix(".whl").rsplit("-", 3)[-3:]
+    if len(filename_tags) != 3 or filename_tags[:2] != ["cp311", "abi3"]:
+        raise RuntimeError(f"wheel filename has unexpected ABI tag: {wheel.name}")
 
 
 def package_metadata(archive: tarfile.TarFile) -> dict[str, object]:
@@ -155,6 +174,10 @@ def validate_npm_tarballs(
     with tarfile.open(root_tarball, "r:gz") as archive:
         members = {member.name for member in archive.getmembers() if member.isfile()}
         metadata = package_metadata(archive)
+        declarations_stream = archive.extractfile("package/index.d.ts")
+        if declarations_stream is None:
+            raise RuntimeError("npm root package has no index.d.ts")
+        declarations = declarations_stream.read().decode("utf-8")
     if metadata.get("name") != "rookie-cookies":
         raise RuntimeError(f"unexpected npm root metadata: {metadata}")
     if metadata.get("engines", {}).get("node") != ">=22":
@@ -164,6 +187,16 @@ def validate_npm_tarballs(
         raise RuntimeError(f"npm root package is missing {required - members}")
     if any(name.endswith(".node") for name in members):
         raise RuntimeError("npm root package must not embed a platform binding")
+    for declaration in (
+        "export interface ChromiumPathOptions",
+        "export declare function cookiesFromPath(path: string, domains?: string[] | null)",
+        "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null)",
+        "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null)",
+    ):
+        if declaration not in declarations:
+            raise RuntimeError(f"npm root declarations are missing: {declaration}")
+    if "allowProcessShutdown" in declarations:
+        raise RuntimeError("npm declarations must not expose process shutdown")
 
     with tarfile.open(native_tarball, "r:gz") as archive:
         native_members = {
@@ -299,7 +332,14 @@ module = Path(rookie_cookies.__file__).resolve()
 prefix = Path(sys.prefix).resolve()
 if prefix not in module.parents:
     raise SystemExit(f"wheel module was not imported from the clean venv: {module}")
-cookies = rookie_cookies.firefox_based(os.environ["ROOKIE_ARTIFACT_DB"], ["artifact.test"])
+database = os.environ["ROOKIE_ARTIFACT_DB"]
+cookies = rookie_cookies.cookies_from_path(database, ["artifact.test"])
+legacy = rookie_cookies.firefox_based(database, ["artifact.test"])
+if legacy != cookies:
+    raise SystemExit("legacy firefox_based disagrees with cookies_from_path")
+for name in ("chromium_cookies_from_path", "chromium_cookies_from_path_detailed"):
+    if not callable(getattr(rookie_cookies, name, None)):
+        raise SystemExit(f"wheel is missing canonical export {name}")
 if len(cookies) != 1 or cookies[0]["name"] != "rookie_artifact" or cookies[0]["value"] != "installed-ok":
     raise SystemExit(f"wheel did not return the fixture: {json.dumps(cookies)}")
 print(f"wheel: loaded {module}; rookie_artifact=installed-ok")
@@ -324,11 +364,14 @@ import json
 import os
 import rookie_cookies
 
-cookies = rookie_cookies.chromium_based(
-    os.environ["ROOKIE_ARTIFACT_KEY"],
-    os.environ["ROOKIE_ARTIFACT_DB"],
-    ["example.test"],
-)
+database = os.environ["ROOKIE_ARTIFACT_DB"]
+key_path = os.environ["ROOKIE_ARTIFACT_KEY"]
+options = {"domains": ["example.test"], "local_state_path": key_path}
+cookies = rookie_cookies.chromium_cookies_from_path(database, options)
+detailed = rookie_cookies.chromium_cookies_from_path_detailed(database, options)
+legacy = rookie_cookies.chromium_based(key_path, database, ["example.test"])
+if legacy != cookies or [record["cookie"] for record in detailed] != cookies:
+    raise SystemExit("canonical and legacy Chromium wheel exports disagree")
 if len(cookies) != 1 or cookies[0]["name"] != "rookie_ci" or cookies[0]["value"] != "bar":
     raise SystemExit(f"wheel did not decrypt the DPAPI fixture: {json.dumps(cookies)}")
 print("wheel: rookie_ci=bar decrypted through current-user DPAPI")

@@ -43,7 +43,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
+  'const { version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
 )
 
 const exportStart = loader.search(
@@ -72,6 +72,91 @@ function asyncNative(nativeFunction, name) {
   }
 }
 
+const chromiumPathOptionKeys = new Set([
+  'domains',
+  'browserId',
+  'localStatePath',
+  'plaintextOnly',
+])
+
+function validateChromiumPathOptions(options) {
+  if (options === null || options === undefined) {
+    return undefined
+  }
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Chromium path options must be an object or null')
+  }
+  const prototype = Object.getPrototypeOf(options)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('Chromium path options must be a plain object or null')
+  }
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== 'string' || !chromiumPathOptionKeys.has(key)) {
+      throw new TypeError(
+        'Unknown Chromium path option: ' + (typeof key === 'symbol' ? key.toString() : key)
+      )
+    }
+  }
+
+  const normalized = {}
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(options, key)
+  if (hasOwn('domains') && options.domains !== null && options.domains !== undefined) {
+    if (!Array.isArray(options.domains)) {
+      throw new TypeError('Chromium path option domains must be an array of strings or null')
+    }
+    for (const [index, domain] of options.domains.entries()) {
+      if (typeof domain !== 'string') {
+        throw new TypeError(
+          'Chromium path option domains element ' + index + ' must be a string'
+        )
+      }
+    }
+    normalized.domains = options.domains.slice()
+  }
+
+  for (const key of ['browserId', 'localStatePath']) {
+    if (!hasOwn(key)) {
+      continue
+    }
+    const value = options[key]
+    if (value !== null && value !== undefined) {
+      if (typeof value !== 'string') {
+        throw new TypeError('Chromium path option ' + key + ' must be a string or null')
+      }
+      normalized[key] = value
+    }
+  }
+
+  if (
+    hasOwn('plaintextOnly')
+    && options.plaintextOnly !== null
+    && options.plaintextOnly !== undefined
+  ) {
+    if (typeof options.plaintextOnly !== 'boolean') {
+      throw new TypeError('Chromium path option plaintextOnly must be a boolean or null')
+    }
+    normalized.plaintextOnly = options.plaintextOnly
+  }
+
+  const selectorCount = Number(normalized.browserId !== undefined)
+    + Number(normalized.localStatePath !== undefined)
+    + Number(normalized.plaintextOnly === true)
+  if (selectorCount > 1) {
+    throw new TypeError(
+      'Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive'
+    )
+  }
+  return normalized
+}
+
+function chromiumPathNative(nativeFunction, name) {
+  const required = requiredNative(nativeFunction, name)
+  return asyncNative(
+    (path, options) => required(path, validateChromiumPathOptions(options)),
+    name
+  )
+}
+
 function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
     \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
@@ -90,6 +175,9 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
+module.exports.cookiesFromPath = asyncNative(cookiesFromPath, 'cookiesFromPath')
+module.exports.chromiumCookiesFromPath = chromiumPathNative(chromiumCookiesFromPath, 'chromiumCookiesFromPath')
+module.exports.chromiumCookiesFromPathDetailed = chromiumPathNative(chromiumCookiesFromPathDetailed, 'chromiumCookiesFromPathDetailed')
 module.exports.firefox = asyncNative(firefox, 'firefox')
 module.exports.zen = asyncNative(zen, 'zen')
 module.exports.librewolf = asyncNative(librewolf, 'librewolf')
@@ -127,6 +215,41 @@ if (testWorkerPanic) {
 writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
+
+const chromiumPathOptionsPattern = /^export interface ChromiumPathOptions \{\n(?:  .*\n)*\}/m
+if (!chromiumPathOptionsPattern.test(types)) {
+  throw new Error('patch-loader.js: generated declarations are missing ChromiumPathOptions')
+}
+types = types.replace(
+  chromiumPathOptionsPattern,
+  `export interface ChromiumPathOptions {
+  domains?: string[] | null
+  browserId?: string | null
+  localStatePath?: string | null
+  plaintextOnly?: boolean | null
+}`
+)
+
+const canonicalDeclarationPatterns = [
+  [
+    /^export declare function cookiesFromPath\([^\n]*$/m,
+    'export declare function cookiesFromPath(path: string, domains?: string[] | null): Promise<CookieObject[]>',
+  ],
+  [
+    /^export declare function chromiumCookiesFromPath\([^\n]*$/m,
+    'export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null): Promise<CookieObject[]>',
+  ],
+  [
+    /^export declare function chromiumCookiesFromPathDetailed\([^\n]*$/m,
+    'export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null): Promise<DetailedCookieObject[]>',
+  ],
+]
+for (const [pattern, declaration] of canonicalDeclarationPatterns) {
+  if (!pattern.test(types)) {
+    throw new Error(`patch-loader.js: generated declarations are missing ${declaration}`)
+  }
+  types = types.replace(pattern, declaration)
+}
 
 // Two separate hazards need two separate checks, because one cannot cover the
 // other: a baseline derived from the input can never notice that the input
@@ -174,6 +297,10 @@ if (facadeIndex !== -1) {
 }
 
 types = types.replace(
+  /^\/\*\* @deprecated Use `chromiumCookiesFromPath(?:Detailed)?`\. Earliest removal is 0\.7\. \*\/\n(?=export declare function chromiumBased)/gm,
+  ''
+)
+types = types.replace(
   /^export declare function (?:cachy|operaGx|octoBrowser|internetExplorer|safari|chromiumBased|chromiumBasedDetailed|testWorkerPanic)\([^\n]*\):[^\n]*\n?/gm,
   ''
 )
@@ -195,10 +322,14 @@ export declare function internetExplorer(domains?: Array<string> | undefined | n
 /** macOS-only browsers */
 export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
+/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>
+/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<DetailedCookieObject>>
 /** Windows browsers */
+/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
 `
 

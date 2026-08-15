@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.cookiejar
+import inspect
 import os
 import sqlite3
 import sys
@@ -32,11 +33,15 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         self.assertTrue(
             {
                 "MAX_ISSUE_SAMPLES",
+                "ChromiumPathOptions",
                 "browser_profiles",
                 "browser_report",
                 "chrome_profile",
                 "chrome_profiles",
                 "chromium_based_detailed",
+                "chromium_cookies_from_path",
+                "chromium_cookies_from_path_detailed",
+                "cookies_from_path",
                 "create_cookie",
                 "firefox_based_detailed",
                 "firefox_profile",
@@ -53,6 +58,154 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         self.assertNotIn("to_dict", rookie_cookies.__all__)
         for name in rookie_cookies.__all__:
             self.assertTrue(hasattr(rookie_cookies, name), name)
+
+    def test_canonical_direct_path_runtime_signatures(self) -> None:
+        self.assertEqual(
+            str(inspect.signature(rookie_cookies.cookies_from_path)),
+            "(path, domains=None)",
+        )
+        self.assertEqual(
+            str(inspect.signature(rookie_cookies.chromium_cookies_from_path)),
+            "(path, options=None)",
+        )
+
+        stub = Path(rookie_cookies.__file__).with_name("rookie_cookies.pyi").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "def cookies_from_path(\n    path: str, domains: list[str] | None = None",
+            stub,
+        )
+        self.assertIn(
+            "path: str, options: ChromiumPathOptions | None = None",
+            stub,
+        )
+        self.assertEqual(stub.count("class ChromiumPathOptions(TypedDict"), 1)
+        self.assertEqual(
+            str(
+                inspect.signature(
+                    rookie_cookies.chromium_cookies_from_path_detailed
+                )
+            ),
+            "(path, options=None)",
+        )
+
+    def test_cookies_from_path_classifies_firefox_and_filters_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "cookies.sqlite"
+            _seed_firefox_database(
+                db_path,
+                [
+                    (".example.test", "wanted", "value"),
+                    ("other.test", "ignored", "value"),
+                ],
+            )
+            cookies = rookie_cookies.cookies_from_path(
+                str(db_path), ["example.test"]
+            )
+
+        self.assertEqual([cookie["name"] for cookie in cookies], ["wanted"])
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
+        "Chromium direct paths are supported on desktop targets",
+    )
+    def test_canonical_chromium_plaintext_flat_detailed_and_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "Cookies"
+            _seed_chromium_database(
+                db_path,
+                [
+                    (".example.test", "wanted", "plain", b""),
+                    ("other.test", "ignored", "plain", b""),
+                ],
+            )
+            options = {"domains": ["example.test"], "plaintext_only": True}
+            cookies = rookie_cookies.chromium_cookies_from_path(
+                str(db_path), options
+            )
+            detailed = rookie_cookies.chromium_cookies_from_path_detailed(
+                str(db_path), options
+            )
+
+        self.assertEqual([cookie["name"] for cookie in cookies], ["wanted"])
+        self.assertEqual(detailed[0]["cookie"], cookies[0])
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
+        "Chromium direct paths are supported on desktop targets",
+    )
+    def test_plaintext_only_is_a_whole_request_guarantee(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "Cookies"
+            _seed_chromium_database(
+                db_path,
+                [
+                    (".example.test", "wanted", "plain", b""),
+                    ("other.test", "encrypted", "", b"v10encrypted"),
+                ],
+            )
+            with self.assertRaisesRegex(RuntimeError, "no browser key identity"):
+                rookie_cookies.chromium_cookies_from_path(
+                    str(db_path),
+                    {"domains": ["example.test"], "plaintext_only": True},
+                )
+
+    def test_chromium_options_reject_shape_errors_before_database_io(self) -> None:
+        missing = str(Path(tempfile.gettempdir()) / "rookie-python-missing-Cookies")
+        invalid_options = [
+            [],
+            {"unknown": True},
+            {1: "value"},
+            {"domains": "example.test"},
+            {"domains": ["example.test", 1]},
+            {"browser_id": 1},
+            {"local_state_path": 1},
+            {"plaintext_only": 1},
+            {"browser_id": "chrome", "plaintext_only": True},
+            {"local_state_path": "Local State", "plaintext_only": True},
+        ]
+        for options in invalid_options:
+            with self.subTest(options=options):
+                with self.assertRaises(ValueError):
+                    rookie_cookies.chromium_cookies_from_path(missing, options)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
+        "Chromium direct paths are supported on desktop targets",
+    )
+    def test_none_false_and_empty_credential_selectors_follow_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "Cookies"
+            _seed_chromium_database(
+                db_path, [(".example.test", "wanted", "plain", b"")]
+            )
+            for options in (None, {}, {"plaintext_only": False}):
+                with self.subTest(options=options):
+                    if sys.platform == "win32":
+                        with self.assertRaises(RuntimeError):
+                            rookie_cookies.chromium_cookies_from_path(
+                                str(db_path), options
+                            )
+                    else:
+                        cookies = rookie_cookies.chromium_cookies_from_path(
+                            str(db_path), options
+                        )
+                        self.assertEqual(cookies[0]["name"], "wanted")
+
+            plaintext = rookie_cookies.chromium_cookies_from_path(
+                str(db_path), {"plaintext_only": True}
+            )
+            self.assertEqual(plaintext[0]["name"], "wanted")
+
+            with self.assertRaises(RuntimeError):
+                rookie_cookies.chromium_cookies_from_path(
+                    str(db_path), {"browser_id": ""}
+                )
+            with self.assertRaises(RuntimeError):
+                rookie_cookies.chromium_cookies_from_path(
+                    str(db_path), {"local_state_path": ""}
+                )
 
     def test_platform_browser_exports_match_support_matrix(self) -> None:
         platform_exports = {"cachy", "internet_explorer", "octo_browser", "opera_gx", "safari"}
@@ -399,6 +552,31 @@ def _seed_firefox_database(path: Path, rows) -> None:
               host, path, isSecure, expiry, name, value, isHttpOnly, sameSite
             ) VALUES (?, '/', 0, 1700000000000, ?, ?, 0, 0)
             """,
+            rows,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _seed_chromium_database(path: Path, rows) -> None:
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO meta VALUES ('version', '23');
+            CREATE TABLE cookies (
+              host_key TEXT NOT NULL, path TEXT NOT NULL,
+              is_secure INTEGER NOT NULL, expires_utc INTEGER NOT NULL,
+              name TEXT NOT NULL, value TEXT NOT NULL,
+              encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+              samesite INTEGER NOT NULL
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO cookies VALUES (?, '/', 0, 0, ?, ?, ?, 0, 0)",
             rows,
         )
         connection.commit()

@@ -120,6 +120,33 @@ def main() -> int:
         ("bindings/python pyproject package name", pyproject["project"]["name"], "rookie-cookies"),
         ("bindings/python pyproject readme", pyproject["project"].get("readme"), "README.md"),
         (
+            "bindings/python pyproject Python requirement",
+            pyproject["project"].get("requires-python"),
+            ">=3.11",
+        ),
+        (
+            "bindings/python PyO3 ABI features",
+            python["dependencies"]["pyo3"].get("features"),
+            ["abi3-py311", "anyhow"],
+        ),
+        (
+            "bindings/python supported Python classifiers",
+            [
+                classifier
+                for classifier in pyproject["project"].get("classifiers", [])
+                if classifier.startswith("Programming Language :: Python")
+            ],
+            [
+                "Programming Language :: Python",
+                "Programming Language :: Python :: 3 :: Only",
+                "Programming Language :: Python :: 3.11",
+                "Programming Language :: Python :: 3.12",
+                "Programming Language :: Python :: 3.13",
+                "Programming Language :: Python :: 3.14",
+                "Programming Language :: Python :: Implementation :: CPython",
+            ],
+        ),
+        (
             "bindings/python pyproject homepage",
             pyproject["project"]["urls"]["Homepage"],
             CANONICAL_REPOSITORY,

@@ -1,8 +1,188 @@
 use crate::{detailed_to_dict, to_dict};
 use ::rookie_cookies as rookie_core;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyString};
 use std::path::PathBuf;
+
+const CHROMIUM_PATH_OPTION_KEYS: &[&str] = &[
+  "domains",
+  "browser_id",
+  "local_state_path",
+  "plaintext_only",
+];
+
+fn option_value<'py>(
+  options: &'py Bound<'py, PyDict>,
+  key: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+  Ok(options.get_item(key)?.filter(|value| !value.is_none()))
+}
+
+fn validate_option_keys(options: &Bound<'_, PyDict>) -> PyResult<()> {
+  for (key, _) in options.iter() {
+    let key = key
+      .cast::<PyString>()
+      .map_err(|_| PyValueError::new_err("Chromium path option keys must be strings"))?;
+    let key = key.extract::<String>()?;
+    if !CHROMIUM_PATH_OPTION_KEYS.contains(&key.as_str()) {
+      return Err(PyValueError::new_err(format!(
+        "unknown Chromium path option: {key}"
+      )));
+    }
+  }
+  Ok(())
+}
+
+fn string_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+  let Some(value) = option_value(options, key)? else {
+    return Ok(None);
+  };
+  let value = value.cast::<PyString>().map_err(|_| {
+    PyValueError::new_err(format!(
+      "Chromium path option '{key}' must be a string or None"
+    ))
+  })?;
+  Ok(Some(value.extract::<String>()?))
+}
+
+fn domains_option(options: &Bound<'_, PyDict>) -> PyResult<Option<Vec<String>>> {
+  let Some(value) = option_value(options, "domains")? else {
+    return Ok(None);
+  };
+  let values = value.cast::<PyList>().map_err(|_| {
+    PyValueError::new_err("Chromium path option 'domains' must be a list of strings or None")
+  })?;
+  values
+    .iter()
+    .enumerate()
+    .map(|(index, value)| {
+      value
+        .cast::<PyString>()
+        .map_err(|_| {
+          PyValueError::new_err(format!(
+            "Chromium path option 'domains' element {index} must be a string"
+          ))
+        })?
+        .extract::<String>()
+    })
+    .collect::<PyResult<Vec<_>>>()
+    .map(Some)
+}
+
+fn plaintext_only_option(options: &Bound<'_, PyDict>) -> PyResult<bool> {
+  let Some(value) = option_value(options, "plaintext_only")? else {
+    return Ok(false);
+  };
+  let value = value.cast::<PyBool>().map_err(|_| {
+    PyValueError::new_err("Chromium path option 'plaintext_only' must be a bool or None")
+  })?;
+  Ok(value.is_true())
+}
+
+fn chromium_path_request(
+  path: String,
+  options: Option<Bound<'_, PyAny>>,
+) -> PyResult<rookie_core::direct_path::ChromiumPathRequest> {
+  let Some(options) = options else {
+    return Ok(rookie_core::direct_path::ChromiumPathRequest::new(path));
+  };
+  if options.is_none() {
+    return Ok(rookie_core::direct_path::ChromiumPathRequest::new(path));
+  }
+  let options = options
+    .cast::<PyDict>()
+    .map_err(|_| PyValueError::new_err("Chromium path options must be a dict or None"))?;
+  validate_option_keys(options)?;
+
+  let domains = domains_option(options)?;
+  let browser_id = string_option(options, "browser_id")?;
+  let local_state_path = string_option(options, "local_state_path")?;
+  let plaintext_only = plaintext_only_option(options)?;
+
+  let selector_count = usize::from(browser_id.is_some())
+    + usize::from(local_state_path.is_some())
+    + usize::from(plaintext_only);
+  if selector_count > 1 {
+    return Err(PyValueError::new_err(
+      "Chromium path options browser_id, local_state_path, and plaintext_only are mutually exclusive",
+    ));
+  }
+
+  let mut request = rookie_core::direct_path::ChromiumPathRequest::new(path);
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  let credentials = if let Some(browser_id) = browser_id {
+    Some(rookie_core::direct_path::ChromiumCredentialSource::BrowserId(browser_id))
+  } else if let Some(local_state_path) = local_state_path {
+    Some(
+      rookie_core::direct_path::ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+        local_state_path,
+      )),
+    )
+  } else if plaintext_only {
+    Some(rookie_core::direct_path::ChromiumCredentialSource::PlaintextOnly)
+  } else {
+    None
+  };
+  if let Some(credentials) = credentials {
+    request = request.credentials(credentials);
+  }
+  Ok(request)
+}
+
+fn direct_path_runtime_error(error: rookie_core::anyhow::Error) -> PyErr {
+  PyRuntimeError::new_err(format!("{error:?}"))
+}
+
+/// Extract cookies after identifying an explicit cookie source.
+#[pyfunction]
+#[pyo3(signature = (path, domains=None))]
+pub fn cookies_from_path(
+  py: Python<'_>,
+  path: String,
+  domains: Option<Vec<String>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  let mut request = rookie_core::direct_path::DirectPathRequest::new(path);
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  let cookies = py
+    .detach(|| rookie_core::direct_path::cookies_from_path(request))
+    .map_err(direct_path_runtime_error)?;
+  to_dict(py, cookies)
+}
+
+/// Extract cookies from an explicit Chromium cookie database.
+#[pyfunction]
+#[pyo3(signature = (path, options=None))]
+pub fn chromium_cookies_from_path(
+  py: Python<'_>,
+  path: String,
+  options: Option<Bound<'_, PyAny>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  let request = chromium_path_request(path, options)?;
+  let cookies = py
+    .detach(|| rookie_core::direct_path::chromium_cookies_from_path(request))
+    .map_err(direct_path_runtime_error)?;
+  to_dict(py, cookies)
+}
+
+/// Detailed counterpart to ``chromium_cookies_from_path``.
+#[pyfunction]
+#[pyo3(signature = (path, options=None))]
+pub fn chromium_cookies_from_path_detailed(
+  py: Python<'_>,
+  path: String,
+  options: Option<Bound<'_, PyAny>>,
+) -> PyResult<Vec<Py<PyAny>>> {
+  let request = chromium_path_request(path, options)?;
+  let cookies = py
+    .detach(|| rookie_core::direct_path::chromium_cookies_from_path_detailed(request))
+    .map_err(direct_path_runtime_error)?;
+  detailed_to_dict(py, cookies)
+}
 
 /// Extract Cookies from any browser
 ///

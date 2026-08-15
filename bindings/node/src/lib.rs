@@ -4,6 +4,9 @@
 extern crate napi_derive;
 
 use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
+use rookie_cookies::direct_path::{
+  ChromiumCredentialSource, ChromiumPathRequest, DirectPathRequest,
+};
 use rookie_cookies::enums::{Cookie, DetailedCookie};
 use rookie_cookies::report::{
   BrowserCapabilitiesDescriptor, BrowserDescriptor, CookieSourceDescriptor, CookieSourceIdentity,
@@ -49,6 +52,15 @@ pub struct CookieContextObject {
 pub struct DetailedCookieObject {
   pub cookie: CookieObject,
   pub context: CookieContextObject,
+}
+
+/// Cross-platform options for explicit Chromium cookie databases.
+#[napi(object)]
+pub struct ChromiumPathOptions {
+  pub domains: Option<Vec<String>>,
+  pub browser_id: Option<String>,
+  pub local_state_path: Option<String>,
+  pub plaintext_only: Option<bool>,
 }
 
 #[napi(object)]
@@ -491,6 +503,138 @@ fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
   }
 }
 
+fn chromium_path_request(
+  path: String,
+  options: Option<ChromiumPathOptions>,
+) -> Result<ChromiumPathRequest> {
+  let mut request = ChromiumPathRequest::new(path);
+  let Some(options) = options else {
+    return Ok(request);
+  };
+  if let Some(domains) = options.domains {
+    request = request.domains(domains);
+  }
+
+  let plaintext_only = options.plaintext_only.unwrap_or(false);
+  let selector_count = usize::from(options.browser_id.is_some())
+    + usize::from(options.local_state_path.is_some())
+    + usize::from(plaintext_only);
+  if selector_count > 1 {
+    return Err(napi::Error::new(
+      Status::InvalidArg,
+      "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
+    ));
+  }
+
+  let credentials = if let Some(browser_id) = options.browser_id {
+    Some(ChromiumCredentialSource::BrowserId(browser_id))
+  } else if let Some(local_state_path) = options.local_state_path {
+    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+      local_state_path,
+    )))
+  } else if plaintext_only {
+    Some(ChromiumCredentialSource::PlaintextOnly)
+  } else {
+    None
+  };
+  if let Some(credentials) = credentials {
+    request = request.credentials(credentials);
+  }
+  Ok(request)
+}
+
+pub struct CookiesFromPathTask {
+  request: DirectPathRequest,
+}
+
+impl Task for CookiesFromPathTask {
+  type Output = Vec<Cookie>;
+  type JsValue = Vec<CookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::direct_path::cookies_from_path(self.request.clone())
+        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    cookies_to_js(output)
+  }
+}
+
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
+pub fn cookies_from_path(
+  path: String,
+  domains: Option<Vec<String>>,
+) -> AsyncTask<CookiesFromPathTask> {
+  let mut request = DirectPathRequest::new(path);
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  AsyncTask::new(CookiesFromPathTask { request })
+}
+
+pub struct ChromiumCookiesFromPathTask {
+  request: ChromiumPathRequest,
+}
+
+impl Task for ChromiumCookiesFromPathTask {
+  type Output = Vec<Cookie>;
+  type JsValue = Vec<CookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::direct_path::chromium_cookies_from_path(self.request.clone())
+        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    cookies_to_js(output)
+  }
+}
+
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
+pub fn chromium_cookies_from_path(
+  path: String,
+  options: Option<ChromiumPathOptions>,
+) -> Result<AsyncTask<ChromiumCookiesFromPathTask>> {
+  Ok(AsyncTask::new(ChromiumCookiesFromPathTask {
+    request: chromium_path_request(path, options)?,
+  }))
+}
+
+pub struct ChromiumCookiesFromPathDetailedTask {
+  request: ChromiumPathRequest,
+}
+
+impl Task for ChromiumCookiesFromPathDetailedTask {
+  type Output = Vec<DetailedCookie>;
+  type JsValue = Vec<DetailedCookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| {
+      rookie_cookies::direct_path::chromium_cookies_from_path_detailed(self.request.clone())
+        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    detailed_cookies_to_js(output)
+  }
+}
+
+#[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
+pub fn chromium_cookies_from_path_detailed(
+  path: String,
+  options: Option<ChromiumPathOptions>,
+) -> Result<AsyncTask<ChromiumCookiesFromPathDetailedTask>> {
+  Ok(AsyncTask::new(ChromiumCookiesFromPathDetailedTask {
+    request: chromium_path_request(path, options)?,
+  }))
+}
+
 // ---------------------------------------------------------------------------
 // AnyBrowser needs special handling (db_path, domains, key_path)
 // ---------------------------------------------------------------------------
@@ -517,6 +661,7 @@ impl Task for AnyBrowserTaskImpl {
   }
 }
 
+/// @deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn any_browser(
   db_path: String,
@@ -654,6 +799,7 @@ impl Task for FirefoxBasedTask {
   }
 }
 
+/// @deprecated Use `cookiesFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn firefox_based(db_path: String, domains: Option<Vec<String>>) -> AsyncTask<FirefoxBasedTask> {
   AsyncTask::new(FirefoxBasedTask { db_path, domains })
@@ -976,6 +1122,7 @@ impl Task for ChromiumBasedWinTask {
   }
 }
 
+/// @deprecated Use `chromiumCookiesFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn chromium_based(
@@ -1019,6 +1166,7 @@ impl Task for ChromiumBasedDetailedWinTask {
   }
 }
 
+/// @deprecated Use `chromiumCookiesFromPathDetailed`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn chromium_based_detailed(
@@ -1094,6 +1242,7 @@ impl Task for ChromiumBasedUnixTask {
   }
 }
 
+/// @deprecated Use `chromiumCookiesFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(unix)]
 pub fn chromium_based(
@@ -1137,7 +1286,7 @@ impl Task for ChromiumBasedDetailedUnixTask {
   }
 }
 
-// Extracts Chromium partition/source context from an explicit Unix path.
+/// @deprecated Use `chromiumCookiesFromPathDetailed`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
 #[cfg(unix)]
 pub fn chromium_based_detailed(

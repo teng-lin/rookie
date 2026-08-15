@@ -74,6 +74,33 @@ fn seed_firefox_cookies(db: &Path, rows: &[MozRow<'_>]) {
   }
 }
 
+// (host_key, name, value, encrypted_value)
+type ChromiumRow<'a> = (&'a str, &'a str, &'a str, &'a [u8]);
+
+fn seed_chromium_cookies(db: &Path, rows: &[ChromiumRow<'_>]) {
+  let conn = rusqlite::Connection::open(db).expect("open writable sqlite");
+  conn
+    .execute_batch(
+      "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); \
+       INSERT INTO meta VALUES ('version', '23'); \
+       CREATE TABLE cookies (\
+         host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL, \
+         expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, \
+         encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL, \
+         samesite INTEGER NOT NULL\
+       );",
+    )
+    .expect("create Chromium fixture");
+  for row in rows {
+    conn
+      .execute(
+        "INSERT INTO cookies VALUES (?1, '/', 0, 0, ?2, ?3, ?4, 0, 0)",
+        rusqlite::params![row.0, row.1, row.2, row.3],
+      )
+      .expect("insert Chromium row");
+  }
+}
+
 fn run_rookie(args: &[&str]) -> std::process::Output {
   // RUST_LOG=error silences tracing-subscriber's INFO output so it
   // doesn't pollute the JSON stdout we're asserting against.
@@ -333,6 +360,23 @@ fn conflicting_and_incomplete_source_arguments_are_parse_errors() {
     &["--browser", "chrome", "--key-path", "Local State"][..],
     &["--path", "cookies.sqlite", "--load"][..],
     &["--key-path", "Local State"][..],
+    &["--browser-id", "chrome"][..],
+    &["--plaintext-only"][..],
+    &[
+      "--path",
+      "Cookies",
+      "--browser-id",
+      "chrome",
+      "--plaintext-only",
+    ][..],
+    &[
+      "--path",
+      "Cookies",
+      "--key-path",
+      "Local State",
+      "--browser-id",
+      "chrome",
+    ][..],
   ] {
     let out = run_rookie(args);
     assert!(
@@ -350,6 +394,92 @@ fn conflicting_and_incomplete_source_arguments_are_parse_errors() {
       "parse error missing clap diagnostic for {args:?}: {stderr}"
     );
   }
+}
+
+#[test]
+fn process_shutdown_is_not_a_cli_option() {
+  let out = run_rookie(&["--allow-process-shutdown"]);
+  assert_eq!(out.status.code(), Some(2));
+  assert!(out.stdout.is_empty());
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(stderr.contains("unexpected argument"), "{stderr}");
+  assert!(stderr.contains("--allow-process-shutdown"), "{stderr}");
+}
+
+#[test]
+fn plaintext_only_selects_chromium_and_fails_closed_before_domain_filtering() {
+  let dir = unique_tmpdir("cli-canonical-chromium");
+  let db = dir.path().join("Cookies");
+  seed_chromium_cookies(
+    &db,
+    &[
+      (".example.test", "plain", "visible", b""),
+      ("other.test", "encrypted", "", b"v10encrypted"),
+    ],
+  );
+
+  let out = run_rookie(&[
+    "--path",
+    db.to_str().unwrap(),
+    "--domains",
+    "example.test",
+    "--plaintext-only",
+  ]);
+  assert_eq!(out.status.code(), Some(1));
+  assert!(out.stdout.is_empty());
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("no browser key identity"),
+    "missing plaintext-only causal diagnostic: {stderr}"
+  );
+}
+
+#[test]
+fn plaintext_only_extracts_an_explicit_chromium_database() {
+  let dir = unique_tmpdir("cli-canonical-chromium-plain");
+  let db = dir.path().join("Cookies");
+  seed_chromium_cookies(
+    &db,
+    &[
+      (".example.test", "plain", "visible", b""),
+      ("other.test", "ignored", "other", b""),
+    ],
+  );
+
+  let out = run_rookie(&[
+    "--path",
+    db.to_str().unwrap(),
+    "--domains",
+    "example.test",
+    "--plaintext-only",
+  ]);
+  let parsed = parsed_json(&out);
+  assert_eq!(parsed.as_array().map(Vec::len), Some(1));
+  assert_eq!(parsed[0]["name"], "plain");
+}
+
+#[test]
+fn credential_selector_on_firefox_is_a_core_error_not_a_usage_error() {
+  let dir = unique_tmpdir("cli-key-path-is-chromium");
+  let db = dir.path().join("cookies.sqlite");
+  seed_firefox_cookies(
+    &db,
+    &[(".example.test", "/", false, 0, "id", "value", false, 0)],
+  );
+
+  let out = run_rookie(&[
+    "--path",
+    db.to_str().unwrap(),
+    "--key-path",
+    dir.path().join("Local State").to_str().unwrap(),
+  ]);
+  assert_eq!(out.status.code(), Some(1));
+  assert!(out.stdout.is_empty());
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("expected_chromium_sqlite") || stderr.contains("expected Chromium"),
+    "missing typed source diagnostic: {stderr}"
+  );
 }
 
 #[test]
@@ -433,19 +563,31 @@ fn help_and_version_are_successful_stdout_contracts() {
   assert_success(&help);
   assert!(help.stderr.is_empty(), "help wrote to stderr");
   let help_stdout = String::from_utf8(help.stdout).expect("utf-8 help");
-  for flag in ["--path", "--key-path", "--browser", "--format"] {
+  for flag in [
+    "--path",
+    "--key-path",
+    "--browser-id",
+    "--plaintext-only",
+    "--browser",
+    "--format",
+  ] {
     assert!(
       help_stdout.contains(flag),
       "help omitted {flag}: {help_stdout}"
     );
   }
+  assert!(help_stdout.contains("Windows Local State"), "{help_stdout}");
+  assert!(
+    !help_stdout.contains("allow-process-shutdown"),
+    "{help_stdout}"
+  );
 
   // `--browser` accepts registered IDs in report/list mode, so its accepted set
   // is no longer a closed clap value list. The deterministic legacy set is
   // pinned on the invalid-value diagnostic in `generic_modes.rs` instead.
   let browser_help = help_stdout
     .lines()
-    .find(|line| line.contains("--browser"))
+    .find(|line| line.contains("--browser <BROWSER>"))
     .expect("browser help line");
   assert!(
     browser_help.contains("--list-browsers"),

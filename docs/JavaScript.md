@@ -55,6 +55,32 @@ The CLI keeps the generic contract: list with
 
 ## Explicit paths and cookie context
 
+Use `cookiesFromPath(path, domains)` for a path that may be Firefox or
+Chromium. Use the Chromium-specific API to select credentials explicitly:
+
+```js
+import { chromiumCookiesFromPath, cookiesFromPath } from "rookie-cookies";
+
+const firefox = await cookiesFromPath("/path/to/cookies.sqlite", ["example.com"]);
+const chrome = await chromiumCookiesFromPath(
+  "/path/to/Chrome/Default/Network/Cookies",
+  { browserId: "chrome", domains: ["example.com"] },
+);
+```
+
+Chromium options accept at most one of `browserId`, `localStatePath`, or
+`plaintextOnly: true`. `null`, omitted fields, and `plaintextOnly: false` mean
+omission; zero selectors selects Automatic. Automatic probes platform
+credentials on Linux and macOS; on Windows an explicit Chromium path rejects
+with `missing_local_state_file` because it does not guess a browser
+installation. Invalid option shapes reject their Promise with `TypeError`
+before database I/O; the functions never throw synchronously. Process shutdown
+is not exposed by the Node binding.
+
+`anyBrowser()`, the Chromium `*Based` pair, and flat `firefoxBased()` are
+deprecated in 0.6 for removal no earlier than 0.7. Their 0.6 behavior remains
+unchanged, and `firefoxBasedDetailed()` is not deprecated.
+
 Use `firefoxBasedDetailed()` or `chromiumBasedDetailed()` when partition or
 container identity matters. Detailed records contain the unchanged legacy
 cookie object and a separate context object:

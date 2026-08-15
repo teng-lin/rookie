@@ -2,7 +2,12 @@
 
 use clap::error::ErrorKind;
 use clap::{Command, CommandFactory, FromArgMatches};
-use rookie_cookies::{any_browser, common::enums::Cookie};
+use rookie_cookies::common::enums::Cookie;
+use rookie_cookies::direct_path::{
+  chromium_cookies_from_path, cookies_from_path, ChromiumCredentialSource, ChromiumPathRequest,
+  DirectPathRequest,
+};
+use std::path::PathBuf;
 mod browsers_map;
 use browsers_map::BROWSERS_MAP;
 mod args;
@@ -68,6 +73,40 @@ fn canonical_legacy_browser(browser: &str) -> &str {
     "opera gx" | "opera-gx" => "opera_gx",
     _ => browser,
   }
+}
+
+fn cookies_from_explicit_path(
+  path: String,
+  domains: Option<Vec<String>>,
+  key_path: Option<String>,
+  browser_id: Option<String>,
+  plaintext_only: bool,
+) -> rookie_cookies::Result<Vec<Cookie>> {
+  let credential_selector = if let Some(key_path) = key_path {
+    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+      key_path,
+    )))
+  } else if let Some(browser_id) = browser_id {
+    Some(ChromiumCredentialSource::BrowserId(browser_id))
+  } else if plaintext_only {
+    Some(ChromiumCredentialSource::PlaintextOnly)
+  } else {
+    None
+  };
+
+  let Some(credentials) = credential_selector else {
+    let mut request = DirectPathRequest::new(path);
+    if let Some(domains) = domains {
+      request = request.domains(domains);
+    }
+    return cookies_from_path(request);
+  };
+
+  let mut request = ChromiumPathRequest::new(path).credentials(credentials);
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  chromium_cookies_from_path(request)
 }
 
 /// Post-parse mode validation from Section 5.8. `--browser` no longer carries a
@@ -207,7 +246,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       .expect("validate_modes rejects browsers outside the legacy map");
     cookies = browser_fn(args.domains)?;
   } else if let Some(path) = args.path {
-    cookies = any_browser(path.as_str(), args.domains, args.key_path.as_deref())?;
+    cookies = cookies_from_explicit_path(
+      path,
+      args.domains,
+      args.key_path,
+      args.browser_id,
+      args.plaintext_only,
+    )?;
   } else {
     // Default load from all
     cookies = rookie_cookies::load(args.domains)?;
