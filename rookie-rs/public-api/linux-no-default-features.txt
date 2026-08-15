@@ -101,7 +101,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::config::Browser
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::config::Browser
 pub struct rookie_cookies::config::Config
 pub rookie_cookies::config::Config::platforms: std::collections::hash::map::HashMap<alloc::string::String, rookie_cookies::config::BrowsersMap>
-pub rookie_cookies::config::Config::version: alloc::string::String
 impl core::fmt::Debug for rookie_cookies::config::Config
 pub fn rookie_cookies::config::Config::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl serde_core::ser::Serialize for rookie_cookies::config::Config
