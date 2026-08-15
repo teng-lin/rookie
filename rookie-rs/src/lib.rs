@@ -1454,33 +1454,42 @@ mod tests {
   #[cfg(unix)]
   static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-  /// RAII guard that restores `HOME` to its prior value when dropped.
+  /// RAII guard that restores Chromium discovery environment variables to
+  /// their prior values when dropped.
   ///
   /// Holds the `ENV_MUTEX` lock for its entire lifetime so that parallel
-  /// tests never observe an intermediate value for `HOME`. The temp
-  /// directory is also removed in `Drop`, guaranteeing cleanup even when
-  /// the test panics before reaching the end of the function.
+  /// tests never observe intermediate environment values. The temp directory
+  /// is also removed in `Drop`, guaranteeing cleanup even when the test panics
+  /// before reaching the end of the function.
   #[cfg(unix)]
   struct HomeGuard<'a> {
     old_home: Option<std::ffi::OsString>,
+    old_chrome_config_home: Option<std::ffi::OsString>,
+    old_xdg_config_home: Option<std::ffi::OsString>,
     home_dir: std::path::PathBuf,
     _lock: MutexGuard<'a, ()>,
   }
 
   #[cfg(unix)]
   impl<'a> HomeGuard<'a> {
-    /// Create a new guard: acquires `lock`, sets `HOME` to `home_dir`,
-    /// and arranges to restore the old value on drop.
+    /// Create a new guard: acquires `lock`, sets `HOME` to `home_dir`, clears
+    /// config-home overrides, and arranges to restore the old values on drop.
     fn new(lock: MutexGuard<'a, ()>, home_dir: std::path::PathBuf) -> Self {
       let old_home = std::env::var_os("HOME");
+      let old_chrome_config_home = std::env::var_os("CHROME_CONFIG_HOME");
+      let old_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
       // SAFETY: we hold ENV_MUTEX so no other test thread concurrently
-      // reads or writes HOME.
+      // writes these environment variables.
       #[allow(deprecated)]
       unsafe {
         std::env::set_var("HOME", &home_dir);
+        std::env::remove_var("CHROME_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
       }
       HomeGuard {
         old_home,
+        old_chrome_config_home,
+        old_xdg_config_home,
         home_dir,
         _lock: lock,
       }
@@ -1490,12 +1499,20 @@ mod tests {
   #[cfg(unix)]
   impl Drop for HomeGuard<'_> {
     fn drop(&mut self) {
-      // Restore HOME before releasing the mutex lock.
+      // Restore the discovery environment before releasing the mutex lock.
       #[allow(deprecated)]
       unsafe {
         match &self.old_home {
           Some(old) => std::env::set_var("HOME", old),
           None => std::env::remove_var("HOME"),
+        }
+        match &self.old_chrome_config_home {
+          Some(old) => std::env::set_var("CHROME_CONFIG_HOME", old),
+          None => std::env::remove_var("CHROME_CONFIG_HOME"),
+        }
+        match &self.old_xdg_config_home {
+          Some(old) => std::env::set_var("XDG_CONFIG_HOME", old),
+          None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
       }
       // Best-effort removal of the temporary home directory.

@@ -3140,6 +3140,7 @@ pub(crate) fn legacy_internet_explorer_outcome(
         cookies: extraction.cookies,
         records_seen: extraction.stats.records_seen,
         records_skipped: extraction.stats.records_skipped,
+        row_error: extraction.row_error,
       })
     },
   ))
@@ -4856,6 +4857,43 @@ mod tests {
   }
 
   #[test]
+  fn internet_explorer_report_preserves_row_errors() {
+    let temp = TempDir::new("ie-row-error");
+    let home = temp.path().to_path_buf();
+    let context = test_context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let root = test_seams::resolvable_root_paths(&context, "internet_explorer")
+      .into_iter()
+      .next()
+      .expect("Internet Explorer root");
+    std::fs::create_dir_all(&root).expect("create WebCache root");
+    std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+      .expect("seed WebCache database");
+
+    let outcome =
+      internet_explorer_report_with_context(&context, "internet_explorer", None, None, |_, _| {
+        Ok(InternetExplorerRows {
+          cookies: Vec::new(),
+          records_seen: 2,
+          records_skipped: 1,
+          row_error: Some("invalid WebCache record".to_owned()),
+        })
+      })
+      .expect("Internet Explorer report");
+
+    let source = &outcome.profiles[0].sources[0];
+    assert_eq!(source.rows_seen, 2);
+    assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.row_error.as_deref(), Some("invalid WebCache record"));
+  }
+
+  #[test]
   fn gecko_emitted_source_formats_are_declared_by_every_gecko_definition() {
     let registry = embedded_registry().expect("registry");
     let mut checked = 0;
@@ -6218,6 +6256,32 @@ mod tests {
       channel_root(&empty_override_context, "stable"),
       xdg_config.join("google-chrome")
     );
+  }
+
+  #[test]
+  fn linux_default_config_home_projects_network_cookies_through_legacy_path() {
+    let temp = TempDir::new("linux-default-config-home");
+    let home = temp.path().join("home");
+    let context = test_context_for(PlatformId::Linux, home.clone(), []);
+    let root = channel_root(&context, "stable");
+    assert_eq!(root, home.join(".config/google-chrome"));
+    seed_cookie(&root.join("Default"), true, "network-cookie", "value");
+
+    let report = extract_chromium_with_provider_and_selection(
+      &context,
+      "chrome",
+      ProfileSelection::LegacyFirstProfile,
+      None,
+      &CountingProvider::default(),
+    )
+    .expect("extract default Linux Chrome profile");
+    let cookies = project_legacy_chromium_report("chrome", report)
+      .expect("project legacy Chrome report")
+      .expect("Chrome cookie source");
+
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "network-cookie");
+    assert_eq!(cookies[0].value, "value");
   }
 
   #[test]
