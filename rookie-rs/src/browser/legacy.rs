@@ -121,12 +121,27 @@ fn project_engine_outcome(
   };
 
   let mut cookies = Vec::new();
+  let mut deferred_persistent_row_error = None;
   let mut selected_session_succeeded = false;
   let mut failed_session_sources = Vec::new();
   for source in profile.sources {
     match source.role {
       registry::SOURCE_ROLE_PERSISTENT if source.selected => {
-        cookies.extend(selected_source_cookies(source, policy)?);
+        if let Some(error) = source.error {
+          bail!(error)
+        }
+        if policy == LegacyEnginePolicy::Gecko
+          && source.cookies.is_empty()
+          && source.rows_skipped > 0
+        {
+          deferred_persistent_row_error = Some(
+            source
+              .row_error
+              .unwrap_or_else(|| policy.all_rows_rejected_fallback().to_owned()),
+          );
+        } else {
+          cookies.extend(selected_source_cookies(source, policy)?);
+        }
       }
       registry::SOURCE_ROLE_SESSION if source.selected && source.error.is_none() => {
         // Historical Firefox extraction logs an invalid session candidate and
@@ -147,6 +162,11 @@ fn project_engine_outcome(
       "all existing Firefox session store candidates failed: {}",
       failed_session_sources.join("; ")
     )
+  }
+  if cookies.is_empty() {
+    if let Some(error) = deferred_persistent_row_error {
+      bail!(error)
+    }
   }
   Ok(cookies)
 }
@@ -221,6 +241,7 @@ mod tests {
         installation_id: "b".repeat(64),
         installation_priority: 10,
         legacy_profile_order: 0,
+        legacy_is_default: true,
         installation_path: PathBuf::from("/browser"),
         name: "default".to_owned(),
         path: PathBuf::from("/browser/default"),
@@ -408,5 +429,61 @@ mod tests {
         .expect("an authoritative empty session source is still a success")
         .is_empty()
     );
+  }
+
+  #[test]
+  fn valid_gecko_session_cookie_rescues_persistent_all_row_failure() {
+    let mut session = failed_session_source("/browser/default/sessionstore.js", "unused");
+    session.selected = true;
+    session.error = None;
+    session.cookies.push(Cookie {
+      domain: ".example.com".to_owned(),
+      path: "/".to_owned(),
+      secure: false,
+      expires: None,
+      name: "session".to_owned(),
+      value: "value".to_owned(),
+      http_only: false,
+      same_site: -1,
+    });
+    let mut outcome = profile_with(Some(persistent_source(
+      None,
+      Some("every persistent row failed"),
+    )));
+    outcome.profiles[0].sources.push(session);
+
+    let cookies = project_engine_outcome("firefox", outcome, LegacyEnginePolicy::Gecko)
+      .expect("a valid session source is the historical fallback");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "session");
+
+    let mut selected_empty = failed_session_source("/browser/default/sessionstore.js", "unused");
+    selected_empty.selected = true;
+    selected_empty.error = None;
+    let mut empty = profile_with(Some(persistent_source(
+      None,
+      Some("every persistent row failed"),
+    )));
+    empty.profiles[0].sources.push(selected_empty);
+    let error = project_engine_outcome("firefox", empty, LegacyEnginePolicy::Gecko)
+      .expect_err("a successful but empty session source cannot hide persistent row failures");
+    assert!(error.to_string().contains("every persistent row failed"));
+
+    let mut all_sessions_failed = profile_with(Some(persistent_source(
+      None,
+      Some("every persistent row failed"),
+    )));
+    all_sessions_failed.profiles[0]
+      .sources
+      .push(failed_session_source(
+        "/browser/default/sessionstore.js",
+        "invalid JSON",
+      ));
+    let error = project_engine_outcome("firefox", all_sessions_failed, LegacyEnginePolicy::Gecko)
+      .expect_err("the historical total-session failure takes precedence");
+    assert!(error
+      .to_string()
+      .contains("all existing Firefox session store candidates failed"));
+    assert!(!error.to_string().contains("every persistent row failed"));
   }
 }
