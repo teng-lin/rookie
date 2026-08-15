@@ -109,7 +109,6 @@ def main() -> int:
     node = load_toml("bindings/node/Cargo.toml")
     rust_example = load_toml("examples/rust/http/Cargo.toml")
     cargo_lock = load_toml("Cargo.lock")
-    config = load_json("rookie-rs/config.json")
     node_package = load_json("bindings/node/package.json")
     node_lock = load_json("bindings/node/package-lock.json")
     javascript_lock = load_json("examples/javascript/package-lock.json")
@@ -232,9 +231,6 @@ def main() -> int:
         failures.append(
             "examples/rust/http/Cargo.toml: excluded path dependency must not carry a version"
         )
-    if "version" in config:
-        failures.append("rookie-rs/config.json: unused top-level version must be absent")
-
     for package_name in NATIVE_PACKAGES:
         package_path = (
             f"bindings/node/npm/{package_name.removeprefix('rookie-cookies-')}/package.json"

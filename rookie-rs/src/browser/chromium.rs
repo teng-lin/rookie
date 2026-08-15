@@ -425,7 +425,7 @@ impl ChromiumEngineExtractionOutcome {
     ))
   }
 
-  fn into_legacy_result(self) -> Result<Vec<Cookie>> {
+  pub(crate) fn into_legacy_result(self) -> Result<Vec<Cookie>> {
     match self.legacy_error {
       Some(error) => Err(error),
       None => Ok(self.cookies),

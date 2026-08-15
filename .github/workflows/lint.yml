@@ -58,3 +58,12 @@ jobs:
           grep -q "^examples/simple.rs$" package_files.txt
           grep -q "^examples/from_path.rs$" package_files.txt
           grep -q "^examples/detailed_from_path.rs$" package_files.txt
+          grep -q "^browser_registry.json$" package_files.txt
+      - name: Enforce authoritative browser discovery
+        run: |
+          test ! -e rookie-rs/config.json
+          test ! -e rookie-rs/src/common/paths.rs
+          if rg -n 'common::paths|paths::find_[a-z_]+_paths' rookie-rs/src; then
+            echo 'legacy browser discovery call site found' >&2
+            exit 1
+          fi

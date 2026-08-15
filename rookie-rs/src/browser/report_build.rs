@@ -161,6 +161,7 @@ fn chromium_profile_outcome(
     acquisition,
     acquisition_attempts,
     failure,
+    legacy_error: _,
   } = extraction;
   let identity = profile_identity(
     browser_id,
@@ -963,6 +964,7 @@ mod tests {
       acquisition: registry::SourceAcquisition::NotAttempted,
       acquisition_attempts: 1,
       failure,
+      legacy_error: None,
     }
   }
 
@@ -1016,8 +1018,14 @@ mod tests {
       profile_id: "c".repeat(64),
       installation_id: "d".repeat(64),
       installation_priority: 0,
+      legacy_installation_priority: 0,
+      legacy_profile_order: 0,
+      legacy_is_default: true,
+      legacy_eligible: true,
       installation_path: PathBuf::from("/firefox"),
+      legacy_installation_path: PathBuf::from("/firefox"),
       name: "default".to_owned(),
+      legacy_name: "default".to_owned(),
       path: PathBuf::from("/firefox/Profiles/default"),
       is_default: true,
       persistent_source_discovered: true,

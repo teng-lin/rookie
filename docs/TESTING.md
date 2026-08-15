@@ -15,6 +15,11 @@ cargo test --workspace --doc
 python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
 ```
 
+The lint workflow also enforces the authoritative-discovery boundary: the old
+`config.json` and `common/paths.rs` files must stay absent, production code may
+not add `paths::find_*` calls, and the packaged crate must contain
+`browser_registry.json`.
+
 The CLI integration suite uses a generated Firefox database and covers JSON and
 Netscape output, logs on stderr, errors, help/version output, profile discovery,
 and paths containing spaces and Unicode. On Windows, the Rust Chrome e2e target
