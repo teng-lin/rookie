@@ -128,7 +128,8 @@ fn compatibility_browser(platform: &str, definition: &RegistryBrowser) -> Browse
   }
 }
 
-/// Frozen public compatibility view generated from the authoritative registry.
+/// Frozen public compatibility view generated from the authoritative registry,
+/// plus the historical config-only Linux Opera GX sentinel.
 ///
 /// Discovery does not read this value. `Browser`, `Config`, and `CONFIG` remain
 /// available for source compatibility, but there is no second path database to
@@ -151,6 +152,22 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
             .or_insert_with(|| compatibility_browser(&platform, &definition));
         }
         browsers.insert(definition.canonical_id, browser);
+      }
+      // Linux Opera GX has never been discoverable or extractable, but the
+      // public compatibility map historically exposed an empty entry for it.
+      // Keep that config-only sentinel without registering the browser in the
+      // authoritative discovery registry or advertising it as supported.
+      if platform == "linux" {
+        browsers.insert(
+          "opera_gx".to_owned(),
+          Browser {
+            paths: Vec::new(),
+            channels: Some(vec![String::new(), String::new()]),
+            unix_crypt_name: None,
+            osx_key_service: None,
+            osx_key_user: None,
+          },
+        );
       }
       (platform, browsers)
     })
@@ -212,6 +229,38 @@ mod tests {
     let absent = "safari";
 
     assert!(try_get_browser_config(absent).is_none());
+  }
+
+  #[test]
+  fn linux_projection_retains_config_only_opera_gx() {
+    let opera_gx = CONFIG
+      .platforms
+      .get("linux")
+      .and_then(|browsers| browsers.get("opera_gx"))
+      .expect("Linux compatibility map keeps Opera GX");
+    assert!(opera_gx.paths.is_empty());
+    assert_eq!(
+      opera_gx.channels.as_deref(),
+      Some([String::new(), String::new()].as_slice())
+    );
+    assert!(opera_gx.unix_crypt_name.is_none());
+    assert!(opera_gx.osx_key_service.is_none());
+    assert!(opera_gx.osx_key_user.is_none());
+
+    let registry: RegistryProjection =
+      serde_json::from_str(include_str!("../browser_registry.json")).expect("valid registry");
+    assert!(registry
+      .platforms
+      .get("linux")
+      .expect("Linux registry")
+      .iter()
+      .all(|browser| browser.canonical_id != "opera_gx"));
+
+    #[cfg(target_os = "linux")]
+    assert!(std::ptr::eq(
+      try_get_browser_config("opera_gx").expect("Linux lookup succeeds"),
+      opera_gx
+    ));
   }
 
   #[test]

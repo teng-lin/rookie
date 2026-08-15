@@ -797,7 +797,7 @@ fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
   })
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn any_browser_chromium_configs() -> Result<Vec<(&'static str, Browser)>> {
   let configs = vec![
     (
@@ -932,7 +932,7 @@ pub fn any_browser(
           )
         })
       }
-      #[cfg(all(unix, not(target_os = "linux")))]
+      #[cfg(target_os = "macos")]
       {
         let configs = any_browser_chromium_configs()?;
         best_chromium_probe(&configs, |_name, config| {
@@ -943,6 +943,10 @@ pub fn any_browser(
             false,
           )
         })
+      }
+      #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+      {
+        bail!("Chromium cookie extraction is unsupported on this Unix platform")
       }
     }
     AnyBrowserSource::SafariBinaryCookies => {
@@ -1374,7 +1378,7 @@ mod tests {
     );
   }
 
-  #[cfg(unix)]
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   #[test]
   fn any_browser_does_not_accept_partial_wrong_chromium_identity_early() {
     let configs = vec![
@@ -1414,7 +1418,7 @@ mod tests {
     );
   }
 
-  #[cfg(unix)]
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   #[test]
   fn any_browser_preserves_chromium_probe_diagnostics_when_all_identities_fail() {
     let configs = vec![
@@ -1436,7 +1440,7 @@ mod tests {
     assert!(message.contains("brave: brave keyring is locked"));
   }
 
-  #[cfg(unix)]
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   #[test]
   fn any_browser_chromium_configs_include_arc_with_its_own_identity() {
     let configs = any_browser_chromium_configs().expect("Chromium configurations");
