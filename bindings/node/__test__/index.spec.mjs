@@ -171,8 +171,8 @@ test("platform exports are required only on their supported OS", async (t) => {
   });
 });
 
-test("all packages advertise the exact Node-API v4 engine range", (t) => {
-  const expected = "^10.16.0 || ^11.8.0 || >=12.0.0";
+test("all packages advertise the supported Node.js engine range", (t) => {
+  const expected = ">=22";
   const manifests = [
     ["root", new URL("../package.json", import.meta.url)],
     ["darwin-arm64", new URL("../npm/darwin-arm64/package.json", import.meta.url)],

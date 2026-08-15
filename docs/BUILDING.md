@@ -52,9 +52,12 @@ maturin develop --release
 
 ## Node Bindings
 
+Node.js 22 or newer is required. Use Node.js 22 for local native builds to
+match CI; the resulting Node-API v4 module is also tested on Node.js 24 and 26.
+
 ```console
 cd bindings/node
-npm install
+npm ci
 npm run build
 ```
 

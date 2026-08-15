@@ -7,6 +7,9 @@ Browser extraction functions return Promises and must be awaited. When migrating
 from v0.5.7 or earlier, add `await` (or use `.then(...)`) for every extraction
 call. `version()` remains synchronous.
 
+Node.js 22 or newer is required. The binding is tested on Node.js 22, 24, and
+26. Node.js 18 and 20 are no longer supported.
+
 ## Usage
 
 ```typescript

@@ -15,7 +15,7 @@
   "description": "Load cookies from any browser on any platform",
   "license": "MIT",
   "engines": {
-    "node": "^10.16.0 || ^11.8.0 || >=12.0.0"
+    "node": ">=22"
   },
   "repository": "https://github.com/teng-lin/rookie-cookies",
   "libc": [

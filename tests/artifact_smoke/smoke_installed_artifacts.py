@@ -157,6 +157,8 @@ def validate_npm_tarballs(
         metadata = package_metadata(archive)
     if metadata.get("name") != "rookie-cookies":
         raise RuntimeError(f"unexpected npm root metadata: {metadata}")
+    if metadata.get("engines", {}).get("node") != ">=22":
+        raise RuntimeError(f"unexpected npm root Node.js engine: {metadata}")
     required = {"package/package.json", "package/index.js", "package/index.d.ts"}
     if not required.issubset(members):
         raise RuntimeError(f"npm root package is missing {required - members}")
@@ -180,6 +182,8 @@ def validate_npm_tarballs(
         raise RuntimeError(
             f"expected native npm package {expected_native_name}, got {native_metadata}"
         )
+    if native_metadata.get("engines", {}).get("node") != ">=22":
+        raise RuntimeError(f"unexpected native npm Node.js engine: {native_metadata}")
     if binary_member not in native_members or not native_entry.endswith(".node"):
         raise RuntimeError(f"invalid native npm package contents: {native_members}")
     return native_entry, native_binary

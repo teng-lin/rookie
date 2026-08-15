@@ -25,6 +25,12 @@ not require Chrome.
 Windows additionally compiles and tests the core crate without default features
 so the legacy non-App-Bound branch cannot silently rot.
 
+Node bindings are built once per operating system on the minimum supported
+Node.js 22 runtime. The resulting native module is then tested without
+rebuilding on Node.js 22, 24, and 26 on Ubuntu, macOS, and Windows. This keeps
+the Node-API ABI check separate from the JavaScript runtime compatibility
+matrix.
+
 ## Real-browser tests
 
 `.github/workflows/e2e.yml` seeds fake cookies from a loopback HTTP server. The
@@ -80,6 +86,10 @@ outside the checkout. Each native lane exercises:
 - the copied release CLI executable;
 - a wheel installed into a fresh virtual environment with `pip --no-index`;
 - the packed npm root and native-platform tarballs installed offline.
+
+The native npm module is built on Node.js 22, the release-shaped tarballs are
+assembled with Node.js 24, and clean consumers install and load those same
+tarballs on Node.js 22, 24, and 26.
 
 The existing E2E workflow bootstraps the reusable artifact jobs on pull requests,
 covering Ubuntu x64, Windows x64, and macOS ARM64. The standalone workflow owns

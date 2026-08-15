@@ -112,9 +112,11 @@ cargo publish --dry-run -p rookie-cookies --features appbound
 ```
 
 Use `--ignore-scripts` for the npm preview. The release workflow builds and
-tests every native binary, creates all five immutable tarballs without running
-publish lifecycle scripts, and saves them as a workflow artifact before any
-registry write.
+tests every native binary. Native builds run on Node.js 22; macOS, Windows, and
+Linux Docker tests load them on Node.js 22, 24, and 26; and packaging plus
+trusted publishing run on Node.js 24. The workflow creates all five immutable
+tarballs without running publish lifecycle scripts and saves them as a workflow
+artifact before any registry write.
 
 Merge the release pull request and wait for all main-branch checks to pass.
 Create an annotated tag from the resulting main commit:

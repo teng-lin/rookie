@@ -68,6 +68,9 @@ fn main() -> anyhow::Result<()> {
 
 ## Node.js
 
+The npm packages require Node.js 22 or newer. CI and release artifacts are
+tested on Node.js 22, 24, and 26; Node.js 18 and 20 are no longer supported.
+
 ```console
 npm install rookie-cookies
 ```

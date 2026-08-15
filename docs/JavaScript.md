@@ -2,6 +2,9 @@
 
 ## Install
 
+Use Node.js 22 or newer. The supported and tested release lines are Node.js 22,
+24, and 26; Node.js 18 and 20 are no longer supported.
+
 ```console
 npm install rookie-cookies
 ```

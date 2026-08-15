@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_REPOSITORY = "https://github.com/teng-lin/rookie-cookies"
 PYTHON_DOCUMENTATION = f"{CANONICAL_REPOSITORY}/blob/main/docs/Python.md"
 ISSUE_TRACKER = f"{CANONICAL_REPOSITORY}/issues"
+NODE_ENGINE_RANGE = ">=22"
 SEMVER_PATTERN = re.compile(
     r"^(0|[1-9][0-9]*)\."
     r"(0|[1-9][0-9]*)\."
@@ -151,6 +152,21 @@ def main() -> int:
             workspace["workspace"]["dependencies"]["rookie-cookies"].get("default-features"),
             False,
         ),
+        (
+            "bindings/node/package.json Node.js engine",
+            node_package["engines"]["node"],
+            NODE_ENGINE_RANGE,
+        ),
+        (
+            "bindings/node/package-lock.json root Node.js engine",
+            node_lock["packages"][""]["engines"]["node"],
+            NODE_ENGINE_RANGE,
+        ),
+        (
+            "examples/javascript/package-lock.json linked Node.js engine",
+            javascript_lock["packages"]["../../bindings/node"]["engines"]["node"],
+            NODE_ENGINE_RANGE,
+        ),
     ]
     versions: list[tuple[str, Any]] = [
         ("Cargo.toml workspace package", workspace_version),
@@ -263,6 +279,11 @@ def main() -> int:
             (
                 (f"{package_path} repository", package["repository"], CANONICAL_REPOSITORY),
                 (f"{package_path} package name", package["name"], package_name),
+                (
+                    f"{package_path} Node.js engine",
+                    package["engines"]["node"],
+                    NODE_ENGINE_RANGE,
+                ),
             )
         )
 
