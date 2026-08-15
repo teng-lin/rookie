@@ -1,6 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
-use std::{collections::HashMap, sync::Arc};
-use zbus::{blocking::Connection, zvariant::ObjectPath, zvariant::Value, Message};
+use std::collections::HashMap;
+use zbus::{
+  blocking::Connection,
+  zvariant::{DynamicType, ObjectPath, Value},
+  Message,
+};
 use zeroize::Zeroizing;
 
 // Keep the legacy KWallet caller ID so existing access grants continue to work.
@@ -83,9 +87,9 @@ fn push_unique(values: &mut Vec<Zeroizing<String>>, value: Zeroizing<String>) {
   }
 }
 
-fn libsecret_call<T>(connection: &Connection, method: &str, args: T) -> zbus::Result<Arc<Message>>
+fn libsecret_call<T>(connection: &Connection, method: &str, args: T) -> zbus::Result<Message>
 where
-  T: serde::ser::Serialize + zvariant::DynamicType,
+  T: serde::ser::Serialize + DynamicType,
 {
   connection.call_method(
     Some("org.freedesktop.secrets"),
@@ -121,9 +125,9 @@ fn kwallet_call<T>(
   endpoint: KWalletEndpoint,
   method: &str,
   args: T,
-) -> zbus::Result<Arc<Message>>
+) -> zbus::Result<Message>
 where
-  T: serde::ser::Serialize + zvariant::DynamicType,
+  T: serde::ser::Serialize + DynamicType,
 {
   connection.call_method(
     Some(endpoint.service),
@@ -171,8 +175,9 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
     attributes.insert("application", crypt_name);
     let message = libsecret_call(&self.connection, "SearchItems", &attributes)
       .context("Secret Service SearchItems failed")?;
-    let (unlocked, locked): (Vec<ObjectPath>, Vec<ObjectPath>) = message
-      .body()
+    let body = message.body();
+    let (unlocked, locked): (Vec<ObjectPath>, Vec<ObjectPath>) = body
+      .deserialize()
       .context("Secret Service SearchItems returned an invalid response")?;
     Ok(SecretSearchResult {
       unlocked: unlocked.into_iter().map(|path| path.to_string()).collect(),
@@ -188,8 +193,9 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
       .context("Secret Service returned an invalid locked item path")?;
     let message =
       libsecret_call(&self.connection, "Unlock", &paths).context("Secret Service Unlock failed")?;
-    let (unlocked, prompt): (Vec<ObjectPath>, ObjectPath) = message
-      .body()
+    let body = message.body();
+    let (unlocked, prompt): (Vec<ObjectPath>, ObjectPath) = body
+      .deserialize()
       .context("Secret Service Unlock returned an invalid response")?;
     Ok(SecretUnlockResult {
       unlocked: unlocked.into_iter().map(|path| path.to_string()).collect(),
@@ -203,8 +209,9 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
 
     let message = libsecret_call(&self.connection, "OpenSession", &("plain", Value::new("")))
       .context("Secret Service OpenSession failed")?;
-    let (_output, session): (Value, ObjectPath) = message
-      .body()
+    let body = message.body();
+    let (_output, session): (Value, ObjectPath) = body
+      .deserialize()
       .context("Secret Service OpenSession returned an invalid response")?;
 
     let message = libsecret_call(
@@ -214,8 +221,9 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
     )
     .context("Secret Service GetSecrets failed")?;
     type Secret<'a> = (ObjectPath<'a>, Vec<u8>, Vec<u8>, String);
-    let secrets: HashMap<ObjectPath, Secret> = message
-      .body()
+    let body = message.body();
+    let secrets: HashMap<ObjectPath, Secret> = body
+      .deserialize()
       .context("Secret Service GetSecrets returned an invalid response")?;
     let secret = secrets
       .get(&item_path)
@@ -283,6 +291,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
     message
       .body()
+      .deserialize()
       .context("KWallet networkWallet returned an invalid response")
   }
 
@@ -296,6 +305,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
     .with_context(|| format!("KWallet {} open failed", self.endpoint.version))?;
     let handle: i32 = message
       .body()
+      .deserialize()
       .context("KWallet open returned an invalid response")?;
     if handle < 0 {
       bail!("KWallet open returned invalid handle {handle}");
@@ -313,6 +323,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
     .with_context(|| format!("KWallet {} readPassword failed", self.endpoint.version))?;
     message
       .body()
+      .deserialize()
       .context("KWallet readPassword returned an invalid response")
   }
 
@@ -326,6 +337,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
     .with_context(|| format!("KWallet {} close failed", self.endpoint.version))?;
     let code: i32 = message
       .body()
+      .deserialize()
       .context("KWallet close returned an invalid response")?;
     ensure_kwallet_return_code("close", code)
   }
@@ -576,6 +588,28 @@ mod tests {
       .to_string();
     assert!(error.contains("requires an interactive prompt"));
     assert!(error.contains("/prompt/42"));
+    assert!(backend.secret_calls.borrow().is_empty());
+  }
+
+  #[test]
+  fn libsecret_reports_when_unlock_returns_no_item_or_prompt() {
+    let backend = FakeSecretService {
+      search: RefCell::new(Some(Ok(SecretSearchResult {
+        unlocked: vec![],
+        locked: vec!["/locked/item".to_string()],
+      }))),
+      unlock: RefCell::new(Some(Ok(SecretUnlockResult {
+        unlocked: vec![],
+        prompt: None,
+      }))),
+      ..Default::default()
+    };
+
+    let error = get_password_libsecret_with_backend(&backend, "schema", "chrome")
+      .expect_err("an empty unlock response must be explicit")
+      .to_string();
+    assert!(error.contains("did not unlock any matching item"));
+    assert!(error.contains("returned no prompt"));
     assert!(backend.secret_calls.borrow().is_empty());
   }
 
