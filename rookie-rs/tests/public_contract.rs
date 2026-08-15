@@ -91,10 +91,7 @@ fn public_cookie_and_config_types_remain_constructible() {
   browsers.insert("fixture".to_string(), browser);
   let mut platforms = HashMap::new();
   platforms.insert("fixture-os".to_string(), browsers);
-  let config = Config {
-    version: "fixture".to_string(),
-    platforms,
-  };
+  let config = Config { platforms };
 
   assert_eq!(
     config.platforms["fixture-os"]["fixture"].paths,
@@ -102,7 +99,7 @@ fn public_cookie_and_config_types_remain_constructible() {
   );
 
   let embedded: &Lazy<Config> = &CONFIG;
-  assert!(!embedded.version.is_empty());
+  assert!(!embedded.platforms.is_empty());
   assert!(!get_browser_config("firefox").paths.is_empty());
   assert!(try_get_browser_config("firefox").is_some());
   assert!(try_get_browser_config("not-a-browser").is_none());

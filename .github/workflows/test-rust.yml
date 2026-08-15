@@ -27,9 +27,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check release metadata
-        run: |
-          version=$(python -c 'import tomllib; print(tomllib.load(open("rookie-rs/Cargo.toml", "rb"))["package"]["version"])')
-          python scripts/check-release.py "$version"
+        run: python scripts/check-release.py
+      - name: Test release tooling
+        run: python -m unittest discover -s tests/release -p 'test_*.py' -v
       - name: Test E2E Python helpers
         run: python -m unittest discover -s tests/e2e -p 'test_*.py' -v
 

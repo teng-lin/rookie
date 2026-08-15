@@ -59,20 +59,56 @@ or repository files.
 
 ## Prepare a release
 
-Update `CHANGELOG.md`, every package, and every internal dependency constraint
-to the same version. Set that version once for the current shell session, then
-run the checks below. The release metadata checker requires Python 3.11 or
-newer.
+Author the release-note prose under the single `## [Unreleased]` heading in
+`CHANGELOG.md`, then set the target version once and run the deterministic bump
+command. It updates the workspace version and internal dependency requirement,
+synchronizes all five npm manifests and exact optional-dependency pins,
+promotes the authored changelog prose to a dated release section, and asks
+Cargo and npm to regenerate their lockfiles. It never generates release-note
+prose or replaces unrelated dependency versions that happen to match the old
+project version.
+
+The next native npm versions do not exist in the registry during preparation,
+so npm can omit their optional resolution records. The command restores only
+those minimal records from the structurally parsed local manifests, then runs
+`npm ci --dry-run` against both npm lockfiles to prove they are installable.
 
 ```console
-export VERSION=0.5.9
+export VERSION=0.5.10
+python3 scripts/bump-version.py "$VERSION"
+```
+
+The default release date is today's UTC date. Pass an explicit date when
+preparing reproducible metadata or working across a UTC date boundary:
+
+```console
+python3 scripts/bump-version.py "$VERSION" --date 2026-08-20
+```
+
+The command requires Python 3.11 or newer and reports every changed field and
+regenerated file. It rolls metadata back if a package manager or the independent
+release verifier fails. An exact rerun of an already prepared version is a
+no-op; an ambiguous changelog or a pre-existing target release heading fails
+without creating another release section.
+
+Review the resulting release notes and generated metadata, then run the full
+release checks. `check-release.py` reads `workspace.package.version` when no
+argument is supplied; release workflows still pass an explicit version to bind
+their check to the requested tag.
+
+```console
+python3 scripts/check-release.py
 python3 scripts/check-release.py "$VERSION"
-cargo test --workspace --all-targets
-cargo test --workspace --doc
+cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --locked
 cargo publish --dry-run -p rookie-cookies --features appbound
-cd bindings/node
-npm ci --ignore-scripts
-npm pack --dry-run --ignore-scripts
+(
+  cd bindings/node
+  npm ci --ignore-scripts
+  npm run build
+  npm test
+  npm pack --dry-run --ignore-scripts
+)
 ```
 
 Use `--ignore-scripts` for the npm preview. The release workflow builds and

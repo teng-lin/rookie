@@ -5,6 +5,7 @@
 //! `str`, so a vocabulary value this build has never seen still arrives intact.
 
 use crate::to_dict;
+use ::rookie_cookies as rookie_core;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rookie_core::report::{

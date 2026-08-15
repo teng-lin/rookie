@@ -1,4 +1,5 @@
 use crate::{detailed_to_dict, to_dict};
+use ::rookie_cookies as rookie_core;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
