@@ -87,7 +87,7 @@ function validateChromiumPathOptions(options) {
     throw new TypeError('Chromium path options must be an object or null')
   }
   const prototype = Object.getPrototypeOf(options)
-  if (prototype !== Object.prototype && prototype !== null) {
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null) {
     throw new TypeError('Chromium path options must be a plain object or null')
   }
   for (const key of Reflect.ownKeys(options)) {

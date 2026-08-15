@@ -282,6 +282,22 @@ test("canonical Chromium paths support flat, detailed, and domain projections", 
   }
 });
 
+test("Chromium path options accept plain records from another realm", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-cross-realm-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-plaintext.sqlite.base64", import.meta.url),
+    );
+    const options = runInNewContext("({ plaintextOnly: true })");
+    const cookies = await rookieCookies.chromiumCookiesFromPath(dbPath, options);
+    t.is(cookies.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("plaintextOnly rejects a mixed database as a whole request", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-mixed-"));
   const dbPath = join(dir, "Cookies");
