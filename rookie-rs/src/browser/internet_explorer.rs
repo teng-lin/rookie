@@ -70,12 +70,17 @@ pub(crate) fn internet_explorer_outcome(
         let records = table
           .iter_records()
           .with_context(|| format!("{table_name}: unable to enumerate unsupported cookie table"))?;
-        let skipped = records.count();
+        let record_count = records.count();
+        // Even an empty table is one failed extraction input when its schema
+        // is unreadable. Counting that table-level failure keeps legacy and
+        // report callers from mistaking an unsupported empty store for a
+        // successful empty result.
+        let skipped = unsupported_table_skipped_inputs(record_count);
         stats.records_seen += skipped;
         stats.records_skipped += skipped;
         row_error = Some(format!("{error:#}"));
         log::warn!(
-          "{table_name}: skipping unsupported cookie table containing {skipped} record(s): {error:#}"
+          "{table_name}: skipping unsupported cookie table containing {record_count} record(s); counted {skipped} skipped input(s): {error:#}"
         );
         continue;
       }
@@ -121,6 +126,10 @@ pub(crate) fn internet_explorer_outcome(
     stats,
     row_error,
   })
+}
+
+fn unsupported_table_skipped_inputs(record_count: usize) -> usize {
+  record_count.max(1)
 }
 
 fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {
@@ -249,6 +258,12 @@ mod tests {
   fn signed_flags_preserve_the_underlying_bit_pattern() {
     let flags = -1_i64 as u32;
     assert_eq!(flags, 0xffff_ffff);
+  }
+
+  #[test]
+  fn unsupported_empty_table_counts_as_one_failed_input() {
+    assert_eq!(unsupported_table_skipped_inputs(0), 1);
+    assert_eq!(unsupported_table_skipped_inputs(4), 4);
   }
 
   #[test]

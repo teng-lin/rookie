@@ -6,10 +6,10 @@ pub fn json(cookies: Vec<Cookie>) -> String {
 
 /// Serialize cookies in the seven-column Netscape cookie-file format.
 ///
-/// Tabs, carriage returns, line feeds, and hash signs in cookie-controlled
-/// fields are percent-encoded. Hash signs are especially important in the
-/// first field: a literal leading `#` would turn a cookie into a comment or a
-/// forged `#HttpOnly_` marker in standard Netscape-file parsers.
+/// Tabs, carriage returns, and line feeds in cookie-controlled fields are
+/// percent-encoded. Hash signs are encoded only in the domain field, where a
+/// literal leading `#` would turn a cookie into a comment or a forged
+/// `#HttpOnly_` marker in standard Netscape-file parsers.
 pub fn netscape(cookies: Vec<Cookie>) -> String {
   let mut data = indoc::formatdoc! {"
     # Netscape HTTP Cookie File
@@ -19,7 +19,7 @@ pub fn netscape(cookies: Vec<Cookie>) -> String {
   .to_string();
   for cookie in cookies {
     let subdomain = cookie.domain.starts_with('.').to_string().to_uppercase();
-    let domain = escape_netscape_field(&cookie.domain);
+    let domain = escape_netscape_domain(&cookie.domain);
     let domain = if cookie.http_only {
       format!("#HttpOnly_{domain}")
     } else {
@@ -43,10 +43,13 @@ pub fn netscape(cookies: Vec<Cookie>) -> String {
 
 fn escape_netscape_field(field: &str) -> String {
   field
-    .replace('#', "%23")
     .replace('\t', "%09")
     .replace('\r', "%0D")
     .replace('\n', "%0A")
+}
+
+fn escape_netscape_domain(domain: &str) -> String {
+  escape_netscape_field(domain).replace('#', "%23")
 }
 
 #[cfg(test)]
@@ -136,5 +139,25 @@ mod tests {
         "record became a comment: {record}"
       );
     }
+  }
+
+  #[test]
+  fn netscape_preserves_literal_hashes_outside_the_domain_column() {
+    let output = netscape(vec![Cookie {
+      domain: "example.com".to_owned(),
+      path: "/fragment#anchor".to_owned(),
+      secure: false,
+      expires: None,
+      name: "name#suffix".to_owned(),
+      value: "value#fragment".to_owned(),
+      http_only: false,
+      same_site: 0,
+    }]);
+
+    let record = output.lines().last().expect("cookie record");
+    assert_eq!(
+      record,
+      "example.com\tFALSE\t/fragment#anchor\tFALSE\t0\tname#suffix\tvalue#fragment"
+    );
   }
 }

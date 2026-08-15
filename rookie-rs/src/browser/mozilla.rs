@@ -44,8 +44,13 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
   let mut cookies = persistent.cookies;
 
   let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
-  let session = get_authoritative_session_outcome(domains.as_deref(), &parent_path)?;
-  cookies.extend(session.cookies);
+  match get_authoritative_session_outcome(domains.as_deref(), &parent_path) {
+    Ok(session) => cookies.extend(session.cookies),
+    Err(error) if cookies.is_empty() => return Err(error),
+    Err(error) => {
+      log::warn!("All Firefox session stores failed; returning persistent cookies only: {error:#}")
+    }
+  }
   if cookies.is_empty() {
     if let Some(error) = persistent.last_row_error {
       return Err(error);
@@ -67,8 +72,13 @@ pub fn firefox_based_detailed(
   let mut cookies = persistent.detailed_cookies;
 
   let parent_path = db_path.parent().unwrap_or(Path::new("")).to_path_buf();
-  let session = get_authoritative_session_outcome(domains.as_deref(), &parent_path)?;
-  cookies.extend(session.detailed_cookies);
+  match get_authoritative_session_outcome(domains.as_deref(), &parent_path) {
+    Ok(session) => cookies.extend(session.detailed_cookies),
+    Err(error) if cookies.is_empty() => return Err(error),
+    Err(error) => log::warn!(
+      "All Firefox session stores failed; returning detailed persistent cookies only: {error:#}"
+    ),
+  }
   if cookies.is_empty() {
     if let Some(error) = persistent.last_row_error {
       return Err(error);
@@ -1855,7 +1865,7 @@ mod tests {
   }
 
   #[test]
-  fn legacy_extraction_signals_when_every_existing_session_candidate_fails() {
+  fn legacy_extraction_preserves_persistent_cookies_when_every_session_candidate_fails() {
     let dir = unique_tmpdir("ff-legacy-all-session-failures");
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(
@@ -1879,8 +1889,32 @@ mod tests {
       std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
     }
 
+    let cookies = firefox_based(db.clone(), None)
+      .expect("persistent cookies remain usable when every session store fails");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "persistent");
+
+    let cookies = firefox_based_detailed(db, None)
+      .expect("detailed persistent cookies remain usable when every session store fails");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].cookie.name, "persistent");
+  }
+
+  #[test]
+  fn legacy_extraction_signals_all_session_failure_without_persistent_cookies() {
+    let dir = unique_tmpdir("ff-legacy-only-session-failures");
+    let db = dir.join("cookies.sqlite");
+    seed_moz_cookies(&db, &[]);
+    for (relative, _) in SESSION_CANDIDATES {
+      let path = dir.join(relative);
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create session directory");
+      }
+      std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
+    }
+
     let error = firefox_based(db.clone(), None)
-      .expect_err("persistent cookies must not hide total session-store failure");
+      .expect_err("total session-store failure without persistent cookies must be signaled");
     assert!(format!("{error:#}").contains("all existing Firefox session store candidates failed"));
     let error = firefox_based_detailed(db, None)
       .expect_err("detailed extraction must signal total session-store failure");

@@ -266,6 +266,22 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         self.assertIn("\t1%0D%0Aforged\t", output)
         self.assertEqual(len(output.splitlines()), 5)
 
+    def test_to_netscape_preserves_hashes_outside_domain(self) -> None:
+        cookie = {
+            **COOKIE,
+            "path": "/fragment#anchor",
+            "name": "name#suffix",
+            "value": "value#fragment",
+        }
+
+        record = rookie_cookies.to_netscape([cookie]).splitlines()[-1]
+
+        self.assertEqual(
+            record,
+            "#HttpOnly_.example.test\tTRUE\t/fragment#anchor\tTRUE\t1700000000\t"
+            "name#suffix\tvalue#fragment",
+        )
+
     def test_to_netscape_handles_empty_cookie_list(self) -> None:
         output = rookie_cookies.to_netscape([])
 
