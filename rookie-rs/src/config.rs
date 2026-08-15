@@ -15,7 +15,6 @@ pub type BrowsersMap = HashMap<String, Browser>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-  pub version: String,
   pub platforms: HashMap<String, BrowsersMap>,
 }
 

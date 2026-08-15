@@ -1,3 +1,4 @@
+use ::rookie_cookies as rookie_core;
 use log::LevelFilter;
 use pyo3::{prelude::*, types::PyDict};
 use pyo3_log::{Caching, Logger};
