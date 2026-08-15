@@ -44,29 +44,6 @@ where
   )
 }
 
-fn retrieve_linux_key_outcomes<B>(
-  credentials: &ChromiumKeyCredentials,
-  backend: &B,
-) -> ChromiumKeyOutcomes
-where
-  B: LinuxKeyringBackend,
-{
-  let v11 = match credentials
-    .linux_crypt_name
-    .as_deref()
-    .filter(|name| !name.is_empty())
-  {
-    None => ChromiumKeyOutcome::NotApplicable,
-    Some(crypt_name) => retrieve_linux_v11_outcome(crypt_name, backend),
-  };
-
-  ChromiumKeyOutcomes {
-    v10: linux_v10_outcome(),
-    v11,
-    v20: ChromiumKeyOutcome::NotApplicable,
-  }
-}
-
 /// Per-`any_browser` Linux key cache.
 ///
 /// Several browser configurations deliberately share a `unix_crypt_name`.
@@ -210,6 +187,17 @@ mod tests {
     }
   }
 
+  fn outcomes_with_backend<B>(
+    credentials: &ChromiumKeyCredentials,
+    backend: &B,
+  ) -> ChromiumKeyOutcomes
+  where
+    B: LinuxKeyringBackend,
+  {
+    let mut session = HostKeySession::new();
+    session.retrieve_with_backend(ChromiumKeyRequest::direct(credentials), backend)
+  }
+
   #[test]
   fn linux_separates_fixed_v10_from_ordered_keyring_v11_candidates() {
     let backend = FakeLinuxBackend {
@@ -219,7 +207,7 @@ mod tests {
         Zeroizing::new("second".to_string()),
       ]),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(Some("chrome")), &backend);
+    let outcomes = outcomes_with_backend(&linux_credentials(Some("chrome")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     assert_eq!(
@@ -250,7 +238,7 @@ mod tests {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("keyring unavailable")),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(Some("chrome")), &backend);
+    let outcomes = outcomes_with_backend(&linux_credentials(Some("chrome")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     assert!(matches!(
@@ -274,7 +262,7 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(vec![]),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(Some("chrome")), &backend);
+    let outcomes = outcomes_with_backend(&linux_credentials(Some("chrome")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     assert!(matches!(
@@ -296,7 +284,7 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(vec![Zeroizing::new("unused".to_string())]),
     };
-    let outcomes = retrieve_linux_key_outcomes(&linux_credentials(None), &backend);
+    let outcomes = outcomes_with_backend(&linux_credentials(None), &backend);
 
     assert_eq!(backend.calls.get(), 0);
     assert!(matches!(

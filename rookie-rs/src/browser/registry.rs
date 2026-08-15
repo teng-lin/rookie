@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use super::chromium::{query_cookies_engine_outcome, ChromiumExtractionStats, ChromiumRowIssue};
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 use super::chromium_crypto::ChromiumKeyOutcome;
 use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, ChromiumKeyProvider};
 use super::chromium_platform_keys::{
