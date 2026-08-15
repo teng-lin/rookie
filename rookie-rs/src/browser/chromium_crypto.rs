@@ -1,4 +1,5 @@
 use std::fmt;
+use zeroize::{Zeroize, Zeroizing};
 
 const CIPHER_VERSION_PREFIX_LEN: usize = 3;
 
@@ -79,17 +80,44 @@ impl fmt::Display for ChromiumKeyTier {
 /// A candidate key whose debug representation never contains the key bytes.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct KeyCandidate {
-  bytes: Vec<u8>,
+  bytes: Zeroizing<Vec<u8>>,
 }
 
 impl KeyCandidate {
-  pub(crate) fn new(bytes: Vec<u8>) -> Self {
+  pub(crate) fn from_zeroizing(bytes: Zeroizing<Vec<u8>>) -> Self {
     Self { bytes }
   }
 
   pub(crate) fn as_bytes(&self) -> &[u8] {
     &self.bytes
   }
+}
+
+impl Drop for KeyCandidate {
+  fn drop(&mut self) {
+    // `Zeroizing` repeats this on field drop. Doing it explicitly makes the
+    // invariant directly testable and guarantees any future drop-time work
+    // observes only wiped storage.
+    #[cfg(test)]
+    let original_len = self.bytes.len();
+    self.bytes.zeroize();
+    #[cfg(test)]
+    KEY_DROP_OBSERVATIONS.with(|observations| {
+      if let Some(observations) = observations.borrow_mut().as_mut() {
+        observations.push((original_len, self.bytes.as_slice().to_vec()));
+      }
+    });
+  }
+}
+
+#[cfg(test)]
+type KeyDropObservation = (usize, Vec<u8>);
+
+#[cfg(test)]
+thread_local! {
+  static KEY_DROP_OBSERVATIONS: std::cell::RefCell<Option<Vec<KeyDropObservation>>> = const {
+    std::cell::RefCell::new(None)
+  };
 }
 
 impl fmt::Debug for KeyCandidate {
@@ -111,13 +139,11 @@ pub(crate) struct NonEmptyKeyCandidates {
 }
 
 impl NonEmptyKeyCandidates {
-  fn from_raw(candidates: Vec<Vec<u8>>) -> Option<Self> {
+  fn from_candidates(candidates: Vec<KeyCandidate>) -> Option<Self> {
     if candidates.is_empty() {
       return None;
     }
-    Some(Self {
-      candidates: candidates.into_iter().map(KeyCandidate::new).collect(),
-    })
+    Some(Self { candidates })
   }
 
   fn as_slice(&self) -> &[KeyCandidate] {
@@ -161,8 +187,19 @@ impl ChromiumKeyOutcome {
   /// Providers must decide explicitly whether an empty retrieval is
   /// `NotApplicable` or `Failure`; this constructor never makes that policy
   /// decision for them.
+  #[cfg(test)]
   pub(crate) fn success(candidates: Vec<Vec<u8>>) -> Option<Self> {
-    NonEmptyKeyCandidates::from_raw(candidates).map(Self::Success)
+    Self::success_zeroizing(candidates.into_iter().map(Zeroizing::new).collect())
+  }
+
+  pub(crate) fn success_zeroizing(candidates: Vec<Zeroizing<Vec<u8>>>) -> Option<Self> {
+    NonEmptyKeyCandidates::from_candidates(
+      candidates
+        .into_iter()
+        .map(KeyCandidate::from_zeroizing)
+        .collect(),
+    )
+    .map(Self::Success)
   }
 
   #[allow(dead_code)]
@@ -296,6 +333,30 @@ impl ChromiumKeyProvider<()> for LegacySharedKeyProvider {
 mod tests {
   use super::*;
   use std::cell::{Cell, RefCell};
+
+  #[test]
+  fn key_candidates_and_their_clones_are_wiped_on_drop() {
+    KEY_DROP_OBSERVATIONS.with(|observations| {
+      assert!(observations.borrow().is_none());
+      *observations.borrow_mut() = Some(Vec::new());
+    });
+
+    let candidate = KeyCandidate::from_zeroizing(Zeroizing::new(vec![0x5a; 32]));
+    let duplicate = candidate.clone();
+    drop(candidate);
+    drop(duplicate);
+
+    let observed = KEY_DROP_OBSERVATIONS.with(|observations| {
+      observations
+        .borrow_mut()
+        .take()
+        .expect("drop observations enabled")
+    });
+    assert_eq!(observed.len(), 2);
+    assert!(observed
+      .iter()
+      .all(|(original_len, bytes)| { *original_len == 32 && bytes.is_empty() }));
+  }
 
   #[test]
   fn classifier_recognizes_every_declared_cipher() {
