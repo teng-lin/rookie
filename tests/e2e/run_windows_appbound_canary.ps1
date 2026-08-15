@@ -154,6 +154,8 @@ try {
     "$cookiesDb" "$walCookiesDb" --source-cookie rookie_ci `
     --fixture-cookie rookie_wal
   if ($LASTEXITCODE -ne 0) { throw "could not stage App-Bound WAL fixture" }
+  Copy-Item -LiteralPath $localState `
+    -Destination (Join-Path $walFixtureUserData "Local State")
 
   # Reopen the same default profile and leave Chrome running. /wal sets a
   # second real cookie as a browser-liveness signal during extraction.
@@ -175,7 +177,7 @@ try {
 
   & .\.venv\Scripts\python.exe tests/e2e/inspect_chromium_profile.py `
     "$walFixtureUserData" --cookie-name rookie_wal `
-    --expected-prefix v20 --require-wal-only
+    --expected-prefix v20 --require-app-bound-key --require-wal-only
   if ($LASTEXITCODE -ne 0) { throw "strict WAL-only v20 fixture check failed" }
 
   $env:ROOKIE_E2E_COOKIE_DB = $walCookiesDb
