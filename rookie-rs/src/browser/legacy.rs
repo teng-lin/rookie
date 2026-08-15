@@ -80,6 +80,7 @@ fn selected_source_cookies(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LegacyEnginePolicy {
   Gecko,
+  #[cfg(any(target_os = "macos", test))]
   Safari,
   #[cfg(any(target_os = "windows", test))]
   InternetExplorer,
@@ -89,6 +90,7 @@ impl LegacyEnginePolicy {
   fn rejects_all_row_failures(self) -> bool {
     match self {
       Self::Gecko => true,
+      #[cfg(any(target_os = "macos", test))]
       Self::Safari => false,
       #[cfg(any(target_os = "windows", test))]
       Self::InternetExplorer => true,
@@ -98,6 +100,7 @@ impl LegacyEnginePolicy {
   fn all_rows_rejected_fallback(self) -> &'static str {
     match self {
       Self::Gecko => "all Firefox cookie database rows failed to decode",
+      #[cfg(any(target_os = "macos", test))]
       Self::Safari => "all Safari cookie records failed to decode",
       #[cfg(any(target_os = "windows", test))]
       Self::InternetExplorer => "all Internet Explorer WebCache records failed to decode",
