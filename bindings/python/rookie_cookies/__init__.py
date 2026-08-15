@@ -1,6 +1,6 @@
 import http.cookiejar
 from sys import platform
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 from .rookie_cookies import (
     MAX_ISSUE_SAMPLES,
@@ -15,6 +15,9 @@ from .rookie_cookies import (
     chromium,
     chromium_based,
     chromium_based_detailed,
+    chromium_cookies_from_path,
+    chromium_cookies_from_path_detailed,
+    cookies_from_path,
     edge,
     firefox,
     firefox_based,
@@ -33,6 +36,7 @@ from .rookie_cookies import (
 
 __all__ = [
     "MAX_ISSUE_SAMPLES",
+    "ChromiumPathOptions",
     "any_browser",
     "arc",
     "brave",
@@ -44,6 +48,9 @@ __all__ = [
     "chromium",
     "chromium_based",
     "chromium_based_detailed",
+    "chromium_cookies_from_path",
+    "chromium_cookies_from_path_detailed",
+    "cookies_from_path",
     "create_cookie",
     "edge",
     "firefox",
@@ -62,6 +69,13 @@ __all__ = [
     "vivaldi",
     "zen",
 ]
+
+
+class ChromiumPathOptions(TypedDict, total=False):
+    domains: list[str]
+    browser_id: str
+    local_state_path: str
+    plaintext_only: bool
 
 
 CookieList = List[Dict[str, Any]]

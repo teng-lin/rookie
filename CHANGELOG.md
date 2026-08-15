@@ -6,8 +6,22 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Python and Node.js now expose canonical `cookies_from_path` / `cookiesFromPath`
+  and explicit Chromium path APIs with credential options matching Rust's typed
+  direct-path builders. The CLI adds `--browser-id` and `--plaintext-only`.
+
 ### Changed
 
+- **Breaking (0.6.0):** The Python package now requires CPython 3.11 or newer.
+  CPython 3.8–3.10 and PyPy are no longer supported, and published wheels move
+  from the `cp38-abi3` tag to `cp311-abi3`.
+- **Breaking (0.6.0):** CLI `--key-path` is now always a Chromium Windows
+  `Local State` credential selector. It requires `--path`, is mutually exclusive
+  with `--browser-id` and `--plaintext-only`, and no longer remains silently
+  ignored on Unix or beside a Firefox database. Inapplicable combinations now
+  fail with the typed direct-path diagnostic.
 - **Breaking (0.6.0):** The npm packages now require Node.js 22 or newer and
   are tested on Node.js 22, 24, and 26. Node.js 18 and 20 are no longer
   supported. The Node-API v4 ABI target is unchanged.
@@ -16,6 +30,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   functions keep their flat first-profile behavior through an explicit
   compatibility selection policy, while `CONFIG` remains available as a
   registry-derived public compatibility view.
+- In the Python and Node bindings, `any_browser`/`anyBrowser`, Chromium
+  `*_based` functions, and flat Firefox `firefox_based`/`firefoxBased`
+  functions are deprecated for removal no earlier than 0.7. Their 0.6 runtime
+  signatures and behavior remain unchanged; detailed Firefox functions remain
+  supported in those bindings.
 
 ### Removed
 

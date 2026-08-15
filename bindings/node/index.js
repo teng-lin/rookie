@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
+const { version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -342,6 +342,91 @@ function asyncNative(nativeFunction, name) {
       return Promise.reject(error)
     }
   }
+}
+
+const chromiumPathOptionKeys = new Set([
+  'domains',
+  'browserId',
+  'localStatePath',
+  'plaintextOnly',
+])
+
+function validateChromiumPathOptions(options) {
+  if (options === null || options === undefined) {
+    return undefined
+  }
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Chromium path options must be an object or null')
+  }
+  const prototype = Object.getPrototypeOf(options)
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null) {
+    throw new TypeError('Chromium path options must be a plain object or null')
+  }
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== 'string' || !chromiumPathOptionKeys.has(key)) {
+      throw new TypeError(
+        'Unknown Chromium path option: ' + (typeof key === 'symbol' ? key.toString() : key)
+      )
+    }
+  }
+
+  const normalized = {}
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(options, key)
+  if (hasOwn('domains') && options.domains !== null && options.domains !== undefined) {
+    if (!Array.isArray(options.domains)) {
+      throw new TypeError('Chromium path option domains must be an array of strings or null')
+    }
+    for (const [index, domain] of options.domains.entries()) {
+      if (typeof domain !== 'string') {
+        throw new TypeError(
+          'Chromium path option domains element ' + index + ' must be a string'
+        )
+      }
+    }
+    normalized.domains = options.domains.slice()
+  }
+
+  for (const key of ['browserId', 'localStatePath']) {
+    if (!hasOwn(key)) {
+      continue
+    }
+    const value = options[key]
+    if (value !== null && value !== undefined) {
+      if (typeof value !== 'string') {
+        throw new TypeError('Chromium path option ' + key + ' must be a string or null')
+      }
+      normalized[key] = value
+    }
+  }
+
+  if (
+    hasOwn('plaintextOnly')
+    && options.plaintextOnly !== null
+    && options.plaintextOnly !== undefined
+  ) {
+    if (typeof options.plaintextOnly !== 'boolean') {
+      throw new TypeError('Chromium path option plaintextOnly must be a boolean or null')
+    }
+    normalized.plaintextOnly = options.plaintextOnly
+  }
+
+  const selectorCount = Number(normalized.browserId !== undefined)
+    + Number(normalized.localStatePath !== undefined)
+    + Number(normalized.plaintextOnly === true)
+  if (selectorCount > 1) {
+    throw new TypeError(
+      'Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive'
+    )
+  }
+  return normalized
+}
+
+function chromiumPathNative(nativeFunction, name) {
+  const required = requiredNative(nativeFunction, name)
+  return asyncNative(
+    (path, options) => required(path, validateChromiumPathOptions(options)),
+    name
+  )
 }
 
 function unsupportedPlatform(name, supportedPlatform) {
@@ -362,6 +447,9 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
+module.exports.cookiesFromPath = asyncNative(cookiesFromPath, 'cookiesFromPath')
+module.exports.chromiumCookiesFromPath = chromiumPathNative(chromiumCookiesFromPath, 'chromiumCookiesFromPath')
+module.exports.chromiumCookiesFromPathDetailed = chromiumPathNative(chromiumCookiesFromPathDetailed, 'chromiumCookiesFromPathDetailed')
 module.exports.firefox = asyncNative(firefox, 'firefox')
 module.exports.zen = asyncNative(zen, 'zen')
 module.exports.librewolf = asyncNative(librewolf, 'librewolf')

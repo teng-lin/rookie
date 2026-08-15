@@ -3,14 +3,13 @@ Chrome profile seeded earlier in the same CI job.
 
 Driven by env vars:
   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
-  ROOKIE_E2E_COOKIE_DB      optional — explicit DB override for chromium_based
+  ROOKIE_E2E_COOKIE_DB      optional — explicit DB override
   ROOKIE_E2E_DOMAIN         optional — domain filter (default: 127.0.0.1)
   ROOKIE_E2E_COOKIE_NAME    optional — expected name (default: rookie_ci)
   ROOKIE_E2E_COOKIE_VALUE   optional — expected value (default: bar)
   ROOKIE_E2E_DISCOVERY_*    optional — separate name/value for chrome discovery
 
-Designed to be run on Linux/macOS/Windows (rookie_cookies's chromium_based
-binding handles the per-OS crypto). On Linux this runs inside the same
+Designed to be run on Linux/macOS/Windows. On Linux this runs inside the same
 dbus-run-session as the Rust test so libsecret is reachable.
 """
 
@@ -47,15 +46,38 @@ def main() -> int:
     db_path = Path(db_override) if db_override else find_cookie_db(user_data_dir)
 
     if sys.platform == "win32":
-        # Windows binding takes (key_path, db_path, domains)
         key_path = user_data_dir / "Local State"
-        cookies = rookie_cookies.chromium_based(str(key_path), str(db_path), [domain])
+        canonical = rookie_cookies.chromium_cookies_from_path(
+            str(db_path),
+            {"domains": [domain], "local_state_path": str(key_path)},
+        )
+        legacy = rookie_cookies.chromium_based(
+            str(key_path), str(db_path), [domain]
+        )
+        results = [
+            ("chromium_cookies_from_path(LocalStateFile)", canonical),
+            ("chromium_based", legacy),
+        ]
     else:
-        cookies = rookie_cookies.chromium_based(str(db_path), [domain], "chrome")
+        automatic = rookie_cookies.chromium_cookies_from_path(
+            str(db_path), {"domains": [domain]}
+        )
+        canonical = rookie_cookies.chromium_cookies_from_path(
+            str(db_path), {"domains": [domain], "browser_id": "chrome"}
+        )
+        legacy = rookie_cookies.chromium_based(str(db_path), [domain], "chrome")
+        results = [
+            ("chromium_cookies_from_path(Automatic)", automatic),
+            ("chromium_cookies_from_path(BrowserId)", canonical),
+            ("chromium_based", legacy),
+        ]
 
     expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
-    results = [("chromium_based", cookies, expected_name, expected_value)]
+    results = [
+        (surface, cookies, expected_name, expected_value)
+        for surface, cookies in results
+    ]
     if os.environ.get("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY") == "1":
         discovery_name = os.environ.get(
             "ROOKIE_E2E_DISCOVERY_COOKIE_NAME", expected_name
@@ -87,7 +109,7 @@ def main() -> int:
     print(
         f"rookie_cookies ({sys.platform}): "
         f"{expected_name}={expected_value} verified "
-        f"({len(cookies)} cookies for {domain}; "
+        f"({len(results[0][1])} cookies for {domain}; "
         f"surfaces: {', '.join(surface for surface, *_ in results)})"
     )
     return 0

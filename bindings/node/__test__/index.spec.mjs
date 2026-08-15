@@ -30,6 +30,9 @@ const EXPECTED_EXPORTS = [
   "version",
   "toNetscape",
   "anyBrowser",
+  "cookiesFromPath",
+  "chromiumCookiesFromPath",
+  "chromiumCookiesFromPathDetailed",
   "firefox",
   "zen",
   "librewolf",
@@ -244,6 +247,149 @@ test("firefoxBasedDetailed preserves colliding container identities", async (t) 
   }
 });
 
+test("cookiesFromPath classifies Firefox and applies domain filters", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-firefox-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+    );
+    const cookies = await rookieCookies.cookiesFromPath(dbPath, ["example.test"]);
+    t.is(cookies.length, 1);
+    t.is(cookies[0].name, "selected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("canonical Chromium paths support flat, detailed, and domain projections", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-chromium-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-plaintext.sqlite.base64", import.meta.url),
+    );
+    const options = { domains: ["example.test"], plaintextOnly: true };
+    const cookies = await rookieCookies.chromiumCookiesFromPath(dbPath, options);
+    const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(dbPath, options);
+    t.deepEqual(cookies.map(({ name }) => name), ["plain"]);
+    t.deepEqual(detailed.map(({ cookie }) => cookie), cookies);
+    t.is(detailed[0].context.topFrameSiteKey, "https://top.example");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Chromium path options accept plain records from another realm", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-cross-realm-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-plaintext.sqlite.base64", import.meta.url),
+    );
+    const options = runInNewContext("({ plaintextOnly: true })");
+    const cookies = await rookieCookies.chromiumCookiesFromPath(dbPath, options);
+    t.is(cookies.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plaintextOnly rejects a mixed database as a whole request", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-mixed-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-mixed.sqlite.base64", import.meta.url),
+    );
+    await t.throwsAsync(
+      rookieCookies.chromiumCookiesFromPath(dbPath, {
+        domains: ["example.test"],
+        plaintextOnly: true,
+      }),
+      { message: /no browser key identity/ },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Chromium path option validation rejects asynchronously before database I/O", async (t) => {
+  const missing = join(tmpdir(), "rookie-node-missing-canonical-Cookies");
+  const invalidOptions = [
+    [],
+    new Date(),
+    new Map(),
+    { unknown: true },
+    { [Symbol("unknown")]: true },
+    { allowProcessShutdown: true },
+    { shutdown: true },
+    { domains: "example.test" },
+    { domains: ["example.test", 1] },
+    { browserId: 1 },
+    { localStatePath: 1 },
+    { plaintextOnly: 1 },
+    { browserId: "chrome", plaintextOnly: true },
+    { localStatePath: "Local State", plaintextOnly: true },
+  ];
+
+  for (const options of invalidOptions) {
+    for (const extract of [
+      rookieCookies.chromiumCookiesFromPath,
+      rookieCookies.chromiumCookiesFromPathDetailed,
+    ]) {
+      let promise;
+      t.notThrows(() => {
+        promise = extract(missing, options);
+      });
+      t.true(promise instanceof Promise);
+      await t.throwsAsync(promise, { instanceOf: TypeError });
+    }
+  }
+});
+
+test("null, false, and empty Chromium selectors retain their distinct meanings", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-selectors-"));
+  const dbPath = join(dir, "Cookies");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/chromium-plaintext.sqlite.base64", import.meta.url),
+    );
+    for (const options of [
+      { plaintextOnly: true },
+      { plaintextOnly: true, domains: null },
+    ]) {
+      const cookies = await rookieCookies.chromiumCookiesFromPath(dbPath, options);
+      t.is(cookies.length, 2);
+    }
+
+    if (process.platform !== "win32") {
+      for (const options of [undefined, null, {}, { plaintextOnly: false }]) {
+        const cookies = await rookieCookies.chromiumCookiesFromPath(dbPath, options);
+        t.is(cookies.length, 2);
+      }
+    }
+
+    for (const options of [{ browserId: "" }, { localStatePath: "" }]) {
+      let error;
+      try {
+        await rookieCookies.chromiumCookiesFromPath(dbPath, options);
+      } catch (caught) {
+        error = caught;
+      }
+      t.truthy(error, "an empty selected credential must reach core validation");
+      t.false(error instanceof TypeError, "empty strings are not facade shape errors");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("identity-less encrypted Chromium paths reject explicitly on Unix", async (t) => {
   if (process.platform === "win32") {
     t.pass();
@@ -291,6 +437,12 @@ test("explicit Chromium browser IDs are registry identities, not profile selecto
 test("bad async API arguments reject instead of throwing synchronously", async (t) => {
   const invalidCalls = [
     ["anyBrowser", () => rookieCookies.anyBrowser(42)],
+    ["cookiesFromPath", () => rookieCookies.cookiesFromPath(42)],
+    ["chromiumCookiesFromPath", () => rookieCookies.chromiumCookiesFromPath(42)],
+    [
+      "chromiumCookiesFromPathDetailed",
+      () => rookieCookies.chromiumCookiesFromPathDetailed(42),
+    ],
     ["firefox", () => rookieCookies.firefox(42)],
     ["firefoxProfile", () => rookieCookies.firefoxProfile(42)],
     ["firefoxBased", () => rookieCookies.firefoxBased(42)],
@@ -409,6 +561,36 @@ test("generated Firefox profile exports and declarations survive patching", (t) 
   t.is((types.match(/firefoxProfiles\(/g) || []).length, 1);
   t.is((types.match(/firefoxProfile\(/g) || []).length, 1);
   t.false(types.includes("testWorkerPanic"));
+});
+
+test("canonical direct-path declarations and compatibility deprecations are exact", (t) => {
+  const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
+  t.regex(
+    types,
+    /export interface ChromiumPathOptions \{\n  domains\?: string\[\] \| null\n  browserId\?: string \| null\n  localStatePath\?: string \| null\n  plaintextOnly\?: boolean \| null\n\}/,
+  );
+  t.true(
+    types.includes(
+      "export declare function cookiesFromPath(path: string, domains?: string[] | null): Promise<CookieObject[]>",
+    ),
+  );
+  t.true(
+    types.includes(
+      "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null): Promise<CookieObject[]>",
+    ),
+  );
+  t.true(
+    types.includes(
+      "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null): Promise<DetailedCookieObject[]>",
+    ),
+  );
+  t.regex(types, /@deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`/);
+  t.regex(types, /@deprecated Use `cookiesFromPath`\. Earliest removal is 0\.7/);
+  t.false(
+    /@deprecated[^\n]*\nexport declare function firefoxBasedDetailed/.test(types),
+    "detailed Firefox remains supported",
+  );
+  t.false(types.includes("allowProcessShutdown"));
 });
 
 test("supportedBrowsers describes registered browsers in camelCase", async (t) => {
@@ -632,6 +814,10 @@ test("generated report exports and declarations survive patching", (t) => {
 
   const facadeIndex = types.indexOf("/** rookie-cookies cross-platform facade */");
   t.not(facadeIndex, -1, "the types facade marker must survive patching");
+  t.false(
+    types.slice(0, facadeIndex).endsWith("@deprecated Use `chromiumCookiesFromPathDetailed`. Earliest removal is 0.7. */\n"),
+    "stripped platform declarations must not leave orphaned JSDoc",
+  );
 
   for (const name of REPORT_FUNCTIONS) {
     t.regex(destructure[0], new RegExp(`\\b${name}\\b`), `${name} must be destructured`);
@@ -925,6 +1111,9 @@ test("public JavaScript examples await async extraction APIs", (t) => {
   ];
   const asyncApis = [
     "anyBrowser",
+    "cookiesFromPath",
+    "chromiumCookiesFromPath",
+    "chromiumCookiesFromPathDetailed",
     "firefox",
     "firefoxProfiles",
     "firefoxProfile",

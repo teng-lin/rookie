@@ -28,7 +28,8 @@ if (!existsSync(dbPath)) {
   process.exit(1);
 }
 
-const cookies = await rookieCookies.firefoxBased(dbPath, [domain]);
+const cookies = await rookieCookies.cookiesFromPath(dbPath, [domain]);
+const legacy = await rookieCookies.firefoxBased(dbPath, [domain]);
 const detailed = await rookieCookies.firefoxBasedDetailed(dbPath, [domain]);
 
 const seeded = cookies.find((c) => c.name === expectedName);
@@ -42,6 +43,10 @@ if (seeded.value !== expectedValue) {
   console.error(
     `cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
   );
+  process.exit(1);
+}
+if (JSON.stringify(legacy) !== JSON.stringify(cookies)) {
+  console.error("legacy firefoxBased disagrees with cookiesFromPath");
   process.exit(1);
 }
 const now = Math.floor(Date.now() / 1000);

@@ -122,7 +122,27 @@ value and keep a fallback branch rather than switching exhaustively. Every
 counter is an ordinary JavaScript number, never a `BigInt`; a count that would
 overflow is clamped and sets `countersSaturated`.
 
-## Detailed cookies and explicit Chromium paths
+## Explicit paths
+
+```typescript
+import { chromiumCookiesFromPath, cookiesFromPath } from "rookie-cookies";
+
+const firefox = await cookiesFromPath("/path/to/cookies.sqlite", ["example.com"]);
+const chrome = await chromiumCookiesFromPath(
+  "/path/to/Chrome/Default/Network/Cookies",
+  { browserId: "chrome", domains: ["example.com"] },
+);
+```
+
+Chromium options accept `domains` plus at most one of `browserId`,
+`localStatePath`, or `plaintextOnly: true`. Zero selectors selects Automatic.
+Automatic probes platform credentials on Linux and macOS; on Windows an
+explicit Chromium path rejects with `missing_local_state_file` because it does
+not guess a browser installation. Invalid option shapes reject with `TypeError`
+before database I/O; every canonical export always returns a Promise. Process
+shutdown is intentionally unavailable.
+
+## Compatibility direct-path functions
 
 ```typescript
 import { chromiumBasedDetailed, firefoxBasedDetailed } from "rookie-cookies";
@@ -140,6 +160,11 @@ Each record contains the unchanged `CookieObject` under `cookie` and a
 `chromiumBased()` likewise accepts the canonical browser ID as its third
 argument. Omit it only for plaintext-only databases; encrypted rows reject
 instead of silently using Chrome's key identity.
+
+`anyBrowser()`, `chromiumBased()` and its detailed twin, and flat
+`firefoxBased()` are deprecated in 0.6 for removal no earlier than 0.7. Their
+runtime behavior remains unchanged throughout 0.6.x. `firefoxBasedDetailed()`
+is not deprecated.
 
 ## Netscape export
 

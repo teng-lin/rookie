@@ -6,9 +6,9 @@
 //
 // On CI this is invoked against the seeded Firefox profile that the
 // e2e workflow creates, so it doubles as a regression test for the
-// `rookie-cookies` `firefoxBased` public API drifting.
+// `rookie-cookies` `cookiesFromPath` public API drifting.
 
-import { firefoxBased } from "rookie-cookies";
+import { cookiesFromPath } from "rookie-cookies";
 
 const dbPath = process.argv[2];
 if (!dbPath) {
@@ -16,6 +16,6 @@ if (!dbPath) {
   process.exit(2);
 }
 
-for (const cookie of await firefoxBased(dbPath, null)) {
+for (const cookie of await cookiesFromPath(dbPath)) {
   console.log(cookie);
 }

@@ -32,7 +32,8 @@ def main() -> int:
         print(f"no cookies.sqlite under {profile_dir}", file=sys.stderr)
         return 1
 
-    cookies = rookie_cookies.firefox_based(str(db_path), [domain])
+    cookies = rookie_cookies.cookies_from_path(str(db_path), [domain])
+    legacy = rookie_cookies.firefox_based(str(db_path), [domain])
     detailed = rookie_cookies.firefox_based_detailed(str(db_path), [domain])
 
     expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
@@ -52,6 +53,10 @@ def main() -> int:
             f"got {seeded['value']!r}",
             file=sys.stderr,
         )
+        return 1
+
+    if legacy != cookies:
+        print("legacy firefox_based disagrees with cookies_from_path", file=sys.stderr)
         return 1
 
     now = int(time.time())

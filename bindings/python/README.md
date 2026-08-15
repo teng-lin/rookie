@@ -3,6 +3,9 @@
 Extract cookies from web browsers
 Bindings for [rookie-cookies](https://github.com/teng-lin/rookie-cookies)
 
+CPython 3.11 or newer is required. Published wheels use the `cp311-abi3`
+stable ABI and are tested on CPython 3.11–3.14.
+
 ## Usage
 
 ```python
@@ -75,7 +78,31 @@ Every identifier and code (`status`, `engine`, `role`, `format`, `severity`, …
 is an open snake_case string, so compare against a known value and keep a
 fallback: a build newer than your code can return one you have not seen.
 
-## Detailed cookies and explicit Chromium paths
+## Explicit paths
+
+Use `cookies_from_path()` when the file may be Firefox or Chromium. Use the
+Chromium-specific functions when selecting credentials explicitly:
+
+```python
+from rookie_cookies import chromium_cookies_from_path, cookies_from_path
+
+firefox = cookies_from_path("/path/to/cookies.sqlite", ["example.com"])
+chrome = chromium_cookies_from_path(
+    "/path/to/Chrome/Default/Network/Cookies",
+    {"browser_id": "chrome", "domains": ["example.com"]},
+)
+```
+
+Chromium options accept at most one credential selector: `browser_id`,
+`local_state_path`, or `plaintext_only=True`. Omitting all three selects
+Automatic credentials. Automatic probes platform credentials on Linux and
+macOS; on Windows an explicit Chromium path raises `RuntimeError` with the core
+`missing_local_state_file` diagnostic because it does not guess a browser
+installation.
+`chromium_cookies_from_path_detailed()` returns the same cookies with
+partition/source context.
+
+## Compatibility direct-path functions
 
 ```python
 from rookie_cookies import chromium_based_detailed, firefox_based_detailed
@@ -93,6 +120,11 @@ separate `context` dictionary. Existing functions and cookie dictionaries are
 unchanged. On Unix, `chromium_based()` also accepts `browser_id` as its third
 argument. Omit it only for plaintext-only databases; encrypted rows fail rather
 than using an assumed Chrome identity.
+
+`any_browser()`, `chromium_based()` and its detailed twin, and flat
+`firefox_based()` are deprecated in 0.6 for removal no earlier than 0.7. Their
+runtime behavior remains unchanged throughout 0.6.x. The detailed Firefox API
+is not deprecated because there is no generic detailed Mozilla replacement.
 
 ## Netscape export
 

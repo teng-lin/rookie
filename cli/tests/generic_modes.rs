@@ -556,28 +556,24 @@ fn profile_conflicts_with_each_list_mode_individually() {
 }
 
 #[test]
-fn key_path_conflicts_with_each_new_mode_individually() {
-  for (args, other) in [
-    (
-      &["--key-path", "ks", "--list-browsers"][..],
-      "--list-browsers",
-    ),
-    // No `--browser` here: it conflicts with `--key-path` too, and a second
-    // conflict switches clap to a multi-line rendering that would obscure the
-    // pair under test.
-    (
-      &["--key-path", "ks", "--list-profiles"][..],
-      "--list-profiles",
-    ),
-    (&["--key-path", "ks", "--report"][..], "--report"),
+fn credential_selectors_conflict_with_each_new_mode_individually() {
+  for (flag, value) in [
+    ("--key-path", Some("ks")),
+    ("--browser-id", Some("chrome")),
+    ("--plaintext-only", None),
   ] {
-    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-    assert!(
-      stderr.contains(&format!(
-        "the argument '--key-path <KEY_PATH>' cannot be used with '{other}'"
-      )),
-      "{args:?}: expected the --key-path/{other} conflict: {stderr}"
-    );
+    for other in ["--list-browsers", "--list-profiles", "--report"] {
+      let mut args = vec![flag];
+      if let Some(value) = value {
+        args.push(value);
+      }
+      args.push(other);
+      let stderr = assert_usage_error(&run_rookie(&args), &format!("{args:?}"));
+      assert!(
+        stderr.contains(other),
+        "{args:?}: expected the {flag}/{other} conflict: {stderr}"
+      );
+    }
   }
 }
 

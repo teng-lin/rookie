@@ -6,7 +6,7 @@ Run with:
 
 On CI this is invoked against the seeded Firefox profile that the e2e
 workflow creates, so it doubles as a regression test for the
-`rookie_cookies.firefox_based` public API drifting.
+`rookie_cookies.cookies_from_path` public API drifting.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def main() -> int:
         print("usage: from_path.py <cookies.sqlite>", file=sys.stderr)
         return 2
     db_path = sys.argv[1]
-    cookies = rookie_cookies.firefox_based(db_path, None)
+    cookies = rookie_cookies.cookies_from_path(db_path)
     for cookie in cookies:
         print(cookie)
     return 0

@@ -25,9 +25,23 @@ async function main() {
   assert.equal(typeof rookieCookies.version, "function");
   assert.match(rookieCookies.version(), /^\d+\.\d+\.\d+/);
 
-  const cookies = keyPath
-    ? await rookieCookies.chromiumBased(keyPath, database, ["example.test"])
-    : await rookieCookies.firefoxBased(database, ["artifact.test"]);
+  let cookies;
+  if (keyPath) {
+    const options = { domains: ["example.test"], localStatePath: keyPath };
+    cookies = await rookieCookies.chromiumCookiesFromPath(database, options);
+    const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(database, options);
+    const legacy = await rookieCookies.chromiumBased(keyPath, database, ["example.test"]);
+    assert.deepEqual(legacy, cookies);
+    assert.deepEqual(detailed.map(({ cookie }) => cookie), cookies);
+  } else {
+    cookies = await rookieCookies.cookiesFromPath(database, ["artifact.test"]);
+    assert.deepEqual(
+      await rookieCookies.firefoxBased(database, ["artifact.test"]),
+      cookies,
+    );
+    assert.equal(typeof rookieCookies.chromiumCookiesFromPath, "function");
+    assert.equal(typeof rookieCookies.chromiumCookiesFromPathDetailed, "function");
+  }
   assert.equal(cookies.length, 1, JSON.stringify(cookies));
   assert.equal(cookies[0].name, keyPath ? "rookie_ci" : "rookie_artifact");
   assert.equal(cookies[0].value, keyPath ? "bar" : "installed-ok");

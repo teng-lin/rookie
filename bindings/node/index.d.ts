@@ -37,6 +37,13 @@ export interface DetailedCookieObject {
   cookie: CookieObject
   context: CookieContextObject
 }
+/** Cross-platform options for explicit Chromium cookie databases. */
+export interface ChromiumPathOptions {
+  domains?: string[] | null
+  browserId?: string | null
+  localStatePath?: string | null
+  plaintextOnly?: boolean | null
+}
 export interface FirefoxProfileObject {
   name: string
   path: string
@@ -193,6 +200,10 @@ export declare function version(): string
  * encoded as `%09`, `%0D`, and `%0A`, matching the Rust, CLI, and Python APIs.
  */
 export declare function toNetscape(cookies: Array<CookieObject>): string
+export declare function cookiesFromPath(path: string, domains?: string[] | null): Promise<CookieObject[]>
+export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null): Promise<CookieObject[]>
+export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null): Promise<DetailedCookieObject[]>
+/** @deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`. Earliest removal is 0.7. */
 export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
 export declare function firefox(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function zen(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
@@ -207,6 +218,7 @@ export declare function vivaldi(domains?: Array<string> | undefined | null): Pro
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function firefoxProfiles(): Promise<Array<FirefoxProfileObject>>
 export declare function firefoxProfile(profile: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** @deprecated Use `cookiesFromPath`. Earliest removal is 0.7. */
 export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Extracts cookies with Firefox container and origin context preserved. */
 export declare function firefoxBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
@@ -267,8 +279,12 @@ export declare function internetExplorer(domains?: Array<string> | undefined | n
 /** macOS-only browsers */
 export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
+/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>
+/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<DetailedCookieObject>>
 /** Windows browsers */
+/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
