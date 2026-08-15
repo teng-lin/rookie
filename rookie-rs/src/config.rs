@@ -150,10 +150,7 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
       (platform, browsers)
     })
     .collect();
-  Config {
-    version: env!("CARGO_PKG_VERSION").to_owned(),
-    platforms,
-  }
+  Config { platforms }
 });
 
 fn platform_name() -> &'static str {

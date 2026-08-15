@@ -51,11 +51,12 @@ fn discovery_failure(outcome: &EngineExtractionOutcome, browser_id: &str) -> Opt
     .discovery_issues
     .iter()
     .filter(|issue| {
-      issue.code.starts_with("profile_")
-        && !matches!(
-          issue.code,
-          "profile_has_no_cookie_source" | "profile_excluded_service_directory"
-        )
+      !matches!(
+        issue.code,
+        "profile_has_no_cookie_source"
+          | "profile_excluded_service_directory"
+          | "safari_profile_discovery_degraded"
+      )
     })
     .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
     .take(8)
@@ -217,11 +218,52 @@ mod tests {
     }
   }
 
+  fn empty_outcome_with_issue(code: &'static str) -> EngineExtractionOutcome {
+    EngineExtractionOutcome {
+      discovery_issues: vec![registry::DiscoveryIssue {
+        code,
+        path: PathBuf::from("/browser/discovery"),
+        message: "injected discovery failure".to_owned(),
+        occurrences: 1,
+      }],
+      installations_detected: 1,
+      installations_discovered: 1,
+      installations_enumerated: 1,
+      ..EngineExtractionOutcome::default()
+    }
+  }
+
   #[test]
   fn ordinary_absence_stays_typed_for_load() {
     let error = project_engine_outcome("firefox", EngineExtractionOutcome::default(), true)
       .expect_err("absence");
     assert!(is_browser_not_installed(&error));
+  }
+
+  #[test]
+  fn non_profile_discovery_failures_do_not_become_browser_absence() {
+    for code in [
+      "mozilla_profiles_ini_invalid",
+      "safari_profile_enumeration_failed",
+    ] {
+      let error = project_engine_outcome("browser", empty_outcome_with_issue(code), false)
+        .expect_err("discovery failures must surface");
+      assert!(!is_browser_not_installed(&error), "{code}");
+      assert!(error.to_string().contains("injected discovery failure"));
+    }
+  }
+
+  #[test]
+  fn ordinary_empty_profile_diagnostics_stay_typed_as_absence() {
+    for code in [
+      "profile_has_no_cookie_source",
+      "profile_excluded_service_directory",
+      "safari_profile_discovery_degraded",
+    ] {
+      let error = project_engine_outcome("browser", empty_outcome_with_issue(code), false)
+        .expect_err("empty discovery remains absence");
+      assert!(is_browser_not_installed(&error), "{code}");
+    }
   }
 
   #[test]

@@ -580,7 +580,7 @@ impl DiscoveryFs for RealDiscoveryFs {
 
 pub(crate) struct DiscoveryContext<F> {
   platform: PlatformId,
-  home: PathBuf,
+  home: Option<PathBuf>,
   env: BTreeMap<OsString, OsString>,
   fs: F,
 }
@@ -595,6 +595,10 @@ impl DiscoveryContext<RealDiscoveryFs> {
   fn system() -> Result<Self> {
     let platform = PlatformId::current()?;
     let env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    Self::from_system_env(platform, env)
+  }
+
+  fn from_system_env(platform: PlatformId, env: BTreeMap<OsString, OsString>) -> Result<Self> {
     let home_key = if platform == PlatformId::Windows {
       OsStr::new("USERPROFILE")
     } else {
@@ -602,8 +606,11 @@ impl DiscoveryContext<RealDiscoveryFs> {
     };
     let home = env
       .get(home_key)
-      .map(PathBuf::from)
-      .ok_or_else(|| anyhow!("{} is not set", home_key.to_string_lossy()))?;
+      .filter(|value| !value.is_empty())
+      .map(PathBuf::from);
+    if platform != PlatformId::Windows && home.is_none() {
+      bail!("{} is not set", home_key.to_string_lossy())
+    }
     Ok(Self {
       platform,
       home,
@@ -622,23 +629,23 @@ impl<F> DiscoveryContext<F> {
       .map(PathBuf::from)
   }
 
-  fn xdg_config_home(&self) -> PathBuf {
+  fn xdg_config_home(&self) -> Option<PathBuf> {
     self
       .env_path("XDG_CONFIG_HOME")
-      .unwrap_or_else(|| self.home.join(".config"))
+      .or_else(|| self.home.as_ref().map(|home| home.join(".config")))
   }
 
-  fn chrome_config_home(&self) -> PathBuf {
+  fn chrome_config_home(&self) -> Option<PathBuf> {
     self
       .env_path("CHROME_CONFIG_HOME")
-      .unwrap_or_else(|| self.xdg_config_home())
+      .or_else(|| self.xdg_config_home())
   }
 
   fn resolve_template(&self, template: &str) -> Option<ResolvedRoot> {
     let replacements = [
-      ("{home}", Some(self.home.clone())),
-      ("{config_home}", Some(self.chrome_config_home())),
-      ("{xdg_config_home}", Some(self.xdg_config_home())),
+      ("{home}", self.home.clone()),
+      ("{config_home}", self.chrome_config_home()),
+      ("{xdg_config_home}", self.xdg_config_home()),
       ("{local_app_data}", self.env_path("LOCALAPPDATA")),
       ("{roaming_app_data}", self.env_path("APPDATA")),
     ];
@@ -1449,7 +1456,9 @@ where
       };
       match query_cookies_engine_outcome(&key_outcomes, source, domains.clone(), false) {
         Ok(mut outcome) => {
-          sort_cookies(&mut outcome.cookies);
+          if selection != ProfileSelection::LegacyFirstProfile {
+            sort_cookies(&mut outcome.cookies);
+          }
           let legacy_error = outcome
             .legacy_error
             .as_ref()
@@ -1838,6 +1847,16 @@ pub(crate) fn legacy_chromium_cookies(
     domains,
     &SystemChromiumKeyProvider,
   )?;
+  project_legacy_chromium_report(browser_id, report)
+}
+
+fn project_legacy_chromium_report(
+  browser_id: &str,
+  report: ChromiumRegistryReport,
+) -> Result<Option<Vec<Cookie>>> {
+  if report.all_detected_roots_failed {
+    bail!("every detected {browser_id} installation failed profile enumeration")
+  }
   let Some(profile) = report
     .installations
     .into_iter()
@@ -3186,7 +3205,7 @@ pub(crate) mod test_seams {
     }
     DiscoveryContext {
       platform,
-      home,
+      home: Some(home),
       env,
       fs: RealDiscoveryFs,
     }
@@ -3466,7 +3485,7 @@ mod tests {
     }
     DiscoveryContext {
       platform,
-      home,
+      home: Some(home),
       env,
       fs: RealDiscoveryFs,
     }
@@ -3479,13 +3498,55 @@ mod tests {
   ) -> DiscoveryContext<RealDiscoveryFs> {
     DiscoveryContext {
       platform,
-      home,
+      home: Some(home),
       env: env
         .into_iter()
         .map(|(name, value)| (OsString::from(name), value.into_os_string()))
         .collect(),
       fs: RealDiscoveryFs,
     }
+  }
+
+  #[test]
+  fn windows_system_context_discovers_registry_roots_without_userprofile() {
+    let temp = TempDir::new("windows-context-without-userprofile");
+    let local_app_data = temp.path().join("LocalAppData");
+    let roaming_app_data = temp.path().join("AppData");
+    let env = BTreeMap::from([
+      (
+        OsString::from("LOCALAPPDATA"),
+        local_app_data.clone().into_os_string(),
+      ),
+      (
+        OsString::from("APPDATA"),
+        roaming_app_data.clone().into_os_string(),
+      ),
+    ]);
+    let context = DiscoveryContext::from_system_env(PlatformId::Windows, env)
+      .expect("Windows registry discovery does not require USERPROFILE");
+    assert!(context.home.is_none());
+
+    let chrome_root = channel_root(&context, "stable");
+    assert!(chrome_root.starts_with(&local_app_data));
+    seed_cookie(&chrome_root.join("Default"), true, "chrome", "value");
+    assert_eq!(
+      discover_browser_with_context(&context, "chrome")
+        .expect("discover Chrome from LOCALAPPDATA")
+        .profiles()
+        .len(),
+      1
+    );
+
+    let firefox_root = gecko_test_root(&context);
+    assert!(firefox_root.starts_with(&roaming_app_data));
+    seed_empty_gecko_database(&firefox_root);
+    assert_eq!(
+      discover_gecko_with_context(&context, "firefox")
+        .expect("discover Firefox from APPDATA")
+        .profiles
+        .len(),
+      1
+    );
   }
 
   fn channel_root(context: &DiscoveryContext<RealDiscoveryFs>, channel: &str) -> PathBuf {
@@ -6306,6 +6367,11 @@ mod tests {
       .discovery_issues
       .iter()
       .any(|issue| issue.code == "installation_glob_expand_failed"));
+    let error = project_legacy_chromium_report("octo_browser", report)
+      .expect_err("named projection must preserve a total discovery failure");
+    assert!(error
+      .to_string()
+      .contains("every detected octo_browser installation failed profile enumeration"));
   }
 
   #[test]
