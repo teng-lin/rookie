@@ -161,6 +161,7 @@ fn chromium_profile_outcome(
     acquisition,
     acquisition_attempts,
     failure,
+    legacy_error: _,
   } = extraction;
   let identity = profile_identity(
     browser_id,
@@ -963,6 +964,7 @@ mod tests {
       acquisition: registry::SourceAcquisition::NotAttempted,
       acquisition_attempts: 1,
       failure,
+      legacy_error: None,
     }
   }
 

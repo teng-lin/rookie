@@ -1696,6 +1696,23 @@
         }
       },
       {
+        "canonical_id": "opera_gx",
+        "aliases": [
+          "opera-gx",
+          "opera gx"
+        ],
+        "display_name": "Opera GX",
+        "engine": "chromium",
+        "roots": [],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": []
+        }
+      },
+      {
         "canonical_id": "firefox",
         "aliases": [],
         "display_name": "Firefox",

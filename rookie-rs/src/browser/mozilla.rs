@@ -970,6 +970,7 @@ struct ProfileSection {
 /// destroys the Windows paths that `IsRelative=0` sections store:
 /// `Path=C:\Users\me\Profiles\work` would parse as `C:UsersmeProfileswork`,
 /// with `\r` becoming a carriage return.
+#[cfg(test)]
 fn load_profiles_ini(profiles_path: &Path) -> Result<Ini> {
   Ini::load_from_file_opt(
     profiles_path,
@@ -1089,6 +1090,7 @@ fn resolve_default_path(profiles: &[ProfileSection], installs: &[String]) -> Opt
 ///
 /// Exposing the secondary profiles — not just the default — is what lets
 /// callers read cookies from a profile the browser does not open by default.
+#[cfg(test)]
 pub(crate) fn list_profiles(profiles_path: &Path) -> Result<Vec<MozillaProfile>> {
   let conf = load_profiles_ini(profiles_path)?;
   Ok(profiles_from_ini(&conf, profiles_path))

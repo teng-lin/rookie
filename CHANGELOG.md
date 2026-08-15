@@ -11,6 +11,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking (0.6.0):** The npm packages now require Node.js 22 or newer and
   are tested on Node.js 22, 24, and 26. Node.js 18 and 20 are no longer
   supported. The Node-API v4 ABI target is unchanged.
+- `browser_registry.json` is now the single browser discovery and credential
+  source for named APIs, profile/report APIs, bindings, and CLI modes. Named
+  functions keep their flat first-profile behavior through an explicit
+  compatibility selection policy, while `CONFIG` remains available as a
+  registry-derived public compatibility view.
+
+### Removed
+
+- Removed the duplicate internal `config.json` + `common/paths.rs` discovery
+  stack. No public browser function or configuration type was removed.
 
 ## [0.5.9] - 2026-08-15
 

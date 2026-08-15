@@ -21,7 +21,6 @@ pub use browser::{
 mod browser;
 pub use anyhow::{self, Result};
 use anyhow::{bail, Context};
-use common::paths;
 #[cfg(unix)]
 use config::Browser;
 use enums::Cookie;
@@ -33,13 +32,9 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// Converts the fallible configuration lookup into the crate's established
-/// error channel. Public extraction functions are called from the Python and
-/// Node bindings, so a missing configuration must not unwind across FFI.
-fn browser_config(name: &str) -> Result<&config::Browser> {
-  config::try_get_browser_config(name).ok_or_else(|| {
-    anyhow::anyhow!("browser configuration {name:?} is unavailable for this platform")
-  })
+/// Thin compatibility projection over registry-backed discovery/extraction.
+fn named_browser(name: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  browser::legacy::browser_cookies(name, domains)
 }
 
 /// Extracts an explicit Chromium cookie database using registry-resolved key
@@ -291,9 +286,7 @@ pub fn load_report(domains: Option<Vec<String>>) -> Result<report::ExtractionRep
 /// let cookies = rookie_cookies::firefox(Some(domains));
 /// ```
 pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("firefox")?;
-  let db_path = paths::find_mozilla_based_paths(config)?;
-  firefox_based(db_path, domains)
+  named_browser("firefox", domains)
 }
 
 /// Returns every Firefox profile that holds a cookie database.
@@ -314,8 +307,7 @@ pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
-  let config = browser_config("firefox")?;
-  paths::find_mozilla_based_profiles(config)
+  browser::legacy::gecko_profiles("firefox")
 }
 
 /// Returns cookies from a specific Firefox profile.
@@ -351,9 +343,7 @@ pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Ve
 /// let cookies = rookie_cookies::librewolf(Some(domains));
 /// ```
 pub fn librewolf(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("librewolf")?;
-  let db_path = paths::find_mozilla_based_paths(config)?;
-  firefox_based(db_path, domains)
+  named_browser("librewolf", domains)
 }
 
 /// Returns cookies from Cachy Browser (Linux only)
@@ -370,9 +360,7 @@ pub fn librewolf(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[cfg(target_os = "linux")]
 pub fn cachy(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("cachy")?;
-  let db_path = paths::find_mozilla_based_paths(config)?;
-  firefox_based(db_path, domains)
+  named_browser("cachy", domains)
 }
 
 /// Returns cookies from Chrome
@@ -388,17 +376,7 @@ pub fn cachy(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::chrome(Some(domains));
 /// ```
 pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("chrome")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("chrome", domains)
 }
 
 /// Returns cookies from Chromium
@@ -414,17 +392,7 @@ pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::chromium(Some(domains));
 /// ```
 pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("chromium")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("chromium", domains)
 }
 
 /// Returns cookies from Brave
@@ -440,17 +408,7 @@ pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::brave(Some(domains));
 /// ```
 pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("brave")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("brave", domains)
 }
 
 /// Returns cookies from Arc
@@ -466,17 +424,7 @@ pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::arc(Some(domains));
 /// ```
 pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("arc")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("arc", domains)
 }
 
 /// Returns cookies from Firefox
@@ -492,9 +440,7 @@ pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::zen(Some(domains));
 /// ```
 pub fn zen(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("zen")?;
-  let db_path = paths::find_mozilla_based_paths(config)?;
-  firefox_based(db_path, domains)
+  named_browser("zen", domains)
 }
 
 /// Returns cookies from Edge
@@ -510,17 +456,7 @@ pub fn zen(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::edge(Some(domains));
 /// ```
 pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("edge")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("edge", domains)
 }
 
 /// Returns cookies from Vivaldi
@@ -536,17 +472,7 @@ pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::vivaldi(Some(domains));
 /// ```
 pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("vivaldi")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("vivaldi", domains)
 }
 
 /// Returns cookies from Opera
@@ -562,17 +488,7 @@ pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::opera(Some(domains));
 /// ```
 pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("opera")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(unix)]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("opera", domains)
 }
 
 /// Returns cookies from Opera GX
@@ -595,23 +511,7 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   )
 )]
 pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  #[cfg(target_os = "linux")]
-  {
-    let _ = domains;
-    bail!("Opera GX is not supported on Linux")
-  }
-  #[cfg(any(target_os = "macos", target_os = "windows"))]
-  let config = browser_config("opera_gx")?;
-  #[cfg(target_os = "windows")]
-  {
-    let (key, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(key, db_path, domains, false)
-  }
-  #[cfg(target_os = "macos")]
-  {
-    let (_, db_path) = paths::find_chrome_based_paths(config)?;
-    chromium_based(config, db_path, domains, false)
-  }
+  named_browser("opera_gx", domains)
 }
 
 /// Returns cookies from Octo Browser
@@ -628,9 +528,7 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[cfg(target_os = "windows")]
 pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("octo_browser")?;
-  let (key, db_path) = paths::find_chrome_based_paths(config)?;
-  chromium_based(key, db_path, domains, false)
+  named_browser("octo_browser", domains)
 }
 
 /// Returns cookies from Safari (macOS only)
@@ -647,9 +545,7 @@ pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[cfg(target_os = "macos")]
 pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("safari")?;
-  let db_path = paths::find_safari_based_paths(config)?;
-  safari_based(db_path, domains)
+  named_browser("safari", domains)
 }
 
 /// Returns cookies from Internet Explorer (Windows only)
@@ -666,9 +562,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[cfg(target_os = "windows")]
 pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let config = browser_config("ie")?;
-  let db_path = paths::find_ie_based_paths(config)?;
-  internet_explorer_based(db_path, domains, false)
+  named_browser("internet_explorer", domains)
 }
 
 fn load_from_browsers<F>(
@@ -688,7 +582,7 @@ where
         successful_extractions += 1;
         cookies.extend(browser_cookies);
       }
-      Err(err) if paths::is_browser_not_installed(&err) => {
+      Err(err) if browser::legacy::is_browser_not_installed(&err) => {
         log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {err}");
       }
       Err(err) => {
@@ -898,20 +792,38 @@ fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
 }
 
 #[cfg(unix)]
-fn any_browser_chromium_configs() -> Result<Vec<(&'static str, &'static Browser)>> {
+fn any_browser_chromium_configs() -> Result<Vec<(&'static str, Browser)>> {
   let configs = vec![
-    ("chrome", browser_config("chrome")?),
-    ("brave", browser_config("brave")?),
-    ("chromium", browser_config("chromium")?),
-    ("edge", browser_config("edge")?),
-    ("opera", browser_config("opera")?),
-    ("vivaldi", browser_config("vivaldi")?),
-    ("arc", browser_config("arc")?),
+    (
+      "chrome",
+      browser::registry::registry_key_credentials("chrome")?,
+    ),
+    (
+      "brave",
+      browser::registry::registry_key_credentials("brave")?,
+    ),
+    (
+      "chromium",
+      browser::registry::registry_key_credentials("chromium")?,
+    ),
+    ("edge", browser::registry::registry_key_credentials("edge")?),
+    (
+      "opera",
+      browser::registry::registry_key_credentials("opera")?,
+    ),
+    (
+      "vivaldi",
+      browser::registry::registry_key_credentials("vivaldi")?,
+    ),
+    ("arc", browser::registry::registry_key_credentials("arc")?),
   ];
   #[cfg(target_os = "macos")]
   let configs = configs
     .into_iter()
-    .chain(std::iter::once(("opera_gx", browser_config("opera_gx")?)))
+    .chain(std::iter::once((
+      "opera_gx",
+      browser::registry::registry_key_credentials("opera_gx")?,
+    )))
     .collect();
   Ok(configs)
 }
@@ -922,16 +834,16 @@ fn any_browser_chromium_configs() -> Result<Vec<(&'static str, &'static Browser)
 /// rows for an equal-size result, wins.
 #[cfg(unix)]
 fn best_chromium_probe<Probe>(
-  configs: &[(&'static str, &'static Browser)],
+  configs: &[(&'static str, Browser)],
   mut probe: Probe,
 ) -> Result<Vec<Cookie>>
 where
-  Probe: FnMut(&'static str, &'static Browser) -> Result<browser::chromium::ChromiumProbeResult>,
+  Probe: FnMut(&'static str, &Browser) -> Result<browser::chromium::ChromiumProbeResult>,
 {
   let mut best: Option<(&'static str, browser::chromium::ChromiumProbeResult)> = None;
   let mut failures = Vec::new();
 
-  for &(name, config) in configs {
+  for (name, config) in configs {
     match probe(name, config) {
       Ok(candidate) => {
         let is_better = best.as_ref().is_none_or(|(_, current)| {
@@ -1050,7 +962,7 @@ mod tests {
   type BrowserEntry = (&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>);
 
   fn not_installed(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-    Err(paths::BrowserNotInstalled::CookieDatabase.into())
+    Err(browser::legacy::BrowserNotInstalled::CookieDatabase.into())
   }
 
   fn extraction_fails(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
@@ -1059,15 +971,6 @@ mod tests {
 
   fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     Ok(vec![])
-  }
-
-  #[test]
-  fn dynamic_config_lookup_uses_the_result_channel() {
-    let error = browser_config("not-a-browser").expect_err("unknown names must return an error");
-    assert_eq!(
-      error.to_string(),
-      "browser configuration \"not-a-browser\" is unavailable for this platform"
-    );
   }
 
   #[cfg(unix)]
@@ -1457,11 +1360,11 @@ mod tests {
     let configs = vec![
       (
         "wrong",
-        browser_config("chrome").expect("Chrome configuration"),
+        browser::registry::registry_key_credentials("chrome").expect("Chrome configuration"),
       ),
       (
         "correct",
-        browser_config("brave").expect("Brave configuration"),
+        browser::registry::registry_key_credentials("brave").expect("Brave configuration"),
       ),
     ];
     let mut probed = Vec::new();
@@ -1497,11 +1400,11 @@ mod tests {
     let configs = vec![
       (
         "chrome",
-        browser_config("chrome").expect("Chrome configuration"),
+        browser::registry::registry_key_credentials("chrome").expect("Chrome configuration"),
       ),
       (
         "brave",
-        browser_config("brave").expect("Brave configuration"),
+        browser::registry::registry_key_credentials("brave").expect("Brave configuration"),
       ),
     ];
     let error = best_chromium_probe(&configs, |name, _config| {
@@ -1533,6 +1436,7 @@ mod tests {
       .iter()
       .find(|(name, _)| *name == "arc")
       .expect("Arc configuration");
+    #[cfg(target_os = "linux")]
     assert_eq!(arc.unix_crypt_name.as_deref(), Some("arc"));
 
     #[cfg(target_os = "macos")]

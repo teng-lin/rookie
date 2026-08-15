@@ -1,6 +1,6 @@
 # ADR 0001: Cookie extraction compatibility and report contracts
 
-- Status: Accepted
+- Status: Superseded by [ADR 0002](0002-authoritative-browser-registry.md) for internal discovery implementation
 - Date: 2026-08-11
 - Scope: cookie extraction only
 
