@@ -565,11 +565,14 @@ macro_rules! async_browser_fn {
 async_browser_fn!(firefox, FirefoxTask, rookie_cookies::firefox);
 async_browser_fn!(zen, ZenTask, rookie_cookies::zen);
 async_browser_fn!(librewolf, LibrewolfTask, rookie_cookies::librewolf);
+#[cfg(target_os = "linux")]
+async_browser_fn!(cachy, CachyTask, rookie_cookies::cachy);
 async_browser_fn!(chrome, ChromeTask, rookie_cookies::chrome);
 async_browser_fn!(brave, BraveTask, rookie_cookies::brave);
 async_browser_fn!(arc, ArcTask, rookie_cookies::arc);
 async_browser_fn!(edge, EdgeTask, rookie_cookies::edge);
 async_browser_fn!(opera, OperaTask, rookie_cookies::opera);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 async_browser_fn!(opera_gx, OperaGxTask, rookie_cookies::opera_gx);
 async_browser_fn!(chromium, ChromiumTask, rookie_cookies::chromium);
 async_browser_fn!(vivaldi, VivaldiTask, rookie_cookies::vivaldi);

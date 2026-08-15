@@ -54,6 +54,21 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         for name in rookie_cookies.__all__:
             self.assertTrue(hasattr(rookie_cookies, name), name)
 
+    def test_platform_browser_exports_match_support_matrix(self) -> None:
+        platform_exports = {"cachy", "internet_explorer", "octo_browser", "opera_gx", "safari"}
+        if sys.platform.startswith("linux"):
+            expected = {"cachy"}
+        elif sys.platform == "darwin":
+            expected = {"opera_gx", "safari"}
+        elif sys.platform == "win32":
+            expected = {"internet_explorer", "octo_browser", "opera_gx"}
+        else:
+            expected = set()
+
+        self.assertEqual(platform_exports.intersection(rookie_cookies.__all__), expected)
+        for name in platform_exports:
+            self.assertEqual(hasattr(rookie_cookies, name), name in expected, name)
+
     def test_create_cookie_maps_cookie_fields(self) -> None:
         cookie = rookie_cookies.create_cookie(
             host=COOKIE["domain"],

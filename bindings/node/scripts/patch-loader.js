@@ -43,7 +43,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
+  'const { version, toNetscape, anyBrowser, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
 )
 
 const exportStart = loader.search(
@@ -78,12 +78,11 @@ function unsupportedPlatform(name, supportedPlatform) {
   ))
 }
 
-function platformNative(nativeFunction, name, nodePlatform, supportedPlatform) {
-  if (typeof nativeFunction === 'function') {
-    return asyncNative(nativeFunction, name)
-  }
-  if (platform === nodePlatform) {
+function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) {
+  const supported = Array.isArray(nodePlatforms) ? nodePlatforms : [nodePlatforms]
+  if (supported.includes(platform)) {
     requiredNative(nativeFunction, name)
+    return asyncNative(nativeFunction, name)
   }
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
@@ -94,12 +93,13 @@ module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
 module.exports.firefox = asyncNative(firefox, 'firefox')
 module.exports.zen = asyncNative(zen, 'zen')
 module.exports.librewolf = asyncNative(librewolf, 'librewolf')
+module.exports.cachy = platformNative(cachy, 'cachy', 'linux', 'Linux')
 module.exports.chrome = asyncNative(chrome, 'chrome')
 module.exports.brave = asyncNative(brave, 'brave')
 module.exports.arc = asyncNative(arc, 'arc')
 module.exports.edge = asyncNative(edge, 'edge')
 module.exports.opera = asyncNative(opera, 'opera')
-module.exports.operaGx = asyncNative(operaGx, 'operaGx')
+module.exports.operaGx = platformNative(operaGx, 'operaGx', ['darwin', 'win32'], 'macOS and Windows')
 module.exports.chromium = asyncNative(chromium, 'chromium')
 module.exports.vivaldi = asyncNative(vivaldi, 'vivaldi')
 module.exports.load = asyncNative(load, 'load')
@@ -151,7 +151,7 @@ generatedNames.delete('testWorkerPanic')
 // napi only generates these on the platform that owns them; the facade
 // re-declares them for every platform, so they are absent from `generatedNames`
 // on most builds and cannot be required of it.
-const platformFunctions = ['octoBrowser', 'internetExplorer', 'safari', 'chromiumBased', 'chromiumBasedDetailed']
+const platformFunctions = ['cachy', 'operaGx', 'octoBrowser', 'internetExplorer', 'safari', 'chromiumBased', 'chromiumBasedDetailed']
 const publishedFunctions = [...loader.matchAll(/^module\.exports\.(\w+) = /gm)]
   .map((match) => match[1])
   .filter((name) => !name.startsWith('__') && !platformFunctions.includes(name))
@@ -174,7 +174,7 @@ if (facadeIndex !== -1) {
 }
 
 types = types.replace(
-  /^export declare function (?:octoBrowser|internetExplorer|safari|chromiumBased|chromiumBasedDetailed|testWorkerPanic)\([^\n]*\):[^\n]*\n?/gm,
+  /^export declare function (?:cachy|operaGx|octoBrowser|internetExplorer|safari|chromiumBased|chromiumBasedDetailed|testWorkerPanic)\([^\n]*\):[^\n]*\n?/gm,
   ''
 )
 types = types.replace(
@@ -185,6 +185,10 @@ types = types.replace(
 types = types.trimEnd()
 types += `
 ${facadeMarker}
+/** Linux-only browsers */
+export declare function cachy(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+/** macOS- and Windows-only browsers */
+export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Windows-only browsers */
 export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>

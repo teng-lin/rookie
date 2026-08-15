@@ -36,7 +36,6 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_function(wrap_pyfunction!(brave, m)?)?;
   m.add_function(wrap_pyfunction!(edge, m)?)?;
   m.add_function(wrap_pyfunction!(opera, m)?)?;
-  m.add_function(wrap_pyfunction!(opera_gx, m)?)?;
 
   m.add_function(wrap_pyfunction!(chromium, m)?)?;
   m.add_function(wrap_pyfunction!(vivaldi, m)?)?;
@@ -62,10 +61,16 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   {
     m.add_function(wrap_pyfunction!(internet_explorer, m)?)?;
     m.add_function(wrap_pyfunction!(octo_browser, m)?)?;
+    m.add_function(wrap_pyfunction!(opera_gx, m)?)?;
   }
   #[cfg(target_os = "macos")]
   {
+    m.add_function(wrap_pyfunction!(opera_gx, m)?)?;
     m.add_function(wrap_pyfunction!(safari, m)?)?;
+  }
+  #[cfg(target_os = "linux")]
+  {
+    m.add_function(wrap_pyfunction!(cachy, m)?)?;
   }
 
   m.add_function(wrap_pyfunction!(version, m)?)?;

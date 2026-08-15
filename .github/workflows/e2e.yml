@@ -163,7 +163,9 @@ jobs:
           npx playwright install firefox
 
       - name: Pre-build the e2e test binary
-        run: cargo test --test e2e_firefox --no-run --locked
+        run: |
+          cargo test --test e2e_firefox --no-run --locked
+          cargo build -p rookie-cookies --example report_surface --release --locked
 
       - name: Build and install rookie-cookies into a venv
         run: |
@@ -179,6 +181,14 @@ jobs:
           cd bindings/node
           npm install
           npm run build -- --cargo-flags=--locked
+
+      - name: Compare report semantics across all four public surfaces
+        run: |
+          .venv/bin/python tests/e2e/check_report_surfaces.py \
+            --rust target/release/examples/report_surface \
+            --python .venv/bin/python \
+            --node "$(command -v node)" \
+            --cli target/release/rookie-cookies
 
       - name: Seed Firefox profile and run extraction (rust + python + cli + node)
         run: |

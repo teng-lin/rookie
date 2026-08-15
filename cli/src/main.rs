@@ -61,6 +61,13 @@ fn legacy_browser_values() -> String {
     .join(", ")
 }
 
+fn canonical_legacy_browser(browser: &str) -> &str {
+  match browser {
+    "opera gx" | "opera-gx" => "opera_gx",
+    _ => browser,
+  }
+}
+
 /// Post-parse mode validation from Section 5.8. `--browser` no longer carries a
 /// closed `PossibleValuesParser`, so the accepted set depends on the mode: the
 /// historical `BROWSERS_MAP` keys alone without a list/report mode, and the
@@ -102,7 +109,7 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
     ));
   }
 
-  if BROWSERS_MAP.contains_key(browser) {
+  if BROWSERS_MAP.contains_key(canonical_legacy_browser(browser)) {
     return Ok(());
   }
 
@@ -194,7 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cookies = rookie_cookies::load(args.domains)?;
   } else if let Some(browser) = args.browser {
     let browser_fn = BROWSERS_MAP
-      .get(browser.as_str())
+      .get(canonical_legacy_browser(&browser))
       .expect("validate_modes rejects browsers outside the legacy map");
     cookies = browser_fn(args.domains)?;
   } else if let Some(path) = args.path {

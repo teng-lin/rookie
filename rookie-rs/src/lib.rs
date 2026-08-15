@@ -587,14 +587,27 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::opera_gx(Some(domains));
 /// ```
+#[cfg_attr(
+  target_os = "linux",
+  deprecated(
+    since = "0.5.9",
+    note = "Opera GX is not supported on Linux; this compatibility shim will be removed in 0.6"
+  )
+)]
 pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  #[cfg(target_os = "linux")]
+  {
+    let _ = domains;
+    bail!("Opera GX is not supported on Linux")
+  }
+  #[cfg(any(target_os = "macos", target_os = "windows"))]
   let config = browser_config("opera_gx")?;
   #[cfg(target_os = "windows")]
   {
     let (key, db_path) = paths::find_chrome_based_paths(config)?;
     chromium_based(key, db_path, domains, false)
   }
-  #[cfg(unix)]
+  #[cfg(target_os = "macos")]
   {
     let (_, db_path) = paths::find_chrome_based_paths(config)?;
     chromium_based(config, db_path, domains, false)
@@ -717,6 +730,7 @@ fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
   {
     browser_types.push(("chrome", chrome));
     browser_types.push(("internet_explorer", internet_explorer));
+    browser_types.push(("octo_browser", octo_browser));
     browser_types.push(("opera_gx", opera_gx));
   }
   #[cfg(target_os = "linux")]
@@ -1309,6 +1323,7 @@ mod tests {
         "arc",
         "chrome",
         "internet_explorer",
+        "octo_browser",
         "opera_gx",
       ]
     );

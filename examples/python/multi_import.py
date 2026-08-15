@@ -18,7 +18,7 @@ browsers_fn = [arc, brave, chromium, chrome, edge, firefox, librewolf, vivaldi]
 if platform.system() == "Linux":
     from rookie_cookies import cachy, opera
 
-    browsers_fn.append(cachy)
+    browsers_fn.extend([cachy, opera])
 
 # Windows
 elif platform.system() == "Windows":
@@ -28,9 +28,9 @@ elif platform.system() == "Windows":
 
 # macOS
 elif platform.system() == "Darwin":
-    from rookie_cookies import safari
+    from rookie_cookies import opera, opera_gx, safari
 
-    browsers_fn.extend([safari])
+    browsers_fn.extend([opera, opera_gx, safari])
 
 for fn in browsers_fn:
     cookies = fn()

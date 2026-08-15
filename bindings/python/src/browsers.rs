@@ -147,8 +147,21 @@ pub fn opera(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<Py
 /// :return: A list of dictionaries of cookies
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn opera_gx(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
   let cookies = py.detach(|| rookie_core::opera_gx(domains))?;
+  to_dict(py, cookies)
+}
+
+/// Extract Cookies from Cachy Browser
+///
+/// :param domains: Optional list of domains to extract only from them
+/// :return: A list of dictionaries of cookies
+#[pyfunction]
+#[pyo3(signature = (domains=None))]
+#[cfg(target_os = "linux")]
+pub fn cachy(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
+  let cookies = py.detach(|| rookie_core::cachy(domains))?;
   to_dict(py, cookies)
 }
 
