@@ -117,6 +117,191 @@ pub static rookie_cookies::config::CONFIG: once_cell::sync::Lazy<rookie_cookies:
 pub fn rookie_cookies::config::get_browser_config(&str) -> &rookie_cookies::config::Browser
 pub fn rookie_cookies::config::try_get_browser_config(&str) -> core::option::Option<&rookie_cookies::config::Browser>
 pub type rookie_cookies::config::BrowsersMap = std::collections::hash::map::HashMap<alloc::string::String, rookie_cookies::config::Browser>
+pub mod rookie_cookies::direct_path
+#[non_exhaustive] pub enum rookie_cookies::direct_path::ChromiumCredentialSource
+pub rookie_cookies::direct_path::ChromiumCredentialSource::Automatic
+pub rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(alloc::string::String)
+pub rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(std::path::PathBuf)
+pub rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly
+impl core::clone::Clone for rookie_cookies::direct_path::ChromiumCredentialSource
+pub fn rookie_cookies::direct_path::ChromiumCredentialSource::clone(&self) -> rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::cmp::Eq for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::cmp::PartialEq for rookie_cookies::direct_path::ChromiumCredentialSource
+pub fn rookie_cookies::direct_path::ChromiumCredentialSource::eq(&self, &rookie_cookies::direct_path::ChromiumCredentialSource) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::ChromiumCredentialSource
+pub fn rookie_cookies::direct_path::ChromiumCredentialSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::marker::Freeze for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::marker::Send for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::marker::Sync for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::marker::Unpin for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::ChromiumCredentialSource
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::ChromiumCredentialSource
+#[non_exhaustive] pub enum rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+pub rookie_cookies::direct_path::ChromiumLockedDatabasePolicy::AllowProcessShutdown
+pub rookie_cookies::direct_path::ChromiumLockedDatabasePolicy::NonDisruptive
+impl core::clone::Clone for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+pub fn rookie_cookies::direct_path::ChromiumLockedDatabasePolicy::clone(&self) -> rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::cmp::Eq for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::cmp::PartialEq for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+pub fn rookie_cookies::direct_path::ChromiumLockedDatabasePolicy::eq(&self, &rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> bool
+impl core::default::Default for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+pub fn rookie_cookies::direct_path::ChromiumLockedDatabasePolicy::default() -> rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::fmt::Debug for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+pub fn rookie_cookies::direct_path::ChromiumLockedDatabasePolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::marker::Freeze for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::marker::Send for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::marker::Sync for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::marker::Unpin for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::ChromiumLockedDatabasePolicy
+#[non_exhaustive] pub enum rookie_cookies::direct_path::CookieSourceKind
+pub rookie_cookies::direct_path::CookieSourceKind::ChromiumSqlite
+pub rookie_cookies::direct_path::CookieSourceKind::InternetExplorerEse
+pub rookie_cookies::direct_path::CookieSourceKind::MozillaSqlite
+pub rookie_cookies::direct_path::CookieSourceKind::SafariBinaryCookies
+impl core::clone::Clone for rookie_cookies::direct_path::CookieSourceKind
+pub fn rookie_cookies::direct_path::CookieSourceKind::clone(&self) -> rookie_cookies::direct_path::CookieSourceKind
+impl core::cmp::Eq for rookie_cookies::direct_path::CookieSourceKind
+impl core::cmp::PartialEq for rookie_cookies::direct_path::CookieSourceKind
+pub fn rookie_cookies::direct_path::CookieSourceKind::eq(&self, &rookie_cookies::direct_path::CookieSourceKind) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::CookieSourceKind
+pub fn rookie_cookies::direct_path::CookieSourceKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::direct_path::CookieSourceKind
+pub fn rookie_cookies::direct_path::CookieSourceKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::direct_path::CookieSourceKind
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::CookieSourceKind
+impl core::marker::Freeze for rookie_cookies::direct_path::CookieSourceKind
+impl core::marker::Send for rookie_cookies::direct_path::CookieSourceKind
+impl core::marker::Sync for rookie_cookies::direct_path::CookieSourceKind
+impl core::marker::Unpin for rookie_cookies::direct_path::CookieSourceKind
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::CookieSourceKind
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::CookieSourceKind
+#[non_exhaustive] pub enum rookie_cookies::direct_path::DirectPathError
+pub rookie_cookies::direct_path::DirectPathError::InvalidOptions
+pub rookie_cookies::direct_path::DirectPathError::InvalidOptions::reason: rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+pub rookie_cookies::direct_path::DirectPathError::InvalidOptions::source: rookie_cookies::direct_path::CookieSourceKind
+pub rookie_cookies::direct_path::DirectPathError::InvalidSource
+pub rookie_cookies::direct_path::DirectPathError::InvalidSource::path: std::path::PathBuf
+pub rookie_cookies::direct_path::DirectPathError::InvalidSource::reason: rookie_cookies::direct_path::InvalidCookieSourceReason
+pub rookie_cookies::direct_path::DirectPathError::UnsupportedTarget
+pub rookie_cookies::direct_path::DirectPathError::UnsupportedTarget::source: rookie_cookies::direct_path::CookieSourceKind
+pub rookie_cookies::direct_path::DirectPathError::UnsupportedTarget::target_arch: &'static str
+pub rookie_cookies::direct_path::DirectPathError::UnsupportedTarget::target_os: &'static str
+impl rookie_cookies::direct_path::DirectPathError
+pub fn rookie_cookies::direct_path::DirectPathError::code(&self) -> &'static str
+pub fn rookie_cookies::direct_path::DirectPathError::invalid_options_reason(&self) -> core::option::Option<&rookie_cookies::direct_path::InvalidDirectPathOptionsReason>
+pub fn rookie_cookies::direct_path::DirectPathError::invalid_source_reason(&self) -> core::option::Option<&rookie_cookies::direct_path::InvalidCookieSourceReason>
+pub fn rookie_cookies::direct_path::DirectPathError::kind(&self) -> &'static str
+pub fn rookie_cookies::direct_path::DirectPathError::path(&self) -> core::option::Option<&std::path::Path>
+pub fn rookie_cookies::direct_path::DirectPathError::source_kind(&self) -> core::option::Option<rookie_cookies::direct_path::CookieSourceKind>
+pub fn rookie_cookies::direct_path::DirectPathError::target_arch(&self) -> core::option::Option<&str>
+pub fn rookie_cookies::direct_path::DirectPathError::target_os(&self) -> core::option::Option<&str>
+impl core::clone::Clone for rookie_cookies::direct_path::DirectPathError
+pub fn rookie_cookies::direct_path::DirectPathError::clone(&self) -> rookie_cookies::direct_path::DirectPathError
+impl core::cmp::Eq for rookie_cookies::direct_path::DirectPathError
+impl core::cmp::PartialEq for rookie_cookies::direct_path::DirectPathError
+pub fn rookie_cookies::direct_path::DirectPathError::eq(&self, &rookie_cookies::direct_path::DirectPathError) -> bool
+impl core::error::Error for rookie_cookies::direct_path::DirectPathError
+impl core::fmt::Debug for rookie_cookies::direct_path::DirectPathError
+pub fn rookie_cookies::direct_path::DirectPathError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::direct_path::DirectPathError
+pub fn rookie_cookies::direct_path::DirectPathError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::DirectPathError
+impl core::marker::Freeze for rookie_cookies::direct_path::DirectPathError
+impl core::marker::Send for rookie_cookies::direct_path::DirectPathError
+impl core::marker::Sync for rookie_cookies::direct_path::DirectPathError
+impl core::marker::Unpin for rookie_cookies::direct_path::DirectPathError
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::DirectPathError
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::DirectPathError
+#[non_exhaustive] pub enum rookie_cookies::direct_path::InvalidCookieSourceReason
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::AmbiguousSqliteSchema
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::ExpectedChromiumSqlite
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::ExpectedChromiumSqlite::actual: rookie_cookies::direct_path::CookieSourceKind
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::NotARegularFile
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::SourceInspectionFailed
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::UnrecognizedSignature
+pub rookie_cookies::direct_path::InvalidCookieSourceReason::UnsupportedSqliteSchema
+impl core::clone::Clone for rookie_cookies::direct_path::InvalidCookieSourceReason
+pub fn rookie_cookies::direct_path::InvalidCookieSourceReason::clone(&self) -> rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::cmp::Eq for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::cmp::PartialEq for rookie_cookies::direct_path::InvalidCookieSourceReason
+pub fn rookie_cookies::direct_path::InvalidCookieSourceReason::eq(&self, &rookie_cookies::direct_path::InvalidCookieSourceReason) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::InvalidCookieSourceReason
+pub fn rookie_cookies::direct_path::InvalidCookieSourceReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::marker::Freeze for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::marker::Send for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::marker::Sync for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::marker::Unpin for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::InvalidCookieSourceReason
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::InvalidCookieSourceReason
+#[non_exhaustive] pub enum rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::BrowserIdIsNotChromium
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::BrowserIdNotSupportedOnTarget
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::EmptyBrowserId
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::MissingLocalStateFile
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::ProcessShutdownNotSupportedOnTarget
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::UnknownBrowserId
+impl core::clone::Clone for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+pub fn rookie_cookies::direct_path::InvalidDirectPathOptionsReason::clone(&self) -> rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::cmp::Eq for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::cmp::PartialEq for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+pub fn rookie_cookies::direct_path::InvalidDirectPathOptionsReason::eq(&self, &rookie_cookies::direct_path::InvalidDirectPathOptionsReason) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+pub fn rookie_cookies::direct_path::InvalidDirectPathOptionsReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::marker::Freeze for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::marker::Send for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::marker::Sync for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::marker::Unpin for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
+pub struct rookie_cookies::direct_path::ChromiumPathRequest
+impl rookie_cookies::direct_path::ChromiumPathRequest
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::credentials(self, rookie_cookies::direct_path::ChromiumCredentialSource) -> Self
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::locked_database_policy(self, rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> Self
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
+impl core::clone::Clone for rookie_cookies::direct_path::ChromiumPathRequest
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::clone(&self) -> rookie_cookies::direct_path::ChromiumPathRequest
+impl core::cmp::Eq for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::cmp::PartialEq for rookie_cookies::direct_path::ChromiumPathRequest
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::eq(&self, &rookie_cookies::direct_path::ChromiumPathRequest) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::ChromiumPathRequest
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::marker::Freeze for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::marker::Send for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::marker::Sync for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::marker::Unpin for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::ChromiumPathRequest
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::ChromiumPathRequest
+pub struct rookie_cookies::direct_path::DirectPathRequest
+impl rookie_cookies::direct_path::DirectPathRequest
+pub fn rookie_cookies::direct_path::DirectPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn rookie_cookies::direct_path::DirectPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
+impl core::clone::Clone for rookie_cookies::direct_path::DirectPathRequest
+pub fn rookie_cookies::direct_path::DirectPathRequest::clone(&self) -> rookie_cookies::direct_path::DirectPathRequest
+impl core::cmp::Eq for rookie_cookies::direct_path::DirectPathRequest
+impl core::cmp::PartialEq for rookie_cookies::direct_path::DirectPathRequest
+pub fn rookie_cookies::direct_path::DirectPathRequest::eq(&self, &rookie_cookies::direct_path::DirectPathRequest) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::DirectPathRequest
+pub fn rookie_cookies::direct_path::DirectPathRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::DirectPathRequest
+impl core::marker::Freeze for rookie_cookies::direct_path::DirectPathRequest
+impl core::marker::Send for rookie_cookies::direct_path::DirectPathRequest
+impl core::marker::Sync for rookie_cookies::direct_path::DirectPathRequest
+impl core::marker::Unpin for rookie_cookies::direct_path::DirectPathRequest
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::DirectPathRequest
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::DirectPathRequest
+pub fn rookie_cookies::direct_path::chromium_cookies_from_path(rookie_cookies::direct_path::ChromiumPathRequest) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::direct_path::chromium_cookies_from_path_detailed(rookie_cookies::direct_path::ChromiumPathRequest) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>
+pub fn rookie_cookies::direct_path::cookies_from_path(rookie_cookies::direct_path::DirectPathRequest) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub mod rookie_cookies::enums
 pub struct rookie_cookies::enums::Cookie
 pub rookie_cookies::enums::Cookie::domain: alloc::string::String

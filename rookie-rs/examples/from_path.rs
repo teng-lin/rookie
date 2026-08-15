@@ -6,7 +6,7 @@
 //!
 //! On CI this is invoked against the seeded Firefox profile that the
 //! e2e workflow creates, so it doubles as a regression test for the
-//! `firefox_based` public API drifting.
+//! canonical `direct_path` public API drifting.
 
 use std::path::PathBuf;
 
@@ -16,7 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .ok_or("usage: from_path <cookies.sqlite>")?
     .into();
 
-  let cookies = rookie_cookies::firefox_based(db_path, None)?;
+  let cookies = rookie_cookies::direct_path::cookies_from_path(
+    rookie_cookies::direct_path::DirectPathRequest::new(db_path),
+  )?;
   for cookie in cookies {
     println!("{:?}", cookie);
   }

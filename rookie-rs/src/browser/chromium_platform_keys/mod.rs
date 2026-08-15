@@ -80,6 +80,18 @@ impl<'a> ChromiumKeyRequest<'a> {
     }
   }
 
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  pub(crate) fn for_browser_id(
+    browser_id: &'a str,
+    credentials: &'a ChromiumKeyCredentials,
+  ) -> Self {
+    Self {
+      browser_id: Some(browser_id),
+      credentials,
+      local_state: LocalStateInput::NotApplicable,
+    }
+  }
+
   pub(crate) fn for_installation(
     browser_id: &'a str,
     credentials: &'a ChromiumKeyCredentials,

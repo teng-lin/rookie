@@ -31,6 +31,10 @@ const MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 =
   MAX_PLAUSIBLE_SESSION_EXPIRY_SECONDS * 1000 + 999;
 
 /// Returns cookies from mozilla based browsers
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::cookies_from_path with DirectPathRequest"
+)]
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let database = sqlite::with_browser_database(db_path.clone(), |connection| {
     query_persistent_cookies(connection, domains.as_deref())
@@ -61,6 +65,10 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
 
 /// Returns cookies from a Mozilla profile with container and origin attributes
 /// preserved.
+#[deprecated(
+  since = "0.6.0",
+  note = "the canonical direct-path API returns legacy Cookie values; this compatibility function remains through 0.6"
+)]
 pub fn firefox_based_detailed(
   db_path: PathBuf,
   domains: Option<Vec<String>>,

@@ -6,6 +6,10 @@ use libesedb::{EseDb, Record, Table, Value};
 use std::path::{Path, PathBuf};
 
 /// Returns cookies from IE based browsers.
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::cookies_from_path with DirectPathRequest"
+)]
 pub fn internet_explorer_based(
   db_path: PathBuf,
   domains: Option<Vec<String>>,

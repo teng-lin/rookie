@@ -142,6 +142,45 @@ jobs:
           path: target/public-api/${{ matrix.platform }}-*.txt
           if-no-files-found: error
 
+  freebsd-native:
+    name: native FreeBSD direct-path API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test inside a real FreeBSD VM
+        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        with:
+          release: '14.3'
+          usesh: true
+          prepare: pkg install -y rust pkgconf
+          run: |
+            set -eu
+            freebsd-version
+            uname -a
+            rustc -vV
+            cargo -V
+            cargo test -p rookie-cookies --all-targets --all-features --locked --no-run
+            cargo test -p rookie-cookies --all-targets --no-default-features --locked --no-run
+            cargo check -p rookie-cookies-cli --bin rookie-cookies --locked
+            cargo test -p rookie-cookies --all-features --locked --lib \
+              direct_path::shared::
+            cargo test -p rookie-cookies --no-default-features --locked --lib \
+              direct_path::shared::
+            cargo test -p rookie-cookies --all-features --locked --lib \
+              direct_path::tests::mozilla_direct_path_is_available_on_every_compile_target -- --exact
+            cargo test -p rookie-cookies --no-default-features --locked --lib \
+              direct_path::tests::mozilla_direct_path_is_available_on_every_compile_target -- --exact
+            cargo test -p rookie-cookies --all-features --locked --lib \
+              direct_path::tests::unsupported_target_accessors_are_stable -- --exact
+            cargo test -p rookie-cookies --no-default-features --locked --lib \
+              direct_path::tests::unsupported_target_accessors_are_stable -- --exact
+            cargo test -p rookie-cookies --all-features --locked --lib \
+              config::tests::unsupported_target_never_borrows_linux_compatibility_config -- --exact
+            cargo test -p rookie-cookies --all-features --locked --test public_contract direct_path_
+            cargo run --manifest-path tests/direct_path_consumer/Cargo.toml
+
   node-build:
     name: node build (${{ matrix.os }}, Node.js 22)
     runs-on: ${{ matrix.os }}

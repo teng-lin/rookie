@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! End-to-end test: extracts cookies from a real Chrome profile that was
 //! seeded by `tests/e2e/seed_chromium_cookie.mjs` and asserts the seeded
 //! `rookie_ci=bar` cookie is recovered with the OS-encrypted value intact.

@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[deprecated(
+  since = "0.6.0",
+  note = "legacy direct-path configuration; use direct_path request builders"
+)]
 pub struct Browser {
   pub paths: Vec<String>,
   pub channels: Option<Vec<String>>,
@@ -14,6 +18,10 @@ pub struct Browser {
 pub type BrowsersMap = HashMap<String, Browser>;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[deprecated(
+  since = "0.6.0",
+  note = "legacy direct-path configuration; use direct_path request builders"
+)]
 pub struct Config {
   pub platforms: HashMap<String, BrowsersMap>,
 }
@@ -134,6 +142,10 @@ fn compatibility_browser(platform: &str, definition: &RegistryBrowser) -> Browse
 /// Discovery does not read this value. `Browser`, `Config`, and `CONFIG` remain
 /// available for source compatibility, but there is no second path database to
 /// update when a browser definition changes.
+#[deprecated(
+  since = "0.6.0",
+  note = "legacy direct-path configuration; use direct_path request builders"
+)]
 pub static CONFIG: Lazy<Config> = Lazy::new(|| {
   let registry: RegistryProjection = serde_json::from_str(include_str!("../browser_registry.json"))
     .expect("embedded browser_registry.json is invalid");
@@ -175,13 +187,15 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
   Config { platforms }
 });
 
-fn platform_name() -> &'static str {
+fn platform_name() -> Option<&'static str> {
   if cfg!(windows) {
-    "windows"
+    Some("windows")
   } else if cfg!(target_os = "macos") {
-    "macos"
+    Some("macos")
+  } else if cfg!(target_os = "linux") {
+    Some("linux")
   } else {
-    "linux"
+    None
   }
 }
 
@@ -190,15 +204,23 @@ fn platform_name() -> &'static str {
 /// Unlike [`get_browser_config`], this function is safe for browser names that
 /// come from users, bindings, or other dynamic sources: an unknown browser or
 /// one that is unavailable on the current platform returns `None`.
+#[deprecated(
+  since = "0.6.0",
+  note = "legacy direct-path configuration; use direct_path request builders"
+)]
 pub fn try_get_browser_config(name: &str) -> Option<&Browser> {
-  CONFIG.platforms.get(platform_name())?.get(name)
+  CONFIG.platforms.get(platform_name()?)?.get(name)
 }
 
+#[deprecated(
+  since = "0.6.0",
+  note = "legacy direct-path configuration; use direct_path request builders"
+)]
 pub fn get_browser_config(name: &str) -> &Browser {
   try_get_browser_config(name).unwrap_or_else(|| {
     panic!(
       "browser configuration {name:?} is unavailable for platform {:?}",
-      platform_name()
+      platform_name().unwrap_or(std::env::consts::OS)
     )
   })
 }
@@ -229,6 +251,13 @@ mod tests {
     let absent = "safari";
 
     assert!(try_get_browser_config(absent).is_none());
+  }
+
+  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+  #[test]
+  fn unsupported_target_never_borrows_linux_compatibility_config() {
+    assert_eq!(platform_name(), None);
+    assert!(try_get_browser_config("chrome").is_none());
   }
 
   #[test]

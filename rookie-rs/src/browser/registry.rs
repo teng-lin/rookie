@@ -1759,6 +1759,39 @@ pub(crate) fn registry_key_credentials(browser_id: &str) -> Result<ChromiumKeyCr
   Ok(project_key_credentials(definition.key_credentials.as_ref()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) enum DirectPathChromiumIdentity {
+  Unknown,
+  OtherEngine,
+  Chromium(Option<ChromiumKeyCredentials>),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn direct_path_chromium_identity(
+  browser_id: &str,
+) -> Result<DirectPathChromiumIdentity> {
+  let registry = embedded_registry()?;
+  let platform = PlatformId::current()?;
+  let Some(definitions) = registry.platforms.get(platform.as_str()) else {
+    return Ok(DirectPathChromiumIdentity::Unknown);
+  };
+  let Some(definition) = definitions.iter().find(|definition| {
+    definition.canonical_id == browser_id
+      || definition.aliases.iter().any(|alias| alias == browser_id)
+  }) else {
+    return Ok(DirectPathChromiumIdentity::Unknown);
+  };
+  if definition.engine != BrowserEngine::Chromium {
+    return Ok(DirectPathChromiumIdentity::OtherEngine);
+  }
+  Ok(DirectPathChromiumIdentity::Chromium(
+    definition
+      .key_credentials
+      .as_ref()
+      .map(|credentials| project_key_credentials(Some(credentials))),
+  ))
+}
+
 pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<Option<crate::config::Browser>> {
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   {
