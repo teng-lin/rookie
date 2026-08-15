@@ -244,7 +244,10 @@ jobs:
         run: ls -R .
         shell: bash
       - name: Test bindings
-        run: docker run --rm -v "$PWD:/build" -w /build "node:${{ matrix.node }}-slim" npm test
+        # The Node test suite also verifies repository-level README/docs and
+        # JavaScript examples. Mount the complete checkout so those paths have
+        # the same layout inside Docker as they do on the runner.
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace/bindings/node "node:${{ matrix.node }}-slim" npm test
   package:
     name: Prepare immutable npm tarballs
     runs-on: ubuntu-latest
