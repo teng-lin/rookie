@@ -1657,6 +1657,7 @@ mod tests {
     let dir = unique_tmpdir("chromium-partition-collision");
     let db = dir.join("Cookies");
     let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
     connection
       .execute_batch(
         "CREATE TABLE cookies (
@@ -1738,6 +1739,7 @@ mod tests {
     let dir = unique_tmpdir("chromium-malformed-detailed-context");
     let db = dir.join("Cookies");
     let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
     connection
       .execute_batch(
         "CREATE TABLE cookies (
@@ -1765,6 +1767,7 @@ mod tests {
     let dir = unique_tmpdir("chromium-mixed-detailed-context");
     let db = dir.join("Cookies");
     let connection = rusqlite::Connection::open(&db).expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
     connection
       .execute_batch(
         "CREATE TABLE cookies (
@@ -3187,10 +3190,32 @@ mod tests {
     assert!(empty.cookies.is_empty());
     assert_eq!(empty.stats.rows_seen, 0);
 
+    let empty_detailed = query_cookies_from_connection_mode(
+      &connection,
+      &outcomes,
+      Some(&empty_domains),
+      CookieProjection::Detailed,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("a detailed empty allowlist must validate the schema and match nothing");
+    assert!(empty_detailed.detailed_cookies.is_empty());
+    assert_eq!(empty_detailed.stats.rows_seen, 0);
+
     let empty_database = rusqlite::Connection::open_in_memory().expect("open empty database");
     assert!(
       query_cookies_from_connection(&empty_database, &outcomes, Some(&empty_domains)).is_err(),
-      "an empty allowlist must not bypass schema validation"
+      "a legacy empty allowlist must not bypass schema validation"
+    );
+    assert!(
+      query_cookies_from_connection_mode(
+        &empty_database,
+        &outcomes,
+        Some(&empty_domains),
+        CookieProjection::Detailed,
+        EncryptedValuePolicy::UseKeyOutcomes,
+      )
+      .is_err(),
+      "a detailed empty allowlist must not bypass schema validation"
     );
 
     let unfiltered =
@@ -3612,7 +3637,8 @@ mod tests {
       .expect("select strict host-hash schema");
     drop(connection);
 
-    let mut outcome = query_outcome_with_legacy_keys(vec![key.to_vec()], db).expect("source query");
+    let mut outcome =
+      query_outcome_with_legacy_keys(vec![key.to_vec()], db.clone()).expect("legacy source query");
     outcome
       .cookies
       .sort_by(|left, right| left.name.cmp(&right.name));
@@ -3635,6 +3661,29 @@ mod tests {
     assert_eq!(outcome.issues.len(), 1);
     assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::Decode);
     assert_eq!(outcome.issues[0].occurrences, 1);
+
+    let mut detailed = query_cookies_engine_outcome_mode(
+      ChromiumKeyOutcomes::from_legacy_shared(vec![key.to_vec()]),
+      db,
+      None,
+      false,
+      CookieProjection::Detailed,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("detailed source query");
+    detailed
+      .detailed_cookies
+      .sort_by(|left, right| left.cookie.name.cmp(&right.cookie.name));
+    assert_eq!(detailed.stats, outcome.stats);
+    assert_eq!(detailed.issues, outcome.issues);
+    assert_eq!(
+      detailed
+        .detailed_cookies
+        .iter()
+        .map(|record| (record.cookie.name.as_str(), record.cookie.value.as_str()))
+        .collect::<Vec<_>>(),
+      vec![("plain", "fallback"), ("verified", "verified value")]
+    );
   }
 
   #[cfg(unix)]

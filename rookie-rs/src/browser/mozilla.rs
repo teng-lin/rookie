@@ -807,7 +807,10 @@ fn firefox_session_cookie_context(origin_attributes: Option<&Value>) -> CookieCo
     return firefox_cookie_context(Some(origin_attributes.to_owned()));
   }
   let Some(attributes) = origin_attributes.as_object() else {
-    return CookieContext::default();
+    return CookieContext {
+      origin_attributes: Some(origin_attributes.to_string()),
+      ..CookieContext::default()
+    };
   };
 
   let unsigned_attribute = |name: &str| {
@@ -1379,6 +1382,23 @@ mod tests {
   }
 
   #[test]
+  fn detailed_session_context_preserves_arbitrary_origin_attribute_json() {
+    for origin_attributes in [
+      serde_json::json!(["future", {"shape": true}]),
+      serde_json::json!(42),
+      serde_json::json!(false),
+      Value::Null,
+    ] {
+      let context = firefox_session_cookie_context(Some(&origin_attributes));
+      let raw = origin_attributes.to_string();
+      assert_eq!(context.origin_attributes.as_deref(), Some(raw.as_str()));
+      assert_eq!(context.user_context_id, None);
+      assert_eq!(context.partition_key, None);
+      assert_eq!(context.private_browsing_id, None);
+    }
+  }
+
+  #[test]
   fn firefox_based_errors_when_every_row_fails_to_decode() {
     let dir = unique_tmpdir("ff-all-rows-bad");
     let db = dir.join("cookies.sqlite");
@@ -1864,10 +1884,17 @@ mod tests {
     set_mozilla_schema_version(&connection, 16);
     drop(connection);
 
-    let old = firefox_based(old_db, None).expect("read seconds-era profile");
-    let new = firefox_based(new_db, None).expect("read milliseconds-era profile");
+    let old = firefox_based(old_db.clone(), None).expect("read seconds-era profile");
+    let new = firefox_based(new_db.clone(), None).expect("read milliseconds-era profile");
     assert_eq!(old[0].expires, Some(1_700_000_000));
     assert_eq!(new[0].expires, Some(1_700_000_000));
+
+    let old_detailed =
+      firefox_based_detailed(old_db, None).expect("read detailed seconds-era profile");
+    let new_detailed =
+      firefox_based_detailed(new_db, None).expect("read detailed milliseconds-era profile");
+    assert_eq!(old_detailed[0].cookie.expires, Some(1_700_000_000));
+    assert_eq!(new_detailed[0].cookie.expires, Some(1_700_000_000));
   }
 
   #[test]
@@ -1901,7 +1928,7 @@ mod tests {
       }]),
     );
 
-    let mut cookies = firefox_based(db, None).expect("read persistent and session cookies");
+    let mut cookies = firefox_based(db.clone(), None).expect("read persistent and session cookies");
     cookies.sort_by(|left, right| left.name.cmp(&right.name));
     assert_eq!(cookies[0].name, "persistent");
     assert_eq!(cookies[0].expires, Some(1_700_000_000));
@@ -1910,6 +1937,15 @@ mod tests {
     // legacy-seconds interpretation rather than applying the DB conversion.
     assert_eq!(cookies[1].value, "legacy-seconds");
     assert_eq!(cookies[1].expires, Some(1_800_000_000));
+
+    let mut detailed =
+      firefox_based_detailed(db, None).expect("read detailed persistent and session cookies");
+    detailed.sort_by(|left, right| left.cookie.name.cmp(&right.cookie.name));
+    assert_eq!(detailed[0].cookie.name, "persistent");
+    assert_eq!(detailed[0].cookie.expires, Some(1_700_000_000));
+    assert_eq!(detailed[1].cookie.name, "sessionstore");
+    assert_eq!(detailed[1].cookie.value, "legacy-seconds");
+    assert_eq!(detailed[1].cookie.expires, Some(1_800_000_000));
   }
 
   #[test]

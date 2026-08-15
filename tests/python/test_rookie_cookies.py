@@ -133,6 +133,11 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             with sqlite3.connect(db_path) as connection:
                 connection.executescript(
                     """
+                    CREATE TABLE meta (
+                        key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY,
+                        value LONGVARCHAR
+                    );
+                    INSERT INTO meta (key, value) VALUES ('version', '23');
                     CREATE TABLE cookies (
                         host_key TEXT, path TEXT, is_secure INTEGER,
                         expires_utc INTEGER, name TEXT, value TEXT,
@@ -150,6 +155,30 @@ class RookieCookiesHelpersTest(unittest.TestCase):
                 RuntimeError, r"no browser key identity.*browser_id"
             ):
                 rookie_cookies.chromium_based(str(db_path))
+
+    @unittest.skipIf(sys.platform == "win32", "Windows uses an explicit Local State path")
+    def test_chromium_browser_ids_are_registry_identities_not_profile_selectors(
+        self,
+    ) -> None:
+        missing_db = str(Path(tempfile.gettempdir()) / "rookie-python-missing-Cookies")
+        profile_like_id = "0" * 64
+        invalid_identities = [
+            ("definitely-not-a-browser", r'unknown browser id "definitely-not-a-browser"'),
+            (
+                "firefox",
+                r'browser id "firefox" resolves to the gecko engine, not Chromium',
+            ),
+            (profile_like_id, rf'unknown browser id "{profile_like_id}"'),
+        ]
+
+        for browser_id, message in invalid_identities:
+            for extract in (
+                rookie_cookies.chromium_based,
+                rookie_cookies.chromium_based_detailed,
+            ):
+                with self.subTest(browser_id=browser_id, extract=extract.__name__):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        extract(missing_db, browser_id=browser_id)
 
     def test_clear_session_cookies_preserves_persistent_cookies(self) -> None:
         session_cookie = dict(COOKIE)

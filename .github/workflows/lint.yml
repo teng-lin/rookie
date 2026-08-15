@@ -57,3 +57,4 @@ jobs:
           cat package_files.txt
           grep -q "^examples/simple.rs$" package_files.txt
           grep -q "^examples/from_path.rs$" package_files.txt
+          grep -q "^examples/detailed_from_path.rs$" package_files.txt

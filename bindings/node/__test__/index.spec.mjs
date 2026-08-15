@@ -249,6 +249,29 @@ test("identity-less encrypted Chromium paths reject explicitly on Unix", async (
   }
 });
 
+test("explicit Chromium browser IDs are registry identities, not profile selectors", async (t) => {
+  if (process.platform === "win32") {
+    t.pass();
+    return;
+  }
+  const missingDb = join(tmpdir(), "rookie-node-missing-key-identity-Cookies");
+  const profileLikeId = "0".repeat(64);
+  const invalidIdentities = [
+    ["definitely-not-a-browser", /unknown browser id "definitely-not-a-browser"/],
+    ["firefox", /browser id "firefox" resolves to the gecko engine, not Chromium/],
+    [profileLikeId, new RegExp(`unknown browser id "${profileLikeId}"`)],
+  ];
+
+  for (const [browserId, message] of invalidIdentities) {
+    for (const extract of [
+      rookieCookies.chromiumBased,
+      rookieCookies.chromiumBasedDetailed,
+    ]) {
+      await t.throwsAsync(extract(missingDb, undefined, browserId), { message });
+    }
+  }
+});
+
 test("bad async API arguments reject instead of throwing synchronously", async (t) => {
   const invalidCalls = [
     ["anyBrowser", () => rookieCookies.anyBrowser(42)],
