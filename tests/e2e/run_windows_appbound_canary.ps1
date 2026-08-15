@@ -183,7 +183,7 @@ try {
   $env:ROOKIE_E2E_COOKIE_DB = $walCookiesDb
   $env:ROOKIE_E2E_COOKIE_NAME = "rookie_wal"
   $env:ROOKIE_E2E_COOKIE_VALUE = "bar"
-  $env:ROOKIE_E2E_CHECK_BROWSER_DISCOVERY = "1"
+  $env:ROOKIE_E2E_CHECK_BROWSER_DISCOVERY = "0"
   $env:ROOKIE_E2E_DISCOVERY_COOKIE_NAME = "rookie_ci"
   $env:ROOKIE_E2E_DISCOVERY_COOKIE_VALUE = "bar"
 
@@ -211,11 +211,31 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound extraction failed" }
   Assert-ChromeAlive
 
+  # Chrome currently uses rollback-journal mode for its real default Cookies
+  # database and share-denies live readers. The non-disruptive extraction
+  # policy deliberately returns a typed lock for that case instead of copying
+  # a potentially incoherent database or terminating Chrome. Close it through
+  # its window only after every surface has proved the WAL fixture can be read
+  # without killing the live browser, then exercise default-profile discovery.
+  Close-ChromeGracefully
+  Remove-Item Env:\ROOKIE_E2E_COOKIE_DB
   $env:ROOKIE_E2E_COOKIE_NAME = "rookie_ci"
   $env:ROOKIE_E2E_COOKIE_VALUE = "bar"
+  $env:ROOKIE_E2E_CHECK_BROWSER_DISCOVERY = "1"
+
+  cargo test --test e2e_chrome `
+    extracts_seeded_cookie_through_default_chrome_discovery `
+    -- --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw "Rust App-Bound Chrome discovery failed" }
+
+  & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
+  if ($LASTEXITCODE -ne 0) { throw "Python App-Bound Chrome discovery failed" }
+
+  node tests/e2e/assert_chrome_cookie.mjs
+  if ($LASTEXITCODE -ne 0) { throw "Node App-Bound Chrome discovery failed" }
+
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py --browser chrome
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound Chrome discovery failed" }
-  Assert-ChromeAlive
 } finally {
   # The canary uses only its fake-cookie profile on an ephemeral runner.
   # Profiles and Local State are never uploaded.

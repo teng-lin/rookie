@@ -50,8 +50,10 @@ Before extraction it requires all of the following:
 - a copy of that real `v20` encrypted row staged under a new name in a synthetic
   WAL fixture, absent from its main-database-only copy and validated through a
   lock-free raw snapshot of the DB+WAL pair;
-- both explicit-path extraction and default Chrome profile/key discovery;
-- Chrome remaining alive after each Rust, Python, Node, and CLI extraction.
+- explicit-path WAL extraction while Chrome is live, with Chrome remaining
+  alive after each Rust, Python, Node, and CLI extraction;
+- default Chrome profile/key discovery on all four surfaces after the canary
+  closes Chrome gracefully through its main window.
 
 The canary fails when a prerequisite is absent. It never uploads the disposable
 profile, Cookies database, WAL, or `Local State`.
