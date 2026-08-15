@@ -150,7 +150,8 @@ jobs:
         run: |
           set -euo pipefail
           artifact="rookie-cookies-cli-${{ matrix.target }}"
-          shasum -a 256 "$artifact" > "$artifact.sha256"
+          python3 scripts/write-sha256-sidecar.py "$artifact"
+          shasum -a 256 -c "$artifact.sha256"
           gh release upload "$RELEASE_TAG" "$artifact" "$artifact.sha256" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -162,8 +163,15 @@ jobs:
         run: |
           $artifact = "rookie-cookies-cli-${{ matrix.target }}.exe"
           $checksum = "$artifact.sha256"
-          $hash = (Get-FileHash -Algorithm SHA256 $artifact).Hash.ToLowerInvariant()
-          "$hash  $artifact" | Set-Content -Encoding ascii $checksum
+          python scripts/write-sha256-sidecar.py $artifact
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to write $checksum"
+          }
+          $expected = (Get-Content -Raw $checksum).Split(' ')[0]
+          $actual = (Get-FileHash -Algorithm SHA256 $artifact).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) {
+            throw "checksum verification failed for $artifact"
+          }
           gh release upload "$env:RELEASE_TAG" $artifact $checksum --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
