@@ -699,7 +699,10 @@ impl Task for SupportedBrowsersTask {
   type JsValue = Vec<BrowserDescriptorObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| Ok(rookie_cookies::supported_browsers()))
+    run_worker(|| {
+      rookie_cookies::supported_browsers()
+        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {

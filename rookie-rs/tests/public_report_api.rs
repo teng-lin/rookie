@@ -293,7 +293,7 @@ fn browser_profiles_returns_an_empty_list_for_a_known_absent_browser() {
 fn load_report_summarizes_uninstalled_browsers_in_counters_only() {
   let _home = SyntheticHome::new("load-report");
 
-  let registered = rookie_cookies::supported_browsers();
+  let registered = rookie_cookies::supported_browsers().expect("registered browser inventory");
   let report = rookie_cookies::load_report(None).expect("an empty machine is not an error");
 
   assert_eq!(report.status, ReportStatusCode::no_sources());

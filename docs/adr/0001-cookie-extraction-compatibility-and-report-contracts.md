@@ -232,7 +232,7 @@ Generic discovery may include a session-only profile once its format is supporte
 The additive Rust API is:
 
 ```rust
-supported_browsers() -> Vec<BrowserDescriptor>
+supported_browsers() -> Result<Vec<BrowserDescriptor>>
 browser_profiles(browser_id: &str) -> Result<Vec<ProfileDescriptor>>
 browser_report(
   browser_id: &str,

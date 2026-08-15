@@ -11,7 +11,18 @@ pub fn internet_explorer_based(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  internet_explorer_outcome(db_path, domains, force_kill).map(|outcome| outcome.cookies)
+  let outcome = internet_explorer_outcome(db_path, domains, force_kill)?;
+  if outcome.cookies.is_empty() && outcome.stats.records_skipped > 0 {
+    bail!(
+      "Internet Explorer cookie extraction rejected all {} record(s): {}",
+      outcome.stats.records_skipped,
+      outcome
+        .row_error
+        .as_deref()
+        .unwrap_or("one or more cookie tables or records were unreadable")
+    );
+  }
+  Ok(outcome.cookies)
 }
 
 /// Record accounting for the private cross-engine report. The legacy
@@ -26,6 +37,7 @@ pub(crate) struct InternetExplorerExtractionStats {
 pub(crate) struct InternetExplorerExtraction {
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) stats: InternetExplorerExtractionStats,
+  pub(crate) row_error: Option<String>,
 }
 
 pub(crate) fn internet_explorer_outcome(
@@ -36,6 +48,7 @@ pub(crate) fn internet_explorer_outcome(
   let db = open_database(&db_path, force_kill)?;
   let mut cookies = Vec::new();
   let mut stats = InternetExplorerExtractionStats::default();
+  let mut row_error = None;
 
   for table in db
     .iter_tables()
@@ -50,8 +63,23 @@ pub(crate) fn internet_explorer_outcome(
       continue;
     }
 
-    let columns = cookie_column_layout(&table)
-      .with_context(|| format!("{table_name}: unsupported WebCache cookie schema"))?;
+    let columns = match cookie_column_layout(&table) {
+      Ok(columns) => columns,
+      Err(error) => {
+        let error = error.context(format!("{table_name}: unsupported WebCache cookie schema"));
+        let records = table
+          .iter_records()
+          .with_context(|| format!("{table_name}: unable to enumerate unsupported cookie table"))?;
+        let skipped = records.count();
+        stats.records_seen += skipped;
+        stats.records_skipped += skipped;
+        row_error = Some(format!("{error:#}"));
+        log::warn!(
+          "{table_name}: skipping unsupported cookie table containing {skipped} record(s): {error:#}"
+        );
+        continue;
+      }
+    };
     let records = table
       .iter_records()
       .with_context(|| format!("{table_name}: unable to enumerate cookie records"))?;
@@ -77,6 +105,7 @@ pub(crate) fn internet_explorer_outcome(
           stats.records_seen += 1;
           skipped_records += 1;
           stats.records_skipped += 1;
+          row_error = Some(format!("{table_name}: record {record_index}: {error:#}"));
           log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
         }
       }
@@ -87,7 +116,11 @@ pub(crate) fn internet_explorer_outcome(
     }
   }
 
-  Ok(InternetExplorerExtraction { cookies, stats })
+  Ok(InternetExplorerExtraction {
+    cookies,
+    stats,
+    row_error,
+  })
 }
 
 fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {

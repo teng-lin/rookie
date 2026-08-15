@@ -2664,19 +2664,21 @@ where
           source.rows_seen = extraction.stats.records_seen;
           source.rows_skipped = extraction.stats.records_skipped;
           source.acquisition_attempts = extraction.acquisition_attempts;
+          source.row_error = extraction.row_error;
           source.cookies = extraction.cookies;
         }
         Err(error) => {
           // Exhausting the retries is itself the failure, so report the
           // attempts spent rather than the placeholder.
           source.acquisition_attempts = super::safari::STABLE_READ_ATTEMPTS as u32;
-          source.error_stage = if error
-            .downcast_ref::<super::safari::SafariParseFailure>()
-            .is_some()
-          {
-            SourceFailureStage::Parse
-          } else {
-            SourceFailureStage::Acquisition
+          source.error_stage = match error.downcast_ref::<super::safari::SafariParseFailure>() {
+            Some(failure) => {
+              source.rows_seen = failure.stats.records_seen;
+              source.rows_skipped = failure.stats.records_skipped;
+              source.row_error = Some(format!("{error:#}"));
+              SourceFailureStage::Parse
+            }
+            None => SourceFailureStage::Acquisition,
           };
           source.error = Some(format!("{error:#}"));
         }
@@ -2712,6 +2714,7 @@ pub(crate) struct InternetExplorerRows {
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
+  pub(crate) row_error: Option<String>,
 }
 
 /// Crate-private generic Internet Explorer seam. The WebCache root is flat, so
@@ -2827,6 +2830,7 @@ where
         Ok(rows) => {
           source.rows_seen = rows.records_seen;
           source.rows_skipped = rows.records_skipped;
+          source.row_error = rows.row_error;
           source.cookies = rows.cookies;
         }
         Err(error) => {
@@ -2869,6 +2873,7 @@ pub(crate) fn internet_explorer_report(
         cookies: extraction.cookies,
         records_seen: extraction.stats.records_seen,
         records_skipped: extraction.stats.records_skipped,
+        row_error: extraction.row_error,
       })
     },
   )
@@ -5031,6 +5036,7 @@ mod tests {
         cookies: Vec::new(),
         records_seen: 0,
         records_skipped: 0,
+        row_error: None,
       })
     };
 

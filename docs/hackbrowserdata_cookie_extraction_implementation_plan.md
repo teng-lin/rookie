@@ -567,7 +567,7 @@ Rust uses internal `PathBuf`; public wire identities expose a UTF-8 display path
 Final additive Rust surface:
 
 ```rust
-supported_browsers() -> Vec<BrowserDescriptor>
+supported_browsers() -> Result<Vec<BrowserDescriptor>>
 browser_profiles(browser_id: &str) -> Result<Vec<ProfileDescriptor>>
 browser_report(
   browser_id: &str,

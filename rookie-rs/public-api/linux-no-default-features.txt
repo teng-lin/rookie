@@ -1005,7 +1005,7 @@ pub fn rookie_cookies::load(core::option::Option<alloc::vec::Vec<alloc::string::
 pub fn rookie_cookies::load_report(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<rookie_cookies::report::ExtractionReport>
 pub fn rookie_cookies::opera(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::opera_gx(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
-pub fn rookie_cookies::supported_browsers() -> alloc::vec::Vec<rookie_cookies::report::BrowserDescriptor>
+pub fn rookie_cookies::supported_browsers() -> anyhow::Result<alloc::vec::Vec<rookie_cookies::report::BrowserDescriptor>>
 pub fn rookie_cookies::version() -> alloc::string::String
 pub fn rookie_cookies::vivaldi(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::zen(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>

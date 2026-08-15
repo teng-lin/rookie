@@ -37,23 +37,12 @@ fn usage_error(
   command.error(kind, message)
 }
 
-/// Whether `browser` is a registered ID or alias, or `None` when the registered
-/// inventory is unavailable and the question cannot be answered here.
-///
 /// This is only a pre-check; `browser_profiles` and `browser_report` resolve the
-/// ID themselves. The two do not agree in every case: `supported_browsers`
-/// builds descriptors with a stricter identifier rule than registry resolution
-/// applies, and it reports any registry failure as an empty list rather than an
-/// error. Both conditions collapse the inventory to empty, so treating empty as
-/// "nothing is registered" would reject every ID in every generic mode over one
-/// unrepresentable row — including IDs that resolve perfectly well. An empty
-/// inventory therefore defers to the library's own resolution instead.
-fn registration_of(browser: &str) -> Option<bool> {
-  let registered = rookie_cookies::supported_browsers();
-  if registered.is_empty() {
-    return None;
-  }
-  Some(registered.iter().any(|descriptor| {
+/// ID themselves. Registry construction failures are surfaced instead of
+/// being mistaken for an empty registered inventory.
+fn registration_of(browser: &str) -> rookie_cookies::Result<bool> {
+  let registered = rookie_cookies::supported_browsers()?;
+  Ok(registered.iter().any(|descriptor| {
     descriptor.id.as_str() == browser || descriptor.aliases.iter().any(|alias| alias == browser)
   }))
 }
@@ -92,7 +81,14 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
   };
 
   if args.is_generic_mode() {
-    if registration_of(browser) != Some(false) {
+    let registered = registration_of(browser).map_err(|error| {
+      usage_error(
+        command,
+        ErrorKind::Io,
+        format!("could not read the embedded browser registry: {error:#}"),
+      )
+    })?;
+    if registered {
       return Ok(());
     }
     return Err(usage_error(
@@ -110,7 +106,13 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
     return Ok(());
   }
 
-  if registration_of(browser) == Some(true) {
+  if registration_of(browser).map_err(|error| {
+    usage_error(
+      command,
+      ErrorKind::Io,
+      format!("could not read the embedded browser registry: {error:#}"),
+    )
+  })? {
     return Err(usage_error(
       command,
       ErrorKind::InvalidValue,
@@ -158,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
 
   if args.list_browsers {
-    let browsers = rookie_cookies::supported_browsers();
+    let browsers = rookie_cookies::supported_browsers()?;
     println!("{}", serde_json::to_string_pretty(&browsers)?);
     return Ok(());
   }

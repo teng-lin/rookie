@@ -166,9 +166,9 @@ def to_netscape(cookies: CookieList) -> str:
     """
     Convert a list of dictionaries representing cookies to a netscape compatible string.
 
-    Tabs, carriage returns, and line feeds in domain, path, expiry, name, and
-    value fields are emitted as ``%09``, ``%0D``, and ``%0A``. All other
-    characters are preserved, matching Rust, CLI, and Node byte-for-byte.
+    Tabs, carriage returns, line feeds, and hash signs in domain, path, expiry,
+    name, and value fields are percent-encoded. Escaping ``#`` prevents a
+    caller-controlled domain from becoming a comment or forged HttpOnly marker.
 
     :param cookies: A list of dictionaries representing cookies
     :return: A string containing the converted cookies
@@ -199,6 +199,7 @@ def to_netscape(cookies: CookieList) -> str:
 def _escape_netscape_field(field: Any) -> str:
     return (
         str(field)
+        .replace("#", "%23")
         .replace("\t", "%09")
         .replace("\r", "%0D")
         .replace("\n", "%0A")

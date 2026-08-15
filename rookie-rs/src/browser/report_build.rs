@@ -1329,6 +1329,88 @@ mod tests {
     assert_eq!(report.status, ReportStatusCode::partial());
   }
 
+  fn assert_counter_identity(report: &ExtractionReport) {
+    for profile in &report.profiles {
+      for source in &profile.sources {
+        assert!(source.stats.rows_seen >= source.stats.rows_skipped);
+        assert_eq!(
+          source.stats.rows_seen - source.stats.rows_skipped,
+          source.stats.cookies_emitted,
+          "source format {}",
+          source.source.format
+        );
+        assert_eq!(
+          source.stats.cookies_emitted as usize,
+          source.cookies.len(),
+          "source format {}",
+          source.source.format
+        );
+      }
+      assert!(profile.stats.rows_seen >= profile.stats.rows_skipped);
+      assert_eq!(
+        profile.stats.rows_seen - profile.stats.rows_skipped,
+        profile.stats.cookies_emitted
+      );
+    }
+    assert!(report.summary.rows_seen >= report.summary.rows_skipped);
+    assert_eq!(
+      report.summary.rows_seen - report.summary.rows_skipped,
+      report.summary.cookies_emitted
+    );
+  }
+
+  #[test]
+  fn report_row_counters_reconcile_across_every_backend_adapter() {
+    let cookie = |name: &str| crate::common::enums::Cookie {
+      domain: ".example.com".to_owned(),
+      path: "/".to_owned(),
+      secure: true,
+      expires: None,
+      name: name.to_owned(),
+      value: String::new(),
+      http_only: true,
+      same_site: crate::common::enums::SAME_SITE_UNSPECIFIED,
+    };
+
+    let mut chromium = chromium_profile(true, None);
+    chromium.cookies = vec![cookie("chromium")];
+    chromium.stats = crate::browser::chromium::ChromiumExtractionStats {
+      rows_seen: 3,
+      cookies_emitted: 1,
+      rows_skipped: 2,
+    };
+    chromium.row_issues = vec![crate::browser::chromium::ChromiumRowIssue {
+      code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
+      occurrences: 2,
+      samples: vec!["row 2".to_owned(), "row 3".to_owned()],
+    }];
+    let chromium = chromium_profile_outcome(&BrowserId::known("chrome"), &"d".repeat(64), chromium)
+      .expect("adapt Chromium counters");
+
+    let mut profiles = vec![chromium];
+    for (format, name) in [
+      ("mozilla_sqlite", "mozilla"),
+      ("safari_binarycookies", "safari"),
+      ("internet_explorer_ese", "internet-explorer"),
+    ] {
+      let mut source = engine_source(name, SOURCE_ROLE_PERSISTENT, 10, true, None);
+      source.format = format;
+      source.cookies = vec![cookie(name)];
+      source.rows_seen = 3;
+      source.rows_skipped = 2;
+      source.row_error = Some(format!("{name} rejected two records"));
+      let mut profile = EngineExtractionOutcome::new(identity(), true);
+      profile.sources.push(engine_source_outcome(source));
+      profiles.push(profile);
+    }
+
+    let report = assemble(4, vec![outcome(profiles, false)]);
+    assert_eq!(report.summary.rows_seen, 12);
+    assert_eq!(report.summary.rows_skipped, 8);
+    assert_eq!(report.summary.cookies_emitted, 4);
+    assert_counter_identity(&report);
+  }
+
   #[test]
   fn a_source_that_skipped_nothing_reports_no_row_issue() {
     let mut profile = EngineExtractionOutcome::new(identity(), true);
@@ -1790,6 +1872,7 @@ mod engine_chain_tests {
           }],
           records_seen: 1,
           records_skipped: 0,
+          row_error: None,
         })
       })
       .expect("internet explorer report");
@@ -2085,6 +2168,7 @@ mod engine_chain_tests {
         }],
         records_seen: 1,
         records_skipped: 0,
+        row_error: None,
       })
     };
 

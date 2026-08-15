@@ -220,8 +220,10 @@ fn public_function_signatures_remain_compatible() {
 fn generic_report_api_signatures_are_the_section_5_8_surface() {
   type BrowserReportFn = fn(&str, Option<&str>, Option<Vec<String>>) -> Result<ExtractionReport>;
 
-  // Section 5.8 freezes this one as infallible; the other three return `Result`.
-  let _: fn() -> Vec<BrowserDescriptor> = rookie_cookies::supported_browsers;
+  // Registry construction failures stay distinguishable from an empty
+  // registered inventory, so every generic report API now has an error channel.
+  let _: fn() -> rookie_cookies::Result<Vec<BrowserDescriptor>> =
+    rookie_cookies::supported_browsers;
   let _: fn(&str) -> Result<Vec<ProfileDescriptor>> = rookie_cookies::browser_profiles;
   let _: BrowserReportFn = rookie_cookies::browser_report;
   let _: fn(Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::load_report;
@@ -305,7 +307,7 @@ fn report_identifiers_are_open_string_newtypes() {
 
 #[test]
 fn supported_browsers_describes_registration_without_touching_the_filesystem() {
-  let browsers = rookie_cookies::supported_browsers();
+  let browsers = rookie_cookies::supported_browsers().expect("registered browser inventory");
   assert!(
     !browsers.is_empty(),
     "every supported OS registers at least one browser"
