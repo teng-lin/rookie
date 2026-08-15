@@ -90,12 +90,42 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
-On Unix, explicit Chromium paths should use
-`chromium_based_detailed_with_browser_id(Some("brave"), ...)` (or the legacy
-projection `chromium_based_with_browser_id`). The ID is resolved through the
-browser registry to Brave's Linux crypt name or macOS Keychain service/account.
-Omitting it is allowed only for a plaintext-only database; encrypted rows fail
-explicitly instead of being attempted with Chrome's identity.
+For explicit Chromium databases, use the all-target request API. The source is
+validated as Chromium before options or key providers are touched:
+
+```rust
+use rookie_cookies::direct_path::{
+    chromium_cookies_from_path_detailed, ChromiumCredentialSource,
+    ChromiumPathRequest,
+};
+
+fn main() -> rookie_cookies::Result<()> {
+    let cookies = chromium_cookies_from_path_detailed(
+        ChromiumPathRequest::new("/path/to/Network/Cookies")
+            .domains(vec!["example.com".to_owned()])
+            .credentials(ChromiumCredentialSource::BrowserId("brave".to_owned())),
+    )?;
+    println!("{}", cookies.len());
+    Ok(())
+}
+```
+
+`Automatic` preserves the existing ordered browser-identity probe on Linux and
+macOS. Windows requires an explicit `LocalStateFile`. `PlaintextOnly` is strict:
+if any row is encrypted, the complete request fails instead of returning a
+partial list. `AllowProcessShutdown` is an explicit Windows-only choice; the
+default `NonDisruptive` policy never terminates a browser.
+
+For a source whose browser family is not known in advance, use
+`cookies_from_path(DirectPathRequest::new(path))`. Mozilla SQLite works on every
+compile target. Chromium works on Linux, macOS, and Windows; Safari binary
+cookies are macOS-only and Internet Explorer WebCache is Windows-only.
+
+The earlier `*_based`, `any_browser`, and config-based direct-path APIs remain
+available through 0.6 for compatibility and are deprecated for removal in 0.7.
+Errors from the new API remain `anyhow::Error`; downcast to
+`direct_path::DirectPathError` for stable `kind()`, `code()`, source, target,
+and reason accessors without losing the underlying I/O, SQLite, or key error.
 
 ## Logging
 

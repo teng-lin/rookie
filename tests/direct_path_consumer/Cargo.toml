@@ -1,0 +1,11 @@
+[package]
+name = "direct-path-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rookie-cookies = { path = "../../rookie-rs", default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }

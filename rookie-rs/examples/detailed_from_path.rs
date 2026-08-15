@@ -1,6 +1,8 @@
 //! Read an explicit Firefox cookie database without discarding container or
 //! partition identity.
 
+#![allow(deprecated)]
+
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! End-to-end test: extracts cookies from a real Firefox profile seeded
 //! by `tests/e2e/seed_firefox_cookie.mjs` and asserts the seeded
 //! `rookie_ci=bar` cookie is recovered.

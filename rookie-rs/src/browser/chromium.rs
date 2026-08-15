@@ -22,6 +22,10 @@ use super::chromium_database_acquisition;
 
 /// Returns cookies from chromium based browser
 #[cfg(target_os = "windows")]
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+)]
 pub fn chromium_based(
   key: PathBuf,
   db_path: PathBuf,
@@ -37,6 +41,10 @@ pub fn chromium_based(
 
 /// Returns Chromium cookies with partition and source context preserved.
 #[cfg(target_os = "windows")]
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+)]
 pub fn chromium_based_detailed(
   key: PathBuf,
   db_path: PathBuf,
@@ -53,7 +61,6 @@ pub fn chromium_based_detailed(
 /// Extracts only plaintext rows without selecting or probing a key provider.
 /// Encountering an encrypted row fails the request instead of degrading into
 /// a partial result under an assumed browser identity.
-#[cfg(unix)]
 pub(crate) fn chromium_based_plaintext_only(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -71,7 +78,6 @@ pub(crate) fn chromium_based_plaintext_only(
 }
 
 /// Detailed counterpart to [`chromium_based_plaintext_only`].
-#[cfg(unix)]
 pub(crate) fn chromium_based_detailed_plaintext_only(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -90,6 +96,10 @@ pub(crate) fn chromium_based_detailed_plaintext_only(
 
 /// Returns cookies from chromium based browser
 #[cfg(unix)]
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+)]
 pub fn chromium_based(
   config: &Browser,
   db_path: PathBuf,
@@ -117,6 +127,10 @@ pub fn chromium_based(
 
 /// Returns Chromium cookies with partition and source context preserved.
 #[cfg(unix)]
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+)]
 pub fn chromium_based_detailed(
   config: &Browser,
   db_path: PathBuf,
@@ -334,6 +348,13 @@ pub(crate) struct ChromiumProbeResult {
   pub(crate) rows_skipped: usize,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+pub(crate) struct ChromiumDetailedProbeResult {
+  pub(crate) cookies: Vec<DetailedCookie>,
+  pub(crate) rows_skipped: usize,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ChromiumEngineExtractionOutcome {
   pub(crate) cookies: Vec<Cookie>,
@@ -409,6 +430,17 @@ impl ChromiumEngineExtractionOutcome {
       Some(error) => Err(error),
       None => Ok(ChromiumProbeResult {
         cookies: self.cookies,
+        rows_skipped: self.stats.rows_skipped,
+      }),
+    }
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn into_detailed_probe_result(self) -> Result<ChromiumDetailedProbeResult> {
+    match self.legacy_error {
+      Some(error) => Err(error),
+      None => Ok(ChromiumDetailedProbeResult {
+        cookies: self.detailed_cookies,
         rows_skipped: self.stats.rows_skipped,
       }),
     }
@@ -634,7 +666,7 @@ pub(crate) fn query_cookies_with_key_outcomes(
 }
 
 #[allow(unused_variables)]
-fn query_detailed_cookies_with_key_outcomes(
+pub(crate) fn query_detailed_cookies_with_key_outcomes(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -649,6 +681,86 @@ fn query_detailed_cookies_with_key_outcomes(
     EncryptedValuePolicy::UseKeyOutcomes,
   )?
   .into_detailed_result()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn query_cookies_with_key_outcomes_without_platform_recovery(
+  outcomes: &ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<&[String]>,
+) -> Result<Vec<Cookie>> {
+  query_cookies_from_database(
+    outcomes,
+    db_path,
+    domains,
+    CookieProjection::Legacy,
+    EncryptedValuePolicy::UseKeyOutcomes,
+  )?
+  .into_legacy_result()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery(
+  outcomes: &ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<&[String]>,
+) -> Result<Vec<DetailedCookie>> {
+  query_cookies_from_database(
+    outcomes,
+    db_path,
+    domains,
+    CookieProjection::Detailed,
+    EncryptedValuePolicy::UseKeyOutcomes,
+  )?
+  .into_detailed_result()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn query_cookies_plaintext_without_platform_recovery(
+  db_path: PathBuf,
+  domains: Option<&[String]>,
+) -> Result<Vec<Cookie>> {
+  query_cookies_from_database(
+    &ChromiumKeyOutcomes::default(),
+    db_path,
+    domains,
+    CookieProjection::Legacy,
+    EncryptedValuePolicy::RejectMissingIdentity,
+  )?
+  .into_legacy_result()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
+  db_path: PathBuf,
+  domains: Option<&[String]>,
+) -> Result<Vec<DetailedCookie>> {
+  query_cookies_from_database(
+    &ChromiumKeyOutcomes::default(),
+    db_path,
+    domains,
+    CookieProjection::Detailed,
+    EncryptedValuePolicy::RejectMissingIdentity,
+  )?
+  .into_detailed_result()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn chromium_based_detailed_probe_with_key_outcomes(
+  outcomes: ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+) -> Result<ChromiumDetailedProbeResult> {
+  query_cookies_engine_outcome_mode(
+    &outcomes,
+    db_path,
+    domains,
+    force_kill,
+    CookieProjection::Detailed,
+    EncryptedValuePolicy::UseKeyOutcomes,
+  )?
+  .into_detailed_probe_result()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -865,6 +977,22 @@ fn query_cookies_from_connection_mode(
   let mut rows = stmt.query(rusqlite::params_from_iter(query_domain_filters.iter()))?;
 
   while let Some(row) = rows.next()? {
+    let plaintext_only_encrypted =
+      if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
+        let encrypted_value = row.get::<_, Option<Vec<u8>>>(6).map_err(|error| {
+          anyhow!(
+            "can't prove that explicit-path Chromium cookie row is plaintext: \
+             failed to read encrypted_value: {error}"
+          )
+        })?;
+        let encrypted_value = encrypted_value.unwrap_or_default();
+        if !encrypted_value.is_empty() {
+          return Err(MissingBrowserKeyIdentity.into());
+        }
+        Some(encrypted_value)
+      } else {
+        None
+      };
     let host_key = match row.get::<_, Option<String>>(0) {
       Ok(host_key) => host_key.unwrap_or_default(),
       Err(error) => {
@@ -878,31 +1006,6 @@ fn query_cookies_from_connection_mode(
         continue;
       }
     };
-    let encrypted_value = if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-      match row.get::<_, Option<Vec<u8>>>(6) {
-        Ok(value) => value.unwrap_or_default(),
-        Err(error) => {
-          extraction.stats.rows_seen += 1;
-          let row_number = extraction.stats.rows_seen;
-          log::warn!("Failed to read encrypted_value from Chromium cookie row: {error}");
-          last_row_error = Some(anyhow!(
-            "failed to read encrypted_value from Chromium cookie row: {error}"
-          ));
-          extraction.record_skipped_row(
-            ChromiumRowIssueCode::ColumnRead("encrypted_value"),
-            row_number,
-          );
-          continue;
-        }
-      }
-    } else {
-      Vec::new()
-    };
-    if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity
-      && !encrypted_value.is_empty()
-    {
-      return Err(MissingBrowserKeyIdentity.into());
-    }
     if !utils::some_domain_in_host(domains, &host_key) {
       continue;
     }
@@ -949,7 +1052,7 @@ fn query_cookies_from_connection_mode(
       }
     };
     let encrypted_value = if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-      encrypted_value
+      plaintext_only_encrypted.expect("plaintext-only mode captured encrypted_value")
     } else {
       read_optional_column!(6, Vec<u8>, "encrypted_value").unwrap_or_default()
     };

@@ -1,4 +1,5 @@
 target/
+tests/direct_path_consumer/Cargo.lock
 venv/
 __pycache__
 *.pyc

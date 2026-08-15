@@ -241,6 +241,16 @@ impl Default for ChromiumKeyOutcomes {
 }
 
 impl ChromiumKeyOutcomes {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  pub(crate) fn provider_failure(message: impl Into<String>) -> Self {
+    let outcome = ChromiumKeyOutcome::failure(message);
+    Self {
+      v10: outcome.clone(),
+      v11: outcome.clone(),
+      v20: outcome,
+    }
+  }
+
   /// Test adapter preserving the pre-1B shared-candidate behavior.
   #[cfg(test)]
   pub(crate) fn from_legacy_shared(candidates: Vec<Vec<u8>>) -> Self {

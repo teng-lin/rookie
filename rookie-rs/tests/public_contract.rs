@@ -3,10 +3,16 @@
 //! Integration tests compile as a downstream crate, so constructing these
 //! types here catches source breaks that an in-module unit test would miss.
 
+#![allow(deprecated)]
+
 use once_cell::sync::Lazy;
 use rookie_cookies::common::format;
 use rookie_cookies::config::{
   get_browser_config, try_get_browser_config, Browser, BrowsersMap, Config, CONFIG,
+};
+use rookie_cookies::direct_path::{
+  ChromiumCredentialSource, ChromiumLockedDatabasePolicy, ChromiumPathRequest, CookieSourceKind,
+  DirectPathError, DirectPathRequest, InvalidCookieSourceReason, InvalidDirectPathOptionsReason,
 };
 use rookie_cookies::enums::{
   Cookie, CookieContext, CookieToString, DetailedCookie, SAME_SITE_UNSPECIFIED,
@@ -212,6 +218,54 @@ fn public_function_signatures_remain_compatible() {
 
   #[cfg(target_os = "windows")]
   let _: ChromiumBasedDetailedFn = rookie_cookies::chromium_based_detailed;
+}
+
+#[test]
+fn direct_path_request_builders_and_functions_are_unconditional() {
+  let direct = DirectPathRequest::new("cookies.sqlite").domains(vec!["example.test".to_owned()]);
+  let chromium = ChromiumPathRequest::new("Cookies")
+    .domains(vec!["example.test".to_owned()])
+    .credentials(ChromiumCredentialSource::BrowserId("chrome".to_owned()))
+    .locked_database_policy(ChromiumLockedDatabasePolicy::NonDisruptive);
+  let local_state = ChromiumPathRequest::new("Cookies").credentials(
+    ChromiumCredentialSource::LocalStateFile("Local State".into()),
+  );
+  let plaintext =
+    ChromiumPathRequest::new("Cookies").credentials(ChromiumCredentialSource::PlaintextOnly);
+
+  let _: fn(DirectPathRequest) -> Result<Vec<Cookie>> =
+    rookie_cookies::direct_path::cookies_from_path;
+  let _: fn(ChromiumPathRequest) -> Result<Vec<Cookie>> =
+    rookie_cookies::direct_path::chromium_cookies_from_path;
+  let _: fn(ChromiumPathRequest) -> Result<Vec<DetailedCookie>> =
+    rookie_cookies::direct_path::chromium_cookies_from_path_detailed;
+  let _ = (direct, chromium, local_state, plaintext);
+}
+
+#[test]
+fn direct_path_error_accessors_are_stable_for_downstream_consumers() {
+  fn inspect(error: &DirectPathError) {
+    let _: &'static str = error.kind();
+    let _: &'static str = error.code();
+    let _: Option<&std::path::Path> = error.path();
+    let _: Option<CookieSourceKind> = error.source_kind();
+    let _: Option<&str> = error.target_os();
+    let _: Option<&str> = error.target_arch();
+    let _: Option<&InvalidCookieSourceReason> = error.invalid_source_reason();
+    let _: Option<&InvalidDirectPathOptionsReason> = error.invalid_options_reason();
+  }
+
+  let missing = std::env::temp_dir().join(format!(
+    "rookie-public-direct-path-missing-{}",
+    std::process::id()
+  ));
+  let error = rookie_cookies::direct_path::cookies_from_path(DirectPathRequest::new(missing))
+    .expect_err("missing source is invalid");
+  inspect(
+    error
+      .downcast_ref::<DirectPathError>()
+      .expect("DirectPathError stays downcastable through anyhow"),
+  );
 }
 
 #[test]

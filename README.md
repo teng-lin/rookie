@@ -107,8 +107,10 @@ console.log(cookies);
 
 Registry-only browsers such as Cốc Cốc, DuckDuckGo, and Yandex are available
 through the generic report/profile APIs and CLI report mode. Browser profile
-discovery is platform-specific. Every legacy browser extractor also has a
-lower-level `*_based` or `from_path` form for explicit database/profile paths;
+discovery is platform-specific. Rust callers should use the typed
+`direct_path::DirectPathRequest` or `direct_path::ChromiumPathRequest` builders
+for explicit database paths. The legacy `*_based`, `any_browser`, and config
+surfaces remain available through 0.6 and are deprecated for removal in 0.7;
 see the language-specific documentation and examples.
 
 ## Testing

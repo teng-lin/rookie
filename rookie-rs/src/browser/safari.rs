@@ -29,6 +29,10 @@ const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
 // Only the macOS public surface calls this; other targets compile the parser
 // under `cfg(test)` for fixtures alone.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[deprecated(
+  since = "0.6.0",
+  note = "use direct_path::cookies_from_path with DirectPathRequest"
+)]
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   safari_based_outcome(db_path, domains).map(|outcome| outcome.cookies)
 }

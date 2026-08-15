@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use clap::error::ErrorKind;
 use clap::{Command, CommandFactory, FromArgMatches};
 use rookie_cookies::{any_browser, common::enums::Cookie};
