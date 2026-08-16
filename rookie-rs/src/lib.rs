@@ -738,16 +738,18 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 
 /// Returns cookies from Internet Explorer (Windows only)
 ///
-/// Internet Explorer itself has been discontinued since 2022. Its cookie
-/// database uses the ESE (Extensible Storage Engine) format, read here by
-/// linking an unmodified native C library in-process; unlike this crate's
-/// other native calls, that parsing runs with no process isolation, so a
-/// malformed or malicious database can crash the whole host process rather
-/// than fail as a typed error. Containing that would mean running the
-/// parser in a sandboxed subprocess, which this crate is not planning to
-/// build for a discontinued browser — Internet Explorer support is
-/// deprecated for removal in a future major version instead.
-/// `browser("internet_explorer", domains)` /
+/// Its cookie database uses the ESE (Extensible Storage Engine) format,
+/// read here by linking an unmodified native C library (`libesedb`)
+/// in-process with no process isolation, so a malformed or malicious
+/// database can crash the whole host process rather than fail as a typed
+/// error. Unlike this crate's bundled SQLite parser — pinned to an exact
+/// version with its own tracked security inventory
+/// (`docs/sqlite-security.md`) — `libesedb` carries no such inventory.
+/// Containing that gap would mean running the parser in a sandboxed
+/// subprocess; the Internet Explorer 11 browser app was discontinued in
+/// 2022, and this crate is not planning to build that containment for it.
+/// Internet Explorer support is deprecated for removal in a future major
+/// version instead. `browser("internet_explorer", domains)` /
 /// `extract(Request::browser("internet_explorer"))` remain available for
 /// the rest of the deprecation window.
 ///
@@ -764,7 +766,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "Internet Explorer support is deprecated for removal; Internet Explorer itself was discontinued in 2022"
+  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022"
 )]
 pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("internet_explorer", domains)

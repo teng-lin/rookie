@@ -14,14 +14,15 @@ use std::path::{Path, PathBuf};
 
 /// Returns cookies from IE based browsers.
 ///
-/// Deprecated for removal, not just for a newer call shape: Internet
-/// Explorer was discontinued in 2022, and its ESE-format cookie database is
-/// read here through an unmodified native C library with no process
-/// isolation, so this crate is not planning to keep investing in it. See
-/// [`crate::internet_explorer`] for the full rationale.
+/// Deprecated for removal, not just for a newer call shape: its ESE-format
+/// cookie database is read through an unmodified native C library with no
+/// process isolation, and this crate is not planning to keep investing in
+/// containing it. See [`crate::internet_explorer`] for the full rationale.
+/// `direct_path::cookies_from_path` with `DirectPathRequest` remains
+/// available for the rest of the deprecation window.
 #[deprecated(
   since = "0.6.0",
-  note = "Internet Explorer support is deprecated for removal; Internet Explorer itself was discontinued in 2022"
+  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::cookies_from_path with DirectPathRequest for the rest of the deprecation window"
 )]
 pub fn internet_explorer_based(
   db_path: PathBuf,
