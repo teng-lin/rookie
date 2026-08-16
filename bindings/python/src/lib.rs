@@ -18,6 +18,32 @@ fn version() -> PyResult<String> {
   Ok(rookie_core::version())
 }
 
+/// A shared stop signal for an in-flight extraction.
+///
+/// Calling `cancel()` from any thread (e.g. a signal handler, or another
+/// Python thread) stops the extraction this handle was passed into at its
+/// next internal checkpoint. Cloning shares the same underlying signal --
+/// cancelling a clone cancels every clone.
+#[pyclass(name = "CancellationHandle")]
+#[derive(Clone)]
+pub struct PyCancellationHandle(pub(crate) rookie_core::CancellationHandle);
+
+#[pymethods]
+impl PyCancellationHandle {
+  #[new]
+  fn new() -> Self {
+    Self(rookie_core::CancellationHandle::new())
+  }
+
+  fn cancel(&self) -> bool {
+    self.0.cancel()
+  }
+
+  fn is_cancelled(&self) -> bool {
+    self.0.is_cancelled()
+  }
+}
+
 #[pymodule]
 fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   // Scope log forwarding to the "rookie_cookies" Python logger instead of
@@ -80,6 +106,7 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
   }
 
   m.add_function(wrap_pyfunction!(version, m)?)?;
+  m.add_class::<PyCancellationHandle>()?;
   Ok(())
 }
 

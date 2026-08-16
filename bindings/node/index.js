@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
+const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -424,7 +424,8 @@ function validateChromiumPathOptions(options) {
 function chromiumPathNative(nativeFunction, name) {
   const required = requiredNative(nativeFunction, name)
   return asyncNative(
-    (path, options) => required(path, validateChromiumPathOptions(options)),
+    (path, options, timeoutMs, cancellation) =>
+      required(path, validateChromiumPathOptions(options), timeoutMs, cancellation),
     name
   )
 }
@@ -444,6 +445,7 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
 
+module.exports.CancellationHandle = requiredNative(CancellationHandle, 'CancellationHandle')
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')

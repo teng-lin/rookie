@@ -189,9 +189,10 @@ def validate_npm_tarballs(
         raise RuntimeError("npm root package must not embed a platform binding")
     for declaration in (
         "export interface ChromiumPathOptions",
-        "export declare function cookiesFromPath(path: string, domains?: string[] | null)",
-        "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null)",
-        "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null)",
+        "export declare class CancellationHandle",
+        "export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null)",
+        "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null)",
+        "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null)",
     ):
         if declaration not in declarations:
             raise RuntimeError(f"npm root declarations are missing: {declaration}")

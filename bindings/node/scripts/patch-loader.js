@@ -5,6 +5,97 @@ const root = join(__dirname, '..')
 const loaderPath = join(root, 'index.js')
 const typesPath = join(root, 'index.d.ts')
 
+// The legacy per-browser Node exports (cachy/operaGx/octoBrowser/internetExplorer/safari)
+// are each gated to the OS(es) that browser is registered on. Rather than hand-typing that
+// gate in three separate places (the loader's platformNative() calls, the generated .d.ts
+// facade, and the list of names to exclude from the "napi declared it" completeness check),
+// derive it once from the platform contract those OS gates actually come from.
+const registryPath = join(root, '..', '..', 'rookie-rs', 'browser_registry.json')
+const registry = JSON.parse(readFileSync(registryPath, 'utf8'))
+
+const REGISTRY_PLATFORM_TO_NODE_PLATFORM = { windows: 'win32', macos: 'darwin', linux: 'linux' }
+const NODE_PLATFORM_DISPLAY_NAME = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }
+
+// napi-rs Node function name -> canonical browser ID in browser_registry.json. The names
+// differ (camelCase Node export vs snake_case registry ID), so this glue table is the only
+// hand-maintained part; the platforms each maps to are looked up, not typed in.
+const LEGACY_PLATFORM_FUNCTIONS = {
+  cachy: 'cachy',
+  operaGx: 'opera_gx',
+  octoBrowser: 'octo_browser',
+  internetExplorer: 'internet_explorer',
+  safari: 'safari',
+}
+
+function nodePlatformsForCanonicalId(canonicalId) {
+  const platforms = []
+  for (const [registryPlatform, browsers] of Object.entries(registry.platforms)) {
+    if (browsers.some((browser) => browser.canonical_id === canonicalId)) {
+      const nodePlatform = REGISTRY_PLATFORM_TO_NODE_PLATFORM[registryPlatform]
+      if (!nodePlatform) {
+        throw new Error(`patch-loader.js: unrecognized registry platform '${registryPlatform}'`)
+      }
+      platforms.push(nodePlatform)
+    }
+  }
+  if (platforms.length === 0) {
+    throw new Error(
+      `patch-loader.js: '${canonicalId}' is not registered on any platform in browser_registry.json`
+    )
+  }
+  return platforms.sort()
+}
+
+const legacyFunctionPlatforms = Object.fromEntries(
+  Object.entries(LEGACY_PLATFORM_FUNCTIONS).map(([functionName, canonicalId]) => [
+    functionName,
+    nodePlatformsForCanonicalId(canonicalId),
+  ])
+)
+
+function nodePlatformDisplayList(nodePlatforms) {
+  const names = nodePlatforms.map((platform) => NODE_PLATFORM_DISPLAY_NAME[platform])
+  return names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+function platformNativeExportLine(functionName) {
+  const nodePlatforms = legacyFunctionPlatforms[functionName]
+  const platformArg =
+    nodePlatforms.length === 1
+      ? `'${nodePlatforms[0]}'`
+      : `[${nodePlatforms.map((platform) => `'${platform}'`).join(', ')}]`
+  const supportedPlatform = nodePlatformDisplayList(nodePlatforms)
+  return `module.exports.${functionName} = platformNative(${functionName}, '${functionName}', ${platformArg}, '${supportedPlatform}')`
+}
+
+function legacyPlatformDeclarations() {
+  const groups = []
+  const groupByPlatformKey = new Map()
+  for (const functionName of Object.keys(LEGACY_PLATFORM_FUNCTIONS)) {
+    const platforms = legacyFunctionPlatforms[functionName]
+    const platformKey = platforms.join(',')
+    let group = groupByPlatformKey.get(platformKey)
+    if (!group) {
+      group = { platforms, functionNames: [] }
+      groupByPlatformKey.set(platformKey, group)
+      groups.push(group)
+    }
+    group.functionNames.push(functionName)
+  }
+  return groups
+    .map(({ platforms, functionNames }) => {
+      const heading = `/** ${nodePlatformDisplayList(platforms)}-only browsers */`
+      const declarations = functionNames.map(
+        (functionName) =>
+          `export declare function ${functionName}(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>`
+      )
+      return [heading, ...declarations].join('\n')
+    })
+    .join('\n')
+}
+
 let loader = readFileSync(loaderPath, 'utf8')
 
 if (!loader.includes("const { optionalDependencies = {} } = require('./package.json')")) {
@@ -35,19 +126,27 @@ if (!loader.includes('No prebuilt rookie-cookies binding is published')) {
   )
 }
 
-const nativeBindingDestructurePattern = /^const \{ version,.* \} = nativeBinding$/m
+const nativeBindingDestructurePattern = /^const \{ .*\bversion\b.*\} = nativeBinding$/m
 if (!nativeBindingDestructurePattern.test(loader)) {
   throw new Error(
-    "patch-loader.js: could not find the napi-generated `const { version, ... } = nativeBinding` line; napi-rs output format may have changed"
+    "patch-loader.js: could not find the napi-generated `const { ..., version, ... } = nativeBinding` line; napi-rs output format may have changed"
   )
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
+  'const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
 )
 
+// Every napi-generated raw export is a simple self-reexport
+// (`module.exports.name = name`), whatever the name -- unlike this script's
+// own validated exports further down (`module.exports.name = requiredNative(name, 'name')`
+// or an asyncNative(...)/platformNative(...) call), which never take this
+// shape. Matching that shape generically, instead of a specific name like
+// `version`, means a new napi export sorting ahead of every previously
+// known one (as CancellationHandle did) still gets sliced off here instead
+// of surviving as an unvalidated duplicate of its own patched export below.
 const exportStart = loader.search(
-  /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.version = version)/m
+  /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.(\w+) = \1$)/m
 )
 if (exportStart === -1) {
   throw new Error('Generated loader has no export facade')
@@ -152,7 +251,8 @@ function validateChromiumPathOptions(options) {
 function chromiumPathNative(nativeFunction, name) {
   const required = requiredNative(nativeFunction, name)
   return asyncNative(
-    (path, options) => required(path, validateChromiumPathOptions(options)),
+    (path, options, timeoutMs, cancellation) =>
+      required(path, validateChromiumPathOptions(options), timeoutMs, cancellation),
     name
   )
 }
@@ -172,6 +272,7 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
 
+module.exports.CancellationHandle = requiredNative(CancellationHandle, 'CancellationHandle')
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
@@ -181,19 +282,19 @@ module.exports.chromiumCookiesFromPathDetailed = chromiumPathNative(chromiumCook
 module.exports.firefox = asyncNative(firefox, 'firefox')
 module.exports.zen = asyncNative(zen, 'zen')
 module.exports.librewolf = asyncNative(librewolf, 'librewolf')
-module.exports.cachy = platformNative(cachy, 'cachy', 'linux', 'Linux')
+${platformNativeExportLine('cachy')}
 module.exports.chrome = asyncNative(chrome, 'chrome')
 module.exports.brave = asyncNative(brave, 'brave')
 module.exports.arc = asyncNative(arc, 'arc')
 module.exports.edge = asyncNative(edge, 'edge')
 module.exports.opera = asyncNative(opera, 'opera')
-module.exports.operaGx = platformNative(operaGx, 'operaGx', ['darwin', 'win32'], 'macOS and Windows')
+${platformNativeExportLine('operaGx')}
 module.exports.chromium = asyncNative(chromium, 'chromium')
 module.exports.vivaldi = asyncNative(vivaldi, 'vivaldi')
 module.exports.load = asyncNative(load, 'load')
-module.exports.octoBrowser = platformNative(octoBrowser, 'octoBrowser', 'win32', 'Windows')
-module.exports.internetExplorer = platformNative(internetExplorer, 'internetExplorer', 'win32', 'Windows')
-module.exports.safari = platformNative(safari, 'safari', 'darwin', 'macOS')
+${platformNativeExportLine('octoBrowser')}
+${platformNativeExportLine('internetExplorer')}
+${platformNativeExportLine('safari')}
 module.exports.chromiumBased = asyncNative(chromiumBased, 'chromiumBased')
 module.exports.chromiumBasedDetailed = asyncNative(chromiumBasedDetailed, 'chromiumBasedDetailed')
 module.exports.firefoxProfiles = asyncNative(firefoxProfiles, 'firefoxProfiles')
@@ -216,6 +317,17 @@ writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
 
+// Whether `types` is napi's own fresh output (the only case that can be
+// trusted to reflect this build's actual #[cfg(...)] gates) or a *previously
+// patched* file being fed back in, e.g. by a test asserting patch-loader.js
+// is idempotent on its own output. A prior patch run already stripped every
+// legacy platform function's original declaration and replaced it with one
+// unconditional copy per function under the facade marker, for every
+// platform regardless of what this build compiled -- so once that's
+// happened, presence/absence in `types` no longer means anything about this
+// build's #[cfg(...)] gates.
+const isFreshNapiOutput = !types.includes('/** rookie-cookies cross-platform facade */')
+
 const chromiumPathOptionsPattern = /^export interface ChromiumPathOptions \{\n(?:  .*\n)*\}/m
 if (!chromiumPathOptionsPattern.test(types)) {
   throw new Error('patch-loader.js: generated declarations are missing ChromiumPathOptions')
@@ -233,15 +345,15 @@ types = types.replace(
 const canonicalDeclarationPatterns = [
   [
     /^export declare function cookiesFromPath\([^\n]*$/m,
-    'export declare function cookiesFromPath(path: string, domains?: string[] | null): Promise<CookieObject[]>',
+    'export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>',
   ],
   [
     /^export declare function chromiumCookiesFromPath\([^\n]*$/m,
-    'export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null): Promise<CookieObject[]>',
+    'export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>',
   ],
   [
     /^export declare function chromiumCookiesFromPathDetailed\([^\n]*$/m,
-    'export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null): Promise<DetailedCookieObject[]>',
+    'export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>',
   ],
 ]
 for (const [pattern, declaration] of canonicalDeclarationPatterns) {
@@ -263,7 +375,7 @@ for (const [pattern, declaration] of canonicalDeclarationPatterns) {
 //      by comparing the surviving names against everything napi generated.
 //      This one is structural: a declaration added later is covered without
 //      anybody remembering to list it.
-const declarationPattern = /^export (?:declare function|interface) (\w+)/gm
+const declarationPattern = /^export (?:declare function|declare class|interface) (\w+)/gm
 const generatedNames = new Set(
   [...types.matchAll(declarationPattern)].map((match) => match[1])
 )
@@ -274,7 +386,10 @@ generatedNames.delete('testWorkerPanic')
 // napi only generates these on the platform that owns them; the facade
 // re-declares them for every platform, so they are absent from `generatedNames`
 // on most builds and cannot be required of it.
-const platformFunctions = ['cachy', 'operaGx', 'octoBrowser', 'internetExplorer', 'safari', 'chromiumBased', 'chromiumBasedDetailed']
+// `chromiumBased`/`chromiumBasedDetailed` are not in browser_registry.json -- they are one
+// deprecated function whose Rust signature itself differs by OS, not a registered browser --
+// so they stay an explicit addendum to the registry-derived legacy browser functions.
+const platformFunctions = [...Object.keys(LEGACY_PLATFORM_FUNCTIONS), 'chromiumBased', 'chromiumBasedDetailed']
 const publishedFunctions = [...loader.matchAll(/^module\.exports\.(\w+) = /gm)]
   .map((match) => match[1])
   .filter((name) => !name.startsWith('__') && !platformFunctions.includes(name))
@@ -283,6 +398,35 @@ if (undeclared.length > 0) {
   throw new Error(
     `Generated declarations were truncated: missing ${undeclared.join(', ')}`
   )
+}
+
+// The registry-derived platform list only helps if it agrees with the actual
+// `#[cfg(target_os = ...)]` gates in bindings/node/src/lib.rs -- both name the
+// same platforms by hand, in different files. On fresh napi output,
+// `generatedNames` is ground truth for what this build's #[cfg(...)] gates
+// actually compiled; a mismatch here would otherwise surface at import time
+// as a hard crash for every user on the affected platform (`platformNative`
+// calls `requiredNative` eagerly), not just callers of the one drifted
+// function. Runs only on fresh napi output that already passed the
+// completeness check above: an already-patched file's facade re-declares
+// every legacy platform function for every platform (making presence in
+// `types` meaningless there), and a truncated file would make an unrelated
+// omission look like a platform mismatch.
+if (isFreshNapiOutput) {
+  for (const functionName of Object.keys(LEGACY_PLATFORM_FUNCTIONS)) {
+    const registryExpectsThisPlatform = legacyFunctionPlatforms[functionName].includes(
+      process.platform,
+    )
+    const rustCompiledThisPlatform = generatedNames.has(functionName)
+    if (registryExpectsThisPlatform !== rustCompiledThisPlatform) {
+      throw new Error(
+        `patch-loader.js: '${functionName}' disagrees with bindings/node/src/lib.rs on ${process.platform} -- ` +
+          `browser_registry.json says it ${registryExpectsThisPlatform ? 'should' : 'should not'} be compiled here, ` +
+          `but the Rust #[cfg(...)] gate ${rustCompiledThisPlatform ? 'compiled' : 'did not compile'} it. ` +
+          'Keep browser_registry.json and the #[cfg(...)] gate in sync.',
+      )
+    }
+  }
 }
 
 // NAPI-RS emits declarations for the platform doing the build. Remove only
@@ -312,15 +456,7 @@ types = types.replace(
 types = types.trimEnd()
 types += `
 ${facadeMarker}
-/** Linux-only browsers */
-export declare function cachy(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** macOS- and Windows-only browsers */
-export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** Windows-only browsers */
-export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** macOS-only browsers */
-export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+${legacyPlatformDeclarations()}
 /** Unix browsers */
 /** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>

@@ -27,6 +27,7 @@ const execFileAsync = promisify(execFile);
 // functions are validated while the facade is constructed; this list also
 // guards against the documented facade and its smoke test drifting apart.
 const EXPECTED_EXPORTS = [
+  "CancellationHandle",
   "version",
   "toNetscape",
   "anyBrowser",
@@ -134,6 +135,9 @@ test("version returns a non-empty string", (t) => {
 });
 
 test("the generated facade validates required native exports", (t) => {
+  t.throws(() => constructFacade("linux", "CancellationHandle"), {
+    message: /native binding function: CancellationHandle/,
+  });
   t.throws(() => constructFacade("linux", "version"), {
     message: /native binding function: version/,
   });
@@ -276,6 +280,60 @@ test("cookiesFromPath classifies Firefox and applies domain filters", async (t) 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("CancellationHandle tracks its own cancelled state", (t) => {
+  const handle = new rookieCookies.CancellationHandle();
+  t.false(handle.isCancelled);
+  t.true(handle.cancel(), "the first cancel() call takes effect");
+  t.true(handle.isCancelled);
+  t.false(handle.cancel(), "a handle already cancelled stays cancelled");
+});
+
+test("cookiesFromPath rejects once its timeout budget expires", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-timeout-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+    );
+    await t.throwsAsync(rookieCookies.cookiesFromPath(dbPath, null, 0), {
+      message: /operation deadline expired/,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cookiesFromPath rejects when handed an already-cancelled handle", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-cancelled-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+    );
+    const handle = new rookieCookies.CancellationHandle();
+    handle.cancel();
+    await t.throwsAsync(
+      rookieCookies.cookiesFromPath(dbPath, null, undefined, handle),
+      { message: /operation cancelled/ },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a migrated single-browser export honors timeoutMs like cookiesFromPath", async (t) => {
+  // Every async_named_browser_fn!-generated export (firefox, chrome, safari,
+  // ...) shares one macro body, so this stands in for the whole family: the
+  // deadline checkpoint runs before any real profile discovery -- proven at
+  // the Rust level by zero_timeout_stops_extraction_before_any_browser_lookup
+  // -- so this needs no installed-browser fixture to be deterministic.
+  await t.throwsAsync(rookieCookies.firefox(null, 0), {
+    message: /operation deadline expired/,
+  });
 });
 
 test("canonical Chromium paths support flat, detailed, and domain projections", async (t) => {
@@ -586,17 +644,17 @@ test("canonical direct-path declarations and compatibility deprecations are exac
   );
   t.true(
     types.includes(
-      "export declare function cookiesFromPath(path: string, domains?: string[] | null): Promise<CookieObject[]>",
+      "export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>",
     ),
   );
   t.true(
     types.includes(
-      "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null): Promise<CookieObject[]>",
+      "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>",
     ),
   );
   t.true(
     types.includes(
-      "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null): Promise<DetailedCookieObject[]>",
+      "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>",
     ),
   );
   t.regex(types, /@deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`/);
@@ -828,7 +886,7 @@ test("generated report exports and declarations survive patching", (t) => {
   const loader = readFileSync(new URL("../index.js", import.meta.url), "utf8");
   const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
 
-  const destructure = loader.match(/^const \{ version,.* \} = nativeBinding$/m);
+  const destructure = loader.match(/^const \{ .*\bversion\b.*\} = nativeBinding$/m);
   t.truthy(destructure, "the patched loader must destructure the native binding");
 
   const facadeIndex = types.indexOf("/** rookie-cookies cross-platform facade */");
@@ -872,28 +930,40 @@ test("generated report exports and declarations survive patching", (t) => {
 function runPatchLoader(mutate = (sources) => sources) {
   const dir = mkdtempSync(join(tmpdir(), "rookie-patch-loader-"));
   try {
-    mkdirSync(join(dir, "scripts"));
+    // patch-loader.js reads browser_registry.json from a fixed position relative
+    // to itself (repo_root/rookie-rs/...), so the disposable copy has to mirror
+    // that layout -- not just drop the script in a bare scripts/ directory --
+    // for the registry read to resolve to a real file.
+    const nodeDir = join(dir, "bindings", "node");
+    mkdirSync(join(nodeDir, "scripts"), { recursive: true });
+    mkdirSync(join(dir, "rookie-rs"), { recursive: true });
     const sources = mutate({
       loader: readFileSync(new URL("../index.js", import.meta.url), "utf8"),
       types: readFileSync(new URL("../index.d.ts", import.meta.url), "utf8"),
     });
-    writeFileSync(join(dir, "index.js"), sources.loader);
-    writeFileSync(join(dir, "index.d.ts"), sources.types);
+    writeFileSync(join(nodeDir, "index.js"), sources.loader);
+    writeFileSync(join(nodeDir, "index.d.ts"), sources.types);
     copyFileSync(
       fileURLToPath(new URL("../scripts/patch-loader.js", import.meta.url)),
-      join(dir, "scripts", "patch-loader.js"),
+      join(nodeDir, "scripts", "patch-loader.js"),
+    );
+    copyFileSync(
+      fileURLToPath(
+        new URL("../../../rookie-rs/browser_registry.json", import.meta.url),
+      ),
+      join(dir, "rookie-rs", "browser_registry.json"),
     );
 
     const result = spawnSync(
       process.execPath,
-      [join(dir, "scripts", "patch-loader.js")],
+      [join(nodeDir, "scripts", "patch-loader.js")],
       { encoding: "utf8" },
     );
     return {
       status: result.status,
       stderr: result.stderr,
-      loader: readFileSync(join(dir, "index.js"), "utf8"),
-      types: readFileSync(join(dir, "index.d.ts"), "utf8"),
+      loader: readFileSync(join(nodeDir, "index.js"), "utf8"),
+      types: readFileSync(join(nodeDir, "index.d.ts"), "utf8"),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -964,7 +1034,7 @@ test("patch-loader rejects patching that would drop a declaration", (t) => {
 test("patch-loader rejects an unrecognized napi destructure line", (t) => {
   const result = runPatchLoader(({ loader, types }) => ({
     loader: loader.replace(
-      /^const \{ version,.*$/m,
+      /^const \{ .*\bversion\b.*\} = nativeBinding$/m,
       "const { renamed } = nativeBinding",
     ),
     types,
@@ -972,6 +1042,27 @@ test("patch-loader rejects an unrecognized napi destructure line", (t) => {
 
   t.not(result.status, 0);
   t.regex(result.stderr, /could not find the napi-generated/);
+});
+
+test("patch-loader rejects a registry/#[cfg(...)] platform mismatch on fresh napi output", (t) => {
+  const result = runPatchLoader(({ loader, types }) => {
+    const facadeIndex = types.indexOf("/** rookie-cookies cross-platform facade */");
+    let rawTypes = types.slice(0, facadeIndex === -1 ? types.length : facadeIndex);
+    // browser_registry.json only registers `cachy` on Linux. Simulate the
+    // Rust #[cfg(...)] gate having drifted out of sync with that: on Linux,
+    // as if it stopped compiling there; everywhere else, as if it started
+    // compiling somewhere it shouldn't.
+    if (process.platform === "linux") {
+      rawTypes = rawTypes.replace(/^export declare function cachy\([^\n]*\n/m, "");
+    } else {
+      rawTypes +=
+        "export declare function cachy(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>\n";
+    }
+    return { loader, types: rawTypes };
+  });
+
+  t.not(result.status, 0);
+  t.regex(result.stderr, /'cachy' disagrees with bindings\/node\/src\/lib\.rs/);
 });
 
 test.serial("report extraction runs off the event loop", async (t) => {

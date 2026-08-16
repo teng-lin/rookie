@@ -79,6 +79,37 @@ Unknown options, wrong types, or competing selectors raise `ValueError` before
 the database is touched. Extraction failures raise `RuntimeError` with the Rust
 error chain preserved.
 
+### Timeouts and cancellation
+
+`cookies_from_path` accepts optional `timeout` (seconds) and `cancellation`
+keyword arguments; `chromium_cookies_from_path`/`chromium_cookies_from_path_detailed`
+accept the same two keys in their options dictionary. `cancellation` is a
+`CancellationHandle`, shared across threads:
+
+```python
+import threading
+import rookie_cookies
+
+cancellation = rookie_cookies.CancellationHandle()
+threading.Timer(5, cancellation.cancel).start()
+
+try:
+    cookies = rookie_cookies.cookies_from_path(
+        "/path/to/cookies.sqlite", timeout=30, cancellation=cancellation
+    )
+except RuntimeError as error:
+    if "operation deadline expired" in str(error):
+        print("timed out")
+    elif "operation cancelled" in str(error):
+        print("cancelled")
+    else:
+        raise
+```
+
+Cancellation and timeouts are checked cooperatively, so they take effect
+mid-extraction rather than only before it starts, but a single long-running
+step is not interrupted mid-step.
+
 The older functions below remain behavior-compatible in 0.6.x, but
 `any_browser()`, the Chromium `*_based` pair, and flat `firefox_based()` are
 deprecated for removal no earlier than 0.7. `firefox_based_detailed()` is not

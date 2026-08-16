@@ -14,6 +14,9 @@ use std::{
 };
 
 pub(crate) const DEFAULT_EXTRACTION_BUDGET: Duration = Duration::from_secs(30);
+/// A century, in seconds. Every real platform's `Instant` has far more
+/// headroom than this, so adding it to `now()` cannot itself overflow.
+const EFFECTIVELY_UNBOUNDED_HORIZON: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 100);
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
@@ -47,12 +50,17 @@ impl Deadline {
   }
 
   pub(crate) fn after(clock: &dyn Clock, duration: Duration) -> Self {
-    Self {
-      expires_at: clock
-        .now()
-        .checked_add(duration)
-        .unwrap_or_else(|| clock.now()),
-    }
+    let now = clock.now();
+    // A caller-supplied duration near `Duration::MAX` (e.g. "no real budget,
+    // just don't hang forever") can overflow `Instant` addition. Falling back
+    // to `now` there would invert the caller's intent into an
+    // already-expired deadline instead of an effectively unbounded one, so
+    // clamp to a horizon far beyond any real extraction first.
+    let expires_at = now
+      .checked_add(duration)
+      .or_else(|| now.checked_add(EFFECTIVELY_UNBOUNDED_HORIZON))
+      .unwrap_or(now);
+    Self { expires_at }
   }
 
   pub(crate) fn remaining(self, clock: &dyn Clock) -> Duration {
@@ -80,7 +88,6 @@ impl CancellationToken {
   ///
   /// The first writer wins, so concurrent cancellation and resource-budget
   /// exhaustion cannot change the reason observed by later boundaries.
-  #[allow(dead_code)] // The public request object in PR4 will drive this internal control seam.
   pub(crate) fn cancel(&self) -> bool {
     self
       .0
@@ -103,6 +110,13 @@ impl CancellationToken {
 
   pub(crate) fn is_resource_exhausted(&self) -> bool {
     self.0.load(Ordering::Acquire) == 2
+  }
+
+  /// Whether `self` and `other` are clones of the same token, sharing one
+  /// cancellation state, rather than two independent tokens that merely
+  /// happen to be in the same state.
+  pub(crate) fn same_as(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.0, &other.0)
   }
 }
 
@@ -167,7 +181,6 @@ impl<'a> BoundaryRuntime<'a> {
     }
   }
 
-  #[allow(dead_code)] // The public request object in PR4 will inject the shared control token.
   pub(crate) fn with_stop(
     clock: &'a dyn Clock,
     deadline: Deadline,
@@ -187,6 +200,19 @@ impl<'a> BoundaryRuntime<'a> {
   pub(crate) fn check(&self) -> Result<(), BoundaryStop> {
     checkpoint(self.clock, self.deadline, &self.stop)
   }
+}
+
+/// Builds the runtime backing a public request's `.timeout(..)` /
+/// cancellation handle: `timeout` overrides [`DEFAULT_EXTRACTION_BUDGET`]
+/// when given, and `stop` is the caller-supplied (or default, never
+/// cancelled) control token.
+pub(crate) fn boundary_runtime(
+  clock: &dyn Clock,
+  timeout: Option<Duration>,
+  stop: CancellationToken,
+) -> BoundaryRuntime<'_> {
+  let deadline = Deadline::after(clock, timeout.unwrap_or(DEFAULT_EXTRACTION_BUDGET));
+  BoundaryRuntime::with_stop(clock, deadline, stop)
 }
 
 #[cfg(test)]
@@ -250,6 +276,20 @@ mod tests {
         .cleanup_deadline(Duration::from_secs(2))
         .remaining(&clock),
       Duration::from_secs(1)
+    );
+  }
+
+  #[test]
+  fn an_overflowing_timeout_does_not_invert_into_an_already_expired_deadline() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::MAX);
+    // A caller passing `Duration::MAX` means "don't really bound this," not
+    // "expire it instantly." Advancing by a very long, but not overflowing,
+    // duration must still leave time remaining.
+    clock.advance(Duration::from_secs(60 * 60 * 24 * 365 * 50));
+    assert!(
+      !deadline.remaining(&clock).is_zero(),
+      "an overflowing timeout must clamp to a far horizon, not to `now`"
     );
   }
 

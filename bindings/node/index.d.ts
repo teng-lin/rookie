@@ -210,22 +210,22 @@ export declare function version(): string
  * encoded as `%09`, `%0D`, and `%0A`, matching the Rust, CLI, and Python APIs.
  */
 export declare function toNetscape(cookies: Array<CookieObject>): string
-export declare function cookiesFromPath(path: string, domains?: string[] | null): Promise<CookieObject[]>
-export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null): Promise<CookieObject[]>
-export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null): Promise<DetailedCookieObject[]>
+export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>
+export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>
+export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>
 /** @deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`. Earliest removal is 0.7. */
 export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
-export declare function firefox(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function zen(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function librewolf(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function chrome(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function brave(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function arc(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function edge(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function opera(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function chromium(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function vivaldi(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function firefox(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function zen(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function librewolf(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function chrome(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function brave(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function arc(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function edge(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function opera(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function chromium(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function vivaldi(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 export declare function firefoxProfiles(): Promise<Array<FirefoxProfileObject>>
 export declare function firefoxProfile(profile: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** @deprecated Use `cookiesFromPath`. Earliest removal is 0.7. */
@@ -278,16 +278,35 @@ export declare function browserReport(browserId: string, profileId?: string | un
  * not abort the others; it becomes an issue on the returned report.
  */
 export declare function loadReport(domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
+export type JsCancellationHandle = CancellationHandle
+/**
+ * A cross-thread cancellation token for an in-flight extraction.
+ *
+ * `cancel()` is safe to call from the JS main thread while the matching
+ * extraction runs on napi's worker threadpool: it flips a shared atomic
+ * flag that the extraction observes at the same deadline/cancellation
+ * checkpoints a `timeoutMs` budget uses, so cancellation takes effect
+ * mid-extraction rather than only before it starts.
+ */
+export declare class CancellationHandle {
+  constructor()
+  /**
+   * Requests cancellation. Returns `true` the first time it takes effect,
+   * `false` if this handle was already cancelled.
+   */
+  cancel(): boolean
+  get isCancelled(): boolean
+}
 /** rookie-cookies cross-platform facade */
 /** Linux-only browsers */
-export declare function cachy(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** macOS- and Windows-only browsers */
-export declare function operaGx(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function cachy(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+/** macOS and Windows-only browsers */
+export declare function operaGx(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** Windows-only browsers */
-export declare function octoBrowser(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-export declare function internetExplorer(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function octoBrowser(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function internetExplorer(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** macOS-only browsers */
-export declare function safari(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
+export declare function safari(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
 /** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>

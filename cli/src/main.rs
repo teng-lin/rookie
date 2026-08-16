@@ -7,33 +7,95 @@ use rookie_cookies::direct_path::{
   chromium_cookies_from_path, cookies_from_path, ChromiumCredentialSource, ChromiumPathRequest,
   DirectPathRequest,
 };
+use rookie_cookies::CancellationHandle;
 use std::path::PathBuf;
 mod browsers_map;
 use browsers_map::BROWSERS_MAP;
 mod args;
 use args::Args;
 use rookie_cookies::common::format;
+use std::io::Write;
+
+/// Writes `line` plus a trailing newline to stdout.
+///
+/// A closed downstream pipe (e.g. `rookie-cookies --load | head -1`) is
+/// ordinary, expected shutdown, not a program error: Rust's `println!`
+/// panics on it (exit code 101), which looks like a crash to a script
+/// checking the exit code. This exits cleanly (matching how a traditional
+/// Unix tool terminates on `SIGPIPE`) instead.
+fn print_line_or_exit(line: &str) {
+  if let Err(error) = writeln!(std::io::stdout(), "{line}") {
+    if error.kind() == std::io::ErrorKind::BrokenPipe {
+      std::process::exit(0);
+    }
+    eprintln!("error: failed to write output: {error}");
+    std::process::exit(1);
+  }
+}
+
+/// Creates a [`CancellationHandle`] and arms `SIGINT`/`SIGTERM` (Ctrl-C, or
+/// a terminal hangup, on Unix; Ctrl-C/Ctrl-Break on Windows) to cancel it.
+///
+/// Cancellation is cooperative: it takes effect at the next boundary
+/// checkpoint, not instantly. A signal received after the first one (the
+/// caller pressing Ctrl-C again because nothing happened yet, e.g. while
+/// blocked on a non-cooperative wait like a keychain prompt) exits the
+/// process immediately instead of waiting for a checkpoint that may not
+/// come soon -- the conventional "first signal asks nicely, second signal
+/// means it now" escalation.
+///
+/// Only the `--browser`/`--path` extraction modes call this: those are the
+/// only ones built from a [`rookie_cookies::Request`]/`DirectPathRequest`/
+/// `ChromiumPathRequest`, which is what actually observes cancellation.
+/// `--load`, `--report`, and the `--list-*` modes keep the process's
+/// default signal disposition (immediate termination) unchanged, since
+/// `rookie_cookies::load`/`load_report`/`browser_report`/`browser_profiles`/
+/// `supported_browsers` have no cancellation hook to drive.
+fn install_cancel_on_signal() -> CancellationHandle {
+  let handle = CancellationHandle::new();
+  let armed = handle.clone();
+  // A signal handler that can't be installed (e.g. a second call, or a
+  // hostile embedding environment) leaves the default disposition in place,
+  // which still terminates the process -- less gracefully, but not silently
+  // stuck -- so an install failure doesn't need to abort startup, but it is
+  // logged so "Ctrl-C didn't clean up" is diagnosable instead of invisible.
+  if let Err(error) = ctrlc::set_handler(move || {
+    // `cancel()` returns `false` when this handle was already cancelled, so
+    // a repeated signal past the first one exits immediately rather than
+    // being silently ignored while cooperative cancellation is still
+    // pending at its next checkpoint.
+    if !armed.cancel() {
+      std::process::exit(130);
+    }
+  }) {
+    tracing::warn!(
+      %error,
+      "failed to install SIGINT/SIGTERM handler; Ctrl-C will terminate immediately without graceful cancellation"
+    );
+  }
+  handle
+}
 
 fn print_cookies(args: Args, cookies: Vec<Cookie>) {
   match args.format.as_str() {
     "json" => {
       let str = format::json(cookies);
-      println!("{str}");
+      print_line_or_exit(&str);
     }
     "netscape" => {
       let data = format::netscape(cookies);
-      println!("{}", data);
+      print_line_or_exit(&data);
     }
     _ => {}
   }
 }
 
 fn print_version() {
-  println!(
+  print_line_or_exit(&format!(
     "CLI: {}\nrookie-cookies: {}",
     env!("CARGO_PKG_VERSION"),
     rookie_cookies::version()
-  );
+  ));
 }
 
 fn usage_error(
@@ -56,7 +118,7 @@ fn registration_of(browser: &str) -> rookie_cookies::Result<bool> {
 
 fn legacy_browser_values() -> String {
   BROWSERS_MAP
-    .keys()
+    .iter()
     .map(|key| {
       if key.contains(char::is_whitespace) {
         format!("\"{key}\"")
@@ -81,6 +143,7 @@ fn cookies_from_explicit_path(
   key_path: Option<String>,
   browser_id: Option<String>,
   plaintext_only: bool,
+  cancellation: CancellationHandle,
 ) -> rookie_cookies::Result<Vec<Cookie>> {
   let credential_selector = if let Some(key_path) = key_path {
     Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
@@ -95,14 +158,16 @@ fn cookies_from_explicit_path(
   };
 
   let Some(credentials) = credential_selector else {
-    let mut request = DirectPathRequest::new(path);
+    let mut request = DirectPathRequest::new(path).cancellation(cancellation);
     if let Some(domains) = domains {
       request = request.domains(domains);
     }
     return cookies_from_path(request);
   };
 
-  let mut request = ChromiumPathRequest::new(path).credentials(credentials);
+  let mut request = ChromiumPathRequest::new(path)
+    .credentials(credentials)
+    .cancellation(cancellation);
   if let Some(domains) = domains {
     request = request.domains(domains);
   }
@@ -150,7 +215,7 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
     ));
   }
 
-  if BROWSERS_MAP.contains_key(canonical_legacy_browser(browser)) {
+  if BROWSERS_MAP.contains(canonical_legacy_browser(browser)) {
     return Ok(());
   }
 
@@ -209,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   if args.list_browsers {
     let browsers = rookie_cookies::supported_browsers()?;
-    println!("{}", serde_json::to_string_pretty(&browsers)?);
+    print_line_or_exit(&serde_json::to_string_pretty(&browsers)?);
     return Ok(());
   }
   if args.list_profiles {
@@ -218,7 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       .as_deref()
       .expect("clap requires --browser with --list-profiles");
     let profiles = rookie_cookies::browser_profiles(browser)?;
-    println!("{}", serde_json::to_string_pretty(&profiles)?);
+    print_line_or_exit(&serde_json::to_string_pretty(&profiles)?);
     return Ok(());
   }
 
@@ -231,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       }
       None => rookie_cookies::load_report(args.domains.clone())?,
     };
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    print_line_or_exit(&serde_json::to_string_pretty(&report)?);
     return Ok(());
   }
 
@@ -241,17 +306,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   if args.load {
     cookies = rookie_cookies::load(args.domains)?;
   } else if let Some(browser) = args.browser {
-    let browser_fn = BROWSERS_MAP
-      .get(canonical_legacy_browser(&browser))
-      .expect("validate_modes rejects browsers outside the legacy map");
-    cookies = browser_fn(args.domains)?;
+    let canonical = canonical_legacy_browser(&browser);
+    assert!(
+      BROWSERS_MAP.contains(canonical),
+      "validate_modes rejects browsers outside the legacy map"
+    );
+    let cancellation = install_cancel_on_signal();
+    let request = rookie_cookies::Request::browser(canonical)
+      .domains(args.domains)
+      .cancellation(cancellation);
+    cookies = rookie_cookies::extract(request)?;
   } else if let Some(path) = args.path {
+    let cancellation = install_cancel_on_signal();
     cookies = cookies_from_explicit_path(
       path,
       args.domains,
       args.key_path,
       args.browser_id,
       args.plaintext_only,
+      cancellation,
     )?;
   } else {
     // Default load from all

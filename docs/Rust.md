@@ -42,6 +42,45 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
+## Timeouts and cancellation
+
+`Request`, `DirectPathRequest`, and `ChromiumPathRequest` each accept an
+optional `.timeout(Duration)` budget and an optional `.cancellation(handle)`
+for cooperative, cross-thread cancellation of an in-flight extraction:
+
+```rust
+use std::time::Duration;
+
+fn main() -> rookie_cookies::Result<()> {
+    let cancellation = rookie_cookies::CancellationHandle::new();
+    let watcher = cancellation.clone();
+    std::thread::spawn(move || {
+        // Cancel from another thread, e.g. in response to a user action.
+        std::thread::sleep(Duration::from_secs(5));
+        watcher.cancel();
+    });
+
+    let request = rookie_cookies::Request::browser("chrome")
+        .timeout(Duration::from_secs(30))
+        .cancellation(cancellation);
+    match rookie_cookies::extract(request) {
+        Ok(cookies) => println!("{cookies:?}"),
+        Err(error) => match rookie_cookies::stop_reason(&error) {
+            Some(rookie_cookies::StopReason::TimedOut) => println!("timed out"),
+            Some(rookie_cookies::StopReason::Cancelled) => println!("cancelled"),
+            _ => return Err(error),
+        },
+    }
+    Ok(())
+}
+```
+
+`CancellationHandle` is `Clone`; every clone shares one underlying signal, so
+cancelling any clone cancels all of them. Cancellation and timeouts are
+checked cooperatively at the same internal boundaries, so they take effect
+mid-extraction rather than only before it starts, but a single long-running
+step between checkpoints is not interrupted mid-step.
+
 ## Firefox profiles
 
 `firefox()` prefers the profile Firefox itself would open, resolved from
