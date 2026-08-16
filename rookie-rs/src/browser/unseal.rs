@@ -8,6 +8,7 @@ use super::chromium_crypto::{self, ChromiumKeyOutcomes, ChromiumKeyRoute, Legacy
 use super::cookie_record::{
   CipherTier, CookieRecord, CookieValue, UnavailableCode, UnavailableReason,
 };
+use super::outcome::Retryability;
 use crate::common::secret::{SecretBytes, SecretString};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
@@ -83,7 +84,10 @@ pub(super) enum ChromiumCookieValueError {
   Decrypt(anyhow::Error),
   Decode(ChromiumCookieDecodeError),
   ProviderUnavailable(anyhow::Error),
-  ProviderFailed(anyhow::Error),
+  ProviderFailed {
+    error: anyhow::Error,
+    retryability: Retryability,
+  },
   /// A decoder or earlier unseal stage already classified this unavailable
   /// value. Preserve its taxonomy instead of laundering it through Decrypt.
   Unavailable(UnavailableReason),
@@ -95,8 +99,21 @@ impl ChromiumCookieValueError {
       Self::Decrypt(_) => UnavailableCode::Decrypt,
       Self::Decode(_) => UnavailableCode::Decode,
       Self::ProviderUnavailable(_) => UnavailableCode::ProviderUnavailable,
-      Self::ProviderFailed(_) => UnavailableCode::ProviderFailed,
+      Self::ProviderFailed { .. } => UnavailableCode::ProviderFailed,
       Self::Unavailable(reason) => reason.code,
+    }
+  }
+
+  pub(super) fn retryability(&self) -> Retryability {
+    match self {
+      Self::ProviderUnavailable(_) => Retryability::NotRetryable,
+      Self::ProviderFailed { retryability, .. } => *retryability,
+      Self::Unavailable(reason) => match reason.code {
+        UnavailableCode::ProviderUnavailable => Retryability::NotRetryable,
+        UnavailableCode::ProviderFailed => Retryability::Retryable,
+        UnavailableCode::Decrypt | UnavailableCode::Decode => Retryability::Unknown,
+      },
+      Self::Decrypt(_) | Self::Decode(_) => Retryability::Unknown,
     }
   }
 }
@@ -104,9 +121,8 @@ impl ChromiumCookieValueError {
 impl fmt::Display for ChromiumCookieValueError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Decrypt(error) | Self::ProviderUnavailable(error) | Self::ProviderFailed(error) => {
-        error.fmt(formatter)
-      }
+      Self::Decrypt(error) | Self::ProviderUnavailable(error) => error.fmt(formatter),
+      Self::ProviderFailed { error, .. } => error.fmt(formatter),
       Self::Decode(error) => error.fmt(formatter),
       Self::Unavailable(reason) => reason.fmt(formatter),
     }
@@ -239,10 +255,10 @@ where
       )));
     }
     ChromiumKeyRoute::Failure { tier, failure } => {
-      return Err(ChromiumCookieValueError::ProviderFailed(anyhow!(
-        "Chromium {tier} key provider failed: {}",
-        failure.message()
-      )));
+      return Err(ChromiumCookieValueError::ProviderFailed {
+        error: anyhow!("Chromium {tier} key provider failed: {}", failure.message()),
+        retryability: failure.retryability(),
+      });
     }
     ChromiumKeyRoute::LegacyDpapi => {
       return match decrypt_legacy(encrypted_value).map_err(ChromiumCookieValueError::Decrypt)? {

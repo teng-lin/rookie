@@ -25,6 +25,7 @@ pub use browser::{
 // Private
 mod browser;
 mod compatibility_dispatch;
+#[cfg(test)]
 use anyhow::bail;
 pub use anyhow::{self, Result};
 use enums::Cookie;
@@ -622,6 +623,17 @@ where
   Ok(cookies)
 }
 
+fn aggregate_load_failure(
+  errors: &[String],
+  stop: Option<common::deadline::BoundaryStop>,
+) -> anyhow::Error {
+  let summary = format!("all browser extractions failed:\n  {}", errors.join("\n  "));
+  match stop {
+    Some(stop) => anyhow::Error::new(stop).context(summary),
+    None => anyhow::anyhow!(summary),
+  }
+}
+
 /// Returns cookies from all browsers
 ///
 /// This is a best-effort aggregator: each browser is probed in turn and
@@ -652,6 +664,7 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let runtime = common::deadline::BoundaryRuntime::standard(&clock);
   let mut cookies = Vec::new();
   let mut errors = Vec::new();
+  let mut terminal_stop = None;
   let mut successful_extractions = 0;
   for (browser_name, _) in browser_types {
     match browser::legacy::browser_cookies_with_runtime(browser_name, domains.clone(), &runtime) {
@@ -663,21 +676,22 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
         log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {error}");
       }
       Err(error) => {
-        let stopped = error.chain().any(|cause| {
+        let stopped = error.chain().find_map(|cause| {
           cause
             .downcast_ref::<common::deadline::BoundaryStop>()
-            .is_some()
+            .copied()
         });
         log::warn!("rookie_cookies::load skipping {browser_name}: {error}");
         errors.push(format!("{browser_name}: {error}"));
-        if stopped {
+        if let Some(stop) = stopped {
+          terminal_stop = Some(stop);
           break;
         }
       }
     }
   }
   if successful_extractions == 0 && !errors.is_empty() {
-    bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
+    return Err(aggregate_load_failure(&errors, terminal_stop));
   }
   Ok(cookies)
 }
@@ -888,6 +902,21 @@ mod tests {
     assert!(
       msg.contains("chrome: cookie database is corrupt"),
       "error should list chrome error, got: {msg}"
+    );
+  }
+
+  #[test]
+  fn aggregate_load_stop_keeps_its_summary_and_typed_source() {
+    let stop = common::deadline::BoundaryStop::TimedOut;
+    let error = aggregate_load_failure(
+      &["chrome: operation deadline expired".to_owned()],
+      Some(stop),
+    );
+    assert!(error.to_string().contains("all browser extractions failed"));
+    assert!(format!("{error:#}").contains("chrome: operation deadline expired"));
+    assert_eq!(
+      error.downcast_ref::<common::deadline::BoundaryStop>(),
+      Some(&stop)
     );
   }
 

@@ -354,6 +354,7 @@ fn report_identifiers_are_open_string_newtypes() {
   );
 
   // Bounded samples are only interpretable if the bound is public.
+  assert_eq!(rookie_cookies::report::EXTRACTION_REPORT_SCHEMA_VERSION, 1);
   assert_eq!(rookie_cookies::report::MAX_ISSUE_SAMPLES, 8);
 }
 

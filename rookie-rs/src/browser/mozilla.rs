@@ -2432,6 +2432,12 @@ mod tests {
     assert_eq!(cookies[0].cookie.name, cookies[1].cookie.name);
     assert_eq!(cookies[0].cookie.domain, cookies[1].cookie.domain);
     assert_eq!(cookies[0].cookie.path, cookies[1].cookie.path);
+    assert!(
+      cookies
+        .iter()
+        .all(|cookie| cookie.context.top_frame_site_key.is_none()),
+      "Firefox partitionKey must not populate Chromium top_frame_site_key"
+    );
     let contexts = cookies
       .iter()
       .map(|cookie| {
@@ -2941,6 +2947,7 @@ mod tests {
       .map(|cookie| (cookie.cookie.value.as_str(), &cookie.context))
       .collect::<std::collections::HashMap<_, _>>();
     let work = contexts.get("work").expect("work container");
+    assert_eq!(work.top_frame_site_key, None);
     assert_eq!(work.user_context_id, Some(2));
     assert_eq!(work.partition_key.as_deref(), Some("(https,work.example)"));
     assert_eq!(work.private_browsing_id, Some(0));
@@ -2954,6 +2961,7 @@ mod tests {
     assert_eq!(raw["futureAttribute"], "retained");
 
     let personal = contexts.get("personal").expect("personal container");
+    assert_eq!(personal.top_frame_site_key, None);
     assert_eq!(personal.user_context_id, Some(1));
     assert_eq!(
       personal.partition_key.as_deref(),

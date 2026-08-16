@@ -12,7 +12,7 @@ use zbus::{
 
 #[cfg(test)]
 use crate::common::deadline::SystemClock;
-use crate::common::deadline::{BoundaryRuntime, Deadline, CLEANUP_GRACE};
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop, Deadline, CLEANUP_GRACE};
 use crate::common::secret::SecretString;
 
 mod confidential;
@@ -90,21 +90,29 @@ where
   let mut failures = Vec::new();
 
   for schema in LIBSECRET_SCHEMAS {
-    runtime.check()?;
+    if let Err(stop) = runtime.check() {
+      return stop_or_collected(stop, passwords);
+    }
     let result = source.libsecret_password(schema, crypt_name, runtime);
-    runtime.check()?;
     match result {
       Ok(password) => push_unique(&mut passwords, password),
       Err(error) => failures.push(format!("Secret Service schema '{schema}': {error:#}")),
     }
+    if let Err(stop) = runtime.check() {
+      return stop_or_collected(stop, passwords);
+    }
   }
 
-  runtime.check()?;
+  if let Err(stop) = runtime.check() {
+    return stop_or_collected(stop, passwords);
+  }
   let result = source.kwallet_password(crypt_name, runtime);
-  runtime.check()?;
   match result {
     Ok(password) => push_unique(&mut passwords, password),
     Err(error) => failures.push(format!("KWallet: {error:#}")),
+  }
+  if let Err(stop) = runtime.check() {
+    return stop_or_collected(stop, passwords);
   }
 
   if passwords.is_empty() {
@@ -119,8 +127,20 @@ where
   for failure in failures {
     log::debug!("Linux keyring candidate source was unavailable: {failure}");
   }
-  runtime.check()?;
   Ok(passwords)
+}
+
+/// A late stop must not erase keys already retrieved: partial keyring
+/// results are still usable for decryption, unlike an empty set.
+fn stop_or_collected(
+  stop: BoundaryStop,
+  passwords: Vec<SecretString>,
+) -> Result<Vec<SecretString>> {
+  if passwords.is_empty() {
+    Err(stop.into())
+  } else {
+    Ok(passwords)
+  }
 }
 
 fn push_unique(values: &mut Vec<SecretString>, value: SecretString) {
@@ -168,6 +188,15 @@ where
     .map_err(anyhow::Error::from)
     .with_context(|| format!("{operation} stopped"))?;
   result
+}
+
+fn dbus_method_timeout(runtime: &BoundaryRuntime<'_>) -> Result<std::time::Duration> {
+  runtime.check()?;
+  let remaining = runtime.deadline.remaining(runtime.clock);
+  if remaining.is_zero() {
+    return Err(BoundaryStop::TimedOut.into());
+  }
+  Ok(remaining)
 }
 
 fn libsecret_call<T>(
@@ -311,11 +340,8 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
 
 impl<'a> DbusSecretServiceBackend<'a> {
   fn connect(runtime: &BoundaryRuntime<'a>) -> Result<Self> {
-    runtime.check()?;
-    let remaining = runtime.deadline.remaining(runtime.clock);
-    if remaining.is_zero() {
-      bail!("session D-Bus connection timed out before starting");
-    }
+    let remaining =
+      dbus_method_timeout(runtime).context("session D-Bus connection timed out before starting")?;
     let builder = zbus::connection::Builder::session()
       .context("failed to resolve the session D-Bus address")?
       .method_timeout(remaining);
@@ -557,11 +583,8 @@ impl<B: KWalletBackend + ?Sized> Drop for KWalletHandle<'_, B> {
 }
 
 fn get_password_kdewallet(crypt_name: &str, runtime: &BoundaryRuntime<'_>) -> Result<SecretString> {
-  runtime.check()?;
-  let remaining = runtime.deadline.remaining(runtime.clock);
-  if remaining.is_zero() {
-    bail!("session D-Bus connection timed out before KWallet lookup");
-  }
+  let remaining = dbus_method_timeout(runtime)
+    .context("session D-Bus connection timed out before KWallet lookup")?;
   let builder = zbus::connection::Builder::session()
     .context("failed to resolve the session D-Bus address")?
     .method_timeout(remaining);
@@ -631,6 +654,23 @@ mod tests {
     SecretString::new(value.to_owned())
   }
 
+  #[test]
+  fn zero_dbus_budget_is_a_typed_timeout_after_the_clock_advances() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+    );
+    runtime.check().expect("budget starts live");
+    clock.advance(std::time::Duration::from_secs(1));
+
+    let error = dbus_method_timeout(&runtime).expect_err("advanced deadline is exhausted");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+  }
+
   struct FakeKeyringSource {
     libsecret: RefCell<VecDeque<Result<SecretString>>>,
     kwallet: RefCell<Option<Result<SecretString>>>,
@@ -695,6 +735,47 @@ mod tests {
     let passwords = get_passwords_with_source(&source, "chrome").unwrap();
     let passwords: Vec<&str> = passwords.iter().map(|password| password.as_str()).collect();
     assert_eq!(passwords, ["candidate"]);
+  }
+
+  struct CancelingKeyringSource {
+    stop: crate::common::deadline::CancellationToken,
+  }
+
+  impl LinuxKeyringSource for CancelingKeyringSource {
+    fn libsecret_password(
+      &self,
+      _schema: &str,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
+      self.stop.cancel();
+      Ok(secret("first schema key"))
+    }
+
+    fn kwallet_password(
+      &self,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
+      panic!("a stop after the first schema must end the search before KWallet")
+    }
+  }
+
+  #[test]
+  fn a_late_stop_keeps_a_key_already_retrieved_instead_of_discarding_it() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let source = CancelingKeyringSource { stop };
+
+    let passwords = get_passwords_with_source_and_runtime(&source, "chrome", &runtime)
+      .expect("a retrieved key survives a stop that lands right after it");
+    let passwords: Vec<&str> = passwords.iter().map(|password| password.as_str()).collect();
+    assert_eq!(passwords, ["first schema key"]);
   }
 
   struct BudgetSource {

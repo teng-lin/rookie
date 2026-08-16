@@ -1,7 +1,8 @@
+use super::outcome::Retryability;
 use crate::common::deadline::BoundaryRuntime;
 #[cfg(test)]
 use crate::common::secret::{SecretBytes, SecretString};
-use crate::common::{diagnostic::REDACTED_PATH, enums::*, sqlite};
+use crate::common::{enums::*, sqlite};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
@@ -230,6 +231,7 @@ pub(crate) fn chromium_based_probe_with_key_outcomes(
 /// caps what a consumer can ever see below the documented limit; collecting
 /// more only to have the report truncate them is wasted work.
 const MAX_CHROMIUM_ROW_ISSUE_SAMPLES: usize = crate::browser::report_core::MAX_ISSUE_SAMPLES;
+const SQLITE_CONNECTION_LOG: &str = "Creating SQLite connection to <path>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChromiumRowIssueCode {
@@ -248,6 +250,7 @@ pub(crate) struct ChromiumRowIssue {
   pub(crate) provider: Option<String>,
   pub(crate) tier: Option<String>,
   pub(crate) cause: Option<String>,
+  pub(crate) retryability: Retryability,
   pub(crate) occurrences: usize,
   pub(crate) samples: Vec<String>,
 }
@@ -282,8 +285,8 @@ impl ChromiumProbeResult {
     self.draft.records.len()
   }
 
-  pub(crate) fn project(self, runtime: &BoundaryRuntime<'_>) -> Result<Vec<Cookie>> {
-    project_legacy_draft_with_runtime(&self.db_path, self.draft, runtime)
+  pub(crate) fn project_committed(self) -> Result<Vec<Cookie>> {
+    project_legacy_draft(&self.db_path, self.draft)
   }
 }
 
@@ -301,8 +304,8 @@ impl ChromiumDetailedProbeResult {
     self.draft.records.len()
   }
 
-  pub(crate) fn project(self, runtime: &BoundaryRuntime<'_>) -> Result<Vec<DetailedCookie>> {
-    project_detailed_draft_with_runtime(&self.db_path, self.draft, runtime)
+  pub(crate) fn project_committed(self) -> Result<Vec<DetailedCookie>> {
+    project_detailed_draft(&self.db_path, self.draft)
   }
 }
 
@@ -322,7 +325,7 @@ pub(crate) struct ChromiumExtractionDraft {
 
 impl ChromiumExtractionDraft {
   pub(super) fn record_row_issue(&mut self, code: ChromiumRowIssueCode, row_number: usize) {
-    self.record_row_issue_with_cause(code, row_number, None, None, None);
+    self.record_row_issue_with_cause(code, row_number, None, None, None, Retryability::Unknown);
   }
 
   fn record_row_issue_with_cause(
@@ -332,9 +335,14 @@ impl ChromiumExtractionDraft {
     provider: Option<String>,
     tier: Option<String>,
     cause: Option<String>,
+    retryability: Retryability,
   ) {
     let issue = match self.issues.iter_mut().find(|issue| {
-      issue.code == code && issue.provider == provider && issue.tier == tier && issue.cause == cause
+      issue.code == code
+        && issue.provider == provider
+        && issue.tier == tier
+        && issue.cause == cause
+        && issue.retryability == retryability
     }) {
       Some(issue) => issue,
       None => {
@@ -343,6 +351,7 @@ impl ChromiumExtractionDraft {
           provider,
           tier,
           cause,
+          retryability,
           occurrences: 0,
           samples: Vec::new(),
         });
@@ -367,6 +376,7 @@ impl ChromiumExtractionDraft {
     row_number: usize,
     tier: Option<super::cookie_record::CipherTier>,
     cause: String,
+    retryability: Retryability,
   ) {
     self.stats.rows_skipped += 1;
     match code {
@@ -389,7 +399,7 @@ impl ChromiumExtractionDraft {
       super::cookie_record::CipherTier::Unknown(_) => "unknown".to_owned(),
       super::cookie_record::CipherTier::Malformed { .. } => "malformed".to_owned(),
     });
-    self.record_row_issue_with_cause(code, row_number, provider, tier, Some(cause));
+    self.record_row_issue_with_cause(code, row_number, provider, tier, Some(cause), retryability);
   }
 
   pub(super) fn total_row_failure(&self, error: anyhow::Error) -> anyhow::Error {
@@ -413,7 +423,6 @@ impl ChromiumExtractionDraft {
   }
 }
 
-#[cfg(test)]
 fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Result<Vec<Cookie>> {
   super::legacy::project_canonical_outcome(
     "chromium",
@@ -435,7 +444,6 @@ fn project_legacy_draft_with_runtime(
   )
 }
 
-#[cfg(test)]
 fn project_detailed_draft(
   db_path: &Path,
   draft: ChromiumExtractionDraft,
@@ -783,7 +791,7 @@ fn query_cookies_from_database_with_runtime(
   encrypted_value_policy: EncryptedValuePolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumExtractionDraft> {
-  log::info!("Creating SQLite connection to {REDACTED_PATH}");
+  log::info!("{SQLITE_CONNECTION_LOG}");
   let database = sqlite::with_browser_database_with_runtime(
     db_path,
     |connection| {
@@ -921,7 +929,14 @@ where
             failed_provider_tiers.insert(tier);
           }
         }
-        outcome.record_unseal_failure(code, decoded.row_number, encrypted_tier, error.to_string());
+        let retryability = error.retryability();
+        outcome.record_unseal_failure(
+          code,
+          decoded.row_number,
+          encrypted_tier,
+          error.to_string(),
+          retryability,
+        );
         // Preserve the historical error surface for unseal failures. Context
         // column errors remain typed because ordered events prevent an earlier
         // stringified unseal error from overwriting a later decoder error.
@@ -1012,37 +1027,6 @@ mod tests {
   use std::cell::{Cell, RefCell};
   use std::path::Path;
   use std::sync::atomic::{AtomicU64, Ordering};
-  use std::sync::{Mutex, Once};
-
-  struct CaptureLogger;
-
-  static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
-  static CAPTURE_LOGGER_INIT: Once = Once::new();
-  static CAPTURED_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-  impl log::Log for CaptureLogger {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-      metadata.level() <= log::Level::Info
-    }
-
-    fn log(&self, record: &log::Record<'_>) {
-      if self.enabled(record.metadata()) {
-        CAPTURED_LOGS
-          .lock()
-          .expect("capture logger lock")
-          .push(format!("{}", record.args()));
-      }
-    }
-
-    fn flush(&self) {}
-  }
-
-  fn install_capture_logger() {
-    CAPTURE_LOGGER_INIT.call_once(|| {
-      log::set_logger(&CAPTURE_LOGGER).expect("install test logger");
-      log::set_max_level(log::LevelFilter::Info);
-    });
-  }
 
   // Per-process unique temp paths without pulling in the `tempfile` dep.
   fn unique_tmpdir(tag: &str) -> PathBuf {
@@ -1066,29 +1050,15 @@ mod tests {
 
   #[test]
   fn sqlite_connection_log_redacts_an_absolute_path_with_spaces() {
-    install_capture_logger();
-    CAPTURED_LOGS.lock().expect("capture logger lock").clear();
     let directory = unique_tmpdir("absolute-path-log-sentinel");
     let path = directory
       .join("private profile sentinel with spaces")
       .join("Cookies");
-    let clock = crate::common::deadline::SystemClock;
-    let runtime = BoundaryRuntime::standard(&clock);
-    let _ = query_cookies_from_database_with_runtime(
-      &ChromiumKeyOutcomes::default(),
-      path.clone(),
-      None,
-      CookieProjection::Legacy,
-      EncryptedValuePolicy::UseKeyOutcomes,
-      &runtime,
+    assert_eq!(
+      SQLITE_CONNECTION_LOG,
+      "Creating SQLite connection to <path>"
     );
-    let logs = CAPTURED_LOGS.lock().expect("capture logger lock");
-    let connection_log = logs
-      .iter()
-      .find(|line| line.starts_with("Creating SQLite connection"))
-      .expect("connection log was captured");
-    assert_eq!(connection_log, "Creating SQLite connection to <path>");
-    assert!(!connection_log.contains(path.to_string_lossy().as_ref()));
+    assert!(!SQLITE_CONNECTION_LOG.contains(path.to_string_lossy().as_ref()));
   }
 
   fn query_outcome_with_legacy_keys(

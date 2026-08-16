@@ -264,9 +264,6 @@ impl IsolationKey {
       (Some(key), _) => PartitionState::Partitioned {
         top_frame_site_key: key.clone(),
       },
-      (None, _) if context.partition_key.is_some() => PartitionState::Partitioned {
-        top_frame_site_key: context.partition_key.clone().unwrap_or_default(),
-      },
       (None, _) if context.origin_attributes.is_some() => PartitionState::Unpartitioned,
       (None, Some(_)) => PartitionState::Unpartitioned,
       (None, None) => PartitionState::Unknown,
@@ -827,6 +824,28 @@ mod tests {
     assert!(!unavailable_debug.contains("unavailable-message-sentinel"));
     assert!(unavailable_debug.contains("code: Decrypt"));
     assert!(unavailable_debug.contains("message: <redacted>"));
+  }
+
+  #[test]
+  fn firefox_partition_key_never_becomes_a_chromium_top_frame_site_key() {
+    for origin_attributes in [
+      Some("^partitionKey=%28https%2Cexample.com%29".to_owned()),
+      Some(r#"{"partitionKey":"(https,example.com)"}"#.to_owned()),
+      None,
+    ] {
+      let context = CookieContext {
+        origin_attributes,
+        partition_key: Some("(https,example.com)".to_owned()),
+        ..CookieContext::default()
+      };
+      let projected = IsolationKey::from_context(context)
+        .to_context_with_semantics(LegacyProjectionSemantics::Standard);
+      assert_eq!(projected.top_frame_site_key, None);
+      assert_eq!(
+        projected.partition_key.as_deref(),
+        Some("(https,example.com)")
+      );
+    }
   }
 
   #[test]

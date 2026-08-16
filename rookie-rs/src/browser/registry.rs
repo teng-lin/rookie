@@ -2119,7 +2119,12 @@ fn lost_chromium_profile_error(browser_id: &str, issues: &[DiscoveryIssue]) -> O
       issue.code.starts_with("profile_") && !is_informational_discovery_issue(issue.code)
     })
     .take(MAX_DISCOVERY_ISSUE_SAMPLES)
-    .map(|issue| format!("{REDACTED_PATH}: {}", issue.message))
+    .map(|issue| {
+      format!(
+        "{REDACTED_PATH}: {}",
+        crate::common::diagnostic::sanitize(&issue.message)
+      )
+    })
     .collect::<Vec<_>>();
   (!lost_profiles.is_empty()).then(|| {
     format!(

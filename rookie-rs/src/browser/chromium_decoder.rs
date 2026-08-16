@@ -530,7 +530,9 @@ pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
   let mut sink = |_event| Ok(());
-  let _ = decoder.decode(&source, &mut sink, &runtime)?;
+  // This cross-engine gate promises only that malformed input completes
+  // without unwinding. A decoder is free to reject the generated row.
+  let _ = decoder.decode(&source, &mut sink, &runtime);
   Ok(())
 }
 

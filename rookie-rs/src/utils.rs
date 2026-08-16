@@ -42,7 +42,7 @@ impl Drop for TempDir {
     if let Err(err) = fs::remove_dir_all(&self.path) {
       log::warn!(
         "failed to remove temporary directory {REDACTED_PATH}: {err}. It may hold a copy of \
-         browser cookie data and should be deleted manually",
+         browser cookie data",
       );
     }
   }

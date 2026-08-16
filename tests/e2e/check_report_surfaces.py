@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,7 @@ def librewolf_root(home: Path) -> Path:
 
 def seed_database(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(
             """
             CREATE TABLE moz_cookies (
@@ -106,7 +107,7 @@ def seed_provider_failure_database(home: Path) -> tuple[str, dict[str, Any]]:
         json.dumps(local_state),
         encoding="utf-8",
     )
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.executescript(
             """
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -130,7 +131,7 @@ def seed_provider_failure_database(home: Path) -> tuple[str, dict[str, Any]]:
         "cause": "credential_provider",
         "provider": "platform_key_provider",
         "tier": tier,
-        "retryability": "retryable",
+        "retryability": "not_retryable" if sys.platform == "win32" else "retryable",
         "occurrences": 1,
     }
 
@@ -206,14 +207,7 @@ def validate_raw_report(surface: str, value: Any) -> None:
     assert value.get(schema_key) == 1, (surface, value)
     assert "termination" in value, (surface, value)
 
-    issue_keys = {
-        "cause",
-        "provider",
-        "tier",
-        "retryability",
-    }
-    if surface == "node":
-        issue_keys = {"cause", "provider", "tier", "retryability"}
+    issue_keys = {"cause", "provider", "tier", "retryability"}
 
     def walk(item: Any) -> None:
         if isinstance(item, list):
@@ -335,12 +329,15 @@ def main() -> None:
         # Linux providers share D-Bus. A nonexistent address makes both Secret
         # Service and KWallet fail immediately and deterministically, without
         # consulting a developer workstation's live session bus.
+        provider_env = env.copy()
         if sys.platform.startswith("linux"):
-            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={home / 'missing-session-bus'}"
+            provider_env["DBUS_SESSION_BUS_ADDRESS"] = (
+                f"unix:path={home / 'missing-session-bus'}"
+            )
         provider_report = compare(
             ["report", provider_browser],
             launchers,
-            env,
+            provider_env,
             expected_provider_issue=expected_provider_issue,
         )
         provider_issues = credential_provider_issues(provider_report)

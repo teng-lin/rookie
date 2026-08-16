@@ -56,7 +56,7 @@ fn discovery_failure(outcome: &EngineExtractionDraft, browser_id: &str) -> Optio
     .discovery_issues
     .iter()
     .filter(|issue| !registry::is_informational_discovery_issue(issue.code))
-    .map(|issue| issue.message.clone())
+    .map(|issue| crate::common::diagnostic::sanitize(&issue.message))
     .take(8)
     .collect::<Vec<_>>();
   (!failures.is_empty()).then(|| {
@@ -113,7 +113,6 @@ fn project_chromium_outcome_with_runtime(
   )
 }
 
-#[cfg(test)]
 pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> Result<Vec<Cookie>> {
   let selected = selected_records(browser_id, outcome, None)?;
   Ok(
@@ -211,7 +210,6 @@ fn selected_records(
   }
 }
 
-#[cfg(test)]
 pub(crate) fn project_canonical_detailed_outcome(
   browser_id: &str,
   outcome: Outcome,
@@ -454,6 +452,23 @@ mod tests {
       assert!(!is_browser_not_installed(&error), "{code}");
       assert!(error.to_string().contains("injected discovery failure"));
     }
+  }
+
+  #[test]
+  fn legacy_discovery_failure_sanitizes_paths_embedded_in_messages() {
+    let mut outcome = empty_outcome_with_issue("profile_enumeration_failed");
+    outcome.discovery_issues[0].message =
+      "failed /private/secret/profile and C:\\Users\\Secret\\Profile".to_owned();
+    let error = project_engine_outcome("browser", outcome).expect_err("profile discovery failed");
+    let diagnostic = error.to_string();
+    assert!(!diagnostic.contains("/private/secret"));
+    assert!(!diagnostic.contains(r"C:\Users\Secret"));
+    assert!(
+      diagnostic
+        .matches(crate::common::diagnostic::REDACTED_PATH)
+        .count()
+        >= 2
+    );
   }
 
   #[test]

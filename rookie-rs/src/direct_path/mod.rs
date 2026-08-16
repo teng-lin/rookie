@@ -480,7 +480,7 @@ fn automatic_chromium_cookies(
       )
     },
     |candidate| (candidate.cookie_count(), candidate.rows_skipped),
-    |candidate| candidate.project(runtime),
+    |candidate| candidate.project_committed(),
   )
 }
 
@@ -508,7 +508,7 @@ fn automatic_chromium_detailed(
       )
     },
     |candidate| (candidate.cookie_count(), candidate.rows_skipped),
-    |candidate| candidate.project(runtime),
+    |candidate| candidate.project_committed(),
   )
 }
 
@@ -543,7 +543,12 @@ where
   let mut best = None;
   let mut failures = Vec::new();
   for (name, credentials) in identities {
-    runtime.check()?;
+    // Before any completed candidate exists, a boundary stop is the request's
+    // result. Once a candidate completes, it is committed: later probes may
+    // fail or observe a stop, but cannot erase already-decoded work.
+    if best.is_none() {
+      runtime.check()?;
+    }
     match probe(
       &mut session,
       name,
@@ -568,7 +573,9 @@ where
       }
     }
   }
-  runtime.check()?;
+  if best.is_none() {
+    runtime.check()?;
+  }
   match best {
     Some((name, result)) => {
       let (cookies, rows_skipped) = score(&result);
@@ -919,6 +926,63 @@ mod tests {
     assert_eq!(selected, "second", "an exact tie keeps the earlier ID");
     assert_eq!(probed, vec!["first", "second", "third"]);
     assert_eq!(sessions.get(), 1);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn automatic_selection_preserves_a_completed_candidate_through_later_stops() {
+    #[derive(Debug)]
+    struct Candidate(&'static str);
+
+    let identities = [
+      (
+        "first",
+        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+      ),
+      (
+        "second",
+        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+      ),
+    ];
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = crate::common::deadline::BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let mut probes = Vec::new();
+
+    let selected = automatic_chromium_with(
+      &identities,
+      PathBuf::from("unused"),
+      None,
+      &runtime,
+      || (),
+      |(), name, _credentials, _path, _domains| {
+        probes.push(name);
+        if name == "first" {
+          stop.cancel();
+          Ok(Candidate(name))
+        } else {
+          runtime.check()?;
+          unreachable!("the stopped second probe cannot produce a candidate")
+        }
+      },
+      |_| (1, 0),
+      |candidate| {
+        assert_eq!(
+          runtime.check(),
+          Err(crate::common::deadline::BoundaryStop::Cancelled),
+          "finish observes the racing stop without discarding the committed candidate"
+        );
+        Ok(candidate.0)
+      },
+    )
+    .expect("completed candidate survives leading, post-loop, and finish stop checks");
+
+    assert_eq!(selected, "first");
+    assert_eq!(probes, vec!["first", "second"]);
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]

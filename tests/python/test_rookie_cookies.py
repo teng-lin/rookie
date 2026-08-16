@@ -288,7 +288,9 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         }
         self.assertEqual(contexts["work"]["user_context_id"], 2)
         self.assertEqual(contexts["work"]["partition_key"], "(https,work.example)")
+        self.assertIsNone(contexts["work"]["top_frame_site_key"])
         self.assertEqual(contexts["personal"]["user_context_id"], 1)
+        self.assertIsNone(contexts["personal"]["top_frame_site_key"])
         self.assertEqual(
             contexts["personal"]["origin_attributes"],
             "^userContextId=1&partitionKey=%28https%2Cpersonal.example%29",

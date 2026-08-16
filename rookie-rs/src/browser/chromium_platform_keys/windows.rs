@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine as _};
 use zeroize::Zeroizing;
 
+use crate::browser::outcome::Retryability;
 use crate::common::deadline::BoundaryRuntime;
 #[cfg(test)]
 use crate::common::deadline::{Deadline, SystemClock};
@@ -185,9 +186,16 @@ where
   } else {
     match local_state_key(local_state, "app_bound_encrypted_key") {
       LocalStateKey::Missing => ChromiumKeyOutcome::NotApplicable,
-      LocalStateKey::InvalidType => ChromiumKeyOutcome::failure(
+      LocalStateKey::InvalidType => ChromiumKeyOutcome::failure_with_retryability(
         "Local State os_crypt.app_bound_encrypted_key must be a base64 string",
+        Retryability::NotRetryable,
       ),
+      LocalStateKey::Encoded(encoded) if general_purpose::STANDARD.decode(encoded).is_err() => {
+        ChromiumKeyOutcome::failure_with_retryability(
+          "Local State os_crypt.app_bound_encrypted_key is not valid base64",
+          Retryability::NotRetryable,
+        )
+      }
       LocalStateKey::Encoded(_) if !backend.appbound_compiled() => {
         ChromiumKeyOutcome::failure("Chromium v20 app-bound provider is unavailable in this build")
       }
@@ -632,6 +640,41 @@ mod tests {
       outcomes.route(ChromiumCipherVersion::V20),
       ChromiumKeyRoute::Candidates { .. }
     ));
+  }
+
+  #[test]
+  fn malformed_app_bound_metadata_is_typed_not_retryable_before_provider_access() {
+    let backend = windows_backend(Ok(vec![vec![0x10; 32]]), Ok(vec![vec![0x20; 32]]));
+    let outcomes = retrieve_windows_key_outcomes(
+      &windows_local_state(serde_json::json!("legacy"), serde_json::json!("not-base64")),
+      &backend,
+    );
+
+    assert_eq!(backend.v20_calls.get(), 0);
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V20)
+    else {
+      panic!("malformed app-bound metadata must be a key failure");
+    };
+    assert_eq!(failure.retryability(), Retryability::NotRetryable);
+    assert!(failure.message().contains("not valid base64"));
+  }
+
+  #[test]
+  fn transient_app_bound_provider_failure_remains_typed_retryable() {
+    let backend = windows_backend(
+      Ok(vec![]),
+      Err(anyhow::anyhow!("transient provider failure")),
+    );
+    let outcomes = retrieve_windows_key_outcomes(
+      &serde_json::json!({"os_crypt": {"app_bound_encrypted_key": "YXBwYm91bmQ="}}),
+      &backend,
+    );
+
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V20)
+    else {
+      panic!("provider failure remains typed");
+    };
+    assert_eq!(failure.retryability(), Retryability::Retryable);
   }
 
   #[test]

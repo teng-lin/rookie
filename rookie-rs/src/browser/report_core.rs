@@ -500,11 +500,12 @@ pub(crate) struct ProfileDraft {
 impl SourceDraft {
   pub(crate) fn new(
     source: CookieSourceIdentity,
+    source_path: &std::path::Path,
     selected: bool,
     acquisition_strategy: AcquisitionStrategyCode,
   ) -> Self {
     Self {
-      source_path_bytes: source.path.as_bytes().to_vec(),
+      source_path_bytes: raw_path_bytes(source_path),
       source,
       selected,
       acquisition_strategy,
@@ -515,11 +516,6 @@ impl SourceDraft {
       issues: Vec::new(),
       failed: false,
     }
-  }
-
-  pub(crate) fn with_source_path(mut self, path: &std::path::Path) -> Self {
-    self.source_path_bytes = raw_path_bytes(path);
-    self
   }
 }
 
@@ -1094,6 +1090,7 @@ mod tests {
         path_lossy: false,
         precedence,
       },
+      std::path::Path::new("/tmp/source"),
       true,
       AcquisitionStrategyCode::live_read_only(),
     )

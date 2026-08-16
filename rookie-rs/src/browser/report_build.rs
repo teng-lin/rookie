@@ -9,7 +9,7 @@ use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
 use super::cookie_record::{CookieRecord, FinalizationError, LegacyProjectionSemantics};
 use super::outcome::{
   CompatibilityAbsence, CompatibilityDecision, CompatibilityDisposition, Diagnostic, Failure,
-  FailureLedger, FailureScope, Outcome, ResultStatus, SourceOutcome, Termination,
+  FailureLedger, FailureScope, Outcome, ResultStatus, Retryability, SourceOutcome, Termination,
 };
 use super::registry::{
   self, ChromiumProfileDraft, ChromiumProfileFailure, ChromiumRegistryDraft, DiscoveryIssue,
@@ -56,11 +56,12 @@ fn discovery_severity(code: &str) -> IssueSeverityCode {
 
 fn discovery_issue(browser_id: &BrowserId, discovery: &DiscoveryIssue) -> ExtractionIssue {
   let (path, _) = display_path(&discovery.path);
+  let message = crate::common::diagnostic::sanitize(&discovery.message);
   issue(
     discovery.code,
     ExtractionStageCode::discovery(),
     discovery_severity(discovery.code),
-    format!("{path}: {}", discovery.message),
+    format!("{path}: {message}"),
   )
   .with_occurrences(discovery.occurrences)
   // Aggregation keeps one message per code, so the path travels as a sample
@@ -151,10 +152,10 @@ fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
     issue.cause = "credential_provider".to_owned();
     issue.provider.clone_from(&issue_code.provider);
     issue.tier.clone_from(&issue_code.tier);
-    issue.retryability = if issue_code.code == ChromiumRowIssueCode::ProviderUnavailable {
-      "not_retryable"
-    } else {
-      "retryable"
+    issue.retryability = match issue_code.retryability {
+      Retryability::Retryable => "retryable",
+      Retryability::NotRetryable => "not_retryable",
+      Retryability::Unknown => "unknown",
     }
     .to_owned();
     if let Some(cause) = &issue_code.cause {
@@ -240,10 +241,10 @@ fn chromium_profile_outcome(
       "chromium_sqlite",
       candidate.precedence,
     ),
+    &candidate.path,
     true,
     acquisition_code(acquisition),
-  )
-  .with_source_path(&candidate.path);
+  );
   source.stats = CounterSet {
     rows_seen: stats.rows_seen as u64,
     cookies_emitted: stats.cookies_emitted as u64,
@@ -338,10 +339,10 @@ fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
   } = source;
   let mut outcome = SourceDraft::new(
     source_identity(&path, role, format, precedence),
+    &path,
     selected,
     acquisition_code(acquisition),
-  )
-  .with_source_path(&path);
+  );
   let cookies_emitted = if records.is_empty() {
     cookies.len()
   } else {
@@ -656,19 +657,17 @@ fn chromium_listing_outcome(
       if !candidate.exists {
         continue;
       }
-      engine.sources.push(
-        SourceDraft::new(
-          source_identity(
-            &candidate.path,
-            SOURCE_ROLE_PERSISTENT,
-            "chromium_sqlite",
-            candidate.precedence,
-          ),
-          candidate.selected,
-          AcquisitionStrategyCode::not_attempted(),
-        )
-        .with_source_path(&candidate.path),
-      );
+      engine.sources.push(SourceDraft::new(
+        source_identity(
+          &candidate.path,
+          SOURCE_ROLE_PERSISTENT,
+          "chromium_sqlite",
+          candidate.precedence,
+        ),
+        &candidate.path,
+        candidate.selected,
+        AcquisitionStrategyCode::not_attempted(),
+      ));
     }
     outcome.profiles.push(engine);
   }
@@ -1472,7 +1471,6 @@ pub(crate) fn canonical_chromium_extraction_with_runtime(
   ))
 }
 
-#[cfg(test)]
 pub(crate) fn canonical_direct_chromium_extraction(
   db_path: &std::path::Path,
   draft: super::chromium::ChromiumExtractionDraft,
@@ -1510,10 +1508,10 @@ fn canonical_direct_chromium_extraction_impl(
       "chromium_sqlite",
       registry::PERSISTENT_SOURCE_PRECEDENCE,
     ),
+    db_path,
     true,
     acquisition_code(draft.acquisition_strategy.into()),
-  )
-  .with_source_path(db_path);
+  );
   source.stats = CounterSet {
     rows_seen: draft.stats.rows_seen as u64,
     cookies_emitted: draft.stats.cookies_emitted as u64,
@@ -2086,10 +2084,10 @@ mod tests {
         "mozilla_sqlite",
         registry::PERSISTENT_SOURCE_PRECEDENCE,
       ),
+      &source_path,
       true,
       AcquisitionStrategyCode::live_read_only(),
-    )
-    .with_source_path(&source_path);
+    );
     source.failed = failed;
     source
   }
@@ -2310,10 +2308,10 @@ mod tests {
           "mozilla_sqlite",
           registry::PERSISTENT_SOURCE_PRECEDENCE + index as u16,
         ),
+        &path,
         true,
         AcquisitionStrategyCode::live_read_only(),
-      )
-      .with_source_path(&path);
+      );
       source.cookies.push(crate::common::enums::Cookie {
         domain: ".example.test".to_owned(),
         path: "/".to_owned(),
@@ -2762,6 +2760,29 @@ mod tests {
     assert_eq!(issue.occurrences, 5);
     assert_eq!(issue.samples, vec!["<path>", "<path>"]);
   }
+
+  #[test]
+  fn public_discovery_diagnostics_sanitize_paths_embedded_in_messages() {
+    let message = "failed /private/secret/profile/Cookies, also C:\\Users\\Secret\\Cookies";
+    let issue = discovery_issue(
+      &BrowserId::known("firefox"),
+      &registry::DiscoveryIssue {
+        code: "profile_enumeration_failed",
+        path: PathBuf::from("/profiles/default"),
+        message: message.to_owned(),
+        occurrences: 1,
+      },
+    );
+    assert!(!issue.message.contains("/private/secret"));
+    assert!(!issue.message.contains(r"C:\Users\Secret"));
+    assert!(
+      issue
+        .message
+        .matches(crate::common::diagnostic::REDACTED_PATH)
+        .count()
+        >= 2
+    );
+  }
   /// Safari and Internet Explorer report skipped rows without keeping the
   /// underlying error. Deriving the row issue from that error alone let a
   /// report claim `complete` while cookies had been dropped.
@@ -2846,6 +2867,7 @@ mod tests {
         provider: None,
         tier: None,
         cause: None,
+        retryability: Retryability::Unknown,
         occurrences: 1,
         samples: vec!["row 2".to_owned()],
       },
@@ -2854,6 +2876,7 @@ mod tests {
         provider: Some("platform_key_provider".to_owned()),
         tier: Some("v11".to_owned()),
         cause: Some("keyring unavailable".to_owned()),
+        retryability: Retryability::Retryable,
         occurrences: 2,
         samples: vec!["row 3".to_owned(), "row 4".to_owned()],
       },
@@ -2944,6 +2967,7 @@ mod tests {
           provider: None,
           tier: None,
           cause: None,
+          retryability: Retryability::Unknown,
           occurrences: 1,
           samples: vec![format!("row {row}")],
         }),
@@ -2955,6 +2979,22 @@ mod tests {
       issues[0].samples,
       vec!["name column, row 1", "value column, row 7"]
     );
+  }
+
+  #[test]
+  fn provider_failure_retryability_reaches_the_canonical_report_issue() {
+    let issue = row_issue(&ChromiumRowIssue {
+      code: ChromiumRowIssueCode::ProviderFailed,
+      provider: Some("platform_key_provider".to_owned()),
+      tier: Some("v20".to_owned()),
+      cause: Some("malformed App-Bound Local State".to_owned()),
+      retryability: Retryability::NotRetryable,
+      occurrences: 1,
+      samples: vec!["row 1".to_owned()],
+    });
+    assert_eq!(issue.code.as_str(), "provider_failed");
+    assert_eq!(issue.retryability, "not_retryable");
+    assert_eq!(issue.tier.as_deref(), Some("v20"));
   }
   /// Profile and source issues carry no context from the engines, because the
   /// enclosing profile is implied structurally. Consumers that flatten every

@@ -286,11 +286,12 @@ where
     runtime,
   } = request;
   runtime.check()?;
-  let ordinary_result = query(db_path, runtime);
-  runtime.check()?;
-  let ordinary_error = match ordinary_result {
+  let ordinary_error = match query(db_path, runtime) {
     Ok(value) => return Ok(value),
-    Err(error) => error,
+    Err(error) => {
+      runtime.check()?;
+      error
+    }
   };
   let violation = classify(db_path, &ordinary_error, runtime);
   runtime.check()?;
@@ -317,9 +318,13 @@ where
         // query. A query/decode failure on this acquired source is final and
         // never grants permission to terminate the live browser.
         runtime.check()?;
-        let result = query(&source.path, runtime);
-        runtime.check()?;
-        return result;
+        return match query(&source.path, runtime) {
+          Ok(value) => Ok(value),
+          Err(error) => {
+            runtime.check()?;
+            Err(error)
+          }
+        };
       }
       Err(error) if !policy.allows_process_shutdown() => {
         return Err(windows_locked_after_shadow_failure(
@@ -347,11 +352,12 @@ where
   };
   if shutdown_succeeded {
     runtime.check()?;
-    let retry = query(db_path, runtime);
-    runtime.check()?;
-    let retry_error = match retry {
+    let retry_error = match query(db_path, runtime) {
       Ok(value) => return Ok(value),
-      Err(error) => error,
+      Err(error) => {
+        runtime.check()?;
+        error
+      }
     };
     let retry_violation = classify(db_path, &retry_error, runtime);
     runtime.check()?;
@@ -593,6 +599,145 @@ mod tests {
 
     assert_eq!(value, "ordinary value");
     assert_eq!(*calls.borrow(), vec!["ordinary"]);
+  }
+
+  #[test]
+  fn successful_ordinary_query_commits_before_a_racing_stop() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+
+    let value = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: Path::new("Cookies"),
+        policy: WindowsLockedDatabasePolicy::AllowProcessShutdown,
+        runtime: &runtime,
+      },
+      |_, _| {
+        stop.cancel();
+        Ok("ordinary value")
+      },
+      |_, _, _| panic!("a completed ordinary query must not be classified"),
+      |_| panic!("a completed ordinary query must not inspect privilege"),
+      |_, _| -> Result<WindowsFallbackSource<()>> {
+        panic!("a completed ordinary query must not acquire a shadow")
+      },
+      |_, _| panic!("a completed ordinary query must not stop a process"),
+    )
+    .expect("completed ordinary result commits");
+
+    assert_eq!(value, "ordinary value");
+    assert_eq!(
+      runtime.check(),
+      Err(crate::common::deadline::BoundaryStop::Cancelled)
+    );
+  }
+
+  #[test]
+  fn successful_shadow_query_commits_before_a_racing_stop() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let db = PathBuf::from("live/Cookies");
+    let query_calls = Cell::new(0);
+
+    let value = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: &db,
+        policy: WindowsLockedDatabasePolicy::NonDisruptive,
+        runtime: &runtime,
+      },
+      |_, _| {
+        query_calls.set(query_calls.get() + 1);
+        if query_calls.get() == 1 {
+          Err(anyhow!("share denied"))
+        } else {
+          stop.cancel();
+          Ok("shadow value")
+        }
+      },
+      |_, _, _| {
+        Ok(Some(sharing_violation(
+          &db,
+          WindowsLockedFile::Database,
+          true,
+        )))
+      },
+      |_| Ok(true),
+      |_, _| {
+        Ok(WindowsFallbackSource {
+          path: PathBuf::from("shadow/Cookies"),
+          _guard: (),
+        })
+      },
+      |_, _| panic!("a completed shadow query must not stop a process"),
+    )
+    .expect("completed shadow result commits");
+
+    assert_eq!(value, "shadow value");
+    assert_eq!(query_calls.get(), 2);
+    assert_eq!(
+      runtime.check(),
+      Err(crate::common::deadline::BoundaryStop::Cancelled)
+    );
+  }
+
+  #[test]
+  fn successful_post_shutdown_retry_commits_before_a_racing_stop() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let db = PathBuf::from("live/Cookies");
+    let query_calls = Cell::new(0);
+
+    let value = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: &db,
+        policy: WindowsLockedDatabasePolicy::AllowProcessShutdown,
+        runtime: &runtime,
+      },
+      |_, _| {
+        query_calls.set(query_calls.get() + 1);
+        if query_calls.get() == 1 {
+          Err(anyhow!("share denied"))
+        } else {
+          stop.cancel();
+          Ok("retry value")
+        }
+      },
+      |_, _, _| {
+        Ok(Some(sharing_violation(
+          &db,
+          WindowsLockedFile::Database,
+          false,
+        )))
+      },
+      |_| Ok(false),
+      |_, _| -> Result<WindowsFallbackSource<()>> {
+        panic!("a no-WAL source must not acquire a shadow")
+      },
+      |_, _| Ok(true),
+    )
+    .expect("completed post-shutdown retry commits");
+
+    assert_eq!(value, "retry value");
+    assert_eq!(query_calls.get(), 2);
+    assert_eq!(
+      runtime.check(),
+      Err(crate::common::deadline::BoundaryStop::Cancelled)
+    );
   }
 
   #[test]

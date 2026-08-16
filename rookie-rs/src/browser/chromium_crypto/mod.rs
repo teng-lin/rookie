@@ -1,6 +1,7 @@
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::browser::outcome::Retryability;
 pub(crate) use crate::common::boundary::KeyProvider;
 use crate::common::secret::SecretBytes;
 
@@ -152,6 +153,7 @@ impl NonEmptyKeyCandidates {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChromiumKeyFailure {
   message: String,
+  retryability: Retryability,
 }
 
 impl ChromiumKeyFailure {
@@ -161,11 +163,27 @@ impl ChromiumKeyFailure {
   pub(crate) fn new(message: impl Into<String>) -> Self {
     Self {
       message: message.into(),
+      retryability: Retryability::Retryable,
+    }
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn new_with_retryability(
+    message: impl Into<String>,
+    retryability: Retryability,
+  ) -> Self {
+    Self {
+      message: message.into(),
+      retryability,
     }
   }
 
   pub(crate) fn message(&self) -> &str {
     &self.message
+  }
+
+  pub(crate) fn retryability(&self) -> Retryability {
+    self.retryability
   }
 }
 
@@ -204,6 +222,17 @@ impl ChromiumKeyOutcome {
   #[allow(dead_code)]
   pub(crate) fn failure(message: impl Into<String>) -> Self {
     Self::Failure(ChromiumKeyFailure::new(message))
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn failure_with_retryability(
+    message: impl Into<String>,
+    retryability: Retryability,
+  ) -> Self {
+    Self::Failure(ChromiumKeyFailure::new_with_retryability(
+      message,
+      retryability,
+    ))
   }
 }
 

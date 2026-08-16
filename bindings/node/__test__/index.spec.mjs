@@ -238,9 +238,24 @@ test("firefoxBasedDetailed preserves colliding container identities", async (t) 
     t.deepEqual(
       Object.fromEntries(records.map(({ cookie, context }) => [
         cookie.value,
-        context.userContextId,
+        {
+          topFrameSiteKey: context.topFrameSiteKey,
+          partitionKey: context.partitionKey,
+          userContextId: context.userContextId,
+        },
       ])),
-      { work: 2, personal: 1 },
+      {
+        work: {
+          topFrameSiteKey: null,
+          partitionKey: "(https,work.example)",
+          userContextId: 2,
+        },
+        personal: {
+          topFrameSiteKey: null,
+          partitionKey: "(https,personal.example)",
+          userContextId: 1,
+        },
+      },
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

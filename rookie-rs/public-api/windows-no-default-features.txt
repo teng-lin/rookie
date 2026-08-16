@@ -1194,6 +1194,7 @@ impl core::marker::Sync for rookie_cookies::report::TerminationCode
 impl core::marker::Unpin for rookie_cookies::report::TerminationCode
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::TerminationCode
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::TerminationCode
+pub const rookie_cookies::report::EXTRACTION_REPORT_SCHEMA_VERSION: u32
 pub const rookie_cookies::report::MAX_ISSUE_SAMPLES: usize
 #[non_exhaustive] pub struct rookie_cookies::MozillaProfile
 pub rookie_cookies::MozillaProfile::is_default: bool

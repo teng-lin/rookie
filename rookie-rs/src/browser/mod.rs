@@ -63,6 +63,9 @@ mod decoder_malformed_gate {
 
   #[test]
   fn every_engine_decoder_is_host_neutral_and_unwind_safe_for_malformed_input() {
+    // Each case must complete without panicking. Decode errors are expected
+    // outcomes for malformed data and are deliberately contained by the
+    // engine-specific gate adapter.
     let cases: [MalformedCase; 3] = [
       ("chromium", chromium_decoder::malformed_decoder_gate_case),
       ("safari", safari::malformed_decoder_gate_case),
