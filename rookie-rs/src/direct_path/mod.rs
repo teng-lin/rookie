@@ -334,34 +334,43 @@ impl ChromiumPathRequest {
 
 /// Extracts cookies after identifying the explicit source by signature/schema.
 pub fn cookies_from_path(request: DirectPathRequest) -> Result<Vec<Cookie>> {
-  let source = classify_cookie_source(&request.path)?;
-  platform::cookies_from_path(request, source)
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  let source = classify_cookie_source(&request.path, &runtime)?;
+  platform::cookies_from_path(request, source, &runtime)
 }
 
 /// Extracts cookies from an explicit Chromium SQLite database.
 pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Cookie>> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   #[cfg(not(target_os = "windows"))]
   {
-    let source = classify_cookie_source(&request.path)?;
+    let source = classify_cookie_source(&request.path, &runtime)?;
     require_chromium_source(&request.path, source)?;
   }
-  platform::chromium_cookies_from_path(request)
+  platform::chromium_cookies_from_path(request, &runtime)
 }
 
 /// Detailed counterpart to [`chromium_cookies_from_path`].
 pub fn chromium_cookies_from_path_detailed(
   request: ChromiumPathRequest,
 ) -> Result<Vec<DetailedCookie>> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   #[cfg(not(target_os = "windows"))]
   {
-    let source = classify_cookie_source(&request.path)?;
+    let source = classify_cookie_source(&request.path, &runtime)?;
     require_chromium_source(&request.path, source)?;
   }
-  platform::chromium_cookies_from_path_detailed(request)
+  platform::chromium_cookies_from_path_detailed(request, &runtime)
 }
 
-fn classify_cookie_source(path: &Path) -> Result<CookieSourceKind> {
-  platform::classify_cookie_source(path).map_err(|error| invalid_source_error(path, error))
+fn classify_cookie_source(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  platform::classify_cookie_source(path, runtime).map_err(|error| invalid_source_error(path, error))
 }
 
 fn invalid_source_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
@@ -423,31 +432,26 @@ fn automatic_chromium_cookies(
   ids: &[&'static str],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   let identities = automatic_identities(ids)?;
-  let clock = crate::common::deadline::SystemClock;
-  let deadline = crate::common::deadline::Deadline::after(
-    &clock,
-    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
-  );
-  let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
-    &runtime,
+    runtime,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
       let outcomes = session.retrieve(
         crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
-        &runtime,
+        runtime,
       );
       crate::browser::chromium::chromium_based_probe_with_key_outcomes(
-        outcomes, db_path, domains, false, &runtime,
+        outcomes, db_path, domains, false, runtime,
       )
     },
-    |candidate| (candidate.cookies.len(), candidate.rows_skipped),
-    |candidate| candidate.cookies,
+    |candidate| (candidate.cookie_count(), candidate.rows_skipped),
+    |candidate| candidate.project(runtime),
   )
 }
 
@@ -456,31 +460,26 @@ fn automatic_chromium_detailed(
   ids: &[&'static str],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
   let identities = automatic_identities(ids)?;
-  let clock = crate::common::deadline::SystemClock;
-  let deadline = crate::common::deadline::Deadline::after(
-    &clock,
-    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
-  );
-  let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
-    &runtime,
+    runtime,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
       let outcomes = session.retrieve(
         crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
-        &runtime,
+        runtime,
       );
       crate::browser::chromium::chromium_based_detailed_probe_with_key_outcomes(
-        outcomes, db_path, domains, false, &runtime,
+        outcomes, db_path, domains, false, runtime,
       )
     },
-    |candidate| (candidate.cookies.len(), candidate.rows_skipped),
-    |candidate| candidate.cookies,
+    |candidate| (candidate.cookie_count(), candidate.rows_skipped),
+    |candidate| candidate.project(runtime),
   )
 }
 
@@ -509,7 +508,7 @@ where
     Option<Vec<String>>,
   ) -> Result<Candidate>,
   Score: Fn(&Candidate) -> (usize, usize),
-  Finish: FnOnce(Candidate) -> Output,
+  Finish: FnOnce(Candidate) -> Result<Output>,
 {
   let mut session = new_session();
   let mut best = None;
@@ -549,7 +548,7 @@ where
         cookies,
         rows_skipped
       );
-      Ok(finish(result))
+      finish(result)
     }
     None => anyhow::bail!(
       "no Chromium configuration decoded the cookie database:\n  {}",
@@ -559,15 +558,64 @@ where
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn legacy_automatic_chromium(
+pub(crate) fn legacy_automatic_chromium_with_runtime(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  platform::automatic_chromium(db_path, domains)
+  platform::automatic_chromium(db_path, domains, runtime)
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn legacy_windows_chromium_with_runtime(
+  local_state: PathBuf,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  let mut request = ChromiumPathRequest::new(db_path)
+    .credentials(ChromiumCredentialSource::LocalStateFile(local_state));
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  if force_kill {
+    request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+  }
+  platform::chromium_cookies_from_path(request, runtime)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn legacy_windows_chromium_detailed_with_runtime(
+  local_state: PathBuf,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<DetailedCookie>> {
+  let mut request = ChromiumPathRequest::new(db_path)
+    .credentials(ChromiumCredentialSource::LocalStateFile(local_state));
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  if force_kill {
+    request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+  }
+  platform::chromium_cookies_from_path_detailed(request, runtime)
+}
+
+#[cfg(test)]
 pub(crate) fn classify_cookie_source_legacy(path: &Path) -> Result<CookieSourceKind> {
-  match platform::classify_cookie_source(path) {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  classify_cookie_source_legacy_with_runtime(path, &runtime)
+}
+
+pub(crate) fn classify_cookie_source_legacy_with_runtime(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  match platform::classify_cookie_source(path, runtime) {
     #[cfg(not(target_os = "windows"))]
     Ok(CookieSourceKind::InternetExplorerEse) => {
       anyhow::bail!("unsupported cookie source format: {}", path.display())
@@ -811,7 +859,7 @@ mod tests {
         })
       },
       |candidate| (candidate.cookies, candidate.rows_skipped),
-      |candidate| candidate.identity,
+      |candidate| Ok(candidate.identity),
     )
     .unwrap();
 
@@ -857,7 +905,7 @@ mod tests {
           anyhow::bail!("{projection} {name} keyring is locked")
         },
         |()| (0, 0),
-        |()| (),
+        |()| Ok(()),
       )
       .unwrap_err();
       let diagnostic = error.to_string();

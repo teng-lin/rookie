@@ -338,9 +338,15 @@ pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
 /// let cookies = rookie_cookies::firefox_profile("default-release", Some(domains));
 /// ```
 pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let profiles = firefox_profiles()?;
+  let clock = common::deadline::SystemClock;
+  let runtime = common::deadline::BoundaryRuntime::standard(&clock);
+  let profiles = browser::legacy::gecko_profiles_with_runtime("firefox", &runtime)?;
   let selected = browser::mozilla::select_profile(&profiles, profile)?;
-  firefox_based(selected.path.join("cookies.sqlite"), domains)
+  browser::mozilla::firefox_based_with_runtime(
+    selected.path.join("cookies.sqlite"),
+    domains,
+    &runtime,
+  )
 }
 
 /// Returns cookies from LibreWolf

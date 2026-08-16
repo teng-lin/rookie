@@ -1,3 +1,4 @@
+use crate::common::deadline::BoundaryRuntime;
 use crate::common::sqlite;
 use crate::utils::TempDir;
 use anyhow::{anyhow, bail, Context, Result};
@@ -5,11 +6,15 @@ use privilege::user::privileged;
 use std::path::{Path, PathBuf};
 
 /// dst should be directory
-pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
+pub fn shadow_copy(src: PathBuf, dst: PathBuf, runtime: &BoundaryRuntime<'_>) -> Result<()> {
+  runtime.check()?;
   if !src.exists() {
     bail!("Source file not exists: {}", src.clone().display())
   }
-  if !privileged() {
+  runtime.check()?;
+  let is_privileged = privileged();
+  runtime.check()?;
+  if !is_privileged {
     bail!("No admin rights")
   }
   log::info!(
@@ -20,7 +25,7 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   let name = src
     .file_name()
     .ok_or_else(|| anyhow!("Database path has no file name: {}", src.display()))?;
-  raw_copy(&src, &dst)?;
+  raw_copy(&src, &dst, runtime)?;
 
   // Cookies committed to the write-ahead log are not in the main database yet,
   // so a copy without it silently omits the very cookies this path exists to
@@ -30,8 +35,11 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   // includes a WAL that cannot be stat'd:
   // `Path::exists` would report an ACL, sharing or transient error as "no WAL".
   let wal = sqlite::sidecar(&src, "-wal");
-  if sqlite::has_nonempty_wal(&src)? {
-    raw_copy(&wal, &dst)?;
+  runtime.check()?;
+  let has_nonempty_wal = sqlite::has_nonempty_wal_with_runtime(&src, runtime);
+  runtime.check()?;
+  if has_nonempty_wal? {
+    raw_copy(&wal, &dst, runtime)?;
   }
 
   // These raw copies are not atomic, and the SQLite query boundary cannot
@@ -50,10 +58,12 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   // between the copy above and the lookup would otherwise go unnoticed, leaving
   // a pre-checkpoint database whose newest cookies now live only in the live
   // main file, and it is also what catches a main copy torn mid-scan.
+  runtime.check()?;
   let probe = TempDir::new()?;
-  raw_copy(&src, probe.path())?;
+  runtime.check()?;
+  raw_copy(&src, probe.path(), runtime)?;
 
-  if !sqlite::files_are_identical(&dst.join(name), &probe.path().join(name))? {
+  if !sqlite::files_are_identical(&dst.join(name), &probe.path().join(name), runtime)? {
     // Reported rather than retried: a raw copy rescans NTFS clusters, so
     // retrying against a busy database is a poor trade. The acquisition policy
     // can fall through to its explicitly enabled restart-manager path, which
@@ -67,7 +77,8 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf) -> Result<()> {
   Ok(())
 }
 
-fn raw_copy(src: &Path, dst: &Path) -> Result<()> {
+fn raw_copy(src: &Path, dst: &Path, runtime: &BoundaryRuntime<'_>) -> Result<()> {
+  runtime.check()?;
   let (src, dst) = (
     src
       .to_str()
@@ -77,7 +88,9 @@ fn raw_copy(src: &Path, dst: &Path) -> Result<()> {
       .with_context(|| format!("Non UTF-8 destination path: {}", dst.display()))?,
   );
 
-  rawcopy_rs_next::rawcopy(src, dst)
+  let result = rawcopy_rs_next::rawcopy(src, dst)
     .map_err(|err| anyhow::anyhow!(Box::new(err)))
-    .context(format!("Can't shadow copy from {src} to {dst}"))
+    .context(format!("Can't shadow copy from {src} to {dst}"));
+  runtime.check()?;
+  result
 }

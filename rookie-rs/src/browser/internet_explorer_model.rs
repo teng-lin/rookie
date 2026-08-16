@@ -140,7 +140,8 @@ pub(crate) fn decode_cookie_record(
 ) -> Result<Option<CookieRecord>> {
   let decoder = InternetExplorerRecordDecoder { domains };
   let mut decoded = Vec::new();
-  decoder.decode(
+  crate::common::boundary::decode(
+    &decoder,
     source,
     &mut |record| {
       decoded.push(record);
@@ -308,6 +309,24 @@ impl std::error::Error for InternetExplorerFailure {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     Some(self.source.as_ref())
   }
+}
+
+#[cfg(test)]
+pub(super) fn malformed_decoder_gate_case() -> Result<()> {
+  let source = RawCookieRecord {
+    domain: ".malformed.test".to_owned(),
+    path: "/".to_owned(),
+    name: vec![0xff, 0],
+    value: SecretBytes::new(vec![0xff, 0]),
+    expires: 1,
+    flags: -1,
+  };
+  let decoder = InternetExplorerRecordDecoder { domains: None };
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let mut sink = |_record| Ok(());
+  let _ = decoder.decode(&source, &mut sink, &runtime);
+  Ok(())
 }
 
 #[cfg(test)]

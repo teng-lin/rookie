@@ -50,10 +50,23 @@ const MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 =
   note = "use direct_path::cookies_from_path with DirectPathRequest"
 )]
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let outcome = query_cookies_engine_outcome(&db_path, domains.as_deref());
-  super::legacy::project_canonical_outcome(
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  firefox_based_with_runtime(db_path, domains, &runtime)
+}
+
+pub(crate) fn firefox_based_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  let outcome = query_cookies_engine_outcome_with_runtime(&db_path, domains.as_deref(), runtime);
+  super::legacy::project_canonical_outcome_with_runtime(
     "firefox",
-    super::report_build::canonical_direct_mozilla_extraction(&db_path, outcome)?,
+    super::report_build::canonical_direct_mozilla_extraction_with_runtime(
+      &db_path, outcome, runtime,
+    )?,
+    runtime,
   )
 }
 
@@ -67,10 +80,23 @@ pub fn firefox_based_detailed(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
 ) -> Result<Vec<DetailedCookie>> {
-  let outcome = query_cookies_engine_outcome(&db_path, domains.as_deref());
-  super::legacy::project_canonical_detailed_outcome(
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  firefox_based_detailed_with_runtime(db_path, domains, &runtime)
+}
+
+pub(crate) fn firefox_based_detailed_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<DetailedCookie>> {
+  let outcome = query_cookies_engine_outcome_with_runtime(&db_path, domains.as_deref(), runtime);
+  super::legacy::project_canonical_detailed_outcome_with_runtime(
     "firefox",
-    super::report_build::canonical_direct_mozilla_extraction(&db_path, outcome)?,
+    super::report_build::canonical_direct_mozilla_extraction_with_runtime(
+      &db_path, outcome, runtime,
+    )?,
+    runtime,
   )
 }
 
@@ -183,7 +209,8 @@ fn query_persistent_cookies_with_runtime(
   };
   let decoder = MozillaPersistentDecoder;
   let mut records = Vec::new();
-  let summary = decoder.decode(
+  let summary = crate::common::boundary::decode(
+    &decoder,
     &source,
     &mut |record| {
       records.push(record);
@@ -577,6 +604,7 @@ const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
 
 #[derive(Debug)]
 struct SessionCookieParseDraft {
+  #[cfg(test)]
   cookies: Vec<Cookie>,
   #[cfg(test)]
   detailed_cookies: Vec<DetailedCookie>,
@@ -662,6 +690,7 @@ pub(crate) struct MozillaSessionDraft {
   /// ones happened to exist.
   pub(crate) precedence: u16,
   pub(crate) selected: bool,
+  #[cfg(test)]
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) records: Vec<CookieRecord>,
   pub(crate) rows_seen: usize,
@@ -673,7 +702,9 @@ pub(crate) struct MozillaSessionDraft {
 
 #[derive(Debug, Default)]
 pub(crate) struct MozillaExtractionDraft {
+  #[cfg(test)]
   pub(crate) persistent_cookies: Vec<Cookie>,
+  #[cfg(test)]
   pub(crate) persistent_detailed_cookies: Vec<DetailedCookie>,
   pub(crate) persistent_records: Vec<CookieRecord>,
   pub(crate) persistent_rows_seen: usize,
@@ -729,26 +760,29 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
       outcome.persistent_rows_seen = persistent.rows_seen;
       outcome.persistent_rows_skipped = persistent.rows_skipped;
       outcome.persistent_row_error = persistent.last_row_error.map(|error| format!("{error:#}"));
-      outcome.persistent_cookies = persistent
-        .records
-        .iter()
-        .cloned()
-        .map(|record| {
-          record
-            .into_cookie()
-            .expect("Firefox rows emit plaintext values")
-        })
-        .collect();
-      outcome.persistent_detailed_cookies = persistent
-        .records
-        .iter()
-        .cloned()
-        .map(|record| {
-          record
-            .into_detailed_cookie()
-            .expect("Firefox rows emit plaintext values")
-        })
-        .collect();
+      #[cfg(test)]
+      {
+        outcome.persistent_cookies = persistent
+          .records
+          .iter()
+          .cloned()
+          .map(|record| {
+            record
+              .into_cookie()
+              .expect("Firefox rows emit plaintext values")
+          })
+          .collect();
+        outcome.persistent_detailed_cookies = persistent
+          .records
+          .iter()
+          .cloned()
+          .map(|record| {
+            record
+              .into_detailed_cookie()
+              .expect("Firefox rows emit plaintext values")
+          })
+          .collect();
+      }
       outcome.persistent_records = persistent.records;
     }
     Err(error) => {
@@ -783,6 +817,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
           format: format.format_id(),
           precedence,
           selected: true,
+          #[cfg(test)]
           cookies: success.parsed.cookies,
           records: success.parsed.records,
           rows_seen: success.parsed.rows_seen,
@@ -807,6 +842,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
           format: format.format_id(),
           precedence,
           selected: false,
+          #[cfg(test)]
           cookies: Vec::new(),
           records: Vec::new(),
           rows_seen: 0,
@@ -1112,6 +1148,7 @@ fn parse_session_json_with_runtime(
 ) -> Result<SessionCookieParseDraft> {
   runtime.check()?;
   let mut outcome = SessionCookieParseDraft {
+    #[cfg(test)]
     cookies: Vec::new(),
     #[cfg(test)]
     detailed_cookies: Vec::new(),
@@ -1254,7 +1291,8 @@ fn decode_acquired_session(
   };
   let decoder = MozillaSessionDecoder;
   let mut records = Vec::new();
-  let summary = decoder.decode(
+  let summary = crate::common::boundary::decode(
+    &decoder,
     &source,
     &mut |record| {
       records.push(record);
@@ -1325,6 +1363,7 @@ fn project_session_records(
   rows_skipped: usize,
   diagnostics: Vec<String>,
 ) -> SessionCookieParseDraft {
+  #[cfg(test)]
   let cookies = records
     .iter()
     .cloned()
@@ -1341,6 +1380,7 @@ fn project_session_records(
     })
     .collect();
   SessionCookieParseDraft {
+    #[cfg(test)]
     cookies,
     #[cfg(test)]
     detailed_cookies,
@@ -1781,6 +1821,21 @@ fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
     .map(|profile| format!("{} ({})", profile.name, profile.path.display()))
     .collect::<Vec<_>>()
     .join(", ")
+}
+
+#[cfg(test)]
+pub(super) fn malformed_decoder_gate_case() -> Result<()> {
+  let source = MozillaSessionReadOnlySource {
+    bytes: br#"{"windows":[{"cookies":[{"host":17,"value":{"nested":"secret"}}]}]}"#,
+    format: SessionStoreFormat::LegacyJson,
+    domains: None,
+  };
+  let decoder = MozillaSessionDecoder;
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let mut sink = |_record| Ok(());
+  let _ = decoder.decode(&source, &mut sink, &runtime);
+  Ok(())
 }
 
 #[cfg(test)]
@@ -2351,6 +2406,20 @@ mod tests {
       unknown.isolation.origin_attributes,
       Observation::Unknown(RawValue::Signed(17))
     ));
+    let historical = unknown
+      .clone()
+      .into_cookie_with_semantics(
+        crate::browser::cookie_record::LegacyProjectionSemantics::FirefoxPersistent,
+      )
+      .expect("project persistent compatibility booleans");
+    assert!(historical.secure);
+    assert!(historical.http_only);
+    let session_semantics = unknown
+      .clone()
+      .into_cookie()
+      .expect("project standard booleans");
+    assert!(!session_semantics.secure);
+    assert!(!session_semantics.http_only);
     let missing = &query.records[1];
     assert!(matches!(missing.attributes.secure, Observation::Missing));
     assert!(matches!(missing.attributes.http_only, Observation::Missing));

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 
-use crate::common::deadline::{Clock, Deadline, CLEANUP_GRACE};
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop, Deadline, CLEANUP_GRACE};
 use crate::common::secret::{SecretBytes, SecretString};
 use std::{
   io::Read,
@@ -26,15 +26,14 @@ fn keychain_lookup_error(exit_code: Option<i32>, stderr_len: usize) -> anyhow::E
   anyhow!("macOS Keychain {kind} ({status}; stderr redacted, {stderr_len} byte(s))")
 }
 
-pub(crate) fn get_osx_keychain_password_with_deadline(
+pub(crate) fn get_osx_keychain_password_with_runtime(
   osx_key_service: &str,
   osx_key_user: &str,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<SecretString> {
-  deadline
-    .check(clock)
-    .context("macOS Keychain lookup timed out before spawn")?;
+  runtime
+    .check()
+    .context("macOS Keychain lookup stopped before spawn")?;
   let mut child = Command::new("/usr/bin/security")
     .args([
       "-q",
@@ -63,13 +62,19 @@ pub(crate) fn get_osx_keychain_password_with_deadline(
   // first retained byte and capped independently.
   let stdout = std::thread::spawn(move || drain_secret_stream(stdout));
   let stderr = std::thread::spawn(move || drain_secret_stream(stderr));
-  let status = supervise_child(&mut child, clock, deadline)?;
+  let status = supervise_child(&mut child, runtime);
+  // Always join both drainers after supervision. In particular, an iterator
+  // poll error must not detach secret-bearing pipe readers or replace its
+  // original cause with a later drain failure.
   let stdout = stdout
     .join()
-    .map_err(|_| anyhow!("macOS Keychain stdout drain failed"))??;
+    .unwrap_or_else(|_| Err(anyhow!("macOS Keychain stdout drain failed")));
   let stderr = stderr
     .join()
-    .map_err(|_| anyhow!("macOS Keychain stderr drain failed"))??;
+    .unwrap_or_else(|_| Err(anyhow!("macOS Keychain stderr drain failed")));
+  let status = status?;
+  let stdout = stdout?;
+  let stderr = stderr?;
 
   if !status.success() {
     return Err(keychain_lookup_error(status.code(), stderr.len()));
@@ -116,46 +121,70 @@ impl ChildControl for Child {
 
 fn supervise_child<C: ChildControl>(
   child: &mut C,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<C::Status> {
   loop {
-    // Timeout wins when process exit and the absolute deadline become
-    // observable at the same boundary.
-    if deadline.remaining(clock).is_zero() {
-      break;
+    if let Err(stop) = runtime.check() {
+      return stop_and_reap_child(child, runtime, anyhow::Error::new(stop));
     }
-    if let Some(status) = child.try_wait().context("failed to poll Keychain helper")? {
-      return Ok(status);
+    match child.try_wait() {
+      Ok(Some(status)) => {
+        // A terminal request observed with the native result wins the tie.
+        runtime.check()?;
+        return Ok(status);
+      }
+      Ok(None) => {}
+      Err(error) => {
+        return stop_and_reap_child(
+          child,
+          runtime,
+          anyhow::Error::new(error).context("failed to poll Keychain helper"),
+        );
+      }
     }
-    let remaining = deadline.remaining(clock);
-    clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
+    let remaining = runtime.deadline.remaining(runtime.clock);
+    runtime.clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
   }
+}
 
-  // A process can exit between the deadline sample and `kill`. Treat that as
-  // a timed-out lookup, but still poll until it is reaped. Preserve a genuine
-  // kill failure if the child never becomes waitable during cleanup.
+fn stop_and_reap_child<C: ChildControl>(
+  child: &mut C,
+  runtime: &BoundaryRuntime<'_>,
+  cause: anyhow::Error,
+) -> Result<C::Status> {
+  // A process can exit between the terminal sample and `kill`. Preserve the
+  // original stop/poll cause, but still poll until the child is reaped.
   let mut kill_error = child.kill().err();
-  let cleanup_deadline = deadline.cleanup_deadline(CLEANUP_GRACE);
+  let cleanup_deadline = if cause
+    .downcast_ref::<BoundaryStop>()
+    .is_some_and(|stop| *stop == BoundaryStop::TimedOut)
+  {
+    runtime.deadline.cleanup_deadline(CLEANUP_GRACE)
+  } else {
+    Deadline::after(runtime.clock, CLEANUP_GRACE)
+  };
+  let mut reap_error = None;
   loop {
     // Cleanup is derived from the original deadline. An exit observed exactly
     // at the cleanup ceiling does not extend that ceiling by one final poll.
-    if cleanup_deadline.remaining(clock).is_zero() {
+    if cleanup_deadline.remaining(runtime.clock).is_zero() {
       if let Some(error) = kill_error.take() {
-        return Err(error).context("failed to kill timed-out Keychain helper");
+        return Err(cause.context(format!("failed to kill stopped Keychain helper: {error}")));
       }
-      return Err(anyhow!(
-        "macOS Keychain helper did not exit during cleanup grace"
-      ));
+      if let Some(error) = reap_error {
+        return Err(cause.context(format!(
+          "failed to reap stopped Keychain helper during cleanup grace: {error}"
+        )));
+      }
+      return Err(cause.context("macOS Keychain helper did not exit during cleanup grace"));
     }
-    if let Some(_status) = child
-      .try_wait()
-      .context("failed to reap timed-out Keychain helper")?
-    {
-      return Err(anyhow!("macOS Keychain lookup timed out"));
+    match child.try_wait() {
+      Ok(Some(_status)) => return Err(cause),
+      Ok(None) => {}
+      Err(error) => reap_error = Some(error),
     }
-    let remaining = cleanup_deadline.remaining(clock);
-    clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
+    let remaining = cleanup_deadline.remaining(runtime.clock);
+    runtime.clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
   }
 }
 
@@ -187,6 +216,15 @@ mod tests {
         None => Ok(()),
       }
     }
+  }
+
+  fn supervise_at<C: ChildControl>(
+    child: &mut C,
+    clock: &dyn crate::common::deadline::Clock,
+    deadline: Deadline,
+  ) -> Result<C::Status> {
+    let runtime = BoundaryRuntime::new(clock, deadline);
+    supervise_child(child, &runtime)
   }
 
   #[test]
@@ -223,14 +261,17 @@ mod tests {
       polls: 0,
       kill_error: None,
     };
-    let error = supervise_child(&mut child, &clock, deadline).expect_err("timeout");
-    assert!(error.to_string().contains("timed out"));
+    let error = supervise_at(&mut child, &clock, deadline).expect_err("timeout");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
     assert_eq!(child.killed, 1);
     assert_eq!(child.polls, 5);
-    assert!(deadline
+    assert!(!deadline
       .cleanup_deadline(CLEANUP_GRACE)
-      .check(&clock)
-      .is_ok());
+      .remaining(&clock)
+      .is_zero());
   }
 
   #[test]
@@ -246,8 +287,11 @@ mod tests {
       kill_error: None,
     };
 
-    let error = supervise_child(&mut child, &clock, deadline).expect_err("exact tie times out");
-    assert_eq!(error.to_string(), "macOS Keychain lookup timed out");
+    let error = supervise_at(&mut child, &clock, deadline).expect_err("exact tie times out");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
     assert_eq!(child.killed, 1);
     assert_eq!(child.polls, 2);
   }
@@ -263,8 +307,11 @@ mod tests {
       kill_error: Some(std::io::ErrorKind::InvalidInput),
     };
 
-    let error = supervise_child(&mut child, &clock, deadline).expect_err("lookup timed out");
-    assert_eq!(error.to_string(), "macOS Keychain lookup timed out");
+    let error = supervise_at(&mut child, &clock, deadline).expect_err("lookup timed out");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
     assert_eq!(child.killed, 1);
     assert_eq!(child.polls, 1);
   }
@@ -280,10 +327,14 @@ mod tests {
       kill_error: Some(std::io::ErrorKind::PermissionDenied),
     };
 
-    let error = supervise_child(&mut child, &clock, deadline).expect_err("kill failed");
+    let error = supervise_at(&mut child, &clock, deadline).expect_err("kill failed");
     assert!(error
       .to_string()
-      .contains("failed to kill timed-out Keychain helper"));
+      .contains("failed to kill stopped Keychain helper"));
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
     assert_eq!(child.killed, 1);
     assert_eq!(child.polls, 200);
     assert_eq!(
@@ -305,11 +356,105 @@ mod tests {
       kill_error: None,
     };
 
-    let error = supervise_child(&mut child, &clock, deadline).expect_err("cleanup ceiling wins");
+    let error = supervise_at(&mut child, &clock, deadline).expect_err("cleanup ceiling wins");
     assert!(error
       .to_string()
       .contains("did not exit during cleanup grace"));
     assert_eq!(child.polls, 200, "no poll occurs at the exact ceiling");
+  }
+
+  #[test]
+  fn cancellation_kills_and_reaps_the_keychain_child() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, Duration::from_secs(1)),
+      stop,
+    );
+    let mut child = FakeChild {
+      states: [Some(())].into(),
+      killed: 0,
+      polls: 0,
+      kill_error: None,
+    };
+
+    let error = supervise_child(&mut child, &runtime).expect_err("cancelled child");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::Cancelled)
+    );
+    assert_eq!(child.killed, 1);
+    assert_eq!(child.polls, 1);
+  }
+
+  #[test]
+  fn resource_exhaustion_kills_and_reaps_the_keychain_child() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.exhaust_resources();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, Duration::from_secs(1)),
+      stop,
+    );
+    let mut child = FakeChild {
+      states: [Some(())].into(),
+      killed: 0,
+      polls: 0,
+      kill_error: None,
+    };
+
+    let error = supervise_child(&mut child, &runtime).expect_err("resource-stopped child");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::ResourceExhausted)
+    );
+    assert_eq!(child.killed, 1);
+    assert_eq!(child.polls, 1);
+  }
+
+  struct PollErrorChild {
+    polls: usize,
+    killed: usize,
+  }
+
+  impl ChildControl for PollErrorChild {
+    type Status = ();
+
+    fn try_wait(&mut self) -> std::io::Result<Option<Self::Status>> {
+      self.polls += 1;
+      if self.polls == 1 {
+        Err(std::io::Error::other("scripted poll failure"))
+      } else {
+        Ok(Some(()))
+      }
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+      self.killed += 1;
+      Ok(())
+    }
+  }
+
+  #[test]
+  fn poll_error_still_kills_and_reaps_without_losing_the_original_cause() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(1)));
+    let mut child = PollErrorChild {
+      polls: 0,
+      killed: 0,
+    };
+
+    let error = supervise_child(&mut child, &runtime).expect_err("poll failure");
+
+    assert!(format!("{error:#}").contains("scripted poll failure"));
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    assert_eq!(child.killed, 1);
+    assert_eq!(child.polls, 2);
   }
 
   #[test]
@@ -324,14 +469,17 @@ mod tests {
     let clock = crate::common::deadline::SystemClock;
     let deadline = Deadline::after(&clock, Duration::from_millis(25));
 
-    let error = supervise_child(&mut child, &clock, deadline).expect_err("child must time out");
+    let error = supervise_at(&mut child, &clock, deadline).expect_err("child must time out");
     let reaped = child.try_wait().expect("child remains waitable");
     if reaped.is_none() {
       // Keep a failed assertion from leaving the real helper behind.
       let _ = child.kill();
       let _ = child.wait();
     }
-    assert_eq!(error.to_string(), "macOS Keychain lookup timed out");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
     assert!(reaped.is_some());
   }
 }

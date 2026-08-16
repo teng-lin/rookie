@@ -10,9 +10,11 @@ use zbus::{
   Connection, Message,
 };
 
+use crate::common::deadline::BoundaryRuntime;
+#[cfg(test)]
+use crate::common::deadline::Deadline;
 #[cfg(test)]
 use crate::common::deadline::SystemClock;
-use crate::common::deadline::{Clock, Deadline};
 use crate::common::secret::SecretString;
 
 mod confidential;
@@ -27,17 +29,11 @@ const LIBSECRET_SCHEMAS: [&str; 2] = [
   "chrome_libsecret_os_crypt_password_v1",
 ];
 
-pub(crate) fn get_passwords_with_deadline(
+pub(crate) fn get_passwords_with_runtime(
   unix_crypt_name: &str,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<SecretString>> {
-  get_passwords_with_source_and_deadline(
-    &SystemLinuxKeyringSource,
-    unix_crypt_name,
-    clock,
-    deadline,
-  )
+  get_passwords_with_source_and_runtime(&SystemLinuxKeyringSource, unix_crypt_name, runtime)
 }
 
 trait LinuxKeyringSource {
@@ -45,14 +41,12 @@ trait LinuxKeyringSource {
     &self,
     schema: &str,
     crypt_name: &str,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> Result<SecretString>;
   fn kwallet_password(
     &self,
     crypt_name: &str,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> Result<SecretString>;
 }
 
@@ -63,19 +57,17 @@ impl LinuxKeyringSource for SystemLinuxKeyringSource {
     &self,
     schema: &str,
     crypt_name: &str,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> Result<SecretString> {
-    get_password_libsecret(schema, crypt_name, clock, deadline)
+    get_password_libsecret(schema, crypt_name, runtime)
   }
 
   fn kwallet_password(
     &self,
     crypt_name: &str,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> Result<SecretString> {
-    get_password_kdewallet(crypt_name, clock, deadline)
+    get_password_kdewallet(crypt_name, runtime)
   }
 }
 
@@ -84,14 +76,14 @@ fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<Secr
 where
   S: LinuxKeyringSource,
 {
-  get_passwords_with_source_and_deadline(source, crypt_name, &SystemClock, Deadline::standard())
+  let runtime = BoundaryRuntime::new(&SystemClock, Deadline::standard());
+  get_passwords_with_source_and_runtime(source, crypt_name, &runtime)
 }
 
-fn get_passwords_with_source_and_deadline<S>(
+fn get_passwords_with_source_and_runtime<S>(
   source: &S,
   crypt_name: &str,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<SecretString>>
 where
   S: LinuxKeyringSource,
@@ -100,15 +92,19 @@ where
   let mut failures = Vec::new();
 
   for schema in LIBSECRET_SCHEMAS {
-    deadline.check(clock)?;
-    match source.libsecret_password(schema, crypt_name, clock, deadline) {
+    runtime.check()?;
+    let result = source.libsecret_password(schema, crypt_name, runtime);
+    runtime.check()?;
+    match result {
       Ok(password) => push_unique(&mut passwords, password),
       Err(error) => failures.push(format!("Secret Service schema '{schema}': {error:#}")),
     }
   }
 
-  deadline.check(clock)?;
-  match source.kwallet_password(crypt_name, clock, deadline) {
+  runtime.check()?;
+  let result = source.kwallet_password(crypt_name, runtime);
+  runtime.check()?;
+  match result {
     Ok(password) => push_unique(&mut passwords, password),
     Err(error) => failures.push(format!("KWallet: {error:#}")),
   }
@@ -125,6 +121,7 @@ where
   for failure in failures {
     log::debug!("Linux keyring candidate source was unavailable: {failure}");
   }
+  runtime.check()?;
   Ok(passwords)
 }
 
@@ -137,32 +134,41 @@ fn push_unique(values: &mut Vec<SecretString>, value: SecretString) {
   }
 }
 
-fn run_dbus_with_deadline<T, F>(
-  clock: &dyn Clock,
-  deadline: Deadline,
+fn run_dbus_with_runtime<T, F>(
+  runtime: &BoundaryRuntime<'_>,
   operation: &'static str,
   future: F,
 ) -> Result<T>
 where
   F: Future<Output = zbus::Result<T>>,
 {
-  let remaining = deadline.ipc_sender_ceiling(clock);
-  if remaining.is_zero() {
-    bail!("{operation} timed out before starting");
-  }
+  runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("{operation} stopped before starting"))?;
+  let stop_runtime = runtime.clone();
   let result = future::block_on(future::race(
     async move { future.await.map_err(anyhow::Error::from) },
     async move {
-      Timer::after(remaining).await;
-      Err(anyhow::anyhow!("{operation} timed out"))
+      loop {
+        if let Err(stop) = stop_runtime.check() {
+          return Err(anyhow::Error::new(stop).context(format!("{operation} stopped")));
+        }
+        let remaining = stop_runtime
+          .deadline
+          .remaining(stop_runtime.clock)
+          .min(std::time::Duration::from_millis(10));
+        Timer::after(remaining).await;
+      }
     },
   ));
   // The operation future is polled first by `race`. Re-sample the absolute
   // deadline before accepting its result so a reply observed exactly when the
   // timer becomes due cannot win by poll order.
-  deadline
-    .check(clock)
-    .with_context(|| format!("{operation} timed out"))?;
+  runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("{operation} stopped"))?;
   result
 }
 
@@ -170,15 +176,13 @@ fn libsecret_call<T>(
   connection: &Connection,
   method: &'static str,
   args: T,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Message>
 where
   T: serde::ser::Serialize + DynamicType,
 {
-  run_dbus_with_deadline(
-    clock,
-    deadline,
+  run_dbus_with_runtime(
+    runtime,
     method,
     connection.call_method(
       Some("org.freedesktop.secrets"),
@@ -215,15 +219,13 @@ fn kwallet_call<T>(
   endpoint: KWalletEndpoint,
   method: &'static str,
   args: T,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Message>
 where
   T: serde::ser::Serialize + DynamicType,
 {
-  run_dbus_with_deadline(
-    clock,
-    deadline,
+  run_dbus_with_runtime(
+    runtime,
     method,
     connection.call_method(
       Some(endpoint.service),
@@ -255,14 +257,12 @@ trait SecretServiceBackend {
 
 struct DbusSecretServiceBackend<'a> {
   connection: Connection,
-  clock: &'a dyn Clock,
-  deadline: Deadline,
+  runtime: BoundaryRuntime<'a>,
 }
 
 struct DbusConfidentialTransport<'a> {
   connection: &'a Connection,
-  clock: &'a dyn Clock,
-  deadline: Deadline,
+  runtime: BoundaryRuntime<'a>,
 }
 
 impl confidential::Transport for DbusConfidentialTransport<'_> {
@@ -271,8 +271,7 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
       self.connection,
       "OpenSession",
       &(algorithm, Value::new(client_public_key)),
-      self.clock,
-      self.deadline,
+      &self.runtime,
     )
     .context("Secret Service OpenSession failed")?;
     let (output, session): (OwnedValue, OwnedObjectPath) = message
@@ -294,8 +293,7 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
       self.connection,
       "GetSecrets",
       &(vec![item_path.clone()], session_path),
-      self.clock,
-      self.deadline,
+      &self.runtime,
     )?;
     type DbusSecret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
     let mut secrets: HashMap<OwnedObjectPath, DbusSecret> = message
@@ -314,8 +312,9 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
 }
 
 impl<'a> DbusSecretServiceBackend<'a> {
-  fn connect(clock: &'a dyn Clock, deadline: Deadline) -> Result<Self> {
-    let remaining = deadline.remaining(clock);
+  fn connect(runtime: &BoundaryRuntime<'a>) -> Result<Self> {
+    runtime.check()?;
+    let remaining = runtime.deadline.remaining(runtime.clock);
     if remaining.is_zero() {
       bail!("session D-Bus connection timed out before starting");
     }
@@ -323,15 +322,9 @@ impl<'a> DbusSecretServiceBackend<'a> {
       .context("failed to resolve the session D-Bus address")?
       .method_timeout(remaining);
     Ok(Self {
-      connection: run_dbus_with_deadline(
-        clock,
-        deadline,
-        "session D-Bus connection",
-        builder.build(),
-      )
-      .context("failed to connect to the session D-Bus")?,
-      clock,
-      deadline,
+      connection: run_dbus_with_runtime(runtime, "session D-Bus connection", builder.build())
+        .context("failed to connect to the session D-Bus")?,
+      runtime: runtime.clone(),
     })
   }
 }
@@ -341,14 +334,8 @@ impl SecretServiceBackend for DbusSecretServiceBackend<'_> {
     let mut attributes = HashMap::<&str, &str>::new();
     attributes.insert("xdg:schema", schema);
     attributes.insert("application", crypt_name);
-    let message = libsecret_call(
-      &self.connection,
-      "SearchItems",
-      &attributes,
-      self.clock,
-      self.deadline,
-    )
-    .context("Secret Service SearchItems failed")?;
+    let message = libsecret_call(&self.connection, "SearchItems", &attributes, &self.runtime)
+      .context("Secret Service SearchItems failed")?;
     let body = message.body();
     let (unlocked, locked): (Vec<ObjectPath>, Vec<ObjectPath>) = body
       .deserialize()
@@ -365,14 +352,8 @@ impl SecretServiceBackend for DbusSecretServiceBackend<'_> {
       .map(|path| ObjectPath::try_from(path.as_str()))
       .collect::<std::result::Result<Vec<_>, _>>()
       .context("Secret Service returned an invalid locked item path")?;
-    let message = libsecret_call(
-      &self.connection,
-      "Unlock",
-      &paths,
-      self.clock,
-      self.deadline,
-    )
-    .context("Secret Service Unlock failed")?;
+    let message = libsecret_call(&self.connection, "Unlock", &paths, &self.runtime)
+      .context("Secret Service Unlock failed")?;
     let body = message.body();
     let (unlocked, prompt): (Vec<ObjectPath>, ObjectPath) = body
       .deserialize()
@@ -391,8 +372,7 @@ impl SecretServiceBackend for DbusSecretServiceBackend<'_> {
     confidential::get_secret(
       &DbusConfidentialTransport {
         connection: &self.connection,
-        clock: self.clock,
-        deadline: self.deadline,
+        runtime: self.runtime.clone(),
       },
       item,
     )
@@ -402,10 +382,9 @@ impl SecretServiceBackend for DbusSecretServiceBackend<'_> {
 fn get_password_libsecret(
   schema: &str,
   crypt_name: &str,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<SecretString> {
-  let backend = DbusSecretServiceBackend::connect(clock, deadline)?;
+  let backend = DbusSecretServiceBackend::connect(runtime)?;
   get_password_libsecret_with_backend(&backend, schema, crypt_name)
 }
 
@@ -447,8 +426,7 @@ trait KWalletBackend {
 struct DbusKWalletBackend<'a> {
   connection: &'a Connection,
   endpoint: KWalletEndpoint,
-  clock: &'a dyn Clock,
-  deadline: Deadline,
+  runtime: BoundaryRuntime<'a>,
 }
 
 fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
@@ -466,8 +444,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "networkWallet",
       (),
-      self.clock,
-      self.deadline,
+      &self.runtime,
     )
     .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
     message
@@ -482,8 +459,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "open",
       (wallet, 0_i64, APP_ID),
-      self.clock,
-      self.deadline,
+      &self.runtime,
     )
     .with_context(|| format!("KWallet {} open failed", self.endpoint.version))?;
     let handle: i32 = message
@@ -502,8 +478,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "readPassword",
       (handle, folder, key, APP_ID),
-      self.clock,
-      self.deadline,
+      &self.runtime,
     )
     .with_context(|| format!("KWallet {} readPassword failed", self.endpoint.version))?;
     message
@@ -514,15 +489,19 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
   }
 
   fn close(&self, handle: i32) -> Result<()> {
+    let cleanup_runtime = BoundaryRuntime::new(
+      self.runtime.clock,
+      self
+        .runtime
+        .deadline
+        .cleanup_deadline(crate::common::deadline::CLEANUP_GRACE),
+    );
     let message = kwallet_call(
       self.connection,
       self.endpoint,
       "close",
       (handle, false, APP_ID),
-      self.clock,
-      self
-        .deadline
-        .cleanup_deadline(crate::common::deadline::CLEANUP_GRACE),
+      &cleanup_runtime,
     )
     .with_context(|| format!("KWallet {} close failed", self.endpoint.version))?;
     let code: i32 = message
@@ -572,27 +551,22 @@ impl<B: KWalletBackend + ?Sized> Drop for KWalletHandle<'_, B> {
   }
 }
 
-fn get_password_kdewallet(
-  crypt_name: &str,
-  clock: &dyn Clock,
-  deadline: Deadline,
-) -> Result<SecretString> {
-  let remaining = deadline.remaining(clock);
+fn get_password_kdewallet(crypt_name: &str, runtime: &BoundaryRuntime<'_>) -> Result<SecretString> {
+  runtime.check()?;
+  let remaining = runtime.deadline.remaining(runtime.clock);
   if remaining.is_zero() {
     bail!("session D-Bus connection timed out before KWallet lookup");
   }
   let builder = zbus::connection::Builder::session()
     .context("failed to resolve the session D-Bus address")?
     .method_timeout(remaining);
-  let connection =
-    run_dbus_with_deadline(clock, deadline, "session D-Bus connection", builder.build())
-      .context("failed to connect to the session D-Bus")?;
+  let connection = run_dbus_with_runtime(runtime, "session D-Bus connection", builder.build())
+    .context("failed to connect to the session D-Bus")?;
   get_password_kdewallet_with_fallback(|endpoint| {
     let backend = DbusKWalletBackend {
       connection: &connection,
       endpoint,
-      clock,
-      deadline,
+      runtime: runtime.clone(),
     };
     get_password_kdewallet_with_backend(&backend, crypt_name)
   })
@@ -662,8 +636,7 @@ mod tests {
       &self,
       _schema: &str,
       _crypt_name: &str,
-      _clock: &dyn Clock,
-      _deadline: Deadline,
+      _runtime: &BoundaryRuntime<'_>,
     ) -> Result<SecretString> {
       self
         .libsecret
@@ -675,8 +648,7 @@ mod tests {
     fn kwallet_password(
       &self,
       _crypt_name: &str,
-      _clock: &dyn Clock,
-      _deadline: Deadline,
+      _runtime: &BoundaryRuntime<'_>,
     ) -> Result<SecretString> {
       self
         .kwallet
@@ -730,24 +702,25 @@ mod tests {
       &self,
       _schema: &str,
       _crypt_name: &str,
-      clock: &dyn Clock,
-      deadline: Deadline,
+      runtime: &BoundaryRuntime<'_>,
     ) -> Result<SecretString> {
-      self.remaining.borrow_mut().push(deadline.remaining(clock));
+      self
+        .remaining
+        .borrow_mut()
+        .push(runtime.deadline.remaining(runtime.clock));
       let elapsed = if self.remaining.borrow().len() == 1 {
         7
       } else {
         3
       };
-      clock.sleep(std::time::Duration::from_secs(elapsed));
+      runtime.clock.sleep(std::time::Duration::from_secs(elapsed));
       bail!("scripted provider failure")
     }
 
     fn kwallet_password(
       &self,
       _crypt_name: &str,
-      _clock: &dyn Clock,
-      _deadline: Deadline,
+      _runtime: &BoundaryRuntime<'_>,
     ) -> Result<SecretString> {
       *self.kwallet_calls.borrow_mut() += 1;
       bail!("KWallet must not start after the absolute deadline")
@@ -763,11 +736,12 @@ mod tests {
       kwallet_calls: RefCell::new(0),
     };
 
-    let error = get_passwords_with_source_and_deadline(&source, "chrome", &clock, deadline)
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let error = get_passwords_with_source_and_runtime(&source, "chrome", &runtime)
       .expect_err("the second fallback consumes the remaining budget");
     assert!(error
-      .downcast_ref::<crate::common::deadline::BoundaryExpired>()
-      .is_some());
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::TimedOut));
     assert_eq!(
       source.remaining.into_inner(),
       [
@@ -783,8 +757,9 @@ mod tests {
   fn dbus_reply_at_the_exact_deadline_is_timeout_biased_without_wall_clock_sleep() {
     let clock = ManualClock::default();
     let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
 
-    let error = run_dbus_with_deadline(&clock, deadline, "scripted D-Bus reply", async {
+    let error = run_dbus_with_runtime(&runtime, "scripted D-Bus reply", async {
       // The reply future is ready in the same poll that advances the monotonic
       // clock to the deadline. It must not win merely because `race` polls it
       // before the timer future.
@@ -793,8 +768,47 @@ mod tests {
     })
     .expect_err("an exact reply/timeout tie must time out");
 
-    assert!(error.to_string().contains("scripted D-Bus reply timed out"));
+    assert!(error.to_string().contains("scripted D-Bus reply stopped"));
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::TimedOut));
     assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
+
+  #[test]
+  fn dbus_wait_observes_cancellation_while_the_provider_is_pending() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(&clock, deadline, stop.clone());
+
+    let error = run_dbus_with_runtime(&runtime, "scripted pending D-Bus call", async move {
+      stop.cancel();
+      futures_lite::future::pending::<zbus::Result<()>>().await
+    })
+    .expect_err("cancellation stops a pending provider call");
+
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::Cancelled));
+  }
+
+  #[test]
+  fn dbus_wait_observes_resource_exhaustion_while_the_provider_is_pending() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(&clock, deadline, stop.clone());
+
+    let error = run_dbus_with_runtime(&runtime, "scripted pending D-Bus call", async move {
+      stop.exhaust_resources();
+      futures_lite::future::pending::<zbus::Result<()>>().await
+    })
+    .expect_err("resource exhaustion stops a pending provider call");
+
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::ResourceExhausted));
   }
 
   #[derive(Default)]

@@ -274,16 +274,19 @@ impl IsolationKey {
     }
   }
 
-  pub(crate) fn to_context(&self) -> CookieContext {
+  pub(crate) fn to_context_with_semantics(
+    &self,
+    semantics: LegacyProjectionSemantics,
+  ) -> CookieContext {
     CookieContext {
       top_frame_site_key: match &self.partition {
         PartitionState::Partitioned { top_frame_site_key } => Some(top_frame_site_key.clone()),
         PartitionState::Unpartitioned | PartitionState::Unknown => None,
       },
-      has_cross_site_ancestor: known(&self.has_cross_site_ancestor),
+      has_cross_site_ancestor: legacy_optional_boolean(&self.has_cross_site_ancestor, semantics),
       source_scheme: known(&self.source_scheme),
       source_port: known(&self.source_port),
-      is_persistent: known(&self.is_persistent),
+      is_persistent: legacy_optional_boolean(&self.is_persistent, semantics),
       origin_attributes: known(&self.origin_attributes),
       user_context_id: known(&self.user_context_id),
       partition_key: known(&self.partition_key),
@@ -343,12 +346,12 @@ impl Attributes {
     }
   }
 
-  fn legacy_secure(&self) -> bool {
-    matches!(self.secure, Observation::Known(true))
+  fn legacy_secure(&self, semantics: LegacyProjectionSemantics) -> bool {
+    legacy_boolean(&self.secure, semantics)
   }
 
-  fn legacy_http_only(&self) -> bool {
-    matches!(self.http_only, Observation::Known(true))
+  fn legacy_http_only(&self, semantics: LegacyProjectionSemantics) -> bool {
+    legacy_boolean(&self.http_only, semantics)
   }
 
   fn legacy_expires(&self) -> Option<u64> {
@@ -364,6 +367,61 @@ impl Attributes {
       Observation::Unknown(RawValue::Signed(value)) => *value,
       Observation::Missing | Observation::Unknown(_) => crate::common::enums::SAME_SITE_UNSPECIFIED,
     }
+  }
+}
+
+/// Compatibility-only interpretation selected from the finalized source.
+///
+/// Firefox's persistent SQLite reader historically used SQLite's `bool`
+/// conversion, where any nonzero integer was true. Session JSON, and every
+/// other engine, historically defaulted malformed booleans to false. Keeping
+/// this choice at projection preserves both behaviors without weakening the
+/// canonical `Missing`/`Known`/`Unknown` observation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LegacyProjectionSemantics {
+  #[default]
+  Standard,
+  ChromiumSqlite,
+  FirefoxPersistent,
+}
+
+impl LegacyProjectionSemantics {
+  pub(crate) fn for_source_format(format: &str) -> Self {
+    match format {
+      "chromium_sqlite" => Self::ChromiumSqlite,
+      "mozilla_sqlite" => Self::FirefoxPersistent,
+      _ => Self::Standard,
+    }
+  }
+}
+
+fn legacy_boolean(value: &Observation<bool>, semantics: LegacyProjectionSemantics) -> bool {
+  match value {
+    Observation::Known(value) => *value,
+    Observation::Unknown(RawValue::Signed(value))
+      if matches!(
+        semantics,
+        LegacyProjectionSemantics::ChromiumSqlite | LegacyProjectionSemantics::FirefoxPersistent
+      ) =>
+    {
+      *value != 0
+    }
+    Observation::Missing | Observation::Unknown(_) => false,
+  }
+}
+
+fn legacy_optional_boolean(
+  value: &Observation<bool>,
+  semantics: LegacyProjectionSemantics,
+) -> Option<bool> {
+  match value {
+    Observation::Known(value) => Some(*value),
+    Observation::Unknown(RawValue::Signed(value))
+      if semantics == LegacyProjectionSemantics::ChromiumSqlite =>
+    {
+      Some(*value != 0)
+    }
+    Observation::Missing | Observation::Unknown(_) => None,
   }
 }
 
@@ -510,6 +568,13 @@ impl CookieRecord {
   }
 
   pub(crate) fn into_cookie(self) -> Result<Cookie, UnavailableReason> {
+    self.into_cookie_with_semantics(LegacyProjectionSemantics::Standard)
+  }
+
+  pub(crate) fn into_cookie_with_semantics(
+    self,
+    semantics: LegacyProjectionSemantics,
+  ) -> Result<Cookie, UnavailableReason> {
     let value = match self.value {
       CookieValue::Plain(value) => value.into_output_string(),
       CookieValue::Unavailable(reason) => return Err(reason),
@@ -523,19 +588,27 @@ impl CookieRecord {
     Ok(Cookie {
       domain: self.domain.raw().to_owned(),
       path: self.path,
-      secure: self.attributes.legacy_secure(),
+      secure: self.attributes.legacy_secure(semantics),
       expires: self.attributes.legacy_expires(),
       name: self.name,
       value,
-      http_only: self.attributes.legacy_http_only(),
+      http_only: self.attributes.legacy_http_only(semantics),
       same_site: self.attributes.legacy_same_site(),
     })
   }
 
+  #[cfg(test)]
   pub(crate) fn into_detailed_cookie(self) -> Result<DetailedCookie, UnavailableReason> {
-    let context = self.isolation.to_context();
+    self.into_detailed_cookie_with_semantics(LegacyProjectionSemantics::Standard)
+  }
+
+  pub(crate) fn into_detailed_cookie_with_semantics(
+    self,
+    semantics: LegacyProjectionSemantics,
+  ) -> Result<DetailedCookie, UnavailableReason> {
+    let context = self.isolation.to_context_with_semantics(semantics);
     self
-      .into_cookie()
+      .into_cookie_with_semantics(semantics)
       .map(|cookie| DetailedCookie { cookie, context })
   }
 }
@@ -560,19 +633,22 @@ impl FinalizedCookieRecord {
     &self.0.name
   }
 
-  pub(crate) fn into_cookie(self) -> Cookie {
+  pub(crate) fn into_cookie_with_semantics(self, semantics: LegacyProjectionSemantics) -> Cookie {
     // Construction proved this is Plain, so this match is exhaustive over the
     // sealed invariant and cannot silently discard a record.
     self
       .0
-      .into_cookie()
+      .into_cookie_with_semantics(semantics)
       .expect("finalized cookie record must contain a plain value")
   }
 
-  pub(crate) fn into_detailed_cookie(self) -> DetailedCookie {
+  pub(crate) fn into_detailed_cookie_with_semantics(
+    self,
+    semantics: LegacyProjectionSemantics,
+  ) -> DetailedCookie {
     self
       .0
-      .into_detailed_cookie()
+      .into_detailed_cookie_with_semantics(semantics)
       .expect("finalized cookie record must contain a plain value")
   }
 }
@@ -580,6 +656,35 @@ impl FinalizedCookieRecord {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn firefox_persistent_projection_preserves_historical_nonzero_boolean_semantics() {
+    let mut record = CookieRecord::from_cookie(
+      Cookie {
+        domain: ".example.test".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires: None,
+        name: "name".to_owned(),
+        value: "value".to_owned(),
+        http_only: false,
+        same_site: -1,
+      },
+      SourceRef::pending(0),
+    );
+    record.attributes.secure = Observation::Unknown(RawValue::Signed(2));
+    record.attributes.http_only = Observation::Unknown(RawValue::Signed(-1));
+
+    let standard = record.clone().into_cookie().expect("standard projection");
+    assert!(!standard.secure);
+    assert!(!standard.http_only);
+
+    let persistent = record
+      .into_cookie_with_semantics(LegacyProjectionSemantics::FirefoxPersistent)
+      .expect("Firefox persistent projection");
+    assert!(persistent.secure);
+    assert!(persistent.http_only);
+  }
 
   #[test]
   fn cipher_tier_detection_is_total_for_untrusted_bytes() {

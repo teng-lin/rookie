@@ -1,7 +1,9 @@
 use super::{
-  classify_windows_sharing_violation_with_probe, with_windows_locked_database_policy,
-  WindowsFallbackSource, WindowsLockedDatabasePolicy, WindowsLockedFile, WindowsSharingViolation,
+  classify_windows_sharing_violation_with_fallible_probe,
+  with_windows_locked_database_policy_with_runtime, WindowsFallbackSource,
+  WindowsLockedDatabasePolicy, WindowsLockedFile, WindowsRecoveryRequest, WindowsSharingViolation,
 };
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::sqlite;
 use anyhow::{anyhow, Result};
 use std::path::Path;
@@ -9,70 +11,90 @@ use std::path::Path;
 fn probe_windows_sharing_violation(
   db_path: &Path,
   include_wal: bool,
-) -> Option<WindowsSharingViolation> {
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Option<WindowsSharingViolation>> {
+  runtime.check()?;
   let wal_path = sqlite::sidecar(db_path, "-wal");
   let wal_metadata = std::fs::metadata(&wal_path);
+  runtime.check()?;
   let has_verified_nonempty_wal = wal_metadata
     .as_ref()
     .is_ok_and(|metadata| metadata.len() > 0);
 
-  if let Err(error) = std::fs::File::open(db_path) {
+  runtime.check()?;
+  let database_open = std::fs::File::open(db_path);
+  runtime.check()?;
+  if let Err(error) = database_open {
     if let Some(code) = super::windows_sharing_code(&error) {
-      return Some(WindowsSharingViolation {
+      return Ok(Some(WindowsSharingViolation {
         locked_file: WindowsLockedFile::Database,
         locked_path: db_path.to_path_buf(),
         has_verified_nonempty_wal,
         os_error: code,
-      });
+      }));
     }
   }
 
   if !include_wal {
-    return None;
+    return Ok(None);
   }
 
   if let Err(error) = &wal_metadata {
     if let Some(code) = super::windows_sharing_code(error) {
-      return Some(WindowsSharingViolation {
+      return Ok(Some(WindowsSharingViolation {
         locked_file: WindowsLockedFile::WriteAheadLog,
         locked_path: wal_path,
         // A share-denied metadata lookup cannot prove that the WAL is
         // nonempty, so it is ineligible for raw-copy fallback.
         has_verified_nonempty_wal: false,
         os_error: code,
-      });
+      }));
     }
-    return None;
+    return Ok(None);
   }
 
   if has_verified_nonempty_wal {
-    if let Err(error) = std::fs::File::open(&wal_path) {
+    runtime.check()?;
+    let wal_open = std::fs::File::open(&wal_path);
+    runtime.check()?;
+    if let Err(error) = wal_open {
       if let Some(code) = super::windows_sharing_code(&error) {
-        return Some(WindowsSharingViolation {
+        return Ok(Some(WindowsSharingViolation {
           locked_file: WindowsLockedFile::WriteAheadLog,
           locked_path: wal_path,
           has_verified_nonempty_wal: true,
           os_error: code,
-        });
+        }));
       }
     }
   }
 
-  None
+  Ok(None)
 }
 
 fn classify_windows_sharing_violation(
   db_path: &Path,
   error: &anyhow::Error,
-) -> Option<WindowsSharingViolation> {
-  classify_windows_sharing_violation_with_probe(db_path, error, probe_windows_sharing_violation)
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Option<WindowsSharingViolation>> {
+  classify_windows_sharing_violation_with_fallible_probe(db_path, error, |path, include_wal| {
+    probe_windows_sharing_violation(path, include_wal, runtime)
+  })
 }
 
 fn create_windows_shadow_source(
   db_path: &Path,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<WindowsFallbackSource<crate::utils::TempDir>> {
+  runtime.check()?;
   let temp_dir = crate::utils::TempDir::new()?;
-  crate::windows::shadow_copy::shadow_copy(db_path.to_path_buf(), temp_dir.path().to_path_buf())?;
+  runtime.check()?;
+  crate::windows::shadow_copy::shadow_copy(
+    db_path.to_path_buf(),
+    temp_dir.path().to_path_buf(),
+    runtime,
+  )?;
+  runtime.check()?;
   let file_name = db_path
     .file_name()
     .ok_or_else(|| anyhow!("Database path has no file name: {}", db_path.display()))?;
@@ -83,20 +105,28 @@ fn create_windows_shadow_source(
   })
 }
 
-fn release_windows_lock(locked_path: &Path) -> bool {
+fn windows_privileged(runtime: &BoundaryRuntime<'_>) -> Result<bool> {
+  runtime.check()?;
+  let privileged = privilege::user::privileged();
+  runtime.check()?;
+  Ok(privileged)
+}
+
+fn release_windows_lock(locked_path: &Path, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
   // SAFETY: This wrapper is only called when the public `force_kill` choice
   // selected the disruptive policy. Restart Manager owns the registered path
   // for the duration of its internal session.
   unsafe {
-    match crate::windows::restart_manager::release_file_lock(locked_path, true) {
+    match crate::windows::restart_manager::release_file_lock(locked_path, true, runtime) {
       Ok(
         crate::windows::restart_manager::FileLockStatus::Unlocked
         | crate::windows::restart_manager::FileLockStatus::Released { .. },
-      ) => true,
-      Ok(crate::windows::restart_manager::FileLockStatus::Locked { .. }) => false,
+      ) => Ok(true),
+      Ok(crate::windows::restart_manager::FileLockStatus::Locked { .. }) => Ok(false),
+      Err(error) if error.downcast_ref::<BoundaryStop>().is_some() => Err(error),
       Err(error) => {
         log::warn!("Restart Manager could not release the Windows database lock: {error}");
-        false
+        Ok(false)
       }
     }
   }
@@ -104,18 +134,25 @@ fn release_windows_lock(locked_path: &Path) -> bool {
 
 /// Runs a source-inspection query through the non-disruptive locked-file
 /// recovery policy used before `any_browser` selects a decoder.
-pub(crate) fn with_non_disruptive_recovery<T, Query>(db_path: &Path, query: Query) -> Result<T>
+pub(crate) fn with_non_disruptive_recovery<T, Query>(
+  db_path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+  query: Query,
+) -> Result<T>
 where
-  Query: FnMut(&Path) -> Result<T>,
+  Query: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<T>,
 {
-  with_windows_locked_database_policy(
-    db_path,
-    WindowsLockedDatabasePolicy::NonDisruptive,
+  with_windows_locked_database_policy_with_runtime(
+    WindowsRecoveryRequest {
+      db_path,
+      policy: WindowsLockedDatabasePolicy::NonDisruptive,
+      runtime,
+    },
     query,
     classify_windows_sharing_violation,
-    privilege::user::privileged,
+    windows_privileged,
     create_windows_shadow_source,
-    |_| false,
+    |_, _| Ok(false),
   )
 }
 
@@ -124,17 +161,21 @@ where
 pub(crate) fn with_force_kill_recovery<T, Query>(
   db_path: &Path,
   force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
   query: Query,
 ) -> Result<T>
 where
-  Query: FnMut(&Path) -> Result<T>,
+  Query: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<T>,
 {
-  with_windows_locked_database_policy(
-    db_path,
-    WindowsLockedDatabasePolicy::from_force_kill(force_kill),
+  with_windows_locked_database_policy_with_runtime(
+    WindowsRecoveryRequest {
+      db_path,
+      policy: WindowsLockedDatabasePolicy::from_force_kill(force_kill),
+      runtime,
+    },
     query,
     classify_windows_sharing_violation,
-    privilege::user::privileged,
+    windows_privileged,
     create_windows_shadow_source,
     release_windows_lock,
   )
@@ -164,6 +205,12 @@ mod tests {
       .expect("open exclusive Windows fixture handle")
   }
 
+  fn classify_for_test(db_path: &Path, error: &anyhow::Error) -> Option<WindowsSharingViolation> {
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = BoundaryRuntime::standard(&clock);
+    classify_windows_sharing_violation(db_path, error, &runtime).expect("classification probe")
+  }
+
   #[test]
   fn production_classifier_retains_a_direct_typed_sharing_violation() {
     let directory = crate::utils::TempDir::new().expect("temp dir");
@@ -174,7 +221,7 @@ mod tests {
       std::io::Error::from_raw_os_error(super::super::ERROR_SHARING_VIOLATION_CODE),
     );
 
-    let violation = classify_windows_sharing_violation(&db, &error)
+    let violation = classify_for_test(&db, &error)
       .expect("direct typed sharing error remains classified after probing");
     assert_eq!(violation.locked_file, WindowsLockedFile::Database);
     assert_eq!(violation.locked_path, db);
@@ -193,8 +240,7 @@ mod tests {
       os_error,
     );
 
-    let violation =
-      classify_windows_sharing_violation(&db, &error).expect("native database sharing violation");
+    let violation = classify_for_test(&db, &error).expect("native database sharing violation");
     assert_eq!(violation.locked_file, WindowsLockedFile::Database);
     assert_eq!(violation.locked_path, db);
     assert!(!violation.has_verified_nonempty_wal);
@@ -214,8 +260,7 @@ mod tests {
       os_error,
     );
 
-    let violation =
-      classify_windows_sharing_violation(&db, &error).expect("native WAL sharing violation");
+    let violation = classify_for_test(&db, &error).expect("native WAL sharing violation");
     assert_eq!(violation.locked_file, WindowsLockedFile::WriteAheadLog);
     assert_eq!(violation.locked_path, wal);
     assert!(violation.has_verified_nonempty_wal);

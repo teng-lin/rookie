@@ -50,6 +50,61 @@ pub(crate) trait Decoder<Source: ReadOnlySource, Record> {
   fn deadline_enforcement(&self) -> DeadlineEnforcement;
 }
 
+/// Runs a cooperative or enforceable acquisition according to its declared
+/// capability. Cooperative adapters get an outer final checkpoint because an
+/// in-process syscall can outlive the last checkpoint inside the adapter;
+/// enforceable adapters are responsible for their own exact completion race.
+pub(crate) fn acquire<Id: ?Sized, A: Acquire<Id>>(
+  acquire: &A,
+  id: &Id,
+  runtime: &BoundaryRuntime<'_>,
+) -> anyhow::Result<A::Source> {
+  runtime.check()?;
+  let enforcement = acquire.deadline_enforcement();
+  let source = acquire.open(id, runtime)?;
+  if enforcement == DeadlineEnforcement::Cooperative {
+    runtime.check()?;
+  }
+  Ok(source)
+}
+
+/// Runs a decoder while enforcing the orchestration responsibility declared
+/// by its capability metadata.
+pub(crate) fn decode<Source, Record, D>(
+  decoder: &D,
+  source: &Source,
+  sink: &mut dyn RecordSink<Record>,
+  runtime: &BoundaryRuntime<'_>,
+) -> anyhow::Result<D::Summary>
+where
+  Source: ReadOnlySource,
+  D: Decoder<Source, Record>,
+{
+  runtime.check()?;
+  let enforcement = decoder.deadline_enforcement();
+  let summary = decoder.decode(source, sink, runtime)?;
+  if enforcement == DeadlineEnforcement::Cooperative {
+    runtime.check()?;
+  }
+  Ok(summary)
+}
+
+/// Key providers return a structured set of tier outcomes, so terminal request
+/// state remains a separate typed result instead of becoming a provider error.
+pub(crate) fn keys<Request: ?Sized, P: KeyProvider<Request>>(
+  provider: &P,
+  request: &Request,
+  runtime: &BoundaryRuntime<'_>,
+) -> anyhow::Result<P::Keys> {
+  runtime.check()?;
+  let enforcement = provider.deadline_enforcement();
+  let keys = provider.keys(request, runtime);
+  if enforcement == DeadlineEnforcement::Cooperative {
+    runtime.check()?;
+  }
+  Ok(keys)
+}
+
 impl ReadOnlySource for rusqlite::Connection {}
 
 #[cfg(test)]
@@ -107,13 +162,13 @@ mod tests {
       clock: &clock,
       records: RefCell::new(Vec::new()),
     };
-    decoder
-      .decode(
-        &rusqlite::Connection::open_in_memory().unwrap(),
-        &mut sink,
-        &BoundaryRuntime::new(&clock, deadline),
-      )
-      .expect_err("third emission starts at the deadline");
+    decode(
+      &decoder,
+      &rusqlite::Connection::open_in_memory().unwrap(),
+      &mut sink,
+      &BoundaryRuntime::new(&clock, deadline),
+    )
+    .expect_err("third emission starts at the deadline");
     assert_eq!(sink.records.into_inner(), [0, 1]);
     assert_eq!(
       decoder.deadline_enforcement(),

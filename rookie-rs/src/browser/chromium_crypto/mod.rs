@@ -354,12 +354,11 @@ pub(crate) fn retrieve_key_outcomes<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> ChromiumKeyOutcomes
+) -> anyhow::Result<ChromiumKeyOutcomes>
 where
   Provider: KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
 {
-  let _capability = provider.deadline_enforcement();
-  provider.keys(context, runtime)
+  crate::common::boundary::keys(provider, context, runtime)
 }
 
 /// Provider used only to bridge the current untyped platform retrievers.
@@ -541,7 +540,7 @@ mod tests {
 
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-    let outcomes = retrieve_key_outcomes(&provider, "installation-1", &runtime);
+    let outcomes = retrieve_key_outcomes(&provider, "installation-1", &runtime).unwrap();
     assert_eq!(provider.calls.get(), 1);
     assert_eq!(provider.contexts.borrow().as_slice(), ["installation-1"]);
     assert!(matches!(outcomes.v10, ChromiumKeyOutcome::Success(_)));
@@ -554,7 +553,7 @@ mod tests {
     let provider = LegacySharedKeyProvider::new(vec![vec![0x2a; 16]]);
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-    let outcomes = retrieve_key_outcomes(&provider, &(), &runtime);
+    let outcomes = retrieve_key_outcomes(&provider, &(), &runtime).unwrap();
     for cipher in [
       ChromiumCipherVersion::V10,
       ChromiumCipherVersion::V11,
@@ -572,7 +571,7 @@ mod tests {
     let provider = LegacySharedKeyProvider::new(vec![]);
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-    let outcomes = retrieve_key_outcomes(&provider, &(), &runtime);
+    let outcomes = retrieve_key_outcomes(&provider, &(), &runtime).unwrap();
     assert_eq!(outcomes, ChromiumKeyOutcomes::default());
   }
 }

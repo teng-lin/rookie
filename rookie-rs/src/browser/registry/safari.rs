@@ -208,6 +208,17 @@ pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
   Ok(outcome)
 }
 
+fn discover_safari_with_runtime<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
+  let outcome = discover_safari_with_context(context, browser_id)?;
+  runtime.check()?;
+  Ok(outcome)
+}
+
 pub(super) fn safari_report_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
@@ -259,10 +270,13 @@ where
           source.rows_skipped = extraction.stats.records_skipped;
           source.acquisition_attempts = extraction.acquisition_attempts;
           source.row_error = extraction.row_error;
-          source.cookies = extraction.cookies;
           source.records = extraction.records;
         }
         Err(error) => {
+          if let Some(stop) = boundary_stop_from_error(&error) {
+            outcome.boundary_stop.get_or_insert(stop);
+            return outcome;
+          }
           // Exhausting the retries is itself the failure, so report the
           // attempts spent rather than the placeholder.
           source.acquisition_attempts = crate::browser::safari::STABLE_READ_ATTEMPTS as u32;
@@ -280,6 +294,26 @@ where
         }
       }
     }
+  }
+  outcome
+}
+
+fn boundary_stop_from_error(
+  error: &anyhow::Error,
+) -> Option<crate::common::deadline::BoundaryStop> {
+  error.chain().find_map(|cause| {
+    cause
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .copied()
+  })
+}
+
+fn retain_safari_runtime_stop(
+  mut outcome: EngineExtractionDraft,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> EngineExtractionDraft {
+  if let Err(stop) = runtime.check() {
+    outcome.boundary_stop.get_or_insert(stop);
   }
   outcome
 }
@@ -316,7 +350,7 @@ pub(crate) fn safari_report_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut outcome = discover_safari_with_context(&context, browser_id)?;
+  let mut outcome = discover_safari_with_runtime(&context, browser_id, runtime)?;
   select_engine_profiles(
     &mut outcome,
     browser_id,
@@ -327,8 +361,7 @@ pub(crate) fn safari_report_with_runtime(
       crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
     })
   });
-  runtime.check()?;
-  Ok(outcome)
+  Ok(retain_safari_runtime_stop(outcome, runtime))
 }
 
 pub(super) fn select_legacy_safari_profile(
@@ -361,29 +394,51 @@ pub(crate) fn legacy_safari_outcome_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut outcome = discover_safari_with_context(&context, browser_id)?;
+  let mut outcome = discover_safari_with_runtime(&context, browser_id, runtime)?;
   select_legacy_safari_profile(&mut outcome, browser_id)?;
-  Ok(populate_safari_sources(
-    outcome,
-    domains.as_deref(),
-    |path, domains| {
-      query_safari_file(path, domains, |path, domains| {
-        crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
-      })
-    },
-  ))
+  let outcome = populate_safari_sources(outcome, domains.as_deref(), |path, domains| {
+    query_safari_file(path, domains, |path, domains| {
+      crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
+    })
+  });
+  Ok(retain_safari_runtime_stop(outcome, runtime))
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn safari_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+pub(crate) fn safari_profiles_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  discover_safari_with_context(&context, browser_id)
+  discover_safari_with_runtime(&context, browser_id, runtime)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
   use anyhow::anyhow;
+  use std::cell::Cell;
+
+  fn discovered_source_draft(path: PathBuf) -> EngineSourceDraft {
+    EngineSourceDraft {
+      path,
+      role: SOURCE_ROLE_PERSISTENT,
+      format: "safari_binarycookies",
+      precedence: PERSISTENT_SOURCE_PRECEDENCE,
+      selected: true,
+      cookies: Vec::new(),
+      records: Vec::new(),
+      rows_seen: 0,
+      rows_skipped: 0,
+      acquisition: SourceAcquisition::StableFileImage,
+      acquisition_attempts: 0,
+      diagnostics: Vec::new(),
+      error: None,
+      error_stage: SourceFailureStage::Acquisition,
+      row_error: None,
+    }
+  }
 
   fn discovered_source() -> EngineExtractionDraft {
     let installation_path = PathBuf::from("/Users/rookie/Library");
@@ -408,23 +463,9 @@ mod tests {
         path: profile_path.clone(),
         is_default: true,
         persistent_source_discovered: true,
-        sources: vec![EngineSourceDraft {
-          path: profile_path.join(SAFARI_COOKIE_FILE),
-          role: SOURCE_ROLE_PERSISTENT,
-          format: "safari_binarycookies",
-          precedence: PERSISTENT_SOURCE_PRECEDENCE,
-          selected: true,
-          cookies: Vec::new(),
-          records: Vec::new(),
-          rows_seen: 0,
-          rows_skipped: 0,
-          acquisition: SourceAcquisition::StableFileImage,
-          acquisition_attempts: 0,
-          diagnostics: Vec::new(),
-          error: None,
-          error_stage: SourceFailureStage::Acquisition,
-          row_error: None,
-        }],
+        sources: vec![discovered_source_draft(
+          profile_path.join(SAFARI_COOKIE_FILE),
+        )],
       }],
       discovery_issues: Vec::new(),
     }
@@ -515,5 +556,88 @@ mod tests {
       acquisition.error.as_deref(),
       Some(expected_acquisition_error.as_str())
     );
+  }
+
+  #[test]
+  fn source_population_retains_success_before_typed_stop() {
+    use crate::common::deadline::BoundaryStop;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let mut discovered = discovered_source();
+      discovered.profiles[0]
+        .sources
+        .push(discovered_source_draft(PathBuf::from(
+          "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+        )));
+      let calls = Cell::new(0);
+
+      let populated = populate_safari_sources(discovered, None, |_, _| {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+          Ok(crate::browser::safari::SafariFileDraft {
+            cookies: Vec::new(),
+            records: Vec::new(),
+            stats: crate::browser::safari::SafariExtractionStats {
+              records_seen: 7,
+              records_skipped: 2,
+            },
+            row_error: None,
+            acquisition_attempts: 1,
+          })
+        } else {
+          Err(
+            anyhow::Error::new(stop).context(crate::browser::safari::SafariParseFailure {
+              stats: crate::browser::safari::SafariExtractionStats::default(),
+            }),
+          )
+        }
+      });
+
+      assert_eq!(calls.get(), 2);
+      assert_eq!(populated.boundary_stop, Some(stop));
+      assert_eq!(populated.profiles[0].sources[0].rows_seen, 7);
+      assert!(populated.profiles[0].sources[0].error.is_none());
+      assert_eq!(populated.profiles[0].sources[1].rows_seen, 0);
+      assert!(populated.profiles[0].sources[1].error.is_none());
+    }
+  }
+
+  #[test]
+  fn final_runtime_stop_is_retained_instead_of_discarding_outcome() {
+    use crate::common::deadline::{
+      test_clock::ManualClock, BoundaryRuntime, BoundaryStop, CancellationToken, Deadline,
+    };
+    use std::time::Duration;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let deadline = match stop {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(token.cancel());
+          Deadline::after(&clock, Duration::from_secs(1))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(token.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(1))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+
+      let retained = retain_safari_runtime_stop(discovered_source(), &runtime);
+
+      assert_eq!(retained.boundary_stop, Some(stop));
+      assert_eq!(retained.profiles.len(), 1);
+    }
   }
 }

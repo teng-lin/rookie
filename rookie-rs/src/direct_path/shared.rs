@@ -58,15 +58,22 @@ fn validate_regular_file(path: &Path) -> Result<()> {
   Ok(())
 }
 
-pub(super) fn read_header(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn read_header_with_runtime(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<u8>> {
+  runtime.check()?;
   validate_regular_file(path)?;
+  runtime.check()?;
   let file = std::fs::File::open(path)
     .with_context(|| format!("can't open cookie source {}", path.display()))?;
+  runtime.check()?;
   let mut header = Vec::with_capacity(16);
   file
     .take(16)
     .read_to_end(&mut header)
     .with_context(|| format!("can't read cookie source header {}", path.display()))?;
+  runtime.check()?;
   Ok(header)
 }
 
@@ -86,18 +93,28 @@ pub(super) fn classify_header(header: &[u8]) -> Result<Option<CookieSourceKind>>
   ))
 }
 
-pub(super) fn classify_sqlite(path: &Path) -> Result<CookieSourceKind> {
-  let source = crate::common::sqlite::with_browser_database(path.to_path_buf(), |connection| {
-    let table_exists = |name: &str| -> rusqlite::Result<bool> {
-      connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
-        [name],
-        |row| row.get(0),
-      )
-    };
-    Ok((table_exists("cookies")?, table_exists("moz_cookies")?))
-  })?
+pub(super) fn classify_sqlite_with_runtime(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  runtime.check()?;
+  let source = crate::common::sqlite::with_browser_database_with_runtime(
+    path.to_path_buf(),
+    |connection| {
+      runtime.check()?;
+      let table_exists = |name: &str| -> rusqlite::Result<bool> {
+        connection.query_row(
+          "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+          [name],
+          |row| row.get(0),
+        )
+      };
+      Ok((table_exists("cookies")?, table_exists("moz_cookies")?))
+    },
+    runtime,
+  )?
   .into_value();
+  runtime.check()?;
 
   match source {
     (true, false) => Ok(CookieSourceKind::ChromiumSqlite),
@@ -117,12 +134,22 @@ pub(super) fn classify_sqlite(path: &Path) -> Result<CookieSourceKind> {
   }
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(test)]
 pub(super) fn classify_path(path: &Path) -> Result<CookieSourceKind> {
-  let header = read_header(path)?;
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  classify_path_with_runtime(path, &runtime)
+}
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(super) fn classify_path_with_runtime(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  let header = read_header_with_runtime(path, runtime)?;
   match classify_header(&header)? {
     Some(source) => Ok(source),
-    None => classify_sqlite(path),
+    None => classify_sqlite_with_runtime(path, runtime),
   }
 }
 

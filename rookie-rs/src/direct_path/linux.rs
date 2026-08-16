@@ -14,18 +14,22 @@ pub(super) const AUTOMATIC_BROWSER_IDS: &[&str] = &[
   "chrome", "brave", "chromium", "edge", "opera", "vivaldi", "arc",
 ];
 
-pub(super) fn classify_cookie_source(path: &Path) -> Result<CookieSourceKind> {
-  shared::classify_path(path)
+pub(super) fn classify_cookie_source(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  shared::classify_path_with_runtime(path, runtime)
 }
 
 pub(super) fn cookies_from_path(
   request: DirectPathRequest,
   source: CookieSourceKind,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   match source {
-    CookieSourceKind::ChromiumSqlite => automatic_chromium(request.path, request.domains),
+    CookieSourceKind::ChromiumSqlite => automatic_chromium(request.path, request.domains, runtime),
     CookieSourceKind::MozillaSqlite => {
-      crate::browser::mozilla::firefox_based(request.path, request.domains)
+      crate::browser::mozilla::firefox_based_with_runtime(request.path, request.domains, runtime)
     }
     CookieSourceKind::SafariBinaryCookies | CookieSourceKind::InternetExplorerEse => {
       Err(unsupported_target(source))
@@ -33,27 +37,31 @@ pub(super) fn cookies_from_path(
   }
 }
 
-pub(super) fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Cookie>> {
+pub(super) fn chromium_cookies_from_path(
+  request: ChromiumPathRequest,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
   validate_lock_policy(request.locked_database_policy)?;
   match request.credentials {
-    ChromiumCredentialSource::Automatic => automatic_chromium(request.path, request.domains),
+    ChromiumCredentialSource::Automatic => {
+      automatic_chromium(request.path, request.domains, runtime)
+    }
     ChromiumCredentialSource::PlaintextOnly => {
-      crate::browser::chromium::chromium_based_plaintext_only(request.path, request.domains, false)
+      crate::browser::chromium::chromium_based_plaintext_only_with_runtime(
+        request.path,
+        request.domains,
+        false,
+        runtime,
+      )
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
-      let clock = crate::common::deadline::SystemClock;
-      let deadline = crate::common::deadline::Deadline::after(
-        &clock,
-        crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
-      );
-      let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
-      let outcomes = browser_id_outcomes(&browser_id, &runtime)?;
+      let outcomes = browser_id_outcomes(&browser_id, runtime)?;
       crate::browser::chromium::query_cookies_with_key_outcomes_runtime(
         outcomes,
         request.path,
         request.domains,
         false,
-        &runtime,
+        runtime,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
@@ -64,33 +72,32 @@ pub(super) fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result
 
 pub(super) fn chromium_cookies_from_path_detailed(
   request: ChromiumPathRequest,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
   validate_lock_policy(request.locked_database_policy)?;
   match request.credentials {
-    ChromiumCredentialSource::Automatic => {
-      automatic_chromium_detailed(AUTOMATIC_BROWSER_IDS, request.path, request.domains)
-    }
+    ChromiumCredentialSource::Automatic => automatic_chromium_detailed(
+      AUTOMATIC_BROWSER_IDS,
+      request.path,
+      request.domains,
+      runtime,
+    ),
     ChromiumCredentialSource::PlaintextOnly => {
-      crate::browser::chromium::chromium_based_detailed_plaintext_only(
+      crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
         request.path,
         request.domains,
         false,
+        runtime,
       )
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
-      let clock = crate::common::deadline::SystemClock;
-      let deadline = crate::common::deadline::Deadline::after(
-        &clock,
-        crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
-      );
-      let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
-      let outcomes = browser_id_outcomes(&browser_id, &runtime)?;
+      let outcomes = browser_id_outcomes(&browser_id, runtime)?;
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
         outcomes,
         request.path,
         request.domains,
         false,
-        &runtime,
+        runtime,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
@@ -102,8 +109,9 @@ pub(super) fn chromium_cookies_from_path_detailed(
 pub(crate) fn automatic_chromium(
   path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  automatic_chromium_cookies(AUTOMATIC_BROWSER_IDS, path, domains)
+  automatic_chromium_cookies(AUTOMATIC_BROWSER_IDS, path, domains, runtime)
 }
 
 fn validate_lock_policy(policy: ChromiumLockedDatabasePolicy) -> Result<()> {

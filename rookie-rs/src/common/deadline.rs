@@ -57,14 +57,6 @@ impl Deadline {
     self.expires_at.saturating_duration_since(clock.now())
   }
 
-  pub(crate) fn check(self, clock: &dyn Clock) -> Result<(), BoundaryExpired> {
-    if self.remaining(clock).is_zero() {
-      Err(BoundaryExpired)
-    } else {
-      Ok(())
-    }
-  }
-
   /// One absolute cleanup ceiling derived from the original deadline. Calling
   /// this after expiry never grants a fresh grace period.
   pub(crate) fn cleanup_deadline(self, grace: Duration) -> Self {
@@ -75,43 +67,35 @@ impl Deadline {
         .unwrap_or(self.expires_at),
     }
   }
-
-  /// A duration ceiling for an IPC sender. This is not a transferable
-  /// deadline: a receiver must also retain the parent absolute deadline (or a
-  /// transport-native absolute timestamp) so transit cannot inflate budget.
-  #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-  pub(crate) fn ipc_sender_ceiling(self, clock: &dyn Clock) -> Duration {
-    self.remaining(clock)
-  }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BoundaryExpired;
-
-impl fmt::Display for BoundaryExpired {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    formatter.write_str("operation deadline expired")
-  }
-}
-
-impl std::error::Error for BoundaryExpired {}
 
 #[derive(Clone, Default)]
 pub(crate) struct CancellationToken(Arc<AtomicU8>);
 
 impl CancellationToken {
-  #[cfg_attr(not(test), allow(dead_code))]
-  pub(crate) fn cancel(&self) {
-    self.0.store(1, Ordering::Release);
+  /// Records cancellation if no terminal request reason has already won.
+  ///
+  /// The first writer wins, so concurrent cancellation and resource-budget
+  /// exhaustion cannot change the reason observed by later boundaries.
+  #[allow(dead_code)] // The public request object in PR4 will drive this internal control seam.
+  pub(crate) fn cancel(&self) -> bool {
+    self
+      .0
+      .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+      .is_ok()
   }
 
   pub(crate) fn is_cancelled(&self) -> bool {
     self.0.load(Ordering::Acquire) == 1
   }
 
-  #[cfg_attr(not(test), allow(dead_code))]
-  pub(crate) fn exhaust_resources(&self) {
-    self.0.store(2, Ordering::Release);
+  /// Records resource exhaustion if no terminal request reason has won yet.
+  #[allow(dead_code)] // The public request object in PR4 will drive this internal control seam.
+  pub(crate) fn exhaust_resources(&self) -> bool {
+    self
+      .0
+      .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+      .is_ok()
   }
 
   pub(crate) fn is_resource_exhausted(&self) -> bool {
@@ -179,7 +163,7 @@ impl<'a> BoundaryRuntime<'a> {
     }
   }
 
-  #[cfg(test)]
+  #[allow(dead_code)] // The public request object in PR4 will inject the shared control token.
   pub(crate) fn with_stop(
     clock: &'a dyn Clock,
     deadline: Deadline,
@@ -249,7 +233,7 @@ mod tests {
     clock.advance(Duration::from_secs(7));
     assert_eq!(deadline.remaining(&clock), Duration::from_secs(3));
     clock.advance(Duration::from_secs(3));
-    assert_eq!(deadline.check(&clock), Err(BoundaryExpired));
+    assert!(deadline.remaining(&clock).is_zero());
     assert_eq!(
       deadline
         .cleanup_deadline(Duration::from_secs(2))
@@ -270,7 +254,7 @@ mod tests {
     let clock = ManualClock::default();
     let cancellation = CancellationToken::default();
     let deadline = Deadline::after(&clock, Duration::from_secs(1));
-    cancellation.cancel();
+    assert!(cancellation.cancel());
     clock.advance(Duration::from_secs(1));
     assert_eq!(
       checkpoint(&clock, deadline, &cancellation),
@@ -279,21 +263,24 @@ mod tests {
   }
 
   #[test]
-  fn ipc_sender_ceiling_never_claims_to_replace_the_parent_deadline() {
+  fn first_terminal_request_reason_wins_deterministically() {
     let clock = ManualClock::default();
-    let deadline = Deadline::after(&clock, Duration::from_secs(9));
-    let mut observed = Vec::new();
-    for elapsed in [2, 3, 4] {
-      clock.advance(Duration::from_secs(elapsed));
-      observed.push(deadline.ipc_sender_ceiling(&clock));
-    }
+    let deadline = Deadline::after(&clock, Duration::from_secs(10));
+
+    let cancellation = CancellationToken::default();
+    assert!(cancellation.cancel());
+    assert!(!cancellation.exhaust_resources());
     assert_eq!(
-      observed,
-      [
-        Duration::from_secs(7),
-        Duration::from_secs(4),
-        Duration::ZERO
-      ]
+      checkpoint(&clock, deadline, &cancellation),
+      Err(BoundaryStop::Cancelled)
+    );
+
+    let exhausted = CancellationToken::default();
+    assert!(exhausted.exhaust_resources());
+    assert!(!exhausted.cancel());
+    assert_eq!(
+      checkpoint(&clock, deadline, &exhausted),
+      Err(BoundaryStop::ResourceExhausted)
     );
   }
 }

@@ -7,27 +7,82 @@ use crate::browser::chromium_crypto::ChromiumKeyOutcomes;
 use crate::browser::chromium_platform_keys::{
   ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession,
 };
+use crate::common::deadline::BoundaryRuntime;
 use crate::enums::{Cookie, DetailedCookie};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-pub(super) fn classify_cookie_source(path: &Path) -> Result<CookieSourceKind> {
-  classify_cookie_source_with(
+pub(super) fn classify_cookie_source(
+  path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  classify_cookie_source_with_runtime(
     path,
-    |source| {
+    runtime,
+    |source, runtime| {
       crate::browser::chromium_database_acquisition::with_non_disruptive_recovery(
         source,
-        shared::classify_sqlite,
+        runtime,
+        shared::classify_sqlite_with_runtime,
       )
     },
-    shared::read_header,
+    shared::read_header_with_runtime,
   )
 }
 
-fn classify_cookie_source_without_platform_recovery(path: &Path) -> Result<CookieSourceKind> {
-  classify_cookie_source_with(path, shared::classify_sqlite, shared::read_header)
+fn classify_cookie_source_without_platform_recovery(
+  path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  classify_cookie_source_with_runtime(
+    path,
+    runtime,
+    shared::classify_sqlite_with_runtime,
+    shared::read_header_with_runtime,
+  )
 }
 
+fn classify_cookie_source_with_runtime<Recover, ReadHeader>(
+  path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+  mut recover: Recover,
+  mut read_header: ReadHeader,
+) -> Result<CookieSourceKind>
+where
+  Recover: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<CookieSourceKind>,
+  ReadHeader: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<Vec<u8>>,
+{
+  runtime.check()?;
+  let sqlite_result = recover(path, runtime);
+  runtime.check()?;
+  if let Ok(source) = sqlite_result {
+    return Ok(source);
+  }
+  let sqlite_error = sqlite_result.expect_err("successful classification returned above");
+  runtime.check()?;
+  let header_result = read_header(path, runtime);
+  runtime.check()?;
+  let header = match header_result {
+    Ok(header) => header,
+    Err(header_error) if shared::classification_reason(&header_error).is_some() => {
+      return Err(header_error);
+    }
+    Err(header_error) => {
+      return Err(sqlite_error.context(format!(
+        "cookie source signature fallback also failed: {header_error:#}"
+      )));
+    }
+  };
+  runtime.check()?;
+  let classified = shared::classify_header(&header);
+  runtime.check()?;
+  match classified? {
+    Some(source) => Ok(source),
+    None => Err(sqlite_error),
+  }
+}
+
+#[cfg(test)]
 fn classify_cookie_source_with<Recover, ReadHeader>(
   path: &Path,
   mut recover: Recover,
@@ -75,6 +130,12 @@ mod tests {
 
   impl std::error::Error for SqliteAcquisitionFailure {}
 
+  fn read_header(path: &Path) -> Result<Vec<u8>> {
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = BoundaryRuntime::standard(&clock);
+    shared::read_header_with_runtime(path, &runtime)
+  }
+
   #[test]
   fn signature_fallback_failure_keeps_the_sqlite_acquisition_chain() {
     let error = classify_cookie_source_with(
@@ -103,7 +164,7 @@ mod tests {
     let error = classify_cookie_source_with(
       &missing,
       |_| Err(SqliteAcquisitionFailure.into()),
-      shared::read_header,
+      read_header,
     )
     .unwrap_err();
 
@@ -148,27 +209,32 @@ mod tests {
 pub(super) fn cookies_from_path(
   request: DirectPathRequest,
   source: CookieSourceKind,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   match source {
     CookieSourceKind::ChromiumSqlite => Err(invalid_options(
       InvalidDirectPathOptionsReason::MissingLocalStateFile,
     )),
     CookieSourceKind::MozillaSqlite => {
-      crate::browser::mozilla::firefox_based(request.path, request.domains)
+      crate::browser::mozilla::firefox_based_with_runtime(request.path, request.domains, runtime)
     }
     CookieSourceKind::SafariBinaryCookies => Err(unsupported_target(source)),
     CookieSourceKind::InternetExplorerEse => {
-      crate::browser::internet_explorer::internet_explorer_based(
+      crate::browser::internet_explorer::internet_explorer_based_with_runtime(
         request.path,
         request.domains,
         false,
+        runtime,
       )
     }
   }
 }
 
-pub(super) fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Cookie>> {
-  match chromium_from_path(request, ChromiumProjection::Legacy)? {
+pub(super) fn chromium_cookies_from_path(
+  request: ChromiumPathRequest,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  match chromium_from_path(request, ChromiumProjection::Legacy, runtime)? {
     ChromiumProjectionResult::Legacy(cookies) => Ok(cookies),
     ChromiumProjectionResult::Detailed(_) => {
       unreachable!("legacy request returned detailed cookies")
@@ -178,8 +244,9 @@ pub(super) fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result
 
 pub(super) fn chromium_cookies_from_path_detailed(
   request: ChromiumPathRequest,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  match chromium_from_path(request, ChromiumProjection::Detailed)? {
+  match chromium_from_path(request, ChromiumProjection::Detailed, runtime)? {
     ChromiumProjectionResult::Detailed(cookies) => Ok(cookies),
     ChromiumProjectionResult::Legacy(_) => {
       unreachable!("detailed request returned legacy cookies")
@@ -206,10 +273,11 @@ enum PreparedCredentials {
 fn chromium_from_path(
   request: ChromiumPathRequest,
   projection: ChromiumProjection,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProjectionResult> {
   let shutdown_allowed =
     request.locked_database_policy == ChromiumLockedDatabasePolicy::AllowProcessShutdown;
-  let classification_was_locked = match super::classify_cookie_source(&request.path)
+  let classification_was_locked = match super::classify_cookie_source(&request.path, runtime)
     .and_then(|source| super::require_chromium_source(&request.path, source))
   {
     Ok(()) => false,
@@ -226,7 +294,7 @@ fn chromium_from_path(
 
   // Caller-directed credential I/O must finish before the explicitly
   // authorized recovery policy is allowed to affect another process.
-  let credentials = prepare_credentials(request.credentials)?;
+  let credentials = prepare_credentials(request.credentials, runtime)?;
   if !classification_was_locked {
     return query_prepared(
       credentials,
@@ -234,6 +302,7 @@ fn chromium_from_path(
       request.domains,
       projection,
       shutdown_allowed,
+      runtime,
     );
   }
 
@@ -242,8 +311,9 @@ fn chromium_from_path(
   crate::browser::chromium_database_acquisition::with_force_kill_recovery(
     &original_path,
     true,
-    |acquired_path| {
-      let source = classify_cookie_source_without_platform_recovery(acquired_path)
+    runtime,
+    |acquired_path, runtime| {
+      let source = classify_cookie_source_without_platform_recovery(acquired_path, runtime)
         .map_err(|error| super::invalid_source_error(&original_path, error))?;
       super::require_chromium_source(&original_path, source)?;
       query_prepared_without_platform_recovery(
@@ -251,12 +321,17 @@ fn chromium_from_path(
         acquired_path.to_path_buf(),
         domains.as_deref(),
         projection,
+        runtime,
       )
     },
   )
 }
 
-fn prepare_credentials(source: ChromiumCredentialSource) -> Result<PreparedCredentials> {
+fn prepare_credentials(
+  source: ChromiumCredentialSource,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<PreparedCredentials> {
+  runtime.check()?;
   match source {
     ChromiumCredentialSource::Automatic => Err(invalid_options(
       InvalidDirectPathOptionsReason::MissingLocalStateFile,
@@ -269,7 +344,7 @@ fn prepare_credentials(source: ChromiumCredentialSource) -> Result<PreparedCrede
       InvalidDirectPathOptionsReason::BrowserIdNotSupportedOnTarget,
     )),
     ChromiumCredentialSource::LocalStateFile(local_state) => Ok(PreparedCredentials::KeyOutcomes(
-      local_state_outcomes(&local_state)?,
+      local_state_outcomes(&local_state, runtime)?,
     )),
   }
 }
@@ -280,23 +355,30 @@ fn query_prepared(
   domains: Option<Vec<String>>,
   projection: ChromiumProjection,
   force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProjectionResult> {
   match (credentials, projection) {
     (PreparedCredentials::PlaintextOnly, ChromiumProjection::Legacy) => {
-      crate::browser::chromium::chromium_based_plaintext_only(path, domains, force_kill)
-        .map(ChromiumProjectionResult::Legacy)
+      crate::browser::chromium::chromium_based_plaintext_only_with_runtime(
+        path, domains, force_kill, runtime,
+      )
+      .map(ChromiumProjectionResult::Legacy)
     }
     (PreparedCredentials::PlaintextOnly, ChromiumProjection::Detailed) => {
-      crate::browser::chromium::chromium_based_detailed_plaintext_only(path, domains, force_kill)
-        .map(ChromiumProjectionResult::Detailed)
+      crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+        path, domains, force_kill, runtime,
+      )
+      .map(ChromiumProjectionResult::Detailed)
     }
     (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_with_key_outcomes(outcomes, path, domains, force_kill)
-        .map(ChromiumProjectionResult::Legacy)
+      crate::browser::chromium::query_cookies_with_key_outcomes_runtime(
+        outcomes, path, domains, force_kill, runtime,
+      )
+      .map(ChromiumProjectionResult::Legacy)
     }
     (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Detailed) => {
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes(
-        outcomes, path, domains, force_kill,
+      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
+        outcomes, path, domains, force_kill, runtime,
       )
       .map(ChromiumProjectionResult::Detailed)
     }
@@ -308,27 +390,30 @@ fn query_prepared_without_platform_recovery(
   path: PathBuf,
   domains: Option<&[String]>,
   projection: ChromiumProjection,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProjectionResult> {
   match (credentials, projection) {
     (PreparedCredentials::PlaintextOnly, ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_plaintext_without_platform_recovery(path, domains)
-        .map(ChromiumProjectionResult::Legacy)
+      crate::browser::chromium::query_cookies_plaintext_without_platform_recovery(
+        path, domains, runtime,
+      )
+      .map(ChromiumProjectionResult::Legacy)
     }
     (PreparedCredentials::PlaintextOnly, ChromiumProjection::Detailed) => {
       crate::browser::chromium::query_detailed_cookies_plaintext_without_platform_recovery(
-        path, domains,
+        path, domains, runtime,
       )
       .map(ChromiumProjectionResult::Detailed)
     }
     (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Legacy) => {
       crate::browser::chromium::query_cookies_with_key_outcomes_without_platform_recovery(
-        outcomes, path, domains,
+        outcomes, path, domains, runtime,
       )
       .map(ChromiumProjectionResult::Legacy)
     }
     (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Detailed) => {
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_without_platform_recovery(
-        outcomes, path, domains,
+        outcomes, path, domains, runtime,
       )
       .map(ChromiumProjectionResult::Detailed)
     }
@@ -337,23 +422,18 @@ fn query_prepared_without_platform_recovery(
 
 fn local_state_outcomes(
   path: &Path,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<crate::browser::chromium_crypto::ChromiumKeyOutcomes> {
   if path.as_os_str().is_empty() {
     return Err(invalid_options(
       InvalidDirectPathOptionsReason::MissingLocalStateFile,
     ));
   }
-  let clock = crate::common::deadline::SystemClock;
-  let deadline = crate::common::deadline::Deadline::after(
-    &clock,
-    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
-  );
-  let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
   let credentials = ChromiumKeyCredentials::default();
   let mut session = HostKeySession::new();
   Ok(session.retrieve(
     ChromiumKeyRequest::for_installation("direct_path", &credentials, path, None),
-    &runtime,
+    runtime,
   ))
 }
 

@@ -436,8 +436,8 @@ fn sanitize_diagnostic(message: &str) -> String {
       let byte = bytes[cursor];
       if quote.is_some_and(|quote| byte == quote)
         || (quote.is_none()
-          && (byte.is_ascii_whitespace()
-            || matches!(byte, b',' | b';' | b')' | b']' | b'}' | b'\'' | b'"')))
+          && (matches!(byte, b',' | b';' | b')' | b']' | b'}' | b'\'' | b'"')
+            || (byte == b':' && bytes.get(cursor + 1).is_some_and(u8::is_ascii_whitespace))))
       {
         break;
       }
@@ -552,10 +552,17 @@ mod tests {
 
   #[test]
   fn aggregation_uses_the_full_typed_failure_key() {
+    let installation_id: InstallationId = "c".repeat(64).parse().expect("installation id");
+    let profile_id: ProfileId = "d".repeat(64).parse().expect("profile id");
     let failure = || Failure {
       code: IssueCode::provider_failed(),
       stage: ExtractionStageCode::decrypt(),
-      scope: FailureScope::Request,
+      scope: FailureScope::Source {
+        browser_id: BrowserId::known("chrome"),
+        installation_id: installation_id.clone(),
+        profile_id: profile_id.clone(),
+        source_digest: [7; 32],
+      },
       cause: FailureCause {
         kind: "credential_provider".to_owned(),
         provider: Some("secret_service".to_owned()),
@@ -578,11 +585,50 @@ mod tests {
     variant.stage = ExtractionStageCode::query();
     variants.push(variant);
     let mut variant = failure();
+    variant.scope = FailureScope::Request;
+    variants.push(variant);
+    let mut variant = failure();
+    variant.scope = FailureScope::Browser {
+      browser_id: BrowserId::known("chrome"),
+    };
+    variants.push(variant);
+    let mut variant = failure();
+    variant.scope = FailureScope::Profile {
+      browser_id: BrowserId::known("chrome"),
+      installation_id: installation_id.clone(),
+      profile_id: profile_id.clone(),
+    };
+    variants.push(variant);
+    let mut variant = failure();
+    variant.scope = FailureScope::Source {
+      browser_id: BrowserId::known("firefox"),
+      installation_id: installation_id.clone(),
+      profile_id: profile_id.clone(),
+      source_digest: [7; 32],
+    };
+    variants.push(variant);
+    let mut variant = failure();
     variant.scope = FailureScope::Source {
       browser_id: BrowserId::known("chrome"),
-      installation_id: "c".repeat(64).parse().expect("installation id"),
-      profile_id: "d".repeat(64).parse().expect("profile id"),
+      installation_id: "e".repeat(64).parse().expect("installation id"),
+      profile_id: profile_id.clone(),
       source_digest: [7; 32],
+    };
+    variants.push(variant);
+    let mut variant = failure();
+    variant.scope = FailureScope::Source {
+      browser_id: BrowserId::known("chrome"),
+      installation_id: installation_id.clone(),
+      profile_id: "f".repeat(64).parse().expect("profile id"),
+      source_digest: [7; 32],
+    };
+    variants.push(variant);
+    let mut variant = failure();
+    variant.scope = FailureScope::Source {
+      browser_id: BrowserId::known("chrome"),
+      installation_id: installation_id.clone(),
+      profile_id: profile_id.clone(),
+      source_digest: [8; 32],
     };
     variants.push(variant);
     let mut variant = failure();
@@ -603,7 +649,7 @@ mod tests {
     for variant in variants {
       ledger.push(variant);
     }
-    assert_eq!(ledger.as_slice().len(), 9);
+    assert_eq!(ledger.as_slice().len(), 15);
     assert_eq!(ledger.as_slice()[0].occurrences, 2);
 
     let mut saturated = failure();
@@ -634,6 +680,8 @@ mod tests {
       "path=/Users/alice/Profile/Cookies",
       "source='/Users/alice/Profile With Spaces/Cookies'",
       "embedded(/private/tmp/cookie-db)",
+      "failed to read /Users/alice/Profile With Spaces/Cookies: permission denied",
+      r"failed to read C:\Users\alice\Profile With Spaces\Cookies: access denied",
     ];
     for value in variants {
       let diagnostic = Diagnostic::new_with_secrets(value, &[]);

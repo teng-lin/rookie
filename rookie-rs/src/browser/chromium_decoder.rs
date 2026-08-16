@@ -4,7 +4,9 @@
 //! dependencies. It classifies stored values and emits ciphertext-bearing
 //! `CookieRecord`s for the later row-decryption stage.
 
-use super::cookie_record::{Attributes, CipherTier, CookieRecord, CookieValue, RawValue};
+use super::cookie_record::{
+  Attributes, CipherTier, CookieRecord, CookieValue, Observation, RawValue,
+};
 use crate::common::{
   boundary::{Decoder, ReadOnlySource, RecordSink},
   deadline::{BoundaryRuntime, DeadlineEnforcement},
@@ -71,20 +73,51 @@ pub(super) struct ChromiumDecodeSummary {
   pub(super) rows_seen: usize,
 }
 
-fn chromium_cookie_context(
-  row: &rusqlite::Row<'_>,
-) -> (CookieContext, Vec<(&'static str, RawValue)>) {
-  fn raw(value: rusqlite::types::ValueRef<'_>) -> RawValue {
-    match value {
-      rusqlite::types::ValueRef::Null => RawValue::Null,
-      rusqlite::types::ValueRef::Integer(value) => RawValue::Signed(value),
-      rusqlite::types::ValueRef::Real(value) => RawValue::FloatBits(value.to_bits()),
-      rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value)
-        .map(|value| RawValue::Text(value.to_owned()))
-        .unwrap_or_else(|_| RawValue::Bytes(value.to_vec())),
-      rusqlite::types::ValueRef::Blob(value) => RawValue::Bytes(value.to_vec()),
-    }
+fn raw_sqlite_value(value: rusqlite::types::ValueRef<'_>) -> RawValue {
+  match value {
+    rusqlite::types::ValueRef::Null => RawValue::Null,
+    rusqlite::types::ValueRef::Integer(value) => RawValue::Signed(value),
+    rusqlite::types::ValueRef::Real(value) => RawValue::FloatBits(value.to_bits()),
+    rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value)
+      .map(|value| RawValue::Text(value.to_owned()))
+      .unwrap_or_else(|_| RawValue::Bytes(value.to_vec())),
+    rusqlite::types::ValueRef::Blob(value) => RawValue::Bytes(value.to_vec()),
   }
+}
+
+fn chromium_bool_observation(
+  row: &rusqlite::Row<'_>,
+  index: usize,
+) -> std::result::Result<Observation<bool>, RawValue> {
+  match row.get_ref(index) {
+    Ok(rusqlite::types::ValueRef::Null) => Ok(Observation::Missing),
+    Ok(rusqlite::types::ValueRef::Integer(0)) => Ok(Observation::Known(false)),
+    Ok(rusqlite::types::ValueRef::Integer(1)) => Ok(Observation::Known(true)),
+    Ok(rusqlite::types::ValueRef::Integer(value)) => {
+      Ok(Observation::Unknown(RawValue::Signed(value)))
+    }
+    Ok(value) => Err(raw_sqlite_value(value)),
+    Err(_) => Ok(Observation::Missing),
+  }
+}
+
+fn chromium_context_bool_observation(row: &rusqlite::Row<'_>, index: usize) -> Observation<bool> {
+  match row.get_ref(index) {
+    Ok(rusqlite::types::ValueRef::Null) | Err(_) => Observation::Missing,
+    Ok(rusqlite::types::ValueRef::Integer(0)) => Observation::Known(false),
+    Ok(rusqlite::types::ValueRef::Integer(1)) => Observation::Known(true),
+    Ok(value) => Observation::Unknown(raw_sqlite_value(value)),
+  }
+}
+
+type ChromiumContextFields = (
+  CookieContext,
+  Observation<bool>,
+  Observation<bool>,
+  Vec<(&'static str, RawValue)>,
+);
+
+fn chromium_cookie_context(row: &rusqlite::Row<'_>) -> ChromiumContextFields {
   let mut unknown = Vec::new();
   let text = |index, name, unknown: &mut Vec<_>| match row.get_ref(index) {
     Ok(rusqlite::types::ValueRef::Null) => None,
@@ -96,7 +129,7 @@ fn chromium_cookie_context(
       }
     },
     Ok(value) => {
-      unknown.push((name, raw(value)));
+      unknown.push((name, raw_sqlite_value(value)));
       None
     }
     Err(_) => None,
@@ -105,21 +138,34 @@ fn chromium_cookie_context(
     Ok(rusqlite::types::ValueRef::Null) => None,
     Ok(rusqlite::types::ValueRef::Integer(value)) => Some(value),
     Ok(value) => {
-      unknown.push((name, raw(value)));
+      unknown.push((name, raw_sqlite_value(value)));
       None
     }
     Err(_) => None,
   };
+  let has_cross_site_ancestor = chromium_context_bool_observation(row, 10);
+  let is_persistent = chromium_context_bool_observation(row, 13);
+  if let Observation::Unknown(raw) = &has_cross_site_ancestor {
+    unknown.push(("has_cross_site_ancestor", raw.clone()));
+  }
+  if let Observation::Unknown(raw) = &is_persistent {
+    unknown.push(("is_persistent", raw.clone()));
+  }
+  let known = |value: &Observation<bool>| match value {
+    Observation::Known(value) => Some(*value),
+    Observation::Missing | Observation::Unknown(_) => None,
+  };
   (
     CookieContext {
       top_frame_site_key: text(9, "top_frame_site_key", &mut unknown),
-      has_cross_site_ancestor: integer(10, "has_cross_site_ancestor", &mut unknown)
-        .map(|value| value != 0),
+      has_cross_site_ancestor: known(&has_cross_site_ancestor),
       source_scheme: integer(11, "source_scheme", &mut unknown),
       source_port: integer(12, "source_port", &mut unknown),
-      is_persistent: integer(13, "is_persistent", &mut unknown).map(|value| value != 0),
+      is_persistent: known(&is_persistent),
       ..CookieContext::default()
     },
+    has_cross_site_ancestor,
+    is_persistent,
     unknown,
   )
 }
@@ -365,8 +411,17 @@ impl ChromiumCookieCursor<'_> {
       }
 
       let path = read_optional_column!(1, String, "path").unwrap_or_else(|| "/".to_string());
-      let observed_secure = read_optional_column!(2, bool, "is_secure");
-      let is_secure = observed_secure.unwrap_or(false);
+      let observed_secure = match chromium_bool_observation(row, 2) {
+        Ok(value) => value,
+        Err(_) => {
+          return Ok(Some(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumDecodeIssueCode::ColumnRead("is_secure"),
+            error: anyhow!("failed to read is_secure from Chromium cookie row: expected integer"),
+          })));
+        }
+      };
+      let is_secure = matches!(observed_secure, Observation::Known(true));
       let raw_expires = read_optional_column!(3, i64, "expires_utc");
       let expires = raw_expires
         .and_then(|value| u64::try_from(value).ok())
@@ -410,22 +465,45 @@ impl ChromiumCookieCursor<'_> {
           bytes: encrypted_value,
         }
       };
-      let observed_http_only = read_optional_column!(7, bool, "is_httponly");
-      let http_only = observed_http_only.unwrap_or(false);
+      let observed_http_only = match chromium_bool_observation(row, 7) {
+        Ok(value) => value,
+        Err(_) => {
+          return Ok(Some(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumDecodeIssueCode::ColumnRead("is_httponly"),
+            error: anyhow!("failed to read is_httponly from Chromium cookie row: expected integer"),
+          })));
+        }
+      };
+      let http_only = matches!(observed_http_only, Observation::Known(true));
       let observed_same_site = read_optional_column!(8, i64, "samesite");
       let same_site = observed_same_site.unwrap_or(SAME_SITE_UNSPECIFIED);
-      let (context, raw_context) = chromium_cookie_context(row);
+      let (context, has_cross_site_ancestor, is_persistent, raw_context) =
+        chromium_cookie_context(row);
 
       let mut record = CookieRecord::from_legacy_fields(
         host_key, path, is_secure, expires, name, value, http_only, same_site, context, row_number,
       );
-      record.attributes = Attributes::observed(
-        observed_secure,
-        raw_expires,
-        expires,
-        observed_http_only,
-        observed_same_site,
-      );
+      record.attributes =
+        Attributes::observed(None, raw_expires, expires, None, observed_same_site);
+      record.attributes.secure = observed_secure;
+      record.attributes.http_only = observed_http_only;
+      record.isolation.has_cross_site_ancestor = has_cross_site_ancestor;
+      record.isolation.is_persistent = is_persistent;
+      let raw_secure = match &record.attributes.secure {
+        Observation::Unknown(raw) => Some(raw.clone()),
+        Observation::Missing | Observation::Known(_) => None,
+      };
+      let raw_http_only = match &record.attributes.http_only {
+        Observation::Unknown(raw) => Some(raw.clone()),
+        Observation::Missing | Observation::Known(_) => None,
+      };
+      if let Some(raw) = raw_secure {
+        record.retain_raw("is_secure", raw);
+      }
+      if let Some(raw) = raw_http_only {
+        record.retain_raw("is_httponly", raw);
+      }
       for (name, value) in raw_context {
         record.retain_raw(name, value);
       }
@@ -437,6 +515,34 @@ impl ChromiumCookieCursor<'_> {
       })));
     }
   }
+}
+
+#[cfg(test)]
+pub(super) fn malformed_decoder_gate_case() -> Result<()> {
+  let connection = rusqlite::Connection::open_in_memory()?;
+  connection.execute_batch(
+    "CREATE TABLE meta (key TEXT, value TEXT);
+     INSERT INTO meta VALUES ('version', '23');
+     CREATE TABLE cookies (
+       host_key TEXT, path TEXT, is_secure, expires_utc INTEGER,
+       name, value TEXT, encrypted_value BLOB, is_httponly,
+       samesite INTEGER
+     );
+     INSERT INTO cookies VALUES
+       ('.malformed.test', '/', X'ff', 0, X'ff', 'secret', X'', 'invalid', 0);",
+  )?;
+  let source = ChromiumReadOnlySource {
+    connection: &connection,
+    domains: None,
+  };
+  let decoder = ChromiumBoundaryDecoder {
+    encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+  };
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let mut sink = |_event| Ok(());
+  let _ = decoder.decode(&source, &mut sink, &runtime)?;
+  Ok(())
 }
 
 #[cfg(test)]
@@ -556,5 +662,106 @@ mod tests {
     };
     assert_eq!(second.record.name, "second");
     assert!(cursor.next_event().expect("exhaust cursor").is_none());
+  }
+
+  #[test]
+  fn boolean_columns_preserve_invalid_raw_values_and_decoder_provenance() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE meta (key TEXT, value TEXT);
+         INSERT INTO meta VALUES ('version', '23');
+         CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly,
+           samesite INTEGER, top_frame_site_key TEXT,
+           has_cross_site_ancestor, source_scheme INTEGER, source_port INTEGER,
+           is_persistent
+         );
+         INSERT INTO cookies VALUES
+           ('.example.test', '/', 0, 0, 'known', 'v', X'', 1, 0, '', 0, 0, 443, 1),
+           ('.example.test', '/', 2, 0, 'integer', 'v', X'', -1, 0, '', 2, 0, 443, -1),
+           ('.example.test', '/', 'true', 0, 'text', 'v', X'', 'false', 0, '', 'yes', 0, 443, 'no'),
+           ('.example.test', '/', X'01', 0, 'blob', 'v', X'', X'00', 0, '', X'01', 0, 443, X'00'),
+           ('.example.test', '/', 1, 0, 'context-text', 'v', X'', 0, 0, '', 'yes', 0, 443, 'no'),
+           ('.example.test', '/', 1, 0, 'context-blob', 'v', X'', 0, 0, '', X'01', 0, 443, X'00');",
+      )
+      .expect("seed boolean variants");
+
+    let mut decoder =
+      prepare_cookie_decoder(&connection, None, EncryptedValuePolicy::UseKeyOutcomes)
+        .expect("prepare decoder");
+    let mut cursor = decoder.cursor().expect("start cursor");
+    let mut records = Vec::new();
+    let mut failures = Vec::new();
+    while let Some(event) = cursor.next_event().expect("decode row") {
+      match event {
+        ChromiumDecodeEvent::Record(decoded) => records.push(decoded.record),
+        ChromiumDecodeEvent::RowFailure(failure) => failures.push(failure.code),
+      }
+    }
+
+    assert_eq!(
+      failures,
+      [
+        ChromiumDecodeIssueCode::ColumnRead("is_secure"),
+        ChromiumDecodeIssueCode::ColumnRead("is_secure")
+      ]
+    );
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0].attributes.secure, Observation::Known(false));
+    assert_eq!(records[0].attributes.http_only, Observation::Known(true));
+    assert_eq!(
+      records[0].isolation.has_cross_site_ancestor,
+      Observation::Known(false)
+    );
+    assert_eq!(records[0].isolation.is_persistent, Observation::Known(true));
+
+    assert_eq!(
+      records[1].attributes.secure,
+      Observation::Unknown(RawValue::Signed(2))
+    );
+    assert_eq!(
+      records[1].attributes.http_only,
+      Observation::Unknown(RawValue::Signed(-1))
+    );
+    assert_eq!(
+      records[1].isolation.has_cross_site_ancestor,
+      Observation::Unknown(RawValue::Signed(2))
+    );
+    assert_eq!(
+      records[1].isolation.is_persistent,
+      Observation::Unknown(RawValue::Signed(-1))
+    );
+    assert_eq!(
+      records[1].isolation.has_cross_site_ancestor,
+      Observation::Unknown(RawValue::Signed(2))
+    );
+    assert_eq!(
+      records[1].isolation.is_persistent,
+      Observation::Unknown(RawValue::Signed(-1))
+    );
+    assert_eq!(records[1].raw.get("is_secure"), Some(&RawValue::Signed(2)));
+    assert_eq!(
+      records[2].raw.get("has_cross_site_ancestor"),
+      Some(&RawValue::Text("yes".to_owned()))
+    );
+    assert_eq!(
+      records[2].isolation.is_persistent,
+      Observation::Unknown(RawValue::Text("no".to_owned()))
+    );
+    assert_eq!(
+      records[3].raw.get("has_cross_site_ancestor"),
+      Some(&RawValue::Bytes(vec![1]))
+    );
+    assert_eq!(
+      records[3].isolation.is_persistent,
+      Observation::Unknown(RawValue::Bytes(vec![0]))
+    );
+    assert_eq!(records[0].origin.ordinal, 1);
+    assert_eq!(records[1].origin.ordinal, 2);
+    assert_eq!(records[2].origin.ordinal, 5);
+    assert_eq!(records[3].origin.ordinal, 6);
+    assert_eq!(records[0].origin.source_digest, [0; 32]);
   }
 }

@@ -49,10 +49,21 @@ const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
   note = "use direct_path::cookies_from_path with DirectPathRequest"
 )]
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let draft = safari_based_outcome(db_path.clone(), domains)?;
-  super::legacy::project_canonical_outcome(
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  safari_based_with_runtime(db_path, domains, &runtime)
+}
+
+pub(crate) fn safari_based_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  let draft = safari_based_outcome_with_runtime(db_path.clone(), domains, runtime)?;
+  super::legacy::project_canonical_outcome_with_runtime(
     "safari",
-    super::report_build::canonical_direct_safari_extraction(&db_path, draft)?,
+    super::report_build::canonical_direct_safari_extraction_with_runtime(&db_path, draft, runtime)?,
+    runtime,
   )
 }
 
@@ -80,6 +91,7 @@ impl std::fmt::Display for SafariParseFailure {
 
 #[derive(Debug)]
 pub(crate) struct SafariFileDraft {
+  #[cfg(test)]
   pub(crate) cookies: Vec<Cookie>,
   pub(crate) records: Vec<CookieRecord>,
   pub(crate) stats: SafariExtractionStats,
@@ -163,7 +175,6 @@ pub(crate) fn safari_based_outcome_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<SafariFileDraft> {
-  debug_assert_eq!(deadline_enforcement(), DeadlineEnforcement::Cooperative);
   runtime.check()?;
   let mut file = File::open(&db_path).context(format!(
     "Failed to open {}\n\
@@ -186,46 +197,32 @@ pub(crate) fn safari_based_outcome_with_runtime(
   let source = SafariReadOnlySource { bytes: &bs };
   let decoder = SafariBoundaryDecoder;
   let mut records = Vec::new();
-  let summary = decoder
-    .decode(
-      &source,
-      &mut |record| {
-        records.push(record);
-        Ok(())
-      },
-      runtime,
-    )
-    .map_err(|error| {
-      if error.downcast_ref::<SafariParseFailure>().is_some()
-        || error.downcast_ref::<BoundaryStop>().is_some()
-      {
-        error
-      } else {
-        error.context(SafariParseFailure {
-          stats: SafariExtractionStats::default(),
-        })
-      }
-    })?;
+  let summary = crate::common::boundary::decode(
+    &decoder,
+    &source,
+    &mut |record| {
+      records.push(record);
+      Ok(())
+    },
+    runtime,
+  )
+  .map_err(|error| {
+    if error.downcast_ref::<SafariParseFailure>().is_some()
+      || error.downcast_ref::<BoundaryStop>().is_some()
+    {
+      error
+    } else {
+      error.context(SafariParseFailure {
+        stats: SafariExtractionStats::default(),
+      })
+    }
+  })?;
   let mut stats = summary.stats;
   let row_error = summary.row_error;
-  let cookies = records
-    .iter()
-    .cloned()
-    .map(|record| {
-      record
-        .into_cookie()
-        .expect("Safari rows emit plaintext values")
-    })
-    .collect::<Vec<_>>();
-
   // Filter cookies by domain if domains are specified
-  let (cookies, records) = match &domains {
+  let records = match &domains {
     Some(domain_filters) => {
-      let parsed = cookies.len();
-      let cookies = cookies
-        .into_iter()
-        .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
-        .collect::<Vec<_>>();
+      let parsed = records.len();
       let records = records
         .into_iter()
         .filter(|record| utils::some_domain_in_host(Some(domain_filters), record.domain_raw()))
@@ -236,25 +233,30 @@ pub(crate) fn safari_based_outcome_with_runtime(
       // their domains could not necessarily be inspected.
       stats.records_seen = stats
         .records_seen
-        .saturating_sub(parsed.saturating_sub(cookies.len()));
-      (cookies, records)
+        .saturating_sub(parsed.saturating_sub(records.len()));
+      records
     }
-    None => (cookies, records),
+    None => records,
   };
   runtime.check()?;
+  #[cfg(test)]
+  let cookies = records
+    .iter()
+    .cloned()
+    .map(|record| {
+      record
+        .into_cookie()
+        .expect("Safari rows emit plaintext values")
+    })
+    .collect::<Vec<_>>();
   Ok(SafariFileDraft {
+    #[cfg(test)]
     cookies,
     records,
     stats,
     row_error: row_error.map(|error| format!("{error:#}")),
     acquisition_attempts,
   })
-}
-
-pub(crate) fn deadline_enforcement() -> DeadlineEnforcement {
-  // File and metadata syscalls cannot be preempted in-process; chunk/page/row
-  // checkpoints prevent additional work after the absolute deadline.
-  DeadlineEnforcement::Cooperative
 }
 
 pub(crate) const STABLE_READ_ATTEMPTS: usize = 3;
@@ -428,17 +430,23 @@ fn read_cookie_file_with_runtime(
   // `metadata` is only a snapshot. Limit the read as well in case the file is
   // replaced or grows between the size check and `read_to_end`.
   let mut remaining = MAX_BINARY_COOKIES_FILE_SIZE + 1;
-  let mut chunk = [0_u8; 64 * 1024];
+  // The read frame can contain an entire cookie value. Give it wiping Drop
+  // semantics as soon as it exists so read errors, deadline exits, and unwinds
+  // cannot leave the last stack chunk behind.
+  let mut chunk = SecretBytes::new(vec![0_u8; 64 * 1024]);
   while remaining > 0 {
     runtime.check()?;
     let requested = usize::try_from(remaining.min(chunk.len() as u64)).unwrap_or(chunk.len());
     let read = file
-      .read(&mut chunk[..requested])
+      .read(&mut chunk.as_mut_slice()[..requested])
       .with_context(|| format!("Failed to read {}", db_path.display()))?;
     if read == 0 {
       break;
     }
-    bytes.extend_bounded(&chunk[..read], MAX_BINARY_COOKIES_FILE_SIZE as usize + 1);
+    bytes.extend_bounded(
+      &chunk.as_slice()[..read],
+      MAX_BINARY_COOKIES_FILE_SIZE as usize + 1,
+    );
     remaining = remaining.saturating_sub(read as u64);
   }
   if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_BINARY_COOKIES_FILE_SIZE {
@@ -987,6 +995,19 @@ pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<
 #[cfg(test)]
 pub(crate) fn embedded_nul_test_fixture(field: &str, include_valid: bool) -> Vec<u8> {
   tests::embedded_nul_fixture(field, include_valid)
+}
+
+#[cfg(test)]
+pub(super) fn malformed_decoder_gate_case() -> Result<()> {
+  let source = SafariReadOnlySource {
+    bytes: b"not-a-binarycookies-image",
+  };
+  let decoder = SafariBoundaryDecoder;
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let mut sink = |_record| Ok(());
+  let _ = decoder.decode(&source, &mut sink, &runtime);
+  Ok(())
 }
 
 #[cfg(test)]

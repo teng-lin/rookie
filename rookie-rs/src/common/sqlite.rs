@@ -7,7 +7,6 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{Read as _, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -185,11 +184,7 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   let acquire = BrowserDatabaseAcquire;
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  debug_assert_eq!(
-    acquire.deadline_enforcement(),
-    DeadlineEnforcement::Cooperative
-  );
-  acquire.open(&path, &runtime)
+  super::boundary::acquire(&acquire, &path, &runtime)
 }
 
 struct BrowserDatabaseAcquire;
@@ -199,9 +194,8 @@ impl Acquire<PathBuf> for BrowserDatabaseAcquire {
 
   fn open(&self, path: &PathBuf, runtime: &BoundaryRuntime<'_>) -> Result<Self::Source> {
     runtime.check()?;
-    let reader =
-      acquire_browser_database_with_deadline(path.clone(), runtime.clock, runtime.deadline)
-        .map_err(|failure| failure.error)?;
+    let reader = acquire_browser_database_with_runtime(path.clone(), runtime)
+      .map_err(|failure| failure.error)?;
     runtime.check()?;
     Ok(reader)
   }
@@ -213,12 +207,11 @@ impl Acquire<PathBuf> for BrowserDatabaseAcquire {
   }
 }
 
-fn acquire_browser_database_with_deadline(
+fn acquire_browser_database_with_runtime(
   path: PathBuf,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure> {
-  acquire_browser_database_with_before_live_deadline(path, |_| Ok(()), clock, deadline)
+  acquire_browser_database_with_before_live_runtime(path, |_| Ok(()), runtime)
 }
 
 #[cfg(test)]
@@ -230,31 +223,23 @@ where
   BeforeLive: FnMut(&Path) -> Result<()>,
 {
   let clock = SystemClock;
-  acquire_browser_database_with_before_live_deadline(
-    path,
-    before_live,
-    &clock,
-    Deadline::standard(),
-  )
+  let runtime = BoundaryRuntime::new(&clock, Deadline::standard());
+  acquire_browser_database_with_before_live_runtime(path, before_live, &runtime)
 }
 
-fn acquire_browser_database_with_before_live_deadline<BeforeLive>(
+fn acquire_browser_database_with_before_live_runtime<BeforeLive>(
   path: PathBuf,
   mut before_live: BeforeLive,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>
 where
   BeforeLive: FnMut(&Path) -> Result<()>,
 {
   let check = || {
-    deadline
-      .check(clock)
-      .map_err(anyhow::Error::from)
-      .map_err(|error| DatabaseAcquisitionFailure {
-        strategy: None,
-        error,
-      })
+    runtime.check().map_err(|error| DatabaseAcquisitionFailure {
+      strategy: None,
+      error: error.into(),
+    })
   };
   check()?;
   let path = path
@@ -266,28 +251,32 @@ where
     })?;
 
   check()?;
-  let uses_wal =
-    database_requires_wal_snapshot(&path).map_err(|error| DatabaseAcquisitionFailure {
+  let uses_wal = database_requires_wal_snapshot_with_runtime(&path, runtime).map_err(|error| {
+    DatabaseAcquisitionFailure {
       strategy: None,
       error,
-    })?;
+    }
+  })?;
   check()?;
   let reader = if uses_wal {
-    acquire_verified_wal_snapshot(&path, clock, deadline)?
+    acquire_verified_wal_snapshot(&path, runtime)?
   } else {
     let strategy = DatabaseAcquisitionStrategy::LiveReadOnly;
     before_live(&path).map_err(|error| DatabaseAcquisitionFailure {
       strategy: Some(strategy),
       error,
     })?;
-    let connection = match open_live_read_only(&path) {
+    check()?;
+    let connection = match open_live_read_only_with_runtime(&path, runtime) {
       Ok(connection) => connection,
       Err(error) => {
-        if database_requires_wal_snapshot(&path).map_err(|recheck| DatabaseAcquisitionFailure {
-          strategy: None,
-          error: recheck,
+        if database_requires_wal_snapshot_with_runtime(&path, runtime).map_err(|recheck| {
+          DatabaseAcquisitionFailure {
+            strategy: None,
+            error: recheck,
+          }
         })? {
-          return acquire_verified_wal_snapshot(&path, clock, deadline);
+          return acquire_verified_wal_snapshot(&path, runtime);
         }
         return Err(DatabaseAcquisitionFailure {
           strategy: Some(strategy),
@@ -303,12 +292,15 @@ where
     // If rollback mode still holds, the pinned transaction prevents another
     // journal-mode transition while this recheck runs. Discard the probe and
     // reacquire through the private DB+WAL path whenever the source changed.
-    if database_requires_wal_snapshot(&path).map_err(|error| DatabaseAcquisitionFailure {
-      strategy: None,
-      error,
+    check()?;
+    if database_requires_wal_snapshot_with_runtime(&path, runtime).map_err(|error| {
+      DatabaseAcquisitionFailure {
+        strategy: None,
+        error,
+      }
     })? {
       drop(connection);
-      acquire_verified_wal_snapshot(&path, clock, deadline)?
+      acquire_verified_wal_snapshot(&path, runtime)?
     } else {
       SqliteReader {
         connection,
@@ -331,18 +323,21 @@ where
   Ok(reader)
 }
 
-fn database_requires_wal_snapshot(path: &Path) -> Result<bool> {
-  let has_wal = has_nonempty_wal(path)?;
+fn database_requires_wal_snapshot_with_runtime(
+  path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<bool> {
+  runtime.check()?;
+  let has_wal = has_nonempty_wal_with_runtime(path, runtime)?;
   if has_wal {
     return Ok(true);
   }
-  database_uses_wal(path)
+  database_uses_wal_with_runtime(path, runtime)
 }
 
 fn acquire_verified_wal_snapshot(
   path: &Path,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure> {
   let strategy = DatabaseAcquisitionStrategy::VerifiedWalSnapshot;
   // A snapshot failure is deliberately fatal rather than a fall back to the
@@ -353,20 +348,45 @@ fn acquire_verified_wal_snapshot(
     strategy: Some(strategy),
     error,
   })?;
-  let copy =
-    snapshot_database_with_deadline(path, snapshot.path(), clock, deadline).map_err(|error| {
-      DatabaseAcquisitionFailure {
-        strategy: Some(strategy),
-        error,
-      }
+  runtime
+    .check()
+    .map_err(|error| DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error: error.into(),
+    })?;
+  let copy = snapshot_database_with_runtime(path, snapshot.path(), runtime).map_err(|error| {
+    DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error,
+    }
+  })?;
+  runtime
+    .check()
+    .map_err(|error| DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error: error.into(),
+    })?;
+  runtime
+    .check()
+    .map_err(|error| DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error: error.into(),
+    })?;
+  let connection =
+    open_read_only(&copy, "mode=ro").map_err(|error| DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error,
+    })?;
+  runtime
+    .check()
+    .map_err(|error| DatabaseAcquisitionFailure {
+      strategy: Some(strategy),
+      error: error.into(),
     })?;
   Ok(SqliteReader {
     // Deliberately not `immutable`: that flag tells SQLite to ignore the
     // `-wal`, which is the data this snapshot exists to recover.
-    connection: open_read_only(&copy, "mode=ro").map_err(|error| DatabaseAcquisitionFailure {
-      strategy: Some(strategy),
-      error,
-    })?,
+    connection,
     snapshot: Some(snapshot),
     strategy,
   })
@@ -414,7 +434,7 @@ where
   Query: FnMut(&Connection) -> Result<T>,
 {
   with_browser_database_using_runtime(
-    || acquire_browser_database_with_deadline(path.clone(), runtime.clock, runtime.deadline),
+    || acquire_browser_database_with_runtime(path.clone(), runtime),
     query,
     runtime,
   )
@@ -551,12 +571,22 @@ const SQLITE_WAL_FORMAT_VERSION: u8 = 2;
 /// connection. Opening a WAL-mode file to ask `PRAGMA journal_mode` would be
 /// circular: SQLite can create the very `-wal`/`-shm` files this check exists
 /// to avoid creating in a live profile.
+#[cfg(test)]
 fn database_uses_wal(database: &Path) -> Result<bool> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  database_uses_wal_with_runtime(database, &runtime)
+}
+
+fn database_uses_wal_with_runtime(database: &Path, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
+  runtime.check()?;
   let mut file = fs::File::open(database)
     .with_context(|| format!("Can't open database header {}", database.display()))?;
+  runtime.check()?;
   let mut header = [0_u8; SQLITE_HEADER_PREFIX_LEN];
-  let read = fill(&mut file, &mut header)
+  let read = fill_with_runtime(&mut file, &mut header, runtime)
     .with_context(|| format!("Can't read database header {}", database.display()))?;
+  runtime.check()?;
   if read < header.len() || &header[..SQLITE_HEADER.len()] != SQLITE_HEADER {
     return Ok(false);
   }
@@ -585,8 +615,20 @@ pub(crate) fn open_verified_static_single_file(
 
 /// Opens a live mutable database and establishes its read snapshot before the
 /// connection escapes this module.
+#[cfg(test)]
 fn open_live_read_only(path: &Path) -> Result<Connection> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  open_live_read_only_with_runtime(path, &runtime)
+}
+
+fn open_live_read_only_with_runtime(
+  path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Connection> {
+  runtime.check()?;
   let connection = open_read_only(path, "mode=ro")?;
+  runtime.check()?;
   let locking_mode: String = connection
     .query_row("PRAGMA locking_mode=EXCLUSIVE", [], |row| row.get(0))
     .with_context(|| {
@@ -601,20 +643,36 @@ fn open_live_read_only(path: &Path) -> Result<Connection> {
       path.display()
     ));
   }
-  pin_read_snapshot(&connection, path)?;
+  runtime.check()?;
+  pin_read_snapshot_with_runtime(&connection, path, runtime)?;
+  runtime.check()?;
   Ok(connection)
 }
 
 /// `BEGIN` alone is deferred and takes no read lock. Reading `sqlite_schema`
 /// is what establishes the snapshot and pins the schema for all later cookie
 /// queries on this connection.
+#[cfg(test)]
 fn pin_read_snapshot(connection: &Connection, path: &Path) -> Result<()> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  pin_read_snapshot_with_runtime(connection, path, &runtime)
+}
+
+fn pin_read_snapshot_with_runtime(
+  connection: &Connection,
+  path: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<()> {
+  runtime.check()?;
   connection
     .execute_batch("BEGIN DEFERRED TRANSACTION;")
     .with_context(|| format!("Can't begin read transaction for {}", path.display()))?;
+  runtime.check()?;
   let _: i64 = connection
     .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
     .with_context(|| format!("Can't pin database schema for {}", path.display()))?;
+  runtime.check()?;
   Ok(())
 }
 
@@ -683,24 +741,34 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   snapshot_database_with_deadline(database, directory, &clock, Deadline::standard())
 }
 
+#[cfg(test)]
 fn snapshot_database_with_deadline(
   database: &Path,
   directory: &Path,
   clock: &dyn Clock,
   deadline: Deadline,
 ) -> Result<PathBuf> {
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  snapshot_database_with_runtime(database, directory, &runtime)
+}
+
+fn snapshot_database_with_runtime(
+  database: &Path,
+  directory: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<PathBuf> {
   for attempt in 1..=SNAPSHOT_ATTEMPTS {
-    deadline.check(clock)?;
-    let copy = copy_database_with_deadline(database, directory, clock, deadline)?;
-    deadline.check(clock)?;
-    if !database_uses_wal(&copy)? {
+    runtime.check()?;
+    let copy = copy_database_with_runtime(database, directory, runtime)?;
+    runtime.check()?;
+    if !database_uses_wal_with_runtime(&copy, runtime)? {
       return Err(anyhow!(
         "Can't take a WAL snapshot of {}: its copied journal mode is not WAL",
         database.display()
       ));
     }
-    deadline.check(clock)?;
-    if files_are_identical_with_deadline(database, &copy, clock, deadline)? {
+    runtime.check()?;
+    if files_are_identical(database, &copy, runtime)? {
       return Ok(copy);
     }
 
@@ -712,11 +780,13 @@ fn snapshot_database_with_deadline(
     // mid-burst, and copying straight back into that loses the next attempt to
     // the same race.
     let backoff = RETRY_BACKOFF * attempt;
-    let remaining = deadline.remaining(clock);
+    let remaining = runtime.deadline.remaining(runtime.clock);
     if remaining <= backoff {
-      return Err(crate::common::deadline::BoundaryExpired.into());
+      runtime.check()?;
+      return Err(crate::common::deadline::BoundaryStop::TimedOut.into());
     }
-    clock.sleep(backoff);
+    runtime.clock.sleep(backoff);
+    runtime.check()?;
   }
 
   Err(anyhow!(
@@ -730,33 +800,29 @@ fn snapshot_database_with_deadline(
 /// Only a genuine difference in length or content answers `false`. An I/O fault
 /// is returned, so that `snapshot_database` reports it rather than retrying
 /// three times and blaming a checkpoint.
-#[cfg(test)]
-pub(crate) fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
-  let clock = SystemClock;
-  files_are_identical_with_deadline(left, right, &clock, Deadline::standard())
-}
-
-fn files_are_identical_with_deadline(
+pub(crate) fn files_are_identical(
   left: &Path,
   right: &Path,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<bool> {
-  deadline.check(clock)?;
+  runtime.check()?;
   let open = |path: &Path| -> Result<io::BufReader<fs::File>> {
+    runtime.check()?;
     let file = fs::File::open(path)
       .with_context(|| format!("Can't open {} to verify it", path.display()))?;
+    runtime.check()?;
     Ok(io::BufReader::new(file))
   };
   let (mut left_file, mut right_file) = (open(left)?, open(right)?);
   let (mut left_chunk, mut right_chunk) = ([0u8; 8192], [0u8; 8192]);
 
   loop {
-    deadline.check(clock)?;
-    let filled = fill_with_deadline(&mut left_file, &mut left_chunk, clock, deadline)
+    runtime.check()?;
+    let filled = fill_with_runtime(&mut left_file, &mut left_chunk, runtime)
       .with_context(|| format!("Can't read {}", left.display()))?;
-    let other = fill_with_deadline(&mut right_file, &mut right_chunk, clock, deadline)
+    let other = fill_with_runtime(&mut right_file, &mut right_chunk, runtime)
       .with_context(|| format!("Can't read {}", right.display()))?;
+    runtime.check()?;
 
     // `fill` stops short only at end of file, so unequal counts mean unequal
     // lengths.
@@ -771,28 +837,26 @@ fn files_are_identical_with_deadline(
 
 /// Reads until `buffer` is full or the file ends, retrying interrupted reads
 /// the way [`io::Read::read_exact`] does.
-fn fill(source: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
-  let clock = SystemClock;
-  fill_with_deadline(source, buffer, &clock, Deadline::standard())
-}
-
-fn fill_with_deadline(
+fn fill_with_runtime(
   source: &mut impl io::Read,
   buffer: &mut [u8],
-  clock: &dyn Clock,
-  deadline: Deadline,
-) -> io::Result<usize> {
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<usize> {
   let mut filled = 0;
 
   while filled < buffer.len() {
-    deadline
-      .check(clock)
-      .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+    runtime.check()?;
     match source.read(&mut buffer[filled..]) {
-      Ok(0) => break,
-      Ok(read) => filled += read,
+      Ok(0) => {
+        runtime.check()?;
+        break;
+      }
+      Ok(read) => {
+        runtime.check()?;
+        filled += read;
+      }
       Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-      Err(err) => return Err(err),
+      Err(err) => return Err(err.into()),
     }
   }
 
@@ -812,13 +876,23 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   copy_database_with_deadline(database, directory, &clock, Deadline::standard())
 }
 
+#[cfg(test)]
 fn copy_database_with_deadline(
   database: &Path,
   directory: &Path,
   clock: &dyn Clock,
   deadline: Deadline,
 ) -> Result<PathBuf> {
-  deadline.check(clock)?;
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  copy_database_with_runtime(database, directory, &runtime)
+}
+
+fn copy_database_with_runtime(
+  database: &Path,
+  directory: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<PathBuf> {
+  runtime.check()?;
   let name = database
     .file_name()
     .ok_or_else(|| anyhow!("Database path has no file name: {}", database.display()))?;
@@ -830,7 +904,7 @@ fn copy_database_with_deadline(
   // file with a WAL rewound to offset 0 (<https://sqlite.org/wal.html> section
   // 2.1) and drops rows, as `an_unverified_copy_loses_rows_when_a_checkpoint_intervenes`
   // shows — so the verification is what makes it correct, not the order.
-  copy_file_with_deadline(database, &copy, clock, deadline)
+  copy_file_with_runtime(database, &copy, runtime)
     .with_context(|| format!("Can't copy database {}", database.display()))?;
 
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
@@ -838,59 +912,70 @@ fn copy_database_with_deadline(
   // one could be believed as-is, pinning a stale frame count.
   let wal = sidecar(database, "-wal");
   let wal_copy = sidecar(&copy, "-wal");
-  match copy_file_with_deadline(&wal, &wal_copy, clock, deadline) {
+  runtime.check()?;
+  match copy_file_with_runtime(&wal, &wal_copy, runtime) {
     Ok(()) => {}
     // The browser checkpointed and removed its WAL, either before this attempt
     // or in the moment between. Discard any WAL an earlier attempt left here,
     // which would otherwise replay over a newer main file and hide rows, and
     // let the verification decide whether this attempt stands.
-    Err(err) if err.kind() == io::ErrorKind::NotFound => match fs::remove_file(&wal_copy) {
-      Ok(()) => {}
-      // Nothing to discard, which is the usual case on a first attempt.
-      Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-      Err(err) => {
-        return Err(anyhow::Error::new(err).context(format!(
-          "Can't discard the stale copy {}",
-          wal_copy.display()
-        )))
+    Err(err)
+      if err
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+    {
+      runtime.check()?;
+      match fs::remove_file(&wal_copy) {
+        Ok(()) => {}
+        // Nothing to discard, which is the usual case on a first attempt.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+          return Err(anyhow::Error::new(err).context(format!(
+            "Can't discard the stale copy {}",
+            wal_copy.display()
+          )))
+        }
       }
-    },
-    Err(err) => {
-      return Err(
-        anyhow::Error::new(err).context(format!("Can't copy write-ahead log {}", wal.display())),
-      )
     }
+    Err(err) => return Err(err.context(format!("Can't copy write-ahead log {}", wal.display()))),
   }
 
+  runtime.check()?;
   Ok(copy)
 }
 
-fn copy_file_with_deadline(
+fn copy_file_with_runtime(
   source: &Path,
   destination: &Path,
-  clock: &dyn Clock,
-  deadline: Deadline,
-) -> io::Result<()> {
-  deadline
-    .check(clock)
-    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<()> {
+  runtime.check()?;
   let mut source = io::BufReader::new(fs::File::open(source)?);
+  runtime.check()?;
   let mut destination = io::BufWriter::new(fs::File::create(destination)?);
+  runtime.check()?;
+  copy_stream_with_runtime(&mut source, &mut destination, runtime)
+}
+
+fn copy_stream_with_runtime(
+  source: &mut impl io::Read,
+  destination: &mut impl io::Write,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<()> {
   let mut chunk = [0_u8; 64 * 1024];
   loop {
-    deadline
-      .check(clock)
-      .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+    runtime.check()?;
     let read = source.read(&mut chunk)?;
+    runtime.check()?;
     if read == 0 {
       break;
     }
     destination.write_all(&chunk[..read])?;
+    runtime.check()?;
   }
   destination.flush()?;
-  deadline
-    .check(clock)
-    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))
+  runtime.check()?;
+  Ok(())
 }
 
 /// True when a non-empty `-wal` sidecar sits beside the database.
@@ -903,15 +988,28 @@ fn copy_file_with_deadline(
 /// Only a missing sidecar means "no WAL". Any other stat failure is reported,
 /// because answering `false` could otherwise route a WAL-mode source into the
 /// live rollback-journal path.
+#[cfg(test)]
 pub(crate) fn has_nonempty_wal(database: &Path) -> Result<bool> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  has_nonempty_wal_with_runtime(database, &runtime)
+}
+
+pub(crate) fn has_nonempty_wal_with_runtime(
+  database: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<bool> {
+  runtime.check()?;
   let wal = sidecar(database, "-wal");
-  match fs::metadata(&wal) {
+  let result = match fs::metadata(&wal) {
     Ok(metadata) => Ok(metadata.len() > 0),
     Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
     Err(err) => {
       Err(anyhow::Error::new(err).context(format!("Can't stat write-ahead log {}", wal.display())))
     }
-  }
+  };
+  runtime.check()?;
+  result
 }
 
 /// Builds a SQLite sidecar path by appending `suffix` to the database path,
@@ -934,10 +1032,73 @@ fn open_read_only(path: &Path, query: &str) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::common::deadline::test_clock::ManualClock;
+  use crate::common::deadline::{test_clock::ManualClock, BoundaryStop, CancellationToken};
   use std::cell::{Cell, RefCell};
   use std::ffi::CStr;
   use std::time::Duration;
+
+  fn compare_files(left: &Path, right: &Path) -> Result<bool> {
+    let clock = SystemClock;
+    let runtime = BoundaryRuntime::standard(&clock);
+    files_are_identical(left, right, &runtime)
+  }
+
+  struct StopAfterFirstRead<'a> {
+    clock: &'a ManualClock,
+    token: CancellationToken,
+    stop: BoundaryStop,
+    reads: Cell<usize>,
+  }
+
+  impl io::Read for StopAfterFirstRead<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+      self.reads.set(self.reads.get() + 1);
+      output[..4].copy_from_slice(b"data");
+      match self.stop {
+        BoundaryStop::TimedOut => self.clock.advance(Duration::from_secs(1)),
+        BoundaryStop::Cancelled => {
+          assert!(self.token.cancel());
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(self.token.exhaust_resources());
+        }
+      }
+      Ok(4)
+    }
+  }
+
+  #[test]
+  fn mid_copy_timeout_cancellation_and_resource_exhaustion_stay_typed() {
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let runtime = BoundaryRuntime::with_stop(
+        &clock,
+        Deadline::after(&clock, Duration::from_secs(1)),
+        token.clone(),
+      );
+      let mut source = StopAfterFirstRead {
+        clock: &clock,
+        token,
+        stop,
+        reads: Cell::new(0),
+      };
+      let mut destination = Vec::new();
+      let error = copy_stream_with_runtime(&mut source, &mut destination, &runtime)
+        .expect_err("the terminal stop is observed before the copied chunk is published");
+      assert_eq!(
+        error.downcast_ref::<BoundaryStop>(),
+        Some(&stop),
+        "{error:#}"
+      );
+      assert_eq!(source.reads.get(), 1);
+      assert!(destination.is_empty());
+    }
+  }
 
   #[test]
   fn query_retries_share_one_decreasing_budget_without_wall_clock_sleep() {
@@ -1466,7 +1627,7 @@ mod tests {
       .execute("INSERT INTO cookies (name) VALUES ('in-wal')", [])
       .expect("insert WAL row");
     assert!(
-      files_are_identical(&path, &copy).expect("compare"),
+      compare_files(&path, &copy).expect("compare"),
       "a WAL commit must not touch the main file"
     );
 
@@ -1475,7 +1636,7 @@ mod tests {
       .expect("checkpoint");
 
     assert!(
-      !files_are_identical(&path, &copy).expect("compare"),
+      !compare_files(&path, &copy).expect("compare"),
       "a checkpoint must be detectable"
     );
   }
@@ -1528,9 +1689,9 @@ mod tests {
     fs::write(&b, b"cookie").expect("write b");
     fs::write(&c, b"cookies").expect("write c");
 
-    assert!(files_are_identical(&a, &b).expect("compare equal"));
-    assert!(!files_are_identical(&a, &c).expect("compare shorter"));
-    assert!(!files_are_identical(&c, &a).expect("compare longer"));
+    assert!(compare_files(&a, &b).expect("compare equal"));
+    assert!(!compare_files(&a, &c).expect("compare shorter"));
+    assert!(!compare_files(&c, &a).expect("compare longer"));
   }
 
   /// Cookie databases are far larger than the read buffer, so the comparison
@@ -1542,14 +1703,14 @@ mod tests {
     let bulk = vec![b'c'; 8192 * 3 + 17];
     fs::write(&a, &bulk).expect("write a");
     fs::write(&b, &bulk).expect("write b");
-    assert!(files_are_identical(&a, &b).expect("compare equal"));
+    assert!(compare_files(&a, &b).expect("compare equal"));
 
     // Differ only in the final chunk, past several identical ones.
     let mut tail = bulk.clone();
     *tail.last_mut().expect("non-empty") = b'x';
     fs::write(&b, &tail).expect("rewrite b");
 
-    assert!(!files_are_identical(&a, &b).expect("compare differing tail"));
+    assert!(!compare_files(&a, &b).expect("compare differing tail"));
   }
 
   #[test]

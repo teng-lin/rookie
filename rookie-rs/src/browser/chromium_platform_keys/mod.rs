@@ -18,7 +18,7 @@ pub(crate) use shared::create_pbkdf2_key;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(crate) use unsupported::HostKeySession;
 #[cfg(target_os = "windows")]
-pub(crate) use windows::{HostKeySession, WindowsPlatformKeyProvider};
+pub(crate) use windows::HostKeySession;
 
 use std::path::Path;
 

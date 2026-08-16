@@ -150,6 +150,14 @@ fn checked_boundary<T>(
   result
 }
 
+fn provider_failure(message: String) -> ChromiumKeyOutcomes {
+  ChromiumKeyOutcomes {
+    v10: ChromiumKeyOutcome::failure(message.clone()),
+    v11: ChromiumKeyOutcome::NotApplicable,
+    v20: ChromiumKeyOutcome::failure(message),
+  }
+}
+
 fn retrieve_windows_key_outcomes_with_runtime<B>(
   local_state: &serde_json::Value,
   backend: &B,
@@ -159,7 +167,7 @@ where
   B: WindowsKeyBackend,
 {
   if let Err(error) = runtime.check() {
-    return ChromiumKeyOutcomes::provider_failure(error.to_string());
+    return provider_failure(error.to_string());
   }
   let v10 = match local_state_key(local_state, "encrypted_key") {
     LocalStateKey::Missing => ChromiumKeyOutcome::NotApplicable,
@@ -287,7 +295,7 @@ where
   B: WindowsKeyBackend,
 {
   if let Err(error) = runtime.check() {
-    return ChromiumKeyOutcomes::provider_failure(error.to_string());
+    return provider_failure(error.to_string());
   }
   let parsed;
   let local_state = match request.local_state {
@@ -747,6 +755,86 @@ mod tests {
       panic!("expected provider failure, got {outcome:?}");
     };
     failure.message()
+  }
+
+  #[test]
+  fn cancelled_runtime_starts_no_windows_key_provider_actions() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop,
+    );
+    let backend = AdvancingWindowsBackend::new();
+    let state = serde_json::json!({
+      "os_crypt": {
+        "encrypted_key": "legacy",
+        "app_bound_encrypted_key": "appbound"
+      }
+    });
+
+    let outcomes = retrieve_windows_key_outcomes_with_runtime(&state, &backend, &runtime);
+
+    assert_eq!(backend.v10_calls.get(), 0);
+    assert_eq!(backend.privilege_calls.get(), 0);
+    assert_eq!(backend.v20_calls.get(), 0);
+    assert!(failure_message(&outcomes.v10).contains("operation cancelled"));
+    assert!(failure_message(&outcomes.v20).contains("operation cancelled"));
+  }
+
+  #[test]
+  fn resource_stop_after_local_state_read_prevents_all_key_provider_actions() {
+    struct ResourceStoppingReader {
+      calls: Cell<usize>,
+      stop: crate::common::deadline::CancellationToken,
+    }
+
+    impl LocalStateReader for ResourceStoppingReader {
+      fn read_to_string(
+        &self,
+        _path: &std::path::Path,
+        _runtime: &BoundaryRuntime<'_>,
+      ) -> Result<String> {
+        self.calls.set(self.calls.get() + 1);
+        self.stop.exhaust_resources();
+        Ok(r#"{"os_crypt":{"encrypted_key":"legacy"}}"#.to_owned())
+      }
+    }
+
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let reader = ResourceStoppingReader {
+      calls: Cell::new(0),
+      stop,
+    };
+    let backend = AdvancingWindowsBackend::new();
+    let credentials = super::super::ChromiumKeyCredentials::default();
+
+    let outcomes = host_key_outcomes_with_runtime(
+      ChromiumKeyRequest::for_installation(
+        "chrome",
+        &credentials,
+        std::path::Path::new("Local State"),
+        None,
+      ),
+      &reader,
+      &backend,
+      &runtime,
+    );
+
+    assert_eq!(reader.calls.get(), 1);
+    assert_eq!(backend.v10_calls.get(), 0);
+    assert_eq!(backend.privilege_calls.get(), 0);
+    assert_eq!(backend.v20_calls.get(), 0);
+    assert!(failure_message(&outcomes.v10).contains("resource budget exhausted"));
+    assert!(failure_message(&outcomes.v20).contains("resource budget exhausted"));
   }
 
   #[test]

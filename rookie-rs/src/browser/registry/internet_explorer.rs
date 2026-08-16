@@ -9,7 +9,6 @@ use super::{
 use crate::browser::internet_explorer_model::{
   InternetExplorerFailure, InternetExplorerFailureStage,
 };
-use crate::common::enums::Cookie;
 use anyhow::Result;
 use std::{
   collections::HashSet,
@@ -21,7 +20,6 @@ pub(super) const INTERNET_EXPLORER_COOKIE_FILE: &str = "WebCacheV01.dat";
 /// Row accounting an Internet Explorer extractor must report. The extractor is
 /// injected because the ESE reader only compiles on Windows.
 pub(crate) struct InternetExplorerRows {
-  pub(crate) cookies: Vec<Cookie>,
   pub(crate) records: Vec<crate::browser::cookie_record::CookieRecord>,
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
@@ -127,6 +125,17 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
   Ok(outcome)
 }
 
+fn discover_internet_explorer_with_runtime<F: DiscoveryFs>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
+  let outcome = discover_internet_explorer_with_context(context, browser_id)?;
+  runtime.check()?;
+  Ok(outcome)
+}
+
 pub(super) fn internet_explorer_report_with_context<F, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
@@ -162,15 +171,38 @@ where
           source.rows_seen = rows.records_seen;
           source.rows_skipped = rows.records_skipped;
           source.row_error = rows.row_error;
-          source.cookies = rows.cookies;
           source.records = rows.records;
         }
         Err(error) => {
+          if let Some(stop) = boundary_stop_from_error(&error) {
+            outcome.boundary_stop.get_or_insert(stop);
+            return outcome;
+          }
           source.error_stage = internet_explorer_failure_stage(&error);
           source.error = Some(format!("{error:#}"));
         }
       }
     }
+  }
+  outcome
+}
+
+fn boundary_stop_from_error(
+  error: &anyhow::Error,
+) -> Option<crate::common::deadline::BoundaryStop> {
+  error.chain().find_map(|cause| {
+    cause
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .copied()
+  })
+}
+
+fn retain_internet_explorer_runtime_stop(
+  mut outcome: EngineExtractionDraft,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> EngineExtractionDraft {
+  if let Err(stop) = runtime.check() {
+    outcome.boundary_stop.get_or_insert(stop);
   }
   outcome
 }
@@ -197,9 +229,13 @@ where
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn internet_explorer_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+pub(crate) fn internet_explorer_profiles_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  discover_internet_explorer_with_context(&context, browser_id)
+  discover_internet_explorer_with_runtime(&context, browser_id, runtime)
 }
 
 #[cfg(target_os = "windows")]
@@ -223,7 +259,7 @@ pub(crate) fn internet_explorer_report_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  internet_explorer_report_with_context(
+  let outcome = internet_explorer_report_with_context(
     &context,
     browser_id,
     profile_id,
@@ -234,7 +270,6 @@ pub(crate) fn internet_explorer_report_with_runtime(
           path, domains, force_kill, runtime,
         )
         .map(|extraction| InternetExplorerRows {
-          cookies: extraction.cookies,
           records: extraction.records,
           records_seen: extraction.stats.records_seen,
           records_skipped: extraction.stats.records_skipped,
@@ -242,7 +277,8 @@ pub(crate) fn internet_explorer_report_with_runtime(
         })
       })
     },
-  )
+  )?;
+  Ok(retain_internet_explorer_runtime_stop(outcome, runtime))
 }
 
 #[cfg(target_os = "windows")]
@@ -264,35 +300,87 @@ pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut outcome = discover_internet_explorer_with_context(&context, browser_id)?;
+  let mut outcome = discover_internet_explorer_with_runtime(&context, browser_id, runtime)?;
   select_engine_profiles(
     &mut outcome,
     browser_id,
     ProfileSelection::LegacyFirstProfile,
   )?;
-  Ok(populate_internet_explorer_sources(
-    outcome,
-    domains.as_deref(),
-    |path, domains| {
-      query_internet_explorer_non_disruptive(path, domains, |path, domains, force_kill| {
-        crate::browser::internet_explorer::internet_explorer_outcome_with_runtime(
-          path, domains, force_kill, runtime,
-        )
-        .map(|extraction| InternetExplorerRows {
-          cookies: extraction.cookies,
-          records: extraction.records,
-          records_seen: extraction.stats.records_seen,
-          records_skipped: extraction.stats.records_skipped,
-          row_error: extraction.row_error,
-        })
+  let outcome = populate_internet_explorer_sources(outcome, domains.as_deref(), |path, domains| {
+    query_internet_explorer_non_disruptive(path, domains, |path, domains, force_kill| {
+      crate::browser::internet_explorer::internet_explorer_outcome_with_runtime(
+        path, domains, force_kill, runtime,
+      )
+      .map(|extraction| InternetExplorerRows {
+        records: extraction.records,
+        records_seen: extraction.stats.records_seen,
+        records_skipped: extraction.stats.records_skipped,
+        row_error: extraction.row_error,
       })
-    },
-  ))
+    })
+  });
+  Ok(retain_internet_explorer_runtime_stop(outcome, runtime))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::cell::Cell;
+
+  fn discovered_source_draft(path: PathBuf) -> EngineSourceDraft {
+    EngineSourceDraft {
+      path,
+      role: SOURCE_ROLE_PERSISTENT,
+      format: "internet_explorer_ese",
+      precedence: PERSISTENT_SOURCE_PRECEDENCE,
+      selected: true,
+      cookies: Vec::new(),
+      records: Vec::new(),
+      rows_seen: 0,
+      rows_skipped: 0,
+      acquisition: SourceAcquisition::EseDatabase,
+      acquisition_attempts: 1,
+      diagnostics: Vec::new(),
+      error: None,
+      error_stage: SourceFailureStage::Acquisition,
+      row_error: None,
+    }
+  }
+
+  fn discovered_sources() -> EngineExtractionDraft {
+    let installation_path = PathBuf::from(r"C:\Users\rookie\WebCache");
+    EngineExtractionDraft {
+      installations_detected: 1,
+      installations_discovered: 1,
+      installations_enumerated: 1,
+      boundary_stop: None,
+      profiles: vec![EngineProfileDraft {
+        profile_id: "ie-profile".to_owned(),
+        installation_id: "ie-installation".to_owned(),
+        installation_priority: 10,
+        legacy_installation_priority: 10,
+        legacy_profile_order: 0,
+        legacy_is_default: true,
+        legacy_eligible: true,
+        installation_path: installation_path.clone(),
+        legacy_installation_path: installation_path.clone(),
+        legacy_name: "default".to_owned(),
+        name: "default".to_owned(),
+        path: installation_path.clone(),
+        is_default: true,
+        persistent_source_discovered: true,
+        sources: vec![
+          discovered_source_draft(installation_path.join(INTERNET_EXPLORER_COOKIE_FILE)),
+          discovered_source_draft(
+            installation_path
+              .join("secondary")
+              .join(INTERNET_EXPLORER_COOKIE_FILE),
+          ),
+        ],
+      }],
+      discovery_issues: Vec::new(),
+    }
+  }
 
   #[test]
   fn non_disruptive_query_bridge_forwards_owned_inputs_and_false() {
@@ -307,7 +395,6 @@ mod tests {
         assert_eq!(forwarded_domains.as_deref(), Some(domains.as_slice()));
         assert!(!force_kill);
         Ok(InternetExplorerRows {
-          cookies: Vec::new(),
           records: Vec::new(),
           records_seen: 0,
           records_skipped: 0,
@@ -317,7 +404,7 @@ mod tests {
     )
     .expect("non-disruptive query bridge");
 
-    assert!(rows.cookies.is_empty());
+    assert!(rows.records.is_empty());
   }
 
   #[test]
@@ -343,5 +430,76 @@ mod tests {
       internet_explorer_failure_stage(&anyhow::anyhow!("legacy untyped failure")),
       SourceFailureStage::Parse
     );
+  }
+
+  #[test]
+  fn source_population_retains_success_before_typed_stop() {
+    use crate::common::deadline::BoundaryStop;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let calls = Cell::new(0);
+      let populated = populate_internet_explorer_sources(discovered_sources(), None, |_, _| {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+          Ok(InternetExplorerRows {
+            records: Vec::new(),
+            records_seen: 7,
+            records_skipped: 2,
+            row_error: None,
+          })
+        } else {
+          Err(anyhow::Error::new(InternetExplorerFailure::new(
+            InternetExplorerFailureStage::Parse,
+            anyhow::Error::new(stop),
+          )))
+        }
+      });
+
+      assert_eq!(calls.get(), 2);
+      assert_eq!(populated.boundary_stop, Some(stop));
+      assert_eq!(populated.profiles[0].sources[0].rows_seen, 7);
+      assert!(populated.profiles[0].sources[0].error.is_none());
+      assert_eq!(populated.profiles[0].sources[1].rows_seen, 0);
+      assert!(populated.profiles[0].sources[1].error.is_none());
+    }
+  }
+
+  #[test]
+  fn final_runtime_stop_is_retained_instead_of_discarding_outcome() {
+    use crate::common::deadline::{
+      test_clock::ManualClock, BoundaryRuntime, BoundaryStop, CancellationToken, Deadline,
+    };
+    use std::time::Duration;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let deadline = match stop {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(token.cancel());
+          Deadline::after(&clock, Duration::from_secs(1))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(token.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(1))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+
+      let retained = retain_internet_explorer_runtime_stop(discovered_sources(), &runtime);
+
+      assert_eq!(retained.boundary_stop, Some(stop));
+      assert_eq!(retained.profiles.len(), 1);
+    }
   }
 }

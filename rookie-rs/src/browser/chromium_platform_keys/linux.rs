@@ -2,18 +2,16 @@ use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, Key
 use super::create_pbkdf2_key;
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
-use crate::common::deadline::{BoundaryRuntime, Clock, Deadline, DeadlineEnforcement};
+use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
+#[cfg(test)]
+use crate::common::deadline::{Clock, Deadline};
 use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
 
 trait LinuxKeyringBackend {
-  fn passwords(
-    &self,
-    crypt_name: &str,
-    clock: &dyn Clock,
-    deadline: Deadline,
-  ) -> Result<Vec<SecretString>>;
+  fn passwords(&self, crypt_name: &str, runtime: &BoundaryRuntime<'_>)
+    -> Result<Vec<SecretString>>;
 }
 
 struct SystemLinuxKeyringBackend;
@@ -22,10 +20,9 @@ impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
   fn passwords(
     &self,
     crypt_name: &str,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> Result<Vec<SecretString>> {
-    crate::linux::get_passwords_with_deadline(crypt_name, clock, deadline)
+    crate::linux::get_passwords_with_runtime(crypt_name, runtime)
   }
 }
 
@@ -41,15 +38,20 @@ fn linux_v10_outcome() -> ChromiumKeyOutcome {
 fn retrieve_linux_v11_outcome<B>(
   crypt_name: &str,
   backend: &B,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> ChromiumKeyOutcome
 where
   B: LinuxKeyringBackend,
 {
   let salt = b"saltysalt";
-  let candidates = backend
-    .passwords(crypt_name, clock, deadline)
+  let candidates = runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .and_then(|()| backend.passwords(crypt_name, runtime))
+    .and_then(|passwords| {
+      runtime.check().map_err(anyhow::Error::from)?;
+      Ok(passwords)
+    })
     .map(|passwords| {
       passwords
         .into_iter()
@@ -82,18 +84,16 @@ impl LinuxKeyOutcomeCache {
   fn outcomes_for(
     &mut self,
     credentials: &ChromiumKeyCredentials,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes {
-    self.outcomes_for_with_backend(credentials, &SystemLinuxKeyringBackend, clock, deadline)
+    self.outcomes_for_with_backend(credentials, &SystemLinuxKeyringBackend, runtime)
   }
 
   fn outcomes_for_with_backend<B>(
     &mut self,
     credentials: &ChromiumKeyCredentials,
     backend: &B,
-    clock: &dyn Clock,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes
   where
     B: LinuxKeyringBackend,
@@ -107,7 +107,7 @@ impl LinuxKeyOutcomeCache {
       Some(crypt_name) => self
         .v11_by_crypt_name
         .entry(crypt_name.to_string())
-        .or_insert_with(|| retrieve_linux_v11_outcome(crypt_name, backend, clock, deadline))
+        .or_insert_with(|| retrieve_linux_v11_outcome(crypt_name, backend, runtime))
         .clone(),
     };
 
@@ -138,9 +138,7 @@ impl HostKeySession {
     request: ChromiumKeyRequest<'_>,
     runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes {
-    self
-      .cache
-      .outcomes_for(request.credentials, runtime.clock, runtime.deadline)
+    self.cache.outcomes_for(request.credentials, runtime)
   }
 
   #[cfg(test)]
@@ -154,9 +152,10 @@ impl HostKeySession {
   where
     B: LinuxKeyringBackend,
   {
+    let runtime = BoundaryRuntime::new(clock, deadline);
     self
       .cache
-      .outcomes_for_with_backend(request.credentials, backend, clock, deadline)
+      .outcomes_for_with_backend(request.credentials, backend, &runtime)
   }
 }
 
@@ -214,8 +213,7 @@ mod tests {
     fn passwords(
       &self,
       _crypt_name: &str,
-      _clock: &dyn Clock,
-      _deadline: Deadline,
+      _runtime: &BoundaryRuntime<'_>,
     ) -> Result<Vec<SecretString>> {
       self.calls.set(self.calls.get() + 1);
       self
@@ -261,7 +259,32 @@ mod tests {
   {
     let clock = crate::common::deadline::test_clock::ManualClock::default();
     let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
-    cache.outcomes_for_with_backend(credentials, backend, &clock, deadline)
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    cache.outcomes_for_with_backend(credentials, backend, &runtime)
+  }
+
+  #[test]
+  fn cancelled_runtime_does_not_start_the_linux_keyring_backend() {
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Ok(vec![SecretString::new("must not be read".to_owned())]),
+    };
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop,
+    );
+
+    let outcome = retrieve_linux_v11_outcome("chrome", &backend, &runtime);
+
+    assert_eq!(backend.calls.get(), 0);
+    let ChromiumKeyOutcome::Failure(failure) = outcome else {
+      panic!("cancelled provider must be a typed key outcome failure");
+    };
+    assert!(failure.message().contains("operation cancelled"));
   }
 
   #[test]

@@ -3,6 +3,7 @@
 //! This module contains policy and result-shape compatibility only. It owns no
 //! browser paths, credentials, discovery, acquisition, parsing, or decryption.
 
+use super::cookie_record::{FinalizedCookieRecord, LegacyProjectionSemantics};
 use super::mozilla::MozillaProfile;
 use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome};
 #[cfg(test)]
@@ -66,6 +67,7 @@ fn discovery_failure(outcome: &EngineExtractionDraft, browser_id: &str) -> Optio
   })
 }
 
+#[cfg(test)]
 fn project_engine_outcome(browser_id: &str, outcome: EngineExtractionDraft) -> Result<Vec<Cookie>> {
   project_canonical_outcome(
     browser_id,
@@ -73,6 +75,19 @@ fn project_engine_outcome(browser_id: &str, outcome: EngineExtractionDraft) -> R
   )
 }
 
+fn project_engine_outcome_with_runtime(
+  browser_id: &str,
+  outcome: EngineExtractionDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  project_canonical_outcome_with_runtime(
+    browser_id,
+    super::report_build::canonical_engine_extraction_with_runtime(browser_id, outcome, runtime)?,
+    runtime,
+  )
+}
+
+#[cfg(test)]
 pub(crate) fn project_chromium_outcome(
   browser_id: &str,
   outcome: registry::ChromiumRegistryDraft,
@@ -83,7 +98,57 @@ pub(crate) fn project_chromium_outcome(
   )
 }
 
+fn project_chromium_outcome_with_runtime(
+  browser_id: &str,
+  outcome: registry::ChromiumRegistryDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  project_canonical_outcome_with_runtime(
+    browser_id,
+    super::report_build::canonical_chromium_extraction_with_runtime(browser_id, outcome, runtime)?,
+    runtime,
+  )
+}
+
+#[cfg(test)]
 pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> Result<Vec<Cookie>> {
+  let selected = selected_records(browser_id, outcome, None)?;
+  Ok(
+    selected
+      .into_iter()
+      .flat_map(|(semantics, records)| {
+        records
+          .into_iter()
+          .map(move |record| record.into_cookie_with_semantics(semantics))
+      })
+      .collect(),
+  )
+}
+
+pub(crate) fn project_canonical_outcome_with_runtime(
+  browser_id: &str,
+  outcome: Outcome,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  let selected = selected_records(browser_id, outcome, Some(runtime))?;
+  runtime.check()?;
+  Ok(
+    selected
+      .into_iter()
+      .flat_map(|(semantics, records)| {
+        records
+          .into_iter()
+          .map(move |record| record.into_cookie_with_semantics(semantics))
+      })
+      .collect(),
+  )
+}
+
+fn selected_records(
+  browser_id: &str,
+  outcome: Outcome,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Result<Vec<(LegacyProjectionSemantics, Vec<FinalizedCookieRecord>)>> {
   let Outcome {
     sources,
     compatibility,
@@ -97,18 +162,25 @@ pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> R
       CompatibilityAbsence::CookieDatabase,
     ));
   match disposition {
-    CompatibilityDisposition::Emit { source_digests } => Ok(
-      sources
-        .into_iter()
-        .filter(|source| source_digests.contains(&source.source_digest()))
-        .flat_map(|source| {
-          source
-            .records
-            .into_iter()
-            .map(|record| record.into_cookie())
-        })
-        .collect(),
-    ),
+    CompatibilityDisposition::Emit { source_digests } => {
+      let mut selected = Vec::new();
+      for source in sources {
+        if let Some(runtime) = runtime {
+          runtime.check()?;
+        }
+        if !source_digests.contains(&source.source_digest()) {
+          continue;
+        }
+        let semantics = LegacyProjectionSemantics::for_source_format(source.source.format.as_str());
+        for _ in &source.records {
+          if let Some(runtime) = runtime {
+            runtime.check()?;
+          }
+        }
+        selected.push((semantics, source.records));
+      }
+      Ok(selected)
+    }
     CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase) => {
       Err(BrowserNotInstalled::CookieDatabase.into())
     }
@@ -116,40 +188,41 @@ pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> R
   }
 }
 
+#[cfg(test)]
 pub(crate) fn project_canonical_detailed_outcome(
   browser_id: &str,
   outcome: Outcome,
 ) -> Result<Vec<DetailedCookie>> {
-  let Outcome {
-    sources,
-    compatibility,
-    ..
-  } = outcome;
-  let disposition = compatibility
-    .into_iter()
-    .find(|decision| decision.browser_id.as_str() == browser_id)
-    .map(|decision| decision.disposition)
-    .unwrap_or(CompatibilityDisposition::Absent(
-      CompatibilityAbsence::CookieDatabase,
-    ));
-  match disposition {
-    CompatibilityDisposition::Emit { source_digests } => Ok(
-      sources
-        .into_iter()
-        .filter(|source| source_digests.contains(&source.source_digest()))
-        .flat_map(|source| {
-          source
-            .records
-            .into_iter()
-            .map(|record| record.into_detailed_cookie())
-        })
-        .collect(),
-    ),
-    CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase) => {
-      Err(BrowserNotInstalled::CookieDatabase.into())
-    }
-    CompatibilityDisposition::Failed(diagnostic) => bail!(diagnostic.as_str().to_owned()),
-  }
+  let selected = selected_records(browser_id, outcome, None)?;
+  Ok(
+    selected
+      .into_iter()
+      .flat_map(|(semantics, records)| {
+        records
+          .into_iter()
+          .map(move |record| record.into_detailed_cookie_with_semantics(semantics))
+      })
+      .collect(),
+  )
+}
+
+pub(crate) fn project_canonical_detailed_outcome_with_runtime(
+  browser_id: &str,
+  outcome: Outcome,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<DetailedCookie>> {
+  let selected = selected_records(browser_id, outcome, Some(runtime))?;
+  runtime.check()?;
+  Ok(
+    selected
+      .into_iter()
+      .flat_map(|(semantics, records)| {
+        records
+          .into_iter()
+          .map(move |record| record.into_detailed_cookie_with_semantics(semantics))
+      })
+      .collect(),
+  )
 }
 
 /// Extracts one registered browser using the legacy first-profile projection.
@@ -170,27 +243,31 @@ pub(crate) fn browser_cookies_with_runtime(
   runtime.check()?;
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
-    "chromium" => project_chromium_outcome(
+    "chromium" => project_chromium_outcome_with_runtime(
       &browser.canonical_id,
       registry::legacy_chromium_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
+      runtime,
     ),
-    "gecko" => project_engine_outcome(
+    "gecko" => project_engine_outcome_with_runtime(
       &browser.canonical_id,
       registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
+      runtime,
     ),
     #[cfg(target_os = "macos")]
-    "safari" => project_engine_outcome(
+    "safari" => project_engine_outcome_with_runtime(
       &browser.canonical_id,
       registry::legacy_safari_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
+      runtime,
     ),
     #[cfg(target_os = "windows")]
-    "internet_explorer" => project_engine_outcome(
+    "internet_explorer" => project_engine_outcome_with_runtime(
       &browser.canonical_id,
       registry::legacy_internet_explorer_outcome_with_runtime(
         &browser.canonical_id,
         domains,
         runtime,
       )?,
+      runtime,
     ),
     engine => bail!(
       "browser {:?} uses unsupported engine {engine:?}",
@@ -201,7 +278,16 @@ pub(crate) fn browser_cookies_with_runtime(
 
 /// Compatibility-shaped persistent Gecko profiles from registry discovery.
 pub(crate) fn gecko_profiles(browser_id: &str) -> Result<Vec<MozillaProfile>> {
-  let outcome = registry::legacy_gecko_profiles(browser_id)?;
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  gecko_profiles_with_runtime(browser_id, &runtime)
+}
+
+pub(crate) fn gecko_profiles_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<MozillaProfile>> {
+  let outcome = registry::legacy_gecko_profiles_with_runtime(browser_id, runtime)?;
   if let Some(error) = discovery_failure(&outcome, browser_id) {
     bail!(error)
   }
@@ -217,6 +303,7 @@ pub(crate) fn gecko_profiles(browser_id: &str) -> Result<Vec<MozillaProfile>> {
   if profiles.is_empty() {
     return Err(BrowserNotInstalled::ProfileWithCookieDatabase.into());
   }
+  runtime.check()?;
   Ok(profiles)
 }
 
