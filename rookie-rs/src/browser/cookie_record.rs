@@ -7,7 +7,7 @@ const CIPHER_VERSION_PREFIX_LEN: usize = 3;
 ///
 /// Decoders construct this type without access to browser keys. Only the
 /// `unseal` stage may turn `Encrypted` into `Plain` (or `Unavailable`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum CookieValue {
   Plain(String),
   Encrypted { tier: CipherTier, bytes: Vec<u8> },
@@ -15,7 +15,7 @@ pub(crate) enum CookieValue {
 }
 
 /// Cipher metadata that is safe for an untrusted row decoder to classify.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CipherTier {
   V10,
   V11,
@@ -24,6 +24,49 @@ pub(crate) enum CipherTier {
   LegacyDpapi,
   Unknown([u8; CIPHER_VERSION_PREFIX_LEN]),
   Malformed { observed_len: usize },
+}
+
+struct RedactedCookieValue;
+
+impl fmt::Debug for RedactedCookieValue {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("<redacted>")
+  }
+}
+
+impl fmt::Debug for CookieValue {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Plain(_) => formatter
+        .debug_tuple("Plain")
+        .field(&RedactedCookieValue)
+        .finish(),
+      Self::Encrypted { tier, bytes } => formatter
+        .debug_struct("Encrypted")
+        .field("tier", tier)
+        .field("byte_len", &bytes.len())
+        .field("bytes", &RedactedCookieValue)
+        .finish(),
+      Self::Unavailable(reason) => formatter.debug_tuple("Unavailable").field(reason).finish(),
+    }
+  }
+}
+
+impl fmt::Debug for CipherTier {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::V10 => formatter.write_str("V10"),
+      Self::V11 => formatter.write_str("V11"),
+      Self::V12SecretPortal => formatter.write_str("V12SecretPortal"),
+      Self::V20 => formatter.write_str("V20"),
+      Self::LegacyDpapi => formatter.write_str("LegacyDpapi"),
+      Self::Unknown(_) => formatter.write_str("Unknown"),
+      Self::Malformed { observed_len } => formatter
+        .debug_struct("Malformed")
+        .field("observed_len", observed_len)
+        .finish(),
+    }
+  }
 }
 
 impl CipherTier {
@@ -68,7 +111,7 @@ impl fmt::Display for UnavailableReason {
 impl std::error::Error for UnavailableReason {}
 
 /// Internal record passed from decode, through unseal, to public projection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct CookieRecord {
   pub(crate) domain: String,
   pub(crate) path: String,
@@ -79,6 +122,23 @@ pub(crate) struct CookieRecord {
   pub(crate) http_only: bool,
   pub(crate) same_site: i64,
   pub(crate) context: CookieContext,
+}
+
+impl fmt::Debug for CookieRecord {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("CookieRecord")
+      .field("domain", &self.domain)
+      .field("path", &self.path)
+      .field("secure", &self.secure)
+      .field("expires", &self.expires)
+      .field("name", &self.name)
+      .field("value", &self.value)
+      .field("http_only", &self.http_only)
+      .field("same_site", &self.same_site)
+      .field("context", &self.context)
+      .finish()
+  }
 }
 
 impl CookieRecord {
@@ -135,5 +195,37 @@ mod tests {
       CipherTier::detect(b"v1"),
       CipherTier::Malformed { observed_len: 2 }
     );
+  }
+
+  #[test]
+  fn internal_record_debug_redacts_plain_and_encrypted_values_transitively() {
+    let record = CookieRecord {
+      domain: ".example.com".to_owned(),
+      path: "/".to_owned(),
+      secure: true,
+      expires: None,
+      name: "session".to_owned(),
+      value: CookieValue::Plain("plain-value-sentinel".to_owned()),
+      http_only: true,
+      same_site: 1,
+      context: CookieContext {
+        partition_key: Some("(https,example.com)".to_owned()),
+        ..CookieContext::default()
+      },
+    };
+    let plain_debug = format!("{record:?}");
+    assert!(!plain_debug.contains("plain-value-sentinel"));
+    assert!(plain_debug.contains("Plain(<redacted>)"));
+    assert!(plain_debug.contains("partition_key"));
+
+    let encrypted = CookieValue::Encrypted {
+      tier: CipherTier::Unknown(*b"v99"),
+      bytes: b"ciphertext-value-sentinel".to_vec(),
+    };
+    let encrypted_debug = format!("{encrypted:?}");
+    assert!(!encrypted_debug.contains("ciphertext-value-sentinel"));
+    assert!(!encrypted_debug.contains("118, 57, 57"));
+    assert!(encrypted_debug.contains("tier: Unknown"));
+    assert!(encrypted_debug.contains("bytes: <redacted>"));
   }
 }

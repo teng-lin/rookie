@@ -255,9 +255,9 @@ where
         "Chromium v12 SecretPortal encryption is recognized but unsupported"
       )));
     }
-    ChromiumKeyRoute::Unknown(prefix) => {
+    ChromiumKeyRoute::Unknown(_) => {
       return Err(ChromiumCookieValueError::Decrypt(anyhow!(
-        "Unknown Chromium cipher prefix: {prefix:?}"
+        "Unknown Chromium cipher prefix"
       )));
     }
   };

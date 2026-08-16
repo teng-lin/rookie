@@ -3,6 +3,7 @@ use crate::common::enums::Cookie;
 use crate::common::enums::{CookieContext, SAME_SITE_UNSPECIFIED};
 use crate::common::{date, utils};
 use anyhow::{bail, Result};
+use std::fmt;
 
 use super::cookie_record::{CookieRecord, CookieValue};
 
@@ -73,7 +74,7 @@ impl CookieColumnLayout {
 /// Keeping decoding independent from libesedb makes the failure semantics
 /// testable on every host: malformed record data is rejected as a unit and the
 /// Windows integration can skip only that record.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub(crate) struct RawCookieRecord {
   pub(crate) domain: String,
   pub(crate) path: String,
@@ -81,6 +82,21 @@ pub(crate) struct RawCookieRecord {
   pub(crate) value: Vec<u8>,
   pub(crate) expires: u64,
   pub(crate) flags: i64,
+}
+
+impl fmt::Debug for RawCookieRecord {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("RawCookieRecord")
+      .field("domain", &self.domain)
+      .field("path", &self.path)
+      .field("name", &self.name)
+      .field("value", &"<redacted>")
+      .field("value_len", &self.value.len())
+      .field("expires", &self.expires)
+      .field("flags", &self.flags)
+      .finish()
+  }
 }
 
 impl RawCookieRecord {
@@ -142,6 +158,16 @@ mod tests {
       expires: 116_444_736_010_000_000,
       flags: i64::from(INTERNET_COOKIE_IS_SECURE | INTERNET_COOKIE_HTTPONLY),
     }
+  }
+
+  #[test]
+  fn raw_record_debug_redacts_value_bytes_before_decoding() {
+    let record = record();
+    let debug = format!("{record:?}");
+    assert!(!debug.contains("secret"));
+    assert!(!debug.contains("115, 101, 99, 114, 101, 116"));
+    assert!(debug.contains("value: \"<redacted>\""));
+    assert!(debug.contains("value_len: 7"));
   }
 
   #[test]

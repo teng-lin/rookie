@@ -862,6 +862,32 @@ mod tests {
     }
   }
 
+  #[test]
+  fn public_report_debug_redacts_nested_cookie_values_without_changing_wire_output() {
+    const SENTINEL: &str = "nested-report-cookie-value-sentinel";
+    let source = SourceExtraction {
+      source: source(CookieSourceRoleId::persistent(), 10).source,
+      status: SourceStatusCode::succeeded(),
+      selected: true,
+      acquisition_strategy: AcquisitionStrategyCode::live_read_only(),
+      cookies: vec![cookie(".example.com", "/", "session", SENTINEL)],
+      stats: ExtractionStats {
+        rows_seen: 1,
+        cookies_emitted: 1,
+        ..ExtractionStats::default()
+      },
+      issues: Vec::new(),
+    };
+
+    let debug = format!("{source:?}");
+    assert!(!debug.contains(SENTINEL));
+    assert!(debug.contains("value: <redacted>"));
+    assert!(debug.contains("session"));
+
+    let wire = serde_json::to_value(&source).expect("serialize source extraction");
+    assert_eq!(wire["cookies"][0]["value"], SENTINEL);
+  }
+
   /// Report ordering must be stable across runs, so the cookie sort is total
   /// over every field rather than stopping at the domain.
   #[test]
