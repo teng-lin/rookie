@@ -183,6 +183,7 @@ fn report_dict(py: Python<'_>, report: ExtractionReport) -> PyResult<Py<PyAny>> 
 
   let dict = PyDict::new(py);
   dict.set_item("status", report.status.as_str())?;
+  dict.set_item("termination", report.termination.as_str())?;
   dict.set_item("summary", report_stats_dict(py, report.summary)?)?;
   dict.set_item("profiles", profiles)?;
   dict.set_item("issues", issue_dicts(py, report.issues)?)?;
@@ -258,6 +259,10 @@ fn issue_dict(py: Python<'_>, issue: ExtractionIssue) -> PyResult<Py<PyAny>> {
   dict.set_item("code", issue.code.as_str())?;
   dict.set_item("stage", issue.stage.as_str())?;
   dict.set_item("severity", issue.severity.as_str())?;
+  dict.set_item("cause", issue.cause)?;
+  dict.set_item("provider", issue.provider)?;
+  dict.set_item("tier", issue.tier)?;
+  dict.set_item("retryability", issue.retryability)?;
   dict.set_item("occurrences", issue.occurrences)?;
   dict.set_item("samples", issue.samples)?;
   dict.set_item(

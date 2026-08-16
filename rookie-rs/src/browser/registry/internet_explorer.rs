@@ -2,9 +2,9 @@ use super::{
   canonical_installation_root, embedded_registry, engine_roots, installation_id,
   installation_root_is_directory, normalized_path_bytes, profile_id, select_engine_profiles,
   sort_engine_profiles, BrowserEngine, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtractionOutcome, EngineProfileExtraction, EngineSourceExtraction,
-  ProfileLocator, ProfileSelection, SourceAcquisition, SourceFailureStage,
-  PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT,
+  DiscoveryStrategy, EngineExtractionDraft, EngineProfileDraft, EngineSourceDraft, ProfileLocator,
+  ProfileSelection, SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE,
+  SOURCE_ROLE_PERSISTENT,
 };
 use crate::common::enums::Cookie;
 use anyhow::Result;
@@ -19,6 +19,7 @@ pub(super) const INTERNET_EXPLORER_COOKIE_FILE: &str = "WebCacheV01.dat";
 /// injected because the ESE reader only compiles on Windows.
 pub(crate) struct InternetExplorerRows {
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) records: Vec<crate::browser::cookie_record::CookieRecord>,
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
   pub(crate) row_error: Option<String>,
@@ -29,7 +30,7 @@ pub(crate) struct InternetExplorerRows {
 pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let registry = embedded_registry()?;
   let (definition, roots) = engine_roots(
     registry,
@@ -39,7 +40,7 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
   )?;
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
-  let mut outcome = EngineExtractionOutcome::default();
+  let mut outcome = EngineExtractionDraft::default();
 
   for root in roots {
     if root.discovery != DiscoveryStrategy::InternetExplorerWebCache {
@@ -84,13 +85,14 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       &root.channel,
       &normalized_path_bytes(&canonical_root),
     );
-    let source = EngineSourceExtraction {
+    let source = EngineSourceDraft {
       path: source_path,
       role: SOURCE_ROLE_PERSISTENT,
       format: "internet_explorer_ese",
       precedence: PERSISTENT_SOURCE_PRECEDENCE,
       selected: true,
       cookies: Vec::new(),
+      records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
       acquisition: SourceAcquisition::EseDatabase,
@@ -100,7 +102,7 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       error_stage: SourceFailureStage::Acquisition,
       row_error: None,
     };
-    outcome.profiles.push(EngineProfileExtraction {
+    outcome.profiles.push(EngineProfileDraft {
       profile_id: profile_id(&installation_id, ProfileLocator::Relative(Path::new(""))),
       installation_id,
       installation_priority: root.priority,
@@ -128,7 +130,7 @@ pub(super) fn internet_explorer_report_with_context<F, Q>(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<EngineExtractionOutcome>
+) -> Result<EngineExtractionDraft>
 where
   F: DiscoveryFs,
   Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
@@ -143,10 +145,10 @@ where
 }
 
 pub(super) fn populate_internet_explorer_sources<Q>(
-  mut outcome: EngineExtractionOutcome,
+  mut outcome: EngineExtractionDraft,
   domains: Option<&[String]>,
   mut query: Q,
-) -> EngineExtractionOutcome
+) -> EngineExtractionDraft
 where
   Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
 {
@@ -158,6 +160,7 @@ where
           source.rows_skipped = rows.records_skipped;
           source.row_error = rows.row_error;
           source.cookies = rows.cookies;
+          source.records = rows.records;
         }
         Err(error) => {
           // WebCache failures are schema or record-enumeration problems, which
@@ -183,7 +186,7 @@ where
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn internet_explorer_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+pub(crate) fn internet_explorer_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
   let context = DiscoveryContext::system()?;
   discover_internet_explorer_with_context(&context, browser_id)
 }
@@ -193,7 +196,7 @@ pub(crate) fn internet_explorer_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let context = DiscoveryContext::system()?;
   internet_explorer_report_with_context(
     &context,
@@ -205,6 +208,7 @@ pub(crate) fn internet_explorer_report(
         crate::browser::internet_explorer::internet_explorer_outcome(path, domains, force_kill).map(
           |extraction| InternetExplorerRows {
             cookies: extraction.cookies,
+            records: extraction.records,
             records_seen: extraction.stats.records_seen,
             records_skipped: extraction.stats.records_skipped,
             row_error: extraction.row_error,
@@ -219,7 +223,7 @@ pub(crate) fn internet_explorer_report(
 pub(crate) fn legacy_internet_explorer_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let context = DiscoveryContext::system()?;
   let mut outcome = discover_internet_explorer_with_context(&context, browser_id)?;
   select_engine_profiles(
@@ -235,6 +239,7 @@ pub(crate) fn legacy_internet_explorer_outcome(
         crate::browser::internet_explorer::internet_explorer_outcome(path, domains, force_kill).map(
           |extraction| InternetExplorerRows {
             cookies: extraction.cookies,
+            records: extraction.records,
             records_seen: extraction.stats.records_seen,
             records_skipped: extraction.stats.records_skipped,
             row_error: extraction.row_error,
@@ -263,6 +268,7 @@ mod tests {
         assert!(!force_kill);
         Ok(InternetExplorerRows {
           cookies: Vec::new(),
+          records: Vec::new(),
           records_seen: 0,
           records_skipped: 0,
           row_error: None,

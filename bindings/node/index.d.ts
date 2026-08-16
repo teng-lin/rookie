@@ -153,6 +153,10 @@ export interface ExtractionIssueObject {
   code: string
   stage: string
   severity: string
+  cause: string
+  provider: string | null
+  tier: string | null
+  retryability: string
   occurrences: number
   samples: Array<string>
   browserId: string | null
@@ -192,6 +196,7 @@ export interface ProfileExtractionObject {
  */
 export interface ExtractionReportObject {
   status: string
+  termination: string
   summary: ReportStatsObject
   profiles: Array<ProfileExtractionObject>
   issues: Array<ExtractionIssueObject>

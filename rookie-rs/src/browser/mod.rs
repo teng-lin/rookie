@@ -9,6 +9,7 @@ pub(crate) mod cookie_record;
 pub(crate) mod internet_explorer_model;
 pub(crate) mod legacy;
 pub(crate) mod mozilla;
+pub(crate) mod outcome;
 pub(crate) mod registry;
 pub(crate) mod report_build;
 pub(crate) mod report_core;

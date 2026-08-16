@@ -196,6 +196,10 @@ pub struct ExtractionIssueObject {
   pub code: String,
   pub stage: String,
   pub severity: String,
+  pub cause: String,
+  pub provider: Option<String>,
+  pub tier: Option<String>,
+  pub retryability: String,
   pub occurrences: u32,
   pub samples: Vec<String>,
   pub browser_id: Option<String>,
@@ -237,6 +241,7 @@ pub struct ProfileExtractionObject {
 #[napi(object)]
 pub struct ExtractionReportObject {
   pub status: String,
+  pub termination: String,
   pub summary: ReportStatsObject,
   pub profiles: Vec<ProfileExtractionObject>,
   pub issues: Vec<ExtractionIssueObject>,
@@ -437,6 +442,10 @@ fn issues_to_js(issues: Vec<ExtractionIssue>) -> Vec<ExtractionIssueObject> {
       code: issue.code.as_str().to_owned(),
       stage: issue.stage.as_str().to_owned(),
       severity: issue.severity.as_str().to_owned(),
+      cause: issue.cause,
+      provider: issue.provider,
+      tier: issue.tier,
+      retryability: issue.retryability,
       occurrences: issue.occurrences,
       samples: issue.samples,
       browser_id: issue.browser_id.map(|id| id.as_str().to_owned()),
@@ -475,6 +484,7 @@ fn profile_extraction_to_js(profile: ProfileExtraction) -> Result<ProfileExtract
 fn report_to_js(report: ExtractionReport) -> Result<ExtractionReportObject> {
   Ok(ExtractionReportObject {
     status: report.status.as_str().to_owned(),
+    termination: report.termination.as_str().to_owned(),
     summary: report_stats_to_js(report.summary),
     profiles: report
       .profiles

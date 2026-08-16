@@ -6,19 +6,26 @@
 //! [`crate::browser_report`], and [`crate::load_report`].
 
 use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
-use super::registry::{
-  self, ChromiumProfileExtraction, ChromiumProfileFailure, ChromiumRegistryReport, DiscoveryIssue,
-  EngineProfileExtraction, EngineSourceExtraction, RegisteredBrowser, SourceAcquisition,
-  SourceFailureStage, SOURCE_ROLE_PERSISTENT,
+use super::cookie_record::CookieRecord;
+use super::outcome::{
+  Diagnostic, Failure, FailureLedger, FailureScope, Outcome, ResultStatus, SourceOutcome,
+  Termination,
 };
+use super::registry::{
+  self, ChromiumProfileDraft, ChromiumProfileFailure, ChromiumRegistryDraft, DiscoveryIssue,
+  EngineProfileDraft, EngineSourceDraft, RegisteredBrowser, SourceAcquisition, SourceFailureStage,
+  SOURCE_ROLE_PERSISTENT,
+};
+#[cfg(test)]
+use super::report_core::SourceStatusCode;
 use super::report_core::{
-  display_path, issue, push_aggregated, report_status, sort_cookies, sort_source_descriptors,
-  sort_source_outcomes, source_status, AcquisitionStrategyCode, BrowserCapabilitiesDescriptor,
-  BrowserDescriptor, BrowserId, CipherTierId, CookieSourceDescriptor, CookieSourceFormatId,
-  CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineExtractionOutcome, EngineId,
-  ExtractionIssue, ExtractionReport, ExtractionStageCode, InstallationId, IssueSeverityCode,
-  ProfileDescriptor, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, SourceExtraction,
-  SourceExtractionOutcome, SourceStatusCode, StatsAccumulator, MAX_ISSUE_SAMPLES,
+  display_path, issue, push_aggregated, sort_cookies, sort_source_descriptors, source_status,
+  AcquisitionStrategyCode, BrowserCapabilitiesDescriptor, BrowserDescriptor, BrowserId,
+  CipherTierId, CookieSourceDescriptor, CookieSourceFormatId, CookieSourceIdentity,
+  CookieSourceRoleId, CounterSet, EngineId, ExtractionIssue, ExtractionReport, ExtractionStageCode,
+  InstallationId, IssueSeverityCode, ProfileDescriptor, ProfileDraft, ProfileExtraction, ProfileId,
+  ProfileIdentity, ReportStats, ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator,
+  TerminationCode, MAX_ISSUE_SAMPLES,
 };
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{bail, Result};
@@ -131,9 +138,27 @@ fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
       .collect(),
     _ => issue_code.samples.clone(),
   };
-  issue(code, stage, IssueSeverityCode::error(), message)
+  let mut issue = issue(code, stage, IssueSeverityCode::error(), message)
     .with_occurrences(u32::try_from(issue_code.occurrences).unwrap_or(u32::MAX))
-    .with_samples(samples)
+    .with_samples(samples);
+  if matches!(
+    issue_code.code,
+    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed
+  ) {
+    issue.cause = "credential_provider".to_owned();
+    issue.provider.clone_from(&issue_code.provider);
+    issue.tier.clone_from(&issue_code.tier);
+    issue.retryability = if issue_code.code == ChromiumRowIssueCode::ProviderUnavailable {
+      "not_retryable"
+    } else {
+      "retryable"
+    }
+    .to_owned();
+    if let Some(cause) = &issue_code.cause {
+      issue.message = cause.clone();
+    }
+  }
+  issue
 }
 
 fn profile_identity(
@@ -157,17 +182,18 @@ fn profile_identity(
 fn chromium_profile_outcome(
   browser_id: &BrowserId,
   installation_id: &str,
-  extraction: ChromiumProfileExtraction,
-) -> Result<EngineExtractionOutcome> {
-  let ChromiumProfileExtraction {
+  extraction: ChromiumProfileDraft,
+) -> Result<ProfileDraft> {
+  let ChromiumProfileDraft {
     profile,
     cookies,
+    records,
     stats,
     row_issues,
     acquisition,
     acquisition_attempts,
     failure,
-    legacy_error: _,
+    legacy_error,
   } = extraction;
   let identity = profile_identity(
     browser_id,
@@ -176,7 +202,7 @@ fn chromium_profile_outcome(
     &profile.display_name,
     &profile.path,
   )?;
-  let mut outcome = EngineExtractionOutcome::new(identity, profile.is_default);
+  let mut outcome = ProfileDraft::new(identity, profile.is_default);
 
   let Some(candidate) = profile
     .persistent_candidates
@@ -203,7 +229,7 @@ fn chromium_profile_outcome(
     return Ok(outcome);
   };
 
-  let mut source = SourceExtractionOutcome::new(
+  let mut source = SourceDraft::new(
     source_identity(
       &candidate.path,
       SOURCE_ROLE_PERSISTENT,
@@ -223,6 +249,8 @@ fn chromium_profile_outcome(
   }
   .into_stats();
   source.cookies = cookies;
+  source.records = records;
+  source.compatibility_error = legacy_error;
   for row in &row_issues {
     push_aggregated(&mut source.issues, row_issue(row));
   }
@@ -246,8 +274,8 @@ fn chromium_profile_outcome(
 
 fn engine_profile_outcome(
   browser_id: &BrowserId,
-  profile: EngineProfileExtraction,
-) -> Result<EngineExtractionOutcome> {
+  profile: EngineProfileDraft,
+) -> Result<ProfileDraft> {
   let identity = profile_identity(
     browser_id,
     &profile.installation_id,
@@ -255,7 +283,7 @@ fn engine_profile_outcome(
     &profile.name,
     &profile.path,
   )?;
-  let mut outcome = EngineExtractionOutcome::new(identity, profile.is_default);
+  let mut outcome = ProfileDraft::new(identity, profile.is_default);
   for source in profile.sources {
     outcome.sources.push(engine_source_outcome(source));
   }
@@ -282,14 +310,15 @@ fn engine_profile_outcome(
   Ok(outcome)
 }
 
-fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutcome {
-  let EngineSourceExtraction {
+fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
+  let EngineSourceDraft {
     path,
     role,
     format,
     precedence,
     selected,
     cookies,
+    records,
     rows_seen,
     rows_skipped,
     acquisition,
@@ -299,7 +328,7 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
     error_stage,
     row_error,
   } = source;
-  let mut outcome = SourceExtractionOutcome::new(
+  let mut outcome = SourceDraft::new(
     source_identity(&path, role, format, precedence),
     selected,
     acquisition_code(acquisition),
@@ -314,6 +343,7 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
   }
   .into_stats();
   outcome.cookies = cookies;
+  outcome.records = records;
   for diagnostic in diagnostics {
     push_aggregated(
       &mut outcome.issues,
@@ -366,22 +396,22 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
 }
 
 /// One registered browser's contribution to a report.
-struct BrowserOutcome {
+struct BrowserDraft {
   detected: bool,
   installations_discovered: usize,
   /// Every detected root failed enumeration, so an empty profile list means
   /// "could not look", not "nothing installed". Section 5.7 makes this the
   /// difference between a `failed` report and a `no_sources` one.
   discovery_failed: bool,
-  profiles: Vec<EngineExtractionOutcome>,
+  profiles: Vec<ProfileDraft>,
   issues: Vec<ExtractionIssue>,
 }
 
 fn chromium_browser_outcome(
   browser_id: &BrowserId,
-  report: ChromiumRegistryReport,
-) -> Result<BrowserOutcome> {
-  let mut outcome = BrowserOutcome {
+  report: ChromiumRegistryDraft,
+) -> Result<BrowserDraft> {
+  let mut outcome = BrowserDraft {
     // Discovery counts, not the post-selection list: a profile-selected report
     // must not claim the installations it filtered out were never there. A root
     // that existed but could not be read also counts as detected -- otherwise
@@ -409,9 +439,9 @@ fn chromium_browser_outcome(
 
 fn engine_browser_outcome(
   browser_id: &BrowserId,
-  engine: registry::EngineExtractionOutcome,
-) -> Result<BrowserOutcome> {
-  let mut outcome = BrowserOutcome {
+  engine: registry::EngineExtractionDraft,
+) -> Result<BrowserDraft> {
+  let mut outcome = BrowserDraft {
     detected: engine.installations_discovered > 0 || engine.installations_detected > 0,
     installations_discovered: engine.installations_discovered,
     discovery_failed: engine.all_detected_roots_failed(),
@@ -468,7 +498,7 @@ fn collect_report(
   profile_id: Option<&str>,
   extract: bool,
   domains: Option<Vec<String>>,
-) -> Result<BrowserOutcome> {
+) -> Result<BrowserDraft> {
   let browser_id: BrowserId = browser.canonical_id.parse()?;
   match browser.engine {
     "chromium" => {
@@ -507,7 +537,7 @@ fn collect_report(
     }
     // A registered browser whose engine has no adapter compiled into this
     // build is reported as undetected rather than silently skipped.
-    _ => Ok(BrowserOutcome {
+    _ => Ok(BrowserDraft {
       detected: false,
       installations_discovered: 0,
       discovery_failed: false,
@@ -517,9 +547,9 @@ fn collect_report(
   }
 }
 
-fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Result<BrowserOutcome> {
+fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Result<BrowserDraft> {
   let listing = registry::chromium_listing(canonical_id)?;
-  let mut outcome = BrowserOutcome {
+  let mut outcome = BrowserDraft {
     detected: listing.installations_discovered > 0,
     installations_discovered: listing.installations_discovered,
     discovery_failed: listing.all_detected_roots_failed,
@@ -537,12 +567,12 @@ fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Resul
       &profile.display_name,
       &profile.path,
     )?;
-    let mut engine = EngineExtractionOutcome::new(identity, profile.is_default);
+    let mut engine = ProfileDraft::new(identity, profile.is_default);
     for candidate in &profile.persistent_candidates {
       if !candidate.exists {
         continue;
       }
-      engine.sources.push(SourceExtractionOutcome::new(
+      engine.sources.push(SourceDraft::new(
         source_identity(
           &candidate.path,
           SOURCE_ROLE_PERSISTENT,
@@ -558,45 +588,214 @@ fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Resul
   Ok(outcome)
 }
 
-fn finish_profile(mut engine: EngineExtractionOutcome) -> ProfileExtraction {
-  sort_source_outcomes(&mut engine.sources);
-  let mut stats = StatsAccumulator::default();
-  // Engines raise profile and source issues without context because the
-  // enclosing profile is implied by where they sit. That holds only while the
-  // report keeps its shape: a consumer that flattens every issue into one list
-  // -- which the CLI and bindings do -- cannot tell which profile an issue came
-  // from. The identity is known here, so stamp it once.
-  let identity = &engine.profile;
-  let stamp = |issue: ExtractionIssue| {
-    issue.with_context(
-      Some(&identity.browser_id),
-      Some(&identity.installation_id),
-      Some(&identity.profile_id),
-    )
+fn canonicalize_profile(
+  engine: ProfileDraft,
+  profiles: &mut Vec<(ProfileIdentity, bool)>,
+  sources: &mut Vec<SourceOutcome>,
+  ledger: &mut FailureLedger,
+) {
+  let ProfileDraft {
+    profile,
+    is_default,
+    sources: engine_sources,
+    issues,
+  } = engine;
+  let profile_scope = FailureScope::Profile {
+    browser_id: profile.browser_id.clone(),
+    installation_id: profile.installation_id.clone(),
+    profile_id: profile.profile_id.clone(),
   };
-  let sources = engine
-    .sources
-    .into_iter()
-    .map(|mut source| {
-      sort_cookies(&mut source.cookies);
+  for issue in issues {
+    ledger.push(Failure::from_issue(issue, profile_scope.clone(), &[]));
+  }
+  for source in engine_sources {
+    let secrets = source
+      .cookies
+      .iter()
+      .map(|cookie| cookie.value.as_str())
+      .collect::<Vec<_>>();
+    let mut canonical = SourceOutcome::new(
+      profile.clone(),
+      is_default,
+      source.source,
+      source.selected,
+      source.acquisition_strategy,
+    );
+    canonical.stats = source.stats;
+    canonical.failed = source.failed;
+    canonical.compatibility_error = source
+      .compatibility_error
+      .map(|message| Diagnostic::new_with_secrets(message, &secrets));
+    let source_scope = FailureScope::Source {
+      browser_id: profile.browser_id.clone(),
+      installation_id: profile.installation_id.clone(),
+      profile_id: profile.profile_id.clone(),
+      source_digest: canonical.source_digest(),
+    };
+    for issue in source.issues {
+      ledger.push(Failure::from_issue(issue, source_scope.clone(), &secrets));
+    }
+    canonical.records = if source.records.is_empty() {
+      source
+        .cookies
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, cookie)| {
+          CookieRecord::from_cookie(
+            cookie,
+            super::outcome::source_ref(&canonical.source, ordinal),
+          )
+        })
+        .collect()
+    } else {
+      source.records
+    };
+    sources.push(canonical);
+  }
+  profiles.push((profile, is_default));
+}
+
+fn project_canonical_report(mut outcome: Outcome) -> ExtractionReport {
+  debug_assert_eq!(outcome.counters.sources_discovered, outcome.sources.len());
+  let mut failures = outcome.failure_ledger.into_vec();
+  let mut profiles = Vec::with_capacity(outcome.profiles.len());
+  for (identity, is_default) in outcome.profiles {
+    let mut stats = StatsAccumulator::default();
+    let mut public_sources = Vec::new();
+    let mut retained_sources = Vec::new();
+    for source in outcome.sources {
+      if source.profile.browser_id != identity.browser_id
+        || source.profile.installation_id != identity.installation_id
+        || source.profile.profile_id != identity.profile_id
+      {
+        retained_sources.push(source);
+        continue;
+      }
+      let digest = source.source_digest();
+      debug_assert_eq!(source.is_default_profile, is_default);
+      let mut source_issues = Vec::new();
+      let mut retained_failures = Vec::new();
+      for failure in failures {
+        match &failure.scope {
+          FailureScope::Source {
+            browser_id,
+            installation_id,
+            profile_id,
+            source_digest,
+          } if browser_id == &identity.browser_id
+            && installation_id == &identity.installation_id
+            && profile_id == &identity.profile_id
+            && source_digest == &digest =>
+          {
+            source_issues.push(failure.into_issue())
+          }
+          _ => retained_failures.push(failure),
+        }
+      }
+      failures = retained_failures;
+      let mut cookies = source
+        .records
+        .into_iter()
+        .filter_map(|record| record.into_cookie().ok())
+        .collect::<Vec<_>>();
+      sort_cookies(&mut cookies);
       stats.add(&source.stats);
-      let issues = source.issues.into_iter().map(stamp).collect();
-      SourceExtraction {
+      public_sources.push(SourceExtraction {
         source: source.source,
         status: source_status(source.failed),
         selected: source.selected,
         acquisition_strategy: source.acquisition_strategy,
-        cookies: source.cookies,
+        cookies,
         stats: source.stats,
-        issues,
+        issues: source_issues,
+      });
+    }
+    outcome.sources = retained_sources;
+    public_sources.sort_by(|left, right| {
+      let rank = |role: &CookieSourceRoleId| match role.as_str() {
+        "persistent" => 0,
+        "session" => 1,
+        _ => 2,
+      };
+      rank(&left.source.role)
+        .cmp(&rank(&right.source.role))
+        .then_with(|| left.source.role.as_str().cmp(right.source.role.as_str()))
+        .then_with(|| left.source.precedence.cmp(&right.source.precedence))
+    });
+
+    let mut profile_issues = Vec::new();
+    let mut retained_failures = Vec::new();
+    for failure in failures {
+      match &failure.scope {
+        FailureScope::Profile {
+          browser_id,
+          installation_id,
+          profile_id,
+        } if browser_id == &identity.browser_id
+          && installation_id == &identity.installation_id
+          && profile_id == &identity.profile_id =>
+        {
+          profile_issues.push(failure.into_issue())
+        }
+        _ => retained_failures.push(failure),
       }
-    })
-    .collect::<Vec<_>>();
-  let issues = engine.issues.into_iter().map(stamp).collect();
-  ProfileExtraction {
-    profile: engine.profile,
-    sources,
-    stats: stats.into_stats(),
+    }
+    failures = retained_failures;
+    profiles.push(ProfileExtraction {
+      profile: identity,
+      sources: public_sources,
+      stats: stats.into_stats(),
+      issues: profile_issues,
+    });
+  }
+  let issues = failures.into_iter().map(Failure::into_issue).collect();
+  let mut saturated = false;
+  let summary = ReportStats {
+    registered_browsers: narrow(outcome.counters.registered_browsers, &mut saturated),
+    browsers_detected: narrow(outcome.counters.browsers_detected, &mut saturated),
+    browsers_not_detected: narrow(outcome.counters.browsers_not_detected, &mut saturated),
+    installations_discovered: narrow(outcome.counters.installations_discovered, &mut saturated),
+    profiles_discovered: narrow(outcome.counters.profiles_discovered, &mut saturated),
+    sources_succeeded: narrow(outcome.counters.sources_succeeded, &mut saturated),
+    sources_failed: narrow(outcome.counters.sources_failed, &mut saturated),
+    rows_seen: u32::try_from(outcome.counters.rows_seen).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    cookies_emitted: u32::try_from(outcome.counters.cookies_emitted).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    rows_skipped: u32::try_from(outcome.counters.rows_skipped).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    rows_rejected: u32::try_from(outcome.counters.rows_rejected).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    provider_failures: u32::try_from(outcome.counters.provider_failures).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    counters_saturated: saturated,
+  };
+  let status = match outcome.result_status {
+    ResultStatus::Complete => ReportStatusCode::complete(),
+    ResultStatus::Partial => ReportStatusCode::partial(),
+    ResultStatus::Failed => ReportStatusCode::failed(),
+    ResultStatus::NoSources => ReportStatusCode::no_sources(),
+  };
+  ExtractionReport {
+    status,
+    termination: match outcome.termination {
+      Termination::Completed => TerminationCode::completed(),
+      Termination::Cancelled => TerminationCode::cancelled(),
+      Termination::TimedOut => TerminationCode::timed_out(),
+      Termination::ResourceExhausted => TerminationCode::resource_exhausted(),
+    },
+    summary,
+    profiles,
     issues,
   }
 }
@@ -604,16 +803,6 @@ fn finish_profile(mut engine: EngineExtractionOutcome) -> ProfileExtraction {
 /// Adds to a wire counter, recording any clamp. Every `ReportStats` counter is
 /// `u32` for exact Node/TypeScript representation, so a count that hits the
 /// ceiling must set `counters_saturated` rather than quietly read as exact.
-fn add_saturating(counter: &mut u32, amount: u32, saturated: &mut bool) {
-  match counter.checked_add(amount) {
-    Some(value) => *counter = value,
-    None => {
-      *counter = u32::MAX;
-      *saturated = true;
-    }
-  }
-}
-
 fn narrow(value: usize, saturated: &mut bool) -> u32 {
   u32::try_from(value).unwrap_or_else(|_| {
     *saturated = true;
@@ -621,63 +810,75 @@ fn narrow(value: usize, saturated: &mut bool) -> u32 {
   })
 }
 
-fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> ExtractionReport {
-  let mut saturated = false;
-  let mut summary = ReportStats {
-    registered_browsers: narrow(registered_browsers, &mut saturated),
-    ..ReportStats::default()
-  };
-  let mut top_level = Vec::new();
+fn finalize_outcomes(registered_browsers: usize, outcomes: Vec<BrowserDraft>) -> Outcome {
   let mut profiles = Vec::new();
-  let mut counters = StatsAccumulator::default();
+  let mut sources = Vec::new();
+  let mut ledger = FailureLedger::default();
+  let mut browsers_detected = 0;
+  let mut browsers_not_detected = 0;
+  let mut installations_discovered = 0;
   let mut discovery_failed = false;
 
   for outcome in outcomes {
     discovery_failed |= outcome.discovery_failed;
     if outcome.detected {
-      add_saturating(&mut summary.browsers_detected, 1, &mut saturated);
+      browsers_detected += 1;
     } else {
-      add_saturating(&mut summary.browsers_not_detected, 1, &mut saturated);
+      browsers_not_detected += 1;
     }
-    let discovered = narrow(outcome.installations_discovered, &mut saturated);
-    add_saturating(
-      &mut summary.installations_discovered,
-      discovered,
-      &mut saturated,
-    );
+    installations_discovered += outcome.installations_discovered;
     for issue in outcome.issues {
-      push_aggregated(&mut top_level, issue);
+      let scope = issue
+        .browser_id
+        .clone()
+        .map_or(FailureScope::Request, |browser_id| FailureScope::Browser {
+          browser_id,
+        });
+      ledger.push(Failure::from_issue(issue, scope, &[]));
     }
     for engine in outcome.profiles {
-      let profile = finish_profile(engine);
-      add_saturating(&mut summary.profiles_discovered, 1, &mut saturated);
-      for source in &profile.sources {
-        if source.status == SourceStatusCode::succeeded() {
-          add_saturating(&mut summary.sources_succeeded, 1, &mut saturated);
-        } else {
-          add_saturating(&mut summary.sources_failed, 1, &mut saturated);
-        }
-      }
-      counters.add(&profile.stats);
-      profiles.push(profile);
+      canonicalize_profile(engine, &mut profiles, &mut sources, &mut ledger);
     }
   }
-
-  let totals = counters.into_stats();
-  summary.rows_seen = totals.rows_seen;
-  summary.cookies_emitted = totals.cookies_emitted;
-  summary.rows_skipped = totals.rows_skipped;
-  summary.rows_rejected = totals.rows_rejected;
-  summary.provider_failures = totals.provider_failures;
-  summary.counters_saturated = totals.counters_saturated || saturated;
-
-  let status = report_status(&profiles, &top_level, discovery_failed);
-  ExtractionReport {
-    status,
-    summary,
+  let discovered_any_source = !sources.is_empty() || discovery_failed;
+  let mut outcome = Outcome::finalize(
     profiles,
-    issues: top_level,
-  }
+    sources,
+    ledger,
+    discovered_any_source,
+    Termination::Completed,
+  );
+  outcome.counters.registered_browsers = registered_browsers;
+  outcome.counters.browsers_detected = browsers_detected;
+  outcome.counters.browsers_not_detected = browsers_not_detected;
+  outcome.counters.installations_discovered = installations_discovered;
+  outcome
+}
+
+fn assemble(registered_browsers: usize, outcomes: Vec<BrowserDraft>) -> ExtractionReport {
+  project_canonical_report(finalize_outcomes(registered_browsers, outcomes))
+}
+
+pub(crate) fn canonical_engine_extraction(
+  browser_id: &str,
+  engine: registry::EngineExtractionDraft,
+) -> Result<Outcome> {
+  let browser_id: BrowserId = browser_id.parse()?;
+  Ok(finalize_outcomes(
+    1,
+    vec![engine_browser_outcome(&browser_id, engine)?],
+  ))
+}
+
+pub(crate) fn canonical_chromium_extraction(
+  browser_id: &str,
+  report: ChromiumRegistryDraft,
+) -> Result<Outcome> {
+  let browser_id: BrowserId = browser_id.parse()?;
+  Ok(finalize_outcomes(
+    1,
+    vec![chromium_browser_outcome(&browser_id, report)?],
+  ))
 }
 
 /// Private `browser_report` seam. An unknown browser or profile ID is a request
@@ -738,7 +939,7 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
       // browsers' results; it is recorded as an error-severity issue.
       Err(error) => {
         let id: BrowserId = browser.canonical_id.parse()?;
-        outcomes.push(BrowserOutcome {
+        outcomes.push(BrowserDraft {
           detected: false,
           installations_discovered: 0,
           discovery_failed: true,
@@ -831,7 +1032,7 @@ fn chromium_profile_descriptor(
 
 fn profile_descriptors_from_outcome(
   browser_id: &str,
-  outcome: BrowserOutcome,
+  outcome: BrowserDraft,
 ) -> Result<Vec<ProfileDescriptor>> {
   // An empty list must mean "looked, found nothing". Roots that all failed to
   // enumerate are one way to lose everything; profiles that were all found and
@@ -900,7 +1101,7 @@ fn profile_descriptors_from_outcome(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::browser::report_core::{ReportStatusCode, SourceExtractionOutcome};
+  use crate::browser::report_core::{ReportStatusCode, SourceDraft};
   use std::path::PathBuf;
 
   fn identity() -> ProfileIdentity {
@@ -914,8 +1115,8 @@ mod tests {
     }
   }
 
-  fn source(failed: bool) -> SourceExtractionOutcome {
-    let mut source = SourceExtractionOutcome::new(
+  fn source(failed: bool) -> SourceDraft {
+    let mut source = SourceDraft::new(
       source_identity(
         &PathBuf::from("/profiles/default/cookies.sqlite"),
         SOURCE_ROLE_PERSISTENT,
@@ -929,8 +1130,8 @@ mod tests {
     source
   }
 
-  fn outcome(profiles: Vec<EngineExtractionOutcome>, discovery_failed: bool) -> BrowserOutcome {
-    BrowserOutcome {
+  fn outcome(profiles: Vec<ProfileDraft>, discovery_failed: bool) -> BrowserDraft {
+    BrowserDraft {
       detected: true,
       installations_discovered: 1,
       discovery_failed,
@@ -939,16 +1140,16 @@ mod tests {
     }
   }
 
-  fn status(outcome: BrowserOutcome) -> ReportStatusCode {
+  fn status(outcome: BrowserDraft) -> ReportStatusCode {
     assemble(1, vec![outcome]).status
   }
 
   fn chromium_profile(
     selected_candidate: bool,
     failure: Option<ChromiumProfileFailure>,
-  ) -> registry::ChromiumProfileExtraction {
+  ) -> registry::ChromiumProfileDraft {
     let path = PathBuf::from("/chrome/Default");
-    registry::ChromiumProfileExtraction {
+    registry::ChromiumProfileDraft {
       profile: registry::ChromiumProfile {
         profile_id: "c".repeat(64),
         installation_id: "d".repeat(64),
@@ -967,6 +1168,7 @@ mod tests {
         }],
       },
       cookies: Vec::new(),
+      records: Vec::new(),
       stats: crate::browser::chromium::ChromiumExtractionStats {
         rows_seen: 0,
         cookies_emitted: 0,
@@ -1028,7 +1230,7 @@ mod tests {
   /// rejected session candidate keeps `selected = false` per Section 5.7.
   #[test]
   fn engine_adapter_orders_sources_and_preserves_session_selection() {
-    let profile = registry::EngineProfileExtraction {
+    let profile = registry::EngineProfileDraft {
       profile_id: "c".repeat(64),
       installation_id: "d".repeat(64),
       installation_priority: 0,
@@ -1088,14 +1290,15 @@ mod tests {
     precedence: u16,
     selected: bool,
     error: Option<&str>,
-  ) -> registry::EngineSourceExtraction {
-    registry::EngineSourceExtraction {
+  ) -> registry::EngineSourceDraft {
+    registry::EngineSourceDraft {
       path: PathBuf::from("/firefox/Profiles/default").join(name),
       role,
       format: "mozilla_sqlite",
       precedence,
       selected,
       cookies: Vec::new(),
+      records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
       acquisition: registry::SourceAcquisition::StableFileImage,
@@ -1189,7 +1392,7 @@ mod tests {
 
   #[test]
   fn a_profile_without_sources_is_no_sources_rather_than_failed() {
-    let profile = EngineExtractionOutcome::new(identity(), true);
+    let profile = ProfileDraft::new(identity(), true);
     assert_eq!(
       status(outcome(vec![profile], false)),
       ReportStatusCode::no_sources()
@@ -1200,7 +1403,7 @@ mod tests {
   fn a_root_that_could_not_be_enumerated_is_failed_not_no_sources() {
     // Identical profile shape to the case above; only the discovery signal
     // separates "nothing to read" from "could not look".
-    let profile = EngineExtractionOutcome::new(identity(), true);
+    let profile = ProfileDraft::new(identity(), true);
     assert_eq!(
       status(outcome(vec![profile], true)),
       ReportStatusCode::failed()
@@ -1216,7 +1419,7 @@ mod tests {
     // Same zero-source shape as the `no_sources` case, but the profile lost
     // something. Section 5.7 reserves `no_sources` for discovery that completed
     // without an error-severity failure.
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.issues.push(issue(
       "profile_extraction_failed",
       ExtractionStageCode::acquisition(),
@@ -1231,7 +1434,7 @@ mod tests {
 
   #[test]
   fn an_info_issue_with_no_sources_stays_no_sources() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.issues.push(issue(
       "profile_has_no_cookie_source",
       ExtractionStageCode::discovery(),
@@ -1246,7 +1449,7 @@ mod tests {
 
   #[test]
   fn an_attempted_source_that_failed_is_failed() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(true));
     assert_eq!(
       status(outcome(vec![profile], false)),
@@ -1256,7 +1459,7 @@ mod tests {
 
   #[test]
   fn a_zero_row_source_still_succeeds_and_completes() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(false));
     let report = assemble(1, vec![outcome(vec![profile], false)]);
     assert_eq!(report.status, ReportStatusCode::complete());
@@ -1266,7 +1469,7 @@ mod tests {
 
   #[test]
   fn an_error_issue_beside_a_succeeding_source_is_partial() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(false));
     let mut browser = outcome(vec![profile], false);
     browser.issues.push(issue(
@@ -1280,7 +1483,7 @@ mod tests {
 
   #[test]
   fn a_recovered_discovery_problem_does_not_downgrade_a_complete_report() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(false));
     let mut browser = outcome(vec![profile], false);
     // Both codes fall back to another discovery strategy, so the report lost
@@ -1323,14 +1526,14 @@ mod tests {
       .find(|issue| issue.code.as_str() == "duplicate_profile")
       .expect("aggregated duplicate issue");
     assert_eq!(issue.occurrences, 5);
-    assert_eq!(issue.samples, vec!["/profiles/0", "/profiles/1"]);
+    assert_eq!(issue.samples, vec!["<path>", "<path>"]);
   }
   /// Safari and Internet Explorer report skipped rows without keeping the
   /// underlying error. Deriving the row issue from that error alone let a
   /// report claim `complete` while cookies had been dropped.
   #[test]
   fn skipped_rows_without_a_row_error_still_degrade_the_report() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     let mut source = engine_source("Cookies.binarycookies", "persistent", 10, true, None);
     source.rows_seen = 3;
     source.rows_skipped = 2;
@@ -1406,11 +1609,17 @@ mod tests {
     chromium.row_issues = vec![
       crate::browser::chromium::ChromiumRowIssue {
         code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
+        provider: None,
+        tier: None,
+        cause: None,
         occurrences: 1,
         samples: vec!["row 2".to_owned()],
       },
       crate::browser::chromium::ChromiumRowIssue {
         code: crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed,
+        provider: Some("platform_key_provider".to_owned()),
+        tier: Some("v11".to_owned()),
+        cause: Some("keyring unavailable".to_owned()),
         occurrences: 2,
         samples: vec!["row 3".to_owned(), "row 4".to_owned()],
       },
@@ -1430,7 +1639,7 @@ mod tests {
       source.rows_seen = 3;
       source.rows_skipped = 2;
       source.row_error = Some(format!("{name} rejected two records"));
-      let mut profile = EngineExtractionOutcome::new(identity(), true);
+      let mut profile = ProfileDraft::new(identity(), true);
       profile.sources.push(engine_source_outcome(source));
       profiles.push(profile);
     }
@@ -1451,7 +1660,7 @@ mod tests {
 
   #[test]
   fn a_source_that_skipped_nothing_reports_no_row_issue() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(engine_source_outcome(engine_source(
       "cookies.sqlite",
       "persistent",
@@ -1498,6 +1707,9 @@ mod tests {
         &mut issues,
         row_issue(&ChromiumRowIssue {
           code: ChromiumRowIssueCode::ColumnRead(column),
+          provider: None,
+          tier: None,
+          cause: None,
           occurrences: 1,
           samples: vec![format!("row {row}")],
         }),
@@ -1516,7 +1728,7 @@ mod tests {
   /// identity is stamped on before the report leaves the builder.
   #[test]
   fn profile_and_source_issues_carry_their_profile_context() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.issues.push(issue(
       "profile_extraction_failed",
       ExtractionStageCode::acquisition(),
@@ -1721,11 +1933,7 @@ mod engine_chain_tests {
         .find(|issue| issue.code.as_str() == "installation_metadata_failed")
         .expect("stable root metadata issue");
       assert!(issue.is_error(), "{name}");
-      assert_eq!(
-        issue.samples,
-        [root.to_string_lossy().into_owned()],
-        "{name}"
-      );
+      assert_eq!(issue.samples, ["<path>"], "{name}");
       assert!(
         report
           .issues
@@ -1978,6 +2186,7 @@ mod engine_chain_tests {
             http_only: false,
             same_site: 0,
           }],
+          records: Vec::new(),
           records_seen: 1,
           records_skipped: 0,
           row_error: None,
@@ -2092,6 +2301,19 @@ mod engine_chain_tests {
     assert_eq!(report.status, ReportStatusCode::partial());
     assert_eq!(report.summary.sources_succeeded, 1);
     assert_eq!(report.summary.sources_failed, 0);
+    let diagnostics = source
+      .issues
+      .iter()
+      .flat_map(|issue| {
+        std::iter::once(issue.message.as_str()).chain(issue.samples.iter().map(String::as_str))
+      })
+      .collect::<Vec<_>>();
+    assert!(diagnostics
+      .iter()
+      .all(|text| !text.contains("plaintext sentinel must not escape")));
+    assert!(diagnostics
+      .iter()
+      .all(|text| text.len() <= crate::browser::outcome::MAX_DIAGNOSTIC_BYTES));
   }
 
   /// Selecting a profile narrows which installations are extracted, but must
@@ -2137,7 +2359,7 @@ mod engine_chain_tests {
   /// counters included.
   fn post_filtered_report(
     browser: &BrowserId,
-    engine: registry::EngineExtractionOutcome,
+    engine: registry::EngineExtractionDraft,
     profile_id: &str,
   ) -> ExtractionReport {
     let mut outcome = engine_browser_outcome(browser, engine).expect("adapt the engine outcome");
@@ -2149,7 +2371,7 @@ mod engine_chain_tests {
 
   fn selected_report(
     browser: &BrowserId,
-    engine: registry::EngineExtractionOutcome,
+    engine: registry::EngineExtractionDraft,
   ) -> ExtractionReport {
     assemble(
       1,
@@ -2274,6 +2496,7 @@ mod engine_chain_tests {
           http_only: false,
           same_site: 0,
         }],
+        records: Vec::new(),
         records_seen: 1,
         records_skipped: 0,
         row_error: None,

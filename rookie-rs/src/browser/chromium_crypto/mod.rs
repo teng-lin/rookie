@@ -1,6 +1,7 @@
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
+pub(crate) use crate::common::boundary::KeyProvider;
 use crate::common::secret::SecretBytes;
 
 #[cfg(unix)]
@@ -349,22 +350,16 @@ pub(crate) fn decrypt_legacy(encrypted_value: &[u8]) -> anyhow::Result<LegacyCip
   platform::decrypt_legacy(encrypted_value)
 }
 
-/// Injection seam for installation-scoped key retrieval.
-///
-/// The generic context lets Milestone 1B introduce its installation model
-/// without making any of these types public or changing row extraction again.
-pub(crate) trait ChromiumKeyProvider<Context: ?Sized> {
-  fn retrieve(&self, context: &Context) -> ChromiumKeyOutcomes;
-}
-
 pub(crate) fn retrieve_key_outcomes<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
+  deadline: crate::common::deadline::Deadline,
 ) -> ChromiumKeyOutcomes
 where
-  Provider: ChromiumKeyProvider<Context>,
+  Provider: KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
 {
-  provider.retrieve(context)
+  let _capability = provider.deadline_enforcement();
+  provider.keys(context, deadline)
 }
 
 /// Provider used only to bridge the current untyped platform retrievers.
@@ -383,8 +378,14 @@ impl LegacySharedKeyProvider {
 }
 
 #[cfg(test)]
-impl ChromiumKeyProvider<()> for LegacySharedKeyProvider {
-  fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
+impl KeyProvider<()> for LegacySharedKeyProvider {
+  type Keys = ChromiumKeyOutcomes;
+
+  fn keys(
+    &self,
+    _context: &(),
+    _deadline: crate::common::deadline::Deadline,
+  ) -> ChromiumKeyOutcomes {
     self.outcomes.clone()
   }
 }
@@ -512,8 +513,14 @@ mod tests {
     outcomes: ChromiumKeyOutcomes,
   }
 
-  impl ChromiumKeyProvider<str> for RecordingProvider {
-    fn retrieve(&self, context: &str) -> ChromiumKeyOutcomes {
+  impl KeyProvider<str> for RecordingProvider {
+    type Keys = ChromiumKeyOutcomes;
+
+    fn keys(
+      &self,
+      context: &str,
+      _deadline: crate::common::deadline::Deadline,
+    ) -> ChromiumKeyOutcomes {
       self.calls.set(self.calls.get() + 1);
       self.contexts.borrow_mut().push(context.to_string());
       self.outcomes.clone()
@@ -532,7 +539,11 @@ mod tests {
       },
     };
 
-    let outcomes = retrieve_key_outcomes(&provider, "installation-1");
+    let outcomes = retrieve_key_outcomes(
+      &provider,
+      "installation-1",
+      crate::common::deadline::Deadline::standard(),
+    );
     assert_eq!(provider.calls.get(), 1);
     assert_eq!(provider.contexts.borrow().as_slice(), ["installation-1"]);
     assert!(matches!(outcomes.v10, ChromiumKeyOutcome::Success(_)));
@@ -543,7 +554,11 @@ mod tests {
   #[test]
   fn legacy_provider_keeps_current_shared_candidate_behavior() {
     let provider = LegacySharedKeyProvider::new(vec![vec![0x2a; 16]]);
-    let outcomes = retrieve_key_outcomes(&provider, &());
+    let outcomes = retrieve_key_outcomes(
+      &provider,
+      &(),
+      crate::common::deadline::Deadline::standard(),
+    );
     for cipher in [
       ChromiumCipherVersion::V10,
       ChromiumCipherVersion::V11,
@@ -559,7 +574,11 @@ mod tests {
   #[test]
   fn legacy_provider_maps_an_empty_historical_list_to_not_applicable() {
     let provider = LegacySharedKeyProvider::new(vec![]);
-    let outcomes = retrieve_key_outcomes(&provider, &());
+    let outcomes = retrieve_key_outcomes(
+      &provider,
+      &(),
+      crate::common::deadline::Deadline::standard(),
+    );
     assert_eq!(outcomes, ChromiumKeyOutcomes::default());
   }
 }

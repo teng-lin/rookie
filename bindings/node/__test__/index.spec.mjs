@@ -765,6 +765,7 @@ Path=Profiles/work
     );
 
     t.is(report.status, "complete");
+    t.is(report.termination, "completed");
     t.deepEqual(report.issues, []);
     t.is(report.profiles.length, 1, "profileId must restrict the report");
     const [extracted] = report.profiles;
@@ -1061,6 +1062,10 @@ Path=Profiles/work
       "code",
       "stage",
       "severity",
+      "cause",
+      "provider",
+      "tier",
+      "retryability",
       "occurrences",
       "samples",
       "browserId",
@@ -1085,6 +1090,10 @@ Path=Profiles/work
     t.truthy(observed.requestIssue, "an absent browser must report an issue");
     t.deepEqual(observed.requestIssueKeys, issueKeys);
     t.is(observed.requestIssue.browserId, "chrome");
+    t.is(observed.requestIssue.cause, "browser_not_detected");
+    t.is(observed.requestIssue.provider, null);
+    t.is(observed.requestIssue.tier, null);
+    t.is(observed.requestIssue.retryability, "unknown");
     t.is(observed.requestIssue.installationId, null);
     t.is(observed.requestIssue.profileId, null);
   } finally {

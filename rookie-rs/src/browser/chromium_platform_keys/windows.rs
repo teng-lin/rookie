@@ -1,4 +1,4 @@
-use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
+use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyRequest, LocalStateInput};
 use anyhow::{bail, Result};
@@ -218,7 +218,14 @@ impl HostKeySession {
     Self
   }
 
-  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
+  pub(crate) fn retrieve(
+    &mut self,
+    request: ChromiumKeyRequest<'_>,
+    deadline: crate::common::deadline::Deadline,
+  ) -> ChromiumKeyOutcomes {
+    if let Err(error) = deadline.check(&crate::common::deadline::SystemClock) {
+      return ChromiumKeyOutcomes::provider_failure(error.to_string());
+    }
     host_key_outcomes(request, &SystemLocalStateReader)
   }
 }
@@ -233,14 +240,20 @@ impl<'a> WindowsPlatformKeyProvider<'a> {
   }
 }
 
-impl ChromiumKeyProvider<()> for WindowsPlatformKeyProvider<'_> {
-  fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
+impl KeyProvider<()> for WindowsPlatformKeyProvider<'_> {
+  type Keys = ChromiumKeyOutcomes;
+
+  fn keys(
+    &self,
+    _context: &(),
+    deadline: crate::common::deadline::Deadline,
+  ) -> ChromiumKeyOutcomes {
     let credentials = super::ChromiumKeyCredentials::default();
     let mut session = HostKeySession::new();
-    session.retrieve(ChromiumKeyRequest::for_parsed_local_state(
-      &credentials,
-      self.local_state,
-    ))
+    session.retrieve(
+      ChromiumKeyRequest::for_parsed_local_state(&credentials, self.local_state),
+      deadline,
+    )
   }
 }
 

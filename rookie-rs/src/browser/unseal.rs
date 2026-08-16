@@ -145,7 +145,7 @@ pub(super) fn unseal_chromium_record(
     CookieValue::Encrypted { tier, bytes } => (tier, bytes),
   };
 
-  match unseal_encrypted_value(&record.domain, tier, &bytes, outcomes, schema_version) {
+  match unseal_encrypted_value(record.domain_raw(), tier, &bytes, outcomes, schema_version) {
     Ok(value) => {
       record.value = CookieValue::Plain(value);
       Ok(record)

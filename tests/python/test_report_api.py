@@ -206,19 +206,27 @@ class BrowserReportTest(unittest.TestCase):
             sorted(issue),
             [
                 "browser_id",
+                "cause",
                 "code",
                 "installation_id",
                 "message",
                 "occurrences",
                 "profile_id",
+                "provider",
+                "retryability",
                 "samples",
                 "severity",
                 "stage",
+                "tier",
             ],
         )
         self.assertEqual(issue["code"], "browser_not_detected")
         self.assertEqual(issue["severity"], "info")
         self.assertEqual(issue["stage"], "discovery")
+        self.assertEqual(issue["cause"], "browser_not_detected")
+        self.assertIsNone(issue["provider"])
+        self.assertIsNone(issue["tier"])
+        self.assertEqual(issue["retryability"], "unknown")
         self.assertEqual(issue["browser_id"], "chrome")
         self.assertIsNone(issue["installation_id"])
         self.assertIsNone(issue["profile_id"])
@@ -230,8 +238,12 @@ class BrowserReportTest(unittest.TestCase):
             _seed_chrome(home)
             report = rookie_cookies.browser_report("chrome")
 
-        self.assertEqual(sorted(report), ["issues", "profiles", "status", "summary"])
+        self.assertEqual(
+            sorted(report),
+            ["issues", "profiles", "status", "summary", "termination"],
+        )
         self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["termination"], "completed")
         self.assertEqual(report["issues"], [])
         self.assertEqual(
             sorted(report["summary"]),

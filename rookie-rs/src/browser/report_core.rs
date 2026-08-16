@@ -128,6 +128,7 @@ string_identifier!(
 );
 string_identifier!(CipherTierId, "cipher tier", validate_open_identifier);
 string_identifier!(ReportStatusCode, "report status", validate_open_identifier);
+string_identifier!(TerminationCode, "termination", validate_open_identifier);
 string_identifier!(SourceStatusCode, "source status", validate_open_identifier);
 string_identifier!(
   AcquisitionStrategyCode,
@@ -177,6 +178,17 @@ vocabulary!(ReportStatusCode {
   failed => "failed",
   no_sources => "no_sources",
 });
+
+vocabulary!(TerminationCode {
+  completed => "completed",
+  cancelled => "cancelled",
+  timed_out => "timed_out",
+  resource_exhausted => "resource_exhausted",
+});
+
+fn completed_termination() -> TerminationCode {
+  TerminationCode::completed()
+}
 
 vocabulary!(SourceStatusCode {
   succeeded => "succeeded",
@@ -375,12 +387,28 @@ pub struct ExtractionIssue {
   pub code: IssueCode,
   pub stage: ExtractionStageCode,
   pub severity: IssueSeverityCode,
+  /// Stable machine-readable origin of the failure.
+  #[serde(default)]
+  pub cause: String,
+  /// Credential/provider role when the cause originated at a provider seam.
+  #[serde(default)]
+  pub provider: Option<String>,
+  /// Source-native cipher/provider tier, preserved without message parsing.
+  #[serde(default)]
+  pub tier: Option<String>,
+  /// `retryable`, `not_retryable`, or `unknown`.
+  #[serde(default = "unknown_retryability")]
+  pub retryability: String,
   pub occurrences: u32,
   pub samples: Vec<String>,
   pub browser_id: Option<BrowserId>,
   pub installation_id: Option<InstallationId>,
   pub profile_id: Option<ProfileId>,
   pub message: String,
+}
+
+fn unknown_retryability() -> String {
+  "unknown".to_owned()
 }
 
 /// One attempted cookie source and the cookies it produced.
@@ -418,6 +446,10 @@ pub struct ProfileExtraction {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtractionReport {
   pub status: ReportStatusCode,
+  /// Why execution stopped. This is independent from `status`: a timed-out
+  /// request may still contain complete source outcomes collected earlier.
+  #[serde(default = "completed_termination")]
+  pub termination: TerminationCode,
   pub summary: ReportStats,
   pub profiles: Vec<ProfileExtraction>,
   pub issues: Vec<ExtractionIssue>,
@@ -428,11 +460,18 @@ pub struct ExtractionReport {
 /// builder normalizes ordering, statuses, and aggregate counters.
 #[non_exhaustive]
 #[derive(Debug)]
-pub(crate) struct SourceExtractionOutcome {
+pub(crate) struct SourceDraft {
   pub(crate) source: CookieSourceIdentity,
   pub(crate) selected: bool,
   pub(crate) acquisition_strategy: AcquisitionStrategyCode,
   pub(crate) cookies: Vec<Cookie>,
+  /// Canonical records retain source-native metadata which the compatibility
+  /// `Cookie` projection intentionally omits.
+  pub(crate) records: Vec<super::cookie_record::CookieRecord>,
+  /// Sanitized compatibility-only failure retained by the canonical source so
+  /// pure legacy projectors can preserve historical error behavior without
+  /// owning an engine-specific extraction result.
+  pub(crate) compatibility_error: Option<String>,
   pub(crate) stats: ExtractionStats,
   pub(crate) issues: Vec<ExtractionIssue>,
   /// Acquisition, parsing, or the filtered query did not complete. Skipped rows
@@ -442,14 +481,14 @@ pub(crate) struct SourceExtractionOutcome {
 
 #[non_exhaustive]
 #[derive(Debug)]
-pub(crate) struct EngineExtractionOutcome {
+pub(crate) struct ProfileDraft {
   pub(crate) profile: ProfileIdentity,
   pub(crate) is_default: bool,
-  pub(crate) sources: Vec<SourceExtractionOutcome>,
+  pub(crate) sources: Vec<SourceDraft>,
   pub(crate) issues: Vec<ExtractionIssue>,
 }
 
-impl SourceExtractionOutcome {
+impl SourceDraft {
   pub(crate) fn new(
     source: CookieSourceIdentity,
     selected: bool,
@@ -460,6 +499,8 @@ impl SourceExtractionOutcome {
       selected,
       acquisition_strategy,
       cookies: Vec::new(),
+      records: Vec::new(),
+      compatibility_error: None,
       stats: ExtractionStats::default(),
       issues: Vec::new(),
       failed: false,
@@ -467,7 +508,7 @@ impl SourceExtractionOutcome {
   }
 }
 
-impl EngineExtractionOutcome {
+impl ProfileDraft {
   pub(crate) fn new(profile: ProfileIdentity, is_default: bool) -> Self {
     Self {
       profile,
@@ -561,6 +602,10 @@ pub(crate) fn issue(
     code: IssueCode::known(code),
     stage,
     severity,
+    cause: code.to_owned(),
+    provider: None,
+    tier: None,
+    retryability: "unknown".to_owned(),
     occurrences: 1,
     samples: Vec::new(),
     browser_id: None,
@@ -582,6 +627,11 @@ pub(crate) fn push_aggregated(issues: &mut Vec<ExtractionIssue>, incoming: Extra
   let Some(existing) = issues.iter_mut().find(|issue| {
     issue.code == incoming.code
       && issue.stage == incoming.stage
+      && issue.severity == incoming.severity
+      && issue.cause == incoming.cause
+      && issue.provider == incoming.provider
+      && issue.tier == incoming.tier
+      && issue.retryability == incoming.retryability
       && issue.browser_id == incoming.browser_id
       && issue.installation_id == incoming.installation_id
       && issue.profile_id == incoming.profile_id
@@ -655,7 +705,8 @@ pub(crate) fn sort_cookies(cookies: &mut [Cookie]) {
 
 /// Section 5.5 source ordering: role first, then declared precedence. The sort
 /// is stable, so equal keys keep their engine-declared candidate order.
-pub(crate) fn sort_source_outcomes(sources: &mut [SourceExtractionOutcome]) {
+#[cfg(test)]
+pub(crate) fn sort_source_outcomes(sources: &mut [SourceDraft]) {
   sources.sort_by(|left, right| {
     left
       .source
@@ -693,40 +744,6 @@ pub(crate) fn source_status(failed: bool) -> SourceStatusCode {
 /// to `no_sources`, which Section 5.7 defines as discovery completing *without*
 /// an error-severity failure. A profile that ended up with no sources because
 /// something errored has not found "no sources"; it failed to look.
-pub(crate) fn report_status(
-  profiles: &[ProfileExtraction],
-  top_level: &[ExtractionIssue],
-  discovery_failed: bool,
-) -> ReportStatusCode {
-  let succeeded = profiles.iter().any(|profile| {
-    profile
-      .sources
-      .iter()
-      .any(|source| source.status == SourceStatusCode::succeeded())
-  });
-  let attempted = profiles.iter().any(|profile| !profile.sources.is_empty());
-  let has_error = top_level.iter().any(ExtractionIssue::is_error)
-    || profiles.iter().any(|profile| {
-      profile.issues.iter().any(ExtractionIssue::is_error)
-        || profile
-          .sources
-          .iter()
-          .any(|source| source.issues.iter().any(ExtractionIssue::is_error))
-    });
-
-  if succeeded {
-    if has_error {
-      ReportStatusCode::partial()
-    } else {
-      ReportStatusCode::complete()
-    }
-  } else if attempted || discovery_failed || has_error {
-    ReportStatusCode::failed()
-  } else {
-    ReportStatusCode::no_sources()
-  }
-}
-
 /// Wire paths are UTF-8 with an explicit lossy flag; selection always uses the
 /// opaque IDs instead.
 pub(crate) fn display_path(path: &std::path::Path) -> (String, bool) {
@@ -844,7 +861,7 @@ mod tests {
   }
 
   #[test]
-  fn aggregated_issues_bound_samples_and_keep_the_highest_severity() {
+  fn aggregated_issues_bound_samples_and_keep_severities_distinct() {
     let mut issues = Vec::new();
     for index in 0..MAX_ISSUE_SAMPLES + 4 {
       push_aggregated(
@@ -872,8 +889,10 @@ mod tests {
         "escalated",
       ),
     );
-    assert_eq!(issues[0].severity, IssueSeverityCode::error());
-    assert_eq!(issues[0].message, "escalated");
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].severity, IssueSeverityCode::warning());
+    assert_eq!(issues[1].severity, IssueSeverityCode::error());
+    assert_eq!(issues[1].message, "escalated");
   }
 
   #[test]
@@ -902,8 +921,8 @@ mod tests {
     );
   }
 
-  fn source(role: CookieSourceRoleId, precedence: u16) -> SourceExtractionOutcome {
-    SourceExtractionOutcome::new(
+  fn source(role: CookieSourceRoleId, precedence: u16) -> SourceDraft {
+    SourceDraft::new(
       CookieSourceIdentity {
         role,
         format: CookieSourceFormatId::known("chromium_sqlite"),

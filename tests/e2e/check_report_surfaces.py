@@ -37,6 +37,10 @@ def normalize(value: Any) -> Any:
         if {"code", "stage", "severity", "occurrences"}.issubset(result):
             for key in ("browser_id", "installation_id", "profile_id"):
                 result.setdefault(key, None)
+            result.setdefault("cause", "")
+            result.setdefault("provider", None)
+            result.setdefault("tier", None)
+            result.setdefault("retryability", "unknown")
         return result
     if isinstance(value, list):
         return [normalize(item) for item in value]

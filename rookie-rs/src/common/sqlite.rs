@@ -1,8 +1,13 @@
+use crate::common::{
+  boundary::Acquire,
+  deadline::{Clock, Deadline, DeadlineEnforcement, SystemClock},
+};
 use crate::utils::TempDir;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::ffi::OsString;
 use std::fmt;
+use std::io::{Read as _, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -105,6 +110,8 @@ pub struct SqliteReader {
   strategy: DatabaseAcquisitionStrategy,
 }
 
+impl crate::common::boundary::ReadOnlySource for SqliteReader {}
+
 /// An already-acquired, static single-file database that was verified as
 /// WAL-free across its acquisition window (or copied only after a checkpoint
 /// completely drained the WAL).
@@ -175,22 +182,79 @@ impl Deref for SqliteReader {
 /// immutably opens the live database.
 #[allow(dead_code)]
 pub fn connect(path: PathBuf) -> Result<SqliteReader> {
-  acquire_browser_database(path).map_err(|failure| failure.error)
+  let acquire = BrowserDatabaseAcquire;
+  debug_assert_eq!(
+    acquire.deadline_enforcement(),
+    DeadlineEnforcement::Cooperative
+  );
+  acquire.open(&path, Deadline::standard())
 }
 
-fn acquire_browser_database(
+struct BrowserDatabaseAcquire;
+
+impl Acquire<PathBuf> for BrowserDatabaseAcquire {
+  type Source = SqliteReader;
+
+  fn open(&self, path: &PathBuf, deadline: Deadline) -> Result<Self::Source> {
+    let clock = SystemClock;
+    deadline.check(&clock)?;
+    let reader = acquire_browser_database_with_deadline(path.clone(), &clock, deadline)
+      .map_err(|failure| failure.error)?;
+    deadline.check(&clock)?;
+    Ok(reader)
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    // Filesystem and VFS syscalls cannot be preempted in-process. Checks still
+    // prevent retries or decoder work from starting after the budget expires.
+    DeadlineEnforcement::Cooperative
+  }
+}
+
+fn acquire_browser_database_with_deadline(
   path: PathBuf,
+  clock: &dyn Clock,
+  deadline: Deadline,
 ) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure> {
-  acquire_browser_database_with_before_live(path, |_| Ok(()))
+  acquire_browser_database_with_before_live_deadline(path, |_| Ok(()), clock, deadline)
 }
 
+#[cfg(test)]
 fn acquire_browser_database_with_before_live<BeforeLive>(
   path: PathBuf,
-  mut before_live: BeforeLive,
+  before_live: BeforeLive,
 ) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>
 where
   BeforeLive: FnMut(&Path) -> Result<()>,
 {
+  let clock = SystemClock;
+  acquire_browser_database_with_before_live_deadline(
+    path,
+    before_live,
+    &clock,
+    Deadline::standard(),
+  )
+}
+
+fn acquire_browser_database_with_before_live_deadline<BeforeLive>(
+  path: PathBuf,
+  mut before_live: BeforeLive,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>
+where
+  BeforeLive: FnMut(&Path) -> Result<()>,
+{
+  let check = || {
+    deadline
+      .check(clock)
+      .map_err(anyhow::Error::from)
+      .map_err(|error| DatabaseAcquisitionFailure {
+        strategy: None,
+        error,
+      })
+  };
+  check()?;
   let path = path
     .canonicalize()
     .with_context(|| format!("Can't resolve database path {}", path.display()))
@@ -199,13 +263,15 @@ where
       error,
     })?;
 
+  check()?;
   let uses_wal =
     database_requires_wal_snapshot(&path).map_err(|error| DatabaseAcquisitionFailure {
       strategy: None,
       error,
     })?;
+  check()?;
   let reader = if uses_wal {
-    acquire_verified_wal_snapshot(&path)?
+    acquire_verified_wal_snapshot(&path, clock, deadline)?
   } else {
     let strategy = DatabaseAcquisitionStrategy::LiveReadOnly;
     before_live(&path).map_err(|error| DatabaseAcquisitionFailure {
@@ -219,7 +285,7 @@ where
           strategy: None,
           error: recheck,
         })? {
-          return acquire_verified_wal_snapshot(&path);
+          return acquire_verified_wal_snapshot(&path, clock, deadline);
         }
         return Err(DatabaseAcquisitionFailure {
           strategy: Some(strategy),
@@ -240,7 +306,7 @@ where
       error,
     })? {
       drop(connection);
-      acquire_verified_wal_snapshot(&path)?
+      acquire_verified_wal_snapshot(&path, clock, deadline)?
     } else {
       SqliteReader {
         connection,
@@ -249,6 +315,7 @@ where
       }
     }
   };
+  check()?;
 
   match reader.snapshot_path() {
     Some(directory) => log::debug!(
@@ -272,6 +339,8 @@ fn database_requires_wal_snapshot(path: &Path) -> Result<bool> {
 
 fn acquire_verified_wal_snapshot(
   path: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
 ) -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure> {
   let strategy = DatabaseAcquisitionStrategy::VerifiedWalSnapshot;
   // A snapshot failure is deliberately fatal rather than a fall back to the
@@ -283,9 +352,11 @@ fn acquire_verified_wal_snapshot(
     error,
   })?;
   let copy =
-    snapshot_database(path, snapshot.path()).map_err(|error| DatabaseAcquisitionFailure {
-      strategy: Some(strategy),
-      error,
+    snapshot_database_with_deadline(path, snapshot.path(), clock, deadline).map_err(|error| {
+      DatabaseAcquisitionFailure {
+        strategy: Some(strategy),
+        error,
+      }
     })?;
   Ok(SqliteReader {
     // Deliberately not `immutable`: that flag tells SQLite to ignore the
@@ -312,7 +383,28 @@ pub(crate) fn with_browser_database<T, Query>(
 where
   Query: FnMut(&Connection) -> Result<T>,
 {
-  with_browser_database_using(|| acquire_browser_database(path.clone()), query)
+  let clock = SystemClock;
+  with_browser_database_with_deadline(path, query, &clock, Deadline::standard())
+}
+
+/// Runs acquisition and every query retry under one absolute monotonic
+/// deadline. Callers that also retrieve keys or decode rows pass the same
+/// value through those boundaries; a retry only receives the time left.
+pub(crate) fn with_browser_database_with_deadline<T, Query>(
+  path: PathBuf,
+  query: Query,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<BrowserDatabaseOutcome<T>>
+where
+  Query: FnMut(&Connection) -> Result<T>,
+{
+  with_browser_database_using_deadline(
+    || acquire_browser_database_with_deadline(path.clone(), clock, deadline),
+    query,
+    clock,
+    deadline,
+  )
 }
 
 /// Query-level attempts are separate from the lower-level copy verification
@@ -320,20 +412,37 @@ where
 /// a successfully copied image proves unusable.
 const BROWSER_DATABASE_ATTEMPTS: u32 = 3;
 
+#[cfg(test)]
 fn with_browser_database_using<T, Acquire, Query>(
+  acquire: Acquire,
+  query: Query,
+) -> Result<BrowserDatabaseOutcome<T>>
+where
+  Acquire: FnMut() -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>,
+  Query: FnMut(&Connection) -> Result<T>,
+{
+  let clock = SystemClock;
+  with_browser_database_using_deadline(acquire, query, &clock, Deadline::standard())
+}
+
+fn with_browser_database_using_deadline<T, Acquire, Query>(
   mut acquire: Acquire,
   mut query: Query,
+  clock: &dyn Clock,
+  deadline: Deadline,
 ) -> Result<BrowserDatabaseOutcome<T>>
 where
   Acquire: FnMut() -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>,
   Query: FnMut(&Connection) -> Result<T>,
 {
   for attempt in 1..=BROWSER_DATABASE_ATTEMPTS {
+    deadline.check(clock)?;
     let reader = match acquire() {
       Ok(reader) => reader,
       Err(failure) => {
         let retryable = is_retryable_snapshot_error(failure.strategy, &failure.error);
         if retryable && attempt < BROWSER_DATABASE_ATTEMPTS {
+          deadline.check(clock)?;
           log::debug!(
             "reacquiring browser database after snapshot acquisition attempt {attempt}: {}",
             failure.error
@@ -354,11 +463,13 @@ where
     };
 
     let strategy = reader.strategy();
+    deadline.check(clock)?;
     match query(&reader) {
       Ok(value) => {
         // Drop the connection (then its snapshot directory) before returning a
         // value that is independent of the database attempt.
         drop(reader);
+        deadline.check(clock)?;
         return Ok(BrowserDatabaseOutcome {
           value,
           strategy,
@@ -371,6 +482,7 @@ where
         // boundary rather than an incidental consequence of loop scoping.
         drop(reader);
         if retryable && attempt < BROWSER_DATABASE_ATTEMPTS {
+          deadline.check(clock)?;
           log::debug!(
             "reacquiring browser database after snapshot query attempt {attempt}: {error}"
           );
@@ -552,16 +664,30 @@ const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 /// checkpoint can rewrite same-sized pages inside one filesystem timestamp
 /// tick on coarse filesystems such as FAT. The source was just read, so it is
 /// in the page cache and the second read is cheap.
+#[cfg(test)]
 fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
+  let clock = SystemClock;
+  snapshot_database_with_deadline(database, directory, &clock, Deadline::standard())
+}
+
+fn snapshot_database_with_deadline(
+  database: &Path,
+  directory: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<PathBuf> {
   for attempt in 1..=SNAPSHOT_ATTEMPTS {
-    let copy = copy_database(database, directory)?;
+    deadline.check(clock)?;
+    let copy = copy_database_with_deadline(database, directory, clock, deadline)?;
+    deadline.check(clock)?;
     if !database_uses_wal(&copy)? {
       return Err(anyhow!(
         "Can't take a WAL snapshot of {}: its copied journal mode is not WAL",
         database.display()
       ));
     }
-    if files_are_identical(database, &copy)? {
+    deadline.check(clock)?;
+    if files_are_identical_with_deadline(database, &copy, clock, deadline)? {
       return Ok(copy);
     }
 
@@ -572,7 +698,12 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
     // Back off before retaking it. A browser that just checkpointed is likely
     // mid-burst, and copying straight back into that loses the next attempt to
     // the same race.
-    std::thread::sleep(RETRY_BACKOFF * attempt);
+    let backoff = RETRY_BACKOFF * attempt;
+    let remaining = deadline.remaining(clock);
+    if remaining <= backoff {
+      return Err(crate::common::deadline::BoundaryExpired.into());
+    }
+    clock.sleep(backoff);
   }
 
   Err(anyhow!(
@@ -586,7 +717,19 @@ fn snapshot_database(database: &Path, directory: &Path) -> Result<PathBuf> {
 /// Only a genuine difference in length or content answers `false`. An I/O fault
 /// is returned, so that `snapshot_database` reports it rather than retrying
 /// three times and blaming a checkpoint.
+#[cfg(test)]
 pub(crate) fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
+  let clock = SystemClock;
+  files_are_identical_with_deadline(left, right, &clock, Deadline::standard())
+}
+
+fn files_are_identical_with_deadline(
+  left: &Path,
+  right: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<bool> {
+  deadline.check(clock)?;
   let open = |path: &Path| -> Result<io::BufReader<fs::File>> {
     let file = fs::File::open(path)
       .with_context(|| format!("Can't open {} to verify it", path.display()))?;
@@ -596,9 +739,10 @@ pub(crate) fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
   let (mut left_chunk, mut right_chunk) = ([0u8; 8192], [0u8; 8192]);
 
   loop {
-    let filled = fill(&mut left_file, &mut left_chunk)
+    deadline.check(clock)?;
+    let filled = fill_with_deadline(&mut left_file, &mut left_chunk, clock, deadline)
       .with_context(|| format!("Can't read {}", left.display()))?;
-    let other = fill(&mut right_file, &mut right_chunk)
+    let other = fill_with_deadline(&mut right_file, &mut right_chunk, clock, deadline)
       .with_context(|| format!("Can't read {}", right.display()))?;
 
     // `fill` stops short only at end of file, so unequal counts mean unequal
@@ -615,9 +759,22 @@ pub(crate) fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
 /// Reads until `buffer` is full or the file ends, retrying interrupted reads
 /// the way [`io::Read::read_exact`] does.
 fn fill(source: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
+  let clock = SystemClock;
+  fill_with_deadline(source, buffer, &clock, Deadline::standard())
+}
+
+fn fill_with_deadline(
+  source: &mut impl io::Read,
+  buffer: &mut [u8],
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> io::Result<usize> {
   let mut filled = 0;
 
   while filled < buffer.len() {
+    deadline
+      .check(clock)
+      .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
     match source.read(&mut buffer[filled..]) {
       Ok(0) => break,
       Ok(read) => filled += read,
@@ -636,7 +793,19 @@ fn fill(source: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<usize> {
 /// WAL-mode database if it can build the wal-index, and since no `-shm` is
 /// copied, SQLite recovers one from the `-wal` by creating `<name>-shm` here
 /// (<https://sqlite.org/wal.html> section 5, condition 2).
+#[cfg(test)]
 fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
+  let clock = SystemClock;
+  copy_database_with_deadline(database, directory, &clock, Deadline::standard())
+}
+
+fn copy_database_with_deadline(
+  database: &Path,
+  directory: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<PathBuf> {
+  deadline.check(clock)?;
   let name = database
     .file_name()
     .ok_or_else(|| anyhow!("Database path has no file name: {}", database.display()))?;
@@ -648,7 +817,7 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // file with a WAL rewound to offset 0 (<https://sqlite.org/wal.html> section
   // 2.1) and drops rows, as `an_unverified_copy_loses_rows_when_a_checkpoint_intervenes`
   // shows — so the verification is what makes it correct, not the order.
-  fs::copy(database, &copy)
+  copy_file_with_deadline(database, &copy, clock, deadline)
     .with_context(|| format!("Can't copy database {}", database.display()))?;
 
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
@@ -656,8 +825,8 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   // one could be believed as-is, pinning a stale frame count.
   let wal = sidecar(database, "-wal");
   let wal_copy = sidecar(&copy, "-wal");
-  match fs::copy(&wal, &wal_copy) {
-    Ok(_) => {}
+  match copy_file_with_deadline(&wal, &wal_copy, clock, deadline) {
+    Ok(()) => {}
     // The browser checkpointed and removed its WAL, either before this attempt
     // or in the moment between. Discard any WAL an earlier attempt left here,
     // which would otherwise replay over a newer main file and hide rows, and
@@ -681,6 +850,34 @@ fn copy_database(database: &Path, directory: &Path) -> Result<PathBuf> {
   }
 
   Ok(copy)
+}
+
+fn copy_file_with_deadline(
+  source: &Path,
+  destination: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> io::Result<()> {
+  deadline
+    .check(clock)
+    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+  let mut source = io::BufReader::new(fs::File::open(source)?);
+  let mut destination = io::BufWriter::new(fs::File::create(destination)?);
+  let mut chunk = [0_u8; 64 * 1024];
+  loop {
+    deadline
+      .check(clock)
+      .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?;
+    let read = source.read(&mut chunk)?;
+    if read == 0 {
+      break;
+    }
+    destination.write_all(&chunk[..read])?;
+  }
+  destination.flush()?;
+  deadline
+    .check(clock)
+    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))
 }
 
 /// True when a non-empty `-wal` sidecar sits beside the database.
@@ -724,8 +921,43 @@ fn open_read_only(path: &Path, query: &str) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::test_clock::ManualClock;
   use std::cell::{Cell, RefCell};
   use std::ffi::CStr;
+  use std::time::Duration;
+
+  #[test]
+  fn query_retries_share_one_decreasing_budget_without_wall_clock_sleep() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::from_secs(10));
+    let attempts = Cell::new(0_u32);
+    let observed = RefCell::new(Vec::new());
+
+    let error = with_browser_database_using_deadline(
+      || {
+        attempts.set(attempts.get() + 1);
+        observed.borrow_mut().push(deadline.remaining(&clock));
+        let elapsed = if attempts.get() == 1 { 7 } else { 3 };
+        clock.advance(Duration::from_secs(elapsed));
+        Err(DatabaseAcquisitionFailure {
+          strategy: Some(DatabaseAcquisitionStrategy::VerifiedWalSnapshot),
+          error: sqlite_failure(rusqlite::ffi::SQLITE_CORRUPT),
+        })
+      },
+      |_| Ok(()),
+      &clock,
+      deadline,
+    )
+    .expect_err("the second attempt consumes the remaining budget");
+
+    assert!(error.is::<crate::common::deadline::BoundaryExpired>());
+    assert_eq!(
+      *observed.borrow(),
+      [Duration::from_secs(10), Duration::from_secs(3)]
+    );
+    assert_eq!(attempts.get(), 2, "an expired third attempt must not start");
+    assert_eq!(deadline.remaining(&clock), Duration::ZERO);
+  }
 
   #[test]
   fn bundled_sqlite_matches_the_security_inventory() {

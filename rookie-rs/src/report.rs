@@ -47,5 +47,5 @@ pub use crate::browser::report_core::{
   CookieSourceRoleId, EngineId, ExtractionIssue, ExtractionReport, ExtractionStageCode,
   ExtractionStats, InstallationId, IssueCode, IssueSeverityCode, ProfileDescriptor,
   ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, ReportStatusCode, SourceExtraction,
-  SourceStatusCode, MAX_ISSUE_SAMPLES,
+  SourceStatusCode, TerminationCode, MAX_ISSUE_SAMPLES,
 };

@@ -5,7 +5,7 @@ use crate::common::{date, utils};
 use anyhow::{bail, Result};
 use std::fmt;
 
-use super::cookie_record::{CookieRecord, CookieValue};
+use super::cookie_record::{CookieRecord, CookieValue, DomainScope, RawValue};
 
 // WinInet cookie flag bits (`wininet.h`) as stored in the ESE `Flags` column.
 const INTERNET_COOKIE_IS_SECURE: u32 = 0x0000_0001;
@@ -113,17 +113,28 @@ impl RawCookieRecord {
     let value = decode_cookie_text("Value", self.value)?;
     let flags = self.flags as u32;
 
-    Ok(Some(CookieRecord {
+    let raw_expires = self.expires;
+    let mut record = CookieRecord::from_legacy_fields(
       domain,
-      path: self.path.trim_matches('\0').to_string(),
-      secure: flags & INTERNET_COOKIE_IS_SECURE != 0,
-      expires: date::internet_explorer_timestamp(self.expires),
+      self.path.trim_matches('\0').to_string(),
+      flags & INTERNET_COOKIE_IS_SECURE != 0,
+      date::internet_explorer_timestamp(self.expires),
       name,
-      value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
-      http_only: flags & INTERNET_COOKIE_HTTPONLY != 0,
-      same_site: SAME_SITE_UNSPECIFIED,
-      context: CookieContext::default(),
-    }))
+      CookieValue::Plain(crate::common::secret::SecretString::new(value)),
+      flags & INTERNET_COOKIE_HTTPONLY != 0,
+      SAME_SITE_UNSPECIFIED,
+      CookieContext::default(),
+      0,
+    );
+    // `RDomain` semantics are not established by a real-format fixture yet;
+    // retaining the raw spelling as unknown avoids silently choosing host-only
+    // or domain matching semantics.
+    record.domain = DomainScope::Unknown {
+      raw: record.domain_raw().to_owned(),
+    };
+    record.set_raw_expiry(RawValue::Unsigned(raw_expires));
+    record.retain_raw("flags", RawValue::Signed(self.flags));
+    Ok(Some(record))
   }
 
   #[cfg(test)]
@@ -257,7 +268,17 @@ mod tests {
 
   #[test]
   fn record_decoding_preserves_flags_and_filetime() {
-    let cookie = record().into_cookie(None).unwrap().unwrap();
+    let canonical = record().into_record(None).unwrap().unwrap();
+    assert!(matches!(canonical.domain, DomainScope::Unknown { .. }));
+    assert!(matches!(
+      canonical.attributes.raw_expires,
+      super::super::cookie_record::Observation::Known(RawValue::Unsigned(116_444_736_010_000_000))
+    ));
+    assert!(matches!(
+      canonical.raw.get("flags"),
+      Some(RawValue::Signed(_))
+    ));
+    let cookie = canonical.into_cookie().unwrap();
 
     assert_eq!(cookie.domain, ".example.com");
     assert_eq!(cookie.path, "/");

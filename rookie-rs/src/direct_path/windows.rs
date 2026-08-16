@@ -349,10 +349,10 @@ fn local_state_outcomes(
     .with_context(|| format!("failed to parse Chromium Local State {}", path.display()))?;
   let credentials = ChromiumKeyCredentials::default();
   let mut session = HostKeySession::new();
-  Ok(session.retrieve(ChromiumKeyRequest::for_parsed_local_state(
-    &credentials,
-    &parsed,
-  )))
+  Ok(session.retrieve(
+    ChromiumKeyRequest::for_parsed_local_state(&credentials, &parsed),
+    crate::common::deadline::Deadline::standard(),
+  ))
 }
 
 #[cfg(test)]

@@ -425,16 +425,23 @@ fn automatic_chromium_cookies(
   domains: Option<Vec<String>>,
 ) -> Result<Vec<Cookie>> {
   let identities = automatic_identities(ids)?;
+  let clock = crate::common::deadline::SystemClock;
+  let deadline = crate::common::deadline::Deadline::after(
+    &clock,
+    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+  );
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
-      let outcomes = session
-        .retrieve(crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials));
+      let outcomes = session.retrieve(
+        crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
+        deadline,
+      );
       crate::browser::chromium::chromium_based_probe_with_key_outcomes(
-        outcomes, db_path, domains, false,
+        outcomes, db_path, domains, false, &clock, deadline,
       )
     },
     |candidate| (candidate.cookies.len(), candidate.rows_skipped),
@@ -449,16 +456,23 @@ fn automatic_chromium_detailed(
   domains: Option<Vec<String>>,
 ) -> Result<Vec<DetailedCookie>> {
   let identities = automatic_identities(ids)?;
+  let clock = crate::common::deadline::SystemClock;
+  let deadline = crate::common::deadline::Deadline::after(
+    &clock,
+    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+  );
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
-      let outcomes = session
-        .retrieve(crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials));
+      let outcomes = session.retrieve(
+        crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
+        deadline,
+      );
       crate::browser::chromium::chromium_based_detailed_probe_with_key_outcomes(
-        outcomes, db_path, domains, false,
+        outcomes, db_path, domains, false, &clock, deadline,
       )
     },
     |candidate| (candidate.cookies.len(), candidate.rows_skipped),

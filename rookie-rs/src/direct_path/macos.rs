@@ -42,12 +42,19 @@ pub(super) fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result
       crate::browser::chromium::chromium_based_plaintext_only(request.path, request.domains, false)
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
-      let outcomes = browser_id_outcomes(&browser_id)?;
-      crate::browser::chromium::query_cookies_with_key_outcomes(
+      let clock = crate::common::deadline::SystemClock;
+      let deadline = crate::common::deadline::Deadline::after(
+        &clock,
+        crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+      );
+      let outcomes = browser_id_outcomes(&browser_id, deadline)?;
+      crate::browser::chromium::query_cookies_with_key_outcomes_deadline(
         outcomes,
         request.path,
         request.domains,
         false,
+        &clock,
+        deadline,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
@@ -72,12 +79,19 @@ pub(super) fn chromium_cookies_from_path_detailed(
       )
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
-      let outcomes = browser_id_outcomes(&browser_id)?;
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes(
+      let clock = crate::common::deadline::SystemClock;
+      let deadline = crate::common::deadline::Deadline::after(
+        &clock,
+        crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+      );
+      let outcomes = browser_id_outcomes(&browser_id, deadline)?;
+      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_deadline(
         outcomes,
         request.path,
         request.domains,
         false,
+        &clock,
+        deadline,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
@@ -102,7 +116,10 @@ fn validate_lock_policy(policy: ChromiumLockedDatabasePolicy) -> Result<()> {
   Ok(())
 }
 
-fn browser_id_outcomes(browser_id: &str) -> Result<ChromiumKeyOutcomes> {
+fn browser_id_outcomes(
+  browser_id: &str,
+  deadline: crate::common::deadline::Deadline,
+) -> Result<ChromiumKeyOutcomes> {
   if browser_id.is_empty() {
     return Err(invalid_options(
       InvalidDirectPathOptionsReason::EmptyBrowserId,
@@ -126,7 +143,10 @@ fn browser_id_outcomes(browser_id: &str) -> Result<ChromiumKeyOutcomes> {
     }
     DirectPathChromiumIdentity::Chromium(Some(credentials)) => {
       let mut session = HostKeySession::new();
-      Ok(session.retrieve(ChromiumKeyRequest::for_browser_id(browser_id, &credentials)))
+      Ok(session.retrieve(
+        ChromiumKeyRequest::for_browser_id(browser_id, &credentials),
+        deadline,
+      ))
     }
   }
 }

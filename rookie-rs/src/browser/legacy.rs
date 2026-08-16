@@ -4,7 +4,10 @@
 //! browser paths, credentials, discovery, acquisition, parsing, or decryption.
 
 use super::mozilla::MozillaProfile;
-use super::registry::{self, EngineExtractionOutcome, EngineSourceExtraction};
+use super::outcome::{FailureScope, Outcome};
+#[cfg(test)]
+use super::registry::EngineSourceDraft;
+use super::registry::{self, EngineExtractionDraft};
 use crate::common::enums::Cookie;
 use anyhow::{bail, Result};
 use std::{error::Error, fmt};
@@ -38,7 +41,7 @@ pub(crate) fn is_browser_not_installed(error: &anyhow::Error) -> bool {
     .any(|cause| cause.downcast_ref::<BrowserNotInstalled>().is_some())
 }
 
-fn discovery_failure(outcome: &EngineExtractionOutcome, browser_id: &str) -> Option<String> {
+fn discovery_failure(outcome: &EngineExtractionDraft, browser_id: &str) -> Option<String> {
   if outcome.all_detected_roots_failed() {
     return Some(format!(
       "every detected {browser_id} installation failed profile enumeration"
@@ -51,7 +54,7 @@ fn discovery_failure(outcome: &EngineExtractionOutcome, browser_id: &str) -> Opt
     .discovery_issues
     .iter()
     .filter(|issue| !registry::is_informational_discovery_issue(issue.code))
-    .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
+    .map(|issue| issue.message.clone())
     .take(8)
     .collect::<Vec<_>>();
   (!failures.is_empty()).then(|| {
@@ -62,23 +65,9 @@ fn discovery_failure(outcome: &EngineExtractionOutcome, browser_id: &str) -> Opt
   })
 }
 
-fn selected_source_cookies(
-  source: EngineSourceExtraction,
-  policy: LegacyEnginePolicy,
-) -> Result<Vec<Cookie>> {
-  if let Some(error) = source.error {
-    bail!(error)
-  }
-  if policy.rejects_all_row_failures() && source.cookies.is_empty() && source.rows_skipped > 0 {
-    bail!(source
-      .row_error
-      .unwrap_or_else(|| policy.all_rows_rejected_fallback().to_owned()))
-  }
-  Ok(source.cookies)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LegacyEnginePolicy {
+  Chromium,
   Gecko,
   #[cfg(any(target_os = "macos", test))]
   Safari,
@@ -89,6 +78,7 @@ enum LegacyEnginePolicy {
 impl LegacyEnginePolicy {
   fn rejects_all_row_failures(self) -> bool {
     match self {
+      Self::Chromium => true,
       Self::Gecko => true,
       #[cfg(any(target_os = "macos", test))]
       Self::Safari => false,
@@ -99,6 +89,7 @@ impl LegacyEnginePolicy {
 
   fn all_rows_rejected_fallback(self) -> &'static str {
     match self {
+      Self::Chromium => "all Chromium cookie rows failed to decode",
       Self::Gecko => "all Firefox cookie database rows failed to decode",
       #[cfg(any(target_os = "macos", test))]
       Self::Safari => "all Safari cookie records failed to decode",
@@ -110,52 +101,155 @@ impl LegacyEnginePolicy {
 
 fn project_engine_outcome(
   browser_id: &str,
-  outcome: EngineExtractionOutcome,
+  outcome: EngineExtractionDraft,
   policy: LegacyEnginePolicy,
 ) -> Result<Vec<Cookie>> {
-  if let Some(error) = discovery_failure(&outcome, browser_id) {
-    bail!(error)
-  }
-  let Some(profile) = outcome.profiles.into_iter().next() else {
+  project_canonical_outcome(
+    super::report_build::canonical_engine_extraction(browser_id, outcome)?,
+    policy,
+  )
+}
+
+pub(crate) fn project_chromium_outcome(
+  browser_id: &str,
+  outcome: registry::ChromiumRegistryDraft,
+) -> Result<Vec<Cookie>> {
+  project_canonical_outcome(
+    super::report_build::canonical_chromium_extraction(browser_id, outcome)?,
+    LegacyEnginePolicy::Chromium,
+  )
+}
+
+fn project_canonical_outcome(outcome: Outcome, policy: LegacyEnginePolicy) -> Result<Vec<Cookie>> {
+  let Outcome {
+    profiles,
+    sources,
+    failure_ledger,
+    counters,
+    result_status,
+    ..
+  } = outcome;
+  let failures = failure_ledger.into_vec();
+  let Some((profile, _)) = profiles.into_iter().next() else {
+    if policy == LegacyEnginePolicy::Chromium {
+      let browser_id = failures
+        .iter()
+        .find_map(|failure| match &failure.scope {
+          FailureScope::Browser { browser_id }
+          | FailureScope::Profile { browser_id, .. }
+          | FailureScope::Source { browser_id, .. } => Some(browser_id.as_str()),
+          FailureScope::Request => None,
+        })
+        .unwrap_or("chromium");
+      let diagnostics = failures
+        .iter()
+        .filter(|failure| !registry::is_informational_discovery_issue(failure.code.as_str()))
+        .map(|failure| failure.diagnostic.as_str())
+        .take(super::report_core::MAX_ISSUE_SAMPLES)
+        .collect::<Vec<_>>()
+        .join("; ");
+      if failures
+        .iter()
+        .any(|failure| failure.code.as_str().starts_with("profile_"))
+      {
+        bail!("every discovered {browser_id} profile failed discovery: {diagnostics}")
+      }
+      if result_status == super::outcome::ResultStatus::Failed && counters.browsers_detected > 0 {
+        bail!("every detected {browser_id} installation failed profile enumeration: {diagnostics}")
+      }
+    }
+    if let Some(failure) = failures
+      .iter()
+      .find(|failure| !registry::is_informational_discovery_issue(failure.code.as_str()))
+    {
+      bail!(failure.diagnostic.as_str().to_owned())
+    }
     return Err(BrowserNotInstalled::CookieDatabase.into());
   };
 
   let mut cookies = Vec::new();
+  let mut deferred_persistent_error = None;
   let mut deferred_persistent_row_error = None;
   let mut selected_session_succeeded = false;
+  let mut selected_source_seen = false;
   let mut failed_session_sources = Vec::new();
-  for source in profile.sources {
-    match source.role {
+  for source in sources.into_iter().filter(|source| {
+    source.profile.browser_id == profile.browser_id
+      && source.profile.installation_id == profile.installation_id
+      && source.profile.profile_id == profile.profile_id
+  }) {
+    selected_source_seen |= source.selected;
+    let compatibility_error = source
+      .compatibility_error
+      .as_ref()
+      .map(|diagnostic| diagnostic.as_str().to_owned());
+    let digest = source.source_digest();
+    let source_failures = failures.iter().filter(|failure| {
+      matches!(
+        &failure.scope,
+        FailureScope::Source { source_digest, .. } if source_digest == &digest
+      )
+    });
+    let source_error = source_failures
+      .clone()
+      .find(|failure| failure.code.as_str() == "source_extraction_failed")
+      .map(|failure| failure.diagnostic.as_str().to_owned());
+    let row_error = source_failures
+      .clone()
+      .find(|failure| {
+        matches!(
+          failure.code.as_str(),
+          "row_read_failed" | "column_read_failed"
+        )
+      })
+      .map(|failure| failure.diagnostic.as_str().to_owned());
+    let source_cookies = source
+      .records
+      .into_iter()
+      .map(|record| record.into_cookie().map_err(anyhow::Error::from))
+      .collect::<Result<Vec<_>>>()?;
+    match source.source.role.as_str() {
       registry::SOURCE_ROLE_PERSISTENT if source.selected => {
-        if let Some(error) = source.error {
-          bail!(error)
+        if policy == LegacyEnginePolicy::Chromium {
+          if let Some(error) = compatibility_error {
+            bail!(error)
+          }
         }
-        if policy == LegacyEnginePolicy::Gecko
-          && source.cookies.is_empty()
-          && source.rows_skipped > 0
+        if let Some(error) = source_error {
+          if policy == LegacyEnginePolicy::Gecko {
+            deferred_persistent_error = Some(error);
+          } else {
+            bail!(error)
+          }
+        } else if policy.rejects_all_row_failures()
+          && source_cookies.is_empty()
+          && source.stats.rows_skipped > 0
         {
           deferred_persistent_row_error = Some(
-            source
-              .row_error
+            row_error
+              .filter(|error| !error.ends_with("row(s) could not be read"))
               .unwrap_or_else(|| policy.all_rows_rejected_fallback().to_owned()),
           );
         } else {
-          cookies.extend(selected_source_cookies(source, policy)?);
+          cookies.extend(source_cookies);
         }
       }
-      registry::SOURCE_ROLE_SESSION if source.selected && source.error.is_none() => {
+      registry::SOURCE_ROLE_SESSION if source.selected && source_error.is_none() => {
         // Historical Firefox extraction logs an invalid session candidate and
         // continues to the first valid one; it does not fail the whole call.
         selected_session_succeeded = true;
-        cookies.extend(source.cookies);
+        cookies.extend(source_cookies);
       }
       registry::SOURCE_ROLE_SESSION if policy == LegacyEnginePolicy::Gecko => {
-        if let Some(error) = source.error {
-          failed_session_sources.push(format!("{}: {error}", source.path.display()));
+        if let Some(error) = source_error {
+          failed_session_sources.push(error);
         }
       }
       _ => {}
     }
+  }
+  if policy == LegacyEnginePolicy::Chromium && !selected_source_seen {
+    return Err(BrowserNotInstalled::CookieDatabase.into());
   }
   if cookies.is_empty() && !selected_session_succeeded && !failed_session_sources.is_empty() {
     bail!(
@@ -164,6 +258,9 @@ fn project_engine_outcome(
     )
   }
   if cookies.is_empty() {
+    if let Some(error) = deferred_persistent_error {
+      bail!(error)
+    }
     if let Some(error) = deferred_persistent_row_error {
       bail!(error)
     }
@@ -178,8 +275,10 @@ pub(crate) fn browser_cookies(
 ) -> Result<Vec<Cookie>> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
-    "chromium" => registry::legacy_chromium_cookies(&browser.canonical_id, domains)?
-      .ok_or_else(|| BrowserNotInstalled::CookieDatabase.into()),
+    "chromium" => project_chromium_outcome(
+      &browser.canonical_id,
+      registry::legacy_chromium_outcome(&browser.canonical_id, domains)?,
+    ),
     "gecko" => project_engine_outcome(
       &browser.canonical_id,
       registry::legacy_gecko_outcome(&browser.canonical_id, domains)?,
@@ -229,14 +328,14 @@ pub(crate) fn gecko_profiles(browser_id: &str) -> Result<Vec<MozillaProfile>> {
 mod tests {
   use super::*;
   use crate::browser::registry::{
-    test_seams, EngineProfileExtraction, PlatformId, SourceAcquisition, SourceFailureStage,
+    test_seams, EngineProfileDraft, PlatformId, SourceAcquisition, SourceFailureStage,
     PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT, SOURCE_ROLE_SESSION,
   };
   use std::path::PathBuf;
 
-  fn profile_with(source: Option<EngineSourceExtraction>) -> EngineExtractionOutcome {
-    EngineExtractionOutcome {
-      profiles: vec![EngineProfileExtraction {
+  fn profile_with(source: Option<EngineSourceDraft>) -> EngineExtractionDraft {
+    EngineExtractionDraft {
+      profiles: vec![EngineProfileDraft {
         profile_id: "a".repeat(64),
         installation_id: "b".repeat(64),
         installation_priority: 10,
@@ -256,18 +355,19 @@ mod tests {
       installations_detected: 1,
       installations_discovered: 1,
       installations_enumerated: 1,
-      ..EngineExtractionOutcome::default()
+      ..EngineExtractionDraft::default()
     }
   }
 
-  fn persistent_source(error: Option<&str>, row_error: Option<&str>) -> EngineSourceExtraction {
-    EngineSourceExtraction {
+  fn persistent_source(error: Option<&str>, row_error: Option<&str>) -> EngineSourceDraft {
+    EngineSourceDraft {
       path: PathBuf::from("/browser/default/cookies.sqlite"),
       role: SOURCE_ROLE_PERSISTENT,
       format: "mozilla_sqlite",
       precedence: PERSISTENT_SOURCE_PRECEDENCE,
       selected: true,
       cookies: Vec::new(),
+      records: Vec::new(),
       rows_seen: usize::from(row_error.is_some()),
       rows_skipped: usize::from(row_error.is_some()),
       acquisition: SourceAcquisition::NotAttempted,
@@ -279,14 +379,15 @@ mod tests {
     }
   }
 
-  fn failed_session_source(path: &str, error: &str) -> EngineSourceExtraction {
-    EngineSourceExtraction {
+  fn failed_session_source(path: &str, error: &str) -> EngineSourceDraft {
+    EngineSourceDraft {
       path: PathBuf::from(path),
       role: SOURCE_ROLE_SESSION,
       format: "firefox_session_jsonlz4",
       precedence: 20,
       selected: false,
       cookies: Vec::new(),
+      records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
       acquisition: SourceAcquisition::StableFileImage,
@@ -298,7 +399,7 @@ mod tests {
     }
   }
 
-  fn actual_safari_outcome(fixture: &[u8]) -> EngineExtractionOutcome {
+  fn actual_safari_outcome(fixture: &[u8]) -> EngineExtractionDraft {
     let directory = crate::utils::TempDir::new().expect("temporary Safari fixture directory");
     let context = test_seams::context(PlatformId::Macos, directory.path().to_path_buf());
     let library = test_seams::primary_root_path(&context, "safari");
@@ -309,8 +410,8 @@ mod tests {
     test_seams::safari_report(&context, "safari", None, None).expect("extract Safari fixture")
   }
 
-  fn empty_outcome_with_issue(code: &'static str) -> EngineExtractionOutcome {
-    EngineExtractionOutcome {
+  fn empty_outcome_with_issue(code: &'static str) -> EngineExtractionDraft {
+    EngineExtractionDraft {
       discovery_issues: vec![registry::DiscoveryIssue {
         code,
         path: PathBuf::from("/browser/discovery"),
@@ -320,7 +421,7 @@ mod tests {
       installations_detected: 1,
       installations_discovered: 1,
       installations_enumerated: 1,
-      ..EngineExtractionOutcome::default()
+      ..EngineExtractionDraft::default()
     }
   }
 
@@ -328,7 +429,7 @@ mod tests {
   fn ordinary_absence_stays_typed_for_load() {
     let error = project_engine_outcome(
       "firefox",
-      EngineExtractionOutcome::default(),
+      EngineExtractionDraft::default(),
       LegacyEnginePolicy::Gecko,
     )
     .expect_err("absence");
@@ -459,8 +560,9 @@ mod tests {
       .expect_err("all existing session candidates failed");
     let message = error.to_string();
     assert!(message.contains("all existing Firefox session store candidates failed"));
-    assert!(message.contains("recovery.jsonlz4: invalid mozLz4"));
-    assert!(message.contains("sessionstore.js: invalid JSON"));
+    assert!(message.contains("invalid mozLz4"));
+    assert!(message.contains("invalid JSON"));
+    assert!(!message.contains("/browser/default"));
 
     let mut selected_empty = failed_session_source("/browser/default/sessionstore.js", "unused");
     selected_empty.selected = true;

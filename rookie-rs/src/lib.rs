@@ -93,7 +93,7 @@ pub fn chromium_based_detailed_with_browser_id(
 }
 
 /// Returns the rookie-cookies version.
-/// Format: <semver>(<commit>)
+/// Format: `<semver>(<commit>)`
 ///
 /// # Examples
 ///
@@ -622,7 +622,7 @@ where
 /// abort the load (a locked profile or a decrypt failure on one browser should
 /// not lose cookies from the others). Browsers without a discoverable profile
 /// are skipped normally. If you need to know which browsers failed, hook a logger
-/// like [`tracing-subscriber`] and watch for `rookie_cookies::load` warnings.
+/// like `tracing-subscriber` and watch for `rookie_cookies::load` warnings.
 ///
 /// Returns `Err` only when at least one installed browser is found, every
 /// attempted extraction fails, and none succeeds. The aggregate message lists

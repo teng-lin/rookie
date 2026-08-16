@@ -1,4 +1,9 @@
-use crate::common::{date, enums::*, sqlite, utils};
+use crate::common::{
+  date,
+  deadline::{Clock, Deadline, DeadlineEnforcement, SystemClock},
+  enums::*,
+  sqlite, utils,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::{
@@ -9,7 +14,7 @@ use std::{
   vec::Vec,
 };
 
-use super::cookie_record::{CookieRecord, CookieValue};
+use super::cookie_record::{CookieRecord, CookieValue, RawValue};
 
 /// `Cookies.binarycookies` is a per-user metadata store and is normally only a
 /// few MiB. Keep a generous ceiling so a corrupt or replaced file cannot make
@@ -62,8 +67,9 @@ impl std::fmt::Display for SafariParseFailure {
 }
 
 #[derive(Debug)]
-pub(crate) struct SafariFileExtraction {
+pub(crate) struct SafariFileDraft {
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) records: Vec<CookieRecord>,
   pub(crate) stats: SafariExtractionStats,
   /// Last row/page parse error when valid records were still recovered.
   pub(crate) row_error: Option<String>,
@@ -72,10 +78,21 @@ pub(crate) struct SafariFileExtraction {
   pub(crate) acquisition_attempts: u32,
 }
 
+type SafariParseResult = (
+  Vec<Cookie>,
+  Vec<CookieRecord>,
+  SafariExtractionStats,
+  Option<anyhow::Error>,
+);
+
 pub(crate) fn safari_based_outcome(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
-) -> Result<SafariFileExtraction> {
+) -> Result<SafariFileDraft> {
+  debug_assert_eq!(deadline_enforcement(), DeadlineEnforcement::Cooperative);
+  let clock = SystemClock;
+  let deadline = Deadline::standard();
+  deadline.check(&clock)?;
   let mut file = File::open(&db_path).context(format!(
     "Failed to open {}\n\
       Make sure you have full disk access for the current process.\n\
@@ -89,26 +106,33 @@ pub(crate) fn safari_based_outcome(
       ",
     db_path.display()
   ))?;
-  let (bs, acquisition_attempts) = read_stable_cookie_file(&mut file, &db_path)?;
+  deadline.check(&clock)?;
+  let (bs, acquisition_attempts) =
+    read_stable_cookie_file_with_deadline(&mut file, &db_path, &clock, deadline)?;
   // Tagged so the report can name the stage that actually failed instead of
   // flattening every Safari failure into acquisition.
-  let (cookies, mut stats, row_error) = parse_content(&bs).map_err(|error| {
-    if error.downcast_ref::<SafariParseFailure>().is_some() {
-      error
-    } else {
-      error.context(SafariParseFailure {
-        stats: SafariExtractionStats::default(),
-      })
-    }
-  })?;
+  let (cookies, records, mut stats, row_error) = parse_content_with_deadline(&bs, &clock, deadline)
+    .map_err(|error| {
+      if error.downcast_ref::<SafariParseFailure>().is_some() {
+        error
+      } else {
+        error.context(SafariParseFailure {
+          stats: SafariExtractionStats::default(),
+        })
+      }
+    })?;
 
   // Filter cookies by domain if domains are specified
-  let cookies = match &domains {
+  let (cookies, records) = match &domains {
     Some(domain_filters) => {
       let parsed = cookies.len();
       let cookies = cookies
         .into_iter()
         .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
+        .collect::<Vec<_>>();
+      let records = records
+        .into_iter()
+        .filter(|record| utils::some_domain_in_host(Some(domain_filters), record.domain_raw()))
         .collect::<Vec<_>>();
       // Report counters describe request-relevant records. Successfully
       // decoded cookies excluded by the domain filter were never seen from
@@ -117,16 +141,23 @@ pub(crate) fn safari_based_outcome(
       stats.records_seen = stats
         .records_seen
         .saturating_sub(parsed.saturating_sub(cookies.len()));
-      cookies
+      (cookies, records)
     }
-    None => cookies,
+    None => (cookies, records),
   };
-  Ok(SafariFileExtraction {
+  Ok(SafariFileDraft {
     cookies,
+    records,
     stats,
     row_error: row_error.map(|error| format!("{error:#}")),
     acquisition_attempts,
   })
+}
+
+pub(crate) fn deadline_enforcement() -> DeadlineEnforcement {
+  // File and metadata syscalls cannot be preempted in-process; chunk/page/row
+  // checkpoints prevent additional work after the absolute deadline.
+  DeadlineEnforcement::Cooperative
 }
 
 pub(crate) const STABLE_READ_ATTEMPTS: usize = 3;
@@ -173,24 +204,52 @@ fn file_image_metadata(metadata: std::fs::Metadata) -> FileImageMetadata {
 /// from silently becoming the extraction result when it does not.
 /// Returns the stable image and how many acquisition attempts it took, so a
 /// report can state the real attempt count instead of assuming one.
+#[cfg(test)]
 fn read_stable_cookie_file(file: &mut File, db_path: &Path) -> Result<(Vec<u8>, u32)> {
   read_stable_cookie_file_with(file, db_path, || {})
 }
 
+#[cfg(test)]
 fn read_stable_cookie_file_with<F>(
   file: &mut File,
   db_path: &Path,
+  after_read: F,
+) -> Result<(Vec<u8>, u32)>
+where
+  F: FnMut(),
+{
+  let clock = SystemClock;
+  read_stable_cookie_file_with_runtime(file, db_path, after_read, &clock, Deadline::standard())
+}
+
+fn read_stable_cookie_file_with_deadline(
+  file: &mut File,
+  db_path: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<(Vec<u8>, u32)> {
+  read_stable_cookie_file_with_runtime(file, db_path, || {}, clock, deadline)
+}
+
+fn read_stable_cookie_file_with_runtime<F>(
+  file: &mut File,
+  db_path: &Path,
   mut after_read: F,
+  clock: &dyn Clock,
+  deadline: Deadline,
 ) -> Result<(Vec<u8>, u32)>
 where
   F: FnMut(),
 {
   let mut last_change = None;
   for attempt in 1..=STABLE_READ_ATTEMPTS {
+    deadline.check(clock)?;
     let fd_before = image_metadata(file, db_path)?;
     let path_before = path_image_metadata(db_path)?;
-    let first_bytes = read_cookie_file(file, db_path, fd_before.len)?;
+    let first_bytes =
+      read_cookie_file_with_deadline(file, db_path, fd_before.len, clock, deadline)?;
     after_read();
+    deadline.check(clock)?;
     let fd_after = image_metadata(file, db_path)?;
     let path_after = path_image_metadata(db_path)?;
     // Comparing descriptor metadata alone misses an atomic rename: the old
@@ -207,8 +266,13 @@ where
         File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
       let verification_before = image_metadata(&verification, db_path)?;
       let verification_path_before = path_image_metadata(db_path)?;
-      let verification_bytes =
-        read_cookie_file(&mut verification, db_path, verification_before.len)?;
+      let verification_bytes = read_cookie_file_with_deadline(
+        &mut verification,
+        db_path,
+        verification_before.len,
+        clock,
+        deadline,
+      )?;
       let verification_after = image_metadata(&verification, db_path)?;
       let verification_path_after = path_image_metadata(db_path)?;
       if verification_before == verification_path_before
@@ -241,6 +305,7 @@ where
     }
     *file =
       File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+    deadline.check(clock)?;
   }
   bail!(
     "Safari cookie file {} changed during each of {STABLE_READ_ATTEMPTS} acquisition attempts: {last_change:?}",
@@ -248,7 +313,14 @@ where
   )
 }
 
-fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Result<Vec<u8>> {
+fn read_cookie_file_with_deadline(
+  file: &mut File,
+  db_path: &Path,
+  advertised_len: u64,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<Vec<u8>> {
+  deadline.check(clock)?;
   if advertised_len > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
       "Safari cookie file {} is too large: {advertised_len} bytes exceeds the {} byte limit",
@@ -266,10 +338,20 @@ fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Res
 
   // `metadata` is only a snapshot. Limit the read as well in case the file is
   // replaced or grows between the size check and `read_to_end`.
-  file
-    .take(MAX_BINARY_COOKIES_FILE_SIZE + 1)
-    .read_to_end(&mut bytes)
-    .with_context(|| format!("Failed to read {}", db_path.display()))?;
+  let mut remaining = MAX_BINARY_COOKIES_FILE_SIZE + 1;
+  let mut chunk = [0_u8; 64 * 1024];
+  while remaining > 0 {
+    deadline.check(clock)?;
+    let requested = usize::try_from(remaining.min(chunk.len() as u64)).unwrap_or(chunk.len());
+    let read = file
+      .read(&mut chunk[..requested])
+      .with_context(|| format!("Failed to read {}", db_path.display()))?;
+    if read == 0 {
+      break;
+    }
+    bytes.extend_from_slice(&chunk[..read]);
+    remaining = remaining.saturating_sub(read as u64);
+  }
   if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
       "Safari cookie file {} grew beyond the {} byte limit while it was read",
@@ -284,7 +366,18 @@ fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Res
 /// Parse one page and retain any valid records. The optional error is the last
 /// malformed record encountered. The caller preserves it as a row diagnostic
 /// even when another record on the page was valid.
-fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
+#[cfg(test)]
+fn parse_page(bs: &[u8]) -> Result<SafariParseResult> {
+  let clock = SystemClock;
+  parse_page_with_deadline(bs, &clock, Deadline::standard())
+}
+
+fn parse_page_with_deadline(
+  bs: &[u8],
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SafariParseResult> {
+  deadline.check(clock)?;
   if slice(bs, 0, 4)? != [0x00, 0x00, 0x01, 0x00] {
     bail!("bad page header");
   }
@@ -301,25 +394,30 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
   }
 
   let mut cookies: Vec<Cookie> = vec![];
+  let mut records: Vec<CookieRecord> = vec![];
   let mut last_error = None;
   let mut error_count = 0usize;
   let mut stats = SafariExtractionStats::default();
   for (index, raw_offset) in parsed_table.into_iter().enumerate() {
+    deadline.check(clock)?;
     stats.records_seen += 1;
-    let result = (|| {
+    let result: Result<(Cookie, CookieRecord)> = (|| {
       let offset = usize::try_from(raw_offset)
         .context("Safari cookie offset does not fit in memory address space")?;
       let length = usize::try_from(slice(bs, offset, 4).map(LittleEndian::read_u32)?)
         .context("Safari cookie length does not fit in memory address space")?;
       let record = slice(bs, offset, length)?;
-      parse_cookie::<LittleEndian>(record)?
-        .into_cookie()
-        .map_err(anyhow::Error::from)
+      let record = parse_cookie::<LittleEndian>(record)?;
+      let cookie = record.clone().into_cookie().map_err(anyhow::Error::from)?;
+      Ok::<_, anyhow::Error>((cookie, record))
     })()
     .with_context(|| format!("Failed to parse Safari cookie record {index}"));
 
     match result {
-      Ok(cookie) => cookies.push(cookie),
+      Ok((cookie, record)) => {
+        cookies.push(cookie);
+        records.push(record);
+      }
       Err(error) => {
         error_count += 1;
         stats.records_skipped += 1;
@@ -347,7 +445,7 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
     }
   }
 
-  Ok((cookies, stats, last_error))
+  Ok((cookies, records, stats, last_error))
 }
 
 fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
@@ -362,8 +460,8 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
   let value_off = T::read_u32(&bs[0x1c..0x20]) as usize;
 
   // i/OS/X to Unix timestamp +(1 Jan 2001 epoch seconds).
-  let expires = T::read_f64(&bs[0x28..0x30]);
-  let expires = date::safari_timestamp(expires);
+  let raw_expires = T::read_f64(&bs[0x28..0x30]);
+  let expires = date::safari_timestamp(raw_expires);
 
   let url = slice_to(bs, url_off, name_off).and_then(c_str)?;
   let name = slice_to(bs, name_off, path_off).and_then(c_str)?;
@@ -373,17 +471,20 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
   let is_secure = (flags & 0x01) == 0x01;
   let is_http_only = (flags & 0x04) == 0x04;
 
-  let cookie = CookieRecord {
-    expires,
-    domain: url,
-    http_only: is_http_only,
-    name,
+  let mut cookie = CookieRecord::from_legacy_fields(
+    url,
     path,
-    value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
-    same_site: SAME_SITE_UNSPECIFIED,
-    secure: is_secure,
-    context: CookieContext::default(),
-  };
+    is_secure,
+    expires,
+    name,
+    CookieValue::Plain(crate::common::secret::SecretString::new(value)),
+    is_http_only,
+    SAME_SITE_UNSPECIFIED,
+    CookieContext::default(),
+    0,
+  );
+  cookie.set_raw_expiry(RawValue::FloatBits(raw_expires.to_bits()));
+  cookie.retain_raw("flags", RawValue::Unsigned(u64::from(flags)));
   Ok(cookie)
 }
 
@@ -404,7 +505,18 @@ fn record_page_failure(stats: &mut SafariExtractionStats, page: Option<&[u8]>) {
   stats.records_skipped = stats.records_skipped.saturating_add(skipped);
 }
 
-fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
+#[cfg(test)]
+fn parse_content(bs: &[u8]) -> Result<SafariParseResult> {
+  let clock = SystemClock;
+  parse_content_with_deadline(bs, &clock, Deadline::standard())
+}
+
+fn parse_content_with_deadline(
+  bs: &[u8],
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SafariParseResult> {
+  deadline.check(clock)?;
   // Magic bytes: "COOK" = 0x636F6F6B
   if slice(bs, 0, 4)? != [0x63, 0x6f, 0x6f, 0x6b] {
     bail!("not a cookie file");
@@ -418,10 +530,12 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Optio
     .and_then(|table_len| table_len.checked_add(8))
     .ok_or_else(|| anyhow!("Safari page data offset overflow"))?;
   let mut cookies: Vec<Cookie> = vec![];
+  let mut records: Vec<CookieRecord> = vec![];
   let mut last_error = None;
   let mut stats = SafariExtractionStats::default();
 
   for (index, raw_length) in page_lengths.into_iter().enumerate() {
+    deadline.check(clock)?;
     let length = usize::try_from(raw_length)
       .context("Safari page length does not fit in memory address space")?;
     let next_offset = match offset.checked_add(length) {
@@ -437,10 +551,11 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Optio
 
     match slice(bs, offset, length)
       .with_context(|| format!("Failed to read Safari page {index}"))
-      .and_then(parse_page)
+      .and_then(|page| parse_page_with_deadline(page, clock, deadline))
     {
-      Ok((page_cookies, page_stats, page_error)) => {
+      Ok((page_cookies, page_records, page_stats, page_error)) => {
         cookies.extend(page_cookies);
+        records.extend(page_records);
         stats.records_seen += page_stats.records_seen;
         stats.records_skipped += page_stats.records_skipped;
         if let Some(error) = page_error {
@@ -462,7 +577,7 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Optio
     }
   }
 
-  Ok((cookies, stats, last_error))
+  Ok((cookies, records, stats, last_error))
 }
 
 fn slice(bs: &[u8], off: usize, len: usize) -> Result<&[u8]> {
@@ -749,6 +864,7 @@ pub(crate) fn embedded_nul_test_fixture(field: &str, include_valid: bool) -> Vec
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::test_clock::ManualClock;
   use std::{
     fs,
     panic::{catch_unwind, UnwindSafe},
@@ -756,6 +872,33 @@ mod tests {
   };
 
   const COOKIE_HEADER_LEN: usize = 0x38;
+
+  #[test]
+  fn stable_read_starts_no_verification_or_retry_after_deadline() {
+    let directory = crate::utils::TempDir::new().expect("temporary directory");
+    let path = directory.path().join("Cookies.binarycookies");
+    fs::write(&path, golden_fixture()).expect("write Safari fixture");
+    let mut file = File::open(&path).expect("open Safari fixture");
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let callbacks = std::cell::Cell::new(0_u32);
+
+    let error = read_stable_cookie_file_with_runtime(
+      &mut file,
+      &path,
+      || {
+        callbacks.set(callbacks.get() + 1);
+        clock.advance(std::time::Duration::from_secs(1));
+      },
+      &clock,
+      deadline,
+    )
+    .expect_err("deadline expires after the first chunked read");
+
+    assert!(error.is::<crate::common::deadline::BoundaryExpired>());
+    assert_eq!(callbacks.get(), 1);
+    assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
 
   struct FixtureCookie<'a> {
     domain: &'a str,
@@ -931,7 +1074,7 @@ mod tests {
 
   #[test]
   fn golden_binarycookies_fixture_round_trips_cookie_fields() {
-    let (cookies, stats, row_error) =
+    let (cookies, records, stats, row_error) =
       parse_content(&golden_fixture()).expect("parse golden fixture");
     assert_eq!(cookies.len(), 1);
     assert_eq!(stats.records_seen, 1);
@@ -947,6 +1090,15 @@ mod tests {
     assert!(cookie.http_only);
     assert_eq!(cookie.expires, Some(1_728_307_200));
     assert_eq!(cookie.same_site, SAME_SITE_UNSPECIFIED);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+      records[0].attributes.raw_expires,
+      crate::browser::cookie_record::Observation::Known(RawValue::FloatBits(_))
+    ));
+    assert!(matches!(
+      records[0].raw.get("flags"),
+      Some(RawValue::Unsigned(_))
+    ));
   }
 
   #[test]
@@ -986,7 +1138,7 @@ mod tests {
       usize::try_from(LittleEndian::read_u32(&page[8..12])).expect("first record offset");
     LittleEndian::write_u32(&mut page[first_record..first_record + 4], u32::MAX);
 
-    let (cookies, stats, row_error) =
+    let (cookies, _records, stats, row_error) =
       parse_content(&build_file(&[page])).expect("retain good record");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good");
@@ -1018,7 +1170,7 @@ mod tests {
   fn embedded_nul_record_does_not_discard_a_valid_cookie() {
     for field in ["domain", "name", "path", "value"] {
       let fixture = embedded_nul_fixture(field, true);
-      let (cookies, stats, row_error) =
+      let (cookies, _records, stats, row_error) =
         parse_content(&fixture).expect("retain the valid Safari record");
       assert_eq!(cookies.len(), 1, "{field}");
       assert_eq!(cookies[0].domain, ".good.test", "{field}");
@@ -1068,7 +1220,7 @@ mod tests {
       expires: 0.0,
     })]);
 
-    let (cookies, stats, row_error) =
+    let (cookies, _records, stats, row_error) =
       parse_content(&build_file(&[bad_page, good_page])).expect("retain good page");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-page");
@@ -1089,8 +1241,9 @@ mod tests {
       expires: 0.0,
     })]);
 
-    let (cookies, stats, row_error) = parse_content(&build_file(&[truncated_page, good_page]))
-      .expect("a later valid page remains recoverable");
+    let (cookies, _records, stats, row_error) =
+      parse_content(&build_file(&[truncated_page, good_page]))
+        .expect("a later valid page remains recoverable");
     assert_eq!(cookies.len(), 1);
     assert_eq!(stats.records_seen, 2);
     assert_eq!(stats.records_skipped, 1);
@@ -1163,7 +1316,7 @@ mod tests {
     }
     page.extend_from_slice(&good);
 
-    let (cookies, stats, error) = parse_page(&page).expect("page framing remains valid");
+    let (cookies, _records, stats, error) = parse_page(&page).expect("page framing remains valid");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-before-limit");
     assert_eq!(stats.records_seen, count);

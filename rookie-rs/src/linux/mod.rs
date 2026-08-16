@@ -1,13 +1,18 @@
 #[cfg(test)]
 use anyhow::anyhow;
 use anyhow::{bail, Context, Result};
+use async_io::Timer;
+use futures_lite::future;
 use std::collections::HashMap;
+use std::future::Future;
 use zbus::{
-  blocking::Connection,
   zvariant::{DynamicType, ObjectPath, OwnedObjectPath, OwnedValue, Value},
-  Message,
+  Connection, Message,
 };
 
+#[cfg(test)]
+use crate::common::deadline::SystemClock;
+use crate::common::deadline::{Clock, Deadline};
 use crate::common::secret::SecretString;
 
 mod confidential;
@@ -22,36 +27,72 @@ const LIBSECRET_SCHEMAS: [&str; 2] = [
   "chrome_libsecret_os_crypt_password_v1",
 ];
 
-/// Gets Chromium's password from either Secret Service or KWallet.
-///
-/// A successful backend is enough to continue, but if every configured
-/// backend fails the individual diagnostics are preserved in the returned
-/// error. Secret values are never included in those diagnostics.
-///
-/// Each returned password is wrapped in `SecretString` so it is wiped from
-/// memory when the caller drops it rather than left in freed heap memory.
-pub(crate) fn get_passwords(unix_crypt_name: &str) -> Result<Vec<SecretString>> {
-  get_passwords_with_source(&SystemLinuxKeyringSource, unix_crypt_name)
+pub(crate) fn get_passwords_with_deadline(
+  unix_crypt_name: &str,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<Vec<SecretString>> {
+  get_passwords_with_source_and_deadline(
+    &SystemLinuxKeyringSource,
+    unix_crypt_name,
+    clock,
+    deadline,
+  )
 }
 
 trait LinuxKeyringSource {
-  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<SecretString>;
-  fn kwallet_password(&self, crypt_name: &str) -> Result<SecretString>;
+  fn libsecret_password(
+    &self,
+    schema: &str,
+    crypt_name: &str,
+    clock: &dyn Clock,
+    deadline: Deadline,
+  ) -> Result<SecretString>;
+  fn kwallet_password(
+    &self,
+    crypt_name: &str,
+    clock: &dyn Clock,
+    deadline: Deadline,
+  ) -> Result<SecretString>;
 }
 
 struct SystemLinuxKeyringSource;
 
 impl LinuxKeyringSource for SystemLinuxKeyringSource {
-  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<SecretString> {
-    get_password_libsecret(schema, crypt_name)
+  fn libsecret_password(
+    &self,
+    schema: &str,
+    crypt_name: &str,
+    clock: &dyn Clock,
+    deadline: Deadline,
+  ) -> Result<SecretString> {
+    get_password_libsecret(schema, crypt_name, clock, deadline)
   }
 
-  fn kwallet_password(&self, crypt_name: &str) -> Result<SecretString> {
-    get_password_kdewallet(crypt_name)
+  fn kwallet_password(
+    &self,
+    crypt_name: &str,
+    clock: &dyn Clock,
+    deadline: Deadline,
+  ) -> Result<SecretString> {
+    get_password_kdewallet(crypt_name, clock, deadline)
   }
 }
 
+#[cfg(test)]
 fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<SecretString>>
+where
+  S: LinuxKeyringSource,
+{
+  get_passwords_with_source_and_deadline(source, crypt_name, &SystemClock, Deadline::standard())
+}
+
+fn get_passwords_with_source_and_deadline<S>(
+  source: &S,
+  crypt_name: &str,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<Vec<SecretString>>
 where
   S: LinuxKeyringSource,
 {
@@ -59,13 +100,15 @@ where
   let mut failures = Vec::new();
 
   for schema in LIBSECRET_SCHEMAS {
-    match source.libsecret_password(schema, crypt_name) {
+    deadline.check(clock)?;
+    match source.libsecret_password(schema, crypt_name, clock, deadline) {
       Ok(password) => push_unique(&mut passwords, password),
       Err(error) => failures.push(format!("Secret Service schema '{schema}': {error:#}")),
     }
   }
 
-  match source.kwallet_password(crypt_name) {
+  deadline.check(clock)?;
+  match source.kwallet_password(crypt_name, clock, deadline) {
     Ok(password) => push_unique(&mut passwords, password),
     Err(error) => failures.push(format!("KWallet: {error:#}")),
   }
@@ -94,16 +137,49 @@ fn push_unique(values: &mut Vec<SecretString>, value: SecretString) {
   }
 }
 
-fn libsecret_call<T>(connection: &Connection, method: &str, args: T) -> zbus::Result<Message>
+fn run_dbus_with_deadline<T, F>(
+  clock: &dyn Clock,
+  deadline: Deadline,
+  operation: &'static str,
+  future: F,
+) -> Result<T>
+where
+  F: Future<Output = zbus::Result<T>>,
+{
+  let remaining = deadline.remaining_for_ipc(clock);
+  if remaining.is_zero() {
+    bail!("{operation} timed out before starting");
+  }
+  future::block_on(future::race(
+    async move { future.await.map_err(anyhow::Error::from) },
+    async move {
+      Timer::after(remaining).await;
+      Err(anyhow::anyhow!("{operation} timed out"))
+    },
+  ))
+}
+
+fn libsecret_call<T>(
+  connection: &Connection,
+  method: &'static str,
+  args: T,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<Message>
 where
   T: serde::ser::Serialize + DynamicType,
 {
-  connection.call_method(
-    Some("org.freedesktop.secrets"),
-    "/org/freedesktop/secrets",
-    Some("org.freedesktop.Secret.Service"),
+  run_dbus_with_deadline(
+    clock,
+    deadline,
     method,
-    &args,
+    connection.call_method(
+      Some("org.freedesktop.secrets"),
+      "/org/freedesktop/secrets",
+      Some("org.freedesktop.Secret.Service"),
+      method,
+      &args,
+    ),
   )
 }
 
@@ -130,18 +206,25 @@ const KWALLET_ENDPOINTS: [KWalletEndpoint; 2] = [
 fn kwallet_call<T>(
   connection: &Connection,
   endpoint: KWalletEndpoint,
-  method: &str,
+  method: &'static str,
   args: T,
-) -> zbus::Result<Message>
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<Message>
 where
   T: serde::ser::Serialize + DynamicType,
 {
-  connection.call_method(
-    Some(endpoint.service),
-    endpoint.path,
-    Some("org.kde.KWallet"),
+  run_dbus_with_deadline(
+    clock,
+    deadline,
     method,
-    &args,
+    connection.call_method(
+      Some(endpoint.service),
+      endpoint.path,
+      Some("org.kde.KWallet"),
+      method,
+      &args,
+    ),
   )
 }
 
@@ -163,12 +246,16 @@ trait SecretServiceBackend {
   fn get_secret(&self, item: &str) -> Result<SecretString>;
 }
 
-struct DbusSecretServiceBackend {
+struct DbusSecretServiceBackend<'a> {
   connection: Connection,
+  clock: &'a dyn Clock,
+  deadline: Deadline,
 }
 
 struct DbusConfidentialTransport<'a> {
   connection: &'a Connection,
+  clock: &'a dyn Clock,
+  deadline: Deadline,
 }
 
 impl confidential::Transport for DbusConfidentialTransport<'_> {
@@ -177,6 +264,8 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
       self.connection,
       "OpenSession",
       &(algorithm, Value::new(client_public_key)),
+      self.clock,
+      self.deadline,
     )
     .context("Secret Service OpenSession failed")?;
     let (output, session): (OwnedValue, OwnedObjectPath) = message
@@ -198,6 +287,8 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
       self.connection,
       "GetSecrets",
       &(vec![item_path.clone()], session_path),
+      self.clock,
+      self.deadline,
     )?;
     type DbusSecret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
     let mut secrets: HashMap<OwnedObjectPath, DbusSecret> = message
@@ -215,21 +306,42 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
   }
 }
 
-impl DbusSecretServiceBackend {
-  fn connect() -> Result<Self> {
+impl<'a> DbusSecretServiceBackend<'a> {
+  fn connect(clock: &'a dyn Clock, deadline: Deadline) -> Result<Self> {
+    let remaining = deadline.remaining(clock);
+    if remaining.is_zero() {
+      bail!("session D-Bus connection timed out before starting");
+    }
+    let builder = zbus::connection::Builder::session()
+      .context("failed to resolve the session D-Bus address")?
+      .method_timeout(remaining);
     Ok(Self {
-      connection: Connection::session().context("failed to connect to the session D-Bus")?,
+      connection: run_dbus_with_deadline(
+        clock,
+        deadline,
+        "session D-Bus connection",
+        builder.build(),
+      )
+      .context("failed to connect to the session D-Bus")?,
+      clock,
+      deadline,
     })
   }
 }
 
-impl SecretServiceBackend for DbusSecretServiceBackend {
+impl SecretServiceBackend for DbusSecretServiceBackend<'_> {
   fn search_items(&self, schema: &str, crypt_name: &str) -> Result<SecretSearchResult> {
     let mut attributes = HashMap::<&str, &str>::new();
     attributes.insert("xdg:schema", schema);
     attributes.insert("application", crypt_name);
-    let message = libsecret_call(&self.connection, "SearchItems", &attributes)
-      .context("Secret Service SearchItems failed")?;
+    let message = libsecret_call(
+      &self.connection,
+      "SearchItems",
+      &attributes,
+      self.clock,
+      self.deadline,
+    )
+    .context("Secret Service SearchItems failed")?;
     let body = message.body();
     let (unlocked, locked): (Vec<ObjectPath>, Vec<ObjectPath>) = body
       .deserialize()
@@ -246,8 +358,14 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
       .map(|path| ObjectPath::try_from(path.as_str()))
       .collect::<std::result::Result<Vec<_>, _>>()
       .context("Secret Service returned an invalid locked item path")?;
-    let message =
-      libsecret_call(&self.connection, "Unlock", &paths).context("Secret Service Unlock failed")?;
+    let message = libsecret_call(
+      &self.connection,
+      "Unlock",
+      &paths,
+      self.clock,
+      self.deadline,
+    )
+    .context("Secret Service Unlock failed")?;
     let body = message.body();
     let (unlocked, prompt): (Vec<ObjectPath>, ObjectPath) = body
       .deserialize()
@@ -266,14 +384,21 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
     confidential::get_secret(
       &DbusConfidentialTransport {
         connection: &self.connection,
+        clock: self.clock,
+        deadline: self.deadline,
       },
       item,
     )
   }
 }
 
-fn get_password_libsecret(schema: &str, crypt_name: &str) -> Result<SecretString> {
-  let backend = DbusSecretServiceBackend::connect()?;
+fn get_password_libsecret(
+  schema: &str,
+  crypt_name: &str,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SecretString> {
+  let backend = DbusSecretServiceBackend::connect(clock, deadline)?;
   get_password_libsecret_with_backend(&backend, schema, crypt_name)
 }
 
@@ -315,6 +440,8 @@ trait KWalletBackend {
 struct DbusKWalletBackend<'a> {
   connection: &'a Connection,
   endpoint: KWalletEndpoint,
+  clock: &'a dyn Clock,
+  deadline: Deadline,
 }
 
 fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
@@ -327,8 +454,15 @@ fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
 
 impl KWalletBackend for DbusKWalletBackend<'_> {
   fn network_wallet(&self) -> Result<String> {
-    let message = kwallet_call(self.connection, self.endpoint, "networkWallet", ())
-      .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
+    let message = kwallet_call(
+      self.connection,
+      self.endpoint,
+      "networkWallet",
+      (),
+      self.clock,
+      self.deadline,
+    )
+    .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
     message
       .body()
       .deserialize()
@@ -341,6 +475,8 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "open",
       (wallet, 0_i64, APP_ID),
+      self.clock,
+      self.deadline,
     )
     .with_context(|| format!("KWallet {} open failed", self.endpoint.version))?;
     let handle: i32 = message
@@ -359,6 +495,8 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "readPassword",
       (handle, folder, key, APP_ID),
+      self.clock,
+      self.deadline,
     )
     .with_context(|| format!("KWallet {} readPassword failed", self.endpoint.version))?;
     message
@@ -374,6 +512,10 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "close",
       (handle, false, APP_ID),
+      self.clock,
+      self
+        .deadline
+        .cleanup_deadline(crate::common::deadline::CLEANUP_GRACE),
     )
     .with_context(|| format!("KWallet {} close failed", self.endpoint.version))?;
     let code: i32 = message
@@ -423,12 +565,27 @@ impl<B: KWalletBackend + ?Sized> Drop for KWalletHandle<'_, B> {
   }
 }
 
-fn get_password_kdewallet(crypt_name: &str) -> Result<SecretString> {
-  let connection = Connection::session().context("failed to connect to the session D-Bus")?;
+fn get_password_kdewallet(
+  crypt_name: &str,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SecretString> {
+  let remaining = deadline.remaining(clock);
+  if remaining.is_zero() {
+    bail!("session D-Bus connection timed out before KWallet lookup");
+  }
+  let builder = zbus::connection::Builder::session()
+    .context("failed to resolve the session D-Bus address")?
+    .method_timeout(remaining);
+  let connection =
+    run_dbus_with_deadline(clock, deadline, "session D-Bus connection", builder.build())
+      .context("failed to connect to the session D-Bus")?;
   get_password_kdewallet_with_fallback(|endpoint| {
     let backend = DbusKWalletBackend {
       connection: &connection,
       endpoint,
+      clock,
+      deadline,
     };
     get_password_kdewallet_with_backend(&backend, crypt_name)
   })
@@ -481,6 +638,7 @@ pub fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::test_clock::ManualClock;
   use std::{cell::RefCell, collections::VecDeque};
 
   fn secret(value: &str) -> SecretString {
@@ -493,7 +651,13 @@ mod tests {
   }
 
   impl LinuxKeyringSource for FakeKeyringSource {
-    fn libsecret_password(&self, _schema: &str, _crypt_name: &str) -> Result<SecretString> {
+    fn libsecret_password(
+      &self,
+      _schema: &str,
+      _crypt_name: &str,
+      _clock: &dyn Clock,
+      _deadline: Deadline,
+    ) -> Result<SecretString> {
       self
         .libsecret
         .borrow_mut()
@@ -501,7 +665,12 @@ mod tests {
         .expect("one result per schema")
     }
 
-    fn kwallet_password(&self, _crypt_name: &str) -> Result<SecretString> {
+    fn kwallet_password(
+      &self,
+      _crypt_name: &str,
+      _clock: &dyn Clock,
+      _deadline: Deadline,
+    ) -> Result<SecretString> {
       self
         .kwallet
         .borrow_mut()
@@ -542,6 +711,65 @@ mod tests {
     let passwords = get_passwords_with_source(&source, "chrome").unwrap();
     let passwords: Vec<&str> = passwords.iter().map(|password| password.as_str()).collect();
     assert_eq!(passwords, ["candidate"]);
+  }
+
+  struct BudgetSource {
+    remaining: RefCell<Vec<std::time::Duration>>,
+    kwallet_calls: RefCell<usize>,
+  }
+
+  impl LinuxKeyringSource for BudgetSource {
+    fn libsecret_password(
+      &self,
+      _schema: &str,
+      _crypt_name: &str,
+      clock: &dyn Clock,
+      deadline: Deadline,
+    ) -> Result<SecretString> {
+      self.remaining.borrow_mut().push(deadline.remaining(clock));
+      let elapsed = if self.remaining.borrow().len() == 1 {
+        7
+      } else {
+        3
+      };
+      clock.sleep(std::time::Duration::from_secs(elapsed));
+      bail!("scripted provider failure")
+    }
+
+    fn kwallet_password(
+      &self,
+      _crypt_name: &str,
+      _clock: &dyn Clock,
+      _deadline: Deadline,
+    ) -> Result<SecretString> {
+      *self.kwallet_calls.borrow_mut() += 1;
+      bail!("KWallet must not start after the absolute deadline")
+    }
+  }
+
+  #[test]
+  fn fallbacks_share_one_decreasing_absolute_budget_without_wall_clock_sleep() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(10));
+    let source = BudgetSource {
+      remaining: RefCell::new(Vec::new()),
+      kwallet_calls: RefCell::new(0),
+    };
+
+    let error = get_passwords_with_source_and_deadline(&source, "chrome", &clock, deadline)
+      .expect_err("the second fallback consumes the remaining budget");
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryExpired>()
+      .is_some());
+    assert_eq!(
+      source.remaining.into_inner(),
+      [
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(3),
+      ]
+    );
+    assert_eq!(source.kwallet_calls.into_inner(), 0);
+    assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
   }
 
   #[derive(Default)]

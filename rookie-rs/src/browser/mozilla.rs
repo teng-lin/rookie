@@ -1,4 +1,9 @@
-use crate::common::{date, enums::*, sqlite, utils};
+use crate::common::{
+  date,
+  deadline::{Clock, Deadline, SystemClock},
+  enums::*,
+  sqlite, utils,
+};
 use anyhow::{anyhow, bail, Result};
 use ini::{Ini, ParseOption};
 use lz4_flex::block::decompress_into;
@@ -9,7 +14,7 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use super::cookie_record::{CookieRecord, CookieValue};
+use super::cookie_record::{Attributes, CookieRecord, CookieValue, RawValue};
 
 // Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
 // expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
@@ -38,31 +43,7 @@ const MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 =
   note = "use direct_path::cookies_from_path with DirectPathRequest"
 )]
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let database = sqlite::with_browser_database(db_path.clone(), |connection| {
-    query_persistent_cookies(connection, domains.as_deref())
-  })?;
-  log::debug!(
-    "Mozilla database query succeeded via {:?} after {} attempt(s)",
-    database.strategy(),
-    database.attempts()
-  );
-  let persistent = database.into_value();
-  let mut cookies = persistent.cookies;
-
-  let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
-  match get_authoritative_session_outcome(domains.as_deref(), &parent_path) {
-    Ok(session) => cookies.extend(session.cookies),
-    Err(error) if cookies.is_empty() => return Err(error),
-    Err(error) => {
-      log::warn!("All Firefox session stores failed; returning persistent cookies only: {error:#}")
-    }
-  }
-  if cookies.is_empty() {
-    if let Some(error) = persistent.last_row_error {
-      return Err(error);
-    }
-  }
-  Ok(cookies)
+  project_engine_cookies(query_cookies_engine_outcome(&db_path, domains.as_deref()))
 }
 
 /// Returns cookies from a Mozilla profile with container and origin attributes
@@ -75,26 +56,7 @@ pub fn firefox_based_detailed(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
 ) -> Result<Vec<DetailedCookie>> {
-  let database = sqlite::with_browser_database(db_path.clone(), |connection| {
-    query_persistent_cookies_mode(connection, domains.as_deref(), true)
-  })?;
-  let persistent = database.into_value();
-  let mut cookies = persistent.detailed_cookies;
-
-  let parent_path = db_path.parent().unwrap_or(Path::new("")).to_path_buf();
-  match get_authoritative_session_outcome(domains.as_deref(), &parent_path) {
-    Ok(session) => cookies.extend(session.detailed_cookies),
-    Err(error) if cookies.is_empty() => return Err(error),
-    Err(error) => log::warn!(
-      "All Firefox session stores failed; returning detailed persistent cookies only: {error:#}"
-    ),
-  }
-  if cookies.is_empty() {
-    if let Some(error) = persistent.last_row_error {
-      return Err(error);
-    }
-  }
-  Ok(cookies)
+  project_engine_detailed_cookies(query_cookies_engine_outcome(&db_path, domains.as_deref()))
 }
 
 /// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
@@ -110,6 +72,7 @@ fn escape_like_pattern(input: &str) -> String {
 struct PersistentCookieQuery {
   cookies: Vec<Cookie>,
   detailed_cookies: Vec<DetailedCookie>,
+  records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
   last_row_error: Option<anyhow::Error>,
@@ -129,28 +92,40 @@ fn persistent_cookie_expiry(timestamp: u64, schema_version: u32) -> Option<u64> 
   date::mozilla_timestamp(timestamp)
 }
 
+#[cfg(test)]
 fn query_persistent_cookies(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
 ) -> Result<PersistentCookieQuery> {
-  query_persistent_cookies_mode(connection, domains, false)
+  let clock = SystemClock;
+  query_persistent_cookies_mode(connection, domains, false, &clock, Deadline::standard())
 }
 
 fn query_persistent_cookies_mode(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
-  detailed: bool,
+  _detailed: bool,
+  clock: &dyn Clock,
+  deadline: Deadline,
 ) -> Result<PersistentCookieQuery> {
+  deadline.check(clock)?;
   let schema_version = mozilla_schema_version(connection)?;
   let columns = sqlite_table_columns(connection, "moz_cookies")?;
-  let origin_attributes = if columns.contains("originAttributes") {
-    "originAttributes"
-  } else {
-    "NULL AS originAttributes"
+  let optional_column = |name: &str| {
+    if columns.contains(name) {
+      name.to_owned()
+    } else {
+      format!("NULL AS {name}")
+    }
   };
   let mut query = format!(
-    "SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite, \
-     {origin_attributes} FROM moz_cookies "
+    "SELECT host, {}, {}, {}, name, value, {}, {}, {} FROM moz_cookies ",
+    optional_column("path"),
+    optional_column("isSecure"),
+    optional_column("expiry"),
+    optional_column("isHttpOnly"),
+    optional_column("sameSite"),
+    optional_column("originAttributes"),
   );
 
   let domain_filters: Vec<String> = domains
@@ -179,13 +154,17 @@ fn query_persistent_cookies_mode(
 
   let mut cookies: Vec<Cookie> = vec![];
   let mut detailed_cookies: Vec<DetailedCookie> = vec![];
+  let mut records: Vec<CookieRecord> = vec![];
   let mut last_row_error: Option<anyhow::Error> = None;
   let mut rows_seen = 0;
   let mut rows_skipped = 0;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
-  while let Some(row) = rows.next()? {
+  while let Some(row) = {
+    deadline.check(clock)?;
+    rows.next()?
+  } {
     macro_rules! optional_column {
       ($index:expr, $name:literal, $type:ty, $default:expr) => {
         match row.get::<_, Option<$type>>($index) {
@@ -220,9 +199,30 @@ fn query_persistent_cookies_mode(
     }
     rows_seen += 1;
     let path = optional_column!(1, "path", String, || "/".to_string());
-    let is_secure = optional_column!(2, "isSecure", bool, || false);
-    let expiry = optional_column!(3, "expiry", i64, || 0);
-    let expires = Some(expiry)
+    let observed_secure = match row.get::<_, Option<bool>>(2) {
+      Ok(value) => value,
+      Err(error) => {
+        log::warn!("Failed to read isSecure from Firefox cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to read isSecure from Firefox cookie row: {error}"
+        ));
+        rows_skipped += 1;
+        continue;
+      }
+    };
+    let is_secure = observed_secure.unwrap_or(false);
+    let raw_expiry = match row.get::<_, Option<i64>>(3) {
+      Ok(value) => value,
+      Err(error) => {
+        log::warn!("Failed to read expiry from Firefox cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to read expiry from Firefox cookie row: {error}"
+        ));
+        rows_skipped += 1;
+        continue;
+      }
+    };
+    let expires = raw_expiry
       .and_then(|value| u64::try_from(value).ok())
       .and_then(|value| persistent_cookie_expiry(value, schema_version));
 
@@ -245,49 +245,87 @@ fn query_persistent_cookies_mode(
         continue;
       }
     };
-    let http_only = optional_column!(6, "isHttpOnly", bool, || false);
-    let same_site = optional_column!(7, "sameSite", i64, || SAME_SITE_UNSPECIFIED);
-    let mut record = CookieRecord {
-      domain: host,
+    let observed_http_only = match row.get::<_, Option<bool>>(6) {
+      Ok(value) => value,
+      Err(error) => {
+        log::warn!("Failed to read isHttpOnly from Firefox cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to read isHttpOnly from Firefox cookie row: {error}"
+        ));
+        rows_skipped += 1;
+        continue;
+      }
+    };
+    let http_only = observed_http_only.unwrap_or(false);
+    let observed_same_site = match row.get::<_, Option<i64>>(7) {
+      Ok(value) => value,
+      Err(error) => {
+        log::warn!("Failed to read sameSite from Firefox cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to read sameSite from Firefox cookie row: {error}"
+        ));
+        rows_skipped += 1;
+        continue;
+      }
+    };
+    let same_site = observed_same_site.unwrap_or(SAME_SITE_UNSPECIFIED);
+    let (origin_attributes, raw_origin_attributes) = match row.get_ref(8) {
+      Ok(rusqlite::types::ValueRef::Null) => (None, None),
+      Ok(rusqlite::types::ValueRef::Text(value)) => match std::str::from_utf8(value) {
+        Ok(value) => (Some(value.to_owned()), None),
+        Err(_) => (None, Some(RawValue::Bytes(value.to_vec()))),
+      },
+      Ok(rusqlite::types::ValueRef::Blob(value)) => (None, Some(RawValue::Bytes(value.to_vec()))),
+      Ok(rusqlite::types::ValueRef::Integer(value)) => (None, Some(RawValue::Signed(value))),
+      Ok(rusqlite::types::ValueRef::Real(value)) => (None, Some(RawValue::Text(value.to_string()))),
+      Err(error) => {
+        log::warn!("Failed to inspect originAttributes in Firefox cookie row: {error}");
+        (None, Some(RawValue::Text("unreadable".to_owned())))
+      }
+    };
+    let mut record = CookieRecord::from_legacy_fields(
+      host,
       path,
-      secure: is_secure,
+      is_secure,
       expires,
       name,
-      value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
+      CookieValue::Plain(crate::common::secret::SecretString::new(value)),
       http_only,
       same_site,
-      context: CookieContext::default(),
-    };
-    if detailed {
-      let origin_attributes = match row.get::<_, Option<String>>(8) {
-        Ok(origin_attributes) => origin_attributes,
-        Err(error) => {
-          log::warn!("Failed to read originAttributes from Firefox cookie row: {error}");
-          last_row_error = Some(anyhow!(
-            "failed to read originAttributes from Firefox cookie row: {error}"
-          ));
-          rows_skipped += 1;
-          continue;
-        }
-      };
-      record.context = firefox_cookie_context(origin_attributes);
-      detailed_cookies.push(
-        record
-          .into_detailed_cookie()
-          .expect("Firefox rows emit plaintext values"),
-      );
-    } else {
-      cookies.push(
-        record
-          .into_cookie()
-          .expect("Firefox rows emit plaintext values"),
-      );
+      CookieContext::default(),
+      rows_seen,
+    );
+    record.attributes = Attributes::observed(
+      observed_secure,
+      raw_expiry,
+      expires,
+      observed_http_only,
+      observed_same_site,
+    );
+    record.set_context(firefox_cookie_context(origin_attributes));
+    if let Some(raw) = raw_origin_attributes {
+      record.retain_raw("origin_attributes", raw);
     }
+    detailed_cookies.push(
+      record
+        .clone()
+        .into_detailed_cookie()
+        .expect("Firefox rows emit plaintext values"),
+    );
+    cookies.push(
+      record
+        .clone()
+        .into_cookie()
+        .expect("Firefox rows emit plaintext values"),
+    );
+    records.push(record);
+    deadline.check(clock)?;
   }
 
   Ok(PersistentCookieQuery {
     cookies,
     detailed_cookies,
+    records,
     rows_seen,
     rows_skipped,
     last_row_error,
@@ -384,9 +422,10 @@ const SESSION_CANDIDATE_PRECEDENCE_STEP: u16 = 10;
 const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
 
 #[derive(Debug)]
-struct SessionCookieParseOutcome {
+struct SessionCookieParseDraft {
   cookies: Vec<Cookie>,
   detailed_cookies: Vec<DetailedCookie>,
+  records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
   diagnostics: Vec<String>,
@@ -394,7 +433,7 @@ struct SessionCookieParseOutcome {
 
 #[derive(Debug)]
 struct SessionCandidateSuccess {
-  parsed: SessionCookieParseOutcome,
+  parsed: SessionCookieParseDraft,
   attempts: u32,
   transient_errors: Vec<String>,
 }
@@ -412,7 +451,7 @@ struct SessionCandidateFailure {
 /// Crate-private source outcome for the generic registry adapter.  The legacy
 /// API deliberately continues to project this to a flat `Vec<Cookie>`.
 #[derive(Debug)]
-pub(crate) struct MozillaSessionSourceOutcome {
+pub(crate) struct MozillaSessionDraft {
   pub(crate) path: PathBuf,
   pub(crate) format: &'static str,
   /// Declared candidate precedence from [`session_candidates`], retained so a
@@ -421,6 +460,8 @@ pub(crate) struct MozillaSessionSourceOutcome {
   pub(crate) precedence: u16,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) detailed_cookies: Vec<DetailedCookie>,
+  pub(crate) records: Vec<CookieRecord>,
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
   pub(crate) acquisition_attempts: u32,
@@ -429,8 +470,10 @@ pub(crate) struct MozillaSessionSourceOutcome {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct MozillaEngineExtractionOutcome {
+pub(crate) struct MozillaExtractionDraft {
   pub(crate) persistent_cookies: Vec<Cookie>,
+  pub(crate) persistent_detailed_cookies: Vec<DetailedCookie>,
+  pub(crate) persistent_records: Vec<CookieRecord>,
   pub(crate) persistent_rows_seen: usize,
   pub(crate) persistent_rows_skipped: usize,
   pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
@@ -448,7 +491,7 @@ pub(crate) struct MozillaEngineExtractionOutcome {
   /// against a source that still succeeded, which is why it is deliberately
   /// separate from `persistent_error`.
   pub(crate) persistent_row_error: Option<String>,
-  pub(crate) session_sources: Vec<MozillaSessionSourceOutcome>,
+  pub(crate) session_sources: Vec<MozillaSessionDraft>,
 }
 
 /// Extract a Mozilla profile with the same authoritative session ordering as
@@ -457,11 +500,16 @@ pub(crate) struct MozillaEngineExtractionOutcome {
 pub(crate) fn query_cookies_engine_outcome(
   db_path: &Path,
   domains: Option<&[String]>,
-) -> MozillaEngineExtractionOutcome {
-  let mut outcome = MozillaEngineExtractionOutcome::default();
-  match sqlite::with_browser_database(db_path.to_path_buf(), |connection| {
-    query_persistent_cookies(connection, domains)
-  }) {
+) -> MozillaExtractionDraft {
+  let clock = SystemClock;
+  let deadline = Deadline::standard();
+  let mut outcome = MozillaExtractionDraft::default();
+  match sqlite::with_browser_database_with_deadline(
+    db_path.to_path_buf(),
+    |connection| query_persistent_cookies_mode(connection, domains, false, &clock, deadline),
+    &clock,
+    deadline,
+  ) {
     Ok(database) => {
       outcome.persistent_acquisition_strategy = Some(database.strategy());
       outcome.persistent_acquisition_attempts = database.attempts();
@@ -470,6 +518,8 @@ pub(crate) fn query_cookies_engine_outcome(
       outcome.persistent_rows_skipped = persistent.rows_skipped;
       outcome.persistent_row_error = persistent.last_row_error.map(|error| format!("{error:#}"));
       outcome.persistent_cookies = persistent.cookies;
+      outcome.persistent_detailed_cookies = persistent.detailed_cookies;
+      outcome.persistent_records = persistent.records;
     }
     Err(error) => {
       if let Some(failure) = error.downcast_ref::<sqlite::BrowserDatabaseFailure>() {
@@ -486,16 +536,35 @@ pub(crate) fn query_cookies_engine_outcome(
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
   for (index, (path, format)) in session_candidates(cookies_dir).into_iter().enumerate() {
     let precedence = session_candidate_precedence(index);
-    match parse_session_candidate(&path, &format, domains) {
+    if deadline.check(&clock).is_err() {
+      outcome.session_sources.push(MozillaSessionDraft {
+        path,
+        format: format.format_id(),
+        precedence,
+        selected: false,
+        cookies: Vec::new(),
+        detailed_cookies: Vec::new(),
+        records: Vec::new(),
+        rows_seen: 0,
+        rows_skipped: 0,
+        acquisition_attempts: 0,
+        diagnostics: Vec::new(),
+        error: Some("operation deadline expired".to_owned()),
+      });
+      break;
+    }
+    match parse_session_candidate_with_deadline(&path, &format, domains, &clock, deadline) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
         diagnostics.extend(success.parsed.diagnostics);
-        outcome.session_sources.push(MozillaSessionSourceOutcome {
+        outcome.session_sources.push(MozillaSessionDraft {
           path,
           format: format.format_id(),
           precedence,
           selected: true,
           cookies: success.parsed.cookies,
+          detailed_cookies: success.parsed.detailed_cookies,
+          records: success.parsed.records,
           rows_seen: success.parsed.rows_seen,
           rows_skipped: success.parsed.rows_skipped,
           acquisition_attempts: success.attempts,
@@ -508,12 +577,14 @@ pub(crate) fn query_cookies_engine_outcome(
       // state is "gone" is missing however it got there. Its retry diagnostics
       // are therefore dropped on purpose: a vanished candidate is not a source.
       Err(failure) if is_missing_session_file(&failure.error) => {}
-      Err(failure) => outcome.session_sources.push(MozillaSessionSourceOutcome {
+      Err(failure) => outcome.session_sources.push(MozillaSessionDraft {
         path,
         format: format.format_id(),
         precedence,
         selected: false,
         cookies: Vec::new(),
+        detailed_cookies: Vec::new(),
+        records: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
         acquisition_attempts: failure.attempts,
@@ -525,65 +596,127 @@ pub(crate) fn query_cookies_engine_outcome(
   outcome
 }
 
+fn project_engine_cookies(outcome: MozillaExtractionDraft) -> Result<Vec<Cookie>> {
+  project_engine_values(
+    outcome.persistent_cookies,
+    outcome.persistent_error,
+    outcome.persistent_row_error,
+    outcome.persistent_rows_skipped,
+    outcome
+      .session_sources
+      .into_iter()
+      .map(|source| (source.selected, source.cookies, source.error)),
+  )
+}
+
+fn project_engine_detailed_cookies(outcome: MozillaExtractionDraft) -> Result<Vec<DetailedCookie>> {
+  project_engine_values(
+    outcome.persistent_detailed_cookies,
+    outcome.persistent_error,
+    outcome.persistent_row_error,
+    outcome.persistent_rows_skipped,
+    outcome
+      .session_sources
+      .into_iter()
+      .map(|source| (source.selected, source.detailed_cookies, source.error)),
+  )
+}
+
+fn project_engine_values<T>(
+  mut persistent: Vec<T>,
+  persistent_error: Option<String>,
+  persistent_row_error: Option<String>,
+  persistent_rows_skipped: usize,
+  sessions: impl IntoIterator<Item = (bool, Vec<T>, Option<String>)>,
+) -> Result<Vec<T>> {
+  let mut selected_session_succeeded = false;
+  let mut session_failures = Vec::new();
+  for (selected, values, error) in sessions {
+    if selected && error.is_none() {
+      selected_session_succeeded = true;
+      persistent.extend(values);
+    } else if let Some(error) = error {
+      session_failures.push(error);
+    }
+  }
+  if !persistent.is_empty() {
+    return Ok(persistent);
+  }
+  if let Some(error) = persistent_error {
+    return Err(anyhow!(error));
+  }
+  if !selected_session_succeeded && !session_failures.is_empty() {
+    bail!(
+      "all existing Firefox session store candidates failed: {}",
+      session_failures.join("; ")
+    )
+  }
+  if persistent_rows_skipped > 0 {
+    if let Some(error) = persistent_row_error {
+      return Err(anyhow!(error));
+    }
+  }
+  Ok(persistent)
+}
+
 fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
   SESSION_CANDIDATES.map(|(relative, format)| (cookies_dir.join(relative), format))
 }
 
-fn get_authoritative_session_outcome(
-  domains: Option<&[String]>,
-  cookies_dir: &Path,
-) -> Result<SessionCookieParseOutcome> {
-  let mut failures = Vec::new();
-  for (path, format) in session_candidates(cookies_dir) {
-    match parse_session_candidate(&path, &format, domains) {
-      Ok(success) => return Ok(success.parsed),
-      Err(failure) if is_missing_session_file(&failure.error) => continue,
-      Err(failure) => {
-        let diagnostic = format!("{}: {:#}", path.display(), failure.error);
-        log::warn!("Failed to parse Firefox session store: {diagnostic}");
-        failures.push(diagnostic);
-      }
-    }
-  }
-
-  if !failures.is_empty() {
-    bail!(
-      "all existing Firefox session store candidates failed: {}",
-      failures.join("; ")
-    );
-  }
-
-  Ok(SessionCookieParseOutcome {
-    cookies: Vec::new(),
-    detailed_cookies: Vec::new(),
-    rows_seen: 0,
-    rows_skipped: 0,
-    diagnostics: Vec::new(),
-  })
-}
-
-fn parse_session_candidate(
+fn parse_session_candidate_with_deadline(
   path: &Path,
   format: &SessionStoreFormat,
   domains: Option<&[String]>,
+  clock: &dyn Clock,
+  deadline: Deadline,
 ) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure> {
-  parse_session_candidate_with(path, || match format {
-    SessionStoreFormat::JsonLz4 => parse_session_cookies_lz4(path, domains),
-    SessionStoreFormat::LegacyJson => parse_legacy_session_cookies(path, domains),
-  })
+  parse_session_candidate_with_runtime(
+    path,
+    || match format {
+      SessionStoreFormat::JsonLz4 => {
+        parse_session_cookies_lz4_with_deadline(path, domains, clock, deadline)
+      }
+      SessionStoreFormat::LegacyJson => {
+        parse_legacy_session_cookies_with_deadline(path, domains, clock, deadline)
+      }
+    },
+    clock,
+    deadline,
+  )
 }
 
+#[cfg(test)]
 fn parse_session_candidate_with<F>(
   path: &Path,
-  mut parse: F,
+  parse: F,
 ) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure>
 where
-  F: FnMut() -> Result<SessionCookieParseOutcome>,
+  F: FnMut() -> Result<SessionCookieParseDraft>,
+{
+  let clock = SystemClock;
+  parse_session_candidate_with_runtime(path, parse, &clock, Deadline::standard())
+}
+
+fn parse_session_candidate_with_runtime<F>(
+  path: &Path,
+  mut parse: F,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure>
+where
+  F: FnMut() -> Result<SessionCookieParseDraft>,
 {
   let mut last_error = None;
   let mut attempts = 0;
   let mut transient_errors = Vec::new();
   for attempt in 1..=SESSION_STORE_READ_ATTEMPTS {
+    if let Err(error) = deadline.check(clock) {
+      return Err(SessionCandidateFailure {
+        error: error.into(),
+        attempts,
+        transient_errors,
+      });
+    }
     attempts = attempt as u32;
     match parse() {
       Ok(parsed) => {
@@ -628,7 +761,18 @@ fn is_missing_session_file(error: &anyhow::Error) -> bool {
   )
 }
 
+#[cfg(test)]
 fn read_stable_session_file(path: &Path) -> Result<Vec<u8>> {
+  let clock = SystemClock;
+  read_stable_session_file_with_deadline(path, &clock, Deadline::standard())
+}
+
+fn read_stable_session_file_with_deadline(
+  path: &Path,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<Vec<u8>> {
+  deadline.check(clock)?;
   let mut file = fs::File::open(path)?;
   let before = file.metadata()?;
   if before.len() > MAX_SESSION_STORE_BYTES as u64 {
@@ -645,7 +789,16 @@ fn read_stable_session_file(path: &Path) -> Result<Vec<u8>> {
     .try_reserve_exact(expected_length)
     .map_err(|error| anyhow!("Unable to allocate Firefox session store buffer: {error}"))?;
   bytes.resize(expected_length, 0);
-  file.read_exact(&mut bytes)?;
+  let mut filled = 0;
+  while filled < bytes.len() {
+    deadline.check(clock)?;
+    let read = file.read(&mut bytes[filled..])?;
+    if read == 0 {
+      return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
+    filled += read;
+  }
+  deadline.check(clock)?;
   let after = file.metadata()?;
 
   let length_changed =
@@ -695,7 +848,7 @@ pub fn get_session_cookies(
 }
 
 fn record_session_cookie(
-  outcome: &mut SessionCookieParseOutcome,
+  outcome: &mut SessionCookieParseDraft,
   json_cookie: &Value,
   location: &str,
   domains: Option<&[String]>,
@@ -708,12 +861,26 @@ fn record_session_cookie(
     return;
   }
   outcome.rows_seen += 1;
-  match create_detailed_cookie(json_cookie) {
-    Ok(detailed_cookie) => {
-      outcome
-        .cookies
-        .push(clone_legacy_cookie(&detailed_cookie.cookie));
-      outcome.detailed_cookies.push(detailed_cookie);
+  match create_cookie_record(json_cookie).map(|mut record| {
+    record.set_context(firefox_session_cookie_context(
+      json_cookie.get("originAttributes"),
+    ));
+    record
+  }) {
+    Ok(record) => {
+      outcome.cookies.push(
+        record
+          .clone()
+          .into_cookie()
+          .expect("session record is plaintext"),
+      );
+      outcome.detailed_cookies.push(
+        record
+          .clone()
+          .into_detailed_cookie()
+          .expect("session record is plaintext"),
+      );
+      outcome.records.push(record);
     }
     Err(error) => {
       outcome.rows_skipped += 1;
@@ -726,26 +893,11 @@ fn record_session_cookie(
   }
 }
 
-fn clone_legacy_cookie(cookie: &Cookie) -> Cookie {
-  Cookie {
-    domain: cookie.domain.clone(),
-    path: cookie.path.clone(),
-    secure: cookie.secure,
-    expires: cookie.expires,
-    name: cookie.name.clone(),
-    value: cookie.value.clone(),
-    http_only: cookie.http_only,
-    same_site: cookie.same_site,
-  }
-}
-
-fn parse_session_json(
-  json: &Value,
-  domains: Option<&[String]>,
-) -> Result<SessionCookieParseOutcome> {
-  let mut outcome = SessionCookieParseOutcome {
+fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<SessionCookieParseDraft> {
+  let mut outcome = SessionCookieParseDraft {
     cookies: Vec::new(),
     detailed_cookies: Vec::new(),
+    records: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
     diagnostics: Vec::new(),
@@ -811,13 +963,30 @@ fn parse_session_json(
   Ok(outcome)
 }
 
+#[cfg(test)]
 fn parse_legacy_session_cookies(
   path: &Path,
   domains: Option<&[String]>,
-) -> Result<SessionCookieParseOutcome> {
-  let plain = String::from_utf8(read_stable_session_file(path)?)?;
+) -> Result<SessionCookieParseDraft> {
+  let clock = SystemClock;
+  parse_legacy_session_cookies_with_deadline(path, domains, &clock, Deadline::standard())
+}
+
+fn parse_legacy_session_cookies_with_deadline(
+  path: &Path,
+  domains: Option<&[String]>,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SessionCookieParseDraft> {
+  let plain = String::from_utf8(read_stable_session_file_with_deadline(
+    path, clock, deadline,
+  )?)?;
+  deadline.check(clock)?;
   let json: Value = serde_json::from_str(&plain)?;
-  parse_session_json(&json, domains)
+  deadline.check(clock)?;
+  let parsed = parse_session_json(&json, domains)?;
+  deadline.check(clock)?;
+  Ok(parsed)
 }
 
 #[cfg(test)]
@@ -832,21 +1001,37 @@ pub fn get_session_cookies_lz4(
   .map(|outcome| outcome.cookies)
 }
 
+#[cfg(test)]
 fn parse_session_cookies_lz4(
   path: &Path,
   domains: Option<&[String]>,
-) -> Result<SessionCookieParseOutcome> {
-  let compressed = read_stable_session_file(path)?;
+) -> Result<SessionCookieParseDraft> {
+  let clock = SystemClock;
+  parse_session_cookies_lz4_with_deadline(path, domains, &clock, Deadline::standard())
+}
+
+fn parse_session_cookies_lz4_with_deadline(
+  path: &Path,
+  domains: Option<&[String]>,
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SessionCookieParseDraft> {
+  let compressed = read_stable_session_file_with_deadline(path, clock, deadline)?;
   if !compressed.starts_with(b"mozLz40\0") {
     bail!("Invalid mozLz40 header");
   }
   let compressed = compressed
     .get(8..)
     .ok_or_else(|| anyhow!("Invalid compressed length"))?;
+  deadline.check(clock)?;
   let decompressed = decompress_session_store(compressed)?;
+  deadline.check(clock)?;
   let plain = String::from_utf8(decompressed)?;
   let json: Value = serde_json::from_str(&plain)?;
-  parse_session_json(&json, domains)
+  deadline.check(clock)?;
+  let parsed = parse_session_json(&json, domains)?;
+  deadline.check(clock)?;
+  Ok(parsed)
 }
 
 fn session_cookie_expiry(json_cookie: &Value) -> Result<Option<u64>> {
@@ -901,17 +1086,22 @@ fn create_cookie_record(json_cookie: &Value) -> Result<CookieRecord> {
     .and_then(|v| v.as_i64())
     .unwrap_or(SAME_SITE_UNSPECIFIED);
 
-  Ok(CookieRecord {
-    domain: host.to_string(),
-    expires,
-    http_only,
-    name: name.to_string(),
-    value: CookieValue::Plain(crate::common::secret::SecretString::new(value.to_string())),
-    path: path.to_string(),
-    same_site,
+  let mut record = CookieRecord::from_legacy_fields(
+    host.to_string(),
+    path.to_string(),
     secure,
-    context: CookieContext::default(),
-  })
+    expires,
+    name.to_string(),
+    CookieValue::Plain(crate::common::secret::SecretString::new(value.to_string())),
+    http_only,
+    same_site,
+    CookieContext::default(),
+    0,
+  );
+  if let Some(raw_expiry) = json_cookie.get("expiry").and_then(Value::as_u64) {
+    record.set_raw_expiry(RawValue::Unsigned(raw_expiry));
+  }
+  Ok(record)
 }
 
 #[allow(dead_code)]
@@ -919,16 +1109,6 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
   Ok(
     create_cookie_record(json_cookie)?
       .into_cookie()
-      .expect("Firefox session rows emit plaintext values"),
-  )
-}
-
-fn create_detailed_cookie(json_cookie: &Value) -> Result<DetailedCookie> {
-  let mut record = create_cookie_record(json_cookie)?;
-  record.context = firefox_session_cookie_context(json_cookie.get("originAttributes"));
-  Ok(
-    record
-      .into_detailed_cookie()
       .expect("Firefox session rows emit plaintext values"),
   )
 }
@@ -1371,7 +1551,7 @@ mod tests {
   }
 
   #[test]
-  fn malformed_origin_attributes_errors_without_changing_legacy_projection() {
+  fn malformed_origin_attributes_are_retained_as_unknown_metadata() {
     let dir = unique_tmpdir("firefox-malformed-detailed-context");
     let db = dir.join("cookies.sqlite");
     let connection = rusqlite::Connection::open(&db).expect("open fixture");
@@ -1387,16 +1567,16 @@ mod tests {
       .expect("seed malformed context");
     drop(connection);
 
-    let legacy =
-      firefox_based(db.clone(), None).expect("legacy projection does not inspect detailed columns");
+    let legacy = firefox_based(db.clone(), None).expect("legacy projection remains readable");
     assert_eq!(legacy.len(), 1);
-    let error = firefox_based_detailed(db, None)
-      .expect_err("malformed detailed context must not silently become absent");
-    assert!(format!("{error:#}").contains("originAttributes"));
+    let detailed = firefox_based_detailed(db, None)
+      .expect("canonical decoder retains an unrecognized optional value as typed raw metadata");
+    assert_eq!(detailed.len(), 1);
+    assert_eq!(detailed[0].context, CookieContext::default());
   }
 
   #[test]
-  fn malformed_origin_attributes_skip_only_their_row() {
+  fn malformed_origin_attributes_do_not_abort_or_drop_rows() {
     let dir = unique_tmpdir("firefox-mixed-detailed-context");
     let db = dir.join("cookies.sqlite");
     let connection = rusqlite::Connection::open(&db).expect("open fixture");
@@ -1418,26 +1598,26 @@ mod tests {
     assert_eq!(legacy.len(), 3);
 
     let persistent = sqlite::with_browser_database(db.clone(), |connection| {
-      query_persistent_cookies_mode(connection, None, true)
+      query_persistent_cookies_mode(connection, None, true, &SystemClock, Deadline::standard())
     })
     .expect("query detailed rows")
     .into_value();
     assert_eq!(persistent.rows_seen, 3);
-    assert_eq!(persistent.rows_skipped, 1);
-    assert_eq!(persistent.detailed_cookies.len(), 2);
-    assert!(persistent.last_row_error.is_some());
+    assert_eq!(persistent.rows_skipped, 0);
+    assert_eq!(persistent.detailed_cookies.len(), 3);
+    assert!(persistent.last_row_error.is_none());
     assert_eq!(
       persistent
         .detailed_cookies
         .iter()
         .map(|cookie| cookie.cookie.name.as_str())
         .collect::<Vec<_>>(),
-      vec!["before", "after"]
+      vec!["before", "malformed", "after"]
     );
 
     let public_result =
       firefox_based_detailed(db, None).expect("public detailed extraction returns the valid rows");
-    assert_eq!(public_result.len(), 2);
+    assert_eq!(public_result.len(), 3);
   }
 
   fn write_session_jsonlz4(path: &Path, cookies: Value) {
@@ -1847,6 +2027,32 @@ mod tests {
   }
 
   #[test]
+  fn persistent_failure_still_returns_selected_session_cookies() {
+    let dir = unique_tmpdir("ff-persistent-failure-session-recovery");
+    let db = dir.join("cookies.sqlite");
+    std::fs::create_dir_all(&dir).expect("create profile dir");
+    std::fs::write(&db, b"not a sqlite database").expect("write invalid database");
+    let session = dir.join("sessionstore-backups/recovery.jsonlz4");
+    write_session_jsonlz4(&session, serde_json::json!([session_cookie("recovered")]));
+
+    let outcome = query_cookies_engine_outcome(&db, None);
+    assert!(outcome.persistent_error.is_some());
+    assert!(outcome
+      .session_sources
+      .iter()
+      .any(|source| source.selected && source.cookies.len() == 1));
+
+    let cookies = firefox_based(db.clone(), None)
+      .expect("a failed persistent source must not suppress a usable session source");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "recovered");
+    let detailed = firefox_based_detailed(db, None)
+      .expect("detailed projection uses the same finalized engine outcome");
+    assert_eq!(detailed.len(), 1);
+    assert_eq!(detailed[0].cookie.name, "recovered");
+  }
+
+  #[test]
   fn engine_outcome_retains_invalid_session_candidates_and_selects_first_valid_one() {
     let dir = unique_tmpdir("ff-engine-session-outcomes");
     let db = dir.join("cookies.sqlite");
@@ -2135,9 +2341,10 @@ mod tests {
       if attempts == 1 {
         bail!("Firefox session store changed while it was being read")
       }
-      Ok(SessionCookieParseOutcome {
+      Ok(SessionCookieParseDraft {
         cookies: Vec::new(),
         detailed_cookies: Vec::new(),
+        records: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
         diagnostics: Vec::new(),

@@ -1,4 +1,5 @@
 use crate::browser::internet_explorer_model::{CookieColumnLayout, RawCookieRecord};
+use crate::common::deadline::{Deadline, DeadlineEnforcement, SystemClock};
 use crate::common::enums::Cookie;
 use crate::windows::restart_manager::FileLockStatus;
 use anyhow::{bail, Context, Result};
@@ -32,15 +33,16 @@ pub fn internet_explorer_based(
 /// Record accounting for the private cross-engine report. The legacy
 /// [`internet_explorer_based`] projection deliberately discards it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InternetExplorerExtractionStats {
+pub(crate) struct InternetExplorerDraftStats {
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
 }
 
 #[derive(Debug)]
-pub(crate) struct InternetExplorerExtraction {
+pub(crate) struct InternetExplorerDraft {
   pub(crate) cookies: Vec<Cookie>,
-  pub(crate) stats: InternetExplorerExtractionStats,
+  pub(crate) records: Vec<crate::browser::cookie_record::CookieRecord>,
+  pub(crate) stats: InternetExplorerDraftStats,
   pub(crate) row_error: Option<String>,
 }
 
@@ -48,16 +50,23 @@ pub(crate) fn internet_explorer_outcome(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-) -> Result<InternetExplorerExtraction> {
+) -> Result<InternetExplorerDraft> {
+  debug_assert_eq!(deadline_enforcement(), DeadlineEnforcement::Cooperative);
+  let clock = SystemClock;
+  let deadline = Deadline::standard();
+  deadline.check(&clock)?;
   let db = open_database(&db_path, force_kill)?;
+  deadline.check(&clock)?;
   let mut cookies = Vec::new();
-  let mut stats = InternetExplorerExtractionStats::default();
+  let mut canonical_records = Vec::new();
+  let mut stats = InternetExplorerDraftStats::default();
   let mut row_error = None;
 
   for table in db
     .iter_tables()
     .context("Unable to enumerate WebCache tables")?
   {
+    deadline.check(&clock)?;
     let table = table.context("Unable to read a WebCache table")?;
     let table_name = table
       .name()
@@ -95,6 +104,7 @@ pub(crate) fn internet_explorer_outcome(
     let mut skipped_records = 0_usize;
 
     for (record_index, record) in records.enumerate() {
+      deadline.check(&clock)?;
       let cookie = record
         .map_err(anyhow::Error::from)
         .and_then(|record| read_cookie_record(&record, columns))
@@ -109,9 +119,11 @@ pub(crate) fn internet_explorer_outcome(
           stats.records_seen += 1;
           cookies.push(
             record
+              .clone()
               .into_cookie()
               .expect("Internet Explorer rows emit plaintext values"),
-          )
+          );
+          canonical_records.push(record);
         }
         Ok(None) => {}
         Err(error) => {
@@ -129,11 +141,19 @@ pub(crate) fn internet_explorer_outcome(
     }
   }
 
-  Ok(InternetExplorerExtraction {
+  Ok(InternetExplorerDraft {
     cookies,
+    records: canonical_records,
     stats,
     row_error,
   })
+}
+
+pub(crate) fn deadline_enforcement() -> DeadlineEnforcement {
+  // libesedb and Restart Manager are native in-process calls. They cannot be
+  // forcefully interrupted until the PR5 sidecar boundary, so PR3 truthfully
+  // declares cooperative checkpoints between tables and records.
+  DeadlineEnforcement::Cooperative
 }
 
 fn unsupported_table_skipped_inputs(record_count: usize) -> usize {
@@ -217,7 +237,10 @@ fn text_value(record: &Record<'_>, index: i32, field: &str) -> Result<String> {
       .with_context(|| format!("Unable to open long `{field}` value"))?
       .utf8()
       .with_context(|| format!("Unable to decode long `{field}` value")),
-    value => bail!("`{field}` has incompatible ESE value {value:?}"),
+    value => bail!(
+      "`{field}` has incompatible ESE value type {:?}",
+      std::mem::discriminant(&value)
+    ),
   }
 }
 
@@ -230,22 +253,27 @@ fn bytes_value(record: &Record<'_>, index: i32, field: &str) -> Result<Vec<u8>> 
       .with_context(|| format!("Unable to open long `{field}` value"))?
       .vec()
       .with_context(|| format!("Unable to read long `{field}` value")),
-    value => bail!("`{field}` has incompatible ESE value {value:?}"),
+    value => bail!(
+      "`{field}` has incompatible ESE value type {:?}",
+      std::mem::discriminant(&value)
+    ),
   }
 }
 
 fn unsigned_value(record: &Record<'_>, index: i32, field: &str) -> Result<u64> {
   let value = record_value(record, index, field)?;
+  let value_type = std::mem::discriminant(&value);
   value
     .to_u64()
-    .with_context(|| format!("`{field}` has incompatible ESE value {value:?}"))
+    .with_context(|| format!("`{field}` has incompatible ESE value type {value_type:?}"))
 }
 
 fn integer_value(record: &Record<'_>, index: i32, field: &str) -> Result<i64> {
   let value = record_value(record, index, field)?;
+  let value_type = std::mem::discriminant(&value);
   value
     .to_i64()
-    .with_context(|| format!("`{field}` has incompatible ESE value {value:?}"))
+    .with_context(|| format!("`{field}` has incompatible ESE value type {value_type:?}"))
 }
 
 #[cfg(test)]

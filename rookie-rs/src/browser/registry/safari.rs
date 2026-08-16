@@ -2,9 +2,9 @@ use super::{
   canonical_installation_root, embedded_registry, engine_roots, installation_id,
   installation_root_is_directory, normalized_path_bytes, profile_id, select_engine_profiles,
   sort_engine_profiles, BrowserEngine, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtractionOutcome, EngineProfileExtraction, EngineSourceExtraction,
-  ProfileLocator, ProfileSelection, SourceAcquisition, SourceFailureStage,
-  PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT,
+  DiscoveryStrategy, EngineExtractionDraft, EngineProfileDraft, EngineSourceDraft, ProfileLocator,
+  ProfileSelection, SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE,
+  SOURCE_ROLE_PERSISTENT,
 };
 use anyhow::Result;
 use std::{
@@ -46,7 +46,7 @@ fn has_safari_installation_marker<F: DiscoveryFs>(
 pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let registry = embedded_registry()?;
   let (definition, roots) = engine_roots(
     registry,
@@ -56,7 +56,7 @@ pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
   )?;
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
-  let mut outcome = EngineExtractionOutcome::default();
+  let mut outcome = EngineExtractionDraft::default();
 
   for root in roots {
     if root.discovery != DiscoveryStrategy::SafariDefaultProfile {
@@ -166,13 +166,14 @@ pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
         .map(ProfileLocator::Relative)
         .unwrap_or(ProfileLocator::Absolute(&profile_path));
       let source_path = profile_path.join(SAFARI_COOKIE_FILE);
-      let source = EngineSourceExtraction {
+      let source = EngineSourceDraft {
         path: source_path,
         role: SOURCE_ROLE_PERSISTENT,
         format: "safari_binarycookies",
         precedence,
         selected: true,
         cookies: Vec::new(),
+        records: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
         acquisition: SourceAcquisition::StableFileImage,
@@ -184,7 +185,7 @@ pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
         error_stage: SourceFailureStage::Acquisition,
         row_error: None,
       };
-      outcome.profiles.push(EngineProfileExtraction {
+      outcome.profiles.push(EngineProfileDraft {
         profile_id: profile_id(&installation_id, locator),
         installation_id: installation_id.clone(),
         installation_priority: root.priority,
@@ -212,7 +213,7 @@ pub(super) fn safari_report_with_context<F: DiscoveryFs>(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<&[String]>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   safari_report_with_query(context, browser_id, profile_id, domains, |path, domains| {
     query_safari_file(path, domains, crate::browser::safari::safari_based_outcome)
   })
@@ -228,10 +229,10 @@ pub(super) fn safari_report_with_query<F, Q>(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<EngineExtractionOutcome>
+) -> Result<EngineExtractionDraft>
 where
   F: DiscoveryFs,
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileExtraction>,
+  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
   let mut outcome = discover_safari_with_context(context, browser_id)?;
   select_engine_profiles(
@@ -243,12 +244,12 @@ where
 }
 
 pub(super) fn populate_safari_sources<Q>(
-  mut outcome: EngineExtractionOutcome,
+  mut outcome: EngineExtractionDraft,
   domains: Option<&[String]>,
   mut query: Q,
-) -> EngineExtractionOutcome
+) -> EngineExtractionDraft
 where
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileExtraction>,
+  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
   for profile in &mut outcome.profiles {
     for source in &mut profile.sources {
@@ -259,6 +260,7 @@ where
           source.acquisition_attempts = extraction.acquisition_attempts;
           source.row_error = extraction.row_error;
           source.cookies = extraction.cookies;
+          source.records = extraction.records;
         }
         Err(error) => {
           // Exhausting the retries is itself the failure, so report the
@@ -286,9 +288,9 @@ fn query_safari_file<Q>(
   path: &Path,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<crate::browser::safari::SafariFileExtraction>
+) -> Result<crate::browser::safari::SafariFileDraft>
 where
-  Q: FnOnce(PathBuf, Option<Vec<String>>) -> Result<crate::browser::safari::SafariFileExtraction>,
+  Q: FnOnce(PathBuf, Option<Vec<String>>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
   query(path.to_path_buf(), domains.map(<[String]>::to_vec))
 }
@@ -298,13 +300,13 @@ pub(crate) fn safari_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let context = DiscoveryContext::system()?;
   safari_report_with_context(&context, browser_id, profile_id, domains.as_deref())
 }
 
 pub(super) fn select_legacy_safari_profile(
-  outcome: &mut EngineExtractionOutcome,
+  outcome: &mut EngineExtractionDraft,
   browser_id: &str,
 ) -> Result<()> {
   // The historical named wrapper probed only Safari's two default cookie
@@ -318,7 +320,7 @@ pub(super) fn select_legacy_safari_profile(
 pub(crate) fn legacy_safari_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let context = DiscoveryContext::system()?;
   let mut outcome = discover_safari_with_context(&context, browser_id)?;
   select_legacy_safari_profile(&mut outcome, browser_id)?;
@@ -330,7 +332,7 @@ pub(crate) fn legacy_safari_outcome(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn safari_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+pub(crate) fn safari_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
   let context = DiscoveryContext::system()?;
   discover_safari_with_context(&context, browser_id)
 }
@@ -340,14 +342,14 @@ mod tests {
   use super::*;
   use anyhow::anyhow;
 
-  fn discovered_source() -> EngineExtractionOutcome {
+  fn discovered_source() -> EngineExtractionDraft {
     let installation_path = PathBuf::from("/Users/rookie/Library");
     let profile_path = installation_path.join("Cookies");
-    EngineExtractionOutcome {
+    EngineExtractionDraft {
       installations_detected: 1,
       installations_discovered: 1,
       installations_enumerated: 1,
-      profiles: vec![EngineProfileExtraction {
+      profiles: vec![EngineProfileDraft {
         profile_id: "safari-profile".to_owned(),
         installation_id: "safari-installation".to_owned(),
         installation_priority: 10,
@@ -362,13 +364,14 @@ mod tests {
         path: profile_path.clone(),
         is_default: true,
         persistent_source_discovered: true,
-        sources: vec![EngineSourceExtraction {
+        sources: vec![EngineSourceDraft {
           path: profile_path.join(SAFARI_COOKIE_FILE),
           role: SOURCE_ROLE_PERSISTENT,
           format: "safari_binarycookies",
           precedence: PERSISTENT_SOURCE_PRECEDENCE,
           selected: true,
           cookies: Vec::new(),
+          records: Vec::new(),
           rows_seen: 0,
           rows_skipped: 0,
           acquisition: SourceAcquisition::StableFileImage,
@@ -405,8 +408,9 @@ mod tests {
   #[test]
   fn source_population_preserves_rows_attempts_and_failure_stage() {
     let success = populate_safari_sources(discovered_source(), None, |_, _| {
-      Ok(crate::browser::safari::SafariFileExtraction {
+      Ok(crate::browser::safari::SafariFileDraft {
         cookies: Vec::new(),
+        records: Vec::new(),
         stats: crate::browser::safari::SafariExtractionStats {
           records_seen: 7,
           records_skipped: 2,
