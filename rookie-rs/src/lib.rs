@@ -31,12 +31,106 @@ pub use anyhow::{self, Result};
 use enums::Cookie;
 #[cfg(target_os = "linux")]
 mod linux;
+use std::fmt;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+
+/// A handle that can cancel an in-flight [`extract`] call from another
+/// thread.
+///
+/// Cloning a handle shares the same cancellation state: calling
+/// [`cancel`](Self::cancel) on any clone cancels the operation every clone
+/// (including the one an in-flight [`Request`] is holding) observes.
+/// Canceling after the call already finished, or a second time, is a no-op
+/// and returns `false`.
+#[derive(Clone, Default)]
+pub struct CancellationHandle(pub(crate) common::deadline::CancellationToken);
+
+impl CancellationHandle {
+  /// Creates a handle for one [`extract`] call, not yet cancelled.
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  /// Requests cancellation. Returns `true` if this call recorded it —
+  /// `false` if the operation already stopped for another reason (it timed
+  /// out, or a different clone of this handle cancelled it first).
+  pub fn cancel(&self) -> bool {
+    self.0.cancel()
+  }
+
+  /// Reports whether [`cancel`](Self::cancel) has already been called on
+  /// this handle or any of its clones.
+  pub fn is_cancelled(&self) -> bool {
+    self.0.is_cancelled()
+  }
+}
+
+impl fmt::Debug for CancellationHandle {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("CancellationHandle")
+      .field("cancelled", &self.is_cancelled())
+      .finish()
+  }
+}
+
+impl PartialEq for CancellationHandle {
+  /// Two handles are equal exactly when they share the same underlying
+  /// cancellation state (are clones of one another), not when they happen
+  /// to be in the same cancelled/not-cancelled state.
+  fn eq(&self, other: &Self) -> bool {
+    self.0.same_as(&other.0)
+  }
+}
+
+impl Eq for CancellationHandle {}
+
+/// Why a cancellable operation in this crate (e.g. [`extract`]) stopped
+/// before producing a result, when it stopped for a reason other than an
+/// ordinary request, discovery, or extraction error.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+  /// The request's [`Request::timeout`] elapsed.
+  TimedOut,
+  /// A [`CancellationHandle`] passed to the request was cancelled.
+  Cancelled,
+  /// An internal resource ceiling, not caller-controlled, was reached.
+  ResourceExhausted,
+}
+
+/// Reports why `error` stopped, if it stopped for a timeout, cancellation,
+/// or resource-exhaustion reason rather than an ordinary request or
+/// discovery error. Returns `None` for every other error this crate
+/// returns.
+///
+/// # Examples
+///
+/// ```no_run
+/// let request = rookie_cookies::Request::browser("chrome")
+///   .timeout(std::time::Duration::from_secs(5));
+/// if let Err(error) = rookie_cookies::extract(request) {
+///   if rookie_cookies::stop_reason(&error) == Some(rookie_cookies::StopReason::TimedOut) {
+///     eprintln!("extraction timed out");
+///   }
+/// }
+/// ```
+pub fn stop_reason(error: &anyhow::Error) -> Option<StopReason> {
+  error.chain().find_map(|cause| {
+    cause
+      .downcast_ref::<common::deadline::BoundaryStop>()
+      .map(|stop| match stop {
+        common::deadline::BoundaryStop::TimedOut => StopReason::TimedOut,
+        common::deadline::BoundaryStop::Cancelled => StopReason::Cancelled,
+        common::deadline::BoundaryStop::ResourceExhausted => StopReason::ResourceExhausted,
+      })
+  })
+}
 
 /// One extraction operation, expressed as data rather than a function call.
 ///
@@ -61,6 +155,8 @@ mod windows;
 pub struct Request {
   browser_id: String,
   domains: Option<Vec<String>>,
+  timeout: Option<std::time::Duration>,
+  cancellation: Option<CancellationHandle>,
 }
 
 impl Request {
@@ -70,6 +166,8 @@ impl Request {
     Self {
       browser_id: id.into(),
       domains: None,
+      timeout: None,
+      cancellation: None,
     }
   }
 
@@ -82,6 +180,19 @@ impl Request {
   /// so [`browser`]'s own `Option` parameter forwards here directly.
   pub fn domains(mut self, domains: Option<Vec<String>>) -> Self {
     self.domains = domains;
+    self
+  }
+
+  /// Overrides the default 30-second extraction budget.
+  pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+    self.timeout = Some(timeout);
+    self
+  }
+
+  /// Lets `handle` cancel this request from another thread while it runs —
+  /// see [`CancellationHandle`].
+  pub fn cancellation(mut self, handle: CancellationHandle) -> Self {
+    self.cancellation = Some(handle);
     self
   }
 }
@@ -98,7 +209,9 @@ impl Request {
 /// # Errors
 ///
 /// See [`browser`], which shares this function's error and selection
-/// behavior.
+/// behavior. A request that stopped because of [`Request::timeout`] or a
+/// cancelled [`CancellationHandle`] returns an error [`stop_reason`] reports
+/// on, rather than a plain request/discovery error.
 ///
 /// # Examples
 ///
@@ -107,7 +220,16 @@ impl Request {
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn extract(request: Request) -> Result<Vec<Cookie>> {
-  browser::legacy::browser_cookies(&request.browser_id, request.domains)
+  let clock = common::deadline::SystemClock;
+  let runtime = common::deadline::boundary_runtime(
+    &clock,
+    request.timeout,
+    request
+      .cancellation
+      .map(|handle| handle.0)
+      .unwrap_or_default(),
+  );
+  browser::legacy::browser_cookies_with_runtime(&request.browser_id, request.domains, &runtime)
 }
 
 /// Extracts cookies from one registered browser by canonical ID or alias.
@@ -938,6 +1060,73 @@ mod tests {
 
   fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     Ok(vec![])
+  }
+
+  #[test]
+  fn zero_timeout_stops_extraction_before_any_browser_lookup() {
+    // "unknown-browser-id" would otherwise fail with a request error;
+    // observing TimedOut instead of that error proves the deadline check
+    // runs before browser resolution, matching browser_cookies_with_runtime's
+    // own ordering.
+    let request = Request::browser("unknown-browser-id").timeout(std::time::Duration::ZERO);
+    let error = extract(request).expect_err("a zero timeout must stop before doing any work");
+    assert_eq!(stop_reason(&error), Some(StopReason::TimedOut));
+  }
+
+  #[test]
+  fn a_cancelled_handle_stops_extraction_before_any_browser_lookup() {
+    let handle = CancellationHandle::new();
+    assert!(handle.cancel());
+    assert!(handle.is_cancelled());
+
+    let request = Request::browser("unknown-browser-id").cancellation(handle);
+    let error =
+      extract(request).expect_err("a pre-cancelled handle must stop before doing any work");
+    assert_eq!(stop_reason(&error), Some(StopReason::Cancelled));
+  }
+
+  #[test]
+  fn cancelling_one_clone_cancels_every_clone() {
+    let handle = CancellationHandle::new();
+    let clone = handle.clone();
+    assert!(!handle.is_cancelled());
+    assert!(!clone.is_cancelled());
+
+    assert!(clone.cancel());
+    assert!(
+      handle.is_cancelled(),
+      "cancelling a clone must be visible on the original"
+    );
+
+    // A second cancellation (on either the original or another clone) is a
+    // no-op: the first writer already won.
+    assert!(!handle.cancel());
+  }
+
+  #[test]
+  fn cancellation_handle_equality_is_shared_state_not_shared_value() {
+    let handle = CancellationHandle::new();
+    let clone = handle.clone();
+    let independent = CancellationHandle::new();
+
+    assert_eq!(handle, clone, "clones of the same handle are equal");
+    assert_ne!(
+      handle, independent,
+      "two never-cancelled handles are still not equal unless they're clones"
+    );
+
+    independent.cancel();
+    assert_ne!(
+      handle, independent,
+      "reaching the same cancelled state does not make unrelated handles equal"
+    );
+  }
+
+  #[test]
+  fn stop_reason_is_none_for_an_ordinary_request_error() {
+    let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
+      .expect_err("an unknown browser id is a request error");
+    assert_eq!(stop_reason(&error), None);
   }
 
   #[cfg(unix)]

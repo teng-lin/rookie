@@ -80,7 +80,6 @@ impl CancellationToken {
   ///
   /// The first writer wins, so concurrent cancellation and resource-budget
   /// exhaustion cannot change the reason observed by later boundaries.
-  #[allow(dead_code)] // The public request object in PR4 will drive this internal control seam.
   pub(crate) fn cancel(&self) -> bool {
     self
       .0
@@ -103,6 +102,13 @@ impl CancellationToken {
 
   pub(crate) fn is_resource_exhausted(&self) -> bool {
     self.0.load(Ordering::Acquire) == 2
+  }
+
+  /// Whether `self` and `other` are clones of the same token, sharing one
+  /// cancellation state, rather than two independent tokens that merely
+  /// happen to be in the same state.
+  pub(crate) fn same_as(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.0, &other.0)
   }
 }
 
@@ -167,7 +173,6 @@ impl<'a> BoundaryRuntime<'a> {
     }
   }
 
-  #[allow(dead_code)] // The public request object in PR4 will inject the shared control token.
   pub(crate) fn with_stop(
     clock: &'a dyn Clock,
     deadline: Deadline,
@@ -187,6 +192,19 @@ impl<'a> BoundaryRuntime<'a> {
   pub(crate) fn check(&self) -> Result<(), BoundaryStop> {
     checkpoint(self.clock, self.deadline, &self.stop)
   }
+}
+
+/// Builds the runtime backing a public request's `.timeout(..)` /
+/// cancellation handle: `timeout` overrides [`DEFAULT_EXTRACTION_BUDGET`]
+/// when given, and `stop` is the caller-supplied (or default, never
+/// cancelled) control token.
+pub(crate) fn boundary_runtime(
+  clock: &dyn Clock,
+  timeout: Option<Duration>,
+  stop: CancellationToken,
+) -> BoundaryRuntime<'_> {
+  let deadline = Deadline::after(clock, timeout.unwrap_or(DEFAULT_EXTRACTION_BUDGET));
+  BoundaryRuntime::with_stop(clock, deadline, stop)
 }
 
 #[cfg(test)]

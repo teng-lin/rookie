@@ -263,10 +263,12 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::In
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
 pub struct rookie_cookies::direct_path::ChromiumPathRequest
 impl rookie_cookies::direct_path::ChromiumPathRequest
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::credentials(self, rookie_cookies::direct_path::ChromiumCredentialSource) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::locked_database_policy(self, rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
+pub fn rookie_cookies::direct_path::ChromiumPathRequest::timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for rookie_cookies::direct_path::ChromiumPathRequest
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::clone(&self) -> rookie_cookies::direct_path::ChromiumPathRequest
 impl core::cmp::Eq for rookie_cookies::direct_path::ChromiumPathRequest
@@ -283,8 +285,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::Ch
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::ChromiumPathRequest
 pub struct rookie_cookies::direct_path::DirectPathRequest
 impl rookie_cookies::direct_path::DirectPathRequest
+pub fn rookie_cookies::direct_path::DirectPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::direct_path::DirectPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub fn rookie_cookies::direct_path::DirectPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
+pub fn rookie_cookies::direct_path::DirectPathRequest::timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for rookie_cookies::direct_path::DirectPathRequest
 pub fn rookie_cookies::direct_path::DirectPathRequest::clone(&self) -> rookie_cookies::direct_path::DirectPathRequest
 impl core::cmp::Eq for rookie_cookies::direct_path::DirectPathRequest
@@ -1196,6 +1200,45 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::Termina
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::TerminationCode
 pub const rookie_cookies::report::EXTRACTION_REPORT_SCHEMA_VERSION: u32
 pub const rookie_cookies::report::MAX_ISSUE_SAMPLES: usize
+#[non_exhaustive] pub enum rookie_cookies::StopReason
+pub rookie_cookies::StopReason::Cancelled
+pub rookie_cookies::StopReason::ResourceExhausted
+pub rookie_cookies::StopReason::TimedOut
+impl core::clone::Clone for rookie_cookies::StopReason
+pub fn rookie_cookies::StopReason::clone(&self) -> rookie_cookies::StopReason
+impl core::cmp::Eq for rookie_cookies::StopReason
+impl core::cmp::PartialEq for rookie_cookies::StopReason
+pub fn rookie_cookies::StopReason::eq(&self, &rookie_cookies::StopReason) -> bool
+impl core::fmt::Debug for rookie_cookies::StopReason
+pub fn rookie_cookies::StopReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::StopReason
+impl core::marker::StructuralPartialEq for rookie_cookies::StopReason
+impl core::marker::Freeze for rookie_cookies::StopReason
+impl core::marker::Send for rookie_cookies::StopReason
+impl core::marker::Sync for rookie_cookies::StopReason
+impl core::marker::Unpin for rookie_cookies::StopReason
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::StopReason
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::StopReason
+pub struct rookie_cookies::CancellationHandle(_)
+impl rookie_cookies::CancellationHandle
+pub fn rookie_cookies::CancellationHandle::cancel(&self) -> bool
+pub fn rookie_cookies::CancellationHandle::is_cancelled(&self) -> bool
+pub fn rookie_cookies::CancellationHandle::new() -> Self
+impl core::clone::Clone for rookie_cookies::CancellationHandle
+pub fn rookie_cookies::CancellationHandle::clone(&self) -> rookie_cookies::CancellationHandle
+impl core::cmp::Eq for rookie_cookies::CancellationHandle
+impl core::cmp::PartialEq for rookie_cookies::CancellationHandle
+pub fn rookie_cookies::CancellationHandle::eq(&self, &Self) -> bool
+impl core::default::Default for rookie_cookies::CancellationHandle
+pub fn rookie_cookies::CancellationHandle::default() -> rookie_cookies::CancellationHandle
+impl core::fmt::Debug for rookie_cookies::CancellationHandle
+pub fn rookie_cookies::CancellationHandle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rookie_cookies::CancellationHandle
+impl core::marker::Send for rookie_cookies::CancellationHandle
+impl core::marker::Sync for rookie_cookies::CancellationHandle
+impl core::marker::Unpin for rookie_cookies::CancellationHandle
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::CancellationHandle
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::CancellationHandle
 #[non_exhaustive] pub struct rookie_cookies::MozillaProfile
 pub rookie_cookies::MozillaProfile::is_default: bool
 pub rookie_cookies::MozillaProfile::name: alloc::string::String
@@ -1217,7 +1260,9 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MozillaProfile
 pub struct rookie_cookies::Request
 impl rookie_cookies::Request
 pub fn rookie_cookies::Request::browser(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn rookie_cookies::Request::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::Request::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
+pub fn rookie_cookies::Request::timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for rookie_cookies::Request
 pub fn rookie_cookies::Request::clone(&self) -> rookie_cookies::Request
 impl core::cmp::Eq for rookie_cookies::Request
@@ -1259,6 +1304,7 @@ pub fn rookie_cookies::load(core::option::Option<alloc::vec::Vec<alloc::string::
 pub fn rookie_cookies::load_report(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<rookie_cookies::report::ExtractionReport>
 pub fn rookie_cookies::opera(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::opera_gx(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::stop_reason(&anyhow::Error) -> core::option::Option<rookie_cookies::StopReason>
 pub fn rookie_cookies::supported_browsers() -> anyhow::Result<alloc::vec::Vec<rookie_cookies::report::BrowserDescriptor>>
 pub fn rookie_cookies::version() -> alloc::string::String
 pub fn rookie_cookies::vivaldi(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>

@@ -9,7 +9,7 @@ use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome, Te
 #[cfg(test)]
 use super::registry::EngineSourceDraft;
 use super::registry::{self, EngineExtractionDraft};
-use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::enums::{Cookie, DetailedCookie};
 use anyhow::{bail, Result};
 use std::{error::Error, fmt};
@@ -253,16 +253,6 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
       })
       .collect(),
   )
-}
-
-/// Extracts one registered browser using the legacy first-profile projection.
-pub(crate) fn browser_cookies(
-  browser_id: &str,
-  domains: Option<Vec<String>>,
-) -> Result<Vec<Cookie>> {
-  let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
-  browser_cookies_with_runtime(browser_id, domains, &runtime)
 }
 
 pub(crate) fn browser_cookies_with_runtime(

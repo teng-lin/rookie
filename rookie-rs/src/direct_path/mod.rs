@@ -278,6 +278,8 @@ impl std::error::Error for DirectPathError {}
 pub struct DirectPathRequest {
   path: PathBuf,
   domains: Option<Vec<String>>,
+  timeout: Option<std::time::Duration>,
+  cancellation: Option<crate::CancellationHandle>,
 }
 
 impl DirectPathRequest {
@@ -286,12 +288,27 @@ impl DirectPathRequest {
     Self {
       path: path.into(),
       domains: None,
+      timeout: None,
+      cancellation: None,
     }
   }
 
   /// Restricts emitted cookies to the supplied domain boundaries.
   pub fn domains(mut self, domains: Vec<String>) -> Self {
     self.domains = Some(domains);
+    self
+  }
+
+  /// Overrides the default 30-second extraction budget.
+  pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+    self.timeout = Some(timeout);
+    self
+  }
+
+  /// Lets `handle` cancel this request from another thread while it runs —
+  /// see [`crate::CancellationHandle`].
+  pub fn cancellation(mut self, handle: crate::CancellationHandle) -> Self {
+    self.cancellation = Some(handle);
     self
   }
 }
@@ -328,6 +345,8 @@ pub struct ChromiumPathRequest {
   domains: Option<Vec<String>>,
   credentials: ChromiumCredentialSource,
   locked_database_policy: ChromiumLockedDatabasePolicy,
+  timeout: Option<std::time::Duration>,
+  cancellation: Option<crate::CancellationHandle>,
 }
 
 impl ChromiumPathRequest {
@@ -338,6 +357,8 @@ impl ChromiumPathRequest {
       domains: None,
       credentials: ChromiumCredentialSource::Automatic,
       locked_database_policy: ChromiumLockedDatabasePolicy::NonDisruptive,
+      timeout: None,
+      cancellation: None,
     }
   }
 
@@ -358,12 +379,40 @@ impl ChromiumPathRequest {
     self.locked_database_policy = policy;
     self
   }
+
+  /// Overrides the default 30-second extraction budget.
+  pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+    self.timeout = Some(timeout);
+    self
+  }
+
+  /// Lets `handle` cancel this request from another thread while it runs —
+  /// see [`crate::CancellationHandle`].
+  pub fn cancellation(mut self, handle: crate::CancellationHandle) -> Self {
+    self.cancellation = Some(handle);
+    self
+  }
+}
+
+fn boundary_runtime_for<'a>(
+  clock: &'a crate::common::deadline::SystemClock,
+  timeout: Option<std::time::Duration>,
+  cancellation: &Option<crate::CancellationHandle>,
+) -> crate::common::deadline::BoundaryRuntime<'a> {
+  crate::common::deadline::boundary_runtime(
+    clock,
+    timeout,
+    cancellation
+      .clone()
+      .map(|handle| handle.0)
+      .unwrap_or_default(),
+  )
 }
 
 /// Extracts cookies after identifying the explicit source by signature/schema.
 pub fn cookies_from_path(request: DirectPathRequest) -> Result<Vec<Cookie>> {
   let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  let runtime = boundary_runtime_for(&clock, request.timeout, &request.cancellation);
   let source = classify_cookie_source(&request.path, &runtime)?;
   platform::cookies_from_path(request, source, &runtime)
 }
@@ -371,7 +420,7 @@ pub fn cookies_from_path(request: DirectPathRequest) -> Result<Vec<Cookie>> {
 /// Extracts cookies from an explicit Chromium SQLite database.
 pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Cookie>> {
   let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  let runtime = boundary_runtime_for(&clock, request.timeout, &request.cancellation);
   #[cfg(not(target_os = "windows"))]
   {
     let source = classify_cookie_source(&request.path, &runtime)?;
@@ -385,7 +434,7 @@ pub fn chromium_cookies_from_path_detailed(
   request: ChromiumPathRequest,
 ) -> Result<Vec<DetailedCookie>> {
   let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  let runtime = boundary_runtime_for(&clock, request.timeout, &request.cancellation);
   #[cfg(not(target_os = "windows"))]
   {
     let source = classify_cookie_source(&request.path, &runtime)?;
@@ -799,6 +848,39 @@ mod tests {
     assert_eq!(cookies[0].value, "mozilla");
   }
 
+  #[test]
+  fn direct_path_request_zero_timeout_stops_a_real_extraction() {
+    let (_directory, path) = mozilla_database();
+    let error = cookies_from_path(DirectPathRequest::new(path).timeout(std::time::Duration::ZERO))
+      .expect_err("a zero timeout must stop before reading the real database");
+    assert_eq!(
+      crate::stop_reason(&error),
+      Some(crate::StopReason::TimedOut)
+    );
+  }
+
+  #[test]
+  fn direct_path_request_cancelled_handle_stops_a_real_extraction() {
+    let (_directory, path) = mozilla_database();
+    let handle = crate::CancellationHandle::new();
+    handle.cancel();
+    let error = cookies_from_path(DirectPathRequest::new(path).cancellation(handle))
+      .expect_err("a pre-cancelled handle must stop before reading the real database");
+    assert_eq!(
+      crate::stop_reason(&error),
+      Some(crate::StopReason::Cancelled)
+    );
+  }
+
+  #[test]
+  fn direct_path_request_with_a_generous_timeout_still_succeeds() {
+    let (_directory, path) = mozilla_database();
+    let cookies =
+      cookies_from_path(DirectPathRequest::new(path).timeout(std::time::Duration::from_secs(30)))
+        .expect("a generous explicit timeout must not interfere with a real extraction");
+    assert_eq!(cookies.len(), 1);
+  }
+
   #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
   #[test]
   fn plaintext_only_rejects_any_encrypted_row_before_domain_projection() {
@@ -862,6 +944,38 @@ mod tests {
     assert_eq!(detailed.len(), 1);
     assert_eq!(cookies[0].name, detailed[0].cookie.name);
     assert_eq!(cookies[0].value, detailed[0].cookie.value);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+  #[test]
+  fn chromium_path_request_zero_timeout_stops_a_real_extraction() {
+    let (_directory, path) = chromium_database(&[("example.test", "value", b"")]);
+    let request = ChromiumPathRequest::new(&path)
+      .credentials(ChromiumCredentialSource::PlaintextOnly)
+      .timeout(std::time::Duration::ZERO);
+    let error = chromium_cookies_from_path(request)
+      .expect_err("a zero timeout must stop before reading the real database");
+    assert_eq!(
+      crate::stop_reason(&error),
+      Some(crate::StopReason::TimedOut)
+    );
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+  #[test]
+  fn chromium_path_request_cancelled_handle_stops_a_real_extraction() {
+    let (_directory, path) = chromium_database(&[("example.test", "value", b"")]);
+    let handle = crate::CancellationHandle::new();
+    handle.cancel();
+    let request = ChromiumPathRequest::new(&path)
+      .credentials(ChromiumCredentialSource::PlaintextOnly)
+      .cancellation(handle);
+    let error = chromium_cookies_from_path(request)
+      .expect_err("a pre-cancelled handle must stop before reading the real database");
+    assert_eq!(
+      crate::stop_reason(&error),
+      Some(crate::StopReason::Cancelled)
+    );
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
