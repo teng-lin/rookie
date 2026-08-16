@@ -85,6 +85,14 @@ def render_field(name: str, schema: dict[str, Any], required: bool) -> str:
     if nullable:
         python_type = f"Optional[{python_type}]"
 
+    if required and nullable and "default" not in schema:
+        # render_field would emit `= None` here (making the field optional)
+        # while field_from_dict_expr would still emit `data[name]` (raising
+        # KeyError on absence) -- the two views of the same field would
+        # disagree. No field in the current schema is required, nullable,
+        # and default-less, so fail loudly instead of silently emitting
+        # inconsistent code if one ever is.
+        raise ValueError(f"{name}: required nullable field without a default is not supported")
     if required and not nullable:
         return f"    {name}: {python_type}"
     if "default" in schema:
@@ -114,6 +122,14 @@ def field_from_dict_expr(field_name: str, schema: dict[str, Any], required: bool
         return f"{ref_type}.from_dict({source})"
     items = schema.get("items")
     if schema.get("type") == "array" and items and "$ref" in items:
+        if not required and "default" not in schema:
+            # `source` would be `data.get(name, None)`, and iterating `None`
+            # raises TypeError -- no optional array-of-$ref field without a
+            # default exists in the current schema, so fail loudly instead
+            # of generating that.
+            raise ValueError(
+                f"{field_name}: optional array-of-$ref without a default is not supported"
+            )
         ref_type = items["$ref"].rsplit("/", 1)[-1]
         return f"[{ref_type}.from_dict(item) for item in {source}]"
     return source
@@ -170,7 +186,7 @@ def main() -> int:
     definitions: dict[str, Any] = document["definitions"]
 
     classes = [render_class(name, schema) for name, schema in definitions.items()]
-    all_names = ", ".join(f'"{name}"' for name in definitions)
+    all_names = ", ".join(f'"{name}"' for name in sorted(definitions))
 
     rendered = (
         HEADER

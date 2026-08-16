@@ -142,6 +142,13 @@ class DtoRoundTripTest(unittest.TestCase):
             self.assertTrue(hasattr(dto, name), name)
             self.assertTrue(dataclasses.is_dataclass(getattr(dto, name)), name)
 
+    def test_dtos_are_frozen(self) -> None:
+        # Pins scripts/generate-python-dto.py's `@dataclass(frozen=True)`
+        # choice: these represent already-finalized report data.
+        cookie = dto.Cookie.from_dict(_COOKIE)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            cookie.value = "mutated"
+
 
 if __name__ == "__main__":
     unittest.main()

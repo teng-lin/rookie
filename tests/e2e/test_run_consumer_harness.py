@@ -250,6 +250,10 @@ class ConsumerHarnessTests(unittest.TestCase):
             self.assertIn("checksum-verified only", result.stdout)
 
     @unittest.skipIf(_HOST_CLI_TARGET is None, "host platform has no known CLI target triple")
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "make_cli_binary's #!/bin/sh stand-in isn't directly executable on Windows",
+    )
     def test_cli_binary_matching_the_host_is_executed_outside_the_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -296,6 +300,8 @@ class ConsumerHarnessTests(unittest.TestCase):
             "linux": "manylinux_2_17",
             "win32": "win",
         }
+        if (_HOST_OS, _HOST_CPU) not in host_arch_tokens:
+            self.skipTest(f"no known wheel arch token for {_HOST_OS}/{_HOST_CPU}")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tag = f"{host_platform_tag_prefixes[_HOST_OS]}_{host_arch_tokens[(_HOST_OS, _HOST_CPU)]}"

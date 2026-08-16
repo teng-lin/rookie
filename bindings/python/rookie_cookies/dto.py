@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-__all__ = ["Cookie", "BrowserDescriptor", "BrowserCapabilitiesDescriptor", "ProfileDescriptor", "ProfileIdentity", "CookieSourceDescriptor", "ExtractionReport", "ReportStats", "ProfileExtraction", "SourceExtraction", "CookieSourceIdentity", "ExtractionStats", "ExtractionIssue"]
+__all__ = ["BrowserCapabilitiesDescriptor", "BrowserDescriptor", "Cookie", "CookieSourceDescriptor", "CookieSourceIdentity", "ExtractionIssue", "ExtractionReport", "ExtractionStats", "ProfileDescriptor", "ProfileExtraction", "ProfileIdentity", "ReportStats", "SourceExtraction"]
 
 
 @dataclass(frozen=True)

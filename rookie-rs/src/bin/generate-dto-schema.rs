@@ -92,6 +92,28 @@ fn schema_value(schema: schemars::schema::Schema) -> Value {
   serde_json::to_value(schema).expect("schema serializes to JSON")
 }
 
+/// Recursively removes `enum`/`const` constraints from `schema` and every
+/// nested schema reachable through `properties`, `items`, and
+/// `additionalProperties`. See the call site in `main` for why.
+fn strip_enum_and_const(schema: &mut Value) {
+  let Some(object) = schema.as_object_mut() else {
+    return;
+  };
+  object.remove("enum");
+  object.remove("const");
+  if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+    for property in properties.values_mut() {
+      strip_enum_and_const(property);
+    }
+  }
+  if let Some(items) = object.get_mut("items") {
+    strip_enum_and_const(items);
+  }
+  if let Some(additional) = object.get_mut("additionalProperties") {
+    strip_enum_and_const(additional);
+  }
+}
+
 fn main() {
   let mut generator = SchemaSettings::draft07().into_generator();
   let roots = root_definitions(&mut generator);
@@ -104,12 +126,15 @@ fn main() {
   // Open identifiers are validated snake_case strings, deliberately not a
   // closed enum -- see report_core.rs. Strip any `enum`/`const` constraint
   // schemars may have inferred so a generated DTO class stays forward
-  // compatible with values this build has never heard of.
+  // compatible with values this build has never heard of. Every open
+  // identifier today is a `#[serde(transparent)]` newtype that schemars
+  // inlines as a bare `{"type": "string"}` with nothing nested underneath,
+  // so a shallow strip would happen to be enough right now -- but strip
+  // recursively anyway, so a future report field backed by a real Rust
+  // `enum`, or a nested inlined type, can't silently smuggle a closed
+  // `enum`/`const` constraint into the generated schema.
   for schema in definitions.values_mut() {
-    if let Some(object) = schema.as_object_mut() {
-      object.remove("enum");
-      object.remove("const");
-    }
+    strip_enum_and_const(schema);
   }
 
   let document = json!({
@@ -120,10 +145,13 @@ fn main() {
     "definitions": definitions,
   });
 
-  let output_path = env::args()
-    .nth(1)
-    .map(PathBuf::from)
-    .unwrap_or_else(|| PathBuf::from("../schema/report-dto.schema.json"));
+  let output_path = env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| {
+    // CARGO_MANIFEST_DIR (set at compile time) rather than a CWD-relative
+    // path, so the default works regardless of which directory `cargo run`
+    // was invoked from -- only explicit invocations from `rookie-rs/` (see
+    // the module doc above) got this right before.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../schema/report-dto.schema.json")
+  });
   let rendered = serde_json::to_string_pretty(&document).expect("document serializes to JSON");
   fs::write(&output_path, rendered + "\n")
     .unwrap_or_else(|error| panic!("failed to write {}: {error}", output_path.display()));
