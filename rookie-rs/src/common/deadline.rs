@@ -41,6 +41,7 @@ pub(crate) struct Deadline {
 }
 
 impl Deadline {
+  #[cfg(test)]
   pub(crate) fn standard() -> Self {
     Self::after(&SystemClock, DEFAULT_EXTRACTION_BUDGET)
   }

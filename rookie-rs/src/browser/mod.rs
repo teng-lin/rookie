@@ -28,9 +28,15 @@ mod decoder_malformed_gate {
 
   const CORPUS_SEED: u64 = 0x2255_7a11_c0de_f00d;
   const GENERATED_CASES: usize = 64;
+  const CRAFTED_CASES: usize = 12;
   const MAX_CASE_BYTES: usize = 256;
 
   fn malformed_corpus() -> Vec<Vec<u8>> {
+    let jsonlz4 = |plain: &[u8]| {
+      let mut encoded = b"mozLz40\0".to_vec();
+      encoded.extend(lz4_flex::block::compress_prepend_size(plain));
+      encoded
+    };
     let mut corpus = vec![
       Vec::new(),
       vec![0],
@@ -40,6 +46,10 @@ mod decoder_malformed_gate {
       br#"{"windows":[{"cookies":[]}]}}"#.to_vec(),
       vec![0; MAX_CASE_BYTES],
       vec![0xff; MAX_CASE_BYTES],
+      [b"mozLz40\0".as_slice(), &u32::MAX.to_le_bytes()].concat(),
+      [b"mozLz40\0".as_slice(), &[32, 0, 0, 0], b"truncated"].concat(),
+      jsonlz4(br#"{"unterminated":true"#),
+      jsonlz4(br#"{"windows":[{"cookies":[{"host":17,"value":{"nested":true}}]}]}"#),
     ];
     let mut state = CORPUS_SEED;
     for case_index in 0..GENERATED_CASES {
@@ -61,9 +71,20 @@ mod decoder_malformed_gate {
 
   #[test]
   fn every_engine_decoder_is_host_neutral_and_unwind_safe_for_malformed_input() {
-    let cases: [MalformedCase; 4] = [
+    let cases: [MalformedCase; 6] = [
       ("chromium", chromium_decoder::malformed_decoder_gate_case),
-      ("mozilla", mozilla::malformed_decoder_gate_case),
+      (
+        "mozilla_persistent",
+        mozilla::malformed_persistent_decoder_gate_case,
+      ),
+      (
+        "mozilla_session_legacy_json",
+        mozilla::malformed_legacy_session_decoder_gate_case,
+      ),
+      (
+        "mozilla_session_jsonlz4",
+        mozilla::malformed_jsonlz4_session_decoder_gate_case,
+      ),
       ("safari", safari::malformed_decoder_gate_case),
       (
         "internet_explorer",
@@ -72,7 +93,7 @@ mod decoder_malformed_gate {
     ];
 
     let corpus = malformed_corpus();
-    assert_eq!(corpus.len(), GENERATED_CASES + 8);
+    assert_eq!(corpus.len(), GENERATED_CASES + CRAFTED_CASES);
     assert!(corpus.iter().all(|input| input.len() <= MAX_CASE_BYTES));
 
     for (case_index, input) in corpus.iter().enumerate() {

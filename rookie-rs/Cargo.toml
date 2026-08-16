@@ -64,6 +64,7 @@ getrandom = "0.2"
 zbus = "5.19"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 pbkdf2 = "0.12"
 sha1 = "0.10"
 

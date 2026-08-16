@@ -856,37 +856,60 @@ fn named_profile(library: &Path, uuid: String, title: String) -> SafariProfile {
 /// Returns a successful (including zero-row) profile DB result. The common
 /// SQLite acquisition layer copies a live WAL pair, avoiding the silent
 /// omission of recently-created profiles that immutable reads cause.
-fn named_profiles_from_database(library: &Path) -> Result<Vec<(String, String)>> {
+fn named_profiles_from_database(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<(String, String)>> {
   let database = safari_tabs_database_path(library);
-  sqlite::with_browser_database(database, |connection| {
-    let mut statement = connection.prepare(
-      "SELECT external_uuid, title FROM bookmarks \
+  sqlite::with_browser_database_with_runtime(
+    database,
+    |connection| {
+      runtime.check()?;
+      let mut statement = connection.prepare(
+        "SELECT external_uuid, title FROM bookmarks \
        WHERE type = ?1 AND subtype = ?2 AND external_uuid != ?3 \
        ORDER BY external_uuid COLLATE BINARY, title COLLATE BINARY",
-    )?;
-    let mut rows = statement.query(rusqlite::params![
-      SAFARI_PROFILE_TYPE,
-      SAFARI_PROFILE_SUBTYPE,
-      DEFAULT_PROFILE_SENTINEL
-    ])?;
-    let mut profiles = Vec::new();
-    while let Some(row) = rows.next()? {
-      let uuid = row.get::<_, Option<String>>(0)?.unwrap_or_default();
-      let title = row.get::<_, Option<String>>(1)?.unwrap_or_default();
-      if is_canonical_uuid(&uuid) {
-        profiles.push((uuid, title));
-      } else if !uuid.is_empty() {
-        log::warn!("Skipping Safari profile row with invalid external UUID {uuid:?}");
+      )?;
+      runtime.check()?;
+      let mut rows = statement.query(rusqlite::params![
+        SAFARI_PROFILE_TYPE,
+        SAFARI_PROFILE_SUBTYPE,
+        DEFAULT_PROFILE_SENTINEL
+      ])?;
+      runtime.check()?;
+      let mut profiles = Vec::new();
+      loop {
+        runtime.check()?;
+        let row = rows.next()?;
+        runtime.check()?;
+        let Some(row) = row else {
+          break;
+        };
+        let uuid = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+        let title = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+        if is_canonical_uuid(&uuid) {
+          profiles.push((uuid, title));
+        } else if !uuid.is_empty() {
+          log::warn!("Skipping Safari profile row with invalid external UUID {uuid:?}");
+        }
       }
-    }
-    Ok(profiles)
-  })
+      runtime.check()?;
+      Ok(profiles)
+    },
+    runtime,
+  )
   .map(|outcome| outcome.into_value())
 }
 
-fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>> {
+fn named_profiles_from_directory(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<(String, String)>> {
   let directory = library.join("Containers/com.apple.Safari/Data/Library/Safari/Profiles");
-  let entries = match fs::read_dir(&directory) {
+  runtime.check()?;
+  let entries = fs::read_dir(&directory);
+  runtime.check()?;
+  let mut entries = match entries {
     Ok(entries) => entries,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
     Err(error) => {
@@ -895,15 +918,23 @@ fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>
     }
   };
   let mut profiles = Vec::new();
-  for entry in entries {
+  loop {
+    runtime.check()?;
+    let entry = entries.next();
+    runtime.check()?;
+    let Some(entry) = entry else {
+      break;
+    };
     let entry = entry.with_context(|| {
       format!("Failed to read an entry in Safari profile directory {REDACTED_PATH}")
     })?;
-    if entry
+    runtime.check()?;
+    let file_type = entry
       .file_type()
       .with_context(|| format!("Failed to inspect Safari profile entry {REDACTED_PATH}"))?
-      .is_dir()
-    {
+      .is_dir();
+    runtime.check()?;
+    if file_type {
       if let Ok(uuid) = entry.file_name().into_string() {
         if is_canonical_uuid(&uuid) {
           profiles.push((uuid, String::new()));
@@ -911,7 +942,9 @@ fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>
       }
     }
   }
+  runtime.check()?;
   profiles.sort_by(|left, right| left.0.cmp(&right.0));
+  runtime.check()?;
   Ok(profiles)
 }
 
@@ -936,39 +969,85 @@ impl SafariProfileDiscoveryIssue {
   }
 }
 
-pub(crate) fn discover_safari_profiles(
+fn discover_safari_profiles_with<Database, Directory>(
   library: &Path,
-) -> (Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>) {
+  runtime: &BoundaryRuntime<'_>,
+  database: Database,
+  directory: Directory,
+) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)>
+where
+  Database: FnOnce(&Path, &BoundaryRuntime<'_>) -> Result<Vec<(String, String)>>,
+  Directory: FnOnce(&Path, &BoundaryRuntime<'_>) -> Result<Vec<(String, String)>>,
+{
+  runtime.check()?;
   let mut profiles = vec![default_profile(library)];
-  let (named, warning) = match named_profiles_from_database(library) {
+  let (named, warning) = match database(library, runtime) {
     Ok(profiles) => (profiles, None),
     Err(error) => {
-      match named_profiles_from_directory(library) {
+      // A terminal database result must never be flattened into an ordinary
+      // discovery degradation or reset into a fresh fallback budget.
+      runtime.check()?;
+      match directory(library, runtime) {
         Ok(profiles) => (profiles, Some(SafariProfileDiscoveryIssue::Degraded(format!(
           "Safari profile database acquisition/query failed at {REDACTED_PATH}; using directory fallback (Full Disk Access may be required): {error:#}"
         )))),
-        Err(directory_error) => (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
-          "Safari profile database acquisition/query failed at {REDACTED_PATH}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}"
-        )))),
+        Err(directory_error) => {
+          runtime.check()?;
+          (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
+            "Safari profile database acquisition/query failed at {REDACTED_PATH}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}"
+          ))))
+        }
       }
     }
   };
+  runtime.check()?;
   let mut seen = std::collections::BTreeSet::new();
-  profiles.extend(named.into_iter().filter_map(|(uuid, title)| {
-    seen
-      .insert(uuid.to_ascii_uppercase())
-      .then(|| named_profile(library, uuid, title))
-  }));
+  for (uuid, title) in named {
+    runtime.check()?;
+    if seen.insert(uuid.to_ascii_uppercase()) {
+      profiles.push(named_profile(library, uuid, title));
+    }
+  }
+  runtime.check()?;
   disambiguate_profile_names(&mut profiles);
-  (profiles, warning)
+  runtime.check()?;
+  Ok((profiles, warning))
+}
+
+pub(crate) fn discover_safari_profiles_with_runtime(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)> {
+  discover_safari_profiles_with(
+    library,
+    runtime,
+    named_profiles_from_database,
+    named_profiles_from_directory,
+  )
+}
+
+#[cfg(test)]
+pub(crate) fn discover_safari_profiles(
+  library: &Path,
+) -> (Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>) {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  discover_safari_profiles_with_runtime(library, &runtime)
+    .expect("the standard profile-discovery runtime remains active")
 }
 
 /// Crate-private generic adapter. It is intentionally separate from the
 /// legacy API so a broken named profile cannot hide cookies selected by the
 /// historical default-path-first `safari()` function.
-pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&PathBuf>> {
+pub(crate) fn first_existing_cookie_candidate_with_runtime<'a>(
+  candidates: &'a [PathBuf],
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Option<&'a PathBuf>> {
   for path in candidates {
-    match fs::metadata(path) {
+    runtime.check()?;
+    let metadata = fs::metadata(path);
+    runtime.check()?;
+    match metadata {
       Ok(_) => return Ok(Some(path)),
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
       Err(error) => {
@@ -977,6 +1056,7 @@ pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<
       }
     }
   }
+  runtime.check()?;
   Ok(None)
 }
 
@@ -1903,6 +1983,36 @@ mod tests {
       1,
       "directory fallback must not override a readable zero-row DB"
     );
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn expiring_profile_database_does_not_reset_the_budget_for_directory_fallback() {
+    let library = temp_library("profile-runtime-fallback");
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let directory_calls = std::cell::Cell::new(0);
+
+    let error = discover_safari_profiles_with(
+      &library,
+      &runtime,
+      |_, _| {
+        clock.advance(Duration::from_secs(1));
+        Err(anyhow!("scripted profile database failure"))
+      },
+      |_, _| {
+        directory_calls.set(directory_calls.get() + 1);
+        Ok(Vec::new())
+      },
+    )
+    .expect_err("the shared deadline expires with the database attempt");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+    assert_eq!(directory_calls.get(), 0, "fallback must not start");
     fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
   }
 

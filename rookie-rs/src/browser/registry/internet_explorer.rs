@@ -98,8 +98,8 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       rows_seen: 0,
       rows_skipped: 0,
       rows_rejected: 0,
-      acquisition: SourceAcquisition::EseDatabase,
-      acquisition_attempts: 1,
+      acquisition: SourceAcquisition::NotAttempted,
+      acquisition_attempts: 0,
       diagnostics: Vec::new(),
       error: None,
       error_stage: SourceFailureStage::Acquisition,
@@ -170,6 +170,8 @@ where
     for source in &mut profile.sources {
       match query(&source.path, domains) {
         Ok(rows) => {
+          source.acquisition = SourceAcquisition::EseDatabase;
+          source.acquisition_attempts = 1;
           source.rows_seen = rows.records_seen;
           source.rows_skipped = rows.records_skipped;
           source.rows_rejected = rows.records_rejected;
@@ -179,8 +181,11 @@ where
         Err(error) => {
           if let Some(stop) = boundary_stop_from_error(&error) {
             outcome.boundary_stop.get_or_insert(stop);
+            super::retain_completed_engine_work(&mut outcome);
             return outcome;
           }
+          source.acquisition = SourceAcquisition::EseDatabase;
+          source.acquisition_attempts = 1;
           source.error_stage = internet_explorer_failure_stage(&error);
           source.error = Some(format!("{error:#}"));
         }
@@ -206,6 +211,9 @@ fn retain_internet_explorer_runtime_stop(
 ) -> EngineExtractionDraft {
   if let Err(stop) = runtime.check() {
     outcome.boundary_stop.get_or_insert(stop);
+  }
+  if outcome.boundary_stop.is_some() {
+    super::retain_completed_engine_work(&mut outcome);
   }
   outcome
 }
@@ -344,8 +352,8 @@ mod tests {
       rows_seen: 0,
       rows_skipped: 0,
       rows_rejected: 0,
-      acquisition: SourceAcquisition::EseDatabase,
-      acquisition_attempts: 1,
+      acquisition: SourceAcquisition::NotAttempted,
+      acquisition_attempts: 0,
       diagnostics: Vec::new(),
       error: None,
       error_stage: SourceFailureStage::Acquisition,
@@ -361,8 +369,8 @@ mod tests {
       installations_enumerated: 1,
       boundary_stop: None,
       profiles: vec![EngineProfileDraft {
-        profile_id: "ie-profile".to_owned(),
-        installation_id: "ie-installation".to_owned(),
+        profile_id: "1".repeat(64),
+        installation_id: "0".repeat(64),
         installation_priority: 10,
         legacy_installation_priority: 10,
         legacy_profile_order: 0,
@@ -474,8 +482,80 @@ mod tests {
       assert_eq!(populated.profiles[0].sources[0].rows_skipped, 2);
       assert_eq!(populated.profiles[0].sources[0].rows_rejected, 2);
       assert!(populated.profiles[0].sources[0].error.is_none());
-      assert_eq!(populated.profiles[0].sources[1].rows_seen, 0);
-      assert!(populated.profiles[0].sources[1].error.is_none());
+      assert_eq!(populated.profiles[0].sources.len(), 1);
+    }
+  }
+
+  fn stopped_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtractionDraft {
+    let calls = Cell::new(0);
+    let populated = populate_internet_explorer_sources(discovered_sources(), None, |_, _| {
+      let call = calls.get();
+      calls.set(call + 1);
+      if call == 0 {
+        Ok(InternetExplorerRows {
+          records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+            crate::common::enums::Cookie {
+              domain: ".example.com".to_owned(),
+              path: "/".to_owned(),
+              secure: false,
+              expires: None,
+              name: "retained".to_owned(),
+              value: "value".to_owned(),
+              http_only: false,
+              same_site: 0,
+            },
+            crate::browser::cookie_record::SourceRef::pending(0),
+          )],
+          records_seen: 1,
+          records_skipped: 0,
+          records_rejected: 0,
+          row_error: None,
+        })
+      } else {
+        Err(anyhow::Error::new(InternetExplorerFailure::new(
+          InternetExplorerFailureStage::Parse,
+          anyhow::Error::new(stop),
+        )))
+      }
+    });
+    assert_eq!(calls.get(), 2);
+    populated
+  }
+
+  #[test]
+  fn adapter_report_and_legacy_drop_interrupted_source_placeholders() {
+    use crate::common::deadline::BoundaryStop;
+
+    for (stop, expected_termination) in [
+      (BoundaryStop::TimedOut, "timed_out"),
+      (BoundaryStop::Cancelled, "cancelled"),
+      (BoundaryStop::ResourceExhausted, "resource_exhausted"),
+    ] {
+      let populated = stopped_adapter_outcome(stop);
+      assert_eq!(populated.boundary_stop, Some(stop));
+      assert_eq!(populated.profiles.len(), 1);
+      assert_eq!(populated.profiles[0].sources.len(), 1);
+
+      let report = crate::browser::report_build::project_engine_report(
+        "internet_explorer",
+        stopped_adapter_outcome(stop),
+      )
+      .expect("project stopped Internet Explorer report");
+      assert_eq!(report.termination.as_str(), expected_termination);
+      assert_eq!(report.profiles.len(), 1);
+      assert_eq!(report.profiles[0].sources.len(), 1);
+      assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
+      assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("profile_extraction_failed"));
+
+      let cookies = crate::browser::legacy::project_engine_outcome(
+        "internet_explorer",
+        stopped_adapter_outcome(stop),
+      )
+      .expect("legacy projection retains completed Internet Explorer work");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].name, "retained");
     }
   }
 
@@ -509,7 +589,7 @@ mod tests {
       let retained = retain_internet_explorer_runtime_stop(discovered_sources(), &runtime);
 
       assert_eq!(retained.boundary_stop, Some(stop));
-      assert_eq!(retained.profiles.len(), 1);
+      assert!(retained.profiles.is_empty());
     }
   }
 }

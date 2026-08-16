@@ -340,11 +340,9 @@ pub struct ExtractionStats {
   /// holds and a consumer can read "how much did this source lose?" directly.
   ///
   /// SQL engines reduce candidates in their `WHERE` clause and enforce the
-  /// final host boundary before incrementing these counters. Safari is the
-  /// known deviation: it applies the domain filter after parsing the whole
-  /// file, so it still counts every record. Correcting that means moving the
-  /// filter into the record loop, which is low-level Safari parsing that
-  /// Milestone 4E explicitly does not reimplement.
+  /// final host boundary before incrementing these counters. File decoders,
+  /// including Safari, likewise apply the request filter before incrementing
+  /// their relevant-row counters.
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,

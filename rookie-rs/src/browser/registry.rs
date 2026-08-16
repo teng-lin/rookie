@@ -2375,6 +2375,23 @@ impl EngineExtractionDraft {
   }
 }
 
+/// Drops discovery-only source slots after a typed request stop. A source is
+/// committed atomically by its adapter only after at least one acquisition
+/// attempt completes; leaving a zero-attempt slot behind would fabricate a
+/// successful zero-row source during canonicalization. Profiles that then own
+/// no completed sources are likewise discovery placeholders, not extraction
+/// failures.
+pub(crate) fn retain_completed_engine_work(outcome: &mut EngineExtractionDraft) {
+  for profile in &mut outcome.profiles {
+    profile
+      .sources
+      .retain(|source| source.acquisition_attempts > 0);
+  }
+  outcome
+    .profiles
+    .retain(|profile| !profile.sources.is_empty());
+}
+
 /// Narrows a discovered engine outcome to the one requested profile, before any
 /// source is acquired. This mirrors what the Chromium seam does with its own
 /// `profile_id` filter, and it is the whole point of pushing the selection down
@@ -2954,7 +2971,9 @@ where
     // silence a database that appeared and was corrupt or locked.
     let extraction = query(&persistent, domains);
     let boundary_stop = extraction.boundary_stop;
-    if profile.persistent_source_discovered || persistent_exists(&persistent) {
+    if extraction.persistent_attempted
+      && (profile.persistent_source_discovered || persistent_exists(&persistent))
+    {
       #[cfg(test)]
       let mut persistent_cookies = extraction.persistent_cookies;
       #[cfg(test)]
@@ -3046,6 +3065,9 @@ where
       break;
     }
   }
+  if outcome.boundary_stop.is_some() {
+    retain_completed_engine_work(&mut outcome);
+  }
   outcome
 }
 
@@ -3068,13 +3090,27 @@ pub(crate) fn gecko_report_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  gecko_report_with_query(
+  let outcome = gecko_report_with_query(
     &context,
     browser_id,
     profile_id,
     domains.as_deref(),
     |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
-  )
+  )?;
+  Ok(retain_gecko_runtime_stop(outcome, runtime))
+}
+
+fn retain_gecko_runtime_stop(
+  mut outcome: EngineExtractionDraft,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> EngineExtractionDraft {
+  if let Err(stop) = runtime.check() {
+    outcome.boundary_stop.get_or_insert(stop);
+  }
+  if outcome.boundary_stop.is_some() {
+    retain_completed_engine_work(&mut outcome);
+  }
+  outcome
 }
 
 fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionDraft) {
@@ -3125,13 +3161,14 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
   runtime.check()?;
   let mut outcome = discover_gecko_with_context(&context, browser_id)?;
   select_legacy_gecko_profile(&mut outcome);
-  Ok(populate_gecko_sources_with_order(
+  let outcome = populate_gecko_sources_with_order(
     outcome,
     domains.as_deref(),
     |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
     |path| context.fs.exists(path),
     false,
-  ))
+  );
+  Ok(retain_gecko_runtime_stop(outcome, runtime))
 }
 
 /// Lists persistent Gecko profiles in the same deterministic registry order
@@ -5512,9 +5549,9 @@ mod tests {
       assert_eq!(profile.sources.len(), 1);
       assert_eq!(
         profile.sources[0].acquisition,
-        SourceAcquisition::EseDatabase
+        SourceAcquisition::NotAttempted
       );
-      assert_eq!(profile.sources[0].acquisition_attempts, 1);
+      assert_eq!(profile.sources[0].acquisition_attempts, 0);
     }
     let rediscovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("rediscover both WebCache roots");
@@ -5919,6 +5956,8 @@ mod tests {
       discovery,
       None,
       |_, _| mozilla::MozillaExtractionDraft {
+        persistent_attempted: true,
+        persistent_acquisition_attempts: 1,
         persistent_rows_seen: 2,
         persistent_rows_skipped: 1,
         persistent_rows_rejected: 1,
@@ -5937,6 +5976,116 @@ mod tests {
     assert!(source.error.is_none());
     assert_eq!(source.rows_skipped, 1);
     assert_eq!(source.rows_rejected, 1);
+  }
+
+  fn stopped_gecko_adapter_outcome(
+    stop: crate::common::deadline::BoundaryStop,
+  ) -> EngineExtractionDraft {
+    let profiles = (0..3)
+      .map(|index| {
+        let path = PathBuf::from(format!("/profiles/gecko-{index}"));
+        EngineProfileDraft {
+          profile_id: format!("{index:064x}"),
+          installation_id: "0".repeat(64),
+          installation_priority: 10,
+          legacy_installation_priority: 10,
+          legacy_profile_order: index,
+          legacy_is_default: index == 0,
+          legacy_eligible: true,
+          installation_path: PathBuf::from("/profiles"),
+          legacy_installation_path: PathBuf::from("/profiles"),
+          name: format!("profile-{index}"),
+          legacy_name: format!("profile-{index}"),
+          path,
+          is_default: index == 0,
+          persistent_source_discovered: true,
+          sources: Vec::new(),
+        }
+      })
+      .collect();
+    let discovered = EngineExtractionDraft {
+      profiles,
+      discovery_issues: Vec::new(),
+      installations_discovered: 1,
+      installations_detected: 1,
+      installations_enumerated: 1,
+      boundary_stop: None,
+    };
+    let calls = std::cell::Cell::new(0);
+    let populated = populate_gecko_sources(
+      discovered,
+      None,
+      |_, _| {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+          mozilla::MozillaExtractionDraft {
+            persistent_attempted: true,
+            persistent_cookies: vec![Cookie {
+              domain: ".example.com".to_owned(),
+              path: "/".to_owned(),
+              secure: false,
+              expires: None,
+              name: "retained".to_owned(),
+              value: "value".to_owned(),
+              http_only: false,
+              same_site: 0,
+            }],
+            persistent_rows_seen: 1,
+            persistent_acquisition_strategy: Some(
+              DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
+            ),
+            persistent_acquisition_attempts: 1,
+            ..mozilla::MozillaExtractionDraft::default()
+          }
+        } else {
+          mozilla::MozillaExtractionDraft {
+            boundary_stop: Some(stop),
+            ..mozilla::MozillaExtractionDraft::default()
+          }
+        }
+      },
+      |_| true,
+    );
+    assert_eq!(calls.get(), 2, "later profiles must not be queried");
+    populated
+  }
+
+  #[test]
+  fn gecko_adapter_report_and_legacy_drop_interrupted_discovery_placeholders() {
+    use crate::common::deadline::BoundaryStop;
+
+    for (stop, expected_termination) in [
+      (BoundaryStop::TimedOut, "timed_out"),
+      (BoundaryStop::Cancelled, "cancelled"),
+      (BoundaryStop::ResourceExhausted, "resource_exhausted"),
+    ] {
+      let populated = stopped_gecko_adapter_outcome(stop);
+      assert_eq!(populated.boundary_stop, Some(stop));
+      assert_eq!(populated.profiles.len(), 1);
+      assert_eq!(populated.profiles[0].sources.len(), 1);
+
+      let report = crate::browser::report_build::project_engine_report(
+        "firefox",
+        stopped_gecko_adapter_outcome(stop),
+      )
+      .expect("project stopped Gecko report");
+      assert_eq!(report.termination.as_str(), expected_termination);
+      assert_eq!(report.profiles.len(), 1);
+      assert_eq!(report.profiles[0].sources.len(), 1);
+      assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
+      assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("profile_extraction_failed"));
+
+      let cookies = crate::browser::legacy::project_engine_outcome(
+        "firefox",
+        stopped_gecko_adapter_outcome(stop),
+      )
+      .expect("legacy projection retains completed Gecko work");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].name, "retained");
+    }
   }
 
   #[test]

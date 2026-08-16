@@ -3,7 +3,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, Deadline, CLEANUP_GRACE};
 use crate::common::secret::{SecretBytes, SecretString};
 use std::{
-  io::Read,
+  io::{self, Read},
+  os::fd::AsRawFd,
   process::{Child, Command, ExitStatus, Stdio},
   time::Duration,
 };
@@ -57,24 +58,11 @@ pub(crate) fn get_osx_keychain_password_with_runtime(
     .stderr
     .take()
     .context("Keychain stderr pipe missing")?;
-  // Drain both pipes concurrently so a chatty helper cannot block before the
-  // supervisor observes the deadline. Buffers are secret-owned from their
-  // first retained byte and capped independently.
-  let stdout = std::thread::spawn(move || drain_secret_stream(stdout, "stdout"));
-  let stderr = std::thread::spawn(move || drain_secret_stream(stderr, "stderr"));
-  let status = supervise_child(&mut child, runtime);
-  // Always join both drainers after supervision. In particular, an iterator
-  // poll error must not detach secret-bearing pipe readers or replace its
-  // original cause with a later drain failure.
-  let stdout = stdout
-    .join()
-    .unwrap_or_else(|_| Err(anyhow!("macOS Keychain stdout drain failed")));
-  let stderr = stderr
-    .join()
-    .unwrap_or_else(|_| Err(anyhow!("macOS Keychain stderr drain failed")));
-  let status = status?;
-  let stdout = stdout?;
-  let stderr = stderr?;
+  // Keep both pipes nonblocking and drain them in the same bounded loop that
+  // supervises the helper. A descendant that inherits either descriptor can
+  // therefore never strand an outer drain-thread join after the request (or
+  // its cleanup ceiling) has expired.
+  let (status, stdout, stderr) = supervise_keychain_child(&mut child, stdout, stderr, runtime)?;
 
   if !status.success() {
     return Err(keychain_lookup_error(status.code(), stderr.len()));
@@ -86,29 +74,173 @@ pub(crate) fn get_osx_keychain_password_with_runtime(
   Ok(password.trimmed())
 }
 
-fn drain_secret_stream(mut stream: impl Read, stream_name: &'static str) -> Result<SecretBytes> {
-  let mut retained = SecretBytes::new(Vec::new());
-  let mut buffer = Zeroizing::new([0_u8; 8192]);
-  let mut total_len = 0_usize;
-  loop {
-    let count = stream
-      .read(buffer.as_mut())
-      .with_context(|| format!("failed to drain macOS Keychain {stream_name}"))?;
-    if count == 0 {
-      break;
+struct SecretDrain<R> {
+  stream: R,
+  stream_name: &'static str,
+  retained: SecretBytes,
+  buffer: Zeroizing<[u8; 8192]>,
+  total_len: usize,
+  eof: bool,
+}
+
+impl<R: Read> SecretDrain<R> {
+  fn new(stream: R, stream_name: &'static str) -> Self {
+    Self {
+      stream,
+      stream_name,
+      retained: SecretBytes::new(Vec::new()),
+      buffer: Zeroizing::new([0_u8; 8192]),
+      total_len: 0,
+      eof: false,
     }
-    retained.extend_bounded(&buffer[..count], KEYCHAIN_OUTPUT_LIMIT);
-    total_len = total_len.saturating_add(count);
-    // Wipe each completed read immediately. `Zeroizing` also covers read
-    // errors and unwinds before control can reach this checkpoint.
-    buffer.zeroize();
   }
-  if total_len > KEYCHAIN_OUTPUT_LIMIT {
-    bail!(
-      "macOS Keychain {stream_name} exceeded the {KEYCHAIN_OUTPUT_LIMIT} byte output limit ({total_len} byte(s)); output redacted"
-    );
+
+  fn drain_available(&mut self) -> Result<()> {
+    while !self.eof {
+      // This explicit wipe makes every read start with a zeroed buffer. The
+      // `Zeroizing` guard also covers panics and any return below.
+      self.buffer.zeroize();
+      let result = self.stream.read(self.buffer.as_mut());
+      match result {
+        Ok(0) => self.eof = true,
+        Ok(count) => {
+          self
+            .retained
+            .extend_bounded(&self.buffer[..count], KEYCHAIN_OUTPUT_LIMIT);
+          self.total_len = self.total_len.saturating_add(count);
+          self.buffer.zeroize();
+          if self.total_len > KEYCHAIN_OUTPUT_LIMIT {
+            bail!(
+              "macOS Keychain {} exceeded the {KEYCHAIN_OUTPUT_LIMIT} byte output limit ({} byte(s)); output redacted",
+              self.stream_name,
+              self.total_len
+            );
+          }
+        }
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+        Err(error) => {
+          self.buffer.zeroize();
+          return Err(error)
+            .with_context(|| format!("failed to drain macOS Keychain {}", self.stream_name));
+        }
+      }
+    }
+    Ok(())
   }
-  Ok(retained)
+
+  fn is_eof(&self) -> bool {
+    self.eof
+  }
+
+  fn into_retained(self) -> SecretBytes {
+    self.retained
+  }
+}
+
+#[cfg(test)]
+fn drain_secret_stream(stream: impl Read, stream_name: &'static str) -> Result<SecretBytes> {
+  let mut drain = SecretDrain::new(stream, stream_name);
+  drain.drain_available()?;
+  if !drain.is_eof() {
+    bail!("macOS Keychain {stream_name} drain unexpectedly blocked");
+  }
+  Ok(drain.into_retained())
+}
+
+fn set_nonblocking(stream: &impl AsRawFd, stream_name: &'static str) -> Result<()> {
+  let descriptor = stream.as_raw_fd();
+  // SAFETY: `descriptor` is borrowed from the live child-pipe object and both
+  // fcntl operations preserve ownership of it.
+  let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+  if flags == -1 {
+    return Err(io::Error::last_os_error())
+      .with_context(|| format!("failed to inspect macOS Keychain {stream_name} pipe flags"));
+  }
+  // SAFETY: same live descriptor; `O_NONBLOCK` is a valid status flag.
+  if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+    return Err(io::Error::last_os_error())
+      .with_context(|| format!("failed to bound macOS Keychain {stream_name} pipe drain"));
+  }
+  Ok(())
+}
+
+fn supervise_keychain_child(
+  child: &mut Child,
+  stdout: std::process::ChildStdout,
+  stderr: std::process::ChildStderr,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(ExitStatus, SecretBytes, SecretBytes)> {
+  if let Err(error) = set_nonblocking(&stdout, "stdout") {
+    return Err(cleanup_keychain_child(child, runtime, error));
+  }
+  if let Err(error) = set_nonblocking(&stderr, "stderr") {
+    return Err(cleanup_keychain_child(child, runtime, error));
+  }
+
+  let mut stdout = SecretDrain::new(stdout, "stdout");
+  let mut stderr = SecretDrain::new(stderr, "stderr");
+  let mut status = None;
+  loop {
+    if let Err(stop) = runtime.check() {
+      if status.is_some() {
+        return Err(stop.into());
+      }
+      return Err(cleanup_keychain_child(
+        child,
+        runtime,
+        anyhow::Error::new(stop),
+      ));
+    }
+    if let Err(error) = stdout.drain_available() {
+      if status.is_some() {
+        return Err(error);
+      }
+      return Err(cleanup_keychain_child(child, runtime, error));
+    }
+    if let Err(error) = stderr.drain_available() {
+      if status.is_some() {
+        return Err(error);
+      }
+      return Err(cleanup_keychain_child(child, runtime, error));
+    }
+    if status.is_none() {
+      match child.try_wait() {
+        Ok(Some(child_status)) => {
+          // A terminal request observed with the native result wins the tie.
+          runtime.check()?;
+          status = Some(child_status);
+        }
+        Ok(None) => {}
+        Err(error) => {
+          return Err(cleanup_keychain_child(
+            child,
+            runtime,
+            anyhow::Error::new(error).context("failed to poll Keychain helper"),
+          ));
+        }
+      }
+    }
+    if stdout.is_eof() && stderr.is_eof() {
+      if let Some(status) = status {
+        runtime.check()?;
+        return Ok((status, stdout.into_retained(), stderr.into_retained()));
+      }
+    }
+    let remaining = runtime.deadline.remaining(runtime.clock);
+    runtime.clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
+  }
+}
+
+fn cleanup_keychain_child(
+  child: &mut Child,
+  runtime: &BoundaryRuntime<'_>,
+  cause: anyhow::Error,
+) -> anyhow::Error {
+  match stop_and_reap_child(child, runtime, cause) {
+    Err(error) => error,
+    Ok(_) => unreachable!("stopped Keychain cleanup cannot return a successful status"),
+  }
 }
 
 trait ChildControl {
@@ -129,6 +261,7 @@ impl ChildControl for Child {
   }
 }
 
+#[cfg(test)]
 fn supervise_child<C: ChildControl>(
   child: &mut C,
   runtime: &BoundaryRuntime<'_>,
@@ -568,5 +701,37 @@ mod tests {
       Some(&BoundaryStop::TimedOut)
     );
     assert!(reaped.is_some());
+  }
+
+  #[test]
+  fn inherited_keychain_pipe_cannot_extend_the_request_deadline() {
+    let mut child = Command::new("/bin/sh")
+      .args(["-c", "sleep 1 & exit 0"])
+      .stdin(Stdio::null())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .expect("spawn helper with a descendant-held pipe");
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let stderr = child.stderr.take().expect("stderr pipe");
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_millis(40)));
+    let started = std::time::Instant::now();
+
+    let error = supervise_keychain_child(&mut child, stdout, stderr, &runtime)
+      .expect_err("an inherited pipe must not reset or outlive the request budget");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+    assert!(
+      started.elapsed() < Duration::from_millis(500),
+      "the nonblocking pipe drain must not wait for the descendant"
+    );
+    assert!(
+      child.try_wait().expect("helper remains waitable").is_some(),
+      "the direct child was reaped before the inherited pipe timed out"
+    );
   }
 }

@@ -302,9 +302,8 @@ fn engine_profile_outcome(
     // justified its admission - a Gecko session candidate, since a
     // discovered persistent source always projects into `sources` - is gone
     // by the time of extraction. That is a real failure, not the "nothing
-    // was ever there" case `no_sources` means. Safari and Internet Explorer
-    // profiles always carry a pre-populated source slot (see their registry
-    // discovery), so this branch is unreachable for them.
+    // was ever there" case `no_sources` means. Discovery-only profiles on a
+    // stopped draft are pruned before this adapter and never reach this branch.
     push_aggregated(
       &mut outcome.issues,
       issue(
@@ -493,8 +492,11 @@ fn chromium_browser_outcome(
 
 fn engine_browser_outcome(
   browser_id: &BrowserId,
-  engine: registry::EngineExtractionDraft,
+  mut engine: registry::EngineExtractionDraft,
 ) -> Result<BrowserDraft> {
+  if engine.boundary_stop.is_some() {
+    registry::retain_completed_engine_work(&mut engine);
+  }
   let termination = engine
     .boundary_stop
     .map_or(Termination::Completed, termination_from_stop);
@@ -1422,6 +1424,16 @@ pub(crate) fn canonical_engine_extraction(
   ))
 }
 
+#[cfg(test)]
+pub(crate) fn project_engine_report(
+  browser_id: &str,
+  engine: registry::EngineExtractionDraft,
+) -> Result<ExtractionReport> {
+  Ok(project_canonical_report(canonical_engine_extraction(
+    browser_id, engine,
+  )?))
+}
+
 pub(crate) fn canonical_engine_extraction_with_runtime(
   browser_id: &str,
   engine: registry::EngineExtractionDraft,
@@ -1555,36 +1567,39 @@ fn canonical_direct_mozilla_extraction_impl(
   let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
   #[cfg(test)]
   let persistent_cookies = draft.persistent_cookies;
-  let mut sources = vec![registry::EngineSourceDraft {
-    path: db_path.to_path_buf(),
-    role: registry::SOURCE_ROLE_PERSISTENT,
-    format: super::mozilla::PERSISTENT_FORMAT_ID,
-    precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-    selected: true,
-    cookies: {
-      #[cfg(test)]
-      {
-        persistent_cookies
-      }
-      #[cfg(not(test))]
-      {
-        Vec::new()
-      }
-    },
-    records: draft.persistent_records,
-    rows_seen: draft.persistent_rows_seen,
-    rows_skipped: draft.persistent_rows_skipped,
-    rows_rejected: draft.persistent_rows_rejected,
-    acquisition: draft.persistent_acquisition_strategy.into(),
-    acquisition_attempts: draft.persistent_acquisition_attempts,
-    diagnostics: Vec::new(),
-    error: draft.persistent_error,
-    error_stage: match draft.persistent_failure_kind {
-      Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
-      _ => SourceFailureStage::Acquisition,
-    },
-    row_error: draft.persistent_row_error,
-  }];
+  let mut sources = Vec::new();
+  if draft.persistent_attempted {
+    sources.push(registry::EngineSourceDraft {
+      path: db_path.to_path_buf(),
+      role: registry::SOURCE_ROLE_PERSISTENT,
+      format: super::mozilla::PERSISTENT_FORMAT_ID,
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      selected: true,
+      cookies: {
+        #[cfg(test)]
+        {
+          persistent_cookies
+        }
+        #[cfg(not(test))]
+        {
+          Vec::new()
+        }
+      },
+      records: draft.persistent_records,
+      rows_seen: draft.persistent_rows_seen,
+      rows_skipped: draft.persistent_rows_skipped,
+      rows_rejected: draft.persistent_rows_rejected,
+      acquisition: draft.persistent_acquisition_strategy.into(),
+      acquisition_attempts: draft.persistent_acquisition_attempts,
+      diagnostics: Vec::new(),
+      error: draft.persistent_error,
+      error_stage: match draft.persistent_failure_kind {
+        Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
+        _ => SourceFailureStage::Acquisition,
+      },
+      row_error: draft.persistent_row_error,
+    });
+  }
   sources.extend(
     draft
       .session_sources

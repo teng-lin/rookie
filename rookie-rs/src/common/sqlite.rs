@@ -1,6 +1,8 @@
+#[cfg(test)]
+use crate::common::deadline::{Clock, Deadline};
 use crate::common::{
   boundary::Acquire,
-  deadline::{BoundaryRuntime, Clock, Deadline, DeadlineEnforcement, SystemClock},
+  deadline::{BoundaryRuntime, DeadlineEnforcement, SystemClock},
   diagnostic::REDACTED_PATH,
 };
 use crate::utils::TempDir;
@@ -395,6 +397,7 @@ fn acquire_verified_wal_snapshot(
 /// The closure owns all statement preparation, iteration, and row conversion;
 /// retrying it therefore never resumes a partially consumed query or returns
 /// cookies from an earlier attempt.
+#[cfg(test)]
 pub(crate) fn with_browser_database<T, Query>(
   path: PathBuf,
   query: Query,
@@ -409,6 +412,7 @@ where
 /// Runs acquisition and every query retry under one absolute monotonic
 /// deadline. Callers that also retrieve keys or decode rows pass the same
 /// value through those boundaries; a retry only receives the time left.
+#[cfg(test)]
 pub(crate) fn with_browser_database_with_deadline<T, Query>(
   path: PathBuf,
   query: Query,

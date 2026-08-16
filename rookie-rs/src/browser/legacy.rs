@@ -68,7 +68,10 @@ fn discovery_failure(outcome: &EngineExtractionDraft, browser_id: &str) -> Optio
 }
 
 #[cfg(test)]
-fn project_engine_outcome(browser_id: &str, outcome: EngineExtractionDraft) -> Result<Vec<Cookie>> {
+pub(crate) fn project_engine_outcome(
+  browser_id: &str,
+  outcome: EngineExtractionDraft,
+) -> Result<Vec<Cookie>> {
   project_canonical_outcome(
     browser_id,
     super::report_build::canonical_engine_extraction(browser_id, outcome)?,
