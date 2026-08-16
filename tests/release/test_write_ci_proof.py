@@ -307,6 +307,358 @@ class MainTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertFalse(output.exists())
 
+    def test_manifest_flag_reads_the_digest_from_a_real_manifest_file(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text(
+                json.dumps({"release": {"manifest_digest": MANIFEST_DIGEST}, "artifacts": []}),
+                encoding="utf-8",
+            )
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            proof = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(proof["manifest_digest"], MANIFEST_DIGEST)
+
+    def test_manifest_flag_fails_closed_on_a_missing_digest_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text(json.dumps({"release": {}, "artifacts": []}), encoding="utf-8")
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
+
+    def test_manifest_flag_fails_closed_on_a_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "does-not-exist.json"
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
+
+    def test_manifest_flag_fails_closed_on_malformed_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text("{not valid json", encoding="utf-8")
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
+
+    def test_manifest_flag_fails_closed_on_a_non_string_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text(
+                json.dumps({"release": {"manifest_digest": 12345}, "artifacts": []}), encoding="utf-8"
+            )
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
+
+    def test_a_manifest_read_failure_is_reported_cleanly_without_advisory(self) -> None:
+        # Non-advisory counterpart to the advisory manifest-read-failure test
+        # above: main()'s new backstop except clause must produce the same
+        # clean, reported-problem failure (exit 1, informative message) rather
+        # than a raw uncaught-exception traceback, regardless of --advisory.
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_bytes(b"\xff\xfe not valid utf-8")
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ), mock.patch("builtins.print") as fake_print:
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
+            printed = "\n".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
+            self.assertIn("unexpected error", printed)
+
+    def test_advisory_exits_zero_and_prints_a_warning_annotation_on_failure(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        check_runs["check_runs"] = [
+            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest-digest",
+                    MANIFEST_DIGEST,
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ), mock.patch("builtins.print") as fake_print:
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0, "advisory mode must never exit non-zero")
+            self.assertFalse(output.exists())
+            # GitHub Actions only recognizes `::warning::` as a workflow-command
+            # annotation when it is the *entire* content of a single stdout
+            # print -- not merely present somewhere in the combined output, and
+            # not sharing a call (or a `file=` kwarg routing it to stderr
+            # instead) with anything else. A substring-anywhere check would
+            # still pass if a future regression buried the marker mid-line or
+            # sent it to stderr, silently breaking the visible annotation while
+            # this test kept passing.
+            warning_calls = [
+                call
+                for call in fake_print.call_args_list
+                if call.args and str(call.args[0]).startswith("::warning::")
+            ]
+            self.assertEqual(len(warning_calls), 1, fake_print.call_args_list)
+            (warning_call,) = warning_calls
+            self.assertNotIn("\n", str(warning_call.args[0]))
+            self.assertNotIn("file", warning_call.kwargs, "warning must go to stdout, not stderr")
+            detail = "\n".join(
+                str(call.args[0]) for call in fake_print.call_args_list if call.args and call.kwargs.get("file")
+            )
+            self.assertIn("cargo audit (blocking)", detail)
+
+    def test_advisory_and_manifest_flag_together_report_the_real_failure(self) -> None:
+        # The exact combination every publish workflow actually uses --
+        # `--manifest` (not `--manifest-digest`) together with `--advisory` --
+        # exercised together rather than only independently, so a regression
+        # in how the two interact (e.g. an exception from manifest-reading
+        # bypassing the --advisory wrapper) would be caught here.
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        check_runs["check_runs"] = [
+            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text(
+                json.dumps({"release": {"manifest_digest": MANIFEST_DIGEST}, "artifacts": []}),
+                encoding="utf-8",
+            )
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(output.exists())
+
+    def test_advisory_reports_a_manifest_read_failure_instead_of_crashing(self) -> None:
+        # A malformed --manifest file (invalid UTF-8) raises UnicodeDecodeError,
+        # which is not in _resolve_manifest_digest's own except tuple -- this
+        # proves main()'s outer backstop catches it too, rather than letting an
+        # uncaught exception hard-block the calling workflow step despite
+        # --advisory.
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_bytes(b"\xff\xfe not valid utf-8")
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(output.exists())
+
+    def test_advisory_reports_a_control_failure_instead_of_crashing(self) -> None:
+        # verify_required_checks' initial commits/{sha}/check-runs call can
+        # itself raise ControlFailure (e.g. a transient API error) -- a
+        # different code path than a populated `failures` list, and one this
+        # PR's refactor of main() specifically touched.
+        def raising_gh_api(path: str, *, repo: str):
+            raise write_ci_proof.ControlFailure("boom: simulated API failure")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(write_ci_proof, "gh_api", raising_gh_api), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest-digest",
+                    MANIFEST_DIGEST,
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(output.exists())
+
+    def test_advisory_exits_zero_and_writes_the_proof_on_success(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest-digest",
+                    MANIFEST_DIGEST,
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(output.exists())
+
 
 class MainArgumentValidationTests(unittest.TestCase):
     def test_rejects_a_short_commit_sha(self) -> None:
@@ -349,7 +701,49 @@ class MainArgumentValidationTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("manifest-digest", result.stderr)
+        self.assertIn("manifest digest", result.stderr)
+
+    def test_manifest_digest_and_manifest_are_mutually_exclusive(self) -> None:
+        script_path = REPOSITORY_ROOT / "scripts/write-ci-proof.py"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--repo",
+                REPO,
+                "--commit-sha",
+                COMMIT_SHA,
+                "--manifest-digest",
+                MANIFEST_DIGEST,
+                "--manifest",
+                "/tmp/unused-manifest.json",
+                "--output",
+                "/tmp/unused-ci-proof.json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed with argument", result.stderr)
+
+    def test_neither_manifest_digest_nor_manifest_is_an_error(self) -> None:
+        script_path = REPOSITORY_ROOT / "scripts/write-ci-proof.py"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--repo",
+                REPO,
+                "--commit-sha",
+                COMMIT_SHA,
+                "--output",
+                "/tmp/unused-ci-proof.json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("one of the arguments", result.stderr)
 
 
 if __name__ == "__main__":
