@@ -113,6 +113,58 @@ version = "0.5.9"
                     {"version": "0.5.10", "optional": True},
                 )
 
+    def test_native_lock_normalization_preserves_sri_for_the_target_version(self) -> None:
+        pinned_package = f"node_modules/{bump_version.NATIVE_PACKAGES[0]}"
+        pinned_record = {
+            "version": "0.5.10",
+            "resolved": "https://registry.npmjs.org/...-0.5.10.tgz",
+            "integrity": "sha512-already-pinned==",
+            "optional": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            lockfile = Path(directory) / "package-lock.json"
+            lockfile.write_text(
+                json.dumps(
+                    {
+                        "lockfileVersion": 3,
+                        "packages": {"": {"version": "0.5.10"}, pinned_package: pinned_record},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            bump_version.normalize_native_lock_records(lockfile, "0.5.10")
+
+            packages = bump_version.load_json(lockfile)["packages"]
+            self.assertEqual(packages[pinned_package], pinned_record)
+
+    def test_native_lock_normalization_drops_sri_for_a_different_version(self) -> None:
+        pinned_package = f"node_modules/{bump_version.NATIVE_PACKAGES[0]}"
+        with tempfile.TemporaryDirectory() as directory:
+            lockfile = Path(directory) / "package-lock.json"
+            lockfile.write_text(
+                json.dumps(
+                    {
+                        "lockfileVersion": 3,
+                        "packages": {
+                            "": {"version": "0.5.11"},
+                            pinned_package: {
+                                "version": "0.5.10",
+                                "resolved": "https://registry.npmjs.org/...-0.5.10.tgz",
+                                "integrity": "sha512-stale==",
+                                "optional": True,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            bump_version.normalize_native_lock_records(lockfile, "0.5.11")
+
+            packages = bump_version.load_json(lockfile)["packages"]
+            self.assertEqual(packages[pinned_package], {"version": "0.5.11", "optional": True})
+
 
 class ChangelogTests(unittest.TestCase):
     def write_changelog(self, directory: str, text: str) -> Path:

@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  administration: read
 
 concurrency:
   group: publish-pypi
@@ -20,6 +21,11 @@ env:
   # hosted runner's system store when downloading maturin and other tools.
   NODE_OPTIONS: --use-system-ca
   RELEASE_VERSION: ${{ inputs.version }}
+  # publish-py.yml is dispatched from the `v$VERSION` tag itself (see
+  # docs/RELEASING.md), so `github.sha` already is the verified release
+  # commit in every job here — no need to thread it through job outputs the
+  # way publish-npm.yml (dispatched from `main`) has to.
+  ROOKIE_COOKIES_SOURCE_SHA: ${{ github.sha }}
 
 jobs:
   preflight:
@@ -42,15 +48,38 @@ jobs:
           test "$release_sha" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$release_sha" origin/main
           python scripts/check-release.py "$RELEASE_VERSION"
+      - name: Verify live release controls
+        run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # release/platform-contract.json is the one place the wheel target lists
+  # are spelled out now — see scripts/platform_contract.py.
+  load-contract:
+    runs-on: ubuntu-latest
+    outputs:
+      linux_matrix: ${{ steps.matrix.outputs.linux_matrix }}
+      windows_matrix: ${{ steps.matrix.outputs.windows_matrix }}
+      macos_matrix: ${{ steps.matrix.outputs.macos_matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: matrix
+        run: |
+          set -euo pipefail
+          python3 scripts/platform_contract.py --validate
+          echo "linux_matrix=$(python3 scripts/platform_contract.py --emit-matrix wheel-linux)" >>"$GITHUB_OUTPUT"
+          echo "windows_matrix=$(python3 scripts/platform_contract.py --emit-matrix wheel-win32)" >>"$GITHUB_OUTPUT"
+          echo "macos_matrix=$(python3 scripts/platform_contract.py --emit-matrix wheel-darwin)" >>"$GITHUB_OUTPUT"
 
   linux:
     name: Build Linux wheel (${{ matrix.target }})
-    needs: preflight
+    needs: [preflight, load-contract]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        target: [x86_64, x86, aarch64, armv7, s390x, ppc64le]
+      matrix: ${{ fromJSON(needs.load-contract.outputs.linux_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -76,12 +105,11 @@ jobs:
 
   windows:
     name: Build Windows wheel (${{ matrix.target }})
-    needs: preflight
+    needs: [preflight, load-contract]
     runs-on: windows-latest
     strategy:
       fail-fast: false
-      matrix:
-        target: [x64]
+      matrix: ${{ fromJSON(needs.load-contract.outputs.windows_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -107,12 +135,11 @@ jobs:
 
   macos:
     name: Build macOS wheel (${{ matrix.target }})
-    needs: preflight
+    needs: [preflight, load-contract]
     runs-on: macos-latest
     strategy:
       fail-fast: false
-      matrix:
-        target: [x86_64, aarch64]
+      matrix: ${{ fromJSON(needs.load-contract.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -170,6 +197,9 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: python-*
@@ -177,9 +207,35 @@ jobs:
           merge-multiple: true
       - name: List distributions
         run: find dist -maxdepth 1 -type f -print
+      - name: Write scan manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          contract_digest="$(python3 scripts/platform_contract.py --digest)"
+          mapfile -t distributions < <(find dist -maxdepth 1 -type f | sort)
+          test "${#distributions[@]}" -gt 0
+          python3 scripts/write-release-scan-manifest.py \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$GITHUB_SHA" \
+            --controller-sha "$GITHUB_SHA" \
+            --platform-contract-digest "$contract_digest" \
+            --root "$GITHUB_WORKSPACE" \
+            --output "$GITHUB_WORKSPACE/release-scan-manifest.json" \
+            "${distributions[@]}"
+      - name: Upload scan manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-scan-manifest
+          path: release-scan-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Run consumer harness against manifest-verified artifacts
+        run: |
+          python3 scripts/run-consumer-harness.py \
+            --manifest release-scan-manifest.json \
+            --artifacts-root "$GITHUB_WORKSPACE"
       - name: Publish distributions with trusted publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
-          skip-existing: true
           verbose: true

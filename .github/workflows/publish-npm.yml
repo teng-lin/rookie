@@ -16,6 +16,7 @@ env:
 
 permissions:
   contents: read
+  administration: read
 
 concurrency:
   group: publish-npm
@@ -65,6 +66,10 @@ jobs:
           git merge-base --is-ancestor "$release_sha" origin/main
           python scripts/check-release.py "$RELEASE_VERSION"
           echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
+      - name: Verify live release controls
+        run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "${{ steps.release.outputs.sha }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -83,25 +88,30 @@ jobs:
             }
           "
 
+  # release/platform-contract.json is the one place the npm native
+  # platform/target list is spelled out now — see scripts/platform_contract.py.
+  load-contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: matrix
+        run: |
+          set -euo pipefail
+          python3 scripts/platform_contract.py --validate
+          echo "matrix=$(python3 scripts/platform_contract.py --emit-matrix npm-native)" >>"$GITHUB_OUTPUT"
+
   build:
-    needs: preflight
+    needs: [preflight, load-contract]
     strategy:
       fail-fast: false
-      matrix:
-        settings:
-          - host: macos-latest
-            target: x86_64-apple-darwin
-            build: npm run build -- --target x86_64-apple-darwin --cargo-flags=--locked
-          - host: windows-latest
-            build: npm run build -- --target x86_64-pc-windows-msvc --cargo-flags=--locked
-            target: x86_64-pc-windows-msvc
-          - host: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust@sha256:6f910fc8a723a1eeab2483d2302e8c1fabe36e54c51eb0da27fafd5c3083e08c
-            build: npm run build -- --target x86_64-unknown-linux-gnu --cargo-flags=--locked
-          - host: macos-latest
-            target: aarch64-apple-darwin
-            build: npm run build -- --target aarch64-apple-darwin --cargo-flags=--locked
+      matrix: ${{ fromJSON(needs.load-contract.outputs.matrix) }}
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -137,6 +147,8 @@ jobs:
       - name: Build in docker
         if: ${{ matrix.settings.docker }}
         shell: bash
+        env:
+          ROOKIE_COOKIES_SOURCE_SHA: ${{ needs.preflight.outputs.release_sha }}
         run: |
           mkdir -p .cargo-cache/git/db .cargo-cache/registry/cache .cargo-cache/registry/index
           node22_root="$(dirname "$(dirname "$(command -v node)")")"
@@ -149,6 +161,7 @@ jobs:
           # every workspace member (cli/, bindings/python/) it needs to parse to
           # resolve the graph — `--locked` requires all of this to be visible.
           docker run --rm --user 0:0 \
+            -e ROOKIE_COOKIES_SOURCE_SHA \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/git/db:/usr/local/cargo/git/db" \
             -v "$GITHUB_WORKSPACE/bindings/node/.cargo-cache/registry/cache:/usr/local/cargo/registry/cache" \
@@ -172,6 +185,8 @@ jobs:
         run: ${{ matrix.settings.build }}
         if: ${{ !matrix.settings.docker }}
         shell: bash
+        env:
+          ROOKIE_COOKIES_SOURCE_SHA: ${{ needs.preflight.outputs.release_sha }}
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -322,6 +337,11 @@ jobs:
         shell: bash
         env:
           RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+          # This workflow is the coordinator: it runs from `main`, and
+          # `github.sha` is *its own* commit — the tag's source SHA above is
+          # a separate value, since publish-npm.yml is dispatched from `main`
+          # rather than from the release tag (see docs/RELEASING.md).
+          CONTROLLER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           release_root="../../release-packages/npm"
@@ -331,12 +351,20 @@ jobs:
           cp "npm/win32-x64-msvc/$windows_binary" "$scan_dir/$windows_binary"
           mapfile -t tarballs < <(find "$release_root" -maxdepth 1 -name '*.tgz' -type f | sort)
           test "${#tarballs[@]}" -eq 5
+          contract_digest="$(python3 ../../scripts/platform_contract.py --digest)"
           python ../../scripts/write-release-scan-manifest.py \
             --version "$RELEASE_VERSION" \
             --source-sha "$RELEASE_SHA" \
+            --controller-sha "$CONTROLLER_SHA" \
+            --platform-contract-digest "$contract_digest" \
             --root "$release_root" \
             --output "$scan_dir/release-scan-manifest.json" \
             "${tarballs[@]}" "$scan_dir/$windows_binary"
+      - name: Run consumer harness against manifest-verified artifacts
+        run: |
+          python3 ../../scripts/run-consumer-harness.py \
+            --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
+            --artifacts-root ../../release-packages/npm
       - name: Upload release tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -24,6 +24,8 @@ class ReleaseScanManifestTests(unittest.TestCase):
             tarball.write_bytes(b"package-tarball")
             output = artifact_root / "scan" / "release-scan-manifest.json"
             source_sha = "a" * 40
+            controller_sha = "c" * 40
+            contract_digest = "d" * 64
 
             subprocess.run(
                 [
@@ -33,6 +35,10 @@ class ReleaseScanManifestTests(unittest.TestCase):
                     "0.5.9",
                     "--source-sha",
                     source_sha,
+                    "--controller-sha",
+                    controller_sha,
+                    "--platform-contract-digest",
+                    contract_digest,
                     "--root",
                     str(artifact_root),
                     "--output",
@@ -46,8 +52,15 @@ class ReleaseScanManifestTests(unittest.TestCase):
             manifest = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(
                 manifest["release"],
-                {"source_sha": source_sha, "tag": "v0.5.9", "version": "0.5.9"},
+                {
+                    "source_sha": source_sha,
+                    "controller_sha": controller_sha,
+                    "platform_contract_digest": contract_digest,
+                    "tag": "v0.5.9",
+                    "version": "0.5.9",
+                },
             )
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(
                 [record["path"] for record in manifest["artifacts"]],
                 ["rookie.tgz", "scan/rookie.node"],
@@ -73,6 +86,10 @@ class ReleaseScanManifestTests(unittest.TestCase):
                     "0.5.9",
                     "--source-sha",
                     "b" * 40,
+                    "--controller-sha",
+                    "c" * 40,
+                    "--platform-contract-digest",
+                    "d" * 64,
                     "--root",
                     str(artifact_root),
                     "--output",
@@ -85,6 +102,70 @@ class ReleaseScanManifestTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("outside manifest root", result.stderr)
+
+    def test_rejects_a_malformed_controller_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_root = Path(temporary) / "release"
+            artifact_root.mkdir()
+            artifact = artifact_root / "a.bin"
+            artifact.write_bytes(b"x")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--version",
+                    "0.5.9",
+                    "--source-sha",
+                    "a" * 40,
+                    "--controller-sha",
+                    "not-a-sha",
+                    "--platform-contract-digest",
+                    "d" * 64,
+                    "--root",
+                    str(artifact_root),
+                    "--output",
+                    str(artifact_root / "manifest.json"),
+                    str(artifact),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("controller SHA", result.stderr)
+
+    def test_rejects_a_malformed_platform_contract_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_root = Path(temporary) / "release"
+            artifact_root.mkdir()
+            artifact = artifact_root / "a.bin"
+            artifact.write_bytes(b"x")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--version",
+                    "0.5.9",
+                    "--source-sha",
+                    "a" * 40,
+                    "--controller-sha",
+                    "c" * 40,
+                    "--platform-contract-digest",
+                    "too-short",
+                    "--root",
+                    str(artifact_root),
+                    "--output",
+                    str(artifact_root / "manifest.json"),
+                    str(artifact),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("platform contract digest", result.stderr)
 
 
 if __name__ == "__main__":

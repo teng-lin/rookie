@@ -19,14 +19,14 @@ try:
 except ModuleNotFoundError as error:
     raise SystemExit("bump-version.py requires Python 3.11 or newer") from error
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import platform_contract  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
-NATIVE_PACKAGES = (
-    "rookie-cookies-darwin-arm64",
-    "rookie-cookies-darwin-x64",
-    "rookie-cookies-linux-x64-gnu",
-    "rookie-cookies-win32-x64-msvc",
-)
+# The npm native platform-package set now has exactly one source of truth:
+# release/platform-contract.json. See scripts/platform_contract.py.
+NATIVE_PACKAGES = platform_contract.npm_native_packages(platform_contract.load_contract())
 NATIVE_MANIFESTS = tuple(
     Path("bindings/node/npm")
     / package_name.removeprefix("rookie-cookies-")
@@ -290,13 +290,31 @@ def verify_release(root: Path, version: str) -> None:
 
 
 def normalize_native_lock_records(path: Path, version: str) -> None:
-    """Add npm-ci placeholders for native versions that are not published yet."""
+    """Add npm-ci placeholders for native versions that are not published yet.
+
+    A record already carrying `resolved`/`integrity` for the *target* version
+    (e.g. a real `npm install` already pinned this exact release's SRI hash)
+    is left untouched instead of being overwritten with a bare placeholder —
+    the previous unconditional overwrite silently stripped that SRI pin on
+    every bump, including no-op re-runs where the version did not change.
+    Only a record for a *different* version is replaced: no SHA can exist yet
+    for content that has not been published.
+    """
     lockfile = load_json(path)
     packages = lockfile.get("packages")
     if not isinstance(packages, dict) or "" not in packages:
         raise ReleaseError(f"{path}: missing lockfile package records")
     for package_name in NATIVE_PACKAGES:
-        packages[f"node_modules/{package_name}"] = {
+        key = f"node_modules/{package_name}"
+        existing = packages.get(key)
+        if (
+            isinstance(existing, dict)
+            and existing.get("version") == version
+            and "resolved" in existing
+            and "integrity" in existing
+        ):
+            continue
+        packages[key] = {
             "version": version,
             "optional": True,
         }

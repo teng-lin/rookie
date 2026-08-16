@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,9 @@ try:
     import tomllib
 except ModuleNotFoundError as error:
     raise SystemExit("check-release.py requires Python 3.11 or newer") from error
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import platform_contract  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,12 +33,10 @@ SEMVER_PATTERN = re.compile(
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
     r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
-NATIVE_PACKAGES = (
-    "rookie-cookies-darwin-arm64",
-    "rookie-cookies-darwin-x64",
-    "rookie-cookies-linux-x64-gnu",
-    "rookie-cookies-win32-x64-msvc",
-)
+SRI_INTEGRITY_PATTERN = re.compile(r"^sha(256|384|512)-[A-Za-z0-9+/]+={0,2}$")
+# The npm native platform-package set now has exactly one source of truth:
+# release/platform-contract.json. See scripts/platform_contract.py.
+NATIVE_PACKAGES = platform_contract.npm_native_packages(platform_contract.load_contract())
 RUST_PACKAGES = (
     ("rookie-rs/Cargo.toml", "rookie-cookies"),
     ("cli/Cargo.toml", "rookie-cookies-cli"),
@@ -62,6 +64,45 @@ def is_semver(version: str) -> bool:
         not (identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0"))
         for identifier in prerelease.split(".")
     )
+
+
+def semver_precedence_key(version: str) -> tuple[Any, ...]:
+    """A key such that comparing two SemVer strings' keys matches SemVer precedence."""
+    match = SEMVER_PATTERN.fullmatch(version)
+    if match is None:
+        raise ValueError(f"not a SemVer version: {version!r}")
+    major, minor, patch, prerelease, _build = match.groups()
+    core = (int(major), int(minor), int(patch))
+    if prerelease is None:
+        return (core, (1,))
+    identifiers = tuple(
+        (0, int(part)) if part.isdigit() else (1, part) for part in prerelease.split(".")
+    )
+    return (core, (0, identifiers))
+
+
+def latest_published_version(root: Path, *, excluding: str) -> str | None:
+    """The highest SemVer-precedence `v*` tag in `root`, other than `v{excluding}`.
+
+    `excluding` is the version being released: its own tag, if the release
+    workflow already created it before this check runs, must not count as a
+    "previously published" version to compare against.
+    """
+    result = subprocess.run(
+        ["git", "tag", "--list", "v*"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    versions = [
+        tag[1:]
+        for tag in (line.strip() for line in result.stdout.splitlines())
+        if tag.startswith("v") and is_semver(tag[1:]) and tag[1:] != excluding
+    ]
+    if not versions:
+        return None
+    return max(versions, key=semver_precedence_key)
 
 
 def inherited_package_version(manifest: dict[str, Any]) -> bool:
@@ -210,6 +251,14 @@ def main() -> int:
     ]
 
     failures: list[str] = []
+
+    previous = latest_published_version(ROOT, excluding=expected)
+    if previous is not None and semver_precedence_key(expected) <= semver_precedence_key(previous):
+        failures.append(
+            f"release version {expected} does not exceed the latest published version "
+            f"{previous} (v* tag); a release must strictly increase SemVer precedence"
+        )
+
     for manifest_path, package_name in RUST_PACKAGES:
         manifest = load_toml(manifest_path)
         if not inherited_package_version(manifest):
@@ -297,6 +346,18 @@ def main() -> int:
             if lock_record.get("optional") is not True:
                 failures.append(
                     f"bindings/node/package-lock.json package record {package_name}: must remain optional"
+                )
+            has_resolved = "resolved" in lock_record
+            has_integrity = "integrity" in lock_record
+            if has_resolved != has_integrity:
+                failures.append(
+                    f"bindings/node/package-lock.json package record {package_name}: "
+                    "resolved and integrity must be set or absent together, not just one"
+                )
+            elif has_integrity and not SRI_INTEGRITY_PATTERN.fullmatch(lock_record["integrity"]):
+                failures.append(
+                    f"bindings/node/package-lock.json package record {package_name}: "
+                    f"integrity {lock_record['integrity']!r} is not a well-formed SRI hash"
                 )
         metadata.extend(
             (
