@@ -86,7 +86,9 @@ paths = [
 # Named in #218's own problem statement as the four original hot spots;
 # no rollout PR claims to have fully contained these.
 "rookie-rs/src/browser/chromium.rs" = { max_cfg = 60, reason = "original #218 hot spot, not a rollout target" }
-"rookie-rs/src/browser/registry.rs" = { max_cfg = 27, reason = "original #218 hot spot; includes the IE/Safari leaf call sites" }
+"rookie-rs/src/browser/registry.rs" = { max_cfg = 8, reason = "original #218 hot spot at 27; now shared-core only after the chromium/gecko split (PR #251) moved its engine-specific cfg out, plus 2 new cfg-gated re-export lines needed so chromium.rs's platform-gated symbols aren't unconditionally re-exported" }
+"rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 20, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
+"rookie-rs/src/browser/registry/gecko.rs" = { max_cfg = 1, reason = "Gecko-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
 "rookie-rs/src/lib.rs" = { max_cfg = 27, reason = "original #218 hot spot, not a rollout target" }
 
 # mod.rs files whose cfg is only *partly* the module-selection gate

@@ -1108,14 +1108,19 @@ fn engine_roots<'a>(
 
 mod chromium;
 
+#[cfg(unix)]
+pub(crate) use chromium::chromium_key_credentials;
 #[cfg(test)]
 pub(crate) use chromium::CookieSourceCandidate;
 pub(crate) use chromium::{
-  chrome_profiles_with_runtime, chromium_key_credentials, chromium_listing_with_runtime,
-  chromium_registry_report_with_runtime, direct_path_chromium_identity,
-  legacy_chromium_outcome_with_runtime, registry_key_credentials,
+  chrome_profiles_with_runtime, chromium_listing_with_runtime,
+  chromium_registry_report_with_runtime, legacy_chromium_outcome_with_runtime,
   select_chrome_profile_with_runtime, ChromiumProfile, ChromiumProfileDraft,
-  ChromiumProfileFailure, ChromiumRegistryDraft, DirectPathChromiumIdentity,
+  ChromiumProfileFailure, ChromiumRegistryDraft,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use chromium::{
+  direct_path_chromium_identity, registry_key_credentials, DirectPathChromiumIdentity,
 };
 
 mod gecko;
