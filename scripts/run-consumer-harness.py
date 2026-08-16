@@ -46,17 +46,21 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+_MANIFEST_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import jcs  # noqa: E402
 import platform_contract  # noqa: E402
 
 
@@ -409,6 +413,16 @@ def main() -> int:
         default=platform_contract.DEFAULT_CONTRACT_PATH,
         help="path to platform-contract.json, for re-checking each artifact's manifest helper_roles",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "write a structured JSON evidence record to this path, bound to the "
+            "manifest's release.manifest_digest (schema_version 4+; see "
+            "write-release-scan-manifest.py) -- see release-hardening program R4. "
+            "Does not change stdout/exit-code behavior."
+        ),
+    )
     args = parser.parse_args()
 
     contract = platform_contract.load_contract(args.platform_contract)
@@ -427,6 +441,43 @@ def main() -> int:
         parser.error("--manifest and --artifacts-root are required unless --check-native-coverage is given")
 
     manifest = load_manifest(args.manifest)
+
+    release = manifest.get("release")
+    manifest_digest = release.get("manifest_digest") if isinstance(release, dict) else None
+    if args.output is not None and not (
+        isinstance(manifest_digest, str) and _MANIFEST_DIGEST_PATTERN.fullmatch(manifest_digest)
+    ):
+        print(
+            f"{args.manifest}: --output was given but release.manifest_digest is missing or "
+            f"not a valid SHA-256 hex digest (got {manifest_digest!r}; schema_version 4+ "
+            "required; see write-release-scan-manifest.py)",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.output is not None:
+        # The digest is otherwise write-only: copied verbatim from the
+        # manifest into the evidence record without ever being checked
+        # against the document it claims to bind. Recompute it the same way
+        # write-release-scan-manifest.py does (see that script for why the
+        # comparison excludes the manifest_digest field itself) so evidence
+        # can't attest to bytes that were never actually verified -- a
+        # manifest whose release/artifacts drifted from each other (a
+        # partial edit, a bad merge) would otherwise carry a stale digest
+        # straight through into "evidence."
+        expected_digest = jcs.digest(
+            {
+                "release": {key: value for key, value in release.items() if key != "manifest_digest"},
+                "artifacts": manifest.get("artifacts", []),
+            }
+        )
+        if expected_digest != manifest_digest:
+            print(
+                f"{args.manifest}: release.manifest_digest {manifest_digest!r} does not match "
+                f"the manifest's actual content (recomputed {expected_digest!r})",
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         verified = verify_artifacts(manifest, args.artifacts_root, contract)
@@ -454,6 +505,22 @@ def main() -> int:
     for artifact_path, outcome in results:
         print(f"{artifact_path}: {outcome}")
     print(f"Consumer harness: {len(results)} artifact(s) verified against {args.manifest}.")
+
+    if args.output is not None:
+        host_os, host_cpu = current_host_npm_os_cpu()
+        evidence = {
+            "schema_version": 1,
+            "manifest_digest": manifest_digest,
+            "host": {"os": host_os, "cpu": host_cpu},
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "results": [
+                {"path": artifact_path, "outcome": outcome}
+                for artifact_path, outcome in results
+            ],
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
     return 0
 
 

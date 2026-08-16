@@ -314,6 +314,99 @@ def contract_digest(path: Path = DEFAULT_CONTRACT_PATH) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _cell_identity(cell: dict[str, Any]) -> tuple[Any, ...]:
+    # The same compound key validate() uses to detect duplicate cells
+    # (artifact_id alone is not unique -- the real contract has 9 `wheel`
+    # cells, 4 `npm-native` cells, and 4 `cli` cells, one per platform/libc
+    # combination). Keying only on artifact_id would silently collapse all
+    # of a real artifact_id's cells down to whichever one happens to be
+    # last in list order, hiding a changed or newly-added cell whenever a
+    # sibling cell with the same artifact_id already exists.
+    return (
+        cell.get("artifact_id"),
+        cell.get("registry"),
+        cell.get("os"),
+        cell.get("cpu"),
+        cell.get("libc"),
+    )
+
+
+def diff_cells(base_contract: dict[str, Any], head_contract: dict[str, Any]) -> list[str]:
+    """The sorted, de-duplicated `artifact_id`s of cells that are new in
+    `head_contract` or whose content differs from `base_contract` --
+    release-hardening program R4's "does this PR add or change an
+    artifact/helper cell" signal, since the contract schema itself carries
+    no `added_in`/`new` provenance field.
+
+    Cells are matched between `base_contract` and `head_contract` by their
+    full identity (`_cell_identity`, the same tuple `validate()` uses),
+    not by `artifact_id` alone -- an `artifact_id` can have many cells (one
+    per platform/libc combination). A cell whose identity is present in
+    both with identical content is not reported. One present in
+    `base_contract` but removed in `head_contract` is not reported either:
+    this only answers "does head introduce or change a cell that needs
+    fresh candidate-bundle evidence", not "what changed about the set as a
+    whole". The returned list reports each affected `artifact_id` once,
+    even if multiple of its cells changed.
+    """
+    base_by_identity = {_cell_identity(cell): cell for cell in cells(base_contract)}
+    head_by_identity = {_cell_identity(cell): cell for cell in cells(head_contract)}
+    changed_artifact_ids = {
+        identity[0]
+        for identity, cell in head_by_identity.items()
+        if identity not in base_by_identity or base_by_identity[identity] != cell
+    }
+    return sorted(changed_artifact_ids)
+
+
+def _repo_root_for(path: Path) -> Path:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=path.parent,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ContractError(
+            f"cannot find a git repository containing {path}: {result.stderr.strip()}"
+        )
+    return Path(result.stdout.strip())
+
+
+def _load_contract_at_ref(ref: str, contract_path: Path) -> dict[str, Any]:
+    import subprocess
+
+    if ref.startswith("-"):
+        # `git show <ref>:<path>` would otherwise treat a leading `-` as an
+        # option rather than a revision. `git show -- <ref>:<path>` is not a
+        # fix -- it makes git parse the whole `<ref>:<path>` as a bare
+        # pathspec instead of a revision, which breaks every legitimate call.
+        # Refs come from GitHub's own SHA/ref context in production, so this
+        # is unreachable there, but a plain check-and-reject here is correct
+        # where a `--` workaround would not have been.
+        raise ContractError(f"refusing a ref that looks like an option: {ref!r}")
+
+    resolved = contract_path.resolve()
+    repo_root = _repo_root_for(resolved)
+    relative = resolved.relative_to(repo_root).as_posix()
+    result = subprocess.run(
+        ["git", "show", f"{ref}:{relative}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ContractError(
+            f"cannot read {relative} at {ref}: {result.stderr.strip() or 'git show failed'}"
+        )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ContractError(f"{relative} at {ref} is not valid JSON: {error}") from error
+
+
 _EMITTABLE_MATRICES = ("cli", "npm-native", "wheel-linux", "wheel-win32", "wheel-darwin")
 
 
@@ -337,6 +430,16 @@ def parse_args() -> argparse.Namespace:
         choices=_EMITTABLE_MATRICES,
         help="print one workflow's build matrix as compact JSON (for GitHub Actions fromJSON) and exit",
     )
+    parser.add_argument(
+        "--diff-cells",
+        nargs=2,
+        metavar=("BASE_SHA", "HEAD_SHA"),
+        help=(
+            "print, one per line, the artifact_ids of cells added or changed in "
+            "--contract between BASE_SHA and HEAD_SHA (release-hardening program "
+            "R4); prints nothing and exits 0 if none changed"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -350,6 +453,18 @@ def main() -> int:
     if args.emit_matrix:
         contract = load_contract(args.contract)
         print(json.dumps(emit_matrix(contract, args.emit_matrix), separators=(",", ":")))
+        return 0
+
+    if args.diff_cells:
+        base_sha, head_sha = args.diff_cells
+        try:
+            base_contract = _load_contract_at_ref(base_sha, args.contract)
+            head_contract = _load_contract_at_ref(head_sha, args.contract)
+        except ContractError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        for artifact_id in diff_cells(base_contract, head_contract):
+            print(artifact_id)
         return 0
 
     contract = load_contract(args.contract)

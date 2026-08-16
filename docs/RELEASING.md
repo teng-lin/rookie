@@ -248,6 +248,56 @@ can honestly claim to check. Building the process-isolation architecture
 that language actually requires is tracked separately in
 [#244](https://github.com/teng-lin/rookie-cookies/issues/244).
 
+## Candidate bundles and CI proof (release-hardening program R4/R5)
+
+Two pieces of release-hardening program #230's "PR 2" are implemented and
+tested, but neither is load-bearing yet — they don't gate any
+`publish-*.yml` workflow, and nothing here changes what publishing requires
+today. They exist to be reviewed and iterated on independently before that
+wiring happens.
+
+**R4 — candidate-bundle evidence** (`.github/workflows/candidate-bundle.yml`).
+A PR that adds or changes a cell in `release/platform-contract.json` (checked
+via `scripts/platform_contract.py --diff-cells`) triggers the same build
+pipeline `artifact-smoke.yml` already runs, assembles a *candidate* bundle
+the same way a real release would (`write-release-scan-manifest.py --kind
+candidate`), and runs the R3 consumer harness against it with `--output`,
+producing a structured evidence file bound to that candidate manifest's
+digest. The bundle is never published anywhere; the evidence is uploaded as
+a 7-day build artifact for review. This exists to eventually let a release's
+evidence be traced back to what was actually reviewed on the PR that
+introduced a cell, closing the gap where a release build and a PR's smoke
+test are today two independent, unlinked builds of the same code.
+
+**R5 — non-spoofable CI proof** (`scripts/write-ci-proof.py`).
+`scripts/check-release-controls.py`'s existing required-checks preflight
+verifies a commit's checks by name alone against `commits/{sha}/check-runs`
+— it doesn't verify which workflow, run, or repository actually produced
+each one, and the GitHub Checks API doesn't tie a check-run's name to any
+particular workflow: any token or App with `checks:write` on the repo can
+post a check-run under an arbitrary name for an arbitrary commit.
+`write-ci-proof.py` resolves every required check to its exact producing job
+and run (`check_run.id == job.id`, then `actions/jobs/{id}` →
+`actions/runs/{run_id}`) and verifies the run's repository, workflow file
+path, trigger event, and `head_sha` all genuinely match — not just the
+check-run's name. It writes a JCS-hashed (RFC 8785) `ci-proof.json` bound to
+a release manifest digest. Real cryptographic attestation (Sigstore/OIDC
+signing) beyond that digest is out of scope here, same as PR 1's R3 already
+deferred full attestation — this is a digest binding, not a signature.
+
+Both scripts have full unit test coverage (`tests/release/test_jcs.py`,
+`tests/release/test_write_ci_proof.py`, and the extended
+`tests/e2e/test_release_scan_manifest.py` /
+`tests/e2e/test_run_consumer_harness.py` / `tests/release/test_platform_contract.py`).
+`write-ci-proof.py`'s tests mock every `gh_api` response; anyone changing its
+verification logic should re-run it by hand against a real commit
+(`python3 scripts/write-ci-proof.py --commit-sha <sha> --manifest-digest <64
+hex chars> --output /tmp/ci-proof.json`, read-only against the GitHub API) as
+part of that review, since no CI job currently re-exercises it against live
+data. What's still open: wiring either script into a publish workflow as an
+actual gate, and the rest of #230's PR 2 (R6's digest-safe publication state
+machine and R7's controlled cutover), neither of which is started.
+
 ## Verify
 
 Confirm the exact versions on each registry, then smoke-test clean installs:
