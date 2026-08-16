@@ -324,8 +324,9 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
+const { JsCancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
+module.exports.JsCancellationHandle = JsCancellationHandle
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
     throw new TypeError(`Expected a native binding function: ${name}`)
@@ -424,7 +425,8 @@ function validateChromiumPathOptions(options) {
 function chromiumPathNative(nativeFunction, name) {
   const required = requiredNative(nativeFunction, name)
   return asyncNative(
-    (path, options) => required(path, validateChromiumPathOptions(options)),
+    (path, options, timeoutMs, cancellation) =>
+      required(path, validateChromiumPathOptions(options), timeoutMs, cancellation),
     name
   )
 }
@@ -444,6 +446,7 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
 
+module.exports.JsCancellationHandle = requiredNative(JsCancellationHandle, 'JsCancellationHandle')
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
