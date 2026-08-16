@@ -229,8 +229,8 @@ pub(crate) fn gecko_profiles(browser_id: &str) -> Result<Vec<MozillaProfile>> {
 mod tests {
   use super::*;
   use crate::browser::registry::{
-    EngineProfileExtraction, SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE,
-    SOURCE_ROLE_PERSISTENT, SOURCE_ROLE_SESSION,
+    test_seams, EngineProfileExtraction, PlatformId, SourceAcquisition, SourceFailureStage,
+    PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT, SOURCE_ROLE_SESSION,
   };
   use std::path::PathBuf;
 
@@ -296,6 +296,17 @@ mod tests {
       error_stage: SourceFailureStage::Parse,
       row_error: None,
     }
+  }
+
+  fn actual_safari_outcome(fixture: &[u8]) -> EngineExtractionOutcome {
+    let directory = crate::utils::TempDir::new().expect("temporary Safari fixture directory");
+    let context = test_seams::context(PlatformId::Macos, directory.path().to_path_buf());
+    let library = test_seams::primary_root_path(&context, "safari");
+    let cookie_directory = library.join("Containers/com.apple.Safari/Data/Library/Cookies");
+    std::fs::create_dir_all(&cookie_directory).expect("create Safari cookie directory");
+    std::fs::write(cookie_directory.join("Cookies.binarycookies"), fixture)
+      .expect("write Safari fixture");
+    test_seams::safari_report(&context, "safari", None, None).expect("extract Safari fixture")
   }
 
   fn empty_outcome_with_issue(code: &'static str) -> EngineExtractionOutcome {
@@ -403,6 +414,37 @@ mod tests {
     assert!(error
       .to_string()
       .contains("all Internet Explorer WebCache records failed to decode"));
+  }
+
+  #[test]
+  fn legacy_safari_projection_errors_when_every_embedded_nul_record_is_malformed() {
+    let outcome = actual_safari_outcome(&crate::browser::safari::embedded_nul_test_fixture(
+      "name", false,
+    ));
+    assert_eq!(outcome.profiles[0].sources[0].rows_seen, 1);
+    assert_eq!(outcome.profiles[0].sources[0].rows_skipped, 1);
+
+    let error = project_engine_outcome("safari", outcome, LegacyEnginePolicy::Safari)
+      .expect_err("legacy Safari must preserve the existing all-malformed error");
+    assert!(error.to_string().contains("c string contains embedded NUL"));
+    assert!(!is_browser_not_installed(&error));
+  }
+
+  #[test]
+  fn legacy_safari_projection_keeps_valid_rows_beside_an_embedded_nul_record() {
+    let outcome = actual_safari_outcome(&crate::browser::safari::embedded_nul_test_fixture(
+      "path", true,
+    ));
+    assert_eq!(outcome.profiles[0].sources[0].rows_seen, 2);
+    assert_eq!(outcome.profiles[0].sources[0].rows_skipped, 1);
+
+    let cookies = project_engine_outcome("safari", outcome, LegacyEnginePolicy::Safari)
+      .expect("legacy Safari keeps the valid record");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].domain, ".good.test");
+    assert_eq!(cookies[0].name, "good");
+    assert_eq!(cookies[0].path, "/");
+    assert_eq!(cookies[0].value, "kept");
   }
 
   #[test]

@@ -1806,6 +1806,76 @@ mod engine_chain_tests {
     assert_eq!(report.profiles[0].profile.browser_id.as_str(), "safari");
   }
 
+  fn safari_report_from_embedded_nul_fixture(
+    tag: &str,
+    field: &str,
+    include_valid: bool,
+  ) -> ExtractionReport {
+    use crate::browser::registry::PlatformId;
+
+    let temp = TempDir::new(tag);
+    let context = test_seams::context(PlatformId::Macos, temp.path().to_path_buf());
+    let library = test_seams::primary_root_path(&context, "safari");
+    let cookies = library.join("Containers/com.apple.Safari/Data/Library/Cookies");
+    std::fs::create_dir_all(&cookies).expect("create Safari cookie directory");
+    std::fs::write(
+      cookies.join("Cookies.binarycookies"),
+      crate::browser::safari::embedded_nul_test_fixture(field, include_valid),
+    )
+    .expect("seed Safari embedded-NUL fixture");
+
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+    let outcome =
+      engine_browser_outcome(&BrowserId::known("safari"), engine).expect("adapt the Safari report");
+    assemble(1, vec![outcome])
+  }
+
+  #[test]
+  fn mixed_safari_embedded_nul_fixture_is_partial_with_exact_row_accounting() {
+    let report = safari_report_from_embedded_nul_fixture("safari-nul-mixed", "domain", true);
+    let source = &report.profiles[0].sources[0];
+
+    assert_eq!(report.status, ReportStatusCode::partial());
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+    assert_eq!(source.stats.rows_seen, 2);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.cookies_emitted, 1);
+    assert_eq!(source.cookies.len(), 1);
+    assert_eq!(source.cookies[0].domain, ".good.test");
+    assert_eq!(source.cookies[0].name, "good");
+    assert_eq!(source.cookies[0].path, "/");
+    assert_eq!(source.cookies[0].value, "kept");
+    let issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "row_read_failed")
+      .expect("malformed row issue");
+    assert_eq!(issue.stage.as_str(), "parse");
+    assert_eq!(issue.occurrences, 1);
+  }
+
+  #[test]
+  fn all_malformed_safari_embedded_nul_fixture_fails_with_counted_row() {
+    let report =
+      safari_report_from_embedded_nul_fixture("safari-nul-all-malformed", "value", false);
+    let source = &report.profiles[0].sources[0];
+
+    assert_eq!(report.status, ReportStatusCode::failed());
+    assert_eq!(source.status, SourceStatusCode::failed());
+    assert_eq!(source.stats.rows_seen, 1);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.cookies_emitted, 0);
+    assert!(source.cookies.is_empty());
+    assert!(source.issues.iter().any(|issue| {
+      issue.code.as_str() == "row_read_failed"
+        && issue.stage.as_str() == "parse"
+        && issue.occurrences == 1
+    }));
+    assert!(source.issues.iter().any(|issue| {
+      issue.code.as_str() == "source_extraction_failed" && issue.stage.as_str() == "parse"
+    }));
+  }
+
   /// `~/Library` belongs to macOS, not to Safari. Another browser's data under
   /// it must not make Safari report itself detected and then degraded.
   #[test]
