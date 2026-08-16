@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  administration: read
 
 concurrency:
   group: publish-crate
@@ -47,11 +48,20 @@ jobs:
           test "$release_sha" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$release_sha" origin/main
           python scripts/check-release.py "$RELEASE_VERSION"
+          echo "RELEASE_SHA=$release_sha" >>"$GITHUB_ENV"
+
+      - name: Verify live release controls
+        run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "$RELEASE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Verify crate package
         run: cargo publish --dry-run --locked -p rookie-cookies --features appbound
+        env:
+          ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}
 
       - name: Publish crate
         run: cargo publish --locked -p rookie-cookies --features appbound
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}

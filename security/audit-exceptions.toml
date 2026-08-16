@@ -1,0 +1,11 @@
+# RustSec advisory exceptions for `cargo audit` (wired in
+# .github/workflows/test-rust.yml's `cargo-audit` job via
+# scripts/check-audit-exceptions.py).
+#
+# Every advisory `cargo audit` reports against the committed Cargo.lock must
+# have a matching, non-expired entry here, or the job fails closed. Each
+# entry must carry an owner, a rationale, and an ISO-8601 expiry date so an
+# exception cannot silently outlive the reason it was granted.
+#
+# There are no exceptions today: this file is intentionally empty of
+# [[exception]] entries.

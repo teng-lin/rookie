@@ -1,0 +1,489 @@
+{
+  "schema_version": 1,
+  "notes": [
+    "Source of truth for every artifact/platform cell this project builds,",
+    "advertises, and publishes. scripts/platform_contract.py validates this",
+    "file's internal consistency and is the single loader every workflow and",
+    "script that used to hardcode its own platform list now reads from.",
+    "",
+    "`execute` classifications below were derived by reading each publish",
+    "workflow's `runs-on`/matrix/docker configuration, not by empirically",
+    "instrumenting a real build. Anything not built on a runner whose own",
+    "CPU architecture matches the target (i.e. anything cross-compiled) is",
+    "classified conservatively as \"qemu\" or \"untested\" rather than",
+    "\"native\", which is why several cells below carry an accepted_risk \u2014",
+    "review those classifications against real CI behavior before treating",
+    "them as verified."
+  ],
+  "cells": [
+    {
+      "artifact_id": "crate",
+      "registry": "crates.io",
+      "os": null,
+      "cpu": null,
+      "libc": null,
+      "features": [
+        "appbound"
+      ],
+      "runtime_floor": {},
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [],
+      "accepted_risk": null,
+      "notes": "Source publish; cargo builds it on whatever host runs publish-crate.yml (ubuntu-latest) and cargo test already exercises it there."
+    },
+    {
+      "artifact_id": "npm-root",
+      "registry": "npm",
+      "os": null,
+      "cpu": null,
+      "libc": null,
+      "features": [],
+      "runtime_floor": {
+        "node": "22"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [],
+      "accepted_risk": null,
+      "notes": "Pure JS loader package; no native compilation."
+    },
+    {
+      "artifact_id": "sdist",
+      "registry": "pypi",
+      "os": null,
+      "cpu": null,
+      "libc": null,
+      "features": [],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [],
+      "accepted_risk": null,
+      "notes": "Source distribution; maturin packages it without compiling."
+    },
+    {
+      "artifact_id": "npm-native",
+      "registry": "npm",
+      "os": "darwin",
+      "cpu": "arm64",
+      "libc": null,
+      "features": [
+        "keychain"
+      ],
+      "runtime_floor": {
+        "node": "22"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keychain"
+      ],
+      "accepted_risk": null,
+      "notes": "Built and binding-tested on macos-latest (arm64) across Node 22/24/26 in publish-npm.yml's test-macOS-windows-binding job.",
+      "npm_platform": "darwin-arm64",
+      "target_triple": "aarch64-apple-darwin",
+      "runner": "macos-latest"
+    },
+    {
+      "artifact_id": "npm-native",
+      "registry": "npm",
+      "os": "darwin",
+      "cpu": "x64",
+      "libc": null,
+      "features": [
+        "keychain"
+      ],
+      "runtime_floor": {
+        "node": "22"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "untested",
+      "helper_roles": [
+        "keychain"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "macos-latest GitHub runners are Apple Silicon (arm64); the x64 build is a native cross-compile with no QEMU involved, but nothing in publish-npm.yml executes the resulting binary or exercises real Keychain access from an actual Intel host or Rosetta process.",
+        "expires": "2026-12-31"
+      },
+      "notes": "Built via cross-compile only; publish-npm.yml's test-macOS-windows-binding matrix does not include darwin-x64.",
+      "npm_platform": "darwin-x64",
+      "target_triple": "x86_64-apple-darwin",
+      "runner": "macos-latest"
+    },
+    {
+      "artifact_id": "npm-native",
+      "registry": "npm",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "gnu",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "node": "22"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": null,
+      "notes": "Built inside a napi-rs Docker image on ubuntu-latest (x64 host, no emulation); node test (ubuntu-latest) jobs in test-rust.yml exercise it on real Node.",
+      "npm_platform": "linux-x64-gnu",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "runner": "ubuntu-latest",
+      "docker_image": "ghcr.io/napi-rs/napi-rs/nodejs-rust@sha256:6f910fc8a723a1eeab2483d2302e8c1fabe36e54c51eb0da27fafd5c3083e08c"
+    },
+    {
+      "artifact_id": "npm-native",
+      "registry": "npm",
+      "os": "win32",
+      "cpu": "x64",
+      "libc": "msvc",
+      "features": [
+        "appbound"
+      ],
+      "runtime_floor": {
+        "node": "22"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "dpapi",
+        "appbound"
+      ],
+      "accepted_risk": null,
+      "notes": "Built and binding-tested on windows-latest across Node 22/24/26; the App-Bound v20 canary in e2e.yml exercises the real Windows path separately.",
+      "npm_platform": "win32-x64-msvc",
+      "target_triple": "x86_64-pc-windows-msvc",
+      "runner": "windows-latest"
+    },
+    {
+      "artifact_id": "cli",
+      "registry": "github-release",
+      "os": "darwin",
+      "cpu": "arm64",
+      "libc": null,
+      "features": [],
+      "runtime_floor": {},
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keychain"
+      ],
+      "accepted_risk": null,
+      "notes": "Built on macos-latest (arm64), the runner's native architecture.",
+      "target_triple": "aarch64-apple-darwin",
+      "runner": "macos-latest"
+    },
+    {
+      "artifact_id": "cli",
+      "registry": "github-release",
+      "os": "darwin",
+      "cpu": "x64",
+      "libc": null,
+      "features": [],
+      "runtime_floor": {},
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "untested",
+      "helper_roles": [
+        "keychain"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "Same cross-compile-without-execution situation as the darwin-x64 npm-native cell: built on an arm64 runner, never run.",
+        "expires": "2026-12-31"
+      },
+      "notes": "Built via cross-compile on macos-latest (arm64); publish-cli.yml has no execution/test step for any target.",
+      "target_triple": "x86_64-apple-darwin",
+      "runner": "macos-latest"
+    },
+    {
+      "artifact_id": "cli",
+      "registry": "github-release",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "gnu",
+      "features": [],
+      "runtime_floor": {},
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "untested",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "Built natively on ubuntu-22.04 (matching architecture, no emulation), but publish-cli.yml only builds and uploads the CLI binary \u2014 it never runs it before attaching it to the release.",
+        "expires": "2026-12-31"
+      },
+      "notes": "e2e.yml's ubuntu-chrome job does exercise a separately pre-built CLI binary via 'Pre-build the rookie-cookies CLI', but that is a dev build from source, not this exact release artifact.",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "runner": "ubuntu-22.04"
+    },
+    {
+      "artifact_id": "cli",
+      "registry": "github-release",
+      "os": "win32",
+      "cpu": "x64",
+      "libc": "msvc",
+      "features": [
+        "appbound"
+      ],
+      "runtime_floor": {},
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "untested",
+      "helper_roles": [
+        "dpapi",
+        "appbound"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "Built natively on windows-latest, but publish-cli.yml never runs the built binary; the App-Bound canary in e2e.yml exercises a separate dev build, not this release artifact.",
+        "expires": "2026-12-31"
+      },
+      "notes": "Highest-value gap to close first: this is the same App-Bound-featured target that has a dedicated real-hardware canary elsewhere, just not wired to the release artifact itself.",
+      "target_triple": "x86_64-pc-windows-msvc",
+      "runner": "windows-latest"
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "linux",
+      "cpu": "x86_64",
+      "libc": "manylinux",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": null,
+      "notes": "Runs on ubuntu-latest, the matching native architecture; Python module tests in test-rust.yml exercise the crate on this arch."
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "linux",
+      "cpu": "x86",
+      "libc": "manylinux",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": null,
+      "notes": "32-bit x86 runs natively on the x86_64 runner CPU (no QEMU), but is not covered by any test job."
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "linux",
+      "cpu": "aarch64",
+      "libc": "manylinux",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "qemu",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "maturin-action cross-compiles this target via QEMU-backed manylinux Docker images on an x86_64 runner; the resulting wheel is never executed before publishing.",
+        "expires": "2026-12-31"
+      },
+      "notes": null
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "linux",
+      "cpu": "armv7",
+      "libc": "manylinux",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "qemu",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "Same QEMU cross-compile as aarch64; never executed before publishing.",
+        "expires": "2026-12-31"
+      },
+      "notes": null
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "linux",
+      "cpu": "s390x",
+      "libc": "manylinux",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "qemu",
+      "helper_roles": [],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "Same QEMU cross-compile; s390x is a server/mainframe architecture with no realistic desktop-browser cookie store to read, so helper_roles is empty even though the crate is compiled with the same feature set.",
+        "expires": "2026-12-31"
+      },
+      "notes": "Worth revisiting whether this target should be advertised at all, given no real usage is expected on this architecture."
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "linux",
+      "cpu": "ppc64le",
+      "libc": "manylinux",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "qemu",
+      "helper_roles": [],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "Same QEMU cross-compile and same no-realistic-desktop-usage reasoning as s390x.",
+        "expires": "2026-12-31"
+      },
+      "notes": "Worth revisiting whether this target should be advertised at all, given no real usage is expected on this architecture."
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "win32",
+      "cpu": "x64",
+      "libc": "msvc",
+      "features": [
+        "dpapi"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "dpapi"
+      ],
+      "accepted_risk": null,
+      "notes": "Runs on windows-latest, the matching native architecture."
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "darwin",
+      "cpu": "x86_64",
+      "libc": null,
+      "features": [
+        "keychain"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "untested",
+      "helper_roles": [
+        "keychain"
+      ],
+      "accepted_risk": {
+        "owner": "teng-lin",
+        "rationale": "macos-latest runners are arm64; this is a native cross-compile (no QEMU) but the resulting wheel is never executed.",
+        "expires": "2026-12-31"
+      },
+      "notes": null
+    },
+    {
+      "artifact_id": "wheel",
+      "registry": "pypi",
+      "os": "darwin",
+      "cpu": "aarch64",
+      "libc": null,
+      "features": [
+        "keychain"
+      ],
+      "runtime_floor": {
+        "python": "3.11"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keychain"
+      ],
+      "accepted_risk": null,
+      "notes": "Runs on macos-latest, the matching native architecture."
+    }
+  ]
+}

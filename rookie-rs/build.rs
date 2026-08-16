@@ -3,20 +3,51 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn commit_hash() -> String {
-  match Command::new("git")
+/// A full lowercase 40-character hex commit SHA, same shape release tooling
+/// already validates elsewhere (see `COMMIT_PATTERN` in
+/// `scripts/write-release-scan-manifest.py`).
+fn is_full_sha(value: &str) -> bool {
+  value.len() == 40
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// The source SHA a release coordinator already verified, injected so this
+/// build never needs to (re-)discover it from whatever `.git` happens to be
+/// on disk. Takes precedence over any ambient git discovery below: a
+/// coordinator-built artifact must embed exactly the SHA it was told to
+/// build, not something a vendored/relocated checkout's git history implies.
+fn injected_source_sha() -> Option<String> {
+  let value = env::var("ROOKIE_COOKIES_SOURCE_SHA").ok()?;
+  if is_full_sha(&value) {
+    Some(value[..7].to_string())
+  } else {
+    None
+  }
+}
+
+/// Run `git rev-parse --short HEAD` scoped to a specific, already-resolved
+/// `.git` directory via `--git-dir`, never ambient discovery. Ambient
+/// discovery (plain `git rev-parse` with no `--git-dir`) walks upward from
+/// the process's cwd looking for *any* `.git`, so a copy of this crate
+/// vendored inside an unrelated outer repository would silently embed that
+/// outer repo's SHA instead of failing or reporting "unknown".
+fn commit_hash_from(git_dir: &Path) -> Option<String> {
+  let output = Command::new("git")
+    .arg("--git-dir")
+    .arg(git_dir)
     .args(["rev-parse", "--short", "HEAD"])
     .output()
-  {
-    Ok(output) if output.status.success() => {
-      let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-      if hash.is_empty() {
-        "unknown".to_string()
-      } else {
-        hash
-      }
-    }
-    _ => "unknown".to_string(),
+    .ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+  if hash.is_empty() {
+    None
+  } else {
+    Some(hash)
   }
 }
 
@@ -100,6 +131,10 @@ fn watch_git_head(dot_git: &Path) -> bool {
 fn main() {
   let manifest_dir = env::var("CARGO_MANIFEST_DIR").map(PathBuf::from).ok();
 
+  // Bounded to the crate's own manifest dir and its immediate parent (the
+  // workspace root) — never an unbounded upward search. A build run from
+  // inside some other project's checkout (e.g. this crate vendored into a
+  // consumer's repo) must not pick up that repo's `.git`.
   let candidate_dot_git_paths = [
     manifest_dir.as_ref().map(|d| d.join(".git")),
     manifest_dir.as_ref().map(|d| d.join("..").join(".git")),
@@ -107,12 +142,21 @@ fn main() {
     Some(PathBuf::from("../.git")),
   ];
 
+  let mut resolved_git_dir: Option<PathBuf> = None;
   for candidate in candidate_dot_git_paths.iter().flatten() {
-    if candidate.exists() && watch_git_head(candidate) {
+    if !candidate.exists() {
+      continue;
+    }
+    if resolved_git_dir.is_none() {
+      resolved_git_dir = resolve_git_dir(candidate);
+    }
+    if watch_git_head(candidate) {
       break;
     }
   }
 
-  let hash = commit_hash();
+  let hash = injected_source_sha()
+    .or_else(|| resolved_git_dir.as_deref().and_then(commit_hash_from))
+    .unwrap_or_else(|| "unknown".to_string());
   println!("cargo:rustc-env=COMMIT_HASH={}", hash);
 }
