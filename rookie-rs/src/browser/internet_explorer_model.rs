@@ -312,14 +312,18 @@ impl std::error::Error for InternetExplorerFailure {
 }
 
 #[cfg(test)]
-pub(super) fn malformed_decoder_gate_case() -> Result<()> {
+pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+  let mut numeric = [0_u8; 8];
+  for (target, source) in numeric.iter_mut().zip(bytes.iter().copied()) {
+    *target = source;
+  }
   let source = RawCookieRecord {
     domain: ".malformed.test".to_owned(),
     path: "/".to_owned(),
-    name: vec![0xff, 0],
-    value: SecretBytes::new(vec![0xff, 0]),
-    expires: 1,
-    flags: -1,
+    name: bytes.to_vec(),
+    value: SecretBytes::new(bytes.iter().rev().copied().collect()),
+    expires: u64::from_le_bytes(numeric),
+    flags: i64::from_be_bytes(numeric),
   };
   let decoder = InternetExplorerRecordDecoder { domains: None };
   let clock = crate::common::deadline::SystemClock;

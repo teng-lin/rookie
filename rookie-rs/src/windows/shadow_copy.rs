@@ -1,4 +1,5 @@
 use crate::common::deadline::BoundaryRuntime;
+use crate::common::diagnostic::{sanitize, REDACTED_PATH};
 use crate::common::sqlite;
 use crate::utils::TempDir;
 use anyhow::{anyhow, bail, Context, Result};
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub fn shadow_copy(src: PathBuf, dst: PathBuf, runtime: &BoundaryRuntime<'_>) -> Result<()> {
   runtime.check()?;
   if !src.exists() {
-    bail!("Source file not exists: {}", src.clone().display())
+    bail!("Source file does not exist: {REDACTED_PATH}")
   }
   runtime.check()?;
   let is_privileged = privileged();
@@ -17,14 +18,10 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf, runtime: &BoundaryRuntime<'_>) ->
   if !is_privileged {
     bail!("No admin rights")
   }
-  log::info!(
-    "Creating shadow copy to cookies file from {} to {}",
-    src.display(),
-    dst.display()
-  );
+  log::info!("Creating shadow copy from {REDACTED_PATH} to {REDACTED_PATH}");
   let name = src
     .file_name()
-    .ok_or_else(|| anyhow!("Database path has no file name: {}", src.display()))?;
+    .ok_or_else(|| anyhow!("Database path has no file name: {REDACTED_PATH}"))?;
   raw_copy(&src, &dst, runtime)?;
 
   // Cookies committed to the write-ahead log are not in the main database yet,
@@ -68,10 +65,7 @@ pub fn shadow_copy(src: PathBuf, dst: PathBuf, runtime: &BoundaryRuntime<'_>) ->
     // retrying against a busy database is a poor trade. The acquisition policy
     // can fall through to its explicitly enabled restart-manager path, which
     // yields a checkpointed database instead of an incoherent pair.
-    bail!(
-      "A checkpoint raced the shadow copy of {}; the copy is not coherent",
-      src.display()
-    )
+    bail!("A checkpoint raced the shadow copy of {REDACTED_PATH}; the copy is not coherent")
   }
 
   Ok(())
@@ -82,15 +76,17 @@ fn raw_copy(src: &Path, dst: &Path, runtime: &BoundaryRuntime<'_>) -> Result<()>
   let (src, dst) = (
     src
       .to_str()
-      .with_context(|| format!("Non UTF-8 source path: {}", src.display()))?,
+      .with_context(|| format!("Non UTF-8 source path: {REDACTED_PATH}"))?,
     dst
       .to_str()
-      .with_context(|| format!("Non UTF-8 destination path: {}", dst.display()))?,
+      .with_context(|| format!("Non UTF-8 destination path: {REDACTED_PATH}"))?,
   );
 
   let result = rawcopy_rs_next::rawcopy(src, dst)
-    .map_err(|err| anyhow::anyhow!(Box::new(err)))
-    .context(format!("Can't shadow copy from {src} to {dst}"));
+    .map_err(|error| anyhow::anyhow!(sanitize(&error.to_string())))
+    .context(format!(
+      "Can't shadow copy from {REDACTED_PATH} to {REDACTED_PATH}"
+    ));
   runtime.check()?;
   result
 }

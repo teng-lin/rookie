@@ -329,6 +329,7 @@ fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
     records,
     rows_seen,
     rows_skipped,
+    rows_rejected,
     acquisition,
     acquisition_attempts,
     diagnostics,
@@ -351,7 +352,7 @@ fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
     rows_seen: rows_seen as u64,
     cookies_emitted: cookies_emitted as u64,
     rows_skipped: rows_skipped as u64,
-    rows_rejected: 0,
+    rows_rejected: rows_rejected as u64,
     provider_failures: 0,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
@@ -727,12 +728,6 @@ fn canonicalize_profile(
       source_digest: canonical.source_digest(),
     };
     for issue in source.issues {
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        drop(secrets);
-        sources.push(canonical);
-        profiles.push((profile, is_default));
-        return Some(stop);
-      }
       ledger.push(Failure::from_issue(issue, source_scope.clone(), &secrets));
     }
     if let Some(CompatibilityEvidence::AllRowsRejected(message)) = source.compatibility_evidence {
@@ -755,11 +750,6 @@ fn canonicalize_profile(
       source.records
     };
     for record in draft_records {
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        sources.push(canonical);
-        profiles.push((profile, is_default));
-        return Some(stop);
-      }
       match record.finalize() {
         Ok(record) => canonical.records.push(record),
         Err(error) => {
@@ -815,11 +805,17 @@ fn project_canonical_report_with_runtime(
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> ExtractionReport {
   debug_assert_eq!(outcome.counters.sources_discovered, outcome.sources.len());
+  // An extraction stop belongs to work that attempted to start after these
+  // sources completed. Projecting the immutable completed sources must not
+  // discard them merely because the shared token is now terminal.
+  let projection_runtime = (outcome.termination == Termination::Completed)
+    .then_some(runtime)
+    .flatten();
   let mut failures = outcome.failure_ledger.into_vec();
   let mut profiles = Vec::with_capacity(outcome.profiles.len());
   let mut projection_stop = None;
   for (identity, is_default) in outcome.profiles {
-    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+    if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
       projection_stop = Some(stop);
       break;
     }
@@ -827,7 +823,7 @@ fn project_canonical_report_with_runtime(
     let mut public_sources = Vec::new();
     let mut retained_sources = Vec::new();
     for source in outcome.sources {
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
         projection_stop = Some(stop);
         break;
       }
@@ -843,7 +839,7 @@ fn project_canonical_report_with_runtime(
       let semantics = LegacyProjectionSemantics::for_source_format(source.source.format.as_str());
       let mut finalized_records = Vec::with_capacity(source.records.len());
       for record in source.records {
-        if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+        if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
           projection_stop = Some(stop);
           break;
         }
@@ -887,7 +883,7 @@ fn project_canonical_report_with_runtime(
         stats: source.stats,
         issues: source_issues,
       });
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
         projection_stop = Some(stop);
         break;
       }
@@ -1044,6 +1040,13 @@ fn finalize_outcomes_with_runtime(
   outcomes: Vec<BrowserDraft>,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Outcome {
+  // A stop observed while acquiring a later browser is already represented on
+  // that browser's draft. All earlier drafts, plus the stopped draft's fully
+  // completed sources, are immutable completed work and must survive even
+  // though the shared stop token is now terminal.
+  let has_preexisting_stop = outcomes
+    .iter()
+    .any(|outcome| outcome.termination != Termination::Completed);
   let mut profiles = Vec::new();
   let mut sources = Vec::new();
   let mut ledger = FailureLedger::default();
@@ -1056,11 +1059,14 @@ fn finalize_outcomes_with_runtime(
   let mut compatibility_evidence = BTreeMap::new();
 
   'browsers: for outcome in outcomes {
-    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+    let outcome_stopped = outcome.termination != Termination::Completed;
+    let finalization_runtime = (!has_preexisting_stop && !outcome_stopped)
+      .then_some(runtime)
+      .flatten();
+    if let Some(stop) = finalization_runtime.and_then(|runtime| runtime.check().err()) {
       termination = termination_from_stop(stop);
       break;
     }
-    let outcome_stopped = outcome.termination != Termination::Completed;
     if outcome_stopped && termination == Termination::Completed {
       termination = outcome.termination;
     }
@@ -1073,7 +1079,7 @@ fn finalize_outcomes_with_runtime(
     }
     installations_discovered += outcome.installations_discovered;
     for issue in outcome.issues {
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      if let Some(stop) = finalization_runtime.and_then(|runtime| runtime.check().err()) {
         termination = termination_from_stop(stop);
         break 'browsers;
       }
@@ -1092,7 +1098,7 @@ fn finalize_outcomes_with_runtime(
         &mut sources,
         &mut ledger,
         &mut compatibility_evidence,
-        runtime,
+        finalization_runtime,
       ) {
         termination = termination_from_stop(stop);
         break 'browsers;
@@ -1114,8 +1120,12 @@ fn finalize_outcomes_with_runtime(
   outcome.counters.browsers_detected = browsers_detected;
   outcome.counters.browsers_not_detected = browsers_not_detected;
   outcome.counters.installations_discovered = installations_discovered;
+  let compatibility_runtime = (!has_preexisting_stop
+    && outcome.termination == Termination::Completed)
+    .then_some(runtime)
+    .flatten();
   for (browser_id, family) in compatibility_inputs {
-    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+    if let Some(stop) = compatibility_runtime.and_then(|runtime| runtime.check().err()) {
       outcome.termination = termination_from_stop(stop);
       break;
     }
@@ -1564,6 +1574,7 @@ fn canonical_direct_mozilla_extraction_impl(
     records: draft.persistent_records,
     rows_seen: draft.persistent_rows_seen,
     rows_skipped: draft.persistent_rows_skipped,
+    rows_rejected: draft.persistent_rows_rejected,
     acquisition: draft.persistent_acquisition_strategy.into(),
     acquisition_attempts: draft.persistent_acquisition_attempts,
     diagnostics: Vec::new(),
@@ -1597,6 +1608,7 @@ fn canonical_direct_mozilla_extraction_impl(
         records: source.records,
         rows_seen: source.rows_seen,
         rows_skipped: source.rows_skipped,
+        rows_rejected: source.rows_rejected,
         acquisition: SourceAcquisition::StableFileImage,
         acquisition_attempts: source.acquisition_attempts,
         diagnostics: source.diagnostics,
@@ -1658,29 +1670,10 @@ pub(crate) fn canonical_direct_safari_extraction_with_runtime(
     draft.records,
     draft.stats.records_seen,
     draft.stats.records_skipped,
+    draft.stats.records_rejected,
     draft.acquisition_attempts,
     draft.row_error,
     Some(runtime),
-  )
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn canonical_direct_internet_explorer_extraction(
-  db_path: &std::path::Path,
-  draft: super::internet_explorer::InternetExplorerDraft,
-) -> Result<Outcome> {
-  canonical_direct_engine_source(
-    "internet_explorer",
-    db_path,
-    "internet_explorer_ese",
-    SourceAcquisition::EseDatabase,
-    Vec::new(),
-    draft.records,
-    draft.stats.records_seen,
-    draft.stats.records_skipped,
-    1,
-    draft.row_error,
-    None,
   )
 }
 
@@ -1699,6 +1692,7 @@ pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
     draft.records,
     draft.stats.records_seen,
     draft.stats.records_skipped,
+    draft.stats.records_rejected,
     1,
     draft.row_error,
     Some(runtime),
@@ -1715,6 +1709,7 @@ fn canonical_direct_engine_source(
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
+  rows_rejected: usize,
   acquisition_attempts: u32,
   row_error: Option<String>,
   runtime: Option<&BoundaryRuntime<'_>>,
@@ -1746,6 +1741,7 @@ fn canonical_direct_engine_source(
         records,
         rows_seen,
         rows_skipped,
+        rows_rejected,
         acquisition,
         acquisition_attempts,
         diagnostics: Vec::new(),
@@ -2083,6 +2079,23 @@ mod tests {
     source
   }
 
+  fn completed_source(name: &str) -> SourceDraft {
+    let mut source = source(false);
+    source.cookies.push(crate::common::enums::Cookie {
+      domain: ".example.test".to_owned(),
+      path: "/".to_owned(),
+      secure: false,
+      expires: None,
+      name: name.to_owned(),
+      value: format!("secret-{name}"),
+      http_only: true,
+      same_site: 1,
+    });
+    source.stats.rows_seen = 1;
+    source.stats.cookies_emitted = 1;
+    source
+  }
+
   fn outcome(profiles: Vec<ProfileDraft>, discovery_failed: bool) -> BrowserDraft {
     BrowserDraft {
       browser_id: BrowserId::known("firefox"),
@@ -2135,6 +2148,104 @@ mod tests {
       .expect("expired runtime becomes a report termination");
     assert_eq!(report.termination.as_str(), "timed_out");
     assert!(report.issues.is_empty());
+  }
+
+  #[test]
+  fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection() {
+    use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+    use std::time::Duration;
+
+    for (stop, termination) in [
+      (BoundaryStop::TimedOut, Termination::TimedOut),
+      (BoundaryStop::Cancelled, Termination::Cancelled),
+      (
+        BoundaryStop::ResourceExhausted,
+        Termination::ResourceExhausted,
+      ),
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let deadline = match stop {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(token.cancel());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(token.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+      let stopped = || {
+        let mut profile = ProfileDraft::new(identity(), true);
+        profile.sources.push(completed_source("retained"));
+        let mut browser = outcome(vec![profile], false);
+        browser.termination = termination;
+        browser
+      };
+
+      let report = assemble_with_runtime(1, vec![stopped()], &runtime);
+      let expected_termination = match stop {
+        BoundaryStop::TimedOut => "timed_out",
+        BoundaryStop::Cancelled => "cancelled",
+        BoundaryStop::ResourceExhausted => "resource_exhausted",
+      };
+      assert_eq!(report.termination.as_str(), expected_termination);
+      assert_eq!(report.status.as_str(), "complete");
+      assert_eq!(report.summary.sources_succeeded, 1);
+      assert_eq!(report.summary.rows_seen, 1);
+      assert_eq!(report.summary.cookies_emitted, 1);
+      assert_eq!(report.profiles[0].sources[0].stats.rows_seen, 1);
+      assert_eq!(report.profiles[0].sources[0].stats.cookies_emitted, 1);
+      assert_eq!(report.profiles[0].sources[0].cookies.len(), 1);
+      assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
+
+      let canonical = finalize_outcomes_with_runtime(1, vec![stopped()], Some(&runtime));
+      let cookies = super::super::legacy::project_canonical_outcome_with_runtime(
+        "firefox", canonical, &runtime,
+      )
+      .expect("completed legacy source survives a later typed stop");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].name, "retained");
+    }
+  }
+
+  #[test]
+  fn stopped_empty_legacy_outcome_returns_the_typed_boundary_stop() {
+    use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+    use std::time::Duration;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let deadline = match stop {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(token.cancel());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(token.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+      let mut browser = outcome(Vec::new(), false);
+      browser.termination = termination_from_stop(stop);
+      let canonical = finalize_outcomes_with_runtime(1, vec![browser], Some(&runtime));
+      let error = super::super::legacy::project_canonical_outcome_with_runtime(
+        "firefox", canonical, &runtime,
+      )
+      .expect_err("a stopped empty legacy outcome remains a typed stop");
+      assert!(error
+        .chain()
+        .any(|cause| cause.downcast_ref::<BoundaryStop>() == Some(&stop)));
+    }
   }
 
   #[test]
@@ -2369,6 +2480,7 @@ mod tests {
       records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
+      rows_rejected: 0,
       acquisition: registry::SourceAcquisition::StableFileImage,
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
@@ -3298,6 +3410,7 @@ mod engine_chain_tests {
           )],
           records_seen: 1,
           records_skipped: 0,
+          records_rejected: 0,
           row_error: None,
         })
       })
@@ -3610,6 +3723,7 @@ mod engine_chain_tests {
         )],
         records_seen: 1,
         records_skipped: 0,
+        records_rejected: 0,
         row_error: None,
       })
     };

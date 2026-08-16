@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, Deadline, CLEANUP_GRACE};
 use crate::common::secret::{SecretBytes, SecretString};
@@ -7,7 +7,7 @@ use std::{
   process::{Child, Command, ExitStatus, Stdio},
   time::Duration,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const KEYCHAIN_OUTPUT_LIMIT: usize = 1024 * 1024;
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -60,8 +60,8 @@ pub(crate) fn get_osx_keychain_password_with_runtime(
   // Drain both pipes concurrently so a chatty helper cannot block before the
   // supervisor observes the deadline. Buffers are secret-owned from their
   // first retained byte and capped independently.
-  let stdout = std::thread::spawn(move || drain_secret_stream(stdout));
-  let stderr = std::thread::spawn(move || drain_secret_stream(stderr));
+  let stdout = std::thread::spawn(move || drain_secret_stream(stdout, "stdout"));
+  let stderr = std::thread::spawn(move || drain_secret_stream(stderr, "stderr"));
   let status = supervise_child(&mut child, runtime);
   // Always join both drainers after supervision. In particular, an iterator
   // poll error must not detach secret-bearing pipe readers or replace its
@@ -86,18 +86,28 @@ pub(crate) fn get_osx_keychain_password_with_runtime(
   Ok(password.trimmed())
 }
 
-fn drain_secret_stream(mut stream: impl Read) -> Result<SecretBytes> {
+fn drain_secret_stream(mut stream: impl Read, stream_name: &'static str) -> Result<SecretBytes> {
   let mut retained = SecretBytes::new(Vec::new());
-  let mut buffer = [0_u8; 8192];
+  let mut buffer = Zeroizing::new([0_u8; 8192]);
+  let mut total_len = 0_usize;
   loop {
-    let count = stream.read(&mut buffer)?;
+    let count = stream
+      .read(buffer.as_mut())
+      .with_context(|| format!("failed to drain macOS Keychain {stream_name}"))?;
     if count == 0 {
       break;
     }
     retained.extend_bounded(&buffer[..count], KEYCHAIN_OUTPUT_LIMIT);
-    buffer[..count].zeroize();
+    total_len = total_len.saturating_add(count);
+    // Wipe each completed read immediately. `Zeroizing` also covers read
+    // errors and unwinds before control can reach this checkpoint.
+    buffer.zeroize();
   }
-  buffer.zeroize();
+  if total_len > KEYCHAIN_OUTPUT_LIMIT {
+    bail!(
+      "macOS Keychain {stream_name} exceeded the {KEYCHAIN_OUTPUT_LIMIT} byte output limit ({total_len} byte(s)); output redacted"
+    );
+  }
   Ok(retained)
 }
 
@@ -193,6 +203,49 @@ mod tests {
   use super::*;
   use crate::common::deadline::test_clock::ManualClock;
   use std::collections::VecDeque;
+  use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+  };
+
+  struct CountingZeroCheckedReader {
+    remaining: usize,
+    bytes_read: Arc<AtomicUsize>,
+  }
+
+  impl Read for CountingZeroCheckedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+      assert!(
+        buffer.iter().all(|byte| *byte == 0),
+        "the previous secret chunk must be wiped before the next read"
+      );
+      let count = self.remaining.min(buffer.len());
+      buffer[..count].fill(b'x');
+      self.remaining -= count;
+      self.bytes_read.fetch_add(count, Ordering::SeqCst);
+      Ok(count)
+    }
+  }
+
+  struct ErrorAfterSecretChunk {
+    returned_chunk: bool,
+  }
+
+  impl Read for ErrorAfterSecretChunk {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+      assert!(
+        buffer.iter().all(|byte| *byte == 0),
+        "the previous secret chunk must be wiped before an error"
+      );
+      if self.returned_chunk {
+        buffer[..16].copy_from_slice(b"redacted-secret!");
+        return Err(std::io::Error::other("scripted drain failure"));
+      }
+      self.returned_chunk = true;
+      buffer[..16].copy_from_slice(b"redacted-secret!");
+      Ok(16)
+    }
+  }
 
   struct FakeChild {
     states: VecDeque<Option<()>>,
@@ -249,6 +302,40 @@ mod tests {
     let error = keychain_lookup_error(None, usize::MAX).to_string();
     assert!(error.contains("stderr redacted"));
     assert!(error.contains(&usize::MAX.to_string()));
+  }
+
+  #[test]
+  fn oversized_keychain_stdout_and_stderr_are_fully_drained_then_rejected() {
+    for stream_name in ["stdout", "stderr"] {
+      let bytes_read = Arc::new(AtomicUsize::new(0));
+      let reader = CountingZeroCheckedReader {
+        remaining: KEYCHAIN_OUTPUT_LIMIT + 1,
+        bytes_read: Arc::clone(&bytes_read),
+      };
+
+      let error = drain_secret_stream(reader, stream_name)
+        .expect_err("oversized native output must not be truncated into a credential");
+
+      assert!(error.to_string().contains(stream_name));
+      assert!(error.to_string().contains("exceeded"));
+      assert!(error.to_string().contains("output redacted"));
+      assert_eq!(bytes_read.load(Ordering::SeqCst), KEYCHAIN_OUTPUT_LIMIT + 1);
+    }
+  }
+
+  #[test]
+  fn keychain_drain_wipes_completed_chunks_and_redacts_read_errors() {
+    let error = drain_secret_stream(
+      ErrorAfterSecretChunk {
+        returned_chunk: false,
+      },
+      "stdout",
+    )
+    .expect_err("the scripted second read fails");
+
+    let message = format!("{error:#}");
+    assert!(message.contains("scripted drain failure"));
+    assert!(!message.contains("redacted-secret!"));
   }
 
   #[test]

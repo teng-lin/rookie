@@ -3,8 +3,11 @@ use super::{
   with_windows_locked_database_policy_with_runtime, WindowsFallbackSource,
   WindowsLockedDatabasePolicy, WindowsLockedFile, WindowsRecoveryRequest, WindowsSharingViolation,
 };
-use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::sqlite;
+use crate::common::{
+  deadline::{BoundaryRuntime, BoundaryStop},
+  diagnostic::REDACTED_PATH,
+};
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
@@ -97,7 +100,7 @@ fn create_windows_shadow_source(
   runtime.check()?;
   let file_name = db_path
     .file_name()
-    .ok_or_else(|| anyhow!("Database path has no file name: {}", db_path.display()))?;
+    .ok_or_else(|| anyhow!("Database path has no file name: {REDACTED_PATH}"))?;
   let path = temp_dir.path().join(file_name);
   Ok(WindowsFallbackSource {
     path,

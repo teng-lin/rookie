@@ -19,7 +19,7 @@ impl SecretBytes {
     Self { bytes: Some(bytes) }
   }
 
-  #[cfg(windows)]
+  #[cfg(all(windows, feature = "appbound"))]
   pub(crate) fn zeroed(len: usize) -> Self {
     Self::new(vec![0; len])
   }
@@ -215,13 +215,13 @@ impl std::error::Error for SecretUtf8Error {}
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SecretKind {
+pub(crate) enum SecretKind {
   Bytes,
   String,
 }
 
 #[cfg(test)]
-type DropObservation = (SecretKind, usize, Vec<u8>);
+pub(crate) type DropObservation = (SecretKind, usize, Vec<u8>);
 
 #[cfg(test)]
 thread_local! {
@@ -240,9 +240,9 @@ fn record_drop(kind: SecretKind, original_len: usize, wiped: &[u8]) {
 }
 
 #[cfg(test)]
-pub(crate) fn observe_secret_string_drops(
+pub(crate) fn observe_secret_drops(
   test: impl FnOnce(),
-) -> (Vec<(usize, Vec<u8>)>, std::thread::Result<()>) {
+) -> (Vec<DropObservation>, std::thread::Result<()>) {
   DROP_OBSERVATIONS.with(|observations| {
     assert!(observations.borrow().is_none());
     *observations.borrow_mut() = Some(Vec::new());
@@ -254,6 +254,14 @@ pub(crate) fn observe_secret_string_drops(
       .take()
       .expect("drop observations enabled")
   });
+  (observed, outcome)
+}
+
+#[cfg(test)]
+pub(crate) fn observe_secret_string_drops(
+  test: impl FnOnce(),
+) -> (Vec<(usize, Vec<u8>)>, std::thread::Result<()>) {
+  let (observed, outcome) = observe_secret_drops(test);
   (
     observed
       .into_iter()

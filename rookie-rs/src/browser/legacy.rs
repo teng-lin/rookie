@@ -5,11 +5,11 @@
 
 use super::cookie_record::{FinalizedCookieRecord, LegacyProjectionSemantics};
 use super::mozilla::MozillaProfile;
-use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome};
+use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome, Termination};
 #[cfg(test)]
 use super::registry::EngineSourceDraft;
 use super::registry::{self, EngineExtractionDraft};
-use crate::common::deadline::{BoundaryRuntime, SystemClock};
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::enums::{Cookie, DetailedCookie};
 use anyhow::{bail, Result};
 use std::{error::Error, fmt};
@@ -130,8 +130,11 @@ pub(crate) fn project_canonical_outcome_with_runtime(
   outcome: Outcome,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
+  let completed = outcome.termination == Termination::Completed;
   let selected = selected_records(browser_id, outcome, Some(runtime))?;
-  runtime.check()?;
+  if completed {
+    runtime.check()?;
+  }
   Ok(
     selected
       .into_iter()
@@ -149,6 +152,13 @@ fn selected_records(
   outcome: Outcome,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Vec<(LegacyProjectionSemantics, Vec<FinalizedCookieRecord>)>> {
+  let boundary_stop = match outcome.termination {
+    Termination::Completed => None,
+    Termination::TimedOut => Some(BoundaryStop::TimedOut),
+    Termination::Cancelled => Some(BoundaryStop::Cancelled),
+    Termination::ResourceExhausted => Some(BoundaryStop::ResourceExhausted),
+  };
+  let runtime = boundary_stop.is_none().then_some(runtime).flatten();
   let Outcome {
     sources,
     compatibility,
@@ -172,19 +182,29 @@ fn selected_records(
           continue;
         }
         let semantics = LegacyProjectionSemantics::for_source_format(source.source.format.as_str());
-        for _ in &source.records {
+        let mut records = Vec::with_capacity(source.records.len());
+        for record in source.records {
           if let Some(runtime) = runtime {
             runtime.check()?;
           }
+          if record.is_legacy_compatible_with_semantics(semantics) {
+            records.push(record);
+          }
         }
-        selected.push((semantics, source.records));
+        selected.push((semantics, records));
       }
       Ok(selected)
     }
     CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase) => {
-      Err(BrowserNotInstalled::CookieDatabase.into())
+      Err(boundary_stop.map_or_else(
+        || anyhow::Error::new(BrowserNotInstalled::CookieDatabase),
+        anyhow::Error::new,
+      ))
     }
-    CompatibilityDisposition::Failed(diagnostic) => bail!(diagnostic.as_str().to_owned()),
+    CompatibilityDisposition::Failed(diagnostic) => match boundary_stop {
+      Some(stop) => Err(stop.into()),
+      None => bail!(diagnostic.as_str().to_owned()),
+    },
   }
 }
 
@@ -211,8 +231,11 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   outcome: Outcome,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
+  let completed = outcome.termination == Termination::Completed;
   let selected = selected_records(browser_id, outcome, Some(runtime))?;
-  runtime.check()?;
+  if completed {
+    runtime.check()?;
+  }
   Ok(
     selected
       .into_iter()
@@ -353,6 +376,7 @@ mod tests {
       records: Vec::new(),
       rows_seen: usize::from(row_error.is_some()),
       rows_skipped: usize::from(row_error.is_some()),
+      rows_rejected: usize::from(row_error.is_some()),
       acquisition: SourceAcquisition::NotAttempted,
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
@@ -373,6 +397,7 @@ mod tests {
       records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
+      rows_rejected: 0,
       acquisition: SourceAcquisition::StableFileImage,
       acquisition_attempts: 1,
       diagnostics: Vec::new(),

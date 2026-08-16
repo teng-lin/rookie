@@ -1,13 +1,15 @@
 use crate::common::deadline::BoundaryRuntime;
 #[cfg(test)]
 use crate::common::secret::{SecretBytes, SecretString};
-use crate::common::{enums::*, sqlite};
+use crate::common::{diagnostic::REDACTED_PATH, enums::*, sqlite};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
+use super::chromium_crypto::ChromiumKeyOutcomes;
 #[cfg(test)]
 use super::chromium_crypto::LegacyCipherOutcome;
-use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, KeyProvider};
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use super::chromium_crypto::{retrieve_key_outcomes, KeyProvider};
 #[cfg(test)]
 use super::chromium_decoder::chromium_schema_version;
 use super::chromium_decoder::{
@@ -88,6 +90,7 @@ pub fn chromium_based_detailed(
 /// Extracts only plaintext rows without selecting or probing a key provider.
 /// Encountering an encrypted row fails the request instead of degrading into
 /// a partial result under an assumed browser identity.
+#[cfg(unix)]
 pub(crate) fn chromium_based_plaintext_only(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -117,6 +120,7 @@ pub(crate) fn chromium_based_plaintext_only_with_runtime(
 }
 
 /// Detailed counterpart to [`chromium_based_plaintext_only`].
+#[cfg(unix)]
 pub(crate) fn chromium_based_detailed_plaintext_only(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -264,7 +268,7 @@ pub(crate) struct ChromiumExtractionStats {
 ///
 /// `any_browser` compares all applicable identities instead of returning the
 /// first configuration that happens to decrypt one fallback-key row.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug)]
 pub(crate) struct ChromiumProbeResult {
   db_path: PathBuf,
@@ -272,7 +276,7 @@ pub(crate) struct ChromiumProbeResult {
   pub(crate) rows_skipped: usize,
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl ChromiumProbeResult {
   pub(crate) fn cookie_count(&self) -> usize {
     self.draft.records.len()
@@ -456,6 +460,7 @@ fn project_detailed_draft_with_runtime(
   )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn query_cookies<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
@@ -476,6 +481,7 @@ where
   query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn query_detailed_cookies<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
@@ -496,8 +502,7 @@ where
   query_detailed_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-#[allow(unused_variables)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn query_cookies_with_key_outcomes(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -509,6 +514,7 @@ pub(crate) fn query_cookies_with_key_outcomes(
   query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
 pub(crate) fn query_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -528,19 +534,7 @@ pub(crate) fn query_cookies_with_key_outcomes_runtime(
   project_legacy_draft_with_runtime(&db_path, draft, runtime)
 }
 
-#[allow(unused_variables)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn query_detailed_cookies_with_key_outcomes(
-  outcomes: ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  force_kill: bool,
-) -> Result<Vec<DetailedCookie>> {
-  let clock = crate::common::deadline::SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
-  query_detailed_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
-}
-
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
 pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -781,26 +775,6 @@ fn query_cookies_engine_outcome_mode_with_deadline(
   )
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn query_cookies_from_database(
-  outcomes: &ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<&[String]>,
-  projection: CookieProjection,
-  encrypted_value_policy: EncryptedValuePolicy,
-) -> Result<ChromiumExtractionDraft> {
-  let clock = crate::common::deadline::SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
-  query_cookies_from_database_with_runtime(
-    outcomes,
-    db_path,
-    domains,
-    projection,
-    encrypted_value_policy,
-    &runtime,
-  )
-}
-
 fn query_cookies_from_database_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -809,10 +783,7 @@ fn query_cookies_from_database_with_runtime(
   encrypted_value_policy: EncryptedValuePolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumExtractionDraft> {
-  log::info!(
-    "Creating SQLite connection to {}",
-    db_path.to_str().unwrap_or("")
-  );
+  log::info!("Creating SQLite connection to {REDACTED_PATH}");
   let database = sqlite::with_browser_database_with_runtime(
     db_path,
     |connection| {
@@ -1037,9 +1008,41 @@ mod tests {
   use crate::browser::chromium_database_acquisition::{WindowsDatabaseLocked, WindowsLockedFile};
   #[cfg(unix)]
   use crate::browser::chromium_platform_keys::create_pbkdf2_key;
+  use crate::browser::cookie_record::{Observation, RawValue};
   use std::cell::{Cell, RefCell};
   use std::path::Path;
   use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::{Mutex, Once};
+
+  struct CaptureLogger;
+
+  static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
+  static CAPTURE_LOGGER_INIT: Once = Once::new();
+  static CAPTURED_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+  impl log::Log for CaptureLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+      metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+      if self.enabled(record.metadata()) {
+        CAPTURED_LOGS
+          .lock()
+          .expect("capture logger lock")
+          .push(format!("{}", record.args()));
+      }
+    }
+
+    fn flush(&self) {}
+  }
+
+  fn install_capture_logger() {
+    CAPTURE_LOGGER_INIT.call_once(|| {
+      log::set_logger(&CAPTURE_LOGGER).expect("install test logger");
+      log::set_max_level(log::LevelFilter::Info);
+    });
+  }
 
   // Per-process unique temp paths without pulling in the `tempfile` dep.
   fn unique_tmpdir(tag: &str) -> PathBuf {
@@ -1059,6 +1062,33 @@ mod tests {
   ) -> Result<Vec<Cookie>> {
     let provider = LegacySharedKeyProvider::new(keys);
     query_cookies(&provider, &(), db_path, domains, force_kill)
+  }
+
+  #[test]
+  fn sqlite_connection_log_redacts_an_absolute_path_with_spaces() {
+    install_capture_logger();
+    CAPTURED_LOGS.lock().expect("capture logger lock").clear();
+    let directory = unique_tmpdir("absolute-path-log-sentinel");
+    let path = directory
+      .join("private profile sentinel with spaces")
+      .join("Cookies");
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = BoundaryRuntime::standard(&clock);
+    let _ = query_cookies_from_database_with_runtime(
+      &ChromiumKeyOutcomes::default(),
+      path.clone(),
+      None,
+      CookieProjection::Legacy,
+      EncryptedValuePolicy::UseKeyOutcomes,
+      &runtime,
+    );
+    let logs = CAPTURED_LOGS.lock().expect("capture logger lock");
+    let connection_log = logs
+      .iter()
+      .find(|line| line.starts_with("Creating SQLite connection"))
+      .expect("connection log was captured");
+    assert_eq!(connection_log, "Creating SQLite connection to <path>");
+    assert!(!connection_log.contains(path.to_string_lossy().as_ref()));
   }
 
   fn query_outcome_with_legacy_keys(
@@ -2455,7 +2485,7 @@ mod tests {
   }
 
   #[test]
-  fn query_cookies_skips_every_malformed_core_column_without_defaulting_metadata() {
+  fn canonical_retains_malformed_booleans_while_legacy_skips_historically_unreadable_rows() {
     let dir = unique_tmpdir("chr-malformed-core-columns");
     let db = dir.join("Cookies");
     let connection = rusqlite::Connection::open(&db).expect("open writable sqlite");
@@ -2486,9 +2516,9 @@ mod tests {
       extraction.stats,
       ChromiumExtractionStats {
         rows_seen: 9,
-        cookies_emitted: 1,
-        rows_skipped: 8,
-        rows_rejected: 8,
+        cookies_emitted: 3,
+        rows_skipped: 6,
+        rows_rejected: 6,
         provider_failures: 0,
       }
     );
@@ -2498,8 +2528,16 @@ mod tests {
         .iter()
         .map(|cookie| cookie.name.as_str())
         .collect::<Vec<_>>(),
-      vec!["good"]
+      vec!["good", "bad-secure", "bad-http-only"]
     );
+    assert!(matches!(
+      extraction.records[1].attributes.secure,
+      Observation::Unknown(RawValue::Bytes(_))
+    ));
+    assert!(matches!(
+      extraction.records[2].attributes.http_only,
+      Observation::Unknown(RawValue::Bytes(_))
+    ));
     assert!(extraction.legacy_error.is_none());
     assert_eq!(
       extraction
@@ -2510,18 +2548,25 @@ mod tests {
       vec![
         ChromiumRowIssueCode::ColumnRead("host_key"),
         ChromiumRowIssueCode::ColumnRead("path"),
-        ChromiumRowIssueCode::ColumnRead("is_secure"),
         ChromiumRowIssueCode::ColumnRead("expires_utc"),
         ChromiumRowIssueCode::ColumnRead("name"),
         ChromiumRowIssueCode::ColumnRead("value"),
-        ChromiumRowIssueCode::ColumnRead("is_httponly"),
         ChromiumRowIssueCode::ColumnRead("samesite"),
       ]
+    );
+    let projected = project_legacy_draft(&db, extraction)
+      .expect("legacy projection drops only historically unreadable boolean rows");
+    assert_eq!(
+      projected
+        .iter()
+        .map(|cookie| cookie.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["good"]
     );
   }
 
   #[test]
-  fn plaintext_value_failure_precedes_later_metadata_but_ciphertext_bypasses_value() {
+  fn plaintext_value_failure_precedes_metadata_while_ciphertext_reaches_unseal() {
     let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
     seed_chromium_schema_version(&connection, 23);
     connection
@@ -2549,9 +2594,9 @@ mod tests {
         .collect::<Vec<_>>(),
       vec![
         ChromiumRowIssueCode::ColumnRead("value"),
-        ChromiumRowIssueCode::ColumnRead("is_httponly"),
+        ChromiumRowIssueCode::ProviderUnavailable,
       ],
-      "plaintext reads value immediately, while ciphertext bypasses only the non-authoritative value column"
+      "plaintext reads value immediately, while ciphertext retains malformed metadata and reaches its authoritative unseal outcome"
     );
   }
 

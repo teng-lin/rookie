@@ -72,6 +72,7 @@ pub(crate) struct KeyCandidate {
 }
 
 impl KeyCandidate {
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   pub(crate) fn from_zeroizing(bytes: Zeroizing<Vec<u8>>) -> Self {
     Self { bytes }
   }
@@ -127,6 +128,7 @@ pub(crate) struct NonEmptyKeyCandidates {
 }
 
 impl NonEmptyKeyCandidates {
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   fn from_candidates(candidates: Vec<KeyCandidate>) -> Option<Self> {
     if candidates.is_empty() {
       return None;
@@ -134,6 +136,13 @@ impl NonEmptyKeyCandidates {
     Some(Self { candidates })
   }
 
+  #[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows", test)),
+    expect(
+      dead_code,
+      reason = "unsupported targets cannot construct a candidate route"
+    )
+  )]
   fn as_slice(&self) -> &[KeyCandidate] {
     &self.candidates
   }
@@ -163,6 +172,7 @@ impl ChromiumKeyFailure {
 /// Retrieval state for exactly one configured key tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChromiumKeyOutcome {
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   Success(NonEmptyKeyCandidates),
   NotApplicable,
   #[allow(dead_code)]
@@ -180,6 +190,7 @@ impl ChromiumKeyOutcome {
     Self::success_zeroizing(candidates.into_iter().map(Zeroizing::new).collect())
   }
 
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   pub(crate) fn success_zeroizing(candidates: Vec<Zeroizing<Vec<u8>>>) -> Option<Self> {
     NonEmptyKeyCandidates::from_candidates(
       candidates
@@ -259,6 +270,7 @@ impl ChromiumKeyOutcomes {
     };
 
     match self.outcome(tier) {
+      #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
       ChromiumKeyOutcome::Success(candidates) => ChromiumKeyRoute::Candidates {
         tier,
         candidates: candidates.as_slice(),
@@ -271,6 +283,13 @@ impl ChromiumKeyOutcomes {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChromiumKeyRoute<'a> {
+  #[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows", test)),
+    expect(
+      dead_code,
+      reason = "unsupported targets cannot construct a candidate route"
+    )
+  )]
   Candidates {
     tier: ChromiumKeyTier,
     candidates: &'a [KeyCandidate],

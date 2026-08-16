@@ -19,6 +19,7 @@ use super::chromium_platform_keys::{
 use super::mozilla;
 #[cfg(test)]
 use super::report_core::sort_cookies;
+use crate::common::diagnostic::REDACTED_PATH;
 use crate::common::enums::Cookie;
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{anyhow, bail, Context, Result};
@@ -524,7 +525,7 @@ impl DiscoveryFs for RealDiscoveryFs {
 
   fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = std::fs::read_dir(path)
-      .with_context(|| format!("read directory {}", path.display()))?
+      .with_context(|| format!("read directory {REDACTED_PATH}"))?
       .map(|entry| entry.map(|entry| entry.path()))
       .collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|path| normalized_path_bytes(path));
@@ -534,11 +535,11 @@ impl DiscoveryFs for RealDiscoveryFs {
   fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
     path
       .canonicalize()
-      .with_context(|| format!("canonicalize {}", path.display()))
+      .with_context(|| format!("canonicalize {REDACTED_PATH}"))
   }
 
   fn read_to_string(&self, path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
+    std::fs::read_to_string(path).with_context(|| format!("read {REDACTED_PATH}"))
   }
 
   fn expand_registry_glob(&self, base: &Path, suffix: &str) -> Result<GlobExpansion> {
@@ -996,22 +997,16 @@ fn legacy_windows_local_state<F: DiscoveryFs>(
   if context.platform != PlatformId::Windows {
     return Ok(None);
   }
-  let parent = source.parent().ok_or_else(|| {
-    anyhow!(
-      "Chromium cookie database has no parent: {}",
-      source.display()
-    )
-  })?;
+  let parent = source
+    .parent()
+    .ok_or_else(|| anyhow!("Chromium cookie database has no parent: {REDACTED_PATH}"))?;
   let candidates =
     ["../../Local State", "../Local State", "Local State"].map(|relative| parent.join(relative));
   let local_state = candidates
     .iter()
     .find(|candidate| context.fs.exists(candidate))
     .ok_or_else(|| {
-      anyhow!(
-        "can't find Local State for Chromium cookie database {}",
-        source.display()
-      )
+      anyhow!("can't find Local State for Chromium cookie database {REDACTED_PATH}")
     })?;
   let canonical = context
     .fs
@@ -1020,7 +1015,7 @@ fn legacy_windows_local_state<F: DiscoveryFs>(
   let contents = context
     .fs
     .read_to_string(&canonical)
-    .with_context(|| format!("read Local State {}", canonical.display()))?;
+    .with_context(|| format!("read Local State {REDACTED_PATH}"))?;
   let value =
     serde_json::from_str::<serde_json::Value>(&contents).context("Can't read Local State JSON")?;
   Ok(Some((canonical, value)))
@@ -2110,9 +2105,7 @@ fn describe_chromium_profiles<'a>(profiles: impl Iterator<Item = &'a ChromiumPro
     .map(|profile| {
       format!(
         "{} ({}, {})",
-        profile.display_name,
-        profile.path.display(),
-        profile.profile_id
+        profile.display_name, REDACTED_PATH, profile.profile_id
       )
     })
     .collect::<Vec<_>>()
@@ -2126,7 +2119,7 @@ fn lost_chromium_profile_error(browser_id: &str, issues: &[DiscoveryIssue]) -> O
       issue.code.starts_with("profile_") && !is_informational_discovery_issue(issue.code)
     })
     .take(MAX_DISCOVERY_ISSUE_SAMPLES)
-    .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
+    .map(|issue| format!("{REDACTED_PATH}: {}", issue.message))
     .collect::<Vec<_>>();
   (!lost_profiles.is_empty()).then(|| {
     format!(
@@ -2284,6 +2277,7 @@ pub(crate) struct EngineSourceDraft {
   pub(crate) records: Vec<super::cookie_record::CookieRecord>,
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
+  pub(crate) rows_rejected: usize,
   pub(crate) acquisition: SourceAcquisition,
   pub(crate) acquisition_attempts: u32,
   pub(crate) diagnostics: Vec<String>,
@@ -2446,6 +2440,7 @@ fn source_candidate(
     records: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
+    rows_rejected: 0,
     acquisition: SourceAcquisition::NotAttempted,
     acquisition_attempts: 0,
     diagnostics: Vec::new(),
@@ -2974,6 +2969,7 @@ where
         selected: true,
         rows_seen: extraction.persistent_rows_seen,
         rows_skipped: extraction.persistent_rows_skipped,
+        rows_rejected: extraction.persistent_rows_rejected,
         cookies: {
           #[cfg(test)]
           {
@@ -3020,6 +3016,7 @@ where
           selected: source.selected,
           rows_seen: source.rows_seen,
           rows_skipped: source.rows_skipped,
+          rows_rejected: source.rows_rejected,
           cookies: {
             #[cfg(test)]
             {
@@ -5538,6 +5535,7 @@ mod tests {
         records: Vec::new(),
         records_seen: 0,
         records_skipped: 0,
+        records_rejected: 0,
         row_error: None,
       })
     };
@@ -5713,6 +5711,7 @@ mod tests {
           records: Vec::new(),
           records_seen: 2,
           records_skipped: 1,
+          records_rejected: 1,
           row_error: Some("invalid WebCache record".to_owned()),
         })
       })
@@ -5721,6 +5720,7 @@ mod tests {
     let source = &outcome.profiles[0].sources[0];
     assert_eq!(source.rows_seen, 2);
     assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.rows_rejected, 1);
     assert_eq!(source.row_error.as_deref(), Some("invalid WebCache record"));
   }
 
@@ -5921,6 +5921,7 @@ mod tests {
       |_, _| mozilla::MozillaExtractionDraft {
         persistent_rows_seen: 2,
         persistent_rows_skipped: 1,
+        persistent_rows_rejected: 1,
         persistent_row_error: Some("failed to read value from row: invalid utf-8".to_owned()),
         ..mozilla::MozillaExtractionDraft::default()
       },
@@ -5935,6 +5936,7 @@ mod tests {
     assert!(source.diagnostics.is_empty());
     assert!(source.error.is_none());
     assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.rows_rejected, 1);
   }
 
   #[test]

@@ -23,6 +23,7 @@ pub(crate) struct InternetExplorerRows {
   pub(crate) records: Vec<crate::browser::cookie_record::CookieRecord>,
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
+  pub(crate) records_rejected: usize,
   pub(crate) row_error: Option<String>,
 }
 
@@ -96,6 +97,7 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
+      rows_rejected: 0,
       acquisition: SourceAcquisition::EseDatabase,
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
@@ -170,6 +172,7 @@ where
         Ok(rows) => {
           source.rows_seen = rows.records_seen;
           source.rows_skipped = rows.records_skipped;
+          source.rows_rejected = rows.records_rejected;
           source.row_error = rows.row_error;
           source.records = rows.records;
         }
@@ -273,6 +276,7 @@ pub(crate) fn internet_explorer_report_with_runtime(
           records: extraction.records,
           records_seen: extraction.stats.records_seen,
           records_skipped: extraction.stats.records_skipped,
+          records_rejected: extraction.stats.records_rejected,
           row_error: extraction.row_error,
         })
       })
@@ -315,6 +319,7 @@ pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
         records: extraction.records,
         records_seen: extraction.stats.records_seen,
         records_skipped: extraction.stats.records_skipped,
+        records_rejected: extraction.stats.records_rejected,
         row_error: extraction.row_error,
       })
     })
@@ -338,6 +343,7 @@ mod tests {
       records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
+      rows_rejected: 0,
       acquisition: SourceAcquisition::EseDatabase,
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
@@ -398,6 +404,7 @@ mod tests {
           records: Vec::new(),
           records_seen: 0,
           records_skipped: 0,
+          records_rejected: 0,
           row_error: None,
         })
       },
@@ -450,6 +457,7 @@ mod tests {
             records: Vec::new(),
             records_seen: 7,
             records_skipped: 2,
+            records_rejected: 2,
             row_error: None,
           })
         } else {
@@ -463,6 +471,8 @@ mod tests {
       assert_eq!(calls.get(), 2);
       assert_eq!(populated.boundary_stop, Some(stop));
       assert_eq!(populated.profiles[0].sources[0].rows_seen, 7);
+      assert_eq!(populated.profiles[0].sources[0].rows_skipped, 2);
+      assert_eq!(populated.profiles[0].sources[0].rows_rejected, 2);
       assert!(populated.profiles[0].sources[0].error.is_none());
       assert_eq!(populated.profiles[0].sources[1].rows_seen, 0);
       assert!(populated.profiles[0].sources[1].error.is_none());

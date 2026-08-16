@@ -176,6 +176,7 @@ pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
         records: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
+        rows_rejected: 0,
         acquisition: SourceAcquisition::StableFileImage,
         // Replaced with the real count once acquisition runs; discovery-only
         // listings never attempt a read.
@@ -268,6 +269,7 @@ where
         Ok(extraction) => {
           source.rows_seen = extraction.stats.records_seen;
           source.rows_skipped = extraction.stats.records_skipped;
+          source.rows_rejected = extraction.stats.records_rejected;
           source.acquisition_attempts = extraction.acquisition_attempts;
           source.row_error = extraction.row_error;
           source.records = extraction.records;
@@ -285,6 +287,7 @@ where
               Some(failure) => {
                 source.rows_seen = failure.stats.records_seen;
                 source.rows_skipped = failure.stats.records_skipped;
+                source.rows_rejected = failure.stats.records_rejected;
                 source.row_error = Some(format!("{error:#}"));
                 SourceFailureStage::Parse
               }
@@ -431,6 +434,7 @@ mod tests {
       records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
+      rows_rejected: 0,
       acquisition: SourceAcquisition::StableFileImage,
       acquisition_attempts: 0,
       diagnostics: Vec::new(),
@@ -499,6 +503,7 @@ mod tests {
         stats: crate::browser::safari::SafariExtractionStats {
           records_seen: 7,
           records_skipped: 2,
+          records_rejected: 2,
         },
         row_error: Some("recoverable record".to_owned()),
         acquisition_attempts: 2,
@@ -507,6 +512,7 @@ mod tests {
     let success = &success.profiles[0].sources[0];
     assert_eq!(success.rows_seen, 7);
     assert_eq!(success.rows_skipped, 2);
+    assert_eq!(success.rows_rejected, 2);
     assert_eq!(success.row_error.as_deref(), Some("recoverable record"));
     assert_eq!(success.acquisition_attempts, 2);
     assert!(success.error.is_none());
@@ -516,6 +522,7 @@ mod tests {
         stats: crate::browser::safari::SafariExtractionStats {
           records_seen: 5,
           records_skipped: 3,
+          records_rejected: 3,
         },
       });
     let expected_parse_error = format!("{parse_error:#}");
@@ -527,6 +534,7 @@ mod tests {
     assert_eq!(parse.error_stage, SourceFailureStage::Parse);
     assert_eq!(parse.rows_seen, 5);
     assert_eq!(parse.rows_skipped, 3);
+    assert_eq!(parse.rows_rejected, 3);
     assert_eq!(
       parse.acquisition_attempts,
       crate::browser::safari::STABLE_READ_ATTEMPTS as u32
@@ -547,6 +555,7 @@ mod tests {
     assert_eq!(acquisition.error_stage, SourceFailureStage::Acquisition);
     assert_eq!(acquisition.rows_seen, 0);
     assert_eq!(acquisition.rows_skipped, 0);
+    assert_eq!(acquisition.rows_rejected, 0);
     assert!(acquisition.row_error.is_none());
     assert_eq!(
       acquisition.acquisition_attempts,
@@ -585,6 +594,7 @@ mod tests {
             stats: crate::browser::safari::SafariExtractionStats {
               records_seen: 7,
               records_skipped: 2,
+              records_rejected: 2,
             },
             row_error: None,
             acquisition_attempts: 1,
@@ -601,6 +611,7 @@ mod tests {
       assert_eq!(calls.get(), 2);
       assert_eq!(populated.boundary_stop, Some(stop));
       assert_eq!(populated.profiles[0].sources[0].rows_seen, 7);
+      assert_eq!(populated.profiles[0].sources[0].rows_rejected, 2);
       assert!(populated.profiles[0].sources[0].error.is_none());
       assert_eq!(populated.profiles[0].sources[1].rows_seen, 0);
       assert!(populated.profiles[0].sources[1].error.is_none());

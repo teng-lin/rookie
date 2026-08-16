@@ -4,7 +4,11 @@
 //! characterized on every host. Native file probing, shadow-copy acquisition,
 //! privilege inspection, and Restart Manager calls live in the Windows leaf.
 
-use crate::common::{deadline::BoundaryRuntime, sqlite};
+use crate::common::{
+  deadline::BoundaryRuntime,
+  diagnostic::{sanitize, REDACTED_PATH},
+  sqlite,
+};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -53,7 +57,7 @@ struct WindowsSharingViolation {
 
 /// Typed context for a Windows browser database that ordinary acquisition
 /// could not read because another process denied file sharing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct WindowsDatabaseLocked {
   pub(crate) locked_file: WindowsLockedFile,
   pub(crate) locked_path: PathBuf,
@@ -75,10 +79,22 @@ impl std::fmt::Display for WindowsDatabaseLocked {
     };
     write!(
       formatter,
-      "Windows browser {file} is share-locked at {} (OS error {}); {policy}",
-      self.locked_path.display(),
+      "Windows browser {file} is share-locked at {REDACTED_PATH} (OS error {}); {policy}",
       self.os_error
     )
+  }
+}
+
+impl std::fmt::Debug for WindowsDatabaseLocked {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("WindowsDatabaseLocked")
+      .field("locked_file", &self.locked_file)
+      .field("locked_path", &REDACTED_PATH)
+      .field("has_verified_nonempty_wal", &self.has_verified_nonempty_wal)
+      .field("shutdown_allowed", &self.shutdown_allowed)
+      .field("os_error", &self.os_error)
+      .finish()
   }
 }
 
@@ -98,8 +114,8 @@ struct WindowsShadowFallbackFailure {
 impl WindowsShadowFallbackFailure {
   fn new(shadow_error: &anyhow::Error, retry_error: Option<&anyhow::Error>) -> Self {
     Self {
-      shadow_diagnostic: format!("{shadow_error:#}"),
-      retry_diagnostic: retry_error.map(|error| format!("{error:#}")),
+      shadow_diagnostic: sanitize(&format!("{shadow_error:#}")),
+      retry_diagnostic: retry_error.map(|error| sanitize(&format!("{error:#}"))),
     }
   }
 }

@@ -2,6 +2,12 @@
 use super::super::chromium_crypto::ChromiumKeyOutcome;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use anyhow::Result;
+#[cfg(any(
+  target_os = "linux",
+  target_os = "macos",
+  target_os = "windows",
+  all(test, unix)
+))]
 use zeroize::Zeroizing;
 
 /// Derives a Chromium v10/v11 key from a candidate password.
@@ -9,7 +15,7 @@ use zeroize::Zeroizing;
 /// Wrapped in `Zeroizing` because this is the key material handed to AES-GCM
 /// to decrypt cookie values; it is wiped from memory as soon as its owner
 /// drops it rather than left in freed heap memory.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos", all(test, unix)))]
 pub(crate) fn create_pbkdf2_key(
   password: &str,
   salt: &[u8; 9],

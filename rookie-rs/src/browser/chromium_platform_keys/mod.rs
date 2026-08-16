@@ -13,7 +13,7 @@ mod windows;
 pub(crate) use linux::{HostKeySession, LinuxPlatformKeyProvider};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{HostKeySession, MacosPlatformKeyProvider};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos", all(test, unix)))]
 pub(crate) use shared::create_pbkdf2_key;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(crate) use unsupported::HostKeySession;
@@ -105,18 +105,6 @@ impl<'a> ChromiumKeyRequest<'a> {
         LocalStateInput::Path(local_state_path),
         LocalStateInput::Parsed,
       ),
-    }
-  }
-
-  #[cfg(target_os = "windows")]
-  pub(crate) fn for_parsed_local_state(
-    credentials: &'a ChromiumKeyCredentials,
-    local_state: &'a serde_json::Value,
-  ) -> Self {
-    Self {
-      browser_id: None,
-      credentials,
-      local_state: LocalStateInput::Parsed(local_state),
     }
   }
 

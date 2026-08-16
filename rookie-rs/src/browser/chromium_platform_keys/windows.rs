@@ -1,11 +1,11 @@
-use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
+use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes};
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyRequest, LocalStateInput};
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine as _};
 use zeroize::Zeroizing;
 
-use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
+use crate::common::deadline::BoundaryRuntime;
 #[cfg(test)]
 use crate::common::deadline::{Deadline, SystemClock};
 use crate::common::secret::SecretBytes;
@@ -345,36 +345,6 @@ impl HostKeySession {
       &SystemWindowsKeyBackend,
       runtime,
     )
-  }
-}
-
-pub(crate) struct WindowsPlatformKeyProvider<'a> {
-  local_state: &'a serde_json::Value,
-}
-
-impl<'a> WindowsPlatformKeyProvider<'a> {
-  pub(crate) fn new(local_state: &'a serde_json::Value) -> Self {
-    Self { local_state }
-  }
-}
-
-impl KeyProvider<()> for WindowsPlatformKeyProvider<'_> {
-  type Keys = ChromiumKeyOutcomes;
-
-  fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
-    let credentials = super::ChromiumKeyCredentials::default();
-    let mut session = HostKeySession::new();
-    session.retrieve(
-      ChromiumKeyRequest::for_parsed_local_state(&credentials, self.local_state),
-      runtime,
-    )
-  }
-
-  fn deadline_enforcement(&self) -> DeadlineEnforcement {
-    // DPAPI, privilege inspection, and app-bound decryption are in-process
-    // native calls. The provider checks the shared runtime before and after
-    // each call but cannot preempt one while it is executing.
-    DeadlineEnforcement::Cooperative
   }
 }
 

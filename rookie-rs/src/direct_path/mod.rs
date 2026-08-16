@@ -128,7 +128,7 @@ impl InvalidDirectPathOptionsReason {
 /// A stable direct-path request error carried inside the returned
 /// [`anyhow::Error`] chain.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DirectPathError {
   InvalidSource {
     path: PathBuf,
@@ -143,6 +143,33 @@ pub enum DirectPathError {
     target_os: &'static str,
     target_arch: &'static str,
   },
+}
+
+impl fmt::Debug for DirectPathError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::InvalidSource { reason, .. } => formatter
+        .debug_struct("InvalidSource")
+        .field("path", &crate::common::diagnostic::REDACTED_PATH)
+        .field("reason", reason)
+        .finish(),
+      Self::InvalidOptions { source, reason } => formatter
+        .debug_struct("InvalidOptions")
+        .field("source", source)
+        .field("reason", reason)
+        .finish(),
+      Self::UnsupportedTarget {
+        source,
+        target_os,
+        target_arch,
+      } => formatter
+        .debug_struct("UnsupportedTarget")
+        .field("source", source)
+        .field("target_os", target_os)
+        .field("target_arch", target_arch)
+        .finish(),
+    }
+  }
 }
 
 impl DirectPathError {
@@ -221,10 +248,11 @@ impl fmt::Display for DirectPathError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::InvalidSource { path, reason } => {
+        let _ = path;
         write!(
           formatter,
           "invalid cookie source {}: {}",
-          path.display(),
+          crate::common::diagnostic::REDACTED_PATH,
           reason.code()
         )
       }
@@ -395,6 +423,7 @@ fn require_chromium_source(path: &Path, source: CookieSourceKind) -> Result<()> 
   )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn invalid_options(reason: InvalidDirectPathOptionsReason) -> anyhow::Error {
   DirectPathError::InvalidOptions {
     source: CookieSourceKind::ChromiumSqlite,
@@ -618,14 +647,20 @@ pub(crate) fn classify_cookie_source_legacy_with_runtime(
   match platform::classify_cookie_source(path, runtime) {
     #[cfg(not(target_os = "windows"))]
     Ok(CookieSourceKind::InternetExplorerEse) => {
-      anyhow::bail!("unsupported cookie source format: {}", path.display())
+      anyhow::bail!(
+        "unsupported cookie source format: {}",
+        crate::common::diagnostic::REDACTED_PATH
+      )
     }
     Err(error)
       if shared::classification_reason(&error)
         == Some(InvalidCookieSourceReason::UnrecognizedSignature)
         && error.root_cause().to_string() == "unsupported cookie source signature" =>
     {
-      anyhow::bail!("unsupported cookie source format: {}", path.display())
+      anyhow::bail!(
+        "unsupported cookie source format: {}",
+        crate::common::diagnostic::REDACTED_PATH
+      )
     }
     result => result,
   }
@@ -636,6 +671,7 @@ mod tests {
   use super::*;
   use crate::utils::TempDir;
 
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
   fn chromium_database(rows: &[(&str, &str, &[u8])]) -> (TempDir, PathBuf) {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("Cookies");
@@ -691,7 +727,10 @@ mod tests {
   #[test]
   fn invalid_source_is_typed_without_discarding_io_error() {
     let directory = TempDir::new().unwrap();
-    let missing = directory.path().join("missing");
+    let missing = directory
+      .path()
+      .join("absolute path sentinel with spaces")
+      .join("missing");
     let error = cookies_from_path(DirectPathRequest::new(&missing)).unwrap_err();
     let typed = direct_path_error(&error);
     assert_eq!(typed.kind(), "invalid_source");
@@ -702,6 +741,10 @@ mod tests {
       Some(&InvalidCookieSourceReason::NotARegularFile)
     );
     assert!(error.downcast_ref::<std::io::Error>().is_some());
+    let diagnostic = format!("{error:#}");
+    assert!(!diagnostic.contains(missing.to_string_lossy().as_ref()));
+    assert!(diagnostic.contains(crate::common::diagnostic::REDACTED_PATH));
+    assert!(!format!("{typed:?}").contains(missing.to_string_lossy().as_ref()));
   }
 
   #[test]
@@ -1110,7 +1153,7 @@ mod tests {
     let error = classify_cookie_source_legacy(&path).unwrap_err();
     assert_eq!(
       error.to_string(),
-      format!("unsupported cookie source format: {}", path.display())
+      "unsupported cookie source format: <path>"
     );
   }
 
@@ -1122,7 +1165,7 @@ mod tests {
     let error = classify_cookie_source_legacy(&path).unwrap_err();
     assert_eq!(
       error.to_string(),
-      format!("unsupported cookie source format: {}", path.display())
+      "unsupported cookie source format: <path>"
     );
   }
 }

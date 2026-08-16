@@ -6,6 +6,7 @@ use crate::common::{
   boundary::{Decoder, ReadOnlySource, RecordSink},
   date,
   deadline::{BoundaryRuntime, BoundaryStop, DeadlineEnforcement, SystemClock},
+  diagnostic::REDACTED_PATH,
   enums::*,
   secret::{SecretBytes, SecretString},
   sqlite, utils,
@@ -19,6 +20,7 @@ use std::{
   time::SystemTime,
   vec::Vec,
 };
+use zeroize::Zeroize;
 
 use super::cookie_record::{
   Attributes, CookieRecord, CookieValue, Observation, RawValue, SourceRef,
@@ -73,6 +75,7 @@ pub(crate) fn safari_based_with_runtime(
 pub(crate) struct SafariExtractionStats {
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
+  pub(crate) records_rejected: usize,
 }
 
 /// Context attached to failures raised after acquisition succeeded, so the
@@ -177,7 +180,7 @@ pub(crate) fn safari_based_outcome_with_runtime(
 ) -> Result<SafariFileDraft> {
   runtime.check()?;
   let mut file = File::open(&db_path).context(format!(
-    "Failed to open {}\n\
+    "Failed to open {REDACTED_PATH}\n\
       Make sure you have full disk access for the current process.\n\
       For example, in VSCode or Terminal:\n\
       1. Open Settings\n\
@@ -186,8 +189,7 @@ pub(crate) fn safari_based_outcome_with_runtime(
       ---\n\
       You can also open the disk access page with: \n\
       open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\
-      ",
-    db_path.display()
+      "
   ))?;
   runtime.check()?;
   let (bs, acquisition_attempts) =
@@ -271,16 +273,16 @@ struct FileImageMetadata {
   inode: u64,
 }
 
-fn image_metadata(file: &File, db_path: &Path) -> Result<FileImageMetadata> {
+fn image_metadata(file: &File, _db_path: &Path) -> Result<FileImageMetadata> {
   file
     .metadata()
-    .with_context(|| format!("Failed to inspect {}", db_path.display()))
+    .with_context(|| format!("Failed to inspect {REDACTED_PATH}"))
     .map(file_image_metadata)
 }
 
 fn path_image_metadata(db_path: &Path) -> Result<FileImageMetadata> {
   std::fs::metadata(db_path)
-    .with_context(|| format!("Failed to inspect Safari cookie path {}", db_path.display()))
+    .with_context(|| format!("Failed to inspect Safari cookie path {REDACTED_PATH}"))
     .map(file_image_metadata)
 }
 
@@ -353,7 +355,7 @@ where
       // A writer can preserve metadata while rewriting in place. Reopen and
       // compare a second complete, bounded image before accepting either one.
       let mut verification =
-        File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+        File::open(db_path).with_context(|| format!("Failed to reopen {REDACTED_PATH}"))?;
       let verification_before = image_metadata(&verification, db_path)?;
       let verification_path_before = path_image_metadata(db_path)?;
       let verification_bytes = read_cookie_file_with_runtime(
@@ -394,27 +396,24 @@ where
         path_after,
       ));
     }
-    *file =
-      File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+    *file = File::open(db_path).with_context(|| format!("Failed to reopen {REDACTED_PATH}"))?;
     runtime.check()?;
   }
   bail!(
-    "Safari cookie file {} changed during each of {STABLE_READ_ATTEMPTS} acquisition attempts: {last_change:?}",
-    db_path.display()
+    "Safari cookie file {REDACTED_PATH} changed during each of {STABLE_READ_ATTEMPTS} acquisition attempts: {last_change:?}"
   )
 }
 
 fn read_cookie_file_with_runtime(
-  file: &mut File,
-  db_path: &Path,
+  file: &mut impl Read,
+  _db_path: &Path,
   advertised_len: u64,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<SecretBytes> {
   runtime.check()?;
   if advertised_len > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
-      "Safari cookie file {} is too large: {advertised_len} bytes exceeds the {} byte limit",
-      db_path.display(),
+      "Safari cookie file {REDACTED_PATH} is too large: {advertised_len} bytes exceeds the {} byte limit",
       MAX_BINARY_COOKIES_FILE_SIZE
     );
   }
@@ -430,16 +429,16 @@ fn read_cookie_file_with_runtime(
   // `metadata` is only a snapshot. Limit the read as well in case the file is
   // replaced or grows between the size check and `read_to_end`.
   let mut remaining = MAX_BINARY_COOKIES_FILE_SIZE + 1;
-  // The read frame can contain an entire cookie value. Give it wiping Drop
-  // semantics as soon as it exists so read errors, deadline exits, and unwinds
-  // cannot leave the last stack chunk behind.
+  // The read frame can contain an entire cookie value. Wipe every completed
+  // chunk immediately after copying it; SecretBytes' wiping Drop covers read
+  // errors, deadline exits, and unwinds before the next checkpoint.
   let mut chunk = SecretBytes::new(vec![0_u8; 64 * 1024]);
   while remaining > 0 {
     runtime.check()?;
     let requested = usize::try_from(remaining.min(chunk.len() as u64)).unwrap_or(chunk.len());
     let read = file
       .read(&mut chunk.as_mut_slice()[..requested])
-      .with_context(|| format!("Failed to read {}", db_path.display()))?;
+      .with_context(|| format!("Failed to read {REDACTED_PATH}"))?;
     if read == 0 {
       break;
     }
@@ -447,12 +446,12 @@ fn read_cookie_file_with_runtime(
       &chunk.as_slice()[..read],
       MAX_BINARY_COOKIES_FILE_SIZE as usize + 1,
     );
+    chunk.as_mut_slice().zeroize();
     remaining = remaining.saturating_sub(read as u64);
   }
   if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
-      "Safari cookie file {} grew beyond the {} byte limit while it was read",
-      db_path.display(),
+      "Safari cookie file {REDACTED_PATH} grew beyond the {} byte limit while it was read",
       MAX_BINARY_COOKIES_FILE_SIZE
     );
   }
@@ -513,6 +512,7 @@ fn parse_page_records_with_runtime(
       Err(error) => {
         error_count += 1;
         stats.records_skipped += 1;
+        stats.records_rejected += 1;
         if error_count <= MAX_LOGGED_RECORD_ERRORS_PER_PAGE {
           log::warn!("Skipping malformed Safari cookie record {index}: {error:#}");
         } else if error_count == MAX_LOGGED_RECORD_ERRORS_PER_PAGE + 1 {
@@ -523,6 +523,7 @@ fn parse_page_records_with_runtime(
           let remaining = count.saturating_sub(index + 1);
           stats.records_seen += remaining;
           stats.records_skipped += remaining;
+          stats.records_rejected += remaining;
           let error = error.context(format!(
             "Safari page recovery limit reached after {error_count} malformed records; \
              {remaining} remaining record(s) were skipped without parsing"
@@ -607,6 +608,7 @@ fn record_page_failure(stats: &mut SafariExtractionStats, page: Option<&[u8]>) {
   let skipped = page.and_then(declared_page_record_count).unwrap_or(1);
   stats.records_seen = stats.records_seen.saturating_add(skipped);
   stats.records_skipped = stats.records_skipped.saturating_add(skipped);
+  stats.records_rejected = stats.records_rejected.saturating_add(skipped);
 }
 
 #[cfg(test)]
@@ -670,6 +672,7 @@ fn parse_content_records_with_runtime(
         records.extend(page_records);
         stats.records_seen += page_stats.records_seen;
         stats.records_skipped += page_stats.records_skipped;
+        stats.records_rejected += page_stats.records_rejected;
         if let Some(error) = page_error {
           last_error = Some(error);
         }
@@ -887,30 +890,18 @@ fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>
     Ok(entries) => entries,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
     Err(error) => {
-      return Err(error).with_context(|| {
-        format!(
-          "Failed to enumerate Safari profile directory {}",
-          directory.display()
-        )
-      })
+      return Err(error)
+        .with_context(|| format!("Failed to enumerate Safari profile directory {REDACTED_PATH}"))
     }
   };
   let mut profiles = Vec::new();
   for entry in entries {
     let entry = entry.with_context(|| {
-      format!(
-        "Failed to read an entry in Safari profile directory {}",
-        directory.display()
-      )
+      format!("Failed to read an entry in Safari profile directory {REDACTED_PATH}")
     })?;
     if entry
       .file_type()
-      .with_context(|| {
-        format!(
-          "Failed to inspect Safari profile entry {}",
-          entry.path().display()
-        )
-      })?
+      .with_context(|| format!("Failed to inspect Safari profile entry {REDACTED_PATH}"))?
       .is_dir()
     {
       if let Ok(uuid) = entry.file_name().into_string() {
@@ -952,15 +943,12 @@ pub(crate) fn discover_safari_profiles(
   let (named, warning) = match named_profiles_from_database(library) {
     Ok(profiles) => (profiles, None),
     Err(error) => {
-      let database = safari_tabs_database_path(library);
       match named_profiles_from_directory(library) {
         Ok(profiles) => (profiles, Some(SafariProfileDiscoveryIssue::Degraded(format!(
-          "Safari profile database acquisition/query failed at {}; using directory fallback (Full Disk Access may be required): {error:#}",
-          database.display()
+          "Safari profile database acquisition/query failed at {REDACTED_PATH}; using directory fallback (Full Disk Access may be required): {error:#}"
         )))),
         Err(directory_error) => (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
-          "Safari profile database acquisition/query failed at {}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}",
-          database.display()
+          "Safari profile database acquisition/query failed at {REDACTED_PATH}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}"
         )))),
       }
     }
@@ -985,7 +973,7 @@ pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
       Err(error) => {
         return Err(error)
-          .with_context(|| format!("Failed to inspect Safari cookie source {}", path.display()))
+          .with_context(|| format!("Failed to inspect Safari cookie source {REDACTED_PATH}"))
       }
     }
   }
@@ -998,10 +986,8 @@ pub(crate) fn embedded_nul_test_fixture(field: &str, include_valid: bool) -> Vec
 }
 
 #[cfg(test)]
-pub(super) fn malformed_decoder_gate_case() -> Result<()> {
-  let source = SafariReadOnlySource {
-    bytes: b"not-a-binarycookies-image",
-  };
+pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+  let source = SafariReadOnlySource { bytes };
   let decoder = SafariBoundaryDecoder;
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
@@ -1022,6 +1008,37 @@ mod tests {
   };
 
   const COOKIE_HEADER_LEN: usize = 0x38;
+
+  struct ChunkWipeReader {
+    step: u8,
+    fail_after_first: bool,
+  }
+
+  impl Read for ChunkWipeReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+      assert!(
+        buffer.iter().all(|byte| *byte == 0),
+        "the previous Safari read chunk must be wiped before reuse"
+      );
+      match self.step {
+        0 => {
+          self.step = 1;
+          buffer[..3].copy_from_slice(b"one");
+          Ok(3)
+        }
+        1 if self.fail_after_first => {
+          buffer[..3].copy_from_slice(b"two");
+          Err(std::io::Error::other("scripted Safari read failure"))
+        }
+        1 => {
+          self.step = 2;
+          buffer[..3].copy_from_slice(b"two");
+          Ok(3)
+        }
+        _ => Ok(0),
+      }
+    }
+  }
 
   struct TickClock {
     base: Instant,
@@ -1073,6 +1090,44 @@ mod tests {
     );
     assert_eq!(callbacks.get(), 1);
     assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
+
+  #[test]
+  fn safari_file_reader_wipes_each_completed_chunk_before_reuse() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+    );
+    let mut reader = ChunkWipeReader {
+      step: 0,
+      fail_after_first: false,
+    };
+
+    let bytes =
+      read_cookie_file_with_runtime(&mut reader, Path::new("Cookies.binarycookies"), 6, &runtime)
+        .expect("scripted chunks are readable");
+
+    assert_eq!(bytes.as_slice(), b"onetwo");
+  }
+
+  #[test]
+  fn safari_file_reader_wipes_the_previous_chunk_before_a_read_error() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+    );
+    let mut reader = ChunkWipeReader {
+      step: 0,
+      fail_after_first: true,
+    };
+
+    let error =
+      read_cookie_file_with_runtime(&mut reader, Path::new("Cookies.binarycookies"), 6, &runtime)
+        .expect_err("the scripted second read fails");
+
+    assert!(format!("{error:#}").contains("scripted Safari read failure"));
   }
 
   #[test]
@@ -1402,6 +1457,7 @@ mod tests {
     assert_eq!(cookies[0].value, "kept");
     assert_eq!(stats.records_seen, 2);
     assert_eq!(stats.records_skipped, 1);
+    assert_eq!(stats.records_rejected, 1);
     assert!(row_error.is_some());
   }
 
@@ -1420,6 +1476,7 @@ mod tests {
         .expect("malformed record retains row accounting");
       assert_eq!(failure.stats.records_seen, 1, "{field}");
       assert_eq!(failure.stats.records_skipped, 1, "{field}");
+      assert_eq!(failure.stats.records_rejected, 1, "{field}");
     }
   }
 
@@ -1436,6 +1493,7 @@ mod tests {
       assert_eq!(cookies[0].value, "kept", "{field}");
       assert_eq!(stats.records_seen, 2, "{field}");
       assert_eq!(stats.records_skipped, 1, "{field}");
+      assert_eq!(stats.records_rejected, 1, "{field}");
       assert!(
         row_error
           .expect("malformed record is reported")
@@ -1675,7 +1733,10 @@ mod tests {
     let mut file = File::open(&path).expect("reopen sparse fixture");
     let error = read_stable_cookie_file(&mut file, &path).expect_err("oversized file should fail");
     fs::remove_file(&path).expect("remove sparse fixture");
-    assert!(format!("{error:#}").contains("too large"));
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("too large"));
+    assert!(diagnostic.contains(REDACTED_PATH));
+    assert!(!diagnostic.contains(path.to_string_lossy().as_ref()));
   }
 
   #[cfg(unix)]

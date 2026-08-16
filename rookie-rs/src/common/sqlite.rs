@@ -1,6 +1,7 @@
 use crate::common::{
   boundary::Acquire,
   deadline::{BoundaryRuntime, Clock, Deadline, DeadlineEnforcement, SystemClock},
+  diagnostic::REDACTED_PATH,
 };
 use crate::utils::TempDir;
 use anyhow::{anyhow, Context, Result};
@@ -244,7 +245,7 @@ where
   check()?;
   let path = path
     .canonicalize()
-    .with_context(|| format!("Can't resolve database path {}", path.display()))
+    .with_context(|| format!("Can't resolve database path {REDACTED_PATH}"))
     .map_err(|error| DatabaseAcquisitionFailure {
       strategy: None,
       error,
@@ -312,12 +313,8 @@ where
   check()?;
 
   match reader.snapshot_path() {
-    Some(directory) => log::debug!(
-      "reading {} through a snapshot in {}",
-      path.display(),
-      directory.display()
-    ),
-    None => log::debug!("reading {} in place", path.display()),
+    Some(_) => log::debug!("reading {REDACTED_PATH} through a private snapshot"),
+    None => log::debug!("reading {REDACTED_PATH} in place"),
   }
 
   Ok(reader)
@@ -581,11 +578,11 @@ fn database_uses_wal(database: &Path) -> Result<bool> {
 fn database_uses_wal_with_runtime(database: &Path, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
   runtime.check()?;
   let mut file = fs::File::open(database)
-    .with_context(|| format!("Can't open database header {}", database.display()))?;
+    .with_context(|| format!("Can't open database header {REDACTED_PATH}"))?;
   runtime.check()?;
   let mut header = [0_u8; SQLITE_HEADER_PREFIX_LEN];
   let read = fill_with_runtime(&mut file, &mut header, runtime)
-    .with_context(|| format!("Can't read database header {}", database.display()))?;
+    .with_context(|| format!("Can't read database header {REDACTED_PATH}"))?;
   runtime.check()?;
   if read < header.len() || &header[..SQLITE_HEADER.len()] != SQLITE_HEADER {
     return Ok(false);
@@ -631,16 +628,10 @@ fn open_live_read_only_with_runtime(
   runtime.check()?;
   let locking_mode: String = connection
     .query_row("PRAGMA locking_mode=EXCLUSIVE", [], |row| row.get(0))
-    .with_context(|| {
-      format!(
-        "Can't configure sidecar-free locking for {}",
-        path.display()
-      )
-    })?;
+    .with_context(|| format!("Can't configure sidecar-free locking for {REDACTED_PATH}"))?;
   if !locking_mode.eq_ignore_ascii_case("exclusive") {
     return Err(anyhow!(
-      "Can't configure sidecar-free locking for {}: SQLite selected {locking_mode}",
-      path.display()
+      "Can't configure sidecar-free locking for {REDACTED_PATH}: SQLite selected {locking_mode}"
     ));
   }
   runtime.check()?;
@@ -661,17 +652,17 @@ fn pin_read_snapshot(connection: &Connection, path: &Path) -> Result<()> {
 
 fn pin_read_snapshot_with_runtime(
   connection: &Connection,
-  path: &Path,
+  _path: &Path,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<()> {
   runtime.check()?;
   connection
     .execute_batch("BEGIN DEFERRED TRANSACTION;")
-    .with_context(|| format!("Can't begin read transaction for {}", path.display()))?;
+    .with_context(|| format!("Can't begin read transaction for {REDACTED_PATH}"))?;
   runtime.check()?;
   let _: i64 = connection
     .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-    .with_context(|| format!("Can't pin database schema for {}", path.display()))?;
+    .with_context(|| format!("Can't pin database schema for {REDACTED_PATH}"))?;
   runtime.check()?;
   Ok(())
 }
@@ -686,15 +677,13 @@ fn ensure_single_file(database: &Path) -> Result<()> {
     match fs::metadata(&sidecar) {
       Ok(_) => {
         return Err(anyhow!(
-          "Immutable database acquisition must contain one file; found {}",
-          sidecar.display()
+          "Immutable database acquisition must contain one file; found {REDACTED_PATH}"
         ))
       }
       Err(error) if error.kind() == io::ErrorKind::NotFound => {}
       Err(error) => {
         return Err(anyhow::Error::new(error).context(format!(
-          "Can't verify static database sidecar {}",
-          sidecar.display()
+          "Can't verify static database sidecar {REDACTED_PATH}"
         )))
       }
     }
@@ -763,8 +752,7 @@ fn snapshot_database_with_runtime(
     runtime.check()?;
     if !database_uses_wal_with_runtime(&copy, runtime)? {
       return Err(anyhow!(
-        "Can't take a WAL snapshot of {}: its copied journal mode is not WAL",
-        database.display()
+        "Can't take a WAL snapshot of {REDACTED_PATH}: its copied journal mode is not WAL"
       ));
     }
     runtime.check()?;
@@ -773,8 +761,7 @@ fn snapshot_database_with_runtime(
     }
 
     log::debug!(
-      "a checkpoint raced the snapshot of {} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})",
-      database.display()
+      "a checkpoint raced the snapshot of {REDACTED_PATH} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})"
     );
     // Back off before retaking it. A browser that just checkpointed is likely
     // mid-burst, and copying straight back into that loses the next attempt to
@@ -790,8 +777,7 @@ fn snapshot_database_with_runtime(
   }
 
   Err(anyhow!(
-    "Can't take a coherent snapshot of {}: it is being checkpointed repeatedly",
-    database.display()
+    "Can't take a coherent snapshot of {REDACTED_PATH}: it is being checkpointed repeatedly"
   ))
 }
 
@@ -808,8 +794,8 @@ pub(crate) fn files_are_identical(
   runtime.check()?;
   let open = |path: &Path| -> Result<io::BufReader<fs::File>> {
     runtime.check()?;
-    let file = fs::File::open(path)
-      .with_context(|| format!("Can't open {} to verify it", path.display()))?;
+    let file =
+      fs::File::open(path).with_context(|| format!("Can't open {REDACTED_PATH} to verify it"))?;
     runtime.check()?;
     Ok(io::BufReader::new(file))
   };
@@ -819,9 +805,9 @@ pub(crate) fn files_are_identical(
   loop {
     runtime.check()?;
     let filled = fill_with_runtime(&mut left_file, &mut left_chunk, runtime)
-      .with_context(|| format!("Can't read {}", left.display()))?;
+      .with_context(|| format!("Can't read {REDACTED_PATH}"))?;
     let other = fill_with_runtime(&mut right_file, &mut right_chunk, runtime)
-      .with_context(|| format!("Can't read {}", right.display()))?;
+      .with_context(|| format!("Can't read {REDACTED_PATH}"))?;
     runtime.check()?;
 
     // `fill` stops short only at end of file, so unequal counts mean unequal
@@ -895,7 +881,7 @@ fn copy_database_with_runtime(
   runtime.check()?;
   let name = database
     .file_name()
-    .ok_or_else(|| anyhow!("Database path has no file name: {}", database.display()))?;
+    .ok_or_else(|| anyhow!("Database path has no file name: {REDACTED_PATH}"))?;
   let copy = directory.join(name);
 
   // The main file goes first so that `snapshot_database` can bracket this whole
@@ -905,7 +891,7 @@ fn copy_database_with_runtime(
   // 2.1) and drops rows, as `an_unverified_copy_loses_rows_when_a_checkpoint_intervenes`
   // shows — so the verification is what makes it correct, not the order.
   copy_file_with_runtime(database, &copy, runtime)
-    .with_context(|| format!("Can't copy database {}", database.display()))?;
+    .with_context(|| format!("Can't copy database {REDACTED_PATH}"))?;
 
   // The `-shm` is deliberately left behind: it is a rebuildable index over the
   // WAL, absent entirely when the writer uses exclusive locking, and a copied
@@ -930,14 +916,14 @@ fn copy_database_with_runtime(
         // Nothing to discard, which is the usual case on a first attempt.
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => {
-          return Err(anyhow::Error::new(err).context(format!(
-            "Can't discard the stale copy {}",
-            wal_copy.display()
-          )))
+          return Err(
+            anyhow::Error::new(err)
+              .context(format!("Can't discard the stale copy {REDACTED_PATH}")),
+          )
         }
       }
     }
-    Err(err) => return Err(err.context(format!("Can't copy write-ahead log {}", wal.display()))),
+    Err(err) => return Err(err.context(format!("Can't copy write-ahead log {REDACTED_PATH}"))),
   }
 
   runtime.check()?;
@@ -1005,7 +991,7 @@ pub(crate) fn has_nonempty_wal_with_runtime(
     Ok(metadata) => Ok(metadata.len() > 0),
     Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
     Err(err) => {
-      Err(anyhow::Error::new(err).context(format!("Can't stat write-ahead log {}", wal.display())))
+      Err(anyhow::Error::new(err).context(format!("Can't stat write-ahead log {REDACTED_PATH}")))
     }
   };
   runtime.check()?;
@@ -1022,10 +1008,10 @@ pub(crate) fn sidecar(database: &Path, suffix: &str) -> PathBuf {
 
 fn open_read_only(path: &Path, query: &str) -> Result<Connection> {
   let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-  let url = Url::from_file_path(path)
-    .map_err(|_| anyhow!("Can't build a file URL for {}", path.display()))?;
+  let url =
+    Url::from_file_path(path).map_err(|_| anyhow!("Can't build a file URL for {REDACTED_PATH}"))?;
   let connection = Connection::open_with_flags(format!("{url}?{query}"), flags)
-    .with_context(|| format!("Can't open {} for reading", path.display()))?;
+    .with_context(|| format!("Can't open {REDACTED_PATH} for reading"))?;
   Ok(connection)
 }
 
@@ -2101,10 +2087,19 @@ mod tests {
   #[test]
   fn missing_database_errors() {
     let directory = TempDir::new().expect("temp dir");
+    let path = directory
+      .path()
+      .join("absolute path sentinel with spaces")
+      .join("absent.sqlite");
 
-    let result = connect(directory.path().join("absent.sqlite"));
+    let error = match connect(path.clone()) {
+      Ok(_) => panic!("missing database must error"),
+      Err(error) => error,
+    };
+    let diagnostic = format!("{error:#}");
 
-    assert!(result.is_err(), "missing database must error");
+    assert!(!diagnostic.contains(path.to_string_lossy().as_ref()));
+    assert!(diagnostic.contains(REDACTED_PATH));
   }
 
   #[test]

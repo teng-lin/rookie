@@ -14,6 +14,7 @@ use std::{
 };
 
 pub(crate) const DEFAULT_EXTRACTION_BUDGET: Duration = Duration::from_secs(30);
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) const CLEANUP_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) trait Clock: Send + Sync {
@@ -59,6 +60,7 @@ impl Deadline {
 
   /// One absolute cleanup ceiling derived from the original deadline. Calling
   /// this after expiry never grants a fresh grace period.
+  #[cfg(any(target_os = "linux", target_os = "macos", test))]
   pub(crate) fn cleanup_deadline(self, grace: Duration) -> Self {
     Self {
       expires_at: self
@@ -144,6 +146,7 @@ pub(crate) fn checkpoint(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeadlineEnforcement {
   Cooperative,
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
   Enforceable,
 }
 

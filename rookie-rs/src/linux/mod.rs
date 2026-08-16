@@ -10,11 +10,9 @@ use zbus::{
   Connection, Message,
 };
 
-use crate::common::deadline::BoundaryRuntime;
-#[cfg(test)]
-use crate::common::deadline::Deadline;
 #[cfg(test)]
 use crate::common::deadline::SystemClock;
+use crate::common::deadline::{BoundaryRuntime, Deadline, CLEANUP_GRACE};
 use crate::common::secret::SecretString;
 
 mod confidential;
@@ -489,13 +487,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
   }
 
   fn close(&self, handle: i32) -> Result<()> {
-    let cleanup_runtime = BoundaryRuntime::new(
-      self.runtime.clock,
-      self
-        .runtime
-        .deadline
-        .cleanup_deadline(crate::common::deadline::CLEANUP_GRACE),
-    );
+    let cleanup_runtime = kwallet_cleanup_runtime(&self.runtime);
     let message = kwallet_call(
       self.connection,
       self.endpoint,
@@ -510,6 +502,19 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       .context("KWallet close returned an invalid response")?;
     ensure_kwallet_return_code("close", code)
   }
+}
+
+fn kwallet_cleanup_runtime<'a>(runtime: &BoundaryRuntime<'a>) -> BoundaryRuntime<'a> {
+  // Cleanup must ignore the request stop token so an opened native handle is
+  // still closed, but an early cancellation/resource stop must not inherit the
+  // request's entire remaining budget. A timeout retains only the unused part
+  // of its original absolute cleanup grace.
+  let remaining = runtime
+    .deadline
+    .cleanup_deadline(CLEANUP_GRACE)
+    .remaining(runtime.clock)
+    .min(CLEANUP_GRACE);
+  BoundaryRuntime::new(runtime.clock, Deadline::after(runtime.clock, remaining))
 }
 
 struct KWalletHandle<'a, B: KWalletBackend + ?Sized> {
@@ -809,6 +814,70 @@ mod tests {
     assert!(error
       .downcast_ref::<crate::common::deadline::BoundaryStop>()
       .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::ResourceExhausted));
+  }
+
+  #[test]
+  fn kwallet_cleanup_after_early_cancellation_is_capped_to_one_grace_window() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(30)),
+      stop.clone(),
+    );
+    clock.advance(std::time::Duration::from_secs(1));
+    stop.cancel();
+
+    let cleanup = kwallet_cleanup_runtime(&runtime);
+
+    assert_eq!(cleanup.deadline.remaining(&clock), CLEANUP_GRACE);
+    assert!(cleanup.check().is_ok(), "cleanup ignores cancellation");
+    clock.advance(CLEANUP_GRACE);
+    assert_eq!(
+      cleanup.check(),
+      Err(crate::common::deadline::BoundaryStop::TimedOut)
+    );
+  }
+
+  #[test]
+  fn kwallet_cleanup_after_resource_exhaustion_is_capped_to_one_grace_window() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(30)),
+      stop.clone(),
+    );
+    clock.advance(std::time::Duration::from_secs(1));
+    stop.exhaust_resources();
+
+    let cleanup = kwallet_cleanup_runtime(&runtime);
+
+    assert_eq!(cleanup.deadline.remaining(&clock), CLEANUP_GRACE);
+    assert!(
+      cleanup.check().is_ok(),
+      "cleanup ignores resource exhaustion"
+    );
+    clock.advance(CLEANUP_GRACE);
+    assert_eq!(
+      cleanup.check(),
+      Err(crate::common::deadline::BoundaryStop::TimedOut)
+    );
+  }
+
+  #[test]
+  fn kwallet_timeout_cleanup_keeps_only_the_original_remaining_grace() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(30));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    clock.advance(std::time::Duration::from_secs(31));
+
+    let cleanup = kwallet_cleanup_runtime(&runtime);
+
+    assert_eq!(
+      cleanup.deadline.remaining(&clock),
+      std::time::Duration::from_secs(1)
+    );
   }
 
   #[derive(Default)]

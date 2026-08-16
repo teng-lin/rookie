@@ -24,7 +24,40 @@ mod decoder_malformed_gate {
   use super::{chromium_decoder, internet_explorer_model, mozilla, safari};
   use std::panic::{catch_unwind, AssertUnwindSafe};
 
-  type MalformedCase = (&'static str, fn() -> anyhow::Result<()>);
+  type MalformedCase = (&'static str, fn(&[u8]) -> anyhow::Result<()>);
+
+  const CORPUS_SEED: u64 = 0x2255_7a11_c0de_f00d;
+  const GENERATED_CASES: usize = 64;
+  const MAX_CASE_BYTES: usize = 256;
+
+  fn malformed_corpus() -> Vec<Vec<u8>> {
+    let mut corpus = vec![
+      Vec::new(),
+      vec![0],
+      vec![0xff],
+      b"COOK".to_vec(),
+      b"mozLz40\0".to_vec(),
+      br#"{"windows":[{"cookies":[]}]}}"#.to_vec(),
+      vec![0; MAX_CASE_BYTES],
+      vec![0xff; MAX_CASE_BYTES],
+    ];
+    let mut state = CORPUS_SEED;
+    for case_index in 0..GENERATED_CASES {
+      state ^= state << 13;
+      state ^= state >> 7;
+      state ^= state << 17;
+      let len = (state as usize).wrapping_add(case_index) % (MAX_CASE_BYTES + 1);
+      let mut bytes = Vec::with_capacity(len);
+      for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.push(state as u8);
+      }
+      corpus.push(bytes);
+    }
+    corpus
+  }
 
   #[test]
   fn every_engine_decoder_is_host_neutral_and_unwind_safe_for_malformed_input() {
@@ -38,11 +71,24 @@ mod decoder_malformed_gate {
       ),
     ];
 
-    for (engine, case) in cases {
-      let result = catch_unwind(AssertUnwindSafe(case));
-      let result =
-        result.unwrap_or_else(|_| panic!("{engine} decoder panicked on malformed input"));
-      result.unwrap_or_else(|error| panic!("{engine} malformed-input gate failed: {error:#}"));
+    let corpus = malformed_corpus();
+    assert_eq!(corpus.len(), GENERATED_CASES + 8);
+    assert!(corpus.iter().all(|input| input.len() <= MAX_CASE_BYTES));
+
+    for (case_index, input) in corpus.iter().enumerate() {
+      for &(engine, case) in &cases {
+        let result = catch_unwind(AssertUnwindSafe(|| case(input)));
+        let result = result.unwrap_or_else(|_| {
+          panic!(
+            "{engine} decoder panicked on malformed corpus case {case_index} (seed {CORPUS_SEED:#x})"
+          )
+        });
+        result.unwrap_or_else(|error| {
+          panic!(
+            "{engine} malformed corpus case {case_index} failed (seed {CORPUS_SEED:#x}): {error:#}"
+          )
+        });
+      }
     }
   }
 }

@@ -110,8 +110,10 @@ impl ReadOnlySource for rusqlite::Connection {}
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::common::deadline::{test_clock::ManualClock, Clock, Deadline};
-  use std::{cell::RefCell, time::Duration};
+  use crate::common::deadline::{
+    test_clock::ManualClock, BoundaryStop, CancellationToken, Clock, Deadline, CLEANUP_GRACE,
+  };
+  use std::{cell::Cell, cell::RefCell, time::Duration};
 
   struct FakeDecoder<'a> {
     _clock: &'a dyn Clock,
@@ -174,5 +176,248 @@ mod tests {
       decoder.deadline_enforcement(),
       DeadlineEnforcement::Cooperative
     );
+  }
+
+  #[derive(Clone, Copy)]
+  struct PipelineSource;
+
+  impl ReadOnlySource for PipelineSource {}
+
+  struct PipelineAcquire<'a> {
+    clock: &'a ManualClock,
+    remaining: &'a RefCell<Vec<Duration>>,
+    calls: &'a Cell<usize>,
+  }
+
+  impl Acquire<()> for PipelineAcquire<'_> {
+    type Source = PipelineSource;
+
+    fn open(&self, _id: &(), runtime: &BoundaryRuntime<'_>) -> anyhow::Result<Self::Source> {
+      self.calls.set(self.calls.get() + 1);
+      self
+        .remaining
+        .borrow_mut()
+        .push(runtime.deadline.remaining(runtime.clock));
+      self.clock.advance(Duration::from_secs(2));
+      Ok(PipelineSource)
+    }
+  }
+
+  struct PipelineProvider<'a> {
+    clock: &'a ManualClock,
+    remaining: &'a RefCell<Vec<Duration>>,
+    calls: &'a Cell<usize>,
+    stop: Option<BoundaryStop>,
+  }
+
+  impl KeyProvider<()> for PipelineProvider<'_> {
+    type Keys = usize;
+
+    fn keys(&self, _request: &(), runtime: &BoundaryRuntime<'_>) -> Self::Keys {
+      self.calls.set(self.calls.get() + 1);
+      self
+        .remaining
+        .borrow_mut()
+        .push(runtime.deadline.remaining(runtime.clock));
+      match self.stop {
+        None => self.clock.advance(Duration::from_secs(3)),
+        Some(BoundaryStop::TimedOut) => {
+          self
+            .clock
+            .advance(runtime.deadline.remaining(runtime.clock));
+          self.remaining.borrow_mut().push(Duration::ZERO);
+        }
+        Some(BoundaryStop::Cancelled) => assert!(runtime.stop.cancel()),
+        Some(BoundaryStop::ResourceExhausted) => assert!(runtime.stop.exhaust_resources()),
+      }
+      if self.stop.is_some() {
+        // Cleanup is bounded by both the original absolute ceiling and one
+        // grace from the moment an early non-timeout stop is observed.
+        let cleanup = runtime
+          .deadline
+          .cleanup_deadline(CLEANUP_GRACE)
+          .remaining(runtime.clock)
+          .min(CLEANUP_GRACE);
+        self.clock.advance(cleanup);
+      }
+      1
+    }
+  }
+
+  struct PipelineDecoder<'a> {
+    clock: &'a ManualClock,
+    remaining: &'a RefCell<Vec<Duration>>,
+    calls: &'a Cell<usize>,
+  }
+
+  impl Decoder<PipelineSource, usize> for PipelineDecoder<'_> {
+    type Summary = usize;
+
+    fn decode(
+      &self,
+      _source: &PipelineSource,
+      sink: &mut dyn RecordSink<usize>,
+      runtime: &BoundaryRuntime<'_>,
+    ) -> anyhow::Result<Self::Summary> {
+      self.calls.set(self.calls.get() + 1);
+      self
+        .remaining
+        .borrow_mut()
+        .push(runtime.deadline.remaining(runtime.clock));
+      self.clock.advance(Duration::from_secs(4));
+      sink.emit(1)?;
+      Ok(1)
+    }
+
+    fn deadline_enforcement(&self) -> DeadlineEnforcement {
+      DeadlineEnforcement::Cooperative
+    }
+  }
+
+  #[test]
+  fn production_boundary_pipeline_shares_one_monotonic_runtime_across_all_hops() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::from_secs(12));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let remaining = RefCell::new(Vec::new());
+    let acquire_calls = Cell::new(0);
+    let provider_calls = Cell::new(0);
+    let decoder_calls = Cell::new(0);
+    let source = acquire(
+      &PipelineAcquire {
+        clock: &clock,
+        remaining: &remaining,
+        calls: &acquire_calls,
+      },
+      &(),
+      &runtime,
+    )
+    .expect("acquire");
+    let key = keys(
+      &PipelineProvider {
+        clock: &clock,
+        remaining: &remaining,
+        calls: &provider_calls,
+        stop: None,
+      },
+      &(),
+      &runtime,
+    )
+    .expect("provider");
+    let mut emitted = Vec::new();
+    let summary = decode(
+      &PipelineDecoder {
+        clock: &clock,
+        remaining: &remaining,
+        calls: &decoder_calls,
+      },
+      &source,
+      &mut |record| {
+        emitted.push(record);
+        Ok(())
+      },
+      &runtime,
+    )
+    .expect("decode");
+
+    assert_eq!(key, 1);
+    assert_eq!(summary, 1);
+    assert_eq!(emitted, [1]);
+    assert_eq!(
+      (
+        acquire_calls.get(),
+        provider_calls.get(),
+        decoder_calls.get()
+      ),
+      (1, 1, 1)
+    );
+    assert_eq!(
+      remaining.into_inner(),
+      [
+        Duration::from_secs(12),
+        Duration::from_secs(10),
+        Duration::from_secs(7),
+      ]
+    );
+    assert_eq!(deadline.remaining(&clock), Duration::from_secs(3));
+  }
+
+  #[test]
+  fn terminal_provider_stops_prevent_decode_and_use_at_most_one_cleanup_grace() {
+    for expected in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let started = clock.now();
+      let deadline = Deadline::after(&clock, Duration::from_secs(10));
+      let token = CancellationToken::default();
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+      let remaining = RefCell::new(Vec::new());
+      let acquire_calls = Cell::new(0);
+      let provider_calls = Cell::new(0);
+      let decoder_calls = Cell::new(0);
+      let source = acquire(
+        &PipelineAcquire {
+          clock: &clock,
+          remaining: &remaining,
+          calls: &acquire_calls,
+        },
+        &(),
+        &runtime,
+      )
+      .expect("acquire completes before the injected stop");
+      let error = keys(
+        &PipelineProvider {
+          clock: &clock,
+          remaining: &remaining,
+          calls: &provider_calls,
+          stop: Some(expected),
+        },
+        &(),
+        &runtime,
+      )
+      .expect_err("provider stop remains typed");
+      assert_eq!(error.downcast_ref::<BoundaryStop>(), Some(&expected));
+
+      let mut sink = Vec::new();
+      let decode_error = decode(
+        &PipelineDecoder {
+          clock: &clock,
+          remaining: &remaining,
+          calls: &decoder_calls,
+        },
+        &source,
+        &mut |record| {
+          sink.push(record);
+          Ok(())
+        },
+        &runtime,
+      )
+      .expect_err("no later decoder starts after a terminal provider stop");
+      assert_eq!(decode_error.downcast_ref::<BoundaryStop>(), Some(&expected));
+      assert!(sink.is_empty());
+      assert_eq!(
+        (
+          acquire_calls.get(),
+          provider_calls.get(),
+          decoder_calls.get()
+        ),
+        (1, 1, 0)
+      );
+      assert!(
+        clock.now().duration_since(started) <= Duration::from_secs(10) + CLEANUP_GRACE,
+        "{expected:?} exceeded the absolute deadline plus one cleanup grace"
+      );
+      let samples = remaining.borrow();
+      assert!(samples.windows(2).all(|pair| pair[1] <= pair[0]));
+      if expected == BoundaryStop::TimedOut {
+        assert!(
+          samples.contains(&Duration::ZERO),
+          "exact deadline boundary was not observed"
+        );
+      }
+    }
   }
 }

@@ -1,6 +1,6 @@
 use crate::common::{
   enums::{Cookie, CookieContext, DetailedCookie},
-  secret::SecretString,
+  secret::{SecretBytes, SecretString},
 };
 use std::{collections::BTreeMap, fmt};
 
@@ -187,9 +187,19 @@ pub(crate) enum RawValue {
   Bool(bool),
   Signed(i64),
   Unsigned(u64),
-  Text(String),
-  Bytes(Vec<u8>),
+  Text(SecretString),
+  Bytes(SecretBytes),
   FloatBits(u64),
+}
+
+impl RawValue {
+  pub(crate) fn text(value: impl Into<String>) -> Self {
+    Self::Text(SecretString::new(value.into()))
+  }
+
+  pub(crate) fn bytes(value: impl Into<Vec<u8>>) -> Self {
+    Self::Bytes(SecretBytes::new(value.into()))
+  }
 }
 
 impl fmt::Debug for RawValue {
@@ -372,10 +382,12 @@ impl Attributes {
 
 /// Compatibility-only interpretation selected from the finalized source.
 ///
-/// Firefox's persistent SQLite reader historically used SQLite's `bool`
-/// conversion, where any nonzero integer was true. Session JSON, and every
-/// other engine, historically defaulted malformed booleans to false. Keeping
-/// this choice at projection preserves both behaviors without weakening the
+/// Firefox and Chromium SQLite historically treated any nonzero integer as
+/// true. A non-integer Chromium core boolean made the legacy row unreadable
+/// (while an optional context boolean merely disappeared), so compatibility
+/// filtering handles that row-level distinction before projection. Session
+/// JSON and the other engines defaulted malformed booleans to false. Keeping
+/// these choices at projection preserves history without weakening the
 /// canonical `Missing`/`Known`/`Unknown` observation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum LegacyProjectionSemantics {
@@ -567,6 +579,23 @@ impl CookieRecord {
     self.raw.insert(name.into(), value);
   }
 
+  pub(crate) fn is_legacy_compatible_with_semantics(
+    &self,
+    semantics: LegacyProjectionSemantics,
+  ) -> bool {
+    if semantics != LegacyProjectionSemantics::ChromiumSqlite {
+      return true;
+    }
+    let historically_readable = |value: &Observation<bool>| {
+      matches!(
+        value,
+        Observation::Missing | Observation::Known(_) | Observation::Unknown(RawValue::Signed(_))
+      )
+    };
+    historically_readable(&self.attributes.secure)
+      && historically_readable(&self.attributes.http_only)
+  }
+
   pub(crate) fn into_cookie(self) -> Result<Cookie, UnavailableReason> {
     self.into_cookie_with_semantics(LegacyProjectionSemantics::Standard)
   }
@@ -642,6 +671,13 @@ impl FinalizedCookieRecord {
       .expect("finalized cookie record must contain a plain value")
   }
 
+  pub(crate) fn is_legacy_compatible_with_semantics(
+    &self,
+    semantics: LegacyProjectionSemantics,
+  ) -> bool {
+    self.0.is_legacy_compatible_with_semantics(semantics)
+  }
+
   pub(crate) fn into_detailed_cookie_with_semantics(
     self,
     semantics: LegacyProjectionSemantics,
@@ -656,6 +692,11 @@ impl FinalizedCookieRecord {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::{
+    deadline::{BoundaryRuntime, BoundaryStop, CancellationToken, Deadline},
+    secret::{observe_secret_drops, SecretKind},
+  };
+  use std::time::Duration;
 
   #[test]
   fn firefox_persistent_projection_preserves_historical_nonzero_boolean_semantics() {
@@ -684,6 +725,43 @@ mod tests {
       .expect("Firefox persistent projection");
     assert!(persistent.secure);
     assert!(persistent.http_only);
+  }
+
+  #[test]
+  fn chromium_legacy_compatibility_keeps_historical_integer_coercion_only() {
+    let mut record = CookieRecord::from_cookie(
+      Cookie {
+        domain: ".example.test".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires: None,
+        name: "name".to_owned(),
+        value: "value".to_owned(),
+        http_only: false,
+        same_site: -1,
+      },
+      SourceRef::pending(0),
+    );
+    record.attributes.secure = Observation::Unknown(RawValue::Signed(2));
+    record.attributes.http_only = Observation::Unknown(RawValue::Signed(-1));
+    assert!(record.is_legacy_compatible_with_semantics(LegacyProjectionSemantics::ChromiumSqlite));
+
+    // Context columns were historically optional reads, so their malformed
+    // representations never rejected an otherwise readable legacy row.
+    record.isolation.has_cross_site_ancestor = Observation::Unknown(RawValue::text("yes"));
+    record.isolation.is_persistent = Observation::Unknown(RawValue::bytes(vec![1]));
+    assert!(record.is_legacy_compatible_with_semantics(LegacyProjectionSemantics::ChromiumSqlite));
+
+    for malformed in [
+      RawValue::text("true"),
+      RawValue::bytes(vec![1]),
+      RawValue::FloatBits(1.0_f64.to_bits()),
+    ] {
+      record.attributes.secure = Observation::Unknown(malformed);
+      assert!(
+        !record.is_legacy_compatible_with_semantics(LegacyProjectionSemantics::ChromiumSqlite)
+      );
+    }
   }
 
   #[test]
@@ -773,11 +851,96 @@ mod tests {
 
   #[test]
   fn raw_metadata_debug_redacts_unknown_text_and_bytes() {
-    let text = RawValue::Text("cookie-value-sentinel".to_owned());
-    let bytes = RawValue::Bytes(b"binary-cookie-value-sentinel".to_vec());
+    let text = RawValue::text("cookie-value-sentinel");
+    let bytes = RawValue::bytes(b"binary-cookie-value-sentinel".to_vec());
     let debug = format!("{text:?} {bytes:?}");
     assert!(!debug.contains("cookie-value-sentinel"));
     assert!(!debug.contains("binary-cookie-value-sentinel"));
     assert!(debug.contains("<redacted>"));
+  }
+
+  fn assert_raw_allocations_wiped(observed: &[(SecretKind, usize, Vec<u8>)], expected: usize) {
+    assert_eq!(observed.len(), expected);
+    assert!(observed.iter().all(|(_, original_len, wiped)| {
+      *original_len > 0 && wiped.len() == *original_len && wiped.iter().all(|byte| *byte == 0)
+    }));
+  }
+
+  #[test]
+  fn raw_metadata_clones_retain_protected_wipe_on_drop_ownership() {
+    let (observed, outcome) = observe_secret_drops(|| {
+      let text = RawValue::text("raw-text-clone-sentinel");
+      let bytes = RawValue::bytes(b"raw-bytes-clone-sentinel".to_vec());
+      let text_clone = text.clone();
+      let bytes_clone = bytes.clone();
+      drop((text, bytes, text_clone, bytes_clone));
+    });
+
+    assert!(outcome.is_ok());
+    assert_raw_allocations_wiped(&observed, 4);
+    assert_eq!(
+      observed
+        .iter()
+        .filter(|(kind, _, _)| *kind == SecretKind::String)
+        .count(),
+      2
+    );
+    assert_eq!(
+      observed
+        .iter()
+        .filter(|(kind, _, _)| *kind == SecretKind::Bytes)
+        .count(),
+      2
+    );
+  }
+
+  #[test]
+  fn raw_metadata_is_wiped_during_unwind() {
+    let (observed, outcome) = observe_secret_drops(|| {
+      let _text = RawValue::text("raw-text-unwind-sentinel");
+      let _bytes = RawValue::bytes(b"raw-bytes-unwind-sentinel".to_vec());
+      panic!("intentional RawValue unwind");
+    });
+
+    assert!(outcome.is_err());
+    assert_raw_allocations_wiped(&observed, 2);
+  }
+
+  #[test]
+  fn raw_metadata_is_wiped_on_typed_boundary_stop() {
+    use crate::common::deadline::test_clock::ManualClock;
+
+    for expected in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let stop = CancellationToken::default();
+      let deadline = match expected {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(stop.cancel());
+          Deadline::after(&clock, Duration::from_secs(1))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(stop.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(1))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, stop);
+      let (observed, outcome) = observe_secret_drops(|| {
+        let result = (|| -> Result<(), BoundaryStop> {
+          let _text = RawValue::text("raw-text-stop-sentinel");
+          let _bytes = RawValue::bytes(b"raw-bytes-stop-sentinel".to_vec());
+          runtime.check()?;
+          Ok(())
+        })();
+        assert_eq!(result, Err(expected));
+      });
+
+      assert!(outcome.is_ok());
+      assert_raw_allocations_wiped(&observed, 2);
+    }
   }
 }

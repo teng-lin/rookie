@@ -1,4 +1,5 @@
 use super::{CookieSourceKind, InvalidCookieSourceReason};
+use crate::common::diagnostic::REDACTED_PATH;
 use anyhow::{anyhow, Context, Result};
 use std::io::Read;
 use std::path::Path;
@@ -38,21 +39,19 @@ fn validate_regular_file(path: &Path) -> Result<()> {
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
       return Err(classify_error(
         InvalidCookieSourceReason::NotARegularFile,
-        anyhow::Error::from(error)
-          .context(format!("can't inspect cookie source {}", path.display())),
+        anyhow::Error::from(error).context(format!("can't inspect cookie source {REDACTED_PATH}")),
       ));
     }
     Err(error) => {
       return Err(
-        anyhow::Error::from(error)
-          .context(format!("can't inspect cookie source {}", path.display())),
+        anyhow::Error::from(error).context(format!("can't inspect cookie source {REDACTED_PATH}")),
       );
     }
   };
   if !metadata.is_file() {
     return Err(classify_error(
       InvalidCookieSourceReason::NotARegularFile,
-      anyhow!("cookie source is not a file: {}", path.display()),
+      anyhow!("cookie source is not a file: {REDACTED_PATH}"),
     ));
   }
   Ok(())
@@ -66,13 +65,13 @@ pub(super) fn read_header_with_runtime(
   validate_regular_file(path)?;
   runtime.check()?;
   let file = std::fs::File::open(path)
-    .with_context(|| format!("can't open cookie source {}", path.display()))?;
+    .with_context(|| format!("can't open cookie source {REDACTED_PATH}"))?;
   runtime.check()?;
   let mut header = Vec::with_capacity(16);
   file
     .take(16)
     .read_to_end(&mut header)
-    .with_context(|| format!("can't read cookie source header {}", path.display()))?;
+    .with_context(|| format!("can't read cookie source header {REDACTED_PATH}"))?;
   runtime.check()?;
   Ok(header)
 }

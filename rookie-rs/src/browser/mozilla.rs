@@ -4,6 +4,7 @@ use crate::common::{
   boundary::{Decoder, ReadOnlySource, RecordSink},
   date,
   deadline::{BoundaryRuntime, BoundaryStop, DeadlineEnforcement, SystemClock},
+  diagnostic::{sanitize, REDACTED_PATH},
   enums::*,
   secret::{SecretBytes, SecretString},
   sqlite, utils,
@@ -114,6 +115,7 @@ struct PersistentCookieQuery {
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
+  rows_rejected: usize,
   last_row_error: Option<anyhow::Error>,
 }
 
@@ -130,6 +132,7 @@ pub(crate) struct MozillaPersistentDecoder;
 pub(crate) struct MozillaPersistentDecodeSummary {
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
+  pub(crate) rows_rejected: usize,
   pub(crate) last_row_error: Option<anyhow::Error>,
 }
 
@@ -153,6 +156,7 @@ impl Decoder<MozillaPersistentReadOnlySource<'_>, CookieRecord> for MozillaPersi
     Ok(MozillaPersistentDecodeSummary {
       rows_seen: query.rows_seen,
       rows_skipped: query.rows_skipped,
+      rows_rejected: query.rows_rejected,
       last_row_error: query.last_row_error,
     })
   }
@@ -222,6 +226,7 @@ fn query_persistent_cookies_with_runtime(
     records,
     rows_seen: summary.rows_seen,
     rows_skipped: summary.rows_skipped,
+    rows_rejected: summary.rows_rejected,
     last_row_error: summary.last_row_error,
   })
 }
@@ -279,6 +284,7 @@ fn decode_persistent_cookies(
   let mut last_row_error: Option<anyhow::Error> = None;
   let mut rows_seen = 0;
   let mut rows_skipped = 0;
+  let mut rows_rejected = 0;
   let mut stmt = connection.prepare(query.as_str())?;
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
@@ -295,6 +301,7 @@ fn decode_persistent_cookies(
         ));
         rows_seen += 1;
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -312,6 +319,7 @@ fn decode_persistent_cookies(
           "failed to read path from Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -323,6 +331,7 @@ fn decode_persistent_cookies(
           "failed to inspect isSecure in Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -334,6 +343,7 @@ fn decode_persistent_cookies(
           "failed to inspect expiry in Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -344,6 +354,7 @@ fn decode_persistent_cookies(
         log::warn!("Failed to read name from row: {err}");
         last_row_error = Some(anyhow!("failed to read name from row: {err}"));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -354,6 +365,7 @@ fn decode_persistent_cookies(
         log::warn!("Failed to read value from row: {err}");
         last_row_error = Some(anyhow!("failed to read value from row: {err}"));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -365,6 +377,7 @@ fn decode_persistent_cookies(
           "failed to read isHttpOnly from Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -376,6 +389,7 @@ fn decode_persistent_cookies(
           "failed to read sameSite from Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
+        rows_rejected += 1;
         continue;
       }
     };
@@ -383,14 +397,14 @@ fn decode_persistent_cookies(
       Ok(rusqlite::types::ValueRef::Null) => (None, None),
       Ok(rusqlite::types::ValueRef::Text(value)) => match std::str::from_utf8(value) {
         Ok(value) => (Some(value.to_owned()), None),
-        Err(_) => (None, Some(RawValue::Bytes(value.to_vec()))),
+        Err(_) => (None, Some(RawValue::bytes(value.to_vec()))),
       },
-      Ok(rusqlite::types::ValueRef::Blob(value)) => (None, Some(RawValue::Bytes(value.to_vec()))),
+      Ok(rusqlite::types::ValueRef::Blob(value)) => (None, Some(RawValue::bytes(value.to_vec()))),
       Ok(rusqlite::types::ValueRef::Integer(value)) => (None, Some(RawValue::Signed(value))),
-      Ok(rusqlite::types::ValueRef::Real(value)) => (None, Some(RawValue::Text(value.to_string()))),
+      Ok(rusqlite::types::ValueRef::Real(value)) => (None, Some(RawValue::text(value.to_string()))),
       Err(error) => {
         log::warn!("Failed to inspect originAttributes in Firefox cookie row: {error}");
-        (None, Some(RawValue::Text("unreadable".to_owned())))
+        (None, Some(RawValue::text("unreadable")))
       }
     };
     let mut record = CookieRecord::from_legacy_fields(
@@ -434,6 +448,7 @@ fn decode_persistent_cookies(
     records,
     rows_seen,
     rows_skipped,
+    rows_rejected,
     last_row_error,
   })
 }
@@ -455,10 +470,10 @@ fn raw_sqlite_value(value: rusqlite::types::ValueRef<'_>) -> RawValue {
     rusqlite::types::ValueRef::Integer(value) => RawValue::Signed(value),
     rusqlite::types::ValueRef::Real(value) => RawValue::FloatBits(value.to_bits()),
     rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value).map_or_else(
-      |_| RawValue::Bytes(value.to_vec()),
-      |value| RawValue::Text(value.to_owned()),
+      |_| RawValue::bytes(value.to_vec()),
+      |value| RawValue::text(value.to_owned()),
     ),
-    rusqlite::types::ValueRef::Blob(value) => RawValue::Bytes(value.to_vec()),
+    rusqlite::types::ValueRef::Blob(value) => RawValue::bytes(value.to_vec()),
   }
 }
 
@@ -470,7 +485,7 @@ fn optional_sqlite_string(
     rusqlite::types::ValueRef::Null => Ok((None, None)),
     rusqlite::types::ValueRef::Text(value) => match std::str::from_utf8(value) {
       Ok(value) => Ok((Some(value.to_owned()), None)),
-      Err(_) => Ok((None, Some(RawValue::Bytes(value.to_vec())))),
+      Err(_) => Ok((None, Some(RawValue::bytes(value.to_vec())))),
     },
     value => Ok((None, Some(raw_sqlite_value(value)))),
   }
@@ -611,6 +626,7 @@ struct SessionCookieParseDraft {
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
+  rows_rejected: usize,
   diagnostics: Vec<String>,
 }
 
@@ -628,6 +644,7 @@ pub(crate) struct MozillaSessionDecoder;
 pub(crate) struct MozillaSessionDecodeSummary {
   rows_seen: usize,
   rows_skipped: usize,
+  rows_rejected: usize,
   diagnostics: Vec<String>,
 }
 
@@ -653,6 +670,7 @@ impl Decoder<MozillaSessionReadOnlySource<'_>, CookieRecord> for MozillaSessionD
     Ok(MozillaSessionDecodeSummary {
       rows_seen: parsed.rows_seen,
       rows_skipped: parsed.rows_skipped,
+      rows_rejected: parsed.rows_rejected,
       diagnostics: parsed.diagnostics,
     })
   }
@@ -695,6 +713,7 @@ pub(crate) struct MozillaSessionDraft {
   pub(crate) records: Vec<CookieRecord>,
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
+  pub(crate) rows_rejected: usize,
   pub(crate) acquisition_attempts: u32,
   pub(crate) diagnostics: Vec<String>,
   pub(crate) error: Option<String>,
@@ -709,6 +728,7 @@ pub(crate) struct MozillaExtractionDraft {
   pub(crate) persistent_records: Vec<CookieRecord>,
   pub(crate) persistent_rows_seen: usize,
   pub(crate) persistent_rows_skipped: usize,
+  pub(crate) persistent_rows_rejected: usize,
   pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
   pub(crate) persistent_acquisition_attempts: u32,
   /// Acquisition, schema validation, or the query did not complete, so the
@@ -759,6 +779,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
       let persistent = database.into_value();
       outcome.persistent_rows_seen = persistent.rows_seen;
       outcome.persistent_rows_skipped = persistent.rows_skipped;
+      outcome.persistent_rows_rejected = persistent.rows_rejected;
       outcome.persistent_row_error = persistent.last_row_error.map(|error| format!("{error:#}"));
       #[cfg(test)]
       {
@@ -822,6 +843,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
           records: success.parsed.records,
           rows_seen: success.parsed.rows_seen,
           rows_skipped: success.parsed.rows_skipped,
+          rows_rejected: success.parsed.rows_rejected,
           acquisition_attempts: success.attempts,
           diagnostics,
           error: None,
@@ -847,6 +869,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
           records: Vec::new(),
           rows_seen: 0,
           rows_skipped: 0,
+          rows_rejected: 0,
           acquisition_attempts: failure.attempts,
           diagnostics: failure.transient_errors,
           error: Some(format!("{:#}", failure.error)),
@@ -891,7 +914,7 @@ where
 }
 
 fn parse_session_candidate_with_runtime<F>(
-  path: &Path,
+  _path: &Path,
   mut parse: F,
   runtime: &BoundaryRuntime<'_>,
 ) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure>
@@ -940,12 +963,11 @@ where
         })
       }
       Err(error) => {
-        let diagnostic = format!("session acquisition/parse attempt {attempt} failed: {error:#}");
+        let diagnostic = sanitize(&format!(
+          "session acquisition or parse attempt {attempt} failed: {error:#}"
+        ));
         if attempt < SESSION_STORE_READ_ATTEMPTS {
-          log::debug!(
-            "Retrying Firefox session store {} after {diagnostic}",
-            path.display()
-          );
+          log::debug!("Retrying Firefox session store {REDACTED_PATH} after {diagnostic}");
           transient_errors.push(diagnostic);
         }
         last_error = Some(error);
@@ -1092,6 +1114,7 @@ fn record_session_cookie(
     Ok(record) => outcome.records.push(record),
     Err(error) => {
       outcome.rows_skipped += 1;
+      outcome.rows_rejected += 1;
       if outcome.diagnostics.len() < MAX_SESSION_COOKIE_DIAGNOSTICS {
         outcome
           .diagnostics
@@ -1137,6 +1160,7 @@ fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<Sessio
     parsed.records,
     parsed.rows_seen,
     parsed.rows_skipped,
+    parsed.rows_rejected,
     parsed.diagnostics,
   ))
 }
@@ -1155,6 +1179,7 @@ fn parse_session_json_with_runtime(
     records: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
+    rows_rejected: 0,
     diagnostics: Vec::new(),
   };
   let windows = json
@@ -1305,6 +1330,7 @@ fn decode_acquired_session(
     records,
     summary.rows_seen,
     summary.rows_skipped,
+    summary.rows_rejected,
     summary.diagnostics,
   ))
 }
@@ -1361,6 +1387,7 @@ fn project_session_records(
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
+  rows_rejected: usize,
   diagnostics: Vec<String>,
 ) -> SessionCookieParseDraft {
   #[cfg(test)]
@@ -1387,6 +1414,7 @@ fn project_session_records(
     records,
     rows_seen,
     rows_skipped,
+    rows_rejected,
     diagnostics,
   }
 }
@@ -1429,11 +1457,11 @@ fn raw_json_value(value: &Value) -> RawValue {
           .as_f64()
           .map(|value| RawValue::FloatBits(value.to_bits()))
       })
-      .unwrap_or_else(|| RawValue::Text("unrepresentable number".to_owned())),
-    Value::String(value) => RawValue::Text(value.clone()),
+      .unwrap_or_else(|| RawValue::text("unrepresentable number")),
+    Value::String(value) => RawValue::text(value.clone()),
     // Preserve structured future forms as their canonical JSON spelling. The
     // RawValue debug implementation redacts the contents transitively.
-    Value::Array(_) | Value::Object(_) => RawValue::Text(value.to_string()),
+    Value::Array(_) | Value::Object(_) => RawValue::text(value.to_string()),
   }
 }
 
@@ -1818,15 +1846,15 @@ pub(crate) fn select_profile<'a>(
 
 fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
   profiles
-    .map(|profile| format!("{} ({})", profile.name, profile.path.display()))
+    .map(|profile| format!("{} ({REDACTED_PATH})", profile.name))
     .collect::<Vec<_>>()
     .join(", ")
 }
 
 #[cfg(test)]
-pub(super) fn malformed_decoder_gate_case() -> Result<()> {
+pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
   let source = MozillaSessionReadOnlySource {
-    bytes: br#"{"windows":[{"cookies":[{"host":17,"value":{"nested":"secret"}}]}]}"#,
+    bytes,
     format: SessionStoreFormat::LegacyJson,
     domains: None,
   };
@@ -2359,6 +2387,7 @@ mod tests {
           records: Vec::new(),
           rows_seen: 0,
           rows_skipped: 0,
+          rows_rejected: 0,
           diagnostics: Vec::new(),
         })
       },
@@ -2552,6 +2581,7 @@ mod tests {
     let outcome = query_cookies_engine_outcome(&db, None);
     assert_eq!(outcome.persistent_rows_seen, 2);
     assert_eq!(outcome.persistent_rows_skipped, 1);
+    assert_eq!(outcome.persistent_rows_rejected, 1);
     assert_eq!(outcome.persistent_cookies.len(), 1);
     assert_eq!(
       outcome.persistent_acquisition_strategy,
@@ -2588,6 +2618,7 @@ mod tests {
     let outcome = query_cookies_engine_outcome(&db, None);
     assert_eq!(outcome.persistent_rows_seen, 7);
     assert_eq!(outcome.persistent_rows_skipped, 1);
+    assert_eq!(outcome.persistent_rows_rejected, 1);
     assert_eq!(outcome.persistent_cookies.len(), 6);
     let find = |name: &str| {
       outcome
@@ -2818,6 +2849,7 @@ mod tests {
     assert!(source.selected);
     assert_eq!(source.rows_seen, 4);
     assert_eq!(source.rows_skipped, 0);
+    assert_eq!(source.rows_rejected, 0);
     assert_eq!(source.cookies.len(), 4);
     assert_eq!(source.cookies[0].expires, None);
     assert_eq!(source.cookies[1].expires, Some(1_800_000_000));
@@ -2854,6 +2886,7 @@ mod tests {
     assert!(source.selected);
     assert_eq!(source.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
     assert_eq!(source.rows_skipped, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
+    assert_eq!(source.rows_rejected, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
     assert!(source.cookies.is_empty());
     assert_eq!(source.diagnostics.len(), MAX_SESSION_COOKIE_DIAGNOSTICS);
     assert!(source.diagnostics[0].contains("cookies[0]"));
@@ -2876,6 +2909,7 @@ mod tests {
     assert_eq!(source.format, "firefox_session_json");
     assert_eq!(source.rows_seen, 2);
     assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.rows_rejected, 1);
     assert_eq!(source.cookies.len(), 1);
     assert_eq!(source.diagnostics.len(), 1);
   }
@@ -2987,6 +3021,7 @@ mod tests {
         records: Vec::new(),
         rows_seen: 0,
         rows_skipped: 0,
+        rows_rejected: 0,
         diagnostics: Vec::new(),
       })
     })

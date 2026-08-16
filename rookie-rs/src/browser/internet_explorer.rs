@@ -2,8 +2,11 @@ use crate::browser::internet_explorer_model::{
   decode_cookie_record, CookieColumnLayout, InternetExplorerFailure, InternetExplorerFailureStage,
   RawCookieRecord,
 };
-use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::enums::Cookie;
+use crate::common::{
+  deadline::{BoundaryRuntime, BoundaryStop, SystemClock},
+  diagnostic::REDACTED_PATH,
+};
 use crate::windows::restart_manager::FileLockStatus;
 use anyhow::{bail, Context, Result};
 use libesedb::{EseDb, Record, Table, Value};
@@ -47,6 +50,7 @@ pub(crate) fn internet_explorer_based_with_runtime(
 pub(crate) struct InternetExplorerDraftStats {
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
+  pub(crate) records_rejected: usize,
 }
 
 #[derive(Debug)]
@@ -111,6 +115,7 @@ pub(crate) fn internet_explorer_outcome_with_runtime(
           let skipped = unsupported_table_skipped_inputs(record_count);
           stats.records_seen += skipped;
           stats.records_skipped += skipped;
+          stats.records_rejected += skipped;
           row_error = Some(format!("{error:#}"));
           log::warn!(
           "{table_name}: skipping unsupported cookie table containing {record_count} record(s); counted {skipped} skipped input(s): {error:#}"
@@ -150,6 +155,7 @@ pub(crate) fn internet_explorer_outcome_with_runtime(
             stats.records_seen += 1;
             skipped_records += 1;
             stats.records_skipped += 1;
+            stats.records_rejected += 1;
             row_error = Some(format!("{table_name}: record {record_index}: {error:#}"));
             log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
           }
@@ -191,14 +197,12 @@ where
 }
 
 fn open_database(db_path: &Path, force_kill: bool, runtime: &BoundaryRuntime<'_>) -> Result<EseDb> {
-  let display_path = db_path.display();
-
   runtime.check()?;
   let lock_status = unsafe {
     // `force_kill` comes from the explicitly opted-in public extraction API.
     crate::windows::restart_manager::release_file_lock(db_path, force_kill, runtime)
   }
-  .with_context(|| format!("Unable to inspect locks on WebCache database {display_path}"))?;
+  .with_context(|| format!("Unable to inspect locks on WebCache database {REDACTED_PATH}"))?;
   runtime.check()?;
   let released_processes = require_unlocked_database(db_path, lock_status)?;
 
@@ -207,24 +211,23 @@ fn open_database(db_path: &Path, force_kill: bool, runtime: &BoundaryRuntime<'_>
     Some(process_count) => {
       EseDb::open(db_path).with_context(|| {
         format!(
-          "WebCache database {display_path} still cannot be opened after Restart Manager released {process_count} locking process(es)"
+          "WebCache database {REDACTED_PATH} still cannot be opened after Restart Manager released {process_count} locking process(es)"
         )
       })
     }
     None => EseDb::open(db_path)
-      .with_context(|| format!("Unable to open unlocked WebCache database {display_path}")),
+      .with_context(|| format!("Unable to open unlocked WebCache database {REDACTED_PATH}")),
   };
   runtime.check()?;
   opened
 }
 
-fn require_unlocked_database(db_path: &Path, lock_status: FileLockStatus) -> Result<Option<u32>> {
+fn require_unlocked_database(_db_path: &Path, lock_status: FileLockStatus) -> Result<Option<u32>> {
   match lock_status {
     FileLockStatus::Unlocked => Ok(None),
     FileLockStatus::Released { process_count } => Ok(Some(process_count)),
     FileLockStatus::Locked { process_count } => bail!(
-      "WebCache database {} is locked by {process_count} process(es). Close Internet Explorer and applications using WinINet, then retry; destructive lock release requires force_kill=true",
-      db_path.display()
+      "WebCache database {REDACTED_PATH} is locked by {process_count} process(es). Close Internet Explorer and applications using WinINet, then retry; destructive lock release requires force_kill=true"
     ),
   }
 }
@@ -433,14 +436,16 @@ mod tests {
 
   #[test]
   fn locked_database_error_is_specific_and_actionable() {
+    let sensitive_path = r"C:\Users\rookie\WebCacheV01.dat";
     let error = require_unlocked_database(
-      Path::new(r"C:\Users\rookie\WebCacheV01.dat"),
+      Path::new(sensitive_path),
       FileLockStatus::Locked { process_count: 2 },
     )
     .unwrap_err()
     .to_string();
 
-    assert!(error.contains(r"C:\Users\rookie\WebCacheV01.dat"));
+    assert!(!error.contains(sensitive_path));
+    assert!(error.contains(REDACTED_PATH));
     assert!(error.contains("locked by 2 process(es)"));
     assert!(error.contains("Close Internet Explorer"));
     assert!(error.contains("force_kill=true"));
