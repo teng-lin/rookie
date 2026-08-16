@@ -13,9 +13,15 @@ use libesedb::{EseDb, Record, Table, Value};
 use std::path::{Path, PathBuf};
 
 /// Returns cookies from IE based browsers.
+///
+/// Deprecated for removal, not just for a newer call shape: Internet
+/// Explorer was discontinued in 2022, and its ESE-format cookie database is
+/// read here through an unmodified native C library with no process
+/// isolation, so this crate is not planning to keep investing in it. See
+/// [`crate::internet_explorer`] for the full rationale.
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::cookies_from_path with DirectPathRequest"
+  note = "Internet Explorer support is deprecated for removal; Internet Explorer itself was discontinued in 2022"
 )]
 pub fn internet_explorer_based(
   db_path: PathBuf,
