@@ -38,9 +38,94 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// One extraction operation, expressed as data rather than a function call.
+///
+/// A named function such as [`chrome`] can only ever name the one browser it
+/// was written for. `Request` carries that same selection as a value, so it
+/// reaches any browser [`supported_browsers`] lists — including
+/// registry-only and alternate-channel entries no named function can name.
+///
+/// # Examples
+///
+/// ```no_run
+/// let request = rookie_cookies::Request::browser("chrome")
+///   .domains(Some(vec!["example.com".to_string()]));
+/// let cookies = rookie_cookies::extract(request)?;
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub struct Request {
+  browser_id: String,
+  domains: Option<Vec<String>>,
+}
+
+impl Request {
+  /// Selects one browser by canonical ID or registered alias, as returned by
+  /// [`supported_browsers`].
+  pub fn browser(id: impl Into<String>) -> Self {
+    Self {
+      browser_id: id.into(),
+      domains: None,
+    }
+  }
+
+  /// Restricts extraction to the given domains.
+  pub fn domains(mut self, domains: Option<Vec<String>>) -> Self {
+    self.domains = domains;
+    self
+  }
+}
+
+/// Runs one [`Request`] and returns its cookies.
+///
+/// `Request`/`extract` is the only execution path underneath every named
+/// compatibility function and [`browser`]: they build a `Request` and run it
+/// here rather than dispatching independently.
+///
+/// # Errors
+///
+/// See [`browser`], which shares this function's error behavior.
+///
+/// # Examples
+///
+/// ```no_run
+/// let cookies = rookie_cookies::extract(rookie_cookies::Request::browser("chrome"))?;
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn extract(request: Request) -> Result<Vec<Cookie>> {
+  browser::legacy::browser_cookies(&request.browser_id, request.domains)
+}
+
+/// Extracts cookies from one registered browser by canonical ID or alias.
+///
+/// Unlike the named selectors (e.g. [`chrome`], [`firefox`]), this reaches
+/// every browser [`supported_browsers`] lists, including registry-only and
+/// alternate-channel entries that have no dedicated named function. It is a
+/// convenience over [`extract`]`(`[`Request::browser`]`(id).domains(domains))`.
+///
+/// # Arguments
+///
+/// * `id` - A canonical browser ID or registered alias from
+///   [`supported_browsers`]
+/// * `domains` - An optional list for getting specific domains only
+///
+/// # Errors
+///
+/// An unknown ID or alias is a request error, matching the named selectors'
+/// behavior for their one hardcoded browser.
+///
+/// # Examples
+///
+/// ```no_run
+/// let cookies = rookie_cookies::browser("chrome", None)?;
+/// # Ok::<(), rookie_cookies::anyhow::Error>(())
+/// ```
+pub fn browser(id: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  extract(Request::browser(id).domains(domains))
+}
+
 /// Thin compatibility projection over registry-backed discovery/extraction.
 fn named_browser(name: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  browser::legacy::browser_cookies(name, domains)
+  extract(Request::browser(name).domains(domains))
 }
 
 /// Extracts an explicit Chromium cookie database using registry-resolved key
@@ -299,6 +384,10 @@ pub fn load_report(domains: Option<Vec<String>>) -> Result<report::ExtractionRep
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::firefox(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"firefox\", domains) or extract(Request::browser(\"firefox\")) instead"
+)]
 pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("firefox", domains)
 }
@@ -338,6 +427,11 @@ pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::firefox_profile("default-release", Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser_report(\"firefox\", Some(profile_id), domains) with a profile ID from \
+          browser_profiles(\"firefox\")"
+)]
 pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let clock = common::deadline::SystemClock;
   let runtime = common::deadline::BoundaryRuntime::standard(&clock);
@@ -362,6 +456,10 @@ pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Ve
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::librewolf(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"librewolf\", domains) or extract(Request::browser(\"librewolf\")) instead"
+)]
 pub fn librewolf(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("librewolf", domains)
 }
@@ -379,6 +477,10 @@ pub fn librewolf(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::cachy(Some(domains));
 /// ```
 #[cfg(target_os = "linux")]
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"cachy\", domains) or extract(Request::browser(\"cachy\")) instead"
+)]
 pub fn cachy(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("cachy", domains)
 }
@@ -395,6 +497,10 @@ pub fn cachy(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::chrome(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"chrome\", domains) or extract(Request::browser(\"chrome\")) instead"
+)]
 pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("chrome", domains)
 }
@@ -411,6 +517,10 @@ pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::chromium(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"chromium\", domains) or extract(Request::browser(\"chromium\")) instead"
+)]
 pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("chromium", domains)
 }
@@ -427,6 +537,10 @@ pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::brave(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"brave\", domains) or extract(Request::browser(\"brave\")) instead"
+)]
 pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("brave", domains)
 }
@@ -443,6 +557,10 @@ pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::arc(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"arc\", domains) or extract(Request::browser(\"arc\")) instead"
+)]
 pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("arc", domains)
 }
@@ -459,6 +577,10 @@ pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::zen(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"zen\", domains) or extract(Request::browser(\"zen\")) instead"
+)]
 pub fn zen(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("zen", domains)
 }
@@ -475,6 +597,10 @@ pub fn zen(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::edge(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"edge\", domains) or extract(Request::browser(\"edge\")) instead"
+)]
 pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("edge", domains)
 }
@@ -491,6 +617,10 @@ pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::vivaldi(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"vivaldi\", domains) or extract(Request::browser(\"vivaldi\")) instead"
+)]
 pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("vivaldi", domains)
 }
@@ -507,6 +637,10 @@ pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::opera(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"opera\", domains) or extract(Request::browser(\"opera\")) instead"
+)]
 pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("opera", domains)
 }
@@ -523,6 +657,13 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::opera_gx(Some(domains));
 /// ```
+#[cfg_attr(
+  any(target_os = "macos", target_os = "windows"),
+  deprecated(
+    since = "0.6.0",
+    note = "use browser(\"opera_gx\", domains) or extract(Request::browser(\"opera_gx\")) instead"
+  )
+)]
 #[cfg_attr(
   not(any(target_os = "macos", target_os = "windows")),
   deprecated(
@@ -547,6 +688,10 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::octo_browser(Some(domains));
 /// ```
 #[cfg(target_os = "windows")]
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"octo_browser\", domains) or extract(Request::browser(\"octo_browser\")) instead"
+)]
 pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("octo_browser", domains)
 }
@@ -564,6 +709,10 @@ pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::safari(Some(domains));
 /// ```
 #[cfg(target_os = "macos")]
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"safari\", domains) or extract(Request::browser(\"safari\")) instead"
+)]
 pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("safari", domains)
 }
@@ -581,6 +730,10 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// let cookies = rookie_cookies::internet_explorer(Some(domains));
 /// ```
 #[cfg(target_os = "windows")]
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser(\"internet_explorer\", domains) or extract(Request::browser(\"internet_explorer\")) instead"
+)]
 pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("internet_explorer", domains)
 }
@@ -809,6 +962,32 @@ mod tests {
     let error = chromium_based_with_browser_id(Some("coccoc"), db, None, false)
       .expect_err("registered browser without credentials cannot read encrypted rows");
     assert!(error.to_string().contains("no browser key identity"));
+  }
+
+  /// `coccoc`/`yandex` are registered Chromium forks with no dedicated named
+  /// function — unlike `chrome`, `brave`, and the rest, whose one hardcoded
+  /// string can never name them. `browser`/`extract(Request::browser(..))`
+  /// must resolve them through the registry instead of reporting them as an
+  /// unrecognized ID, the one failure mode a named function's fixed string
+  /// structurally cannot produce.
+  #[cfg(any(target_os = "macos", target_os = "windows"))]
+  #[test]
+  fn public_browser_and_extract_reach_registry_only_browsers_no_named_function_can_name() {
+    fn assert_resolved_through_registry(browser_id: &str, error: &anyhow::Error) {
+      assert!(
+        !error.to_string().contains("unknown browser id"),
+        "{browser_id} must resolve through the registry rather than being unrecognized: {error}"
+      );
+    }
+
+    for browser_id in ["coccoc", "yandex"] {
+      if let Err(error) = browser(browser_id, None) {
+        assert_resolved_through_registry(browser_id, &error);
+      }
+      if let Err(error) = extract(Request::browser(browser_id)) {
+        assert_resolved_through_registry(browser_id, &error);
+      }
+    }
   }
 
   #[cfg(unix)]
@@ -1053,80 +1232,6 @@ mod tests {
   }
 
   #[cfg(unix)]
-  use std::sync::atomic::{AtomicU64, Ordering};
-  #[cfg(unix)]
-  use std::sync::{Mutex, MutexGuard};
-
-  #[cfg(unix)]
-  static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-  /// RAII guard that restores Chromium discovery environment variables to
-  /// their prior values when dropped.
-  ///
-  /// Holds the `ENV_MUTEX` lock for its entire lifetime so that parallel
-  /// tests never observe intermediate environment values. The temp directory
-  /// is also removed in `Drop`, guaranteeing cleanup even when the test panics
-  /// before reaching the end of the function.
-  #[cfg(unix)]
-  struct HomeGuard<'a> {
-    old_home: Option<std::ffi::OsString>,
-    old_chrome_config_home: Option<std::ffi::OsString>,
-    old_xdg_config_home: Option<std::ffi::OsString>,
-    home_dir: std::path::PathBuf,
-    _lock: MutexGuard<'a, ()>,
-  }
-
-  #[cfg(unix)]
-  impl<'a> HomeGuard<'a> {
-    /// Create a new guard: acquires `lock`, sets `HOME` to `home_dir`, clears
-    /// config-home overrides, and arranges to restore the old values on drop.
-    fn new(lock: MutexGuard<'a, ()>, home_dir: std::path::PathBuf) -> Self {
-      let old_home = std::env::var_os("HOME");
-      let old_chrome_config_home = std::env::var_os("CHROME_CONFIG_HOME");
-      let old_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
-      // SAFETY: we hold ENV_MUTEX so no other test thread concurrently
-      // writes these environment variables.
-      #[allow(deprecated)]
-      unsafe {
-        std::env::set_var("HOME", &home_dir);
-        std::env::remove_var("CHROME_CONFIG_HOME");
-        std::env::remove_var("XDG_CONFIG_HOME");
-      }
-      HomeGuard {
-        old_home,
-        old_chrome_config_home,
-        old_xdg_config_home,
-        home_dir,
-        _lock: lock,
-      }
-    }
-  }
-
-  #[cfg(unix)]
-  impl Drop for HomeGuard<'_> {
-    fn drop(&mut self) {
-      // Restore the discovery environment before releasing the mutex lock.
-      #[allow(deprecated)]
-      unsafe {
-        match &self.old_home {
-          Some(old) => std::env::set_var("HOME", old),
-          None => std::env::remove_var("HOME"),
-        }
-        match &self.old_chrome_config_home {
-          Some(old) => std::env::set_var("CHROME_CONFIG_HOME", old),
-          None => std::env::remove_var("CHROME_CONFIG_HOME"),
-        }
-        match &self.old_xdg_config_home {
-          Some(old) => std::env::set_var("XDG_CONFIG_HOME", old),
-          None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-      }
-      // Best-effort removal of the temporary home directory.
-      let _ = std::fs::remove_dir_all(&self.home_dir);
-    }
-  }
-
-  #[cfg(unix)]
   fn seed_test_cookies(db_path: &std::path::Path, cookie_name: &str, cookie_value: &str) {
     let conn = rusqlite::Connection::open(db_path).expect("open sqlite db");
     conn
@@ -1158,10 +1263,8 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn test_chrome_resolves_network_cookies_on_unix() {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let home_dir =
-      std::env::temp_dir().join(format!("rookie-chrome-home-{}-{}", std::process::id(), n));
+    let home = crate::utils::TempDir::new().expect("create temp home");
+    let home_dir = home.path().to_path_buf();
 
     #[cfg(target_os = "macos")]
     let chrome_dir = home_dir.join("Library/Application Support/Google/Chrome");
@@ -1184,10 +1287,14 @@ mod tests {
     seed_test_cookies(&network_db, "net_cookie", "net_val");
     seed_test_cookies(&legacy_db, "legacy_cookie", "legacy_val");
 
-    // HomeGuard acquires ENV_MUTEX, sets HOME to `home_dir`, and restores
-    // the previous value (plus removes the temp dir) in its Drop impl
-    // — even if chrome() panics.
-    let _guard = HomeGuard::new(ENV_MUTEX.lock().unwrap(), home_dir);
+    // Thread-local override, not a mutated process environment: parallel
+    // tests each install their own value and never observe or serialize on
+    // another test's real environment (see `browser::registry::EnvOverride`).
+    let env = std::collections::BTreeMap::from([(
+      std::ffi::OsString::from("HOME"),
+      home_dir.into_os_string(),
+    )]);
+    let _env_override = browser::registry::EnvOverride::install(env);
 
     let cookies = chrome(None).expect("chrome() should find and parse network cookies");
     assert_eq!(

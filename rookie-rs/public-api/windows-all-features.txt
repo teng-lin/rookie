@@ -1214,9 +1214,20 @@ impl core::marker::Sync for rookie_cookies::MozillaProfile
 impl core::marker::Unpin for rookie_cookies::MozillaProfile
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::MozillaProfile
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MozillaProfile
+pub struct rookie_cookies::Request
+impl rookie_cookies::Request
+pub fn rookie_cookies::Request::browser(impl core::convert::Into<alloc::string::String>) -> Self
+pub fn rookie_cookies::Request::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
+impl core::marker::Freeze for rookie_cookies::Request
+impl core::marker::Send for rookie_cookies::Request
+impl core::marker::Sync for rookie_cookies::Request
+impl core::marker::Unpin for rookie_cookies::Request
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::Request
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::Request
 pub fn rookie_cookies::any_browser(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>, core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::arc(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::brave(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::browser(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::browser_profiles(&str) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
 pub fn rookie_cookies::browser_report(&str, core::option::Option<&str>, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<rookie_cookies::report::ExtractionReport>
 pub fn rookie_cookies::chrome(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
@@ -1226,6 +1237,7 @@ pub fn rookie_cookies::chromium(core::option::Option<alloc::vec::Vec<alloc::stri
 pub fn rookie_cookies::chromium_based(std::path::PathBuf, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::chromium_based_detailed(std::path::PathBuf, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>
 pub fn rookie_cookies::edge(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::extract(rookie_cookies::Request) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox_based(std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox_based_detailed(std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>

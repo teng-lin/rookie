@@ -623,13 +623,54 @@ fn environment_value<'a>(
   }
 }
 
+#[cfg(test)]
+std::thread_local! {
+  /// Test-only override for the environment `system()` would otherwise read
+  /// from the real process. Thread-local rather than a mutex-guarded global:
+  /// parallel tests each set their own value and never observe or serialize
+  /// on another test's environment, so discovery tests inject an `Env` value
+  /// directly instead of mutating real process state.
+  static ENV_OVERRIDE: std::cell::RefCell<Option<BTreeMap<OsString, OsString>>> =
+    const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard installing a thread-local environment override for
+/// `DiscoveryContext::system()`. Dropping the guard clears the override.
+#[cfg(test)]
+pub(crate) struct EnvOverride;
+
+#[cfg(test)]
+impl EnvOverride {
+  pub(crate) fn install(env: BTreeMap<OsString, OsString>) -> Self {
+    ENV_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(env));
+    Self
+  }
+}
+
+#[cfg(test)]
+impl Drop for EnvOverride {
+  fn drop(&mut self) {
+    ENV_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+  }
+}
+
 impl DiscoveryContext<RealDiscoveryFs> {
   fn system() -> Result<Self> {
     let platform = PlatformId::current()?;
+    #[cfg(test)]
+    if let Some(env) = ENV_OVERRIDE.with(|cell| cell.borrow().clone()) {
+      return Self::from_system_env(platform, env);
+    }
     let env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     Self::from_system_env(platform, env)
   }
 
+  /// `home` is best-effort, not mandatory: a non-Windows caller with no
+  /// `HOME` still resolves `{config_home}`/`{xdg_config_home}`-rooted
+  /// templates through `XDG_CONFIG_HOME`/`CHROME_CONFIG_HOME` alone, and any
+  /// `{home}`-rooted template resolves to absence rather than a partial path
+  /// (`resolve_template_for_selection` treats a missing token source as "no
+  /// match", not an error).
   fn from_system_env(platform: PlatformId, env: BTreeMap<OsString, OsString>) -> Result<Self> {
     let home_key = if platform == PlatformId::Windows {
       "USERPROFILE"
@@ -639,9 +680,6 @@ impl DiscoveryContext<RealDiscoveryFs> {
     let home = environment_value(platform, &env, home_key)
       .filter(|value| !value.is_empty())
       .map(PathBuf::from);
-    if platform != PlatformId::Windows && home.is_none() {
-      bail!("{home_key} is not set")
-    }
     Ok(Self {
       platform,
       home,
@@ -1186,10 +1224,23 @@ fn discover_installation_profiles<F: DiscoveryFs>(
     let profile_id = profile_id(&installation.installation_id, locator);
     let persistent_candidates = persistent_candidates(context, &canonical_path);
     let canonical_key = if directory_name == "." {
-      let selected_source = persistent_candidates
+      // `profile_has_source` (above) and this fresh `persistent_candidates`
+      // call are two separate filesystem reads of the same profile. Between
+      // them, the selected source can vanish or lose selection under a
+      // concurrent filesystem change; that is a discovery-time race, not an
+      // invariant this loop is entitled to assume.
+      let Some(selected_source) = persistent_candidates
         .iter()
         .find(|candidate| candidate.selected)
-        .expect("source-bearing profile has a selected persistent source");
+      else {
+        issues.push(DiscoveryIssue::new(
+          "profile_source_selection_race",
+          canonical_path.clone(),
+          "the profile's persistent cookie source changed between enumeration and canonical-key \
+           computation",
+        ));
+        continue;
+      };
       match context.fs.canonicalize(&selected_source.path) {
         Ok(path) => normalized_path_bytes(&path),
         Err(error) => {
@@ -1716,10 +1767,19 @@ where
       continue;
     }
     if selection == ProfileSelection::LegacyFirstProfile {
-      let selected_source = selected_profiles
+      // `legacy_profile_id` (above) was computed from this same in-memory
+      // discovery snapshot and only ever selects a profile that has a
+      // selected source, so `selected_source()` returning `None` here should
+      // be unreachable. Treat it as "no legacy source in this installation"
+      // — the same outcome `selected_profiles.is_empty()` already produces
+      // for this selection mode — rather than trusting the invariant across
+      // a future refactor.
+      let Some(selected_source) = selected_profiles
         .first()
         .and_then(|profile| profile.selected_source())
-        .expect("legacy-selected Chromium profile has a persistent source");
+      else {
+        continue;
+      };
       if let Some((local_state_path, local_state)) =
         legacy_windows_local_state(context, selected_source)?
       {
@@ -3612,6 +3672,46 @@ mod tests {
         .collect(),
       fs: RealDiscoveryFs,
     }
+  }
+
+  #[test]
+  fn linux_system_context_discovers_config_roots_without_home() {
+    let temp = TempDir::new("linux-context-without-home");
+    let xdg_config_home = temp.path().join("xdg-config");
+    let env = BTreeMap::from([(
+      OsString::from("XDG_CONFIG_HOME"),
+      xdg_config_home.clone().into_os_string(),
+    )]);
+    let context = DiscoveryContext::from_system_env(PlatformId::Linux, env)
+      .expect("HOME is optional when XDG_CONFIG_HOME resolves independently");
+    assert!(context.home.is_none());
+
+    // `{config_home}`-rooted templates resolve through XDG_CONFIG_HOME alone.
+    let chrome_root = channel_root(&context, "stable");
+    assert!(chrome_root.starts_with(&xdg_config_home));
+    seed_cookie(&chrome_root.join("Default"), true, "chrome", "value");
+    assert_eq!(
+      discover_browser_with_context(&context, "chrome")
+        .expect("discover Chrome from XDG_CONFIG_HOME")
+        .profiles()
+        .len(),
+      1
+    );
+
+    // A `{home}`-only template (Firefox's Linux roots) resolves to absence,
+    // not a partial path rooted at nothing.
+    let registry = embedded_registry().expect("registry");
+    let firefox = browser_definition(registry, context.platform, "firefox").expect("Firefox");
+    for root in &firefox.roots {
+      assert!(
+        context.resolve_template(&root.template).is_none(),
+        "a {{home}}-rooted template must resolve to absence without HOME"
+      );
+    }
+    assert!(discover_gecko_with_context(&context, "firefox")
+      .expect("Firefox discovery without HOME is absence, not an error")
+      .profiles
+      .is_empty());
   }
 
   #[test]
