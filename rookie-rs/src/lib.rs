@@ -738,6 +738,21 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 
 /// Returns cookies from Internet Explorer (Windows only)
 ///
+/// Its cookie database uses the ESE (Extensible Storage Engine) format,
+/// read here by linking an unmodified native C library (`libesedb`)
+/// in-process with no process isolation, so a malformed or malicious
+/// database can crash the whole host process rather than fail as a typed
+/// error. Unlike this crate's bundled SQLite parser — pinned to an exact
+/// version with its own tracked security inventory
+/// (`docs/sqlite-security.md`) — `libesedb` carries no such inventory.
+/// Containing that gap would mean running the parser in a sandboxed
+/// subprocess; the Internet Explorer 11 browser app was discontinued in
+/// 2022, and this crate is not planning to build that containment for it.
+/// Internet Explorer support is deprecated for removal in a future major
+/// version instead. `browser("internet_explorer", domains)` /
+/// `extract(Request::browser("internet_explorer"))` remain available for
+/// the rest of the deprecation window.
+///
 /// # Arguments
 ///
 /// * `domains` - A optional list that for getting specific domains only
@@ -751,7 +766,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"internet_explorer\", domains) or extract(Request::browser(\"internet_explorer\")) instead"
+  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022"
 )]
 pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("internet_explorer", domains)

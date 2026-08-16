@@ -35,6 +35,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   functions are deprecated for removal no earlier than 0.7. Their 0.6 runtime
   signatures and behavior remain unchanged; detailed Firefox functions remain
   supported in those bindings.
+- Rust's `internet_explorer()` and `internet_explorer_based()` are deprecated
+  for removal, not just superseded by a newer call shape: their ESE-format
+  cookie database is read through an unmodified native C library with no
+  process isolation, and containing that is not worth building now that the
+  Internet Explorer browser app is discontinued (2022). Their 0.6 behavior is
+  unchanged.
 
 ### Removed
 
