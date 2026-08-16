@@ -379,7 +379,7 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
     http_only: is_http_only,
     name,
     path,
-    value: CookieValue::Plain(value),
+    value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
     same_site: SAME_SITE_UNSPECIFIED,
     secure: is_secure,
     context: CookieContext::default(),

@@ -119,7 +119,7 @@ impl RawCookieRecord {
       secure: flags & INTERNET_COOKIE_IS_SECURE != 0,
       expires: date::internet_explorer_timestamp(self.expires),
       name,
-      value: CookieValue::Plain(value),
+      value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
       http_only: flags & INTERNET_COOKIE_HTTPONLY != 0,
       same_site: SAME_SITE_UNSPECIFIED,
       context: CookieContext::default(),

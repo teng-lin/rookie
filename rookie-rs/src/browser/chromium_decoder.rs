@@ -4,14 +4,74 @@
 //! dependencies. It classifies stored values and emits ciphertext-bearing
 //! `CookieRecord`s for the later row-decryption stage.
 
-use super::chromium::{
-  ChromiumDecodeEvent, ChromiumEngineExtractionOutcome, ChromiumRowFailure, ChromiumRowIssueCode,
-  CookieProjection, DecodedChromiumRecord, EncryptedValuePolicy, MissingBrowserKeyIdentity,
-};
 use super::cookie_record::{CipherTier, CookieRecord, CookieValue};
-use crate::common::{date, enums::*, utils};
+use crate::common::{date, enums::*, secret::SecretString, utils};
 use anyhow::{anyhow, Context, Result};
 use std::fmt;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CookieProjection {
+  Legacy,
+  Detailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EncryptedValuePolicy {
+  UseKeyOutcomes,
+  RejectMissingIdentity,
+}
+
+const MISSING_BROWSER_KEY_IDENTITY_MESSAGE: &str =
+  "encrypted explicit-path Chromium profile has no browser key identity; \
+   pass a canonical browser_id from supported_browsers()";
+
+#[derive(Debug)]
+pub(super) struct MissingBrowserKeyIdentity;
+
+impl fmt::Display for MissingBrowserKeyIdentity {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(MISSING_BROWSER_KEY_IDENTITY_MESSAGE)
+  }
+}
+
+impl std::error::Error for MissingBrowserKeyIdentity {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChromiumDecodeIssueCode {
+  ColumnRead(&'static str),
+}
+
+#[derive(Debug)]
+pub(super) struct ChromiumRowFailure {
+  pub(super) row_number: usize,
+  pub(super) code: ChromiumDecodeIssueCode,
+  pub(super) error: anyhow::Error,
+}
+
+#[derive(Debug)]
+pub(super) struct DecodedChromiumRecord {
+  pub(super) row_number: usize,
+  pub(super) schema_version: u32,
+  pub(super) record: CookieRecord,
+  /// Detailed-only context errors are read while the SQLite row is alive but
+  /// applied after value opening, matching the historical decrypt-before-context
+  /// failure precedence.
+  pub(super) pending_context_failure: Option<ChromiumRowFailure>,
+}
+
+#[derive(Debug)]
+// Events are handed synchronously to the sink and never collected. Keeping
+// the record inline avoids a heap allocation for every cookie row.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ChromiumDecodeEvent {
+  RowFailure(ChromiumRowFailure),
+  Record(DecodedChromiumRecord),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ChromiumDecodeSummary {
+  pub(super) rows_seen: usize,
+}
 
 #[derive(Debug)]
 pub(super) struct ChromiumContextColumnError {
@@ -92,12 +152,16 @@ fn escape_like_pattern(input: &str) -> String {
     .replace('_', "\\_")
 }
 
-pub(super) fn decode_cookie_records(
+pub(super) fn decode_cookie_records<Sink>(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
   projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
-) -> Result<ChromiumEngineExtractionOutcome> {
+  mut sink: Sink,
+) -> Result<ChromiumDecodeSummary>
+where
+  Sink: FnMut(ChromiumDecodeEvent) -> Result<()>,
+{
   let schema_version = chromium_schema_version(connection)?;
   let columns = sqlite_table_columns(connection, "cookies")?;
   let optional_column = |name: &str| {
@@ -140,8 +204,7 @@ pub(super) fn decode_cookie_records(
   }
   query += ";";
 
-  let mut extraction = ChromiumEngineExtractionOutcome::default();
-  extraction.schema_version = schema_version;
+  let mut rows_seen = 0;
   let mut stmt = connection.prepare(query.as_str())?;
   let query_domain_filters = if apply_sql_domain_filter {
     domain_filters.as_slice()
@@ -170,35 +233,31 @@ pub(super) fn decode_cookie_records(
     let host_key = match row.get::<_, Option<String>>(0) {
       Ok(host_key) => host_key.unwrap_or_default(),
       Err(error) => {
-        extraction.stats.rows_seen += 1;
-        let row_number = extraction.stats.rows_seen;
-        extraction
-          .decoded_events
-          .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-            row_number,
-            code: ChromiumRowIssueCode::ColumnRead("host_key"),
-            error: anyhow!("failed to read host_key from Chromium cookie row: {error}"),
-          }));
+        rows_seen += 1;
+        let row_number = rows_seen;
+        sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+          row_number,
+          code: ChromiumDecodeIssueCode::ColumnRead("host_key"),
+          error: anyhow!("failed to read host_key from Chromium cookie row: {error}"),
+        }))?;
         continue;
       }
     };
     if !utils::some_domain_in_host(domains, &host_key) {
       continue;
     }
-    extraction.stats.rows_seen += 1;
-    let row_number = extraction.stats.rows_seen;
+    rows_seen += 1;
+    let row_number = rows_seen;
     macro_rules! read_optional_column {
       ($index:expr, $type:ty, $name:literal) => {
         match row.get::<_, Option<$type>>($index) {
           Ok(value) => value,
           Err(error) => {
-            extraction
-              .decoded_events
-              .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-                row_number,
-                code: ChromiumRowIssueCode::ColumnRead($name),
-                error: anyhow!("failed to read {} from Chromium cookie row: {error}", $name),
-              }));
+            sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+              row_number,
+              code: ChromiumDecodeIssueCode::ColumnRead($name),
+              error: anyhow!("failed to read {} from Chromium cookie row: {error}", $name),
+            }))?;
             continue;
           }
         }
@@ -213,26 +272,11 @@ pub(super) fn decode_cookie_records(
     let name: String = match row.get(4) {
       Ok(value) => value,
       Err(error) => {
-        extraction
-          .decoded_events
-          .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-            row_number,
-            code: ChromiumRowIssueCode::ColumnRead("name"),
-            error: anyhow!("failed to read name from row: {error}"),
-          }));
-        continue;
-      }
-    };
-    let plaintext: String = match row.get(5) {
-      Ok(value) => value,
-      Err(error) => {
-        extraction
-          .decoded_events
-          .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-            row_number,
-            code: ChromiumRowIssueCode::ColumnRead("value"),
-            error: anyhow!("failed to read value from row: {error}"),
-          }));
+        sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+          row_number,
+          code: ChromiumDecodeIssueCode::ColumnRead("name"),
+          error: anyhow!("failed to read name from row: {error}"),
+        }))?;
         continue;
       }
     };
@@ -252,7 +296,7 @@ pub(super) fn decode_cookie_records(
             CookieContext::default(),
             Some(ChromiumRowFailure {
               row_number,
-              code: ChromiumRowIssueCode::ColumnRead(column),
+              code: ChromiumDecodeIssueCode::ColumnRead(column),
               error: error.into(),
             }),
           )
@@ -262,7 +306,18 @@ pub(super) fn decode_cookie_records(
       (CookieContext::default(), None)
     };
     let value = if encrypted_value.is_empty() {
-      CookieValue::Plain(plaintext)
+      let plaintext: String = match row.get(5) {
+        Ok(value) => value,
+        Err(error) => {
+          sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumDecodeIssueCode::ColumnRead("value"),
+            error: anyhow!("failed to read value from row: {error}"),
+          }))?;
+          continue;
+        }
+      };
+      CookieValue::Plain(SecretString::new(plaintext))
     } else {
       // Non-empty ciphertext is authoritative. The plaintext column is not
       // carried forward as a fallback, so later failures cannot expose it.
@@ -271,28 +326,25 @@ pub(super) fn decode_cookie_records(
         bytes: encrypted_value,
       }
     };
-    extraction
-      .decoded_events
-      .push(ChromiumDecodeEvent::Record(Box::new(
-        DecodedChromiumRecord {
-          row_number,
-          record: CookieRecord {
-            domain: host_key,
-            path,
-            secure: is_secure,
-            expires,
-            name,
-            value,
-            http_only,
-            same_site,
-            context,
-          },
-          pending_context_failure,
-        },
-      )));
+    sink(ChromiumDecodeEvent::Record(DecodedChromiumRecord {
+      row_number,
+      schema_version,
+      record: CookieRecord {
+        domain: host_key,
+        path,
+        secure: is_secure,
+        expires,
+        name,
+        value,
+        http_only,
+        same_site,
+        context,
+      },
+      pending_context_failure,
+    }))?;
   }
 
-  Ok(extraction)
+  Ok(ChromiumDecodeSummary { rows_seen })
 }
 
 #[cfg(test)]
@@ -308,13 +360,15 @@ mod tests {
 
   #[test]
   fn decoder_signature_is_key_free() {
+    type KeyFreeSink = fn(ChromiumDecodeEvent) -> Result<()>;
     type DecoderSignature = fn(
       &rusqlite::Connection,
       Option<&[String]>,
       CookieProjection,
       EncryptedValuePolicy,
-    ) -> Result<ChromiumEngineExtractionOutcome>;
-    let _: DecoderSignature = decode_cookie_records;
+      KeyFreeSink,
+    ) -> Result<ChromiumDecodeSummary>;
+    let _: DecoderSignature = decode_cookie_records::<KeyFreeSink>;
 
     let source = include_str!("chromium_decoder.rs");
     let production_source = source
@@ -361,5 +415,39 @@ mod tests {
         "key-bearing symbol {forbidden} crossed into the decoder module"
       );
     }
+  }
+
+  #[test]
+  fn sink_backpressure_stops_row_decoding_immediately() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE meta (key TEXT, value TEXT);
+         INSERT INTO meta VALUES ('version', '23');
+         CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER
+         );
+         INSERT INTO cookies VALUES
+           ('.example.com', '/', 0, 0, 'first', 'first-value', X'', 0, 0),
+           ('.example.com', '/', 0, 0, 'second', 'second-value', X'', 0, 0);",
+      )
+      .expect("seed rows");
+
+    let mut calls = 0;
+    let error = decode_cookie_records(
+      &connection,
+      None,
+      CookieProjection::Legacy,
+      EncryptedValuePolicy::UseKeyOutcomes,
+      |_event| {
+        calls += 1;
+        anyhow::bail!("sink backpressure sentinel")
+      },
+    )
+    .expect_err("sink stops the decoder");
+    assert_eq!(calls, 1, "the decoder must not read ahead after sink error");
+    assert_eq!(error.to_string(), "sink backpressure sentinel");
   }
 }

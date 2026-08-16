@@ -23,7 +23,7 @@ const CIPHER_VERSION_PREFIX_LEN: usize = 3;
 ///
 /// This is private scaffolding for the installation-aware pipeline. In
 /// particular, raw DPAPI is row-scoped and therefore has no key bucket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChromiumCipherVersion {
   V10,
   V11,
@@ -31,6 +31,19 @@ pub(crate) enum ChromiumCipherVersion {
   V20,
   LegacyDpapi,
   Unknown([u8; CIPHER_VERSION_PREFIX_LEN]),
+}
+
+impl fmt::Debug for ChromiumCipherVersion {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::V10 => formatter.write_str("V10"),
+      Self::V11 => formatter.write_str("V11"),
+      Self::V12SecretPortal => formatter.write_str("V12SecretPortal"),
+      Self::V20 => formatter.write_str("V20"),
+      Self::LegacyDpapi => formatter.write_str("LegacyDpapi"),
+      Self::Unknown(_) => formatter.write_str("Unknown"),
+    }
+  }
 }
 
 /// A non-empty encrypted blob that is too short to carry a version prefix.
@@ -301,7 +314,7 @@ impl ChromiumKeyOutcomes {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChromiumKeyRoute<'a> {
   Candidates {
     tier: ChromiumKeyTier,
@@ -317,6 +330,30 @@ pub(crate) enum ChromiumKeyRoute<'a> {
   LegacyDpapi,
   V12SecretPortal,
   Unknown([u8; CIPHER_VERSION_PREFIX_LEN]),
+}
+
+impl fmt::Debug for ChromiumKeyRoute<'_> {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Candidates { tier, candidates } => formatter
+        .debug_struct("Candidates")
+        .field("tier", tier)
+        .field("candidates", candidates)
+        .finish(),
+      Self::NotApplicable { tier } => formatter
+        .debug_struct("NotApplicable")
+        .field("tier", tier)
+        .finish(),
+      Self::Failure { tier, failure } => formatter
+        .debug_struct("Failure")
+        .field("tier", tier)
+        .field("failure", failure)
+        .finish(),
+      Self::LegacyDpapi => formatter.write_str("LegacyDpapi"),
+      Self::V12SecretPortal => formatter.write_str("V12SecretPortal"),
+      Self::Unknown(_) => formatter.write_str("Unknown"),
+    }
+  }
 }
 
 /// Result of asking the host cipher capability to decrypt an unversioned
@@ -453,6 +490,19 @@ mod tests {
       detect_cipher_version(b"v99payload"),
       Ok(ChromiumCipherVersion::Unknown(*b"v99"))
     );
+  }
+
+  #[test]
+  fn unknown_cipher_and_route_debug_do_not_expose_raw_prefix_bytes() {
+    let cipher = ChromiumCipherVersion::Unknown(*b"v99");
+    let outcomes = ChromiumKeyOutcomes::default();
+    let route = outcomes.route(cipher);
+
+    for debug in [format!("{cipher:?}"), format!("{route:?}")] {
+      assert_eq!(debug, "Unknown");
+      assert!(!debug.contains("v99"));
+      assert!(!debug.contains("118, 57, 57"));
+    }
   }
 
   #[test]

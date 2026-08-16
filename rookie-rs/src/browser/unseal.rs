@@ -8,7 +8,7 @@ use super::chromium_crypto::{self, ChromiumKeyOutcomes, ChromiumKeyRoute, Legacy
 use super::cookie_record::{
   CipherTier, CookieRecord, CookieValue, UnavailableCode, UnavailableReason,
 };
-use crate::common::secret::SecretBytes;
+use crate::common::secret::{SecretBytes, SecretString};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -52,7 +52,7 @@ pub(super) fn decode_chromium_cookie_value(
   host_key: &str,
   plaintext: SecretBytes,
   schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieDecodeError> {
+) -> std::result::Result<SecretString, ChromiumCookieDecodeError> {
   let host_hash_required = schema_version >= CHROMIUM_HOST_HASH_SCHEMA_VERSION;
   if host_hash_required && plaintext.len() < CHROMIUM_HOST_HASH_LEN {
     return Err(ChromiumCookieDecodeError::MissingRequiredHostHash);
@@ -62,19 +62,19 @@ pub(super) fn decode_chromium_cookie_value(
     let expected_host_hash = Sha256::digest(host_key.as_bytes());
     if plaintext[..CHROMIUM_HOST_HASH_LEN] == expected_host_hash[..] {
       return plaintext
-        .into_output_string_from(CHROMIUM_HOST_HASH_LEN)
+        .into_secret_string_from(CHROMIUM_HOST_HASH_LEN)
         .map_err(|_| ChromiumCookieDecodeError::InvalidUtf8AfterVerifiedHostHash);
     }
     if host_hash_required {
       return Err(ChromiumCookieDecodeError::HostHashMismatch);
     }
     return plaintext
-      .into_output_string_from(0)
+      .into_secret_string_from(0)
       .map_err(|_| ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8);
   }
 
   plaintext
-    .into_output_string_from(0)
+    .into_secret_string_from(0)
     .map_err(|_| ChromiumCookieDecodeError::UnprefixedInvalidUtf8)
 }
 
@@ -161,7 +161,7 @@ fn unseal_encrypted_value(
   encrypted_value: &[u8],
   outcomes: &ChromiumKeyOutcomes,
   schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieValueError> {
+) -> std::result::Result<SecretString, ChromiumCookieValueError> {
   unseal_with_cipher_adapter(
     host_key,
     tier,
@@ -191,7 +191,7 @@ fn unseal_with_cipher_adapter<Validate, Candidate, Legacy>(
   outcomes: &ChromiumKeyOutcomes,
   schema_version: u32,
   adapter: CipherAdapter<Validate, Candidate, Legacy>,
-) -> std::result::Result<String, ChromiumCookieValueError>
+) -> std::result::Result<SecretString, ChromiumCookieValueError>
 where
   Validate: Fn(&[u8]) -> Result<()>,
   Candidate: Fn(&[u8], &[u8]) -> Result<SecretBytes>,
@@ -361,4 +361,5 @@ where
     schema_version,
     adapter,
   )
+  .map(SecretString::into_output_string)
 }

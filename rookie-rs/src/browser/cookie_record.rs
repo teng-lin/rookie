@@ -1,4 +1,7 @@
-use crate::common::enums::{Cookie, CookieContext, DetailedCookie};
+use crate::common::{
+  enums::{Cookie, CookieContext, DetailedCookie},
+  secret::SecretString,
+};
 use std::fmt;
 
 const CIPHER_VERSION_PREFIX_LEN: usize = 3;
@@ -9,7 +12,7 @@ const CIPHER_VERSION_PREFIX_LEN: usize = 3;
 /// `unseal` stage may turn `Encrypted` into `Plain` (or `Unavailable`).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum CookieValue {
-  Plain(String),
+  Plain(SecretString),
   Encrypted { tier: CipherTier, bytes: Vec<u8> },
   Unavailable(UnavailableReason),
 }
@@ -47,7 +50,11 @@ impl fmt::Debug for CookieValue {
         .field("byte_len", &bytes.len())
         .field("bytes", &RedactedCookieValue)
         .finish(),
-      Self::Unavailable(reason) => formatter.debug_tuple("Unavailable").field(reason).finish(),
+      Self::Unavailable(reason) => formatter
+        .debug_struct("Unavailable")
+        .field("code", &reason.code)
+        .field("message", &RedactedCookieValue)
+        .finish(),
     }
   }
 }
@@ -96,10 +103,20 @@ pub(crate) enum UnavailableCode {
   ProviderFailed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct UnavailableReason {
   pub(crate) code: UnavailableCode,
   pub(crate) message: String,
+}
+
+impl fmt::Debug for UnavailableReason {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("UnavailableReason")
+      .field("code", &self.code)
+      .field("message", &RedactedCookieValue)
+      .finish()
+  }
 }
 
 impl fmt::Display for UnavailableReason {
@@ -144,7 +161,7 @@ impl fmt::Debug for CookieRecord {
 impl CookieRecord {
   pub(crate) fn into_cookie(self) -> Result<Cookie, UnavailableReason> {
     let value = match self.value {
-      CookieValue::Plain(value) => value,
+      CookieValue::Plain(value) => value.into_output_string(),
       CookieValue::Unavailable(reason) => return Err(reason),
       CookieValue::Encrypted { .. } => {
         return Err(UnavailableReason {
@@ -205,7 +222,7 @@ mod tests {
       secure: true,
       expires: None,
       name: "session".to_owned(),
-      value: CookieValue::Plain("plain-value-sentinel".to_owned()),
+      value: CookieValue::Plain(SecretString::new("plain-value-sentinel".to_owned())),
       http_only: true,
       same_site: 1,
       context: CookieContext {
@@ -227,5 +244,14 @@ mod tests {
     assert!(!encrypted_debug.contains("118, 57, 57"));
     assert!(encrypted_debug.contains("tier: Unknown"));
     assert!(encrypted_debug.contains("bytes: <redacted>"));
+
+    let unavailable = CookieValue::Unavailable(UnavailableReason {
+      code: UnavailableCode::Decrypt,
+      message: "unavailable-message-sentinel".to_owned(),
+    });
+    let unavailable_debug = format!("{unavailable:?}");
+    assert!(!unavailable_debug.contains("unavailable-message-sentinel"));
+    assert!(unavailable_debug.contains("code: Decrypt"));
+    assert!(unavailable_debug.contains("message: <redacted>"));
   }
 }
