@@ -98,12 +98,17 @@ mod tests {
   }
 
   #[test]
-  fn safari_from_path_rejects_a_missing_file_without_touching_the_keychain() {
+  fn safari_from_path_reports_a_missing_file_as_an_open_failure() {
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-    let missing = PathBuf::from("/nonexistent/Cookies.binarycookies");
+    let directory = crate::utils::TempDir::new().unwrap();
+    let missing = directory.path().join("Cookies.binarycookies");
     let error = safari_from_path(missing, None, &runtime).unwrap_err();
-    assert!(format!("{error:#}").contains("Failed to open"));
+    let io_error = error
+      .chain()
+      .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+      .expect("a missing file must surface a std::io::Error in the chain");
+    assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
   }
 
   #[test]

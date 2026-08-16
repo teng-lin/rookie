@@ -671,10 +671,9 @@ mod tests {
       unreachable!("engine mismatch must fail before profile discovery starts")
     })
     .expect_err("chrome is a Chromium browser id, not a Safari one");
-    assert!(
-      error.to_string().contains("is not a"),
-      "{error}: expected an engine-mismatch message"
-    );
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("chrome"), "{diagnostic}");
+    assert!(diagnostic.contains("Safari"), "{diagnostic}");
   }
 
   struct CanonicalizeDeniedFs {
@@ -808,7 +807,11 @@ mod tests {
     let home = directory.path().join("home");
     let cookie_dir = home.join("Library/Cookies");
     std::fs::create_dir_all(&cookie_dir).expect("legacy Safari marker dir");
-    std::fs::write(cookie_dir.join("Cookies.binarycookies"), b"cook").expect("cookie fixture");
+    std::fs::write(
+      cookie_dir.join("Cookies.binarycookies"),
+      crate::browser::safari::golden_binarycookies_test_fixture(),
+    )
+    .expect("cookie fixture");
 
     let env = BTreeMap::from([(OsString::from("HOME"), home.clone().into_os_string())]);
     let _env_override = super::super::EnvOverride::install(env);
@@ -821,12 +824,22 @@ mod tests {
     assert_eq!(profiles.profiles.len(), 1);
 
     let report = safari_report("safari", None, None)
-      .expect("safari_report should discover and query the synthetic legacy home");
+      .expect("safari_report should discover the synthetic legacy home");
     assert_eq!(report.profiles.len(), 1);
+    let report_source = &report.profiles[0].sources[0];
+    // The golden fixture's cookie has a fixed (long-past) expiry, so canonical
+    // projection legitimately drops it as expired; `rows_seen` proves the real
+    // binarycookies parser actually read and processed the fixture rather than
+    // the query silently failing, which is what this test exists to catch.
+    assert!(report_source.error.is_none(), "{:?}", report_source.error);
+    assert_eq!(report_source.rows_seen, 1);
 
     let legacy = legacy_safari_outcome("safari", None)
-      .expect("legacy_safari_outcome should discover and query the synthetic legacy home");
+      .expect("legacy_safari_outcome should discover the synthetic legacy home");
     assert_eq!(legacy.profiles.len(), 1);
+    let legacy_source = &legacy.profiles[0].sources[0];
+    assert!(legacy_source.error.is_none(), "{:?}", legacy_source.error);
+    assert_eq!(legacy_source.rows_seen, 1);
   }
 
   #[test]

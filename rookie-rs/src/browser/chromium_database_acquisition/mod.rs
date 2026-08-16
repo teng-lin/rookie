@@ -481,6 +481,8 @@ mod tests {
       display.contains("process shutdown is disabled"),
       "{display}"
     );
+    assert!(display.contains(REDACTED_PATH), "{display}");
+    assert!(!display.contains("/tmp/Cookies"), "{display}");
     let debug = format!("{database_disallowed:?}");
     assert!(debug.starts_with("WindowsDatabaseLocked {"), "{debug}");
     assert!(debug.contains("locked_file: Database"), "{debug}");
@@ -493,6 +495,8 @@ mod tests {
       debug.contains(&format!("os_error: {ERROR_SHARING_VIOLATION_CODE}")),
       "{debug}"
     );
+    assert!(debug.contains(REDACTED_PATH), "{debug}");
+    assert!(!debug.contains("/tmp/Cookies"), "{debug}");
 
     let wal_allowed = WindowsDatabaseLocked {
       locked_file: WindowsLockedFile::WriteAheadLog,
@@ -510,10 +514,14 @@ mod tests {
       display.contains("explicit process shutdown did not make it readable"),
       "{display}"
     );
+    assert!(display.contains(REDACTED_PATH), "{display}");
+    assert!(!display.contains("/tmp/Cookies-wal"), "{display}");
     let debug = format!("{wal_allowed:?}");
     assert!(debug.contains("locked_file: WriteAheadLog"), "{debug}");
     assert!(debug.contains("has_verified_nonempty_wal: true"), "{debug}");
     assert!(debug.contains("shutdown_allowed: true"), "{debug}");
+    assert!(debug.contains(REDACTED_PATH), "{debug}");
+    assert!(!debug.contains("/tmp/Cookies-wal"), "{debug}");
   }
 
   #[test]

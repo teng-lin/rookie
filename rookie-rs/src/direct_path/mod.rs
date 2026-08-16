@@ -1305,7 +1305,11 @@ mod tests {
       detailed_diagnostic.contains("identity"),
       "{detailed_diagnostic}"
     );
+  }
 
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn a_recognized_safari_signature_dispatches_past_classification_on_macos() {
     let safari_directory = TempDir::new().unwrap();
     let safari_path = safari_directory.path().join("Cookies.binarycookies");
     std::fs::write(&safari_path, b"cookfixture-not-a-real-binarycookies-file").unwrap();
