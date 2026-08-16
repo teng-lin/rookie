@@ -26,3 +26,9 @@ rookie-cookies.workspace = true
 
 [build-dependencies]
 napi-build = "2.0.1"
+
+[dev-dependencies]
+# Only used by the schema-parity test to parse `schema/report-dto.schema.json`.
+# Already part of the build graph via `rookie-cookies`'s own `serde_json`
+# dependency (see `rookie-rs/Cargo.toml`).
+serde_json = "1"

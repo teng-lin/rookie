@@ -57,6 +57,7 @@ macro_rules! string_identifier {
     /// issue code cannot break a downstream match. Compare with
     /// [`Self::as_str`] and parse untrusted input with [`FromStr`].
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+    #[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
     #[serde(transparent)]
     pub struct $name(String);
 
@@ -262,6 +263,7 @@ impl CookieSourceRoleId {
 /// is the set a `decryptable` claim refers to.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct BrowserCapabilitiesDescriptor {
   pub persistent_formats: Vec<CookieSourceFormatId>,
   pub session_formats: Vec<CookieSourceFormatId>,
@@ -272,6 +274,7 @@ pub struct BrowserCapabilitiesDescriptor {
 /// A browser registered for the running OS. Registration is not detection.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct BrowserDescriptor {
   pub id: BrowserId,
   pub aliases: Vec<String>,
@@ -286,6 +289,7 @@ pub struct BrowserDescriptor {
 /// lossy on a non-UTF-8 filesystem, which `path_lossy` reports.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ProfileIdentity {
   pub browser_id: BrowserId,
   pub installation_id: InstallationId,
@@ -298,6 +302,7 @@ pub struct ProfileIdentity {
 /// A cookie source a profile exposes, before any extraction is attempted.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct CookieSourceDescriptor {
   pub role: CookieSourceRoleId,
   pub format: CookieSourceFormatId,
@@ -309,6 +314,7 @@ pub struct CookieSourceDescriptor {
 /// One discovered profile and its cookie sources.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ProfileDescriptor {
   pub profile: ProfileIdentity,
   pub is_default: bool,
@@ -318,6 +324,7 @@ pub struct ProfileDescriptor {
 /// Identity of the source an extraction attempted.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct CookieSourceIdentity {
   pub role: CookieSourceRoleId,
   pub format: CookieSourceFormatId,
@@ -333,6 +340,7 @@ pub struct CookieSourceIdentity {
 /// that exceeded that range is clamped and sets `counters_saturated`.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ExtractionStats {
   /// Rows *relevant to the request*: those matching the domain filter, plus
   /// any that failed before relevance could be determined. Rows the filter
@@ -361,6 +369,7 @@ pub struct ExtractionStats {
 /// Request-wide totals, including browsers that were registered but absent.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ReportStats {
   pub registered_browsers: u32,
   pub browsers_detected: u32,
@@ -387,6 +396,7 @@ pub struct ReportStats {
 /// `occurrences` counts them all while `samples` keeps a bounded excerpt.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ExtractionIssue {
   pub code: IssueCode,
   pub stage: ExtractionStageCode,
@@ -422,6 +432,7 @@ fn unknown_retryability() -> String {
 /// sources in role/precedence order.
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct SourceExtraction {
   pub source: CookieSourceIdentity,
   pub status: SourceStatusCode,
@@ -435,6 +446,7 @@ pub struct SourceExtraction {
 /// One profile's sources, totals, and profile-scoped diagnostics.
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ProfileExtraction {
   pub profile: ProfileIdentity,
   pub sources: Vec<SourceExtraction>,
@@ -448,6 +460,7 @@ pub struct ProfileExtraction {
 /// problems; anything narrower is attached to its profile or source.
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ExtractionReport {
   /// Wire discriminator. Missing values from pre-PR3 JSON deserialize as v1.
   #[serde(default = "extraction_report_schema_version")]

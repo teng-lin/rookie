@@ -111,6 +111,110 @@ def npm_native_packages(contract: dict[str, Any]) -> tuple[str, ...]:
     return tuple(f"rookie-cookies-{platform}" for platform in platforms)
 
 
+class ArtifactMatchError(Exception):
+    """Raised when a release artifact's filename can't be matched to exactly
+    one contract cell -- see `match_cell_for_artifact`."""
+
+
+_CLI_BINARY_PATTERN = re.compile(r"^rookie-cookies-cli-(?P<target>.+?)(?:\.exe)?$")
+_NPM_ADDON_PATTERN = re.compile(r"^rookie_cookies\.(?P<npm_platform>[a-z0-9]+(?:-[a-z0-9]+)+)\.node$")
+
+# PEP 425/600 wheel platform-tag arch tokens this project's cells can appear
+# under, keyed by the contract's own `cpu` vocabulary. macOS and manylinux
+# spell some architectures differently from both each other and from Rust's
+# target-triple arch component (e.g. a manylinux tag says "aarch64" where a
+# macOS tag says "arm64"; "x86" is "i686" on both), so this isn't a single
+# substring check.
+_WHEEL_CPU_TAGS = {
+    "darwin": {
+        "x86_64": {"x86_64"},
+        "aarch64": {"arm64"},
+    },
+    "linux": {
+        "x86_64": {"x86_64"},
+        "x86": {"i686"},
+        "aarch64": {"aarch64"},
+        "armv7": {"armv7l"},
+        "s390x": {"s390x"},
+        "ppc64le": {"ppc64le"},
+    },
+    "win32": {
+        "x64": {"amd64"},
+    },
+}
+
+
+def _wheel_cell_os_cpu(platform_tag: str) -> tuple[str, str] | None:
+    # A compressed manylinux tag looks like "manylinux_2_17_x86_64.manylinux2014_x86_64";
+    # every dot-separated alternative names the same architecture, so only the first is needed.
+    tag = platform_tag.split(".")[0]
+    if tag.startswith("macosx"):
+        os_name = "darwin"
+    elif tag.startswith("manylinux") or tag.startswith("linux"):
+        os_name = "linux"
+    elif tag.startswith("win"):
+        os_name = "win32"
+    else:
+        return None
+    for cpu, tokens in _WHEEL_CPU_TAGS[os_name].items():
+        if any(tag.endswith(f"_{token}") for token in tokens):
+            return os_name, cpu
+    return None
+
+
+def match_cell_for_artifact(contract: dict[str, Any], filename: str) -> dict[str, Any] | None:
+    """The single contract cell `filename` (a release artifact's basename, as
+    written into a release-scan-manifest.json record) was built for, or
+    `None` if `filename` isn't shaped like any artifact this project
+    publishes. Filename shapes are taken from the exact `write-release-scan-manifest.py`
+    invocations in `publish-cli.yml`/`publish-npm.yml`/`publish-py.yml`, not
+    guessed.
+    """
+    addon_match = _NPM_ADDON_PATTERN.match(filename)
+    if addon_match:
+        npm_platform = addon_match["npm_platform"]
+        matches = [
+            cell for cell in cells(contract, artifact_id="npm-native") if cell.get("npm_platform") == npm_platform
+        ]
+        return matches[0] if matches else None
+
+    if filename.endswith(".tgz"):
+        for cell in cells(contract, artifact_id="npm-native"):
+            npm_platform = cell.get("npm_platform")
+            if npm_platform and filename.startswith(f"rookie-cookies-{npm_platform}-"):
+                return cell
+        matches = cells(contract, artifact_id="npm-root")
+        return matches[0] if matches else None
+
+    cli_match = _CLI_BINARY_PATTERN.match(filename)
+    if cli_match:
+        target = cli_match["target"]
+        matches = [cell for cell in cells(contract, artifact_id="cli") if cell.get("target_triple") == target]
+        return matches[0] if matches else None
+
+    if filename.endswith(".whl"):
+        platform_tag = filename.removesuffix(".whl").rsplit("-", 1)[-1]
+        os_cpu = _wheel_cell_os_cpu(platform_tag)
+        if os_cpu is None:
+            raise ArtifactMatchError(
+                f"{filename}: wheel platform tag {platform_tag!r} does not match any known "
+                "architecture token -- see platform_contract.py's _WHEEL_CPU_TAGS"
+            )
+        os_name, cpu = os_cpu
+        matches = [
+            cell for cell in cells(contract, artifact_id="wheel") if cell.get("os") == os_name and cell.get("cpu") == cpu
+        ]
+        if not matches:
+            raise ArtifactMatchError(f"{filename}: no wheel cell declared for os={os_name!r} cpu={cpu!r}")
+        return matches[0]
+
+    if filename.endswith(".tar.gz"):
+        matches = cells(contract, artifact_id="sdist")
+        return matches[0] if matches else None
+
+    return None
+
+
 # Fields that are optional/artifact-specific in the schema (unlike os/cpu/
 # libc, which every cell has, sometimes null) but that emit_matrix()'s
 # per-artifact-type functions access unconditionally via plain dict

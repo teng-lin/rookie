@@ -142,6 +142,83 @@ pub fn stop_reason(error: &anyhow::Error) -> Option<StopReason> {
   })
 }
 
+/// Which side of the FFI boundary an error should be attributed to, for
+/// bindings that raise distinct exception types rather than one flat error
+/// class.
+///
+/// This is a request/engine split only -- a returned [`report::ExtractionReport`]
+/// with `status: failed` is a successful *return*, not an error, and is
+/// never classified here. See [`fault_kind`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultKind {
+  /// The caller's input was invalid, e.g. an unsupported option or an
+  /// explicit source that does not match its declared kind. A caller can
+  /// fix this by changing what it passed in.
+  Request,
+  /// Extraction or engine failure unrelated to caller input, including a
+  /// stopped-early [`StopReason`] -- [`stop_reason`] remains the finer
+  /// grained tool for distinguishing those from each other.
+  Engine,
+}
+
+/// Classifies `error` as a [`FaultKind::Request`] or [`FaultKind::Engine`]
+/// fault, for bindings that raise distinct exception types at the FFI
+/// boundary.
+///
+/// Only errors carrying a structured, downcastable cause can be classified
+/// as [`FaultKind::Request`] today: currently that means
+/// [`direct_path::DirectPathError`]. Every other error -- including the
+/// still-unstructured `bail!` string errors the legacy named-browser and
+/// registry-backed API surface raises for bad input like an unknown browser
+/// ID -- classifies as [`FaultKind::Engine`] until it gains a similarly
+/// structured, downcastable cause. That is a known, honest gap, not a
+/// silent one: giving the legacy API the same structured errors
+/// [`direct_path`] already has is tracked separately rather than attempted
+/// here.
+///
+/// This is also coarser than "caller-fixable" in one more way: every
+/// [`direct_path::DirectPathError`] classifies as `Request`, including
+/// [`direct_path::InvalidCookieSourceReason::SourceInspectionFailed`] --
+/// which covers a genuinely corrupt/locked/unreadable source as well as a
+/// caller simply pointing at the wrong file. Both currently surface the
+/// same way; splitting that reason out to `Engine` is a reasonable future
+/// refinement, not attempted here.
+///
+/// # Examples
+///
+/// ```no_run
+/// let request = rookie_cookies::direct_path::ChromiumPathRequest::new(
+///   "/nonexistent/Cookies",
+/// );
+/// if let Err(error) = rookie_cookies::direct_path::chromium_cookies_from_path(request) {
+///   assert_eq!(rookie_cookies::fault_kind(&error), rookie_cookies::FaultKind::Request);
+/// }
+/// ```
+pub fn fault_kind(error: &anyhow::Error) -> FaultKind {
+  // A timeout or cancellation checked *during* source classification still
+  // gets wrapped in a `DirectPathError` (inspection failed, for whichever
+  // reason), so this must rule out an operational stop first: that is never
+  // a caller input mistake, regardless of what wraps it afterward.
+  if stop_reason(error).is_some() {
+    return FaultKind::Engine;
+  }
+  // `direct_path::DirectPathError` is attached with `anyhow::Error::context`,
+  // not always constructed as the root cause, so this must use
+  // `anyhow::Error::downcast_ref`'s own context-aware matching rather than
+  // `.chain()` -- a `.context(value)` layer's concrete stored type is an
+  // anyhow-internal wrapper, which `.chain()`'s `dyn StdError::downcast_ref`
+  // cannot see through, unlike `Error::downcast_ref` itself.
+  if error
+    .downcast_ref::<direct_path::DirectPathError>()
+    .is_some()
+  {
+    FaultKind::Request
+  } else {
+    FaultKind::Engine
+  }
+}
+
 /// One extraction operation, expressed as data rather than a function call.
 ///
 /// A named function such as [`chrome`] can only ever name the one browser it
@@ -1231,6 +1308,29 @@ mod tests {
     let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
       .expect_err("an unknown browser id is a request error");
     assert_eq!(stop_reason(&error), None);
+  }
+
+  #[test]
+  fn fault_kind_classifies_a_typed_direct_path_error_as_a_request_fault() {
+    let directory = crate::utils::TempDir::new().expect("temp directory");
+    let missing = directory
+      .path()
+      .join("no such parent directory")
+      .join("missing");
+    let error = direct_path::cookies_from_path(direct_path::DirectPathRequest::new(&missing))
+      .expect_err("a missing explicit source is a typed DirectPathError");
+    assert_eq!(fault_kind(&error), FaultKind::Request);
+  }
+
+  #[test]
+  fn fault_kind_falls_back_to_engine_for_an_unstructured_bail_error() {
+    // Known, documented gap (see `fault_kind`'s docs): the legacy
+    // registry-backed API surface still raises plain `bail!` string errors
+    // for bad input, with no downcastable cause to classify on, so this
+    // stays `Engine` until that surface gains a structured error type too.
+    let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
+      .expect_err("an unknown browser id is a request error");
+    assert_eq!(fault_kind(&error), FaultKind::Engine);
   }
 
   #[cfg(unix)]

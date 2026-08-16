@@ -127,6 +127,63 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "operation cancelled"):
                 rookie_cookies.cookies_from_path(str(db_path), cancellation=handle)
 
+    def test_fault_classification_distinguishes_request_from_engine_errors(self) -> None:
+        # RookieRequestError/RookieEngineError subclass ValueError/RuntimeError
+        # respectively, so existing `except ValueError`/`except RuntimeError`
+        # call sites keep working unchanged.
+        self.assertTrue(issubclass(rookie_cookies.RookieRequestError, ValueError))
+        self.assertTrue(issubclass(rookie_cookies.RookieEngineError, RuntimeError))
+
+        missing = str(
+            Path(tempfile.gettempdir()) / "no such parent directory" / "missing"
+        )
+        with self.assertRaises(rookie_cookies.RookieRequestError):
+            rookie_cookies.cookies_from_path(missing)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "cookies.sqlite"
+            _seed_firefox_database(db_path, [(".example.test", "wanted", "value")])
+            # A timeout is an engine-side operational stop, not a caller
+            # input mistake, even though it is checked mid inspection of an
+            # explicit source (which otherwise raises RookieRequestError).
+            with self.assertRaises(rookie_cookies.RookieEngineError):
+                rookie_cookies.cookies_from_path(str(db_path), timeout=0.0)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
+        "Chromium direct paths are supported on desktop targets",
+    )
+    def test_every_direct_path_and_legacy_chromium_function_uses_fault_classification(
+        self,
+    ) -> None:
+        # Regression test: these previously bypassed classify_fault and fell
+        # back to pyo3's blanket anyhow conversion, always raising a bare
+        # RuntimeError instead of RookieEngineError/RookieRequestError.
+        missing = str(Path(tempfile.gettempdir()) / "rookie-missing-db" / "Cookies")
+        classified = (rookie_cookies.RookieRequestError, rookie_cookies.RookieEngineError)
+
+        # firefox_profiles takes no arguments and can't be forced to fail
+        # portably; assert it at least raises a classified type when the
+        # host has no Firefox installation to enumerate, and tolerate an
+        # empty successful result otherwise.
+        try:
+            rookie_cookies.firefox_profiles()
+        except classified:
+            pass
+        except Exception as error:  # pragma: no cover - diagnostic on failure
+            self.fail(f"firefox_profiles raised an unclassified exception: {error!r}")
+
+        if sys.platform == "win32":
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based(missing, missing)
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based_detailed(missing, missing)
+        else:
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based(missing, browser_id="chrome")
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based_detailed(missing, browser_id="chrome")
+
     def test_cancellation_handle_tracks_its_own_cancelled_state(self) -> None:
         handle = rookie_cookies.CancellationHandle()
         self.assertFalse(handle.is_cancelled())
@@ -219,7 +276,11 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             for options in (None, {}, {"plaintext_only": False}):
                 with self.subTest(options=options):
                     if sys.platform == "win32":
-                        with self.assertRaises(RuntimeError):
+                        # Missing an explicit Local State file is a request
+                        # fault on Windows (rookie_cookies.RookieRequestError,
+                        # a ValueError subclass) -- see DirectPathError's
+                        # InvalidOptions/MissingLocalStateFile reason.
+                        with self.assertRaises(ValueError):
                             rookie_cookies.chromium_cookies_from_path(
                                 str(db_path), options
                             )
@@ -234,11 +295,14 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             )
             self.assertEqual(plaintext[0]["name"], "wanted")
 
-            with self.assertRaises(RuntimeError):
+            # An empty selector is a request fault (rookie_cookies.RookieRequestError,
+            # a ValueError subclass), not an engine fault: the caller can fix it by
+            # passing a non-empty value.
+            with self.assertRaises(ValueError):
                 rookie_cookies.chromium_cookies_from_path(
                     str(db_path), {"browser_id": ""}
                 )
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(ValueError):
                 rookie_cookies.chromium_cookies_from_path(
                     str(db_path), {"local_state_path": ""}
                 )

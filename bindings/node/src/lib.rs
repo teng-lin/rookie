@@ -19,6 +19,19 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Converts a `rookie_cookies` error into a `napi::Error`, picking the status
+/// code from [`rookie_cookies::fault_kind`] instead of collapsing every
+/// failure into `Status::Unknown`. `FaultKind` is `#[non_exhaustive]`, so the
+/// match keeps a wildcard arm for kinds this binding doesn't know about yet.
+fn classify_fault(error: rookie_cookies::anyhow::Error) -> napi::Error {
+  match rookie_cookies::fault_kind(&error) {
+    rookie_cookies::FaultKind::Request => {
+      napi::Error::new(Status::InvalidArg, format!("{error:?}"))
+    }
+    _ => napi::Error::new(Status::GenericFailure, format!("{error:?}")),
+  }
+}
+
 /// A cross-thread cancellation token for an in-flight extraction.
 ///
 /// `cancel()` is safe to call from the JS main thread while the matching
@@ -613,8 +626,7 @@ impl Task for CookiesFromPathTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
-      rookie_cookies::direct_path::cookies_from_path(self.request.clone())
-        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+      rookie_cookies::direct_path::cookies_from_path(self.request.clone()).map_err(classify_fault)
     })
   }
 
@@ -654,7 +666,7 @@ impl Task for ChromiumCookiesFromPathTask {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::direct_path::chromium_cookies_from_path(self.request.clone())
-        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+        .map_err(classify_fault)
     })
   }
 
@@ -691,7 +703,7 @@ impl Task for ChromiumCookiesFromPathDetailedTask {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::direct_path::chromium_cookies_from_path_detailed(self.request.clone())
-        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
+        .map_err(classify_fault)
     })
   }
 
@@ -736,7 +748,7 @@ impl Task for AnyBrowserTaskImpl {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::any_browser(&self.db_path, self.domains.take(), self.key_path.as_deref())
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+        .map_err(classify_fault)
     })
   }
 
@@ -773,10 +785,7 @@ macro_rules! async_browser_fn {
       type JsValue = Vec<CookieObject>;
 
       fn compute(&mut self) -> Result<Self::Output> {
-        run_worker(|| {
-          $core_fn(self.domains.take())
-            .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-        })
+        run_worker(|| $core_fn(self.domains.take()).map_err(classify_fault))
       }
 
       fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -821,8 +830,7 @@ macro_rules! async_named_browser_fn {
           if let Some(handle) = self.cancellation.take() {
             request = request.cancellation(handle);
           }
-          rookie_cookies::extract(request)
-            .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+          rookie_cookies::extract(request).map_err(classify_fault)
         })
       }
 
@@ -870,10 +878,7 @@ impl Task for FirefoxProfilesTask {
   type JsValue = Vec<FirefoxProfileObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::firefox_profiles()
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
+    run_worker(|| rookie_cookies::firefox_profiles().map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -897,8 +902,7 @@ impl Task for FirefoxProfileTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
-      rookie_cookies::firefox_profile(&self.profile, self.domains.take())
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      rookie_cookies::firefox_profile(&self.profile, self.domains.take()).map_err(classify_fault)
     })
   }
 
@@ -928,7 +932,7 @@ impl Task for FirefoxBasedTask {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::firefox_based(PathBuf::from(&self.db_path), self.domains.take())
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+        .map_err(classify_fault)
     })
   }
 
@@ -955,7 +959,7 @@ impl Task for FirefoxBasedDetailedTask {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::firefox_based_detailed(PathBuf::from(&self.db_path), self.domains.take())
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+        .map_err(classify_fault)
     })
   }
 
@@ -988,10 +992,7 @@ impl Task for SupportedBrowsersTask {
   type JsValue = Vec<BrowserDescriptorObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::supported_browsers()
-        .map_err(|error| napi::Error::new(Status::Unknown, format!("{error:?}")))
-    })
+    run_worker(|| rookie_cookies::supported_browsers().map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1016,10 +1017,7 @@ impl Task for BrowserProfilesTask {
   type JsValue = Vec<ProfileDescriptorObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::browser_profiles(&self.browser_id)
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
+    run_worker(|| rookie_cookies::browser_profiles(&self.browser_id).map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1044,10 +1042,7 @@ impl Task for ChromeProfilesTask {
   type JsValue = Vec<ProfileDescriptorObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::chrome_profiles()
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
+    run_worker(|| rookie_cookies::chrome_profiles().map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1075,8 +1070,7 @@ impl Task for ChromeProfileTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
-      rookie_cookies::chrome_profile(&self.profile, self.domains.take())
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      rookie_cookies::chrome_profile(&self.profile, self.domains.take()).map_err(classify_fault)
     })
   }
 
@@ -1116,7 +1110,7 @@ impl Task for BrowserReportTask {
         self.profile_id.as_deref(),
         self.domains.take(),
       )
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      .map_err(classify_fault)
     })
   }
 
@@ -1152,10 +1146,7 @@ impl Task for LoadReportTask {
   type JsValue = ExtractionReportObject;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::load_report(self.domains.take())
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
+    run_worker(|| rookie_cookies::load_report(self.domains.take()).map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1200,7 +1191,7 @@ impl Task for ChromiumBasedWinTask {
         self.domains.take(),
         false,
       )
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      .map_err(classify_fault)
     })
   }
 
@@ -1244,7 +1235,7 @@ impl Task for ChromiumBasedDetailedWinTask {
         self.domains.take(),
         false,
       )
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      .map_err(classify_fault)
     })
   }
 
@@ -1295,7 +1286,7 @@ impl Task for ChromiumBasedUnixTask {
         self.domains.take(),
         false,
       )
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      .map_err(classify_fault)
     })
   }
 
@@ -1339,7 +1330,7 @@ impl Task for ChromiumBasedDetailedUnixTask {
         self.domains.take(),
         false,
       )
-      .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
+      .map_err(classify_fault)
     })
   }
 
@@ -1391,6 +1382,7 @@ pub fn test_worker_panic() -> AsyncTask<TestWorkerPanicTask> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::collections::BTreeSet;
 
   #[test]
   fn worker_panics_become_napi_errors() {
@@ -1419,5 +1411,164 @@ mod tests {
 
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].expires, None);
+  }
+
+  /// Schema-parity check for the hand-written `#[napi(object)]` report DTOs.
+  ///
+  /// napi-rs's `#[napi(object)]` is a proc-macro over a real Rust struct, not
+  /// a consumer of arbitrary generated code, so unlike the Python binding --
+  /// which gets `dto.py` generated straight from
+  /// `schema/report-dto.schema.json` -- these structs can't themselves be
+  /// generated from the schema. Node's "generated from one schema" is
+  /// satisfied here instead: each struct's Rust-level field names (which
+  /// match `report_core.rs`'s snake_case names 1:1, before napi-rs's own
+  /// camelCase rename) are hand-listed and diffed against the schema
+  /// definition's `properties` keys, so drift between the struct and
+  /// `report_core.rs` fails loudly instead of silently. This mirrors the
+  /// deliberate, documented AbortSignal-style spec deviation from #238 (a
+  /// custom `CancellationHandle` instead of a native `AbortSignal`): the gap
+  /// is called out and covered, rather than hidden.
+  #[test]
+  fn napi_object_structs_match_report_core_schema() {
+    let schema: serde_json::Value =
+      serde_json::from_str(include_str!("../../../schema/report-dto.schema.json"))
+        .expect("schema/report-dto.schema.json should be valid JSON");
+
+    let cases: &[(&str, &[&str])] = &[
+      (
+        "Cookie",
+        &[
+          "domain",
+          "path",
+          "secure",
+          "expires",
+          "name",
+          "value",
+          "http_only",
+          "same_site",
+        ],
+      ),
+      (
+        "BrowserDescriptor",
+        &["id", "aliases", "display_name", "engine", "capabilities"],
+      ),
+      (
+        "BrowserCapabilitiesDescriptor",
+        &[
+          "persistent_formats",
+          "session_formats",
+          "declared_decryption_tiers",
+          "available_decryption_tiers",
+        ],
+      ),
+      ("ProfileDescriptor", &["profile", "is_default", "sources"]),
+      (
+        "ProfileIdentity",
+        &[
+          "browser_id",
+          "installation_id",
+          "profile_id",
+          "display_name",
+          "path",
+          "path_lossy",
+        ],
+      ),
+      (
+        "CookieSourceDescriptor",
+        &["role", "format", "path", "path_lossy", "precedence"],
+      ),
+      (
+        "CookieSourceIdentity",
+        &["role", "format", "path", "path_lossy", "precedence"],
+      ),
+      (
+        "ExtractionStats",
+        &[
+          "rows_seen",
+          "cookies_emitted",
+          "rows_skipped",
+          "rows_rejected",
+          "provider_failures",
+          "acquisition_attempts",
+          "counters_saturated",
+        ],
+      ),
+      (
+        "ReportStats",
+        &[
+          "registered_browsers",
+          "browsers_detected",
+          "browsers_not_detected",
+          "installations_discovered",
+          "profiles_discovered",
+          "sources_succeeded",
+          "sources_failed",
+          "rows_seen",
+          "cookies_emitted",
+          "rows_skipped",
+          "rows_rejected",
+          "provider_failures",
+          "counters_saturated",
+        ],
+      ),
+      (
+        "ExtractionIssue",
+        &[
+          "code",
+          "stage",
+          "severity",
+          "cause",
+          "provider",
+          "tier",
+          "retryability",
+          "occurrences",
+          "samples",
+          "browser_id",
+          "installation_id",
+          "profile_id",
+          "message",
+        ],
+      ),
+      (
+        "SourceExtraction",
+        &[
+          "source",
+          "status",
+          "selected",
+          "acquisition_strategy",
+          "cookies",
+          "stats",
+          "issues",
+        ],
+      ),
+      (
+        "ProfileExtraction",
+        &["profile", "sources", "stats", "issues"],
+      ),
+      (
+        "ExtractionReport",
+        &[
+          "schema_version",
+          "status",
+          "termination",
+          "summary",
+          "profiles",
+          "issues",
+        ],
+      ),
+    ];
+
+    for (type_name, expected_fields) in cases {
+      let expected: BTreeSet<&str> = expected_fields.iter().copied().collect();
+      let properties = schema["definitions"][type_name]["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("schema definitions.{type_name}.properties should exist"));
+      let actual: BTreeSet<&str> = properties.keys().map(String::as_str).collect();
+
+      assert_eq!(
+        expected, actual,
+        "{type_name}: napi(object) struct fields vs schema properties diverged"
+      );
+    }
   }
 }

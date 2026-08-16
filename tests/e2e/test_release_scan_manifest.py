@@ -17,8 +17,11 @@ class ReleaseScanManifestTests(unittest.TestCase):
     def test_records_exact_source_and_artifact_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             artifact_root = Path(temporary) / "release"
-            scan = artifact_root / "scan" / "rookie.node"
-            tarball = artifact_root / "rookie.tgz"
+            # Realistic filenames -- see publish-npm.yml -- so this also
+            # exercises helper_roles matching against the real contract
+            # rather than a name match_cell_for_artifact can't resolve.
+            scan = artifact_root / "scan" / "rookie_cookies.win32-x64-msvc.node"
+            tarball = artifact_root / "rookie-cookies-win32-x64-msvc-0.5.9.tgz"
             scan.parent.mkdir(parents=True)
             scan.write_bytes(b"native-binary")
             tarball.write_bytes(b"package-tarball")
@@ -60,15 +63,23 @@ class ReleaseScanManifestTests(unittest.TestCase):
                     "version": "0.5.9",
                 },
             )
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
             self.assertEqual(
                 [record["path"] for record in manifest["artifacts"]],
-                ["rookie.tgz", "scan/rookie.node"],
+                [
+                    "rookie-cookies-win32-x64-msvc-0.5.9.tgz",
+                    "scan/rookie_cookies.win32-x64-msvc.node",
+                ],
             )
             self.assertEqual(
                 manifest["artifacts"][1]["sha256"],
                 hashlib.sha256(b"native-binary").hexdigest(),
             )
+            # Both artifacts are the win32-x64-msvc npm-native cell, which
+            # platform-contract.json declares with dpapi + appbound helper
+            # roles.
+            for record in manifest["artifacts"]:
+                self.assertEqual(record["helper_roles"], ["appbound", "dpapi"])
 
     def test_rejects_artifacts_outside_the_manifest_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

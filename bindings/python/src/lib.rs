@@ -6,6 +6,7 @@ use pyo3::{prelude::*, types::PyDict};
 use pyo3_log::{Caching, Logger};
 use rookie_core::enums::{Cookie, DetailedCookie};
 mod browsers;
+mod errors;
 mod report;
 use browsers::*;
 use report::{
@@ -107,6 +108,7 @@ fn rookie_cookies(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
   m.add_function(wrap_pyfunction!(version, m)?)?;
   m.add_class::<PyCancellationHandle>()?;
+  errors::register(m)?;
   Ok(())
 }
 

@@ -59,6 +59,72 @@ class RealContractTests(unittest.TestCase):
         )
 
 
+class MatchCellForArtifactTests(unittest.TestCase):
+    """Filenames are taken verbatim from the real `write-release-scan-manifest.py`
+    invocations in publish-cli.yml/publish-npm.yml/publish-py.yml, not guessed."""
+
+    def setUp(self) -> None:
+        self.contract = platform_contract.load_contract()
+
+    def test_matches_npm_root_tarball(self) -> None:
+        cell = platform_contract.match_cell_for_artifact(self.contract, "rookie-cookies-1.0.0.tgz")
+        assert cell is not None
+        self.assertEqual(cell["artifact_id"], "npm-root")
+
+    def test_matches_npm_native_tarball_and_addon_to_the_same_cell(self) -> None:
+        tarball_cell = platform_contract.match_cell_for_artifact(
+            self.contract, "rookie-cookies-linux-x64-gnu-1.0.0.tgz"
+        )
+        addon_cell = platform_contract.match_cell_for_artifact(
+            self.contract, "rookie_cookies.linux-x64-gnu.node"
+        )
+        assert tarball_cell is not None and addon_cell is not None
+        self.assertEqual(tarball_cell, addon_cell)
+        self.assertEqual(tarball_cell["helper_roles"], ["keyring"])
+
+    def test_matches_cli_binary_with_and_without_exe_suffix(self) -> None:
+        unix_cell = platform_contract.match_cell_for_artifact(
+            self.contract, "rookie-cookies-cli-x86_64-unknown-linux-gnu"
+        )
+        windows_cell = platform_contract.match_cell_for_artifact(
+            self.contract, "rookie-cookies-cli-x86_64-pc-windows-msvc.exe"
+        )
+        assert unix_cell is not None and windows_cell is not None
+        self.assertEqual(unix_cell["helper_roles"], ["keyring"])
+        self.assertEqual(sorted(windows_cell["helper_roles"]), ["appbound", "dpapi"])
+
+    def test_matches_wheel_platform_tags_across_architectures(self) -> None:
+        cases = {
+            "rookie_cookies-1.0.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl": (
+                "linux",
+                "x86_64",
+            ),
+            "rookie_cookies-1.0.0-cp311-abi3-manylinux_2_17_i686.manylinux2014_i686.whl": ("linux", "x86"),
+            "rookie_cookies-1.0.0-cp311-abi3-manylinux_2_17_armv7l.whl": ("linux", "armv7"),
+            "rookie_cookies-1.0.0-cp311-abi3-win_amd64.whl": ("win32", "x64"),
+            "rookie_cookies-1.0.0-cp311-abi3-macosx_11_0_arm64.whl": ("darwin", "aarch64"),
+        }
+        for filename, (os_name, cpu) in cases.items():
+            with self.subTest(filename=filename):
+                cell = platform_contract.match_cell_for_artifact(self.contract, filename)
+                assert cell is not None
+                self.assertEqual((cell["os"], cell["cpu"]), (os_name, cpu))
+
+    def test_matches_sdist_by_extension_with_no_platform_info(self) -> None:
+        cell = platform_contract.match_cell_for_artifact(self.contract, "rookie_cookies-1.0.0.tar.gz")
+        assert cell is not None
+        self.assertEqual(cell["artifact_id"], "sdist")
+
+    def test_unrecognized_wheel_platform_tag_raises_instead_of_guessing(self) -> None:
+        with self.assertRaises(platform_contract.ArtifactMatchError):
+            platform_contract.match_cell_for_artifact(
+                self.contract, "rookie_cookies-1.0.0-cp311-abi3-freebsd_13_x86_64.whl"
+            )
+
+    def test_unrecognized_filename_shape_returns_none(self) -> None:
+        self.assertIsNone(platform_contract.match_cell_for_artifact(self.contract, "README.md"))
+
+
 class ValidationTests(unittest.TestCase):
     def test_rejects_duplicate_cells(self) -> None:
         contract = {"cells": [base_cell(), base_cell()]}

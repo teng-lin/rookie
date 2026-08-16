@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, TypedDict
 from .rookie_cookies import (
     MAX_ISSUE_SAMPLES,
     CancellationHandle,
+    RookieEngineError,
+    RookieRequestError,
     any_browser,
     arc,
     brave,
@@ -39,6 +41,8 @@ __all__ = [
     "MAX_ISSUE_SAMPLES",
     "CancellationHandle",
     "ChromiumPathOptions",
+    "RookieEngineError",
+    "RookieRequestError",
     "any_browser",
     "arc",
     "brave",

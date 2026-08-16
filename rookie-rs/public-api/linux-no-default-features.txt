@@ -1200,6 +1200,24 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::Termina
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::TerminationCode
 pub const rookie_cookies::report::EXTRACTION_REPORT_SCHEMA_VERSION: u32
 pub const rookie_cookies::report::MAX_ISSUE_SAMPLES: usize
+#[non_exhaustive] pub enum rookie_cookies::FaultKind
+pub rookie_cookies::FaultKind::Engine
+pub rookie_cookies::FaultKind::Request
+impl core::clone::Clone for rookie_cookies::FaultKind
+pub fn rookie_cookies::FaultKind::clone(&self) -> rookie_cookies::FaultKind
+impl core::cmp::Eq for rookie_cookies::FaultKind
+impl core::cmp::PartialEq for rookie_cookies::FaultKind
+pub fn rookie_cookies::FaultKind::eq(&self, &rookie_cookies::FaultKind) -> bool
+impl core::fmt::Debug for rookie_cookies::FaultKind
+pub fn rookie_cookies::FaultKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::FaultKind
+impl core::marker::StructuralPartialEq for rookie_cookies::FaultKind
+impl core::marker::Freeze for rookie_cookies::FaultKind
+impl core::marker::Send for rookie_cookies::FaultKind
+impl core::marker::Sync for rookie_cookies::FaultKind
+impl core::marker::Unpin for rookie_cookies::FaultKind
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::FaultKind
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::FaultKind
 #[non_exhaustive] pub enum rookie_cookies::StopReason
 pub rookie_cookies::StopReason::Cancelled
 pub rookie_cookies::StopReason::ResourceExhausted
@@ -1294,6 +1312,7 @@ pub fn rookie_cookies::chromium_based_detailed_with_browser_id(core::option::Opt
 pub fn rookie_cookies::chromium_based_with_browser_id(core::option::Option<&str>, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::edge(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::extract(rookie_cookies::Request) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::fault_kind(&anyhow::Error) -> rookie_cookies::FaultKind
 pub fn rookie_cookies::firefox(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox_based(std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox_based_detailed(std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>

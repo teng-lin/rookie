@@ -2,16 +2,69 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform as platform_module
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "run-consumer-harness.py"
+
+_HOST_OS = {"Darwin": "darwin", "Linux": "linux", "Windows": "win32"}[platform_module.system()]
+_HOST_CPU = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(
+    platform_module.machine().lower(), platform_module.machine().lower()
+)
+_HOST_CLI_TARGET = {
+    ("darwin", "arm64"): "aarch64-apple-darwin",
+    ("darwin", "x64"): "x86_64-apple-darwin",
+    ("linux", "x64"): "x86_64-unknown-linux-gnu",
+    ("win32", "x64"): "x86_64-pc-windows-msvc",
+}.get((_HOST_OS, _HOST_CPU))
+
+
+def make_cli_binary(path: Path, *, version: str) -> None:
+    """A POSIX shell-script stand-in for a real CLI binary: prints `version`
+    when invoked with `--version`, matching what the real CLI's `--version`
+    flag does."""
+    path.write_text(f'#!/bin/sh\necho "{version}"\n', encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def make_pure_python_wheel(path: Path, *, name: str, version: str, platform_tag: str) -> None:
+    """A minimal, real, pip-installable wheel -- valid `dist-info` metadata
+    and a `RECORD` file (pip's install step fails without one), a trivial
+    package body, zipped up by hand rather than built via a packaging tool,
+    so this test has no build-tool dependency."""
+    normalized = name.replace("-", "_")
+    with tempfile.TemporaryDirectory() as staging:
+        staging_path = Path(staging)
+        package_dir = staging_path / normalized
+        package_dir.mkdir()
+        (package_dir / "__init__.py").write_text(
+            f'def version():\n    return "{version}"\n', encoding="utf-8"
+        )
+        dist_info = staging_path / f"{normalized}-{version}.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8"
+        )
+        (dist_info / "WHEEL").write_text(
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\n"
+            f"Tag: py3-none-{platform_tag}\n",
+            encoding="utf-8",
+        )
+        (dist_info / "RECORD").write_text("", encoding="utf-8")
+
+        with zipfile.ZipFile(path, "w") as archive:
+            for file_path in staging_path.rglob("*"):
+                if file_path.is_file():
+                    archive.write(file_path, file_path.relative_to(staging_path))
 
 
 def write_manifest(path: Path, artifacts_root: Path, artifact_paths: list[Path]) -> None:
@@ -173,6 +226,98 @@ class ConsumerHarnessTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not exist in the tarball", result.stderr)
 
+    def test_reports_checksum_only_for_a_foreign_target_cli_binary(self) -> None:
+        foreign_target = next(
+            target
+            for (_, target) in [
+                (("darwin", "arm64"), "aarch64-apple-darwin"),
+                (("darwin", "x64"), "x86_64-apple-darwin"),
+                (("linux", "x64"), "x86_64-unknown-linux-gnu"),
+                (("win32", "x64"), "x86_64-pc-windows-msvc"),
+            ]
+            if target != _HOST_CLI_TARGET
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / f"rookie-cookies-cli-{foreign_target}"
+            make_cli_binary(binary, version="rookie-cookies 9.9.9")
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [binary])
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("checksum-verified only", result.stdout)
+
+    @unittest.skipIf(_HOST_CLI_TARGET is None, "host platform has no known CLI target triple")
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "make_cli_binary's #!/bin/sh stand-in isn't directly executable on Windows",
+    )
+    def test_cli_binary_matching_the_host_is_executed_outside_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / f"rookie-cookies-cli-{_HOST_CLI_TARGET}"
+            make_cli_binary(binary, version="rookie-cookies 9.9.9")
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [binary])
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("executed outside the checkout", result.stdout)
+            self.assertIn("rookie-cookies 9.9.9", result.stdout)
+
+    def test_reports_checksum_only_for_a_foreign_platform_wheel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            foreign_tag = "win_amd64" if _HOST_OS != "win32" else "manylinux_2_17_x86_64"
+            wheel = root / f"rookie_cookies-9.9.9-py3-none-{foreign_tag}.whl"
+            make_pure_python_wheel(
+                wheel, name="rookie-cookies", version="9.9.9", platform_tag=foreign_tag
+            )
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [wheel])
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("checksum-verified only", result.stdout)
+
+    def test_wheel_matching_the_host_is_installed_and_imported_outside_the_checkout(self) -> None:
+        # PEP 600/425 arch tokens, not Rust/generic ones: manylinux says
+        # "aarch64" where macOS says "arm64" for the same architecture (see
+        # scripts/platform_contract.py's _WHEEL_CPU_TAGS for the same split).
+        host_arch_tokens = {
+            ("darwin", "arm64"): "arm64",
+            ("darwin", "x64"): "x86_64",
+            ("linux", "arm64"): "aarch64",
+            ("linux", "x64"): "x86_64",
+            ("win32", "x64"): "amd64",
+        }
+        host_platform_tag_prefixes = {
+            "darwin": "macosx_11_0",
+            "linux": "manylinux_2_17",
+            "win32": "win",
+        }
+        if (_HOST_OS, _HOST_CPU) not in host_arch_tokens:
+            self.skipTest(f"no known wheel arch token for {_HOST_OS}/{_HOST_CPU}")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tag = f"{host_platform_tag_prefixes[_HOST_OS]}_{host_arch_tokens[(_HOST_OS, _HOST_CPU)]}"
+            wheel = root / f"rookie_cookies-9.9.9-py3-none-{tag}.whl"
+            make_pure_python_wheel(
+                wheel, name="rookie-cookies", version="9.9.9", platform_tag=tag
+            )
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [wheel])
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("installed into an isolated venv outside the checkout", result.stdout)
+            self.assertIn("9.9.9", result.stdout)
+
     def test_native_addon_is_checksum_verified_but_not_executed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -185,6 +330,73 @@ class ConsumerHarnessTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("checksum-verified only", result.stdout)
+
+    def test_fails_closed_when_manifest_helper_roles_no_longer_match_the_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tarball = root / "rookie-cookies-linux-x64-gnu-1.0.0.tgz"
+            make_npm_tarball(tarball, name="rookie-cookies-linux-x64-gnu", os_tags=["linux"], cpu_tags=["x64"])
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [tarball])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            # The real contract's linux-x64-gnu npm-native cell is
+            # ["keyring"] -- assert a manifest claiming something else is
+            # caught, not trusted.
+            manifest["artifacts"][0]["helper_roles"] = ["appbound"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no longer matches the current platform contract", result.stderr)
+
+    def test_check_native_coverage_passes_for_the_real_contract(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--check-native-coverage"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_check_native_coverage_fails_for_an_uncovered_native_artifact_id(self) -> None:
+        contract = json.loads((ROOT / "release" / "platform-contract.json").read_text(encoding="utf-8"))
+        contract["cells"].append(
+            {
+                "artifact_id": "made-up-artifact-type",
+                "registry": "npm",
+                "os": None,
+                "cpu": None,
+                "libc": None,
+                "features": [],
+                "runtime_floor": {},
+                "build": True,
+                "advertise": True,
+                "publish": True,
+                "execute": "native",
+                "helper_roles": [],
+                "accepted_risk": None,
+                "notes": None,
+            }
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            contract_path = Path(temporary) / "platform-contract.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--check-native-coverage",
+                    "--platform-contract",
+                    str(contract_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("made-up-artifact-type", result.stderr)
+            self.assertIn("has no exercise() routine", result.stderr)
 
 
 if __name__ == "__main__":
