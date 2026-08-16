@@ -14,24 +14,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # release/platform-contract.json is the one place the CLI's platform/target
+  # list is spelled out now — see scripts/platform_contract.py. This job
+  # reads it so publish-cli.yml never keeps its own copy to drift out of
+  # sync with publish-npm.yml's and publish-py.yml's.
+  load-contract:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: matrix
+        run: |
+          set -euo pipefail
+          python3 scripts/platform_contract.py --validate
+          echo "matrix=$(python3 scripts/platform_contract.py --emit-matrix cli)" >>"$GITHUB_OUTPUT"
+
   publish-cli:
+    needs: load-contract
     permissions:
       contents: write
+      administration: read
     environment:
       name: release
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-latest" # for Arm based macs (M1 and above).
-            target: "aarch64-apple-darwin"
-          - platform: "macos-latest" # for Intel based macs.
-            target: "x86_64-apple-darwin"
-          - platform: "ubuntu-22.04" # Ubuntu 22.04 x86_64 (Works on 24.04 as well)
-            target: "x86_64-unknown-linux-gnu"
-          - platform: "windows-latest" # Windows x86_64
-            target: "x86_64-pc-windows-msvc"
-            args: "--features appbound"
+      matrix: ${{ fromJSON(needs.load-contract.outputs.matrix) }}
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -73,8 +83,14 @@ jobs:
           release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
           test "$release_sha" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$release_sha" origin/main
+          echo "RELEASE_SHA=$release_sha" >>"$GITHUB_ENV"
         env:
           RELEASE_TAG: ${{ inputs.tag }}
+
+      - name: Verify live release controls
+        run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "$RELEASE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -87,6 +103,8 @@ jobs:
 
       - name: Build
         run: cargo build ${{ matrix.args }} --target ${{ matrix.target }} --package rookie-cookies-cli --bin rookie-cookies --release --locked
+        env:
+          ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}
 
       - name: Rename Unix
         run: mv target/${{ matrix.target }}/release/rookie-cookies rookie-cookies-cli-${{ matrix.target }}
@@ -145,6 +163,47 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
 
+      # A per-leg manifest, not one combined across all four targets: unlike
+      # publish-npm.yml, this job has no later aggregation stage to collect
+      # every leg's artifact before writing one manifest — restructuring the
+      # job graph to add one was judged higher-risk than the completeness
+      # gained. See docs/RELEASING.md's "Publish CLI binaries" section.
+      - name: Write scan manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            artifact="rookie-cookies-cli-${{ matrix.target }}.exe"
+          else
+            artifact="rookie-cookies-cli-${{ matrix.target }}"
+          fi
+          contract_digest="$(python3 scripts/platform_contract.py --digest)"
+          python3 scripts/write-release-scan-manifest.py \
+            --version "${RELEASE_TAG#v}" \
+            --source-sha "$RELEASE_SHA" \
+            --controller-sha "$RELEASE_SHA" \
+            --platform-contract-digest "$contract_digest" \
+            --root "$GITHUB_WORKSPACE" \
+            --output "$GITHUB_WORKSPACE/release-scan-manifest.json" \
+            "$GITHUB_WORKSPACE/$artifact"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      - name: Upload scan manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-scan-manifest-${{ matrix.target }}
+          path: release-scan-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run consumer harness against manifest-verified artifact
+        run: |
+          python3 scripts/run-consumer-harness.py \
+            --manifest "$GITHUB_WORKSPACE/release-scan-manifest.json" \
+            --artifacts-root "$GITHUB_WORKSPACE"
+        shell: bash
+
       - name: Upload Unix
         shell: bash
         run: |
@@ -152,7 +211,7 @@ jobs:
           artifact="rookie-cookies-cli-${{ matrix.target }}"
           python3 scripts/write-sha256-sidecar.py "$artifact"
           shasum -a 256 -c "$artifact.sha256"
-          gh release upload "$RELEASE_TAG" "$artifact" "$artifact.sha256" --clobber
+          gh release upload "$RELEASE_TAG" "$artifact" "$artifact.sha256"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -172,7 +231,7 @@ jobs:
           if ($expected -ne $actual) {
             throw "checksum verification failed for $artifact"
           }
-          gh release upload "$env:RELEASE_TAG" $artifact $checksum --clobber
+          gh release upload "$env:RELEASE_TAG" $artifact $checksum
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag }}

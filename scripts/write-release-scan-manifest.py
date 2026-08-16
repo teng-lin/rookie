@@ -26,6 +26,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument(
+        "--controller-sha",
+        required=True,
+        help="commit of the coordinator workflow that produced this manifest",
+    )
+    parser.add_argument(
+        "--platform-contract-digest",
+        required=True,
+        help="SHA-256 of release/platform-contract.json at the pinned commit",
+    )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("artifacts", nargs="+", type=Path)
@@ -35,6 +45,10 @@ def main() -> int:
         parser.error(f"invalid release version: {args.version!r}")
     if not COMMIT_PATTERN.fullmatch(args.source_sha):
         parser.error("source SHA must be a lowercase 40-character commit SHA")
+    if not COMMIT_PATTERN.fullmatch(args.controller_sha):
+        parser.error("controller SHA must be a lowercase 40-character commit SHA")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.platform_contract_digest):
+        parser.error("platform contract digest must be a lowercase 64-character SHA-256 hex digest")
 
     root = args.root.resolve(strict=True)
     records: list[dict[str, object]] = []
@@ -61,9 +75,18 @@ def main() -> int:
         )
 
     document = {
-        "schema_version": 1,
+        # v2 adds controller_sha and platform_contract_digest to `release`.
+        # `registry_digest` on artifacts is deliberately not populated here:
+        # a registry's own digest (npm `dist.integrity`, a PyPI wheel hash,
+        # a crates.io checksum) isn't known until after that artifact is
+        # actually published, so it can't be in a manifest written before
+        # publication. Reconciling pre/post-publish digests is out of scope
+        # for this manifest — see the release-hardening program's R6 phase.
+        "schema_version": 2,
         "release": {
             "source_sha": args.source_sha,
+            "controller_sha": args.controller_sha,
+            "platform_contract_digest": args.platform_contract_digest,
             "tag": f"v{args.version}",
             "version": args.version,
         },

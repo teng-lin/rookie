@@ -27,14 +27,26 @@ verify it before starting the next one.
 
 ## One-time setup
 
-Create a protected GitHub Actions environment named `release`. Requiring a
-reviewer for this environment adds a final confirmation before any registry
-write.
+Create a protected GitHub Actions environment named `release`, with admin
+bypass disabled and its deployment branch/tag policy restricted to exactly
+`main` and `v*` (the only refs any publish workflow legitimately dispatches
+from — see the ref table above). There is deliberately no required reviewer
+here: the gate is fully automated — the SemVer floor, blocking RustSec, the
+scan-evidence records, required CI checks, and the tag ruleset below are the
+whole stop, not a backstop to a human approval step. The judgment call already
+happened when the operator chose to dispatch the workflow; publishing then
+proceeds unattended once those checks pass.
 
-Create a repository tag ruleset for `v*` release tags. Block updates and
-deletion, and restrict tag creation to authorized release maintainers. The
-workflows verify the tag name and package version, while the ruleset keeps that
-reviewed tag commit immutable between creation and manual dispatch.
+Create two repository tag rulesets for `v*` release tags: one restricting tag
+*creation* to authorized release maintainers (admins), and a separate one
+blocking `v*` tag *update* and *deletion* for everyone, with no bypass actors
+at all — not even repo admins. Splitting these into two rulesets matters:
+GitHub ruleset bypass actors apply to every rule in that ruleset, so a single
+combined ruleset with an admin-creation bypass would also let an admin bypass
+the deletion/update block, defeating the point. The workflows verify the tag
+name and package version, while the immutability ruleset keeps that reviewed
+tag commit immutable between creation and manual dispatch — including against
+the person dispatching it.
 
 Configure these credentials without committing or pasting their values into an
 issue, pull request, or workflow log:
@@ -157,7 +169,7 @@ binary, and publishes these prepared native tarballs before the root package:
 Issue [#191](https://github.com/teng-lin/rookie-cookies/issues/191) tracks an
 unresolved historical ESET detection. The npm package job now places these
 additional files in its `npm-release-<version>` workflow artifact before the
-environment-gated publish job runs:
+`publish` job runs:
 
 - `scan/rookie_cookies.win32-x64-msvc.node`, copied byte-for-byte from the
   Windows package assembled by the workflow;
@@ -165,16 +177,34 @@ environment-gated publish job runs:
   tag commit, byte length, and SHA-256 for that native module and all five npm
   tarballs.
 
-For a checksum-identified scan, pause before approving the npm `publish` job,
-download that workflow artifact onto a disposable, fully patched Windows VM,
-and verify every manifest digest before scanning the `.node` file. Do not load
-or execute the native module during this check. Record the following on #191:
+There is no reviewer gate between the package job and `publish` — do not
+dispatch or let the `publish` job proceed until the scan below is complete and
+recorded; nothing else stops it. For a checksum-identified scan, download that
+workflow artifact onto a disposable, fully patched Windows VM before the
+`publish` job runs, and verify every manifest digest before scanning the
+`.node` file. Do not load or execute the native module during this check.
+Record the disposition as structured evidence bound to the artifact's
+SHA-256, rather than as free-form issue prose, using
+`scripts/record-scan-disposition.py` against the downloaded
+`release-scan-manifest.json`:
 
-- workflow run, version, tag commit, artifact filename, byte length, and
-  SHA-256 from the manifest;
-- ESET product, engine, and signature/database versions;
-- the exact detection name, or an explicit clean result;
-- any ESET false-positive submission and final vendor disposition.
+```console
+python3 scripts/record-scan-disposition.py \
+  --manifest release-scan-manifest.json \
+  --artifact scan/rookie_cookies.win32-x64-msvc.node \
+  --scanner-product "ESET Endpoint Antivirus" \
+  --scanner-engine-version <engine version> \
+  --scanner-signature-version <signature/database version> \
+  --result clean \
+  --reviewer <your GitHub username>
+# or, if detected:
+#   --result detected --detection-name "<exact detection name>"
+```
+
+The script appends the recording to the manifest's `scan_evidence` array —
+bound to that exact artifact's SHA-256, so the record can't silently drift
+onto a different build — and prints the entry as JSON. Paste that JSON, plus
+any ESET false-positive submission and final vendor disposition, onto #191.
 
 This repository cannot substitute a different antivirus result for that ESET
 evidence. Do not claim the historical detection is cleared, or close #191,
@@ -204,10 +234,28 @@ After the GitHub release exists, dispatch `publish-cli.yml` from the matching
 tag to build and attach the `rookie-cookies` CLI binary for macOS (arm64 and
 x86_64), Linux x86_64, and Windows x86_64.
 
-Each CLI asset is uploaded with a same-named `.sha256` sidecar. Verify the
-Windows executable against that sidecar before its separate ESET scan and add
-the result to #191; the npm native module and CLI executable are distinct
-artifacts and neither scan stands in for the other.
+Each CLI asset is uploaded with a same-named `.sha256` sidecar. Each matrix leg
+also uploads a `cli-scan-manifest-<target>` workflow artifact containing a
+`release-scan-manifest.json` scoped to that leg's one binary (source SHA,
+controller SHA, platform-contract digest, byte length, SHA-256) — the same
+manifest shape `publish-npm.yml` produces, applied per CLI target instead of
+once for all five npm packages. Verify the Windows executable against its
+sidecar before its separate ESET scan, then record the disposition the same
+way as the npm scan, against the Windows leg's own manifest:
+
+```console
+python3 scripts/record-scan-disposition.py \
+  --manifest release-scan-manifest.json \
+  --artifact rookie-cookies-cli-x86_64-pc-windows-msvc.exe \
+  --scanner-product "ESET Endpoint Antivirus" \
+  --scanner-engine-version <engine version> \
+  --scanner-signature-version <signature/database version> \
+  --result clean \
+  --reviewer <your GitHub username>
+```
+
+Paste the printed entry onto #191; the npm native module and CLI executable
+are distinct artifacts and neither scan stands in for the other.
 
 `workflow_dispatch` runs the copy of the workflow file stored *at the dispatched
 ref*. Dispatching from `v$VERSION` therefore runs that tag's own copy of
@@ -285,35 +333,36 @@ release retargeted to a different tag would still receive these binaries. Both
 gaps need repository write access, the access the tag ruleset already assumes is
 limited to release maintainers.
 
-### `--clobber` deletes the existing asset before uploading
+### A failed platform leg does not auto-retry
 
-The upload steps pass `--clobber` so one failed platform leg can be rebuilt and
-re-attached without regenerating the others. `--clobber` is **not** an atomic
-replace: `gh release upload` deletes the existing asset first and uploads the
-new one afterwards. If that upload then fails — network error, expired token,
-cancelled run, a build that produced a truncated file — the original asset is
-permanently gone. GitHub keeps no copy of a deleted release asset and does not
-roll the deletion back.
+The upload steps do **not** pass `--clobber`. Earlier revisions did, so one
+failed platform leg could be rebuilt and re-attached by just re-running the
+matrix — but `--clobber` is not an atomic replace: `gh release upload` deletes
+the existing asset first and uploads the new one afterwards, so a network
+error, expired token, cancelled run, or truncated build on the *retry* would
+have permanently destroyed the original, already-good asset. GitHub keeps no
+copy of a deleted release asset and does not roll the deletion back. That risk
+is why it's gone: re-dispatching the whole workflow after a partial failure now
+fails loudly on every leg that already succeeded, instead of silently risking
+them.
 
-Before re-running a leg against a release that already carries assets, download
-the current ones so a failed re-upload stays recoverable:
-
-```console
-gh release download "v$VERSION" --dir "release-assets-v$VERSION"
-```
-
-`gh release download` fails rather than overwriting when a target file already
-exists, so download into a fresh directory; add `--clobber` only when you mean
-to replace an earlier copy of that backup.
+To retry only the leg that actually failed, build and attach it by hand for
+that one target instead of re-dispatching the workflow — see "Retrying a tag
+that predates the hardened workflow" below for the exact commands (the same
+manual per-target build-and-upload path, whatever the reason for the retry).
+Automatic digest-safe retry — detecting `present_identical` vs.
+`present_mismatch` per artifact and skipping/failing accordingly instead of
+requiring a manual fallback — is out of scope for this PR; it lands with the
+release-hardening program's R6 phase.
 
 ### Retrying a tag that predates the hardened workflow
 
 If the marker grep above found nothing, the tag stores an older definition of
 `publish-cli.yml`. Dispatching from that tag runs the *old* definition: its tag
-verification step, the `release` environment approval gate, and the SHA-pinned
-action references now on `main` do not apply to that run, whatever `main`
-contains today. Nothing in the dispatch surfaces this — the run simply looks
-like a normal one.
+verification step, the `release` environment's live controls, and the
+SHA-pinned action references now on `main` do not apply to that run, whatever
+`main` contains today. Nothing in the dispatch surfaces this — the run simply
+looks like a normal one.
 
 Handle it one of two ways:
 
@@ -362,3 +411,15 @@ packages exist but the root package does not, download the failed run's
 `npm-release-<version>` artifact and publish its unchanged root tarball with
 lifecycle scripts disabled. Do not rebuild or attempt to overwrite any package
 version; npm, PyPI, and crates.io versions are immutable.
+
+For PyPI, `publish-py.yml` no longer passes `skip-existing: true` to
+`pypa/gh-action-pypi-publish`: a partial failure (say, 6 of 9 files uploaded
+before a timeout) means re-dispatching the whole workflow now hits PyPI's hard
+"File already exists" rejection on every already-uploaded file, rather than
+those being silently treated as already-there. Check `pypi.org/project/
+rookie-cookies/<version>/#files` first to see which files actually made it.
+If some are missing, download the failed run's `python-sdist`/
+`python-linux-*`/`python-windows-*`/`python-macos-*` workflow artifacts and
+publish only the missing files by hand with `twine upload <missing files>`
+rather than re-dispatching the workflow against a distribution set that
+partially already exists.
