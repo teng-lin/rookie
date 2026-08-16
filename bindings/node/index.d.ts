@@ -115,6 +115,8 @@ export interface ExtractionStatsObject {
   rowsSeen: number
   cookiesEmitted: number
   rowsSkipped: number
+  rowsRejected: number
+  providerFailures: number
   acquisitionAttempts: number
   countersSaturated: boolean
 }
@@ -130,6 +132,8 @@ export interface ReportStatsObject {
   rowsSeen: number
   cookiesEmitted: number
   rowsSkipped: number
+  rowsRejected: number
+  providerFailures: number
   countersSaturated: boolean
 }
 /**

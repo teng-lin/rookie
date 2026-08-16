@@ -112,6 +112,12 @@ fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
         issue_code.occurrences
       )
     }
+    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed => {
+      format!(
+        "{} row(s) unavailable because of {code}",
+        issue_code.occurrences
+      )
+    }
     _ => format!("{} row(s) rejected as {code}", issue_code.occurrences),
   };
   // Name-column and value-column failures share one code, so aggregation merges
@@ -211,6 +217,8 @@ fn chromium_profile_outcome(
     rows_seen: stats.rows_seen as u64,
     cookies_emitted: stats.cookies_emitted as u64,
     rows_skipped: stats.rows_skipped as u64,
+    rows_rejected: stats.rows_rejected as u64,
+    provider_failures: stats.provider_failures as u64,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
@@ -300,6 +308,8 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
     rows_seen: rows_seen as u64,
     cookies_emitted: cookies.len() as u64,
     rows_skipped: rows_skipped as u64,
+    rows_rejected: 0,
+    provider_failures: 0,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
@@ -657,6 +667,8 @@ fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> Extrac
   summary.rows_seen = totals.rows_seen;
   summary.cookies_emitted = totals.cookies_emitted;
   summary.rows_skipped = totals.rows_skipped;
+  summary.rows_rejected = totals.rows_rejected;
+  summary.provider_failures = totals.provider_failures;
   summary.counters_saturated = totals.counters_saturated || saturated;
 
   let status = report_status(&profiles, &top_level, discovery_failed);
@@ -959,6 +971,8 @@ mod tests {
         rows_seen: 0,
         cookies_emitted: 0,
         rows_skipped: 0,
+        rows_rejected: 0,
+        provider_failures: 0,
       },
       row_issues: Vec::new(),
       acquisition: registry::SourceAcquisition::NotAttempted,
@@ -1383,15 +1397,24 @@ mod tests {
     let mut chromium = chromium_profile(true, None);
     chromium.cookies = vec![cookie("chromium")];
     chromium.stats = crate::browser::chromium::ChromiumExtractionStats {
-      rows_seen: 3,
+      rows_seen: 4,
       cookies_emitted: 1,
-      rows_skipped: 2,
+      rows_skipped: 3,
+      rows_rejected: 1,
+      provider_failures: 2,
     };
-    chromium.row_issues = vec![crate::browser::chromium::ChromiumRowIssue {
-      code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
-      occurrences: 2,
-      samples: vec!["row 2".to_owned(), "row 3".to_owned()],
-    }];
+    chromium.row_issues = vec![
+      crate::browser::chromium::ChromiumRowIssue {
+        code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
+        occurrences: 1,
+        samples: vec!["row 2".to_owned()],
+      },
+      crate::browser::chromium::ChromiumRowIssue {
+        code: crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed,
+        occurrences: 2,
+        samples: vec!["row 3".to_owned(), "row 4".to_owned()],
+      },
+    ];
     let chromium = chromium_profile_outcome(&BrowserId::known("chrome"), &"d".repeat(64), chromium)
       .expect("adapt Chromium counters");
 
@@ -1413,9 +1436,16 @@ mod tests {
     }
 
     let report = assemble(4, vec![outcome(profiles, false)]);
-    assert_eq!(report.summary.rows_seen, 12);
-    assert_eq!(report.summary.rows_skipped, 8);
+    let chromium_source = &report.profiles[0].sources[0];
+    assert_eq!(chromium_source.stats.rows_rejected, 1);
+    assert_eq!(chromium_source.stats.provider_failures, 2);
+    assert_eq!(report.profiles[0].stats.rows_rejected, 1);
+    assert_eq!(report.profiles[0].stats.provider_failures, 2);
+    assert_eq!(report.summary.rows_seen, 13);
+    assert_eq!(report.summary.rows_skipped, 9);
     assert_eq!(report.summary.cookies_emitted, 4);
+    assert_eq!(report.summary.rows_rejected, 1);
+    assert_eq!(report.summary.provider_failures, 2);
     assert_counter_identity(&report);
   }
 
@@ -2274,9 +2304,9 @@ mod engine_chain_tests {
 
   /// Reported against pre-round-3 4E: a Chromium row that could not be
   /// decrypted took the whole source down with it, because "no row decoded"
-  /// became a source-level failure. Section 5.7 counts a rejected row in
-  /// `rows_skipped` against a source that still succeeded, so this pins the
-  /// scenario end-to-end on the real chain.
+  /// became a source-level failure. Section 5.7 counts every seen-but-not-
+  /// emitted row in `rows_skipped` against a source that still succeeded, so
+  /// this pins the unavailable-provider scenario end-to-end on the real chain.
   #[test]
   fn an_undecryptable_row_does_not_fail_the_chromium_source() {
     let temp = TempDir::new("chromium-undecryptable-row");
@@ -2284,8 +2314,9 @@ mod engine_chain_tests {
     let root = test_seams::primary_root_path(&context, "chrome");
     test_seams::seed_chromium_profile(&root, "Default", "Person 1");
 
-    // Replace the plaintext cookie with a v10 blob no provider can open, so
-    // every row in the profile is rejected.
+    // Replace the plaintext cookie with a dual-populated v10 row no provider
+    // can open. The row is unavailable, and its alternate plaintext must not
+    // reach the report.
     let database = root.join("Default/Cookies");
     let connection = rusqlite::Connection::open(&database).expect("open cookie database");
     connection
@@ -2293,7 +2324,8 @@ mod engine_chain_tests {
       .expect("clear seeded cookie");
     connection
       .execute(
-        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'locked', '', ?1, 0, 0)",
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'locked',
+         'plaintext sentinel must not escape', ?1, 0, 0)",
         [b"v10undecryptable".to_vec()],
       )
       .expect("insert encrypted cookie");
@@ -2301,6 +2333,12 @@ mod engine_chain_tests {
 
     let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
       .expect("chromium report");
+    assert!(
+      registry_report.installations[0].profiles[0]
+        .legacy_error
+        .is_some(),
+      "the legacy projection must retain its all-row error"
+    );
     let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)
       .expect("adapt the chromium report");
     let report = assemble(1, vec![outcome]);
@@ -2316,7 +2354,7 @@ mod engine_chain_tests {
           issue.code.as_str(),
           "provider_unavailable" | "provider_failed" | "decrypt_failed"
         )),
-      "the rejected row must be reported: {:?}",
+      "the unavailable row must be reported: {:?}",
       source.issues
     );
     // Acquisition and the query completed, so nothing failed at source level.

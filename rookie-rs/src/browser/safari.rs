@@ -9,6 +9,8 @@ use std::{
   vec::Vec,
 };
 
+use super::cookie_record::{CookieRecord, CookieValue};
+
 /// `Cookies.binarycookies` is a per-user metadata store and is normally only a
 /// few MiB. Keep a generous ceiling so a corrupt or replaced file cannot make
 /// extraction consume unbounded memory.
@@ -310,7 +312,9 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
       let length = usize::try_from(slice(bs, offset, 4).map(LittleEndian::read_u32)?)
         .context("Safari cookie length does not fit in memory address space")?;
       let record = slice(bs, offset, length)?;
-      parse_cookie::<LittleEndian>(record)
+      parse_cookie::<LittleEndian>(record)?
+        .into_cookie()
+        .map_err(anyhow::Error::from)
     })()
     .with_context(|| format!("Failed to parse Safari cookie record {index}"));
 
@@ -346,7 +350,7 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
   Ok((cookies, stats, last_error))
 }
 
-fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<Cookie> {
+fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
   if bs.len() < 0x30 {
     bail!("cookie data underflow");
   }
@@ -369,15 +373,16 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<Cookie> {
   let is_secure = (flags & 0x01) == 0x01;
   let is_http_only = (flags & 0x04) == 0x04;
 
-  let cookie = Cookie {
+  let cookie = CookieRecord {
     expires,
     domain: url,
     http_only: is_http_only,
     name,
     path,
-    value,
+    value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
     same_site: SAME_SITE_UNSPECIFIED,
     secure: is_secure,
+    context: CookieContext::default(),
   };
   Ok(cookie)
 }

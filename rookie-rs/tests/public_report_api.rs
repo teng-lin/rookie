@@ -333,6 +333,8 @@ fn chrome_report_keeps_cookies_on_the_source_they_came_from() {
   assert_eq!(report.summary.sources_succeeded, 2);
   assert_eq!(report.summary.sources_failed, 0);
   assert_eq!(report.summary.cookies_emitted, 2);
+  assert_eq!(report.summary.rows_rejected, 0);
+  assert_eq!(report.summary.provider_failures, 0);
   assert!(!report.summary.counters_saturated);
 
   let mut values = Vec::new();
@@ -350,6 +352,8 @@ fn chrome_report_keeps_cookies_on_the_source_they_came_from() {
     assert_eq!(source.source.format.as_str(), "chromium_sqlite");
     assert_eq!(source.stats.cookies_emitted, 1);
     assert_eq!(source.stats.rows_skipped, 0);
+    assert_eq!(source.stats.rows_rejected, 0);
+    assert_eq!(source.stats.provider_failures, 0);
     assert_eq!(source.cookies.len(), 1);
     assert_eq!(source.cookies[0].name, "session");
     assert_eq!(source.cookies[0].domain, ".example.test");
@@ -411,6 +415,8 @@ fn reports_serialize_to_snake_case_json_with_open_string_codes() {
 
   assert_eq!(wire["status"], "complete");
   assert_eq!(wire["summary"]["cookies_emitted"], 2);
+  assert_eq!(wire["summary"]["rows_rejected"], 0);
+  assert_eq!(wire["summary"]["provider_failures"], 0);
   assert!(wire["summary"]["counters_saturated"].is_boolean());
   let source = &wire["profiles"][0]["sources"][0];
   assert_eq!(source["status"], "succeeded");

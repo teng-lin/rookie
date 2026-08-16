@@ -792,6 +792,8 @@ Path=Profiles/work
       rowsSeen: 1,
       cookiesEmitted: 1,
       rowsSkipped: 0,
+      rowsRejected: 0,
+      providerFailures: 0,
       acquisitionAttempts: 1,
       countersSaturated: false,
     });
@@ -1041,7 +1043,13 @@ Path=Profiles/work
     for (const key of [...observed.firefoxKeys, ...observed.absentKeys]) {
       t.false(key.includes("_"), `report key ${key} must be camelCase`);
     }
-    for (const key of ["pathLossy", "acquisitionStrategy", "countersSaturated"]) {
+    for (const key of [
+      "pathLossy",
+      "acquisitionStrategy",
+      "countersSaturated",
+      "rowsRejected",
+      "providerFailures",
+    ]) {
       t.true(observed.firefoxKeys.includes(key), `expected key ${key}`);
     }
 

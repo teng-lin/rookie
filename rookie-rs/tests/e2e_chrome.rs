@@ -214,7 +214,7 @@ mod deterministic_dpapi {
       .execute(
         "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value,\
           encrypted_value, is_httponly, samesite)\
-         VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'plaintext sentinel must not escape', ?6, ?7, ?8)",
         rusqlite::params![
           ".example.test",
           "/",

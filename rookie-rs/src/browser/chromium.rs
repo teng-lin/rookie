@@ -1,13 +1,34 @@
-use crate::common::{date, enums::*, secret::SecretBytes, sqlite, utils};
-use anyhow::{anyhow, Context, Result};
-use sha2::{Digest, Sha256};
-use std::fmt;
+#[cfg(test)]
+use crate::common::secret::{SecretBytes, SecretString};
+use crate::common::{enums::*, sqlite};
+#[cfg(target_os = "windows")]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
-use super::chromium_crypto::{
-  self, detect_cipher_version, retrieve_key_outcomes, ChromiumCipherVersion, ChromiumKeyOutcomes,
-  ChromiumKeyProvider, ChromiumKeyRoute, LegacyCipherOutcome,
+#[cfg(test)]
+use super::chromium_crypto::LegacyCipherOutcome;
+use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, ChromiumKeyProvider};
+#[cfg(test)]
+use super::chromium_decoder::{chromium_schema_version, ChromiumContextColumnError};
+use super::chromium_decoder::{
+  prepare_cookie_decoder, ChromiumDecodeEvent, ChromiumDecodeIssueCode, ChromiumDecodeSummary,
+  CookieProjection, EncryptedValuePolicy, MissingBrowserKeyIdentity,
 };
+use super::cookie_record::{CookieRecord, UnavailableCode};
+#[cfg(all(test, unix))]
+use super::unseal::decrypt_encrypted_value_with_outcomes;
+#[cfg(test)]
+use super::unseal::{
+  decode_chromium_cookie_value, decrypt_encrypted_value,
+  decrypt_encrypted_value_with_cipher_adapter, ChromiumCookieDecodeError, CipherAdapter,
+};
+use super::unseal::{unseal_chromium_record, ChromiumCookieValueError};
+#[cfg(test)]
+use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+const CHROMIUM_HOST_HASH_LEN: usize = 32;
 #[cfg(target_os = "linux")]
 use super::chromium_platform_keys::LinuxPlatformKeyProvider;
 #[cfg(target_os = "macos")]
@@ -169,130 +190,11 @@ pub(crate) fn chromium_based_probe_with_key_outcomes(
   query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill)
 }
 
-const CHROMIUM_HOST_HASH_LEN: usize = 32;
-const CHROMIUM_HOST_HASH_SCHEMA_VERSION: u32 = 24;
 /// Row-issue samples are collected against the report contract's bound rather
 /// than a separate number. Collecting fewer than the report retains silently
 /// caps what a consumer can ever see below the documented limit; collecting
 /// more only to have the report truncate them is wasted work.
 const MAX_CHROMIUM_ROW_ISSUE_SAMPLES: usize = crate::browser::report_core::MAX_ISSUE_SAMPLES;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChromiumCookieDecodeError {
-  InvalidUtf8AfterVerifiedHostHash,
-  MissingRequiredHostHash,
-  HostHashMismatch,
-  HostHashMismatchWithInvalidUtf8,
-  UnprefixedInvalidUtf8,
-}
-
-impl fmt::Display for ChromiumCookieDecodeError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::InvalidUtf8AfterVerifiedHostHash => {
-        formatter.write_str("Chromium cookie value after verified host hash is not valid UTF-8")
-      }
-      Self::MissingRequiredHostHash => {
-        formatter.write_str("Chromium cookie plaintext is missing the required v24+ host hash")
-      }
-      Self::HostHashMismatch => {
-        formatter.write_str("Chromium cookie plaintext has a mismatched v24+ host hash")
-      }
-      Self::HostHashMismatchWithInvalidUtf8 => formatter
-        .write_str("Chromium cookie plaintext has a mismatched host hash and is not valid UTF-8"),
-      Self::UnprefixedInvalidUtf8 => {
-        formatter.write_str("Chromium cookie plaintext is not valid UTF-8")
-      }
-    }
-  }
-}
-
-impl std::error::Error for ChromiumCookieDecodeError {}
-
-/// Decodes decrypted Chromium bytes without assuming that any 32-byte prefix
-/// is a host binding. Newer Chromium schemas prefix the value with the exact
-/// SHA-256 of the stored `host_key`; older schemas store the UTF-8 value
-/// directly, including values longer than 32 bytes.
-fn decode_chromium_cookie_value(
-  host_key: &str,
-  plaintext: SecretBytes,
-  schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieDecodeError> {
-  let host_hash_required = schema_version >= CHROMIUM_HOST_HASH_SCHEMA_VERSION;
-  if host_hash_required && plaintext.len() < CHROMIUM_HOST_HASH_LEN {
-    return Err(ChromiumCookieDecodeError::MissingRequiredHostHash);
-  }
-
-  if plaintext.len() >= CHROMIUM_HOST_HASH_LEN {
-    let expected_host_hash = Sha256::digest(host_key.as_bytes());
-    if plaintext[..CHROMIUM_HOST_HASH_LEN] == expected_host_hash[..] {
-      return plaintext
-        .into_output_string_from(CHROMIUM_HOST_HASH_LEN)
-        .map_err(|_| ChromiumCookieDecodeError::InvalidUtf8AfterVerifiedHostHash);
-    }
-
-    if host_hash_required {
-      return Err(ChromiumCookieDecodeError::HostHashMismatch);
-    }
-
-    return plaintext
-      .into_output_string_from(0)
-      .map_err(|_| ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8);
-  }
-
-  plaintext
-    .into_output_string_from(0)
-    .map_err(|_| ChromiumCookieDecodeError::UnprefixedInvalidUtf8)
-}
-
-fn chromium_schema_version(connection: &rusqlite::Connection) -> Result<u32> {
-  let version: String = connection
-    .query_row(
-      "SELECT CAST(value AS TEXT) FROM meta WHERE key = 'version'",
-      [],
-      |row| row.get(0),
-    )
-    .context("Can't read Chromium cookie database schema version from meta.version")?;
-  version
-    .parse()
-    .with_context(|| format!("Invalid Chromium cookie database schema version {version:?}"))
-}
-
-#[derive(Debug)]
-enum ChromiumCookieValueError {
-  Decrypt(anyhow::Error),
-  Decode(ChromiumCookieDecodeError),
-  ProviderUnavailable(anyhow::Error),
-  ProviderFailed(anyhow::Error),
-}
-
-impl ChromiumCookieValueError {
-  fn row_issue_code(&self) -> ChromiumRowIssueCode {
-    match self {
-      Self::Decrypt(_) => ChromiumRowIssueCode::Decrypt,
-      Self::Decode(_) => ChromiumRowIssueCode::Decode,
-      Self::ProviderUnavailable(_) => ChromiumRowIssueCode::ProviderUnavailable,
-      Self::ProviderFailed(_) => ChromiumRowIssueCode::ProviderFailed,
-    }
-  }
-}
-
-impl fmt::Display for ChromiumCookieValueError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::Decrypt(error) | Self::ProviderUnavailable(error) | Self::ProviderFailed(error) => {
-        error.fmt(formatter)
-      }
-      Self::Decode(error) => error.fmt(formatter),
-    }
-  }
-}
-
-impl From<anyhow::Error> for ChromiumCookieValueError {
-  fn from(error: anyhow::Error) -> Self {
-    Self::Decrypt(error)
-  }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChromiumRowIssueCode {
@@ -303,28 +205,6 @@ pub(crate) enum ChromiumRowIssueCode {
   ProviderUnavailable,
   /// A compiled provider was applicable but its key retrieval failed.
   ProviderFailed,
-}
-
-#[derive(Debug)]
-struct ChromiumContextColumnError {
-  column: &'static str,
-  source: rusqlite::Error,
-}
-
-impl fmt::Display for ChromiumContextColumnError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(
-      formatter,
-      "failed to read {} from Chromium cookie row: {}",
-      self.column, self.source
-    )
-  }
-}
-
-impl std::error::Error for ChromiumContextColumnError {
-  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-    Some(&self.source)
-  }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -339,6 +219,11 @@ pub(crate) struct ChromiumExtractionStats {
   pub(crate) rows_seen: usize,
   pub(crate) cookies_emitted: usize,
   pub(crate) rows_skipped: usize,
+  /// Rows rejected because their stored data was malformed or could not be
+  /// authenticated/decoded. Provider failures are counted separately.
+  pub(crate) rows_rejected: usize,
+  /// Distinct cipher tiers unavailable because an applicable provider failed.
+  pub(crate) provider_failures: usize,
 }
 
 /// A successful Chromium configuration probe and its completeness signal.
@@ -371,7 +256,7 @@ pub(crate) struct ChromiumEngineExtractionOutcome {
 }
 
 impl ChromiumEngineExtractionOutcome {
-  fn record_row_issue(&mut self, code: ChromiumRowIssueCode, row_number: usize) {
+  pub(super) fn record_row_issue(&mut self, code: ChromiumRowIssueCode, row_number: usize) {
     let issue = match self.issues.iter_mut().find(|issue| issue.code == code) {
       Some(issue) => issue,
       None => {
@@ -389,12 +274,24 @@ impl ChromiumEngineExtractionOutcome {
     }
   }
 
-  fn record_skipped_row(&mut self, code: ChromiumRowIssueCode, row_number: usize) {
+  pub(super) fn record_skipped_row(&mut self, code: ChromiumRowIssueCode, row_number: usize) {
     self.stats.rows_skipped += 1;
+    self.stats.rows_rejected += 1;
     self.record_row_issue(code, row_number);
   }
 
-  fn total_row_failure(&self, error: anyhow::Error) -> anyhow::Error {
+  fn record_unseal_failure(&mut self, code: ChromiumRowIssueCode, row_number: usize) {
+    self.stats.rows_skipped += 1;
+    match code {
+      ChromiumRowIssueCode::Decrypt | ChromiumRowIssueCode::Decode => self.stats.rows_rejected += 1,
+      ChromiumRowIssueCode::ColumnRead(_)
+      | ChromiumRowIssueCode::ProviderUnavailable
+      | ChromiumRowIssueCode::ProviderFailed => {}
+    }
+    self.record_row_issue(code, row_number);
+  }
+
+  pub(super) fn total_row_failure(&self, error: anyhow::Error) -> anyhow::Error {
     let issues = self
       .issues
       .iter()
@@ -448,186 +345,6 @@ impl ChromiumEngineExtractionOutcome {
         rows_skipped: self.stats.rows_skipped,
       }),
     }
-  }
-}
-
-fn chromium_cookie_context(
-  row: &rusqlite::Row<'_>,
-) -> std::result::Result<CookieContext, ChromiumContextColumnError> {
-  let read = |column, source| ChromiumContextColumnError { column, source };
-  Ok(CookieContext {
-    top_frame_site_key: row
-      .get::<_, Option<String>>(9)
-      .map_err(|error| read("top_frame_site_key", error))?,
-    has_cross_site_ancestor: row
-      .get::<_, Option<i64>>(10)
-      .map_err(|error| read("has_cross_site_ancestor", error))?
-      .map(|value| value != 0),
-    source_scheme: row
-      .get::<_, Option<i64>>(11)
-      .map_err(|error| read("source_scheme", error))?,
-    source_port: row
-      .get::<_, Option<i64>>(12)
-      .map_err(|error| read("source_port", error))?,
-    is_persistent: row
-      .get::<_, Option<i64>>(13)
-      .map_err(|error| read("is_persistent", error))?
-      .map(|value| value != 0),
-    ..CookieContext::default()
-  })
-}
-
-#[cfg(test)]
-fn decrypt_encrypted_value(
-  host_key: &str,
-  value: String,
-  encrypted_value: &[u8],
-  keys: &[Vec<u8>],
-  schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieValueError> {
-  let outcomes = ChromiumKeyOutcomes::from_legacy_shared(keys.to_vec());
-  decrypt_encrypted_value_with_outcomes(host_key, value, encrypted_value, &outcomes, schema_version)
-}
-
-fn decrypt_encrypted_value_with_outcomes(
-  host_key: &str,
-  value: String,
-  encrypted_value: &[u8],
-  outcomes: &ChromiumKeyOutcomes,
-  schema_version: u32,
-) -> std::result::Result<String, ChromiumCookieValueError> {
-  decrypt_encrypted_value_with_cipher_adapter(
-    host_key,
-    value,
-    encrypted_value,
-    outcomes,
-    schema_version,
-    CipherAdapter {
-      candidate_key_length: chromium_crypto::CANDIDATE_KEY_LENGTH,
-      validate_keyed_envelope: chromium_crypto::validate_keyed_envelope,
-      decrypt_candidate: chromium_crypto::decrypt_keyed_candidate,
-      decrypt_legacy: chromium_crypto::decrypt_legacy,
-    },
-  )
-}
-
-struct CipherAdapter<Validate, Candidate, Legacy> {
-  candidate_key_length: Option<usize>,
-  validate_keyed_envelope: Validate,
-  decrypt_candidate: Candidate,
-  decrypt_legacy: Legacy,
-}
-
-fn decrypt_encrypted_value_with_cipher_adapter<Validate, Candidate, Legacy>(
-  host_key: &str,
-  value: String,
-  encrypted_value: &[u8],
-  outcomes: &ChromiumKeyOutcomes,
-  schema_version: u32,
-  adapter: CipherAdapter<Validate, Candidate, Legacy>,
-) -> std::result::Result<String, ChromiumCookieValueError>
-where
-  Validate: Fn(&[u8]) -> Result<()>,
-  Candidate: Fn(&[u8], &[u8]) -> Result<SecretBytes>,
-  Legacy: Fn(&[u8]) -> Result<LegacyCipherOutcome>,
-{
-  let CipherAdapter {
-    candidate_key_length,
-    validate_keyed_envelope,
-    decrypt_candidate,
-    decrypt_legacy,
-  } = adapter;
-  if !value.is_empty() {
-    return Ok(value);
-  }
-  if encrypted_value.is_empty() {
-    return Ok(value);
-  }
-
-  let cipher_version = detect_cipher_version(encrypted_value)
-    .map_err(|error| ChromiumCookieValueError::Decrypt(anyhow!(error)))?;
-  let (key_type, candidates) = match outcomes.route(cipher_version) {
-    ChromiumKeyRoute::Candidates { tier, candidates } => {
-      log::debug!("Chromium cipher tier: {tier}");
-      let prefix = match cipher_version {
-        ChromiumCipherVersion::V10 => b"v10",
-        ChromiumCipherVersion::V11 => b"v11",
-        ChromiumCipherVersion::V20 => b"v20",
-        _ => unreachable!("candidate routes are only emitted for keyed tiers"),
-      };
-      (prefix.as_slice(), candidates)
-    }
-    ChromiumKeyRoute::NotApplicable { tier } => {
-      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
-        "Chromium {tier} key provider is not applicable"
-      )));
-    }
-    ChromiumKeyRoute::Failure { tier, failure } => {
-      return Err(ChromiumCookieValueError::ProviderFailed(anyhow!(
-        "Chromium {tier} key provider failed: {}",
-        failure.message()
-      )));
-    }
-    ChromiumKeyRoute::LegacyDpapi => {
-      return match decrypt_legacy(encrypted_value).map_err(ChromiumCookieValueError::Decrypt)? {
-        LegacyCipherOutcome::Plaintext(plaintext) => {
-          decode_chromium_cookie_value(host_key, plaintext, schema_version)
-            .map_err(ChromiumCookieValueError::Decode)
-        }
-        LegacyCipherOutcome::Unsupported(message) => Err(
-          ChromiumCookieValueError::ProviderUnavailable(anyhow!(message)),
-        ),
-      };
-    }
-    ChromiumKeyRoute::V12SecretPortal => {
-      return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
-        "Chromium v12 SecretPortal encryption is recognized but unsupported"
-      )));
-    }
-    ChromiumKeyRoute::Unknown(prefix) => {
-      return Err(ChromiumCookieValueError::Decrypt(anyhow!(
-        "Unknown Chromium cipher prefix: {prefix:?}"
-      )));
-    }
-  };
-
-  let candidate_key_length = candidate_key_length.ok_or_else(|| {
-    ChromiumCookieValueError::ProviderUnavailable(anyhow!(
-      "Chromium keyed cookie decryption is unsupported on this platform"
-    ))
-  })?;
-  validate_keyed_envelope(encrypted_value).map_err(ChromiumCookieValueError::Decrypt)?;
-  let mut last_decode_error = None;
-
-  for key in candidates {
-    if key.as_bytes().len() != candidate_key_length {
-      log::warn!(
-        "Skipping {key_type:?} candidate key with invalid length {}",
-        key.as_bytes().len()
-      );
-      continue;
-    }
-
-    match decrypt_candidate(encrypted_value, key.as_bytes()) {
-      Ok(plaintext) => match decode_chromium_cookie_value(host_key, plaintext, schema_version) {
-        Ok(decoded) => return Ok(decoded),
-        Err(error) => {
-          // A wrong key can occasionally pass the target cipher's integrity
-          // checks. Do not accept its bytes as a cookie value; another key may
-          // decrypt a correctly bound UTF-8 value.
-          log::debug!("Failed to decode decrypted Chromium value: {error}");
-          last_decode_error = Some(error);
-        }
-      },
-      Err(error) => log::debug!("Failed to decrypt with a key: {error}"),
-    }
-  }
-
-  match last_decode_error {
-    Some(error) => Err(ChromiumCookieValueError::Decode(error)),
-    None => Err(ChromiumCookieValueError::Decrypt(anyhow!(
-      "decrypt_encrypted_value failed"
-    ))),
   }
 }
 
@@ -794,33 +511,6 @@ pub(crate) fn query_cookies_engine_outcome(
   )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CookieProjection {
-  Legacy,
-  Detailed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EncryptedValuePolicy {
-  UseKeyOutcomes,
-  RejectMissingIdentity,
-}
-
-const MISSING_BROWSER_KEY_IDENTITY_MESSAGE: &str =
-  "encrypted explicit-path Chromium profile has no browser key identity; \
-   pass a canonical browser_id from supported_browsers()";
-
-#[derive(Debug)]
-struct MissingBrowserKeyIdentity;
-
-impl fmt::Display for MissingBrowserKeyIdentity {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    formatter.write_str(MISSING_BROWSER_KEY_IDENTITY_MESSAGE)
-  }
-}
-
-impl std::error::Error for MissingBrowserKeyIdentity {}
-
 #[allow(unused_variables)]
 fn query_cookies_engine_outcome_mode(
   outcomes: &ChromiumKeyOutcomes,
@@ -865,12 +555,12 @@ fn query_cookies_from_database(
     db_path.to_str().unwrap_or("")
   );
   let database = sqlite::with_browser_database(db_path, |connection| {
-    query_cookies_from_connection_mode(
+    decode_and_unseal_cookie_records(
       connection,
-      outcomes,
       domains,
       projection,
       encrypted_value_policy,
+      |record, schema_version| unseal_chromium_record(record, outcomes, schema_version),
     )
   });
   let database = match database {
@@ -896,14 +586,117 @@ fn query_cookies_from_database(
   Ok(outcome)
 }
 
-/// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
-/// character itself so a caller-supplied domain is matched as literal text,
-/// not interpreted as a wildcard pattern. Pair with an `ESCAPE '\'` clause.
-fn escape_like_pattern(input: &str) -> String {
-  input
-    .replace('\\', "\\\\")
-    .replace('%', "\\%")
-    .replace('_', "\\_")
+fn decode_and_unseal_cookie_records<Unseal>(
+  connection: &rusqlite::Connection,
+  domains: Option<&[String]>,
+  projection: CookieProjection,
+  encrypted_value_policy: EncryptedValuePolicy,
+  mut unseal: Unseal,
+) -> Result<ChromiumEngineExtractionOutcome>
+where
+  Unseal: FnMut(
+    CookieRecord,
+    u32,
+  )
+    -> std::result::Result<CookieRecord, Box<(CookieRecord, ChromiumCookieValueError)>>,
+{
+  let mut outcome = ChromiumEngineExtractionOutcome::default();
+  let mut failed_provider_tiers = std::collections::HashSet::new();
+  let mut last_row_error = None;
+  // Successful rows stay protected until the SQLite cursor is cleanly
+  // exhausted. A later iteration, identity, or retry error therefore drops
+  // SecretString-backed records instead of abandoning public String values.
+  let mut staged_records = Vec::new();
+  let mut decoder =
+    prepare_cookie_decoder(connection, domains, projection, encrypted_value_policy)?;
+  let mut cursor = decoder.cursor()?;
+  while let Some(event) = cursor.next_event()? {
+    let decoded = match event {
+      ChromiumDecodeEvent::RowFailure(failure) => {
+        log::warn!("Failed to decode Chromium cookie row: {}", failure.error);
+        let code = match failure.code {
+          ChromiumDecodeIssueCode::ColumnRead(column) => ChromiumRowIssueCode::ColumnRead(column),
+        };
+        outcome.record_skipped_row(code, failure.row_number);
+        last_row_error = Some(failure.error);
+        continue;
+      }
+      ChromiumDecodeEvent::Record(decoded) => decoded,
+    };
+    let encrypted_tier = match &decoded.record.value {
+      super::cookie_record::CookieValue::Encrypted { tier, .. } => Some(*tier),
+      super::cookie_record::CookieValue::Plain(_)
+      | super::cookie_record::CookieValue::Unavailable(_) => None,
+    };
+    match unseal(decoded.record, decoded.schema_version) {
+      Ok(record) => {
+        if let Some(failure) = decoded.pending_context_failure {
+          log::warn!(
+            "Failed to decode Chromium cookie context: {}",
+            failure.error
+          );
+          let code = match failure.code {
+            ChromiumDecodeIssueCode::ColumnRead(column) => ChromiumRowIssueCode::ColumnRead(column),
+          };
+          outcome.record_skipped_row(code, failure.row_number);
+          last_row_error = Some(failure.error);
+          continue;
+        }
+        staged_records.push(record);
+      }
+      Err(failure) => {
+        let (_record, error) = *failure;
+        log::warn!("Failed to unseal cookie value: {error}");
+        let code = match error.unavailable_code() {
+          UnavailableCode::Decrypt => ChromiumRowIssueCode::Decrypt,
+          UnavailableCode::Decode => ChromiumRowIssueCode::Decode,
+          UnavailableCode::ProviderUnavailable => ChromiumRowIssueCode::ProviderUnavailable,
+          UnavailableCode::ProviderFailed => ChromiumRowIssueCode::ProviderFailed,
+        };
+        if code == ChromiumRowIssueCode::ProviderFailed {
+          if let Some(tier) = encrypted_tier {
+            failed_provider_tiers.insert(tier);
+          }
+        }
+        outcome.record_unseal_failure(code, decoded.row_number);
+        // Preserve the historical error surface for unseal failures. Context
+        // column errors remain typed because ordered events prevent an earlier
+        // stringified unseal error from overwriting a later decoder error.
+        last_row_error = Some(anyhow!(error.to_string()));
+      }
+    }
+  }
+  let ChromiumDecodeSummary { rows_seen } = cursor.summary();
+  drop(cursor);
+  outcome.stats.rows_seen = rows_seen;
+  outcome.stats.provider_failures = failed_provider_tiers.len();
+  if outcome.stats.rows_seen > 0 && outcome.stats.rows_skipped == outcome.stats.rows_seen {
+    if let Some(error) = last_row_error {
+      outcome.legacy_error = Some(outcome.total_row_failure(error));
+    }
+  }
+  if staged_records
+    .iter()
+    .any(|record| !matches!(record.value, super::cookie_record::CookieValue::Plain(_)))
+  {
+    return Err(anyhow!(
+      "Chromium unseal stage returned a successful record without plaintext"
+    ));
+  }
+  for record in staged_records {
+    match projection {
+      CookieProjection::Detailed => outcome.detailed_cookies.push(
+        record
+          .into_detailed_cookie()
+          .expect("unseal produced plaintext"),
+      ),
+      CookieProjection::Legacy => outcome
+        .cookies
+        .push(record.into_cookie().expect("unseal produced plaintext")),
+    }
+    outcome.stats.cookies_emitted += 1;
+  }
+  Ok(outcome)
 }
 
 #[cfg(test)]
@@ -921,6 +714,7 @@ fn query_cookies_from_connection(
   )
 }
 
+#[cfg(test)]
 fn query_cookies_from_connection_mode(
   connection: &rusqlite::Connection,
   outcomes: &ChromiumKeyOutcomes,
@@ -928,202 +722,13 @@ fn query_cookies_from_connection_mode(
   projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumEngineExtractionOutcome> {
-  let schema_version = chromium_schema_version(connection)?;
-  let columns = sqlite_table_columns(connection, "cookies")?;
-  let optional_column = |name: &str| {
-    if columns.contains(name) {
-      name.to_string()
-    } else {
-      format!("NULL AS {name}")
-    }
-  };
-  let mut query = format!(
-    "SELECT host_key, path, is_secure, expires_utc, name, value, \
-     CAST(encrypted_value AS BLOB), is_httponly, samesite, {}, {}, {}, {}, {} FROM cookies ",
-    optional_column("top_frame_site_key"),
-    optional_column("has_cross_site_ancestor"),
-    optional_column("source_scheme"),
-    optional_column("source_port"),
-    optional_column("is_persistent"),
-  );
-  let domain_filters: Vec<String> = domains
-    .map(|domains| {
-      domains
-        .iter()
-        .filter_map(|domain| utils::normalized_domain_for_match(domain))
-        .map(|domain| format!("%{}%", escape_like_pattern(domain)))
-        .collect()
-    })
-    .unwrap_or_default();
-
-  let apply_sql_domain_filter = encrypted_value_policy == EncryptedValuePolicy::UseKeyOutcomes;
-  if domains.is_some() && apply_sql_domain_filter {
-    if domain_filters.is_empty() {
-      query += "WHERE 0";
-    } else {
-      let predicates = (1..=domain_filters.len())
-        .map(|index| format!("host_key LIKE ?{index} ESCAPE '\\'"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-      query += &format!("WHERE ({predicates})");
-    }
-  }
-  query += ";";
-
-  let mut extraction = ChromiumEngineExtractionOutcome::default();
-  let mut last_row_error: Option<anyhow::Error> = None;
-  let mut stmt = connection.prepare(query.as_str())?;
-  let query_domain_filters = if apply_sql_domain_filter {
-    domain_filters.as_slice()
-  } else {
-    &[]
-  };
-  let mut rows = stmt.query(rusqlite::params_from_iter(query_domain_filters.iter()))?;
-
-  while let Some(row) = rows.next()? {
-    let plaintext_only_encrypted =
-      if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-        let encrypted_value = row.get::<_, Option<Vec<u8>>>(6).map_err(|error| {
-          anyhow!(
-            "can't prove that explicit-path Chromium cookie row is plaintext: \
-             failed to read encrypted_value: {error}"
-          )
-        })?;
-        let encrypted_value = encrypted_value.unwrap_or_default();
-        if !encrypted_value.is_empty() {
-          return Err(MissingBrowserKeyIdentity.into());
-        }
-        Some(encrypted_value)
-      } else {
-        None
-      };
-    let host_key = match row.get::<_, Option<String>>(0) {
-      Ok(host_key) => host_key.unwrap_or_default(),
-      Err(error) => {
-        extraction.stats.rows_seen += 1;
-        let row_number = extraction.stats.rows_seen;
-        log::warn!("Failed to read host_key from Chromium cookie row: {error}");
-        last_row_error = Some(anyhow!(
-          "failed to read host_key from Chromium cookie row: {error}"
-        ));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("host_key"), row_number);
-        continue;
-      }
-    };
-    if !utils::some_domain_in_host(domains, &host_key) {
-      continue;
-    }
-    extraction.stats.rows_seen += 1;
-    let row_number = extraction.stats.rows_seen;
-    macro_rules! read_optional_column {
-      ($index:expr, $type:ty, $name:literal) => {
-        match row.get::<_, Option<$type>>($index) {
-          Ok(value) => value,
-          Err(error) => {
-            log::warn!("Failed to read {} from Chromium cookie row: {error}", $name);
-            last_row_error = Some(anyhow!(
-              "failed to read {} from Chromium cookie row: {error}",
-              $name
-            ));
-            extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead($name), row_number);
-            continue;
-          }
-        }
-      };
-    }
-
-    let path = read_optional_column!(1, String, "path").unwrap_or_else(|| "/".to_string());
-    let is_secure = read_optional_column!(2, bool, "is_secure").unwrap_or(false);
-    let expires = read_optional_column!(3, i64, "expires_utc")
-      .and_then(|value| u64::try_from(value).ok())
-      .and_then(date::chromium_timestamp);
-    let name: String = match row.get(4) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read name from row: {err}");
-        last_row_error = Some(anyhow!("failed to read name from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("name"), row_number);
-        continue;
-      }
-    };
-    let value: String = match row.get(5) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to read value from row: {err}");
-        last_row_error = Some(anyhow!("failed to read value from row: {err}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("value"), row_number);
-        continue;
-      }
-    };
-    let encrypted_value = if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-      plaintext_only_encrypted.expect("plaintext-only mode captured encrypted_value")
-    } else {
-      read_optional_column!(6, Vec<u8>, "encrypted_value").unwrap_or_default()
-    };
-    let http_only = read_optional_column!(7, bool, "is_httponly").unwrap_or(false);
-    let same_site = read_optional_column!(8, i64, "samesite").unwrap_or(SAME_SITE_UNSPECIFIED);
-    let decrypted_value = match decrypt_encrypted_value_with_outcomes(
-      &host_key,
-      value,
-      &encrypted_value,
-      outcomes,
-      schema_version,
-    ) {
-      Ok(val) => val,
-      Err(err) => {
-        log::warn!("Failed to decrypt cookie value: {err}");
-        let issue_code = err.row_issue_code();
-        last_row_error = Some(anyhow!(err.to_string()));
-        extraction.record_skipped_row(issue_code, row_number);
-        continue;
-      }
-    };
-    let cookie = Cookie {
-      domain: host_key,
-      path,
-      secure: is_secure,
-      expires,
-      name,
-      value: decrypted_value,
-      http_only,
-      same_site,
-    };
-    if projection == CookieProjection::Detailed {
-      let context = match chromium_cookie_context(row) {
-        Ok(context) => context,
-        Err(error) => {
-          log::warn!("{error}");
-          let column = error.column;
-          last_row_error = Some(error.into());
-          extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead(column), row_number);
-          continue;
-        }
-      };
-      extraction
-        .detailed_cookies
-        .push(DetailedCookie { cookie, context });
-    } else {
-      extraction.cookies.push(cookie);
-    }
-    extraction.stats.cookies_emitted += 1;
-  }
-  if extraction.stats.rows_seen > 0 && extraction.stats.rows_skipped == extraction.stats.rows_seen {
-    if let Some(error) = last_row_error {
-      extraction.legacy_error = Some(extraction.total_row_failure(error));
-    }
-  }
-  Ok(extraction)
-}
-
-fn sqlite_table_columns(
-  connection: &rusqlite::Connection,
-  table: &str,
-) -> Result<std::collections::HashSet<String>> {
-  let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-  let columns = statement
-    .query_map([], |row| row.get::<_, String>(1))?
-    .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
-  Ok(columns)
+  decode_and_unseal_cookie_records(
+    connection,
+    domains,
+    projection,
+    encrypted_value_policy,
+    |record, schema_version| unseal_chromium_record(record, outcomes, schema_version),
+  )
 }
 
 #[cfg(test)]
@@ -1170,10 +775,6 @@ mod tests {
     let mut plaintext = Sha256::digest(host_key.as_bytes()).to_vec();
     plaintext.extend_from_slice(value);
     plaintext
-  }
-
-  fn secret_bytes(bytes: impl Into<Vec<u8>>) -> SecretBytes {
-    SecretBytes::new(bytes.into())
   }
 
   // (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
@@ -1391,6 +992,8 @@ mod tests {
         rows_seen: 3,
         cookies_emitted: 2,
         rows_skipped: 1,
+        rows_rejected: 1,
+        provider_failures: 0,
       }
     );
     assert_eq!(extraction.issues.len(), 1);
@@ -1413,6 +1016,108 @@ mod tests {
     let public_result = query_detailed_cookies(&provider, &(), db, None, false)
       .expect("public detailed extraction returns the valid rows");
     assert_eq!(public_result.len(), 2);
+  }
+
+  #[test]
+  fn decode_unseal_preserves_row_failure_precedence_order_and_typed_source_chain() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+          host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+          name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+          samesite INTEGER, top_frame_site_key BLOB
+        );
+        INSERT INTO cookies VALUES
+          ('.example.com', '/', 0, 0, 'cipher-before-context', 'must not leak',
+           X'7631', 0, 0, X'FF'),
+          ('.example.com', '/', 0, 0, X'FF', 'unreadable name', X'', 0, 0,
+           'https://valid.example'),
+          ('.example.com', '/', 0, 0, 'context-last', 'plain', X'', 0, 0,
+           X'FF');",
+      )
+      .expect("seed compound and interleaved failures");
+
+    let outcome = query_cookies_from_connection_mode(
+      &connection,
+      &ChromiumKeyOutcomes::default(),
+      None,
+      CookieProjection::Detailed,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("row failures remain an extraction outcome");
+
+    assert_eq!(
+      outcome.stats,
+      ChromiumExtractionStats {
+        rows_seen: 3,
+        cookies_emitted: 0,
+        rows_skipped: 3,
+        rows_rejected: 3,
+        provider_failures: 0,
+      }
+    );
+    assert_eq!(
+      outcome
+        .issues
+        .iter()
+        .map(|issue| (issue.code, issue.occurrences))
+        .collect::<Vec<_>>(),
+      vec![
+        (ChromiumRowIssueCode::Decrypt, 1),
+        (ChromiumRowIssueCode::ColumnRead("name"), 1),
+        (ChromiumRowIssueCode::ColumnRead("top_frame_site_key"), 1,),
+      ],
+      "issues must retain row order and decrypt must win over a same-row context failure"
+    );
+    let error = outcome
+      .legacy_error
+      .as_ref()
+      .expect("all-row failure keeps the final row error");
+    assert!(error
+      .chain()
+      .any(|cause| cause.is::<ChromiumContextColumnError>()));
+    assert!(error.chain().any(|cause| cause.is::<rusqlite::Error>()));
+    assert!(format!("{error:#}").contains("top_frame_site_key"));
+  }
+
+  #[test]
+  fn compound_row_failure_keeps_decrypt_precedence_over_context() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+          host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+          name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+          samesite INTEGER, top_frame_site_key BLOB
+        );
+        INSERT INTO cookies VALUES
+          ('.example.com', '/', 0, 0, 'compound', 'must not leak', X'7631',
+           0, 0, X'FF');",
+      )
+      .expect("seed compound failure");
+
+    let outcome = query_cookies_from_connection_mode(
+      &connection,
+      &ChromiumKeyOutcomes::default(),
+      None,
+      CookieProjection::Detailed,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("row failure remains an extraction outcome");
+    assert_eq!(outcome.issues.len(), 1);
+    assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::Decrypt);
+    let error = outcome
+      .legacy_error
+      .as_ref()
+      .expect("all-row failure keeps the unseal error");
+    assert!(!error
+      .chain()
+      .any(|cause| cause.is::<ChromiumContextColumnError>()));
+    assert!(format!("{error:#}").contains("shorter than the 3-byte cipher prefix"));
+    assert!(!format!("{error:#}").contains("must not leak"));
   }
 
   #[cfg(target_os = "windows")]
@@ -1569,7 +1274,7 @@ mod tests {
           false,
           0,
           "v10-good",
-          "",
+          "attacker-controlled plaintext",
           &v10_value,
           false,
           0,
@@ -1580,7 +1285,7 @@ mod tests {
           false,
           0,
           "v20-failed-tier",
-          "",
+          "must not leak when provider fails",
           &failed_v20_value,
           false,
           0,
@@ -1591,7 +1296,7 @@ mod tests {
           false,
           0,
           "v11-good",
-          "",
+          "attacker-controlled plaintext",
           &v11_value,
           false,
           0,
@@ -1624,6 +1329,614 @@ mod tests {
     assert_eq!(
       extracted,
       vec![("v10-good", "v10 value"), ("v11-good", "v11 value")]
+    );
+    assert!(cookies
+      .iter()
+      .all(|cookie| cookie.value != "attacker-controlled plaintext"));
+  }
+
+  #[test]
+  fn decoder_retains_ciphertext_and_discards_dual_populated_plaintext() {
+    let dir = unique_tmpdir("chr-decoder-ciphertext-record");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "dual",
+        "must not survive decode",
+        b"v20ciphertext",
+        false,
+        0,
+      )],
+    );
+    let connection = rusqlite::Connection::open(db).expect("open fixture");
+    let mut decoder = super::super::chromium_decoder::prepare_cookie_decoder(
+      &connection,
+      None,
+      CookieProjection::Legacy,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("prepare decode without key material");
+    let mut cursor = decoder.cursor().expect("start decoder cursor");
+    let mut events = Vec::new();
+    while let Some(event) = cursor.next_event().expect("decode next row") {
+      events.push(event);
+    }
+    let summary = cursor.summary();
+
+    assert_eq!(summary.rows_seen, 1);
+    assert_eq!(events.len(), 1);
+    let ChromiumDecodeEvent::Record(decoded) = events.pop().expect("one event") else {
+      panic!("valid row must decode to a record")
+    };
+    assert_eq!(
+      decoded.record.value,
+      super::super::cookie_record::CookieValue::Encrypted {
+        tier: super::super::cookie_record::CipherTier::V20,
+        bytes: b"v20ciphertext".to_vec(),
+      }
+    );
+  }
+
+  #[test]
+  fn authoritative_ciphertext_bypasses_null_blob_and_invalid_text_plaintext_columns() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER
+         );
+         INSERT INTO cookies VALUES
+           ('.example.com', '/', 0, 0, 'null-value', NULL,
+            X'76313073796E7468657469632D76616C6964', 0, 0),
+           ('.example.com', '/', 0, 0, 'blob-value', X'00FF',
+            X'76313073796E7468657469632D76616C6964', 0, 0),
+           ('.example.com', '/', 0, 0, 'invalid-text', CAST(X'FF' AS TEXT),
+            X'76313073796E7468657469632D76616C6964', 0, 0);",
+      )
+      .expect("seed authoritative ciphertext rows");
+
+    let outcome = decode_and_unseal_cookie_records(
+      &connection,
+      None,
+      CookieProjection::Legacy,
+      EncryptedValuePolicy::UseKeyOutcomes,
+      |mut record, _schema_version| {
+        assert!(matches!(
+          &record.value,
+          super::super::cookie_record::CookieValue::Encrypted {
+            tier: super::super::cookie_record::CipherTier::V10,
+            ..
+          }
+        ));
+        record.value = super::super::cookie_record::CookieValue::Plain(SecretString::new(format!(
+          "decrypted-{}",
+          record.name
+        )));
+        Ok(record)
+      },
+    )
+    .expect("authoritative ciphertext rows are decryptable");
+
+    assert_eq!(outcome.stats.rows_seen, 3);
+    assert_eq!(outcome.stats.cookies_emitted, 3);
+    assert_eq!(outcome.stats.rows_skipped, 0);
+    assert!(outcome
+      .issues
+      .iter()
+      .all(|issue| { issue.code != ChromiumRowIssueCode::ColumnRead("value") }));
+    assert_eq!(
+      outcome
+        .cookies
+        .iter()
+        .map(|cookie| cookie.value.as_str())
+        .collect::<Vec<_>>(),
+      vec![
+        "decrypted-null-value",
+        "decrypted-blob-value",
+        "decrypted-invalid-text"
+      ]
+    );
+  }
+
+  #[test]
+  fn discarded_detailed_ciphertext_result_is_wiped_without_reading_plaintext() {
+    const STORED_PLAINTEXT: &str = "stored-plaintext-must-never-be-owned";
+    const DECRYPTED: &str = "decrypted-value-must-be-wiped";
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(&format!(
+        "CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER, top_frame_site_key BLOB
+         );
+         INSERT INTO cookies VALUES
+           ('.example.com', '/', 0, 0, 'discarded', '{STORED_PLAINTEXT}',
+            X'76323073796E7468657469632D76616C6964', 0, 0, X'FF');"
+      ))
+      .expect("seed detailed context failure");
+
+    let (observed, unwind) = crate::common::secret::observe_secret_string_drops(|| {
+      let outcome = decode_and_unseal_cookie_records(
+        &connection,
+        None,
+        CookieProjection::Detailed,
+        EncryptedValuePolicy::UseKeyOutcomes,
+        |mut record, _schema_version| {
+          assert!(matches!(
+            &record.value,
+            super::super::cookie_record::CookieValue::Encrypted {
+              tier: super::super::cookie_record::CipherTier::V20,
+              ..
+            }
+          ));
+          record.value = super::super::cookie_record::CookieValue::Plain(SecretString::new(
+            DECRYPTED.to_owned(),
+          ));
+          Ok(record)
+        },
+      )
+      .expect("context failure remains a row outcome");
+      assert!(outcome.detailed_cookies.is_empty());
+      assert_eq!(outcome.stats.rows_skipped, 1);
+      assert_eq!(
+        outcome.issues[0].code,
+        ChromiumRowIssueCode::ColumnRead("top_frame_site_key")
+      );
+    });
+
+    assert!(unwind.is_ok());
+    assert_eq!(
+      observed.len(),
+      1,
+      "only decrypted protected text should be allocated; the stored plaintext column is bypassed"
+    );
+    assert_eq!(observed[0].0, DECRYPTED.len());
+    assert!(observed[0].1.iter().all(|byte| *byte == 0));
+    assert_ne!(observed[0].0, STORED_PLAINTEXT.len());
+  }
+
+  #[test]
+  fn late_missing_identity_error_wipes_staged_plaintext_before_returning() {
+    const STAGED: &str = "staged-plaintext-must-be-wiped";
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(&format!(
+        "CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER
+         );
+         INSERT INTO cookies VALUES
+           ('.example.com', '/', 0, 0, 'staged', '{STAGED}', X'', 0, 0),
+           ('.example.com', '/', 0, 0, 'late-encrypted', 'must-not-win',
+            X'76313073796E746865746963', 0, 0);"
+      ))
+      .expect("seed late identity failure");
+
+    let (observed, unwind) = crate::common::secret::observe_secret_string_drops(|| {
+      let error = decode_and_unseal_cookie_records(
+        &connection,
+        None,
+        CookieProjection::Legacy,
+        EncryptedValuePolicy::RejectMissingIdentity,
+        |record, schema_version| {
+          unseal_chromium_record(record, &ChromiumKeyOutcomes::default(), schema_version)
+        },
+      )
+      .expect_err("a later encrypted row rejects the complete plaintext-only attempt");
+      assert!(error.is::<MissingBrowserKeyIdentity>());
+      assert!(!format!("{error:#}").contains(STAGED));
+    });
+
+    assert!(unwind.is_ok());
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].0, STAGED.len());
+    assert!(observed[0].1.iter().all(|byte| *byte == 0));
+  }
+
+  #[test]
+  fn unwind_during_later_unseal_wipes_every_staged_success() {
+    const DECRYPTED: &str = "staged-decrypted-value-must-be-wiped";
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER
+         );
+         INSERT INTO cookies VALUES
+           ('.example.com', '/', 0, 0, 'first', 'ignored', X'7631306669727374', 0, 0),
+           ('.example.com', '/', 0, 0, 'second', 'ignored', X'7631307365636F6E64', 0, 0);",
+      )
+      .expect("seed unwind fixture");
+
+    let calls = Cell::new(0);
+    let (observed, unwind) = crate::common::secret::observe_secret_string_drops(|| {
+      let _ = decode_and_unseal_cookie_records(
+        &connection,
+        None,
+        CookieProjection::Legacy,
+        EncryptedValuePolicy::UseKeyOutcomes,
+        |mut record, _schema_version| {
+          let call = calls.get() + 1;
+          calls.set(call);
+          if call == 2 {
+            panic!("synthetic later-row unseal panic");
+          }
+          record.value = super::super::cookie_record::CookieValue::Plain(SecretString::new(
+            DECRYPTED.to_owned(),
+          ));
+          Ok(record)
+        },
+      );
+    });
+
+    assert!(unwind.is_err());
+    assert_eq!(calls.get(), 2);
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].0, DECRYPTED.len());
+    assert!(observed[0].1.iter().all(|byte| *byte == 0));
+  }
+
+  fn dual_populated_tier_fixture(ciphertext: &[u8]) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().expect("open tier fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER,
+           samesite INTEGER, top_frame_site_key TEXT
+         );",
+      )
+      .expect("create tier fixture");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES
+          ('.example.com', '/', 0, 0, 'tier',
+           'plaintext-fallback-must-not-escape', ?1, 0, 0,
+           'https://partition.example')",
+        [ciphertext],
+      )
+      .expect("insert tier fixture");
+    connection
+  }
+
+  fn injected_tier_outcome(
+    connection: &rusqlite::Connection,
+    projection: CookieProjection,
+    expected_tier: super::super::cookie_record::CipherTier,
+    succeed: bool,
+  ) -> ChromiumEngineExtractionOutcome {
+    decode_and_unseal_cookie_records(
+      connection,
+      None,
+      projection,
+      EncryptedValuePolicy::UseKeyOutcomes,
+      |mut record, _schema_version| {
+        let actual_tier = match &record.value {
+          super::super::cookie_record::CookieValue::Encrypted { tier, .. } => *tier,
+          _ => panic!("dual-populated row must reach unseal as ciphertext"),
+        };
+        assert_eq!(actual_tier, expected_tier);
+        if succeed {
+          record.value = super::super::cookie_record::CookieValue::Plain(SecretString::new(
+            format!("decrypted-{expected_tier:?}"),
+          ));
+          Ok(record)
+        } else {
+          Err(Box::new((
+            record,
+            ChromiumCookieValueError::ProviderUnavailable(anyhow!(
+              "injected {expected_tier:?} unavailable"
+            )),
+          )))
+        }
+      },
+    )
+    .expect("tier fixture decodes")
+  }
+
+  #[test]
+  fn every_corrected_cipher_tier_uses_ciphertext_on_legacy_detailed_and_report_surfaces() {
+    use super::super::cookie_record::CipherTier;
+
+    for (ciphertext, tier) in [
+      (b"v10synthetic".as_slice(), CipherTier::V10),
+      (b"v11synthetic".as_slice(), CipherTier::V11),
+      (b"v20synthetic".as_slice(), CipherTier::V20),
+      (b"raw-dpapi-synthetic".as_slice(), CipherTier::LegacyDpapi),
+    ] {
+      let connection = dual_populated_tier_fixture(ciphertext);
+      let expected_value = format!("decrypted-{tier:?}");
+
+      let report = injected_tier_outcome(&connection, CookieProjection::Legacy, tier, true);
+      assert_eq!(report.stats.rows_seen, 1);
+      assert_eq!(report.stats.cookies_emitted, 1);
+      assert_eq!(report.stats.rows_skipped, 0);
+      assert_eq!(report.cookies[0].value, expected_value);
+      assert_ne!(
+        report.cookies[0].value,
+        "plaintext-fallback-must-not-escape"
+      );
+
+      let legacy = injected_tier_outcome(&connection, CookieProjection::Legacy, tier, true)
+        .into_legacy_result()
+        .expect("legacy projection succeeds");
+      assert_eq!(legacy[0].value, expected_value);
+
+      let detailed = injected_tier_outcome(&connection, CookieProjection::Detailed, tier, true)
+        .into_detailed_result()
+        .expect("detailed projection succeeds");
+      assert_eq!(detailed[0].cookie.value, expected_value);
+      assert_eq!(
+        detailed[0].context.top_frame_site_key.as_deref(),
+        Some("https://partition.example")
+      );
+
+      let failed_report = injected_tier_outcome(&connection, CookieProjection::Legacy, tier, false);
+      assert!(failed_report.cookies.is_empty());
+      assert_eq!(failed_report.stats.rows_skipped, 1);
+      assert_eq!(
+        failed_report.issues[0].code,
+        ChromiumRowIssueCode::ProviderUnavailable
+      );
+      assert!(
+        !format!("{:#}", failed_report.legacy_error.as_ref().unwrap())
+          .contains("plaintext-fallback-must-not-escape")
+      );
+
+      let legacy_error = injected_tier_outcome(&connection, CookieProjection::Legacy, tier, false)
+        .into_legacy_result()
+        .expect_err("legacy all-row failure remains an error");
+      assert!(!format!("{legacy_error:#}").contains("plaintext-fallback-must-not-escape"));
+
+      let detailed_error =
+        injected_tier_outcome(&connection, CookieProjection::Detailed, tier, false)
+          .into_detailed_result()
+          .expect_err("detailed all-row failure remains an error");
+      assert!(!format!("{detailed_error:#}").contains("plaintext-fallback-must-not-escape"));
+    }
+  }
+
+  #[test]
+  fn provider_failures_are_counted_once_per_distinct_tier_and_not_as_rejected_rows() {
+    let dir = unique_tmpdir("chr-provider-counter-separation");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "v10-first",
+          "must not leak v10 first",
+          b"v10ciphertext-one",
+          false,
+          0,
+        ),
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "v10-second",
+          "must not leak v10 second",
+          b"v10ciphertext-two",
+          false,
+          0,
+        ),
+        (
+          ".example.com",
+          "/",
+          false,
+          0,
+          "v11",
+          "must not leak v11",
+          b"v11ciphertext",
+          false,
+          0,
+        ),
+      ],
+    );
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::failure(
+        "synthetic v10 provider failure",
+      ),
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::failure(
+        "synthetic v11 provider failure",
+      ),
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+    };
+    let outcome = query_cookies_engine_outcome(&outcomes, db, None, false)
+      .expect("provider failure remains a record-level outcome");
+
+    assert!(outcome.cookies.is_empty());
+    assert_eq!(outcome.stats.rows_seen, 3);
+    assert_eq!(outcome.stats.rows_skipped, 3);
+    assert_eq!(outcome.stats.rows_rejected, 0);
+    assert_eq!(outcome.stats.provider_failures, 2);
+    assert_eq!(
+      outcome.stats.rows_seen - outcome.stats.rows_skipped,
+      outcome.stats.cookies_emitted
+    );
+    assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::ProviderFailed);
+    assert_eq!(outcome.issues[0].occurrences, 3);
+    assert!(outcome.legacy_error.is_some());
+  }
+
+  #[test]
+  fn dual_populated_v20_provider_failure_is_reportable_but_legacy_errors() {
+    let dir = unique_tmpdir("chr-v20-provider-pipeline");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "v20",
+        "plaintext sentinel must not escape",
+        b"v20app-bound-ciphertext",
+        false,
+        0,
+      )],
+    );
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::failure(
+        "synthetic App-Bound provider failure",
+      ),
+    };
+
+    let outcome = query_cookies_engine_outcome(&outcomes, db.clone(), None, false)
+      .expect("provider failure remains reportable after a successful query");
+    assert!(outcome.cookies.is_empty());
+    assert_eq!(outcome.stats.rows_seen, 1);
+    assert_eq!(outcome.stats.rows_skipped, 1);
+    assert_eq!(outcome.stats.rows_rejected, 0);
+    assert_eq!(outcome.stats.provider_failures, 1);
+    assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::ProviderFailed);
+    assert!(outcome.legacy_error.is_some());
+
+    let error = query_cookies_with_key_outcomes(outcomes, db, None, false)
+      .expect_err("legacy projection must fail when every row is unavailable");
+    assert!(!format!("{error:#}").contains("plaintext sentinel must not escape"));
+    assert!(format!("{error:#}").contains("App-Bound provider failure"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn dual_populated_legacy_dpapi_pipeline_never_projects_plaintext() {
+    let dir = unique_tmpdir("chr-legacy-dpapi-pipeline");
+    let db = dir.join("Cookies");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "legacy-dpapi",
+        "plaintext sentinel must not escape",
+        b"raw-dpapi-envelope",
+        false,
+        0,
+      )],
+    );
+
+    let outcome = query_cookies_engine_outcome(&ChromiumKeyOutcomes::default(), db, None, false)
+      .expect("unsupported DPAPI remains a row-level outcome");
+    assert!(outcome.cookies.is_empty());
+    assert_eq!(outcome.stats.rows_skipped, 1);
+    assert_eq!(outcome.stats.rows_rejected, 0);
+    assert_eq!(outcome.stats.provider_failures, 0);
+    assert_eq!(
+      outcome.issues[0].code,
+      ChromiumRowIssueCode::ProviderUnavailable
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn detailed_pipeline_unseals_dual_populated_ciphertext_before_projection() {
+    let dir = unique_tmpdir("chr-detailed-unseal-pipeline");
+    let db = dir.join("Cookies");
+    let key = [0x2a; 16];
+    let encrypted = encrypt_unix_cbc_cookie(b"v10", &key, b"decrypted detail");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/detail",
+        true,
+        0,
+        "detailed",
+        "plaintext sentinel must not escape",
+        &encrypted,
+        true,
+        1,
+      )],
+    );
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![key.to_vec()])
+        .expect("nonempty v10 fixture"),
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+    };
+
+    let outcome = query_cookies_engine_outcome_mode(
+      &outcomes,
+      db,
+      None,
+      false,
+      CookieProjection::Detailed,
+      EncryptedValuePolicy::UseKeyOutcomes,
+    )
+    .expect("detailed extraction");
+    assert!(outcome.cookies.is_empty());
+    assert_eq!(outcome.detailed_cookies.len(), 1);
+    assert_eq!(outcome.detailed_cookies[0].cookie.value, "decrypted detail");
+    assert_ne!(
+      outcome.detailed_cookies[0].cookie.value,
+      "plaintext sentinel must not escape"
+    );
+    assert_eq!(outcome.stats.cookies_emitted, 1);
+    assert_eq!(outcome.stats.rows_skipped, 0);
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn dual_populated_v20_pipeline_decrypts_with_app_bound_tier() {
+    let dir = unique_tmpdir("chr-v20-app-bound-pipeline");
+    let db = dir.join("Cookies");
+    let key = [0x20; 32];
+    let encrypted = encrypt_windows_gcm_cookie(b"v20", &key, b"decrypted v20");
+    seed_chromium_cookies(
+      &db,
+      &[(
+        ".example.com",
+        "/",
+        false,
+        0,
+        "v20",
+        "plaintext sentinel must not escape",
+        &encrypted,
+        false,
+        0,
+      )],
+    );
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![key.to_vec()])
+        .expect("nonempty App-Bound fixture"),
+    };
+
+    let outcome =
+      query_cookies_engine_outcome(&outcomes, db, None, false).expect("v20 pipeline extraction");
+    assert_eq!(outcome.cookies.len(), 1);
+    assert_eq!(outcome.cookies[0].value, "decrypted v20");
+    assert_ne!(
+      outcome.cookies[0].value,
+      "plaintext sentinel must not escape"
     );
   }
 
@@ -1878,6 +2191,8 @@ mod tests {
         rows_seen: 9,
         cookies_emitted: 1,
         rows_skipped: 8,
+        rows_rejected: 8,
+        provider_failures: 0,
       }
     );
     assert_eq!(extraction.cookies[0].name, "good");
@@ -1898,6 +2213,41 @@ mod tests {
         ChromiumRowIssueCode::ColumnRead("is_httponly"),
         ChromiumRowIssueCode::ColumnRead("samesite"),
       ]
+    );
+  }
+
+  #[test]
+  fn plaintext_value_failure_precedes_later_metadata_but_ciphertext_bypasses_value() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    seed_chromium_schema_version(&connection, 23);
+    connection
+      .execute_batch(
+        "CREATE TABLE cookies (
+          host_key, path, is_secure, expires_utc, name, value,
+          encrypted_value, is_httponly, samesite
+        );
+        INSERT INTO cookies VALUES
+          ('.example.com', '/', 0, 0, 'plaintext-compound', X'FF', X'', X'FF', 0),
+          ('.example.com', '/', 0, 0, 'ciphertext-compound', X'FF',
+           X'76313073796E746865746963', X'FF', 0);",
+      )
+      .expect("seed compound column failures");
+
+    let outcome = query_cookies_from_connection(&connection, &ChromiumKeyOutcomes::default(), None)
+      .expect("column failures remain row outcomes");
+    assert_eq!(outcome.stats.rows_seen, 2);
+    assert_eq!(outcome.stats.rows_skipped, 2);
+    assert_eq!(
+      outcome
+        .issues
+        .iter()
+        .map(|issue| issue.code)
+        .collect::<Vec<_>>(),
+      vec![
+        ChromiumRowIssueCode::ColumnRead("value"),
+        ChromiumRowIssueCode::ColumnRead("is_httponly"),
+      ],
+      "plaintext reads value immediately, while authoritative ciphertext never reads it"
     );
   }
 
@@ -1934,9 +2284,9 @@ mod tests {
   }
 
   #[test]
-  fn shared_cipher_loop_preserves_plaintext_detect_route_and_adapter_precedence() {
+  fn shared_cipher_loop_never_prefers_plaintext_over_ciphertext() {
     let unavailable = ChromiumKeyOutcomes::default();
-    let plaintext = decrypt_encrypted_value_with_cipher_adapter(
+    let encrypted_wins = decrypt_encrypted_value_with_cipher_adapter(
       ".example.com",
       "plain".to_string(),
       b"x",
@@ -1945,16 +2295,24 @@ mod tests {
       CipherAdapter {
         candidate_key_length: Some(4),
         validate_keyed_envelope: |_: &[u8]| {
-          panic!("plaintext must short-circuit envelope validation")
+          panic!("malformed ciphertext must fail before envelope validation")
         },
         decrypt_candidate: |_: &[u8], _: &[u8]| {
-          panic!("plaintext must short-circuit candidate decryption")
+          panic!("malformed ciphertext must fail before candidate decryption")
         },
-        decrypt_legacy: |_: &[u8]| panic!("plaintext must short-circuit legacy decryption"),
+        decrypt_legacy: |_: &[u8]| {
+          panic!("malformed ciphertext must fail before legacy decryption")
+        },
       },
     )
-    .expect("plaintext wins before cipher detection");
-    assert_eq!(plaintext, "plain");
+    .expect_err("non-empty ciphertext must be classified before plaintext is considered");
+    assert!(matches!(
+      encrypted_wins,
+      ChromiumCookieValueError::Decrypt(_)
+    ));
+    assert!(encrypted_wins
+      .to_string()
+      .contains("shorter than the 3-byte"));
 
     let malformed = decrypt_encrypted_value_with_cipher_adapter(
       ".example.com",
@@ -2055,6 +2413,71 @@ mod tests {
   }
 
   #[test]
+  fn unavailable_records_preserve_their_existing_reason_taxonomy() {
+    for code in [
+      UnavailableCode::Decrypt,
+      UnavailableCode::Decode,
+      UnavailableCode::ProviderUnavailable,
+      UnavailableCode::ProviderFailed,
+    ] {
+      let reason = super::super::cookie_record::UnavailableReason {
+        code,
+        message: format!("synthetic {code:?} reason"),
+      };
+      let record = CookieRecord {
+        domain: ".example.com".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires: None,
+        name: "classified".to_owned(),
+        value: super::super::cookie_record::CookieValue::Unavailable(reason.clone()),
+        http_only: false,
+        same_site: SAME_SITE_UNSPECIFIED,
+        context: CookieContext::default(),
+      };
+
+      let failure = unseal_chromium_record(record, &ChromiumKeyOutcomes::default(), 23)
+        .expect_err("unavailable input remains unavailable");
+      let (record, error) = *failure;
+      assert_eq!(error.unavailable_code(), code);
+      assert!(matches!(error, ChromiumCookieValueError::Unavailable(_)));
+      let super::super::cookie_record::CookieValue::Unavailable(returned) = record.value else {
+        panic!("unseal must preserve the unavailable record")
+      };
+      assert_eq!(returned.code, code);
+      assert_eq!(returned.message, reason.message);
+    }
+  }
+
+  #[test]
+  fn exhausted_candidate_diagnostic_describes_the_actual_condition() {
+    let outcomes = ChromiumKeyOutcomes {
+      v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![vec![0x10; 4]])
+        .expect("nonempty candidate"),
+      v11: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+      v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
+    };
+    let error = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v10payload",
+      &outcomes,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| Ok(()),
+        decrypt_candidate: |_: &[u8], _: &[u8]| Err(anyhow!("synthetic primitive failure")),
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect_err("every candidate failed");
+    assert_eq!(
+      error.to_string(),
+      "no Chromium key candidate decrypted this cookie value"
+    );
+  }
+
+  #[test]
   fn shared_cipher_loop_tries_candidates_then_decodes_and_keeps_decode_precedence() {
     let outcomes = ChromiumKeyOutcomes {
       v10: crate::browser::chromium_crypto::ChromiumKeyOutcome::success(vec![
@@ -2081,10 +2504,10 @@ mod tests {
         decrypt_candidate: |_: &[u8], key: &[u8]| {
           if key[0] == 0x10 {
             events.borrow_mut().push("candidate-1");
-            Ok(secret_bytes(vec![0xff]))
+            Ok(SecretBytes::new(vec![0xff]))
           } else {
             events.borrow_mut().push("candidate-2");
-            Ok(secret_bytes(b"decoded".to_vec()))
+            Ok(SecretBytes::new(b"decoded".to_vec()))
           }
         },
         decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
@@ -2111,7 +2534,7 @@ mod tests {
           let call = calls.get() + 1;
           calls.set(call);
           if call == 1 {
-            Ok(secret_bytes(vec![0xff]))
+            Ok(SecretBytes::new(vec![0xff]))
           } else {
             Err(anyhow!("later primitive failure"))
           }
@@ -2133,7 +2556,7 @@ mod tests {
     let events = RefCell::new(Vec::new());
     let decoded = decrypt_encrypted_value_with_cipher_adapter(
       host,
-      String::new(),
+      "must not win".to_owned(),
       b"raw-dpapi-envelope",
       &ChromiumKeyOutcomes::default(),
       24,
@@ -2147,7 +2570,7 @@ mod tests {
         },
         decrypt_legacy: |_: &[u8]| {
           events.borrow_mut().push("legacy");
-          Ok(LegacyCipherOutcome::Plaintext(secret_bytes(
+          Ok(LegacyCipherOutcome::Plaintext(SecretBytes::new(
             expected.clone(),
           )))
         },
@@ -2197,11 +2620,12 @@ mod tests {
   #[test]
   fn decode_cookie_value_strips_only_the_exact_stored_host_hash() {
     let plaintext = host_bound_plaintext(".example.com", b"cookie value");
-    let decoded = decode_chromium_cookie_value(".example.com", secret_bytes(plaintext.clone()), 23)
-      .expect("host match");
-    assert_eq!(decoded, "cookie value");
+    let decoded =
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(plaintext.clone()), 23)
+        .expect("host match");
+    assert_eq!(decoded.as_str(), "cookie value");
     assert_eq!(
-      decode_chromium_cookie_value("example.com", secret_bytes(plaintext), 23),
+      decode_chromium_cookie_value("example.com", SecretBytes::new(plaintext), 23),
       Err(ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8),
       "the leading dot in the stored host is part of the exact hash input"
     );
@@ -2210,16 +2634,17 @@ mod tests {
   #[test]
   fn decode_cookie_value_maps_an_exact_hash_only_plaintext_to_empty() {
     let plaintext = host_bound_plaintext(".example.com", b"");
-    let decoded =
-      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 23).expect("hash only");
-    assert_eq!(decoded, "");
+    let decoded = decode_chromium_cookie_value(".example.com", SecretBytes::new(plaintext), 23)
+      .expect("hash only");
+    assert_eq!(decoded.as_str(), "");
   }
 
   #[test]
   fn decode_cookie_value_preserves_valid_utf8_when_a_32_byte_prefix_mismatches() {
     let plaintext = b"this old unprefixed value is longer than thirty-two bytes".to_vec();
-    let decoded = decode_chromium_cookie_value(".example.com", secret_bytes(plaintext.clone()), 23)
-      .expect("old unprefixed value");
+    let decoded =
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(plaintext.clone()), 23)
+        .expect("old unprefixed value");
     assert_eq!(decoded.as_bytes(), plaintext);
   }
 
@@ -2228,7 +2653,7 @@ mod tests {
     let mut plaintext = vec![0xff; CHROMIUM_HOST_HASH_LEN];
     plaintext.extend_from_slice(b"must not be stripped");
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 23),
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(plaintext), 23),
       Err(ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8)
     );
   }
@@ -2236,14 +2661,20 @@ mod tests {
   #[test]
   fn decode_cookie_value_preserves_short_and_old_unprefixed_utf8() {
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", secret_bytes(b"short".to_vec()), 23)
-        .expect("short value"),
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(b"short".to_vec()), 23,)
+        .expect("short value")
+        .as_str(),
       "short"
     );
     let old = "x".repeat(CHROMIUM_HOST_HASH_LEN + 8);
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", secret_bytes(old.as_bytes().to_vec()), 23)
-        .expect("old long value"),
+      decode_chromium_cookie_value(
+        ".example.com",
+        SecretBytes::new(old.as_bytes().to_vec()),
+        23,
+      )
+      .expect("old long value")
+      .as_str(),
       old
     );
   }
@@ -2251,13 +2682,13 @@ mod tests {
   #[test]
   fn decode_cookie_value_requires_an_exact_host_hash_for_v24_and_later() {
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", secret_bytes(b"short".to_vec()), 24),
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(b"short".to_vec()), 24,),
       Err(ChromiumCookieDecodeError::MissingRequiredHostHash)
     );
     assert_eq!(
       decode_chromium_cookie_value(
         ".example.com",
-        secret_bytes(b"this valid UTF-8 value has no matching host hash prefix".to_vec()),
+        SecretBytes::new(b"this valid UTF-8 value has no matching host hash prefix".to_vec()),
         24,
       ),
       Err(ChromiumCookieDecodeError::HostHashMismatch)
@@ -2265,8 +2696,9 @@ mod tests {
 
     let plaintext = host_bound_plaintext(".example.com", b"bound value");
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 24)
-        .expect("verified host hash"),
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(plaintext), 24)
+        .expect("verified host hash")
+        .as_str(),
       "bound value"
     );
   }
@@ -2345,7 +2777,7 @@ mod tests {
   fn decode_cookie_value_rejects_invalid_utf8_after_a_verified_hash() {
     let plaintext = host_bound_plaintext(".example.com", &[0xff]);
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 23),
+      decode_chromium_cookie_value(".example.com", SecretBytes::new(plaintext), 23),
       Err(ChromiumCookieDecodeError::InvalidUtf8AfterVerifiedHostHash)
     );
   }
@@ -2379,8 +2811,8 @@ mod tests {
     seed_chromium_cookies(
       &db,
       &[
-        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
-        ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
+        (".example.com", "/", false, 0, "keep", "yes", b"", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", b"", false, 0),
       ],
     );
     let mut cookies = query_cookies_with_legacy_keys(
@@ -2599,8 +3031,8 @@ mod tests {
     seed_chromium_cookies(
       &db,
       &[
-        (".example.com", "/", false, 0, "keep", "yes", b"x", false, 0),
-        ("other.test", "/", false, 0, "drop", "no", b"x", false, 0),
+        (".example.com", "/", false, 0, "keep", "yes", b"", false, 0),
+        ("other.test", "/", false, 0, "drop", "no", b"", false, 0),
       ],
     );
 
@@ -2659,10 +3091,10 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn decrypt_encrypted_value_short_blob_returns_ok() {
-    let res = decrypt_encrypted_value(".example.com", "orig".to_string(), b"v1", &[], 23)
-      .expect("should not panic");
-    assert_eq!(res, "orig");
+  fn decrypt_encrypted_value_short_blob_rejects_plaintext_fallback() {
+    let error = decrypt_encrypted_value(".example.com", "orig".to_string(), b"v1", &[], 23)
+      .expect_err("malformed ciphertext must not expose the plaintext column");
+    assert!(error.to_string().contains("shorter than the 3-byte"));
   }
 
   #[cfg(unix)]
@@ -2801,7 +3233,7 @@ mod tests {
 
     let decrypted = decrypt_encrypted_value(
       ".example.com",
-      "".to_string(),
+      "must not win".to_string(),
       &encrypted_value,
       &[wrong_key, correct_key.to_vec()],
       23,
@@ -2833,13 +3265,20 @@ mod tests {
 
   #[cfg(windows)]
   #[test]
-  fn decrypt_encrypted_value_windows_truncated_blob_returns_ok() {
+  fn decrypt_encrypted_value_windows_truncated_blob_rejects_plaintext_fallback() {
+    let key = vec![0u8; 32];
     for len in 3..15 {
       let mut blob = b"v10".to_vec();
       blob.resize(len, 0);
-      let res = decrypt_encrypted_value(".example.com", "orig".to_string(), &blob, &[], 23)
-        .expect("should not panic");
-      assert_eq!(res, "orig");
+      let error = decrypt_encrypted_value(
+        ".example.com",
+        "must not escape".to_string(),
+        &blob,
+        std::slice::from_ref(&key),
+        23,
+      )
+      .expect_err("truncated ciphertext must be rejected without exposing plaintext");
+      assert!(!error.to_string().contains("must not escape"));
     }
   }
 
@@ -2897,6 +3336,8 @@ mod tests {
         rows_seen: 3,
         cookies_emitted: 1,
         rows_skipped: 2,
+        rows_rejected: 2,
+        provider_failures: 0,
       }
     );
     assert_eq!(outcome.cookies[0].name, "good");
@@ -2976,6 +3417,8 @@ mod tests {
         rows_seen: 3,
         cookies_emitted: 2,
         rows_skipped: 1,
+        rows_rejected: 1,
+        provider_failures: 0,
       }
     );
     assert_eq!(
@@ -3041,7 +3484,7 @@ mod tests {
     // Row 1: Valid row
     conn
       .execute(
-        "INSERT INTO cookies VALUES ('.example.com', '/', 1, 11644473600000000, 'valid1', 'val1', X'76313064756d6d79', 1, 1)",
+        "INSERT INTO cookies VALUES ('.example.com', '/', 1, 11644473600000000, 'valid1', 'val1', X'', 1, 1)",
         [],
       )
       .expect("insert row 1");
@@ -3065,7 +3508,7 @@ mod tests {
     // Row 4: Valid row 2
     conn
       .execute(
-        "INSERT INTO cookies VALUES ('.test.com', '/', 0, 11644473600000000, 'valid2', 'val2', X'76313064756d6d79', 0, 0)",
+        "INSERT INTO cookies VALUES ('.test.com', '/', 0, 11644473600000000, 'valid2', 'val2', X'', 0, 0)",
         [],
       )
       .expect("insert row 4");

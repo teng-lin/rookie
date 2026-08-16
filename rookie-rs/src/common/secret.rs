@@ -47,7 +47,7 @@ impl SecretBytes {
 
   /// Converts an entire secret frame to a protected string. Invalid UTF-8
   /// keeps ownership in `self`, so the error path wipes the original bytes.
-  #[cfg(any(unix, test))]
+  #[cfg(any(target_os = "linux", target_os = "macos", test))]
   pub(crate) fn into_secret_string(mut self) -> Result<SecretString, SecretUtf8Error> {
     if std::str::from_utf8(self.as_slice()).is_err() {
       return Err(SecretUtf8Error);
@@ -61,7 +61,23 @@ impl SecretBytes {
   /// Converts a suffix to the caller-visible result string without leaving a
   /// second plaintext allocation behind. Bytes outside the suffix are wiped
   /// before the allocation is transferred.
-  pub(crate) fn into_output_string_from(mut self, start: usize) -> Result<String, SecretUtf8Error> {
+  #[cfg(test)]
+  pub(crate) fn into_output_string_from(self, start: usize) -> Result<String, SecretUtf8Error> {
+    self
+      .prepare_utf8_suffix(start)
+      .map(SecretString::into_output_string)
+  }
+
+  /// Converts a suffix to protected text while retaining wipe-on-discard
+  /// ownership until public cookie projection succeeds.
+  pub(crate) fn into_secret_string_from(
+    self,
+    start: usize,
+  ) -> Result<SecretString, SecretUtf8Error> {
+    self.prepare_utf8_suffix(start)
+  }
+
+  fn prepare_utf8_suffix(mut self, start: usize) -> Result<SecretString, SecretUtf8Error> {
     let bytes = self.as_slice();
     let suffix = bytes.get(start..).ok_or(SecretUtf8Error)?;
     if std::str::from_utf8(suffix).is_err() {
@@ -76,7 +92,9 @@ impl SecretBytes {
       bytes.truncate(suffix_len);
     }
     // Safety: the retained suffix was validated before the in-place move.
-    Ok(unsafe { String::from_utf8_unchecked(bytes) })
+    Ok(SecretString::new(unsafe {
+      String::from_utf8_unchecked(bytes)
+    }))
   }
 
   #[cfg(windows)]
@@ -117,28 +135,32 @@ impl Drop for SecretBytes {
 
 /// Request-scoped plaintext text returned by a credential provider.
 #[derive(Clone, PartialEq, Eq)]
-#[cfg(any(unix, test))]
 pub(crate) struct SecretString {
-  value: String,
+  value: Option<String>,
 }
 
-#[cfg(any(unix, test))]
 impl SecretString {
   pub(crate) fn new(value: String) -> Self {
-    Self { value }
+    Self { value: Some(value) }
   }
 
   pub(crate) fn as_str(&self) -> &str {
-    &self.value
+    self.value.as_deref().unwrap_or_default()
   }
 
   #[cfg(target_os = "macos")]
   pub(crate) fn trimmed(&self) -> Self {
-    Self::new(self.value.trim().to_owned())
+    Self::new(self.as_str().trim().to_owned())
+  }
+
+  /// Transfers the protected allocation into an explicitly requested public
+  /// cookie result. Discarded records keep ownership here and are wiped by
+  /// `Drop` instead.
+  pub(crate) fn into_output_string(mut self) -> String {
+    self.value.take().expect("secret string is present")
   }
 }
 
-#[cfg(any(unix, test))]
 impl Deref for SecretString {
   type Target = str;
 
@@ -147,28 +169,28 @@ impl Deref for SecretString {
   }
 }
 
-#[cfg(any(unix, test))]
 impl fmt::Debug for SecretString {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter
       .debug_struct("SecretString")
-      .field("length", &self.value.len())
+      .field("length", &self.as_str().len())
       .finish()
   }
 }
 
-#[cfg(any(unix, test))]
 impl Drop for SecretString {
   fn drop(&mut self) {
-    #[cfg(test)]
-    let original_len = self.value.len();
-    // Safety: replacing every byte with zero preserves UTF-8 validity, and the
-    // vector is cleared before this method returns.
-    let bytes = unsafe { self.value.as_mut_vec() };
-    bytes.as_mut_slice().zeroize();
-    #[cfg(test)]
-    record_drop(SecretKind::String, original_len, bytes.as_slice());
-    bytes.clear();
+    if let Some(value) = self.value.as_mut() {
+      #[cfg(test)]
+      let original_len = value.len();
+      // Safety: replacing every byte with zero preserves UTF-8 validity, and
+      // the vector is cleared before this method returns.
+      let bytes = unsafe { value.as_mut_vec() };
+      bytes.as_mut_slice().zeroize();
+      #[cfg(test)]
+      record_drop(SecretKind::String, original_len, bytes.as_slice());
+      bytes.clear();
+    }
   }
 }
 
@@ -207,6 +229,30 @@ fn record_drop(kind: SecretKind, original_len: usize, wiped: &[u8]) {
       observations.push((kind, original_len, wiped.to_vec()));
     }
   });
+}
+
+#[cfg(test)]
+pub(crate) fn observe_secret_string_drops(
+  test: impl FnOnce(),
+) -> (Vec<(usize, Vec<u8>)>, std::thread::Result<()>) {
+  DROP_OBSERVATIONS.with(|observations| {
+    assert!(observations.borrow().is_none());
+    *observations.borrow_mut() = Some(Vec::new());
+  });
+  let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+  let observed = DROP_OBSERVATIONS.with(|observations| {
+    observations
+      .borrow_mut()
+      .take()
+      .expect("drop observations enabled")
+  });
+  (
+    observed
+      .into_iter()
+      .filter_map(|(kind, len, wiped)| (kind == SecretKind::String).then_some((len, wiped)))
+      .collect(),
+    outcome,
+  )
 }
 
 #[cfg(test)]

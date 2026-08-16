@@ -330,6 +330,14 @@ pub struct ExtractionStats {
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,
+  /// Rows rejected because stored fields were malformed or a value could not
+  /// be authenticated or decoded. This is a subset of `rows_skipped`.
+  #[serde(default)]
+  pub rows_rejected: u32,
+  /// Distinct Chromium cipher tiers whose applicable credential provider
+  /// failed. Aggregates sum the per-source distinct-tier counts.
+  #[serde(default)]
+  pub provider_failures: u32,
   pub acquisition_attempts: u32,
   pub counters_saturated: bool,
 }
@@ -348,6 +356,12 @@ pub struct ReportStats {
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,
+  /// Sum of rejected rows across attempted sources.
+  #[serde(default)]
+  pub rows_rejected: u32,
+  /// Sum of per-source distinct Chromium provider-tier failures.
+  #[serde(default)]
+  pub provider_failures: u32,
   pub counters_saturated: bool,
 }
 
@@ -471,6 +485,8 @@ pub(crate) struct CounterSet {
   pub(crate) rows_seen: u64,
   pub(crate) cookies_emitted: u64,
   pub(crate) rows_skipped: u64,
+  pub(crate) rows_rejected: u64,
+  pub(crate) provider_failures: u64,
   pub(crate) acquisition_attempts: u64,
 }
 
@@ -488,6 +504,8 @@ impl CounterSet {
       rows_seen: saturate(self.rows_seen, &mut counters_saturated),
       cookies_emitted: saturate(self.cookies_emitted, &mut counters_saturated),
       rows_skipped: saturate(self.rows_skipped, &mut counters_saturated),
+      rows_rejected: saturate(self.rows_rejected, &mut counters_saturated),
+      provider_failures: saturate(self.provider_failures, &mut counters_saturated),
       acquisition_attempts: saturate(self.acquisition_attempts, &mut counters_saturated),
       counters_saturated,
     }
@@ -514,6 +532,11 @@ impl StatsAccumulator {
     add(&mut self.counters.rows_seen, stats.rows_seen);
     add(&mut self.counters.cookies_emitted, stats.cookies_emitted);
     add(&mut self.counters.rows_skipped, stats.rows_skipped);
+    add(&mut self.counters.rows_rejected, stats.rows_rejected);
+    add(
+      &mut self.counters.provider_failures,
+      stats.provider_failures,
+    );
     add(
       &mut self.counters.acquisition_attempts,
       stats.acquisition_attempts,
@@ -757,11 +780,15 @@ mod tests {
       rows_seen: u64::from(u32::MAX) + 1,
       cookies_emitted: 3,
       rows_skipped: 0,
+      rows_rejected: u64::from(u32::MAX) + 2,
+      provider_failures: 4,
       acquisition_attempts: 1,
     }
     .into_stats();
     assert_eq!(stats.rows_seen, u32::MAX);
     assert_eq!(stats.cookies_emitted, 3);
+    assert_eq!(stats.rows_rejected, u32::MAX);
+    assert_eq!(stats.provider_failures, 4);
     assert!(stats.counters_saturated);
 
     let mut accumulator = StatsAccumulator::default();
@@ -774,6 +801,46 @@ mod tests {
     assert_eq!(aggregate.rows_seen, u32::MAX);
     assert_eq!(aggregate.cookies_emitted, 3);
     assert!(aggregate.counters_saturated);
+  }
+
+  #[test]
+  fn new_chromium_counters_default_when_reading_older_report_json() {
+    let extraction: ExtractionStats = serde_json::from_value(serde_json::json!({
+      "rows_seen": 3,
+      "cookies_emitted": 2,
+      "rows_skipped": 1,
+      "acquisition_attempts": 1,
+      "counters_saturated": false
+    }))
+    .expect("older extraction stats remain readable");
+    assert_eq!(extraction.rows_rejected, 0);
+    assert_eq!(extraction.provider_failures, 0);
+
+    let summary: ReportStats = serde_json::from_value(serde_json::json!({
+      "registered_browsers": 1,
+      "browsers_detected": 1,
+      "browsers_not_detected": 0,
+      "installations_discovered": 1,
+      "profiles_discovered": 1,
+      "sources_succeeded": 1,
+      "sources_failed": 0,
+      "rows_seen": 3,
+      "cookies_emitted": 2,
+      "rows_skipped": 1,
+      "counters_saturated": false
+    }))
+    .expect("older report summary remains readable");
+    assert_eq!(summary.rows_rejected, 0);
+    assert_eq!(summary.provider_failures, 0);
+
+    let wire = serde_json::to_value(ExtractionStats {
+      rows_rejected: 2,
+      provider_failures: 1,
+      ..ExtractionStats::default()
+    })
+    .expect("serialize extraction stats");
+    assert_eq!(wire["rows_rejected"], 2);
+    assert_eq!(wire["provider_failures"], 1);
   }
 
   #[test]
@@ -860,6 +927,32 @@ mod tests {
       http_only: false,
       same_site: 0,
     }
+  }
+
+  #[test]
+  fn public_report_debug_redacts_nested_cookie_values_without_changing_wire_output() {
+    const SENTINEL: &str = "nested-report-cookie-value-sentinel";
+    let source = SourceExtraction {
+      source: source(CookieSourceRoleId::persistent(), 10).source,
+      status: SourceStatusCode::succeeded(),
+      selected: true,
+      acquisition_strategy: AcquisitionStrategyCode::live_read_only(),
+      cookies: vec![cookie(".example.com", "/", "session", SENTINEL)],
+      stats: ExtractionStats {
+        rows_seen: 1,
+        cookies_emitted: 1,
+        ..ExtractionStats::default()
+      },
+      issues: Vec::new(),
+    };
+
+    let debug = format!("{source:?}");
+    assert!(!debug.contains(SENTINEL));
+    assert!(debug.contains("value: <redacted>"));
+    assert!(debug.contains("session"));
+
+    let wire = serde_json::to_value(&source).expect("serialize source extraction");
+    assert_eq!(wire["cookies"][0]["value"], SENTINEL);
   }
 
   /// Report ordering must be stable across runs, so the cookie sort is total

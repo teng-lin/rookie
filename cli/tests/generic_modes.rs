@@ -365,6 +365,14 @@ fn report_with_browser_covers_every_profile() {
   assert_eq!(report["status"], "complete", "{report}");
   assert_eq!(report["summary"]["profiles_discovered"], 2, "{report}");
   assert_eq!(report["summary"]["cookies_emitted"], 2, "{report}");
+  assert_eq!(report["summary"]["rows_rejected"], 0, "{report}");
+  assert_eq!(report["summary"]["provider_failures"], 0, "{report}");
+  for profile in report["profiles"].as_array().expect("profiles") {
+    for source in profile["sources"].as_array().expect("sources") {
+      assert!(source["stats"]["rows_rejected"].is_u64(), "{source}");
+      assert!(source["stats"]["provider_failures"].is_u64(), "{source}");
+    }
+  }
 
   let mut cookie_names: Vec<&str> = report["profiles"]
     .as_array()

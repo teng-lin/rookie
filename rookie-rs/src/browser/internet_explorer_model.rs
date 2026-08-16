@@ -1,6 +1,11 @@
-use crate::common::enums::{Cookie, SAME_SITE_UNSPECIFIED};
+#[cfg(test)]
+use crate::common::enums::Cookie;
+use crate::common::enums::{CookieContext, SAME_SITE_UNSPECIFIED};
 use crate::common::{date, utils};
 use anyhow::{bail, Result};
+use std::fmt;
+
+use super::cookie_record::{CookieRecord, CookieValue};
 
 // WinInet cookie flag bits (`wininet.h`) as stored in the ESE `Flags` column.
 const INTERNET_COOKIE_IS_SECURE: u32 = 0x0000_0001;
@@ -69,7 +74,7 @@ impl CookieColumnLayout {
 /// Keeping decoding independent from libesedb makes the failure semantics
 /// testable on every host: malformed record data is rejected as a unit and the
 /// Windows integration can skip only that record.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub(crate) struct RawCookieRecord {
   pub(crate) domain: String,
   pub(crate) path: String,
@@ -79,8 +84,23 @@ pub(crate) struct RawCookieRecord {
   pub(crate) flags: i64,
 }
 
+impl fmt::Debug for RawCookieRecord {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("RawCookieRecord")
+      .field("domain", &self.domain)
+      .field("path", &self.path)
+      .field("name", &self.name)
+      .field("value", &"<redacted>")
+      .field("value_len", &self.value.len())
+      .field("expires", &self.expires)
+      .field("flags", &self.flags)
+      .finish()
+  }
+}
+
 impl RawCookieRecord {
-  pub(crate) fn into_cookie(self, domains: Option<&[String]>) -> Result<Option<Cookie>> {
+  pub(crate) fn into_record(self, domains: Option<&[String]>) -> Result<Option<CookieRecord>> {
     let domain = self.domain.trim_matches('\0').to_string();
     if !utils::some_domain_in_host(domains, &domain) {
       return Ok(None);
@@ -93,16 +113,25 @@ impl RawCookieRecord {
     let value = decode_cookie_text("Value", self.value)?;
     let flags = self.flags as u32;
 
-    Ok(Some(Cookie {
+    Ok(Some(CookieRecord {
       domain,
       path: self.path.trim_matches('\0').to_string(),
       secure: flags & INTERNET_COOKIE_IS_SECURE != 0,
       expires: date::internet_explorer_timestamp(self.expires),
       name,
-      value,
+      value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
       http_only: flags & INTERNET_COOKIE_HTTPONLY != 0,
       same_site: SAME_SITE_UNSPECIFIED,
+      context: CookieContext::default(),
     }))
+  }
+
+  #[cfg(test)]
+  pub(crate) fn into_cookie(self, domains: Option<&[String]>) -> Result<Option<Cookie>> {
+    self
+      .into_record(domains)?
+      .map(|record| record.into_cookie().map_err(anyhow::Error::from))
+      .transpose()
   }
 }
 
@@ -129,6 +158,16 @@ mod tests {
       expires: 116_444_736_010_000_000,
       flags: i64::from(INTERNET_COOKIE_IS_SECURE | INTERNET_COOKIE_HTTPONLY),
     }
+  }
+
+  #[test]
+  fn raw_record_debug_redacts_value_bytes_before_decoding() {
+    let record = record();
+    let debug = format!("{record:?}");
+    assert!(!debug.contains("secret"));
+    assert!(!debug.contains("115, 101, 99, 114, 101, 116"));
+    assert!(debug.contains("value: \"<redacted>\""));
+    assert!(debug.contains("value_len: 7"));
   }
 
   #[test]

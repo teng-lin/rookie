@@ -221,6 +221,8 @@ fn extraction_stats_dict(py: Python<'_>, stats: ExtractionStats) -> PyResult<Py<
   dict.set_item("rows_seen", stats.rows_seen)?;
   dict.set_item("cookies_emitted", stats.cookies_emitted)?;
   dict.set_item("rows_skipped", stats.rows_skipped)?;
+  dict.set_item("rows_rejected", stats.rows_rejected)?;
+  dict.set_item("provider_failures", stats.provider_failures)?;
   dict.set_item("acquisition_attempts", stats.acquisition_attempts)?;
   dict.set_item("counters_saturated", stats.counters_saturated)?;
   Ok(dict.into())
@@ -238,6 +240,8 @@ fn report_stats_dict(py: Python<'_>, stats: ReportStats) -> PyResult<Py<PyAny>> 
   dict.set_item("rows_seen", stats.rows_seen)?;
   dict.set_item("cookies_emitted", stats.cookies_emitted)?;
   dict.set_item("rows_skipped", stats.rows_skipped)?;
+  dict.set_item("rows_rejected", stats.rows_rejected)?;
+  dict.set_item("provider_failures", stats.provider_failures)?;
   dict.set_item("counters_saturated", stats.counters_saturated)?;
   Ok(dict.into())
 }

@@ -6548,17 +6548,19 @@ mod tests {
           rows_seen: 1,
           cookies_emitted: 0,
           rows_skipped: 1,
+          rows_rejected: 0,
+          provider_failures: 1,
         },
-        "{browser_id} must count the row rejected by the missing provider"
+        "{browser_id} must count the row unavailable through the failed provider"
       );
       assert_eq!(
         extraction.failure, None,
-        "a rejected row does not make the successfully queried source fail"
+        "an unavailable row does not make the successfully queried source fail"
       );
       assert_eq!(
         extraction.row_issues.len(),
         1,
-        "{browser_id} must surface the rejected row instead of silently returning empty output"
+        "{browser_id} must surface the unavailable row instead of silently returning empty output"
       );
       let issue = &extraction.row_issues[0];
       assert_eq!(
