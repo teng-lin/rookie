@@ -5,6 +5,8 @@
 //! [`crate::supported_browsers`], [`crate::browser_profiles`],
 //! [`crate::browser_report`], and [`crate::load_report`].
 
+mod dispatch;
+
 use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
 use super::cookie_record::{CookieRecord, FinalizationError, LegacyProjectionSemantics};
 use super::outcome::{
@@ -587,41 +589,15 @@ fn collect_report(
       };
       engine_browser_outcome(&browser_id, engine)
     }
-    #[cfg(target_os = "macos")]
-    "safari" => {
-      let engine = if extract {
-        registry::safari_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?
-      } else {
-        registry::safari_profiles_with_runtime(&browser.canonical_id, runtime)?
-      };
-      engine_browser_outcome(&browser_id, engine)
-    }
-    #[cfg(target_os = "windows")]
-    "internet_explorer" => {
-      let engine = if extract {
-        registry::internet_explorer_report_with_runtime(
-          &browser.canonical_id,
-          profile_id,
-          domains,
-          runtime,
-        )?
-      } else {
-        registry::internet_explorer_profiles_with_runtime(&browser.canonical_id, runtime)?
-      };
-      engine_browser_outcome(&browser_id, engine)
-    }
-    // A registered browser whose engine has no adapter compiled into this
-    // build is reported as undetected rather than silently skipped.
-    _ => Ok(BrowserDraft {
-      browser_id: browser_id.clone(),
-      compatibility_family: engine_compatibility_family(&browser_id),
-      detected: false,
-      installations_discovered: 0,
-      discovery_failed: false,
-      profiles: Vec::new(),
-      issues: Vec::new(),
-      termination: Termination::Completed,
-    }),
+    engine => dispatch::remaining_engine_report(
+      &browser_id,
+      &browser.canonical_id,
+      engine,
+      profile_id,
+      extract,
+      domains,
+      runtime,
+    ),
   }
 }
 
