@@ -2,18 +2,18 @@ use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, Chr
 use super::create_pbkdf2_key;
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
+use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
-use zeroize::Zeroizing;
 
 trait LinuxKeyringBackend {
-  fn passwords(&self, crypt_name: &str) -> Result<Vec<Zeroizing<String>>>;
+  fn passwords(&self, crypt_name: &str) -> Result<Vec<SecretString>>;
 }
 
 struct SystemLinuxKeyringBackend;
 
 impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
-  fn passwords(&self, crypt_name: &str) -> Result<Vec<Zeroizing<String>>> {
+  fn passwords(&self, crypt_name: &str) -> Result<Vec<SecretString>> {
     crate::linux::get_passwords(crypt_name)
   }
 }
@@ -166,11 +166,11 @@ mod tests {
 
   struct FakeLinuxBackend {
     calls: Cell<usize>,
-    result: Result<Vec<Zeroizing<String>>>,
+    result: Result<Vec<SecretString>>,
   }
 
   impl LinuxKeyringBackend for FakeLinuxBackend {
-    fn passwords(&self, _crypt_name: &str) -> Result<Vec<Zeroizing<String>>> {
+    fn passwords(&self, _crypt_name: &str) -> Result<Vec<SecretString>> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -203,8 +203,8 @@ mod tests {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
       result: Ok(vec![
-        Zeroizing::new("first".to_string()),
-        Zeroizing::new("second".to_string()),
+        SecretString::new("first".to_string()),
+        SecretString::new("second".to_string()),
       ]),
     };
     let outcomes = outcomes_with_backend(&linux_credentials(Some("chrome")), &backend);
@@ -282,7 +282,7 @@ mod tests {
   fn linux_without_keyring_configuration_does_not_call_backend() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
-      result: Ok(vec![Zeroizing::new("unused".to_string())]),
+      result: Ok(vec![SecretString::new("unused".to_string())]),
     };
     let outcomes = outcomes_with_backend(&linux_credentials(None), &backend);
 
@@ -303,7 +303,7 @@ mod tests {
   fn linux_any_browser_cache_reuses_success_per_crypt_name() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
-      result: Ok(vec![Zeroizing::new("shared secret".to_string())]),
+      result: Ok(vec![SecretString::new("shared secret".to_string())]),
     };
     let mut cache = LinuxKeyOutcomeCache::new();
 
@@ -349,7 +349,7 @@ mod tests {
   fn linux_host_session_cache_is_shared_within_a_session_but_not_between_sessions() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
-      result: Ok(vec![Zeroizing::new("session secret".to_string())]),
+      result: Ok(vec![SecretString::new("session secret".to_string())]),
     };
     let credentials = linux_credentials(Some("chrome"));
     let request = ChromiumKeyRequest::direct(&credentials);

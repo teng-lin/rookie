@@ -496,11 +496,13 @@ fn c_str(bs: &[u8]) -> Result<String> {
   bs.split_last()
     .ok_or_else(|| anyhow!("null c string"))
     .and_then(|(&last, elements)| {
-      if last == 0x00 {
-        Ok(elements)
-      } else {
+      if last != 0x00 {
         bail!("c string non null terminator")
       }
+      if elements.contains(&0x00) {
+        bail!("c string contains embedded NUL")
+      }
+      Ok(elements)
     })
     .and_then(|elements| {
       String::from_utf8(elements.to_vec()).map_err(|err| anyhow!(err.to_string()))
@@ -735,6 +737,11 @@ pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<
 }
 
 #[cfg(test)]
+pub(crate) fn embedded_nul_test_fixture(field: &str, include_valid: bool) -> Vec<u8> {
+  tests::embedded_nul_fixture(field, include_valid)
+}
+
+#[cfg(test)]
 mod tests {
   use super::*;
   use std::{
@@ -856,6 +863,37 @@ mod tests {
     build_file(&[build_page(&[cookie])])
   }
 
+  pub(super) fn embedded_nul_fixture(field: &str, include_valid: bool) -> Vec<u8> {
+    let (domain, name, path, value) = match field {
+      "domain" => (".example\0.test", "session", "/account", "secret-value"),
+      "name" => (".example.test", "ses\0sion", "/account", "secret-value"),
+      "path" => (".example.test", "session", "/acc\0ount", "secret-value"),
+      "value" => (".example.test", "session", "/account", "secret\0-value"),
+      _ => panic!("unsupported fixture field {field}"),
+    };
+    let cookie = build_cookie_record(&FixtureCookie {
+      domain,
+      name,
+      path,
+      value,
+      flags: 0,
+      expires: 0.0,
+    });
+    let bad_page = build_page(&[cookie]);
+    if !include_valid {
+      return build_file(&[bad_page]);
+    }
+    let good = build_cookie_record(&FixtureCookie {
+      domain: ".good.test",
+      name: "good",
+      path: "/",
+      value: "kept",
+      flags: 0,
+      expires: 0.0,
+    });
+    build_file(&[bad_page, build_page(&[good])])
+  }
+
   fn assert_error_without_panic<T, F>(case: &str, parse: F)
   where
     F: FnOnce() -> Result<T> + UnwindSafe,
@@ -951,6 +989,47 @@ mod tests {
     assert_eq!(stats.records_seen, 2);
     assert_eq!(stats.records_skipped, 1);
     assert!(row_error.is_some());
+  }
+
+  #[test]
+  fn embedded_nul_fields_are_rejected_as_malformed_records() {
+    for field in ["domain", "name", "path", "value"] {
+      let error = parse_content(&embedded_nul_fixture(field, false))
+        .expect_err("an all-malformed Safari file follows the existing failure rule");
+      let rendered = format!("{error:#}");
+      assert!(
+        rendered.contains("c string contains embedded NUL"),
+        "unexpected {field} error: {rendered}"
+      );
+      let failure = error
+        .downcast_ref::<SafariParseFailure>()
+        .expect("malformed record retains row accounting");
+      assert_eq!(failure.stats.records_seen, 1, "{field}");
+      assert_eq!(failure.stats.records_skipped, 1, "{field}");
+    }
+  }
+
+  #[test]
+  fn embedded_nul_record_does_not_discard_a_valid_cookie() {
+    for field in ["domain", "name", "path", "value"] {
+      let fixture = embedded_nul_fixture(field, true);
+      let (cookies, stats, row_error) =
+        parse_content(&fixture).expect("retain the valid Safari record");
+      assert_eq!(cookies.len(), 1, "{field}");
+      assert_eq!(cookies[0].domain, ".good.test", "{field}");
+      assert_eq!(cookies[0].name, "good", "{field}");
+      assert_eq!(cookies[0].path, "/", "{field}");
+      assert_eq!(cookies[0].value, "kept", "{field}");
+      assert_eq!(stats.records_seen, 2, "{field}");
+      assert_eq!(stats.records_skipped, 1, "{field}");
+      assert!(
+        row_error
+          .expect("malformed record is reported")
+          .to_string()
+          .contains("Failed to parse Safari cookie record"),
+        "{field}"
+      );
+    }
   }
 
   #[test]

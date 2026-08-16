@@ -1806,6 +1806,76 @@ mod engine_chain_tests {
     assert_eq!(report.profiles[0].profile.browser_id.as_str(), "safari");
   }
 
+  fn safari_report_from_embedded_nul_fixture(
+    tag: &str,
+    field: &str,
+    include_valid: bool,
+  ) -> ExtractionReport {
+    use crate::browser::registry::PlatformId;
+
+    let temp = TempDir::new(tag);
+    let context = test_seams::context(PlatformId::Macos, temp.path().to_path_buf());
+    let library = test_seams::primary_root_path(&context, "safari");
+    let cookies = library.join("Containers/com.apple.Safari/Data/Library/Cookies");
+    std::fs::create_dir_all(&cookies).expect("create Safari cookie directory");
+    std::fs::write(
+      cookies.join("Cookies.binarycookies"),
+      crate::browser::safari::embedded_nul_test_fixture(field, include_valid),
+    )
+    .expect("seed Safari embedded-NUL fixture");
+
+    let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+    let outcome =
+      engine_browser_outcome(&BrowserId::known("safari"), engine).expect("adapt the Safari report");
+    assemble(1, vec![outcome])
+  }
+
+  #[test]
+  fn mixed_safari_embedded_nul_fixture_is_partial_with_exact_row_accounting() {
+    let report = safari_report_from_embedded_nul_fixture("safari-nul-mixed", "domain", true);
+    let source = &report.profiles[0].sources[0];
+
+    assert_eq!(report.status, ReportStatusCode::partial());
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+    assert_eq!(source.stats.rows_seen, 2);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.cookies_emitted, 1);
+    assert_eq!(source.cookies.len(), 1);
+    assert_eq!(source.cookies[0].domain, ".good.test");
+    assert_eq!(source.cookies[0].name, "good");
+    assert_eq!(source.cookies[0].path, "/");
+    assert_eq!(source.cookies[0].value, "kept");
+    let issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code.as_str() == "row_read_failed")
+      .expect("malformed row issue");
+    assert_eq!(issue.stage.as_str(), "parse");
+    assert_eq!(issue.occurrences, 1);
+  }
+
+  #[test]
+  fn all_malformed_safari_embedded_nul_fixture_fails_with_counted_row() {
+    let report =
+      safari_report_from_embedded_nul_fixture("safari-nul-all-malformed", "value", false);
+    let source = &report.profiles[0].sources[0];
+
+    assert_eq!(report.status, ReportStatusCode::failed());
+    assert_eq!(source.status, SourceStatusCode::failed());
+    assert_eq!(source.stats.rows_seen, 1);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.cookies_emitted, 0);
+    assert!(source.cookies.is_empty());
+    assert!(source.issues.iter().any(|issue| {
+      issue.code.as_str() == "row_read_failed"
+        && issue.stage.as_str() == "parse"
+        && issue.occurrences == 1
+    }));
+    assert!(source.issues.iter().any(|issue| {
+      issue.code.as_str() == "source_extraction_failed" && issue.stage.as_str() == "parse"
+    }));
+  }
+
   /// `~/Library` belongs to macOS, not to Safari. Another browser's data under
   /// it must not make Safari report itself detected and then degraded.
   #[test]
@@ -2257,5 +2327,50 @@ mod engine_chain_tests {
     assert_eq!(report.status, ReportStatusCode::partial());
     assert_eq!(report.summary.sources_succeeded, 1);
     assert_eq!(report.summary.sources_failed, 0);
+  }
+
+  /// A confidential-session provider failure is a typed row rejection. It
+  /// must neither degrade to provider absence nor get relabeled as a generic
+  /// decrypt failure while travelling through the registry/report adapters.
+  #[test]
+  fn a_confidential_provider_failure_keeps_its_exact_report_code() {
+    let temp = TempDir::new("chromium-confidential-provider-failure");
+    let context = test_seams::current_context(temp.path().to_path_buf());
+    let root = test_seams::primary_root_path(&context, "chrome");
+    test_seams::seed_chromium_profile(&root, "Default", "Person 1");
+
+    let database = root.join("Default/Cookies");
+    let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+    connection
+      .execute("DELETE FROM cookies", [])
+      .expect("clear seeded cookie");
+    connection
+      .execute(
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'locked', '', ?1, 0, 0)",
+        [b"v11undecryptable".to_vec()],
+      )
+      .expect("insert encrypted cookie");
+    drop(connection);
+
+    let keys = ChromiumKeyOutcomes {
+      v10: ChromiumKeyOutcome::NotApplicable,
+      v11: ChromiumKeyOutcome::failure("Secret Service confidential-session negotiation failed"),
+      v20: ChromiumKeyOutcome::NotApplicable,
+    };
+    let registry_report =
+      test_seams::chromium_report(&context, "chrome", None, None, keys).expect("chromium report");
+    let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)
+      .expect("adapt the chromium report");
+    let report = assemble(1, vec![outcome]);
+
+    let source = &report.profiles[0].sources[0];
+    assert_eq!(source.status, SourceStatusCode::succeeded());
+    assert_eq!(source.stats.rows_seen, 1);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert!(source.cookies.is_empty());
+    assert_eq!(source.issues.len(), 1);
+    assert_eq!(source.issues[0].code.as_str(), "provider_failed");
+    assert_eq!(source.issues[0].stage.as_str(), "decrypt");
+    assert_eq!(report.status, ReportStatusCode::partial());
   }
 }

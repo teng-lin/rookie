@@ -12,7 +12,7 @@ rookie-cookies.workspace = true
 serde_json = "1.0.107"
 
 [dev-dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "fallible_uint"] }
 
 [features]
 default = ["appbound"]

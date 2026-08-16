@@ -12,6 +12,8 @@ use aes_gcm::{
 use chacha20poly1305::ChaCha20Poly1305;
 use zeroize::Zeroizing;
 
+use crate::common::secret::SecretBytes;
+
 mod impersonate;
 
 // Keys extracted from Chrome's elevation_service.exe, used to unwrap the
@@ -24,17 +26,17 @@ const FLAG3_XOR_KEY: &[u8; 32] =
   b"\xCC\xF8\xA1\xCE\xC5\x66\x05\xB8\x51\x75\x52\xBA\x1A\x2D\x06\x1C\x03\xA2\x9E\x90\x27\x4F\xB2\xFC\xF5\x9B\xA4\xB7\x5C\x39\x23\x90";
 
 // These unwrap layers of DPAPI/CNG encryption around the app-bound master
-// key. The results are wrapped in `Zeroizing` because they hold decrypted
+// key. The results are wrapped in `SecretBytes` because they hold decrypted
 // key material that should be wiped from memory as soon as it is consumed,
 // rather than left in freed heap memory.
-fn decrypt_dpapi(key: &[u8], as_system: bool) -> Result<Zeroizing<Vec<u8>>> {
+fn decrypt_dpapi(key: &[u8], as_system: bool) -> Result<SecretBytes> {
   let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
-  crate::windows::dpapi::decrypt(key).map(Zeroizing::new)
+  crate::windows::dpapi::decrypt(key)
 }
 
-fn decrypt_ncrypt(key: &[u8], as_system: bool) -> Result<Zeroizing<Vec<u8>>> {
+fn decrypt_ncrypt(key: &[u8], as_system: bool) -> Result<SecretBytes> {
   let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
-  crate::windows::ncrypt::decrypt(key).map(Zeroizing::new)
+  crate::windows::ncrypt::decrypt(key)
 }
 
 /// AEAD-decrypt `[iv(12) | ciphertext | tag(16)]` with `key`.

@@ -1,11 +1,18 @@
-use anyhow::{anyhow, bail, Context, Result};
+#[cfg(test)]
+use anyhow::anyhow;
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use zbus::{
   blocking::Connection,
-  zvariant::{DynamicType, ObjectPath, Value},
+  zvariant::{DynamicType, ObjectPath, OwnedObjectPath, OwnedValue, Value},
   Message,
 };
-use zeroize::Zeroizing;
+
+use crate::common::secret::SecretString;
+
+mod confidential;
+mod zeroizing_dh;
+mod zeroizing_hkdf;
 
 // Keep the legacy KWallet caller ID so existing access grants continue to work.
 pub const APP_ID: &str = "rookie";
@@ -21,30 +28,30 @@ const LIBSECRET_SCHEMAS: [&str; 2] = [
 /// backend fails the individual diagnostics are preserved in the returned
 /// error. Secret values are never included in those diagnostics.
 ///
-/// Each returned password is wrapped in `Zeroizing` so it is wiped from
+/// Each returned password is wrapped in `SecretString` so it is wiped from
 /// memory when the caller drops it rather than left in freed heap memory.
-pub fn get_passwords(unix_crypt_name: &str) -> Result<Vec<Zeroizing<String>>> {
+pub(crate) fn get_passwords(unix_crypt_name: &str) -> Result<Vec<SecretString>> {
   get_passwords_with_source(&SystemLinuxKeyringSource, unix_crypt_name)
 }
 
 trait LinuxKeyringSource {
-  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<String>;
-  fn kwallet_password(&self, crypt_name: &str) -> Result<String>;
+  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<SecretString>;
+  fn kwallet_password(&self, crypt_name: &str) -> Result<SecretString>;
 }
 
 struct SystemLinuxKeyringSource;
 
 impl LinuxKeyringSource for SystemLinuxKeyringSource {
-  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<String> {
+  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<SecretString> {
     get_password_libsecret(schema, crypt_name)
   }
 
-  fn kwallet_password(&self, crypt_name: &str) -> Result<String> {
+  fn kwallet_password(&self, crypt_name: &str) -> Result<SecretString> {
     get_password_kdewallet(crypt_name)
   }
 }
 
-fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<Zeroizing<String>>>
+fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<SecretString>>
 where
   S: LinuxKeyringSource,
 {
@@ -53,13 +60,13 @@ where
 
   for schema in LIBSECRET_SCHEMAS {
     match source.libsecret_password(schema, crypt_name) {
-      Ok(password) => push_unique(&mut passwords, Zeroizing::new(password)),
+      Ok(password) => push_unique(&mut passwords, password),
       Err(error) => failures.push(format!("Secret Service schema '{schema}': {error:#}")),
     }
   }
 
   match source.kwallet_password(crypt_name) {
-    Ok(password) => push_unique(&mut passwords, Zeroizing::new(password)),
+    Ok(password) => push_unique(&mut passwords, password),
     Err(error) => failures.push(format!("KWallet: {error:#}")),
   }
 
@@ -78,7 +85,7 @@ where
   Ok(passwords)
 }
 
-fn push_unique(values: &mut Vec<Zeroizing<String>>, value: Zeroizing<String>) {
+fn push_unique(values: &mut Vec<SecretString>, value: SecretString) {
   if !values
     .iter()
     .any(|existing| existing.as_str() == value.as_str())
@@ -153,11 +160,59 @@ struct SecretUnlockResult {
 trait SecretServiceBackend {
   fn search_items(&self, schema: &str, crypt_name: &str) -> Result<SecretSearchResult>;
   fn unlock(&self, items: &[String]) -> Result<SecretUnlockResult>;
-  fn get_secret(&self, item: &str) -> Result<String>;
+  fn get_secret(&self, item: &str) -> Result<SecretString>;
 }
 
 struct DbusSecretServiceBackend {
   connection: Connection,
+}
+
+struct DbusConfidentialTransport<'a> {
+  connection: &'a Connection,
+}
+
+impl confidential::Transport for DbusConfidentialTransport<'_> {
+  fn open_session(&self, algorithm: &str, client_public_key: Vec<u8>) -> Result<(Vec<u8>, String)> {
+    let message = libsecret_call(
+      self.connection,
+      "OpenSession",
+      &(algorithm, Value::new(client_public_key)),
+    )
+    .context("Secret Service OpenSession failed")?;
+    let (output, session): (OwnedValue, OwnedObjectPath) = message
+      .body()
+      .deserialize()
+      .context("Secret Service OpenSession returned an invalid response")?;
+    let server_public_key = Vec::<u8>::try_from(output)
+      .context("Secret Service OpenSession returned an invalid public key")?;
+    Ok((server_public_key, session.to_string()))
+  }
+
+  fn get_secret(&self, item: &str, session_path: &str) -> Result<confidential::EncryptedSecret> {
+    let item_path = ObjectPath::try_from(item)
+      .context("Secret Service returned an invalid unlocked item path")?
+      .to_owned();
+    let session_path = ObjectPath::try_from(session_path)
+      .context("Secret Service returned an invalid confidential session path")?;
+    let message = libsecret_call(
+      self.connection,
+      "GetSecrets",
+      &(vec![item_path.clone()], session_path),
+    )?;
+    type DbusSecret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
+    let mut secrets: HashMap<OwnedObjectPath, DbusSecret> = message
+      .body()
+      .deserialize()
+      .context("Secret Service GetSecrets returned an invalid response")?;
+    let secret = secrets
+      .remove(&item_path)
+      .ok_or_else(|| anyhow::anyhow!("Secret Service did not return the requested item"))?;
+    Ok(confidential::EncryptedSecret {
+      session_path: secret.0.to_string(),
+      parameters: secret.1,
+      value: secret.2,
+    })
+  }
 }
 
 impl DbusSecretServiceBackend {
@@ -203,36 +258,21 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
     })
   }
 
-  fn get_secret(&self, item: &str) -> Result<String> {
-    let item_path = ObjectPath::try_from(item)
-      .context("Secret Service returned an invalid unlocked item path")?;
-
-    let message = libsecret_call(&self.connection, "OpenSession", &("plain", Value::new("")))
-      .context("Secret Service OpenSession failed")?;
-    let body = message.body();
-    let (_output, session): (Value, ObjectPath) = body
-      .deserialize()
-      .context("Secret Service OpenSession returned an invalid response")?;
-
-    let message = libsecret_call(
-      &self.connection,
-      "GetSecrets",
-      &(vec![item_path.clone()], session),
+  fn get_secret(&self, item: &str) -> Result<SecretString> {
+    // Secret Service's DH mode negotiates
+    // `dh-ietf1024-sha256-aes128-cbc-pkcs7`. A failed negotiation is returned
+    // to the platform key provider; it must never be retried as a `plain`
+    // session because that would put the password on D-Bus in cleartext.
+    confidential::get_secret(
+      &DbusConfidentialTransport {
+        connection: &self.connection,
+      },
+      item,
     )
-    .context("Secret Service GetSecrets failed")?;
-    type Secret<'a> = (ObjectPath<'a>, Vec<u8>, Vec<u8>, String);
-    let body = message.body();
-    let secrets: HashMap<ObjectPath, Secret> = body
-      .deserialize()
-      .context("Secret Service GetSecrets returned an invalid response")?;
-    let secret = secrets
-      .get(&item_path)
-      .ok_or_else(|| anyhow!("Secret Service did not return the requested item"))?;
-    String::from_utf8(secret.2.clone()).context("Secret Service password is not valid UTF-8")
   }
 }
 
-fn get_password_libsecret(schema: &str, crypt_name: &str) -> Result<String> {
+fn get_password_libsecret(schema: &str, crypt_name: &str) -> Result<SecretString> {
   let backend = DbusSecretServiceBackend::connect()?;
   get_password_libsecret_with_backend(&backend, schema, crypt_name)
 }
@@ -241,7 +281,7 @@ fn get_password_libsecret_with_backend<B>(
   backend: &B,
   schema: &str,
   crypt_name: &str,
-) -> Result<String>
+) -> Result<SecretString>
 where
   B: SecretServiceBackend,
 {
@@ -268,7 +308,7 @@ where
 trait KWalletBackend {
   fn network_wallet(&self) -> Result<String>;
   fn open(&self, wallet: &str) -> Result<i32>;
-  fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<String>;
+  fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<SecretString>;
   fn close(&self, handle: i32) -> Result<()>;
 }
 
@@ -313,7 +353,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
     Ok(handle)
   }
 
-  fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<String> {
+  fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<SecretString> {
     let message = kwallet_call(
       self.connection,
       self.endpoint,
@@ -323,7 +363,8 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
     .with_context(|| format!("KWallet {} readPassword failed", self.endpoint.version))?;
     message
       .body()
-      .deserialize()
+      .deserialize::<String>()
+      .map(SecretString::new)
       .context("KWallet readPassword returned an invalid response")
   }
 
@@ -358,7 +399,7 @@ impl<'a, B: KWalletBackend + ?Sized> KWalletHandle<'a, B> {
     }
   }
 
-  fn read_password(&self, folder: &str, key: &str) -> Result<String> {
+  fn read_password(&self, folder: &str, key: &str) -> Result<SecretString> {
     self.backend.read_password(self.handle, folder, key)
   }
 
@@ -382,7 +423,7 @@ impl<B: KWalletBackend + ?Sized> Drop for KWalletHandle<'_, B> {
   }
 }
 
-fn get_password_kdewallet(crypt_name: &str) -> Result<String> {
+fn get_password_kdewallet(crypt_name: &str) -> Result<SecretString> {
   let connection = Connection::session().context("failed to connect to the session D-Bus")?;
   get_password_kdewallet_with_fallback(|endpoint| {
     let backend = DbusKWalletBackend {
@@ -393,9 +434,9 @@ fn get_password_kdewallet(crypt_name: &str) -> Result<String> {
   })
 }
 
-fn get_password_kdewallet_with_fallback<F>(mut attempt: F) -> Result<String>
+fn get_password_kdewallet_with_fallback<F>(mut attempt: F) -> Result<SecretString>
 where
-  F: FnMut(KWalletEndpoint) -> Result<String>,
+  F: FnMut(KWalletEndpoint) -> Result<SecretString>,
 {
   let mut failures = Vec::new();
   for endpoint in KWALLET_ENDPOINTS {
@@ -411,7 +452,7 @@ where
   bail!("all KWallet versions failed: {}", failures.join("; "))
 }
 
-fn get_password_kdewallet_with_backend<B>(backend: &B, crypt_name: &str) -> Result<String>
+fn get_password_kdewallet_with_backend<B>(backend: &B, crypt_name: &str) -> Result<SecretString>
 where
   B: KWalletBackend,
 {
@@ -442,13 +483,17 @@ mod tests {
   use super::*;
   use std::{cell::RefCell, collections::VecDeque};
 
+  fn secret(value: &str) -> SecretString {
+    SecretString::new(value.to_owned())
+  }
+
   struct FakeKeyringSource {
-    libsecret: RefCell<VecDeque<Result<String>>>,
-    kwallet: RefCell<Option<Result<String>>>,
+    libsecret: RefCell<VecDeque<Result<SecretString>>>,
+    kwallet: RefCell<Option<Result<SecretString>>>,
   }
 
   impl LinuxKeyringSource for FakeKeyringSource {
-    fn libsecret_password(&self, _schema: &str, _crypt_name: &str) -> Result<String> {
+    fn libsecret_password(&self, _schema: &str, _crypt_name: &str) -> Result<SecretString> {
       self
         .libsecret
         .borrow_mut()
@@ -456,7 +501,7 @@ mod tests {
         .expect("one result per schema")
     }
 
-    fn kwallet_password(&self, _crypt_name: &str) -> Result<String> {
+    fn kwallet_password(&self, _crypt_name: &str) -> Result<SecretString> {
       self
         .kwallet
         .borrow_mut()
@@ -488,10 +533,10 @@ mod tests {
   fn successful_passwords_are_deduplicated_despite_partial_failures() {
     let source = FakeKeyringSource {
       libsecret: RefCell::new(VecDeque::from([
-        Ok("candidate".to_string()),
+        Ok(secret("candidate")),
         Err(anyhow!("old schema unavailable")),
       ])),
-      kwallet: RefCell::new(Some(Ok("candidate".to_string()))),
+      kwallet: RefCell::new(Some(Ok(secret("candidate")))),
     };
 
     let passwords = get_passwords_with_source(&source, "chrome").unwrap();
@@ -503,7 +548,7 @@ mod tests {
   struct FakeSecretService {
     search: RefCell<Option<Result<SecretSearchResult>>>,
     unlock: RefCell<Option<Result<SecretUnlockResult>>>,
-    secret: RefCell<Option<Result<String>>>,
+    secret: RefCell<Option<Result<SecretString>>>,
     unlock_calls: RefCell<Vec<Vec<String>>>,
     secret_calls: RefCell<Vec<String>>,
   }
@@ -518,7 +563,7 @@ mod tests {
       self.unlock.borrow_mut().take().expect("unlock result")
     }
 
-    fn get_secret(&self, item: &str) -> Result<String> {
+    fn get_secret(&self, item: &str) -> Result<SecretString> {
       self.secret_calls.borrow_mut().push(item.to_string());
       self.secret.borrow_mut().take().expect("secret result")
     }
@@ -531,12 +576,14 @@ mod tests {
         unlocked: vec!["/unlocked/item".to_string()],
         locked: vec!["/locked/item".to_string()],
       }))),
-      secret: RefCell::new(Some(Ok("password".to_string()))),
+      secret: RefCell::new(Some(Ok(secret("password")))),
       ..Default::default()
     };
 
     assert_eq!(
-      get_password_libsecret_with_backend(&backend, "schema", "chrome").unwrap(),
+      get_password_libsecret_with_backend(&backend, "schema", "chrome")
+        .unwrap()
+        .as_str(),
       "password"
     );
     assert!(backend.unlock_calls.borrow().is_empty());
@@ -554,12 +601,14 @@ mod tests {
         unlocked: vec!["/locked/item".to_string()],
         prompt: None,
       }))),
-      secret: RefCell::new(Some(Ok("password".to_string()))),
+      secret: RefCell::new(Some(Ok(secret("password")))),
       ..Default::default()
     };
 
     assert_eq!(
-      get_password_libsecret_with_backend(&backend, "schema", "chrome").unwrap(),
+      get_password_libsecret_with_backend(&backend, "schema", "chrome")
+        .unwrap()
+        .as_str(),
       "password"
     );
     assert_eq!(
@@ -613,8 +662,28 @@ mod tests {
     assert!(backend.secret_calls.borrow().is_empty());
   }
 
+  #[test]
+  fn confidential_session_negotiation_failure_remains_a_provider_error() {
+    let backend = FakeSecretService {
+      search: RefCell::new(Some(Ok(SecretSearchResult {
+        unlocked: vec!["/unlocked/item".to_string()],
+        locked: vec![],
+      }))),
+      secret: RefCell::new(Some(Err(anyhow!(
+        "Secret Service confidential-session negotiation failed"
+      )))),
+      ..Default::default()
+    };
+
+    let error = get_password_libsecret_with_backend(&backend, "schema", "chrome")
+      .expect_err("confidential-session failure must not produce a password")
+      .to_string();
+    assert!(error.contains("confidential-session negotiation failed"));
+    assert_eq!(backend.secret_calls.borrow().as_slice(), ["/unlocked/item"]);
+  }
+
   struct FakeKWallet {
-    read_result: RefCell<Option<Result<String>>>,
+    read_result: RefCell<Option<Result<SecretString>>>,
     close_result: RefCell<Option<Result<()>>>,
     calls: RefCell<Vec<String>>,
   }
@@ -630,7 +699,7 @@ mod tests {
       Ok(42)
     }
 
-    fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<String> {
+    fn read_password(&self, handle: i32, folder: &str, key: &str) -> Result<SecretString> {
       self
         .calls
         .borrow_mut()
@@ -647,13 +716,15 @@ mod tests {
   #[test]
   fn kwallet_closes_the_exact_handle_after_success() {
     let backend = FakeKWallet {
-      read_result: RefCell::new(Some(Ok("password".to_string()))),
+      read_result: RefCell::new(Some(Ok(secret("password")))),
       close_result: RefCell::new(Some(Ok(()))),
       calls: RefCell::new(vec![]),
     };
 
     assert_eq!(
-      get_password_kdewallet_with_backend(&backend, "chrome").unwrap(),
+      get_password_kdewallet_with_backend(&backend, "chrome")
+        .unwrap()
+        .as_str(),
       "password"
     );
     assert_eq!(
@@ -670,13 +741,15 @@ mod tests {
   #[test]
   fn kwallet_preserves_a_successful_read_when_close_fails() {
     let backend = FakeKWallet {
-      read_result: RefCell::new(Some(Ok("password".to_string()))),
+      read_result: RefCell::new(Some(Ok(secret("password")))),
       close_result: RefCell::new(Some(Err(anyhow!("close denied")))),
       calls: RefCell::new(vec![]),
     };
 
     assert_eq!(
-      get_password_kdewallet_with_backend(&backend, "chrome").unwrap(),
+      get_password_kdewallet_with_backend(&backend, "chrome")
+        .unwrap()
+        .as_str(),
       "password"
     );
     assert_eq!(backend.calls.borrow().last().unwrap(), "close:42");
@@ -712,12 +785,12 @@ mod tests {
       if endpoint.version == 6 {
         Err(anyhow!("service unavailable"))
       } else {
-        Ok("password".to_string())
+        Ok(secret("password"))
       }
     })
     .unwrap();
 
-    assert_eq!(password, "password");
+    assert_eq!(password.as_str(), "password");
     assert_eq!(attempted.into_inner(), [6, 5]);
   }
 
@@ -726,11 +799,11 @@ mod tests {
     let attempted = RefCell::new(Vec::new());
     let password = get_password_kdewallet_with_fallback(|endpoint| {
       attempted.borrow_mut().push(endpoint.version);
-      Ok("password".to_string())
+      Ok(secret("password"))
     })
     .unwrap();
 
-    assert_eq!(password, "password");
+    assert_eq!(password.as_str(), "password");
     assert_eq!(attempted.into_inner(), [6]);
   }
 
@@ -740,20 +813,20 @@ mod tests {
     let password = get_password_kdewallet_with_fallback(|endpoint| {
       attempted.borrow_mut().push(endpoint.version);
       if endpoint.version == 6 {
-        Ok(String::new())
+        Ok(secret(""))
       } else {
-        Ok("legacy-password".to_string())
+        Ok(secret("legacy-password"))
       }
     })
     .unwrap();
 
-    assert_eq!(password, "legacy-password");
+    assert_eq!(password.as_str(), "legacy-password");
     assert_eq!(attempted.into_inner(), [6, 5]);
   }
 
   #[test]
   fn kwallet_empty_results_are_reported_as_missing_entries() {
-    let error = get_password_kdewallet_with_fallback(|_| Ok(String::new()))
+    let error = get_password_kdewallet_with_fallback(|_| Ok(secret("")))
       .expect_err("empty reads from every endpoint must not become a password")
       .to_string();
 

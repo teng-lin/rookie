@@ -18,9 +18,9 @@ pub(crate) fn create_pbkdf2_key(
   use pbkdf2::pbkdf2_hmac;
   use sha1::Sha1;
 
-  let mut output = [0u8; 16];
+  let mut output = Zeroizing::new(vec![0u8; 16]);
   pbkdf2_hmac::<Sha1>(password.as_bytes(), salt, iterations, &mut output);
-  Zeroizing::new(output.to_vec())
+  output
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
