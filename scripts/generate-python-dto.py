@@ -129,7 +129,9 @@ def render_class(name: str, schema: dict[str, Any]) -> str:
         key=lambda item: (item[0] in required) is False,
     )
 
-    lines = ["@dataclass", f"class {name}:"]
+    # frozen: these represent already-finalized report data, not a value a
+    # caller should be able to mutate in place after reading it off the wire.
+    lines = ["@dataclass(frozen=True)", f"class {name}:"]
     description = schema.get("description")
     if description:
         doc = description.replace('"""', "'''")

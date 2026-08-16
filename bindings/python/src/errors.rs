@@ -9,8 +9,15 @@
 //!
 //! [`RookieRequestError`] subclasses [`pyo3::exceptions::PyValueError`] and
 //! [`RookieEngineError`] subclasses [`pyo3::exceptions::PyRuntimeError`], so
-//! existing `except ValueError`/`except RuntimeError` call sites keep
-//! working unchanged.
+//! an `except ValueError`/`except RuntimeError` around a function that
+//! already raised `RuntimeError` before this change keeps catching it --
+//! but this is a real behavior change where `fault_kind` newly classifies
+//! something as `Request`: `cookies_from_path` and
+//! `chromium_cookies_from_path(_detailed)` previously always raised
+//! `RuntimeError` and now raise `RookieRequestError`/`ValueError` for a
+//! request fault (e.g. a missing or malformed explicit source), so an
+//! `except RuntimeError` around only those three functions no longer
+//! catches that case. See CHANGELOG.md.
 
 use ::rookie_cookies as rookie_core;
 use pyo3::create_exception;

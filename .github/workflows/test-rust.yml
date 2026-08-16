@@ -85,6 +85,17 @@ jobs:
       - name: Check packaged Rust consumer resolution
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: python3 scripts/check-packaged-rust-consumer.py
+      - name: Check DTO schema and generated DTOs are current
+        # schema/report-dto.schema.json and bindings/python/rookie_cookies/dto.py
+        # are both committed, generated files (see schema/README.md) -- if
+        # report_core.rs changes without regenerating them, this diff catches
+        # the stale pair instead of letting CI stay green, mirroring the
+        # napi-rs loader drift check in the node-test job below.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: |
+          cargo run --manifest-path rookie-rs/Cargo.toml --bin generate-dto-schema --features dto-schema -- schema/report-dto.schema.json
+          python3 scripts/generate-python-dto.py
+          git diff --exit-code schema/report-dto.schema.json bindings/python/rookie_cookies/dto.py
 
   cargo-audit:
     name: cargo audit (blocking)

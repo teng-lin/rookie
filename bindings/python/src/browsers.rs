@@ -304,7 +304,9 @@ pub fn firefox(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<
 /// :return: A list of profile dictionaries with name, path, and is_default fields
 #[pyfunction]
 pub fn firefox_profiles(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-  let profiles = py.detach(rookie_core::firefox_profiles)?;
+  let profiles = py
+    .detach(rookie_core::firefox_profiles)
+    .map_err(crate::errors::classify_fault)?;
   profiles
     .into_iter()
     .map(|profile| {
@@ -591,14 +593,16 @@ pub fn chromium_based_detailed(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| {
-    rookie_core::chromium_based_detailed(
-      PathBuf::from(&key_path),
-      PathBuf::from(&db_path),
-      domains,
-      false,
-    )
-  })?;
+  let cookies = py
+    .detach(|| {
+      rookie_core::chromium_based_detailed(
+        PathBuf::from(&key_path),
+        PathBuf::from(&db_path),
+        domains,
+        false,
+      )
+    })
+    .map_err(crate::errors::classify_fault)?;
   detailed_to_dict(py, cookies)
 }
 
@@ -630,14 +634,16 @@ pub fn chromium_based(
   domains: Option<Vec<String>>,
   browser_id: Option<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| {
-    rookie_core::chromium_based_with_browser_id(
-      browser_id.as_deref(),
-      PathBuf::from(&db_path),
-      domains,
-      false,
-    )
-  })?;
+  let cookies = py
+    .detach(|| {
+      rookie_core::chromium_based_with_browser_id(
+        browser_id.as_deref(),
+        PathBuf::from(&db_path),
+        domains,
+        false,
+      )
+    })
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -654,13 +660,15 @@ pub fn chromium_based_detailed(
   domains: Option<Vec<String>>,
   browser_id: Option<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| {
-    rookie_core::chromium_based_detailed_with_browser_id(
-      browser_id.as_deref(),
-      PathBuf::from(&db_path),
-      domains,
-      false,
-    )
-  })?;
+  let cookies = py
+    .detach(|| {
+      rookie_core::chromium_based_detailed_with_browser_id(
+        browser_id.as_deref(),
+        PathBuf::from(&db_path),
+        domains,
+        false,
+      )
+    })
+    .map_err(crate::errors::classify_fault)?;
   detailed_to_dict(py, cookies)
 }

@@ -281,14 +281,24 @@ class ConsumerHarnessTests(unittest.TestCase):
             self.assertIn("checksum-verified only", result.stdout)
 
     def test_wheel_matching_the_host_is_installed_and_imported_outside_the_checkout(self) -> None:
-        host_platform_tags = {
-            "darwin": f"macosx_11_0_{_HOST_CPU.replace('x64', 'x86_64')}",
-            "linux": f"manylinux_2_17_{_HOST_CPU.replace('x64', 'x86_64')}",
-            "win32": "win_amd64",
+        # PEP 600/425 arch tokens, not Rust/generic ones: manylinux says
+        # "aarch64" where macOS says "arm64" for the same architecture (see
+        # scripts/platform_contract.py's _WHEEL_CPU_TAGS for the same split).
+        host_arch_tokens = {
+            ("darwin", "arm64"): "arm64",
+            ("darwin", "x64"): "x86_64",
+            ("linux", "arm64"): "aarch64",
+            ("linux", "x64"): "x86_64",
+            ("win32", "x64"): "amd64",
+        }
+        host_platform_tag_prefixes = {
+            "darwin": "macosx_11_0",
+            "linux": "manylinux_2_17",
+            "win32": "win",
         }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            tag = host_platform_tags[_HOST_OS]
+            tag = f"{host_platform_tag_prefixes[_HOST_OS]}_{host_arch_tokens[(_HOST_OS, _HOST_CPU)]}"
             wheel = root / f"rookie_cookies-9.9.9-py3-none-{tag}.whl"
             make_pure_python_wheel(
                 wheel, name="rookie-cookies", version="9.9.9", platform_tag=tag

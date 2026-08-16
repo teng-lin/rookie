@@ -177,6 +177,14 @@ pub enum FaultKind {
 /// [`direct_path`] already has is tracked separately rather than attempted
 /// here.
 ///
+/// This is also coarser than "caller-fixable" in one more way: every
+/// [`direct_path::DirectPathError`] classifies as `Request`, including
+/// [`direct_path::InvalidCookieSourceReason::SourceInspectionFailed`] --
+/// which covers a genuinely corrupt/locked/unreadable source as well as a
+/// caller simply pointing at the wrong file. Both currently surface the
+/// same way; splitting that reason out to `Engine` is a reasonable future
+/// refinement, not attempted here.
+///
 /// # Examples
 ///
 /// ```no_run

@@ -8,6 +8,17 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Rust gains `FaultKind`/`fault_kind(&anyhow::Error)`, classifying an error as
+  a request fault (bad input, e.g. an invalid explicit source) or an engine
+  fault, alongside the existing `stop_reason()`. Python's `RookieRequestError`
+  (a `ValueError` subclass) and `RookieEngineError` (a `RuntimeError`
+  subclass) and Node's `InvalidArg`/`GenericFailure` error statuses now use
+  this classification instead of one flat error type for every failure.
+- Python gains `rookie_cookies.dto`, typed dataclasses for the canonical
+  report/descriptor shapes (`ExtractionReport`, `BrowserDescriptor`, `Cookie`,
+  etc.) generated from a new `schema/report-dto.schema.json`, with a
+  `from_dict()` classmethod converting the existing dict-shaped return values.
+  This is additive; every function's existing dict return type is unchanged.
 - Python and Node.js now expose canonical `cookies_from_path` / `cookiesFromPath`
   and explicit Chromium path APIs with credential options matching Rust's typed
   direct-path builders. The CLI adds `--browser-id` and `--plaintext-only`.
@@ -30,6 +41,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking (0.6.0):** Python's `cookies_from_path` and
+  `chromium_cookies_from_path(_detailed)` now raise `RookieRequestError` (a
+  `ValueError` subclass) instead of `RuntimeError` for a request fault (e.g. a
+  missing or malformed explicit source, or mutually exclusive options); an
+  `except RuntimeError` around one of these three functions no longer catches
+  that case. Every other function's error type is unchanged. Node's thrown
+  error `.status`/`.code` moves from always `Unknown` to `InvalidArg` (request
+  faults) or `GenericFailure` (everything else) across every export.
 - **Breaking (0.6.0):** The Python package now requires CPython 3.11 or newer.
   CPython 3.8–3.10 and PyPy are no longer supported, and published wheels move
   from the `cp38-abi3` tag to `cp311-abi3`.

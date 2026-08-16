@@ -149,6 +149,41 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             with self.assertRaises(rookie_cookies.RookieEngineError):
                 rookie_cookies.cookies_from_path(str(db_path), timeout=0.0)
 
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
+        "Chromium direct paths are supported on desktop targets",
+    )
+    def test_every_direct_path_and_legacy_chromium_function_uses_fault_classification(
+        self,
+    ) -> None:
+        # Regression test: these previously bypassed classify_fault and fell
+        # back to pyo3's blanket anyhow conversion, always raising a bare
+        # RuntimeError instead of RookieEngineError/RookieRequestError.
+        missing = str(Path(tempfile.gettempdir()) / "rookie-missing-db" / "Cookies")
+        classified = (rookie_cookies.RookieRequestError, rookie_cookies.RookieEngineError)
+
+        # firefox_profiles takes no arguments and can't be forced to fail
+        # portably; assert it at least raises a classified type when the
+        # host has no Firefox installation to enumerate, and tolerate an
+        # empty successful result otherwise.
+        try:
+            rookie_cookies.firefox_profiles()
+        except classified:
+            pass
+        except Exception as error:  # pragma: no cover - diagnostic on failure
+            self.fail(f"firefox_profiles raised an unclassified exception: {error!r}")
+
+        if sys.platform == "win32":
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based(missing, missing)
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based_detailed(missing, missing)
+        else:
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based(missing, browser_id="chrome")
+            with self.assertRaises(classified):
+                rookie_cookies.chromium_based_detailed(missing, browser_id="chrome")
+
     def test_cancellation_handle_tracks_its_own_cancelled_state(self) -> None:
         handle = rookie_cookies.CancellationHandle()
         self.assertFalse(handle.is_cancelled())

@@ -11,14 +11,16 @@ scripts/check-packaged-rust-consumer.py already established for the crate).
 Scope, honestly: npm tarballs are exercised structurally; CLI binaries and
 Python wheels are actually executed (`--version` for the CLI, an isolated
 `pip install` + `import` + `version()` for wheels) when the artifact's
-declared platform matches the host running this harness -- otherwise, like a
-native `.node` addon or a cross-platform tarball, they fall back to
-checksum-verified-only, which is reported, not silently skipped. A Python
-sdist has no compiled platform to match against and still falls through to
-checksum-verified-only; building one from source isn't a meaningful smoke
-check for this harness. `publish-npm.yml`, `publish-cli.yml`, and
-`publish-py.yml` all now write a manifest and call this harness before their
-respective registry writes.
+declared platform matches the host running this harness -- otherwise they
+fall back to checksum-verified-only, which is reported, not silently
+skipped. A cross-platform npm tarball gets that same fallback outcome when
+its declared platform doesn't match the host. A native `.node` addon always
+gets it too, unconditionally: it can't be `require()`d without its owning
+npm package (see `exercise_native_addon`). A Python sdist has no compiled
+platform to match against and always falls through the same way; building
+one from source isn't a meaningful smoke check for this harness.
+`publish-npm.yml`, `publish-cli.yml`, and `publish-py.yml` all now write a
+manifest and call this harness before their respective registry writes.
 
 This still isn't full per-helper-role live extraction (no real Keychain/
 DPAPI/keyring/App-Bound credential read happens here — the Windows App-Bound
@@ -150,14 +152,6 @@ def current_host_npm_platform() -> str:
     return f"{system.lower()}-{cpu}"
 
 
-_CLI_TARGET_TO_OS_CPU = {
-    "aarch64-apple-darwin": ("darwin", "arm64"),
-    "x86_64-apple-darwin": ("darwin", "x64"),
-    "x86_64-unknown-linux-gnu": ("linux", "x64"),
-    "x86_64-pc-windows-msvc": ("win32", "x64"),
-}
-
-
 def cli_binary_target(name: str) -> str | None:
     """The target triple embedded in a CLI artifact filename, or `None` if
     `name` isn't shaped like one (see `publish-cli.yml`'s
@@ -171,9 +165,15 @@ def cli_binary_target(name: str) -> str | None:
 def wheel_platform_os_cpu(name: str) -> tuple[str, str] | None:
     """The (os, cpu) pair a `.whl` filename's platform tag targets, in the
     same vocabulary `current_host_npm_os_cpu()` uses, or `None` for a
-    platform-independent tag (e.g. `abi3` sdists never reach here since they
-    aren't `.whl` files, but a pure-Python wheel would be) this harness
-    can't usefully compare against a host."""
+    platform-independent tag (a pure-Python wheel's `any` tag) this harness
+    can't usefully compare against a host. A sdist never reaches this
+    function at all -- it isn't a `.whl` file.
+
+    Deliberately coarser than `platform_contract._wheel_cell_os_cpu`: this
+    only needs to answer "can the current host run it", not identify the
+    exact contract cell, so it doesn't need that function's full arch
+    vocabulary (i686/armv7l/s390x/ppc64le).
+    """
     # PEP 425: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
     platform_tag = name.removesuffix(".whl").rsplit("-", 1)[-1]
     if "macosx" in platform_tag:
@@ -193,11 +193,16 @@ def wheel_platform_os_cpu(name: str) -> tuple[str, str] | None:
     return os_name, cpu
 
 
-def exercise_cli_binary(path: Path, scratch: Path) -> str:
+def exercise_cli_binary(path: Path, scratch: Path, contract: dict[str, Any]) -> str:
     target = cli_binary_target(path.name)
     if target is None:
         raise HarnessError(f"{path.name}: does not match the rookie-cookies-cli-<target> naming")
-    target_os_cpu = _CLI_TARGET_TO_OS_CPU.get(target)
+    # Reuses the same contract lookup verify_artifacts() already trusts for
+    # helper_roles, instead of a second hardcoded target->(os, cpu) table
+    # that could silently drift from it -- see platform_contract.py's own
+    # module docstring on why this project stopped doing that.
+    cell = platform_contract.match_cell_for_artifact(contract, path.name)
+    target_os_cpu = (cell["os"], cell["cpu"]) if cell is not None else None
     host_os, host_cpu = current_host_npm_os_cpu()
     if target_os_cpu != (host_os, host_cpu):
         return (
@@ -216,6 +221,8 @@ def exercise_cli_binary(path: Path, scratch: Path) -> str:
             text=True,
             timeout=30,
         )
+    except subprocess.TimeoutExpired as error:
+        raise HarnessError(f"{path.name}: --version did not complete within {error.timeout}s") from error
     except OSError as error:
         raise HarnessError(f"{path.name}: could not execute --version: {error}") from error
     if result.returncode != 0:
@@ -262,6 +269,10 @@ def exercise_python_wheel(path: Path, scratch: Path) -> str:
             text=True,
             timeout=30,
         )
+    except subprocess.TimeoutExpired as error:
+        raise HarnessError(
+            f"{path.name}: install-and-import did not complete within {error.timeout}s"
+        ) from error
     except subprocess.CalledProcessError as error:
         raise HarnessError(
             f"{path.name}: install-and-import failed outside the checkout: {error.stderr.strip()}"
@@ -322,7 +333,7 @@ def exercise_native_addon(path: Path, scratch: Path) -> str:
     return f"checksum-verified only (native addon execution needs its owning npm package, not a bare .node)"
 
 
-def exercise(record: dict[str, Any], path: Path, scratch: Path) -> str:
+def exercise(record: dict[str, Any], path: Path, scratch: Path, contract: dict[str, Any]) -> str:
     name = path.name
     if name.endswith(".tgz"):
         return exercise_npm_tarball(path, scratch)
@@ -331,7 +342,7 @@ def exercise(record: dict[str, Any], path: Path, scratch: Path) -> str:
     if name.endswith(".whl"):
         return exercise_python_wheel(path, scratch)
     if cli_binary_target(name) is not None:
-        return exercise_cli_binary(path, scratch)
+        return exercise_cli_binary(path, scratch, contract)
     return "checksum-verified only (no exercise routine for this artifact type yet)"
 
 
@@ -434,7 +445,7 @@ def main() -> int:
         results = []
         for record, path in verified:
             try:
-                outcome = exercise(record, path, scratch)
+                outcome = exercise(record, path, scratch, contract)
             except HarnessError as error:
                 print(f"FAIL {record['path']}: {error}", file=sys.stderr)
                 return 1

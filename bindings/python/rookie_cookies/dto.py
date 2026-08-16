@@ -19,7 +19,7 @@ from typing import List, Optional
 __all__ = ["Cookie", "BrowserDescriptor", "BrowserCapabilitiesDescriptor", "ProfileDescriptor", "ProfileIdentity", "CookieSourceDescriptor", "ExtractionReport", "ReportStats", "ProfileExtraction", "SourceExtraction", "CookieSourceIdentity", "ExtractionStats", "ExtractionIssue"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Cookie:
     domain: str
     path: str
@@ -45,7 +45,7 @@ class Cookie:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class BrowserDescriptor:
     """A browser registered for the running OS. Registration is not detection."""
     id: str
@@ -66,7 +66,7 @@ class BrowserDescriptor:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class BrowserCapabilitiesDescriptor:
     """What a registered browser claims it can do on this platform.
 
@@ -87,7 +87,7 @@ Declared tiers come from the registry; `available_decryption_tiers` narrows them
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProfileDescriptor:
     """One discovered profile and its cookie sources."""
     profile: ProfileIdentity
@@ -104,7 +104,7 @@ class ProfileDescriptor:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProfileIdentity:
     """Stable identity of one discovered profile.
 
@@ -129,7 +129,7 @@ class ProfileIdentity:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class CookieSourceDescriptor:
     """A cookie source a profile exposes, before any extraction is attempted."""
     role: str
@@ -150,7 +150,7 @@ class CookieSourceDescriptor:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExtractionReport:
     """A grouped extraction result.
 
@@ -175,7 +175,7 @@ class ExtractionReport:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReportStats:
     """Request-wide totals, including browsers that were registered but absent."""
     registered_browsers: int
@@ -212,7 +212,7 @@ class ReportStats:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProfileExtraction:
     """One profile's sources, totals, and profile-scoped diagnostics."""
     profile: ProfileIdentity
@@ -231,7 +231,7 @@ class ProfileExtraction:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class SourceExtraction:
     """One attempted cookie source and the cookies it produced.
 
@@ -258,7 +258,7 @@ Cookies live here rather than on the profile so provenance survives. A profile-w
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class CookieSourceIdentity:
     """Identity of the source an extraction attempted."""
     role: str
@@ -279,7 +279,7 @@ class CookieSourceIdentity:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExtractionStats:
     """Row accounting for one source or profile.
 
@@ -306,7 +306,7 @@ class ExtractionStats:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ExtractionIssue:
     """A diagnostic attached to the request, a profile, or a source.
 
