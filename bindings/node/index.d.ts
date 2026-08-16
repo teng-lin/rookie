@@ -195,6 +195,7 @@ export interface ProfileExtractionObject {
  * problems; anything narrower is attached to its profile or source.
  */
 export interface ExtractionReportObject {
+  schemaVersion: number
   status: string
   termination: string
   summary: ReportStatsObject

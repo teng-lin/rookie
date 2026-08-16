@@ -57,6 +57,7 @@ for profile in browser_profiles("chrome"):
     print(profile["profile"]["profile_id"], profile["profile"]["display_name"])
 
 report = browser_report("chrome", domains=["example.com"])
+assert report["schema_version"] == 1
 for profile in report["profiles"]:
     for source in profile["sources"]:
         if source["selected"] and source["status"] == "succeeded":

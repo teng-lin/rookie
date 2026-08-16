@@ -281,8 +281,10 @@ the report view never reorders canonical emission/provenance order.
 Failure aggregation uses the complete `(code, stage, scope, cause, severity,
 retryability)` key. Diagnostic text and samples are sanitized and bounded at
 the canonical ingress, and provider/tier cause is carried structurally rather
-than recovered from messages. Report JSON adds `cause`, `provider`, `tier`, and
-`retryability` to each issue, and `termination` to the report. Deserialization
+than recovered from messages. Report JSON adds the `schema_version: 1`
+discriminator, `cause`, `provider`, `tier`, and `retryability` to each issue,
+and `termination` to the report. Node exposes the discriminator as
+`schemaVersion`; Rust, Python, and CLI use `schema_version`. Deserialization
 defaults keep older report JSON readable.
 
 `status` describes extraction completeness (`complete`, `partial`, `failed`,

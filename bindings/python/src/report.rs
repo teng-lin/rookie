@@ -182,6 +182,7 @@ fn report_dict(py: Python<'_>, report: ExtractionReport) -> PyResult<Py<PyAny>> 
     .collect::<PyResult<Vec<_>>>()?;
 
   let dict = PyDict::new(py);
+  dict.set_item("schema_version", report.schema_version)?;
   dict.set_item("status", report.status.as_str())?;
   dict.set_item("termination", report.termination.as_str())?;
   dict.set_item("summary", report_stats_dict(py, report.summary)?)?;

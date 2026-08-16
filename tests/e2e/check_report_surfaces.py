@@ -37,10 +37,6 @@ def normalize(value: Any) -> Any:
         if {"code", "stage", "severity", "occurrences"}.issubset(result):
             for key in ("browser_id", "installation_id", "profile_id"):
                 result.setdefault(key, None)
-            result.setdefault("cause", "")
-            result.setdefault("provider", None)
-            result.setdefault("tier", None)
-            result.setdefault("retryability", "unknown")
         return result
     if isinstance(value, list):
         return [normalize(item) for item in value]
@@ -145,13 +141,52 @@ def invoke(command: list[str], surface: str, request: list[str], env: dict[str, 
     )
 
 
+def validate_raw_report(surface: str, value: Any) -> None:
+    if not isinstance(value, dict) or "status" not in value:
+        return
+    schema_key = "schemaVersion" if surface == "node" else "schema_version"
+    assert value.get(schema_key) == 1, (surface, value)
+    assert "termination" in value, (surface, value)
+
+    issue_keys = {
+        "cause",
+        "provider",
+        "tier",
+        "retryability",
+    }
+    if surface == "node":
+        issue_keys = {"cause", "provider", "tier", "retryability"}
+
+    def walk(item: Any) -> None:
+        if isinstance(item, list):
+            for child in item:
+                walk(child)
+        elif isinstance(item, dict):
+            if {"code", "stage", "severity", "occurrences"}.issubset(item):
+                missing = issue_keys.difference(item)
+                assert not missing, (surface, missing, item)
+                if item["cause"] == "credential_provider":
+                    assert item["provider"], (surface, item)
+                    assert item["tier"], (surface, item)
+                    assert item["retryability"] in {
+                        "retryable",
+                        "not_retryable",
+                    }, (surface, item)
+            for child in item.values():
+                walk(child)
+
+    walk(value)
+
+
 def compare(request: list[str], launchers: dict[str, list[str]], env: dict[str, str]) -> Any:
     observed: dict[str, Any] = {}
     for surface, command in launchers.items():
         result = invoke(command, surface, request, env)
         if result.returncode != 0:
             raise AssertionError(f"{surface} {request} failed: {result.stderr}")
-        observed[surface] = normalize(json.loads(result.stdout))
+        raw = json.loads(result.stdout)
+        validate_raw_report(surface, raw)
+        observed[surface] = normalize(raw)
     reference = observed["rust"]
     for surface, value in observed.items():
         if value != reference:

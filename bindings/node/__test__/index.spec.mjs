@@ -764,6 +764,7 @@ Path=Profiles/work
       [{ role: "persistent", format: "mozilla_sqlite", precedence: 10 }],
     );
 
+    t.is(report.schemaVersion, 1);
     t.is(report.status, "complete");
     t.is(report.termination, "completed");
     t.deepEqual(report.issues, []);
@@ -1040,6 +1041,15 @@ Path=Profiles/work
       },
     );
     const observed = JSON.parse(stdout);
+
+    t.deepEqual(observed.reportKeys, [
+      "schemaVersion",
+      "status",
+      "termination",
+      "summary",
+      "profiles",
+      "issues",
+    ]);
 
     for (const key of [...observed.firefoxKeys, ...observed.absentKeys]) {
       t.false(key.includes("_"), `report key ${key} must be camelCase`);

@@ -240,8 +240,16 @@ class BrowserReportTest(unittest.TestCase):
 
         self.assertEqual(
             sorted(report),
-            ["issues", "profiles", "status", "summary", "termination"],
+            [
+                "issues",
+                "profiles",
+                "schema_version",
+                "status",
+                "summary",
+                "termination",
+            ],
         )
+        self.assertEqual(report["schema_version"], 1)
         self.assertEqual(report["status"], "complete")
         self.assertEqual(report["termination"], "completed")
         self.assertEqual(report["issues"], [])

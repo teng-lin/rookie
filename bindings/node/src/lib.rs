@@ -240,6 +240,7 @@ pub struct ProfileExtractionObject {
 /// problems; anything narrower is attached to its profile or source.
 #[napi(object)]
 pub struct ExtractionReportObject {
+  pub schema_version: u32,
   pub status: String,
   pub termination: String,
   pub summary: ReportStatsObject,
@@ -483,6 +484,7 @@ fn profile_extraction_to_js(profile: ProfileExtraction) -> Result<ProfileExtract
 
 fn report_to_js(report: ExtractionReport) -> Result<ExtractionReportObject> {
   Ok(ExtractionReportObject {
+    schema_version: report.schema_version,
     status: report.status.as_str().to_owned(),
     termination: report.termination.as_str().to_owned(),
     summary: report_stats_to_js(report.summary),

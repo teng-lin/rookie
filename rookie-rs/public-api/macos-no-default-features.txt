@@ -722,6 +722,7 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::Extraction
 #[non_exhaustive] pub struct rookie_cookies::report::ExtractionReport
 pub rookie_cookies::report::ExtractionReport::issues: alloc::vec::Vec<rookie_cookies::report::ExtractionIssue>
 pub rookie_cookies::report::ExtractionReport::profiles: alloc::vec::Vec<rookie_cookies::report::ProfileExtraction>
+pub rookie_cookies::report::ExtractionReport::schema_version: u32
 pub rookie_cookies::report::ExtractionReport::status: rookie_cookies::report::ReportStatusCode
 pub rookie_cookies::report::ExtractionReport::summary: rookie_cookies::report::ReportStats
 pub rookie_cookies::report::ExtractionReport::termination: rookie_cookies::report::TerminationCode

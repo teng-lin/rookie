@@ -79,6 +79,7 @@ if (profiles.length === 0) {
 // `undefined`, which is the "every profile" argument, so the query silently
 // widens instead of returning nothing.
 const report = await browserReport("chrome", profiles[0].profile.profileId, ["example.com"]);
+if (report.schemaVersion !== 1) throw new Error("unsupported report schema");
 
 console.log(report.status, report.summary.cookiesEmitted);
 for (const profile of report.profiles) {
