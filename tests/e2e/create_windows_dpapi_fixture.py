@@ -184,7 +184,7 @@ def main() -> int:
             INSERT INTO cookies (
               host_key, path, is_secure, expires_utc, name, value,
               encrypted_value, is_httponly, samesite
-            ) VALUES (?, '/', 0, ?, ?, '', ?, 1, 1)
+            ) VALUES (?, '/', 0, ?, ?, 'plaintext sentinel must not escape', ?, 1, 1)
             """,
             (
                 args.domain,

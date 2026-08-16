@@ -2284,9 +2284,9 @@ mod engine_chain_tests {
 
   /// Reported against pre-round-3 4E: a Chromium row that could not be
   /// decrypted took the whole source down with it, because "no row decoded"
-  /// became a source-level failure. Section 5.7 counts a rejected row in
-  /// `rows_skipped` against a source that still succeeded, so this pins the
-  /// scenario end-to-end on the real chain.
+  /// became a source-level failure. Section 5.7 counts every seen-but-not-
+  /// emitted row in `rows_skipped` against a source that still succeeded, so
+  /// this pins the unavailable-provider scenario end-to-end on the real chain.
   #[test]
   fn an_undecryptable_row_does_not_fail_the_chromium_source() {
     let temp = TempDir::new("chromium-undecryptable-row");
@@ -2294,8 +2294,9 @@ mod engine_chain_tests {
     let root = test_seams::primary_root_path(&context, "chrome");
     test_seams::seed_chromium_profile(&root, "Default", "Person 1");
 
-    // Replace the plaintext cookie with a v10 blob no provider can open, so
-    // every row in the profile is rejected.
+    // Replace the plaintext cookie with a dual-populated v10 row no provider
+    // can open. The row is unavailable, and its alternate plaintext must not
+    // reach the report.
     let database = root.join("Default/Cookies");
     let connection = rusqlite::Connection::open(&database).expect("open cookie database");
     connection
@@ -2303,7 +2304,8 @@ mod engine_chain_tests {
       .expect("clear seeded cookie");
     connection
       .execute(
-        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'locked', '', ?1, 0, 0)",
+        "INSERT INTO cookies VALUES ('.example.com', '/', 0, 0, 'locked',
+         'plaintext sentinel must not escape', ?1, 0, 0)",
         [b"v10undecryptable".to_vec()],
       )
       .expect("insert encrypted cookie");
@@ -2311,6 +2313,12 @@ mod engine_chain_tests {
 
     let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
       .expect("chromium report");
+    assert!(
+      registry_report.installations[0].profiles[0]
+        .legacy_error
+        .is_some(),
+      "the legacy projection must retain its all-row error"
+    );
     let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)
       .expect("adapt the chromium report");
     let report = assemble(1, vec![outcome]);
@@ -2326,7 +2334,7 @@ mod engine_chain_tests {
           issue.code.as_str(),
           "provider_unavailable" | "provider_failed" | "decrypt_failed"
         )),
-      "the rejected row must be reported: {:?}",
+      "the unavailable row must be reported: {:?}",
       source.issues
     );
     // Acquisition and the query completed, so nothing failed at source level.

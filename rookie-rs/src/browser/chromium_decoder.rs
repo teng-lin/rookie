@@ -4,8 +4,8 @@
 //! Its output is ciphertext-bearing `CookieRecord`s consumed by `unseal`.
 
 use super::chromium::{
-  ChromiumEngineExtractionOutcome, ChromiumRowIssueCode, CookieProjection, DecodedChromiumRecord,
-  EncryptedValuePolicy, MissingBrowserKeyIdentity,
+  ChromiumDecodeEvent, ChromiumEngineExtractionOutcome, ChromiumRowFailure, ChromiumRowIssueCode,
+  CookieProjection, DecodedChromiumRecord, EncryptedValuePolicy, MissingBrowserKeyIdentity,
 };
 use super::cookie_record::{CipherTier, CookieRecord, CookieValue};
 use crate::common::{date, enums::*, utils};
@@ -13,8 +13,8 @@ use anyhow::{anyhow, Context, Result};
 use std::fmt;
 
 #[derive(Debug)]
-struct ChromiumContextColumnError {
-  column: &'static str,
+pub(super) struct ChromiumContextColumnError {
+  pub(super) column: &'static str,
   source: rusqlite::Error,
 }
 
@@ -171,11 +171,13 @@ pub(super) fn decode_cookie_records(
       Err(error) => {
         extraction.stats.rows_seen += 1;
         let row_number = extraction.stats.rows_seen;
-        log::warn!("Failed to read host_key from Chromium cookie row: {error}");
-        extraction.last_row_error = Some(anyhow!(
-          "failed to read host_key from Chromium cookie row: {error}"
-        ));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("host_key"), row_number);
+        extraction
+          .decoded_events
+          .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumRowIssueCode::ColumnRead("host_key"),
+            error: anyhow!("failed to read host_key from Chromium cookie row: {error}"),
+          }));
         continue;
       }
     };
@@ -189,12 +191,13 @@ pub(super) fn decode_cookie_records(
         match row.get::<_, Option<$type>>($index) {
           Ok(value) => value,
           Err(error) => {
-            log::warn!("Failed to read {} from Chromium cookie row: {error}", $name);
-            extraction.last_row_error = Some(anyhow!(
-              "failed to read {} from Chromium cookie row: {error}",
-              $name
-            ));
-            extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead($name), row_number);
+            extraction
+              .decoded_events
+              .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+                row_number,
+                code: ChromiumRowIssueCode::ColumnRead($name),
+                error: anyhow!("failed to read {} from Chromium cookie row: {error}", $name),
+              }));
             continue;
           }
         }
@@ -209,18 +212,26 @@ pub(super) fn decode_cookie_records(
     let name: String = match row.get(4) {
       Ok(value) => value,
       Err(error) => {
-        log::warn!("Failed to read name from row: {error}");
-        extraction.last_row_error = Some(anyhow!("failed to read name from row: {error}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("name"), row_number);
+        extraction
+          .decoded_events
+          .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumRowIssueCode::ColumnRead("name"),
+            error: anyhow!("failed to read name from row: {error}"),
+          }));
         continue;
       }
     };
     let plaintext: String = match row.get(5) {
       Ok(value) => value,
       Err(error) => {
-        log::warn!("Failed to read value from row: {error}");
-        extraction.last_row_error = Some(anyhow!("failed to read value from row: {error}"));
-        extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead("value"), row_number);
+        extraction
+          .decoded_events
+          .push(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumRowIssueCode::ColumnRead("value"),
+            error: anyhow!("failed to read value from row: {error}"),
+          }));
         continue;
       }
     };
@@ -231,19 +242,23 @@ pub(super) fn decode_cookie_records(
     };
     let http_only = read_optional_column!(7, bool, "is_httponly").unwrap_or(false);
     let same_site = read_optional_column!(8, i64, "samesite").unwrap_or(SAME_SITE_UNSPECIFIED);
-    let context = if projection == CookieProjection::Detailed {
+    let (context, pending_context_failure) = if projection == CookieProjection::Detailed {
       match chromium_cookie_context(row) {
-        Ok(context) => context,
+        Ok(context) => (context, None),
         Err(error) => {
-          log::warn!("{error}");
           let column = error.column;
-          extraction.last_row_error = Some(error.into());
-          extraction.record_skipped_row(ChromiumRowIssueCode::ColumnRead(column), row_number);
-          continue;
+          (
+            CookieContext::default(),
+            Some(ChromiumRowFailure {
+              row_number,
+              code: ChromiumRowIssueCode::ColumnRead(column),
+              error: error.into(),
+            }),
+          )
         }
       }
     } else {
-      CookieContext::default()
+      (CookieContext::default(), None)
     };
     let value = if encrypted_value.is_empty() {
       CookieValue::Plain(plaintext)
@@ -255,20 +270,25 @@ pub(super) fn decode_cookie_records(
         bytes: encrypted_value,
       }
     };
-    extraction.decoded_records.push(DecodedChromiumRecord {
-      row_number,
-      record: CookieRecord {
-        domain: host_key,
-        path,
-        secure: is_secure,
-        expires,
-        name,
-        value,
-        http_only,
-        same_site,
-        context,
-      },
-    });
+    extraction
+      .decoded_events
+      .push(ChromiumDecodeEvent::Record(Box::new(
+        DecodedChromiumRecord {
+          row_number,
+          record: CookieRecord {
+            domain: host_key,
+            path,
+            secure: is_secure,
+            expires,
+            name,
+            value,
+            http_only,
+            same_site,
+            context,
+          },
+          pending_context_failure,
+        },
+      )));
   }
 
   Ok(extraction)
@@ -290,6 +310,8 @@ mod tests {
 
     let source = include_str!("chromium_decoder.rs");
     for forbidden in [
+      concat!("super::", "chromium_crypto"),
+      concat!("super::", "unseal"),
       concat!("ChromiumKey", "Outcomes"),
       concat!("ChromiumKey", "Provider"),
       concat!("Key", "Candidate"),
