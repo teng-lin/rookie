@@ -725,6 +725,20 @@ fn open_read_only(path: &Path, query: &str) -> Result<Connection> {
 mod tests {
   use super::*;
   use std::cell::{Cell, RefCell};
+  use std::ffi::CStr;
+
+  #[test]
+  fn bundled_sqlite_matches_the_security_inventory() {
+    assert_eq!(rusqlite::version(), "3.53.2");
+    assert_eq!(rusqlite::version_number(), 3_053_002);
+    let source_id = unsafe { CStr::from_ptr(rusqlite::ffi::sqlite3_sourceid()) }
+      .to_str()
+      .expect("SQLite source ID is UTF-8");
+    assert_eq!(
+      source_id,
+      "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24"
+    );
+  }
 
   fn rollback_database(directory: &Path) -> (PathBuf, Connection) {
     let path = directory.join("cookies.sqlite");

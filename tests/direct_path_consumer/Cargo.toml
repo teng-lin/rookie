@@ -8,4 +8,4 @@ publish = false
 
 [dependencies]
 rookie-cookies = { path = "../../rookie-rs", default-features = false }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "fallible_uint"] }
