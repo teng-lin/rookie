@@ -33,6 +33,21 @@ class ChromiumPathOptions(TypedDict, total=False):
     browser_id: str
     local_state_path: str
     plaintext_only: bool
+    timeout: float
+    cancellation: "CancellationHandle"
+
+class CancellationHandle:
+    """
+    A shared stop signal for an in-flight extraction.
+
+    Calling ``cancel()`` from any thread stops the extraction this handle was
+    passed into at its next internal checkpoint. Cloning (e.g. holding the
+    same instance from multiple threads) shares the same underlying signal.
+    """
+
+    def __init__(self) -> None: ...
+    def cancel(self) -> bool: ...
+    def is_cancelled(self) -> bool: ...
 
 DetailedCookieList = List[DetailedCookie]
 FirefoxProfile = Dict[str, Any]
@@ -51,21 +66,39 @@ many, so comparing the two tells a truncated excerpt from a complete one.
 """
 
 def cookies_from_path(
-    path: str, domains: list[str] | None = None
+    path: str,
+    domains: list[str] | None = None,
+    timeout: float | None = None,
+    cancellation: CancellationHandle | None = None,
 ) -> CookieList:
-    """Classify an explicit cookie source and extract its cookies."""
+    """
+    Classify an explicit cookie source and extract its cookies.
+
+    :param timeout: Optional extraction budget in seconds
+    :param cancellation: Optional handle whose ``cancel()`` stops extraction early
+    """
     ...
 
 def chromium_cookies_from_path(
     path: str, options: ChromiumPathOptions | None = None
 ) -> CookieList:
-    """Extract an explicit Chromium cookie database."""
+    """
+    Extract an explicit Chromium cookie database.
+
+    ``options`` may set ``timeout`` (seconds) and ``cancellation`` (a
+    :class:`CancellationHandle`) to bound or stop extraction early.
+    """
     ...
 
 def chromium_cookies_from_path_detailed(
     path: str, options: ChromiumPathOptions | None = None
 ) -> DetailedCookieList:
-    """Extract an explicit Chromium database with cookie context."""
+    """
+    Extract an explicit Chromium database with cookie context.
+
+    ``options`` may set ``timeout`` (seconds) and ``cancellation`` (a
+    :class:`CancellationHandle`) to bound or stop extraction early.
+    """
     ...
 
 def version() -> str:

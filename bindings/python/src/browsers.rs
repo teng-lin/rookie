@@ -1,8 +1,8 @@
-use crate::{detailed_to_dict, to_dict};
+use crate::{detailed_to_dict, to_dict, PyCancellationHandle};
 use ::rookie_cookies as rookie_core;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyString};
+use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyList, PyString};
 use std::path::PathBuf;
 
 const CHROMIUM_PATH_OPTION_KEYS: &[&str] = &[
@@ -10,6 +10,8 @@ const CHROMIUM_PATH_OPTION_KEYS: &[&str] = &[
   "browser_id",
   "local_state_path",
   "plaintext_only",
+  "timeout",
+  "cancellation",
 ];
 
 #[cfg(test)]
@@ -95,6 +97,40 @@ fn domains_option(options: &Bound<'_, PyDict>) -> PyResult<Option<Vec<String>>> 
     .map(Some)
 }
 
+fn timeout_option(options: &Bound<'_, PyDict>) -> PyResult<Option<std::time::Duration>> {
+  let Some(value) = option_value(options, "timeout")? else {
+    return Ok(None);
+  };
+  let seconds = value
+    .cast::<PyFloat>()
+    .map(|value| value.value())
+    .or_else(|_| {
+      value
+        .extract::<i64>()
+        .map(|value| value as f64)
+        .map_err(|_| {
+          PyValueError::new_err(
+            "Chromium path option 'timeout' must be a number of seconds or None",
+          )
+        })
+    })?;
+  duration_from_seconds(seconds).map(Some)
+}
+
+fn cancellation_option(
+  options: &Bound<'_, PyDict>,
+) -> PyResult<Option<rookie_core::CancellationHandle>> {
+  let Some(value) = option_value(options, "cancellation")? else {
+    return Ok(None);
+  };
+  let handle = value.extract::<PyCancellationHandle>().map_err(|_| {
+    PyValueError::new_err(
+      "Chromium path option 'cancellation' must be a CancellationHandle or None",
+    )
+  })?;
+  Ok(Some(handle.0))
+}
+
 fn plaintext_only_option(options: &Bound<'_, PyDict>) -> PyResult<bool> {
   let Some(value) = option_value(options, "plaintext_only")? else {
     return Ok(false);
@@ -124,6 +160,8 @@ fn chromium_path_request(
   let browser_id = string_option(options, "browser_id")?;
   let local_state_path = string_option(options, "local_state_path")?;
   let plaintext_only = plaintext_only_option(options)?;
+  let timeout = timeout_option(options)?;
+  let cancellation = cancellation_option(options)?;
 
   let selector_count = usize::from(browser_id.is_some())
     + usize::from(local_state_path.is_some())
@@ -137,6 +175,12 @@ fn chromium_path_request(
   let mut request = rookie_core::direct_path::ChromiumPathRequest::new(path);
   if let Some(domains) = domains {
     request = request.domains(domains);
+  }
+  if let Some(timeout) = timeout {
+    request = request.timeout(timeout);
+  }
+  if let Some(cancellation) = cancellation {
+    request = request.cancellation(cancellation);
   }
   let credentials = if let Some(browser_id) = browser_id {
     Some(rookie_core::direct_path::ChromiumCredentialSource::BrowserId(browser_id))
@@ -161,17 +205,34 @@ fn direct_path_runtime_error(error: rookie_core::anyhow::Error) -> PyErr {
   PyRuntimeError::new_err(format!("{error:?}"))
 }
 
+fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
+  if !seconds.is_finite() || seconds < 0.0 {
+    return Err(PyValueError::new_err(
+      "timeout must be a non-negative, finite number of seconds",
+    ));
+  }
+  Ok(std::time::Duration::from_secs_f64(seconds))
+}
+
 /// Extract cookies after identifying an explicit cookie source.
 #[pyfunction]
-#[pyo3(signature = (path, domains=None))]
+#[pyo3(signature = (path, domains=None, timeout=None, cancellation=None))]
 pub fn cookies_from_path(
   py: Python<'_>,
   path: String,
   domains: Option<Vec<String>>,
+  timeout: Option<f64>,
+  cancellation: Option<PyCancellationHandle>,
 ) -> PyResult<Vec<Py<PyAny>>> {
   let mut request = rookie_core::direct_path::DirectPathRequest::new(path);
   if let Some(domains) = domains {
     request = request.domains(domains);
+  }
+  if let Some(timeout) = timeout {
+    request = request.timeout(duration_from_seconds(timeout)?);
+  }
+  if let Some(cancellation) = cancellation {
+    request = request.cancellation(cancellation.0);
   }
   let cookies = py
     .detach(|| rookie_core::direct_path::cookies_from_path(request))

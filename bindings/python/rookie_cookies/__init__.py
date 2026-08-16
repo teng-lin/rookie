@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from .rookie_cookies import (
     MAX_ISSUE_SAMPLES,
+    CancellationHandle,
     any_browser,
     arc,
     brave,
@@ -36,6 +37,7 @@ from .rookie_cookies import (
 
 __all__ = [
     "MAX_ISSUE_SAMPLES",
+    "CancellationHandle",
     "ChromiumPathOptions",
     "any_browser",
     "arc",
@@ -76,6 +78,8 @@ class ChromiumPathOptions(TypedDict, total=False):
     browser_id: str
     local_state_path: str
     plaintext_only: bool
+    timeout: float
+    cancellation: CancellationHandle
 
 
 CookieList = List[Dict[str, Any]]
