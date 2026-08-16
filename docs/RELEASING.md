@@ -256,7 +256,11 @@ gate any `publish-*.yml` workflow. R5 (`write-ci-proof.py`) **is** now wired
 into all three publish workflows, but **advisory-only**: `publish-npm.yml`,
 `publish-cli.yml`, and `publish-py.yml` each call it with `--advisory` right
 after writing that release's manifest and running the R3 harness, and before
-their registry-mutating step. `--advisory` means a verification failure
+the registry-mutating step (immediately after, in the same job, for
+`publish-cli.yml`/`publish-py.yml`; in `publish-npm.yml` the call is in the
+`package` job, which only prepares tarballs — the actual `npm publish` runs
+afterward in the downstream `publish` job that `needs: [preflight,
+package]`). `--advisory` means a verification failure
 prints a `::warning::` annotation instead of failing the job — it never
 blocks a publish yet.
 
@@ -320,9 +324,11 @@ read the digest from a real manifest file directly, matching what the
 publish workflows themselves do).
 
 What's still open: promoting R5 to hard-blocking (see above), R4's evidence
-gate (still advisory-only, not wired into any publish workflow at all yet),
-and the rest of #230's PR 2 (R6's digest-safe publication state machine and
-R7's controlled cutover), neither of which is started.
+gate (still not wired into any publish workflow — it produces a standalone
+review artifact on qualifying PRs, not a pass/fail gate, so "advisory" vs
+"blocking" doesn't apply to it the way it does to R5), and the rest of #230's
+PR 2 (R6's digest-safe publication state machine and R7's controlled
+cutover), neither of which is started.
 
 ## Verify
 

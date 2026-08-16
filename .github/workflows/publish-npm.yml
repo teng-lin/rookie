@@ -16,7 +16,6 @@ env:
 
 permissions:
   contents: read
-  administration: read
 
 concurrency:
   group: publish-npm
@@ -275,12 +274,11 @@ jobs:
     name: Prepare immutable npm tarballs
     runs-on: ubuntu-latest
     # A job-level permissions: block replaces, not extends, the workflow's
-    # top-level one -- carry contents/administration forward and add
-    # actions: read for write-ci-proof.py's actions/jobs and actions/runs
-    # reads (see the "Verify non-spoofable CI proof" step below).
+    # top-level one -- carry contents forward and add actions: read for
+    # write-ci-proof.py's actions/jobs and actions/runs reads (see the
+    # "Verify non-spoofable CI proof" step below).
     permissions:
       contents: read
-      administration: read
       actions: read
     needs:
       - preflight
@@ -392,6 +390,22 @@ jobs:
             --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
             --output ../../release-packages/npm/scan/ci-proof.json \
             --advisory
+      # A dedicated upload, mirroring publish-cli.yml/publish-py.yml, so a
+      # verification failure (which never writes ci-proof.json at all) is
+      # visible here too, not only via the step's own ::warning:: above --
+      # `if-no-files-found: warn`, not `error`, since a missing file is an
+      # expected possible outcome of --advisory, not itself an error. This is
+      # in addition to, not instead of, the "Upload release tarballs" step
+      # below: that step's whole-directory upload already sweeps up
+      # ci-proof.json on success, but gives no failure signal of its own when
+      # the file was never written, since the rest of scan/ still exists.
+      - name: Upload CI proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-ci-proof
+          path: release-packages/npm/scan/ci-proof.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload release tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

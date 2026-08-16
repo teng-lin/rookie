@@ -36,7 +36,6 @@ jobs:
     needs: load-contract
     permissions:
       contents: write
-      administration: read
       # For write-ci-proof.py's actions/jobs and actions/runs reads -- see
       # the "Verify non-spoofable CI proof" step below.
       actions: read

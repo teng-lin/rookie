@@ -311,22 +311,30 @@ def main() -> int:
         problems.append(f"--commit-sha must be a lowercase 40-character commit SHA, got {args.commit_sha!r}")
 
     manifest_digest: str | None = None
-    if not problems:
-        manifest_digest, digest_problem = _resolve_manifest_digest(args)
-        if digest_problem is not None:
-            problems.append(digest_problem)
-        elif not DIGEST_PATTERN.fullmatch(manifest_digest):
-            problems.append(
-                f"manifest digest must be a lowercase 64-character SHA-256 hex digest, got {manifest_digest!r}"
-            )
-
     verified: list[dict[str, Any]] = []
     if not problems:
         try:
-            verified, verification_failures = verify_required_checks(args.repo, args.commit_sha)
-            problems.extend(verification_failures)
+            manifest_digest, digest_problem = _resolve_manifest_digest(args)
+            if digest_problem is not None:
+                problems.append(digest_problem)
+            elif not DIGEST_PATTERN.fullmatch(manifest_digest):
+                problems.append(
+                    f"manifest digest must be a lowercase 64-character SHA-256 hex digest, got {manifest_digest!r}"
+                )
+
+            if not problems:
+                verified, verification_failures = verify_required_checks(args.repo, args.commit_sha)
+                problems.extend(verification_failures)
         except ControlFailure as error:
             problems.append(f"CI proof could not be produced: {error}")
+        except Exception as error:  # noqa: BLE001
+            # --advisory's whole point is that a bug *here* must never be able
+            # to hard-block a real publish (see the module docstring) -- this
+            # is the backstop for anything not already anticipated by the
+            # narrower except clauses above and inside _resolve_manifest_digest
+            # (a manifest file with unexpected bytes, a malformed API response
+            # shape missing a field this code indexes directly, etc).
+            problems.append(f"CI proof could not be produced due to an unexpected error: {error!r}")
 
     if problems:
         return _report_failure(problems, advisory=args.advisory)

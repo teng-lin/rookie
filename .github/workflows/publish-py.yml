@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  administration: read
 
 concurrency:
   group: publish-pypi
