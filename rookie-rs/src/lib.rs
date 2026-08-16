@@ -24,13 +24,13 @@ pub use browser::{
 
 // Private
 mod browser;
+mod compatibility_dispatch;
 use anyhow::bail;
-#[cfg(target_os = "windows")]
-use anyhow::Context;
 pub use anyhow::{self, Result};
 use enums::Cookie;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -524,20 +524,7 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   )
 )]
 pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  #[cfg(target_os = "linux")]
-  {
-    let _ = domains;
-    bail!("Opera GX is not supported on Linux")
-  }
-  #[cfg(any(target_os = "macos", target_os = "windows"))]
-  {
-    named_browser("opera_gx", domains)
-  }
-  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-  {
-    let _ = domains;
-    bail!("Opera GX is not supported on {}", std::env::consts::OS)
-  }
+  compatibility_dispatch::opera_gx(domains)
 }
 
 /// Returns cookies from Octo Browser
@@ -628,46 +615,6 @@ where
   Ok(cookies)
 }
 
-type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
-
-/// The legacy `load` probe order is observable through cookie ordering and
-/// warning output. Keep construction separate from extraction so platform CI
-/// can pin the exact browser set without probing browsers installed on a host.
-fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
-  let mut browser_types: Vec<(&'static str, LoadFn)> = vec![
-    ("firefox", firefox),
-    ("zen", zen),
-    ("librewolf", librewolf),
-    ("opera", opera),
-    ("edge", edge),
-    ("chromium", chromium),
-    ("brave", brave),
-    ("vivaldi", vivaldi),
-    ("arc", arc),
-  ];
-
-  #[cfg(target_os = "windows")]
-  {
-    browser_types.push(("chrome", chrome));
-    browser_types.push(("internet_explorer", internet_explorer));
-    browser_types.push(("octo_browser", octo_browser));
-    browser_types.push(("opera_gx", opera_gx));
-  }
-  #[cfg(target_os = "linux")]
-  {
-    browser_types.push(("chrome", chrome));
-    browser_types.push(("cachy", cachy));
-  }
-  #[cfg(target_os = "macos")]
-  {
-    browser_types.push(("chrome", chrome));
-    browser_types.push(("opera_gx", opera_gx));
-    browser_types.push(("safari", safari));
-  }
-
-  browser_types
-}
-
 /// Returns cookies from all browsers
 ///
 /// This is a best-effort aggregator: each browser is probed in turn and
@@ -693,7 +640,7 @@ fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
 /// let cookies = rookie_cookies::load(Some(domains));
 /// ```
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let browser_types = legacy_load_browsers();
+  let browser_types = compatibility_dispatch::legacy_load_browsers();
   load_from_browsers(&browser_types, domains)
 }
 
@@ -723,7 +670,6 @@ fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
 /// let key_path = "C:\\Users\\User\\AppData\\Local\\BraveSoftware\\Brave-Browser\\User Data\\Local State";
 /// let cookies = rookie_cookies::any_browser(cookies_path, None, Some(key_path)).unwrap();
 /// ```
-#[allow(unused_variables)]
 #[deprecated(
   since = "0.6.0",
   note = "use direct_path::cookies_from_path with DirectPathRequest"
@@ -733,51 +679,7 @@ pub fn any_browser(
   domains: Option<Vec<String>>,
   key_path: Option<&str>,
 ) -> Result<Vec<Cookie>> {
-  let cookies_path = PathBuf::from(cookies_path);
-  match direct_path::classify_cookie_source_legacy(&cookies_path)? {
-    direct_path::CookieSourceKind::MozillaSqlite => firefox_based(cookies_path, domains),
-    direct_path::CookieSourceKind::ChromiumSqlite => {
-      #[cfg(target_os = "windows")]
-      {
-        let key_path = key_path.context(
-          "a Chromium Local State key file is required for a Chromium cookie database on Windows",
-        )?;
-        chromium_based(PathBuf::from(key_path), cookies_path, domains, false)
-      }
-      #[cfg(target_os = "linux")]
-      {
-        direct_path::legacy_automatic_chromium(cookies_path, domains)
-      }
-      #[cfg(target_os = "macos")]
-      {
-        direct_path::legacy_automatic_chromium(cookies_path, domains)
-      }
-      #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-      {
-        bail!("Chromium cookie extraction is unsupported on this Unix platform")
-      }
-    }
-    direct_path::CookieSourceKind::SafariBinaryCookies => {
-      #[cfg(target_os = "macos")]
-      {
-        safari_based(cookies_path, domains)
-      }
-      #[cfg(not(target_os = "macos"))]
-      {
-        bail!("Safari binary cookie files are only supported on macOS")
-      }
-    }
-    direct_path::CookieSourceKind::InternetExplorerEse => {
-      #[cfg(target_os = "windows")]
-      {
-        internet_explorer_based(cookies_path, domains, false)
-      }
-      #[cfg(not(target_os = "windows"))]
-      {
-        bail!("Internet Explorer WebCache files are only supported on Windows")
-      }
-    }
-  }
+  compatibility_dispatch::any_browser(cookies_path, domains, key_path)
 }
 
 #[cfg(test)]
@@ -991,87 +893,6 @@ mod tests {
       .expect("successful sources survive an intervening extraction error");
     let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
     assert_eq!(names, vec!["first", "second"]);
-  }
-
-  #[test]
-  fn legacy_load_browser_set_and_order_are_stable_for_this_platform() {
-    let names: Vec<_> = legacy_load_browsers()
-      .into_iter()
-      .map(|(name, _)| name)
-      .collect();
-
-    #[cfg(target_os = "linux")]
-    assert_eq!(
-      names,
-      vec![
-        "firefox",
-        "zen",
-        "librewolf",
-        "opera",
-        "edge",
-        "chromium",
-        "brave",
-        "vivaldi",
-        "arc",
-        "chrome",
-        "cachy",
-      ]
-    );
-
-    #[cfg(target_os = "macos")]
-    assert_eq!(
-      names,
-      vec![
-        "firefox",
-        "zen",
-        "librewolf",
-        "opera",
-        "edge",
-        "chromium",
-        "brave",
-        "vivaldi",
-        "arc",
-        "chrome",
-        "opera_gx",
-        "safari",
-      ]
-    );
-
-    #[cfg(target_os = "windows")]
-    assert_eq!(
-      names,
-      vec![
-        "firefox",
-        "zen",
-        "librewolf",
-        "opera",
-        "edge",
-        "chromium",
-        "brave",
-        "vivaldi",
-        "arc",
-        "chrome",
-        "internet_explorer",
-        "octo_browser",
-        "opera_gx",
-      ]
-    );
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    assert_eq!(
-      names,
-      vec![
-        "firefox",
-        "zen",
-        "librewolf",
-        "opera",
-        "edge",
-        "chromium",
-        "brave",
-        "vivaldi",
-        "arc",
-      ]
-    );
   }
 
   #[cfg(target_os = "linux")]
