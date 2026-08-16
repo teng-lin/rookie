@@ -3,6 +3,8 @@
 //! This module contains policy and result-shape compatibility only. It owns no
 //! browser paths, credentials, discovery, acquisition, parsing, or decryption.
 
+mod dispatch;
+
 use super::cookie_record::{FinalizedCookieRecord, LegacyProjectionSemantics};
 use super::mozilla::MozillaProfile;
 use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome, Termination};
@@ -273,25 +275,11 @@ pub(crate) fn browser_cookies_with_runtime(
       registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
       runtime,
     ),
-    #[cfg(target_os = "macos")]
-    "safari" => project_engine_outcome_with_runtime(
+    engine => dispatch::remaining_engine_cookies_with_runtime(
       &browser.canonical_id,
-      registry::legacy_safari_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
+      engine,
+      domains,
       runtime,
-    ),
-    #[cfg(target_os = "windows")]
-    "internet_explorer" => project_engine_outcome_with_runtime(
-      &browser.canonical_id,
-      registry::legacy_internet_explorer_outcome_with_runtime(
-        &browser.canonical_id,
-        domains,
-        runtime,
-      )?,
-      runtime,
-    ),
-    engine => bail!(
-      "browser {:?} uses unsupported engine {engine:?}",
-      browser.canonical_id
     ),
   }
 }
