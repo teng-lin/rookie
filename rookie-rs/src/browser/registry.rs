@@ -665,12 +665,17 @@ impl DiscoveryContext<RealDiscoveryFs> {
     Self::from_system_env(platform, env)
   }
 
-  /// `home` is best-effort, not mandatory: a non-Windows caller with no
-  /// `HOME` still resolves `{config_home}`/`{xdg_config_home}`-rooted
-  /// templates through `XDG_CONFIG_HOME`/`CHROME_CONFIG_HOME` alone, and any
-  /// `{home}`-rooted template resolves to absence rather than a partial path
-  /// (`resolve_template_for_selection` treats a missing token source as "no
-  /// match", not an error).
+  /// `home` is optional *when an alternative discovery root resolves*: a
+  /// non-Windows caller with no `HOME` but a usable `XDG_CONFIG_HOME` or
+  /// `CHROME_CONFIG_HOME` still resolves `{config_home}`/`{xdg_config_home}`
+  /// -rooted templates, and any `{home}`-rooted template resolves to absence
+  /// rather than a partial path (`resolve_template_for_selection` treats a
+  /// missing token source as "no match", not an error). But an environment
+  /// with none of `HOME`/`USERPROFILE` and none of its platform alternatives
+  /// gives discovery nothing to search at all — every root would silently
+  /// resolve to absence, indistinguishable from every browser being
+  /// genuinely uninstalled, which is exactly the "plausible empty success"
+  /// this crate's discovery contract rejects. That case still errors.
   fn from_system_env(platform: PlatformId, env: BTreeMap<OsString, OsString>) -> Result<Self> {
     let home_key = if platform == PlatformId::Windows {
       "USERPROFILE"
@@ -680,6 +685,22 @@ impl DiscoveryContext<RealDiscoveryFs> {
     let home = environment_value(platform, &env, home_key)
       .filter(|value| !value.is_empty())
       .map(PathBuf::from);
+    if home.is_none() {
+      let alternative_keys: &[&str] = if platform == PlatformId::Windows {
+        &["LOCALAPPDATA", "APPDATA"]
+      } else {
+        &["XDG_CONFIG_HOME", "CHROME_CONFIG_HOME"]
+      };
+      let has_alternative = alternative_keys
+        .iter()
+        .any(|key| environment_value(platform, &env, key).is_some_and(|value| !value.is_empty()));
+      if !has_alternative {
+        bail!(
+          "{home_key} is not set, and no alternative discovery root ({}) is available either",
+          alternative_keys.join("/")
+        );
+      }
+    }
     Ok(Self {
       platform,
       home,
@@ -1770,14 +1791,19 @@ where
       // `legacy_profile_id` (above) was computed from this same in-memory
       // discovery snapshot and only ever selects a profile that has a
       // selected source, so `selected_source()` returning `None` here should
-      // be unreachable. Treat it as "no legacy source in this installation"
-      // — the same outcome `selected_profiles.is_empty()` already produces
-      // for this selection mode — rather than trusting the invariant across
-      // a future refactor.
+      // be unreachable. Record it and skip this installation — the same
+      // outcome `selected_profiles.is_empty()` already produces for this
+      // selection mode — rather than either trusting the invariant silently
+      // or panicking if a future refactor breaks it.
       let Some(selected_source) = selected_profiles
         .first()
         .and_then(|profile| profile.selected_source())
       else {
+        report.discovery_issues.push(DiscoveryIssue::new(
+          "legacy_profile_missing_selected_source",
+          installation.path.clone(),
+          "legacy-first-profile selection picked a profile with no persistent cookie source",
+        ));
         continue;
       };
       if let Some((local_state_path, local_state)) =
@@ -3712,6 +3738,67 @@ mod tests {
       .expect("Firefox discovery without HOME is absence, not an error")
       .profiles
       .is_empty());
+  }
+
+  /// Every macOS root, for every registered browser, is `{home}`-rooted —
+  /// unlike Linux (which has `{config_home}` roots) or Windows (which has
+  /// `{local_app_data}`/`{roaming_app_data}` roots), macOS templates never
+  /// use `XDG_CONFIG_HOME`/`CHROME_CONFIG_HOME`. But an environment that
+  /// clears `HOME` while leaving one of those two variables set still counts
+  /// as "an alternative resolved" for `from_system_env`'s coarse per-platform
+  /// check (it cannot know a variable is irrelevant to every macOS
+  /// template), so construction still succeeds — and then every root
+  /// silently resolves to absence, exactly like a present-but-empty root
+  /// (`missing_non_chromium_roots_are_silent`).
+  #[test]
+  fn macos_system_context_without_home_resolves_every_root_to_absence() {
+    let env = BTreeMap::from([(
+      OsString::from("XDG_CONFIG_HOME"),
+      OsString::from("/irrelevant-to-every-macos-template"),
+    )]);
+    let context = DiscoveryContext::from_system_env(PlatformId::Macos, env)
+      .expect("an unrelated alternative variable still lets macOS discovery proceed");
+    assert!(context.home.is_none());
+
+    let registry = embedded_registry().expect("registry");
+    for browser_id in ["chrome", "safari", "firefox"] {
+      let definition = browser_definition(registry, PlatformId::Macos, browser_id)
+        .unwrap_or_else(|_| panic!("{browser_id} is registered on macOS"));
+      for root in &definition.roots {
+        assert!(
+          context.resolve_template(&root.template).is_none(),
+          "{browser_id} root {:?} must resolve to absence without HOME",
+          root.template
+        );
+      }
+    }
+
+    let chrome = discover_browser_with_context(&context, "chrome").expect("discover Chrome");
+    assert_eq!(chrome.detected_roots, 0);
+    assert!(chrome.issues.is_empty());
+    assert!(!chrome.all_detected_roots_failed());
+
+    let safari = discover_safari_with_context(&context, "safari").expect("discover Safari");
+    assert_eq!(safari.installations_detected, 0);
+    assert!(safari.discovery_issues.is_empty());
+    assert!(!safari.all_detected_roots_failed());
+  }
+
+  /// A fully bare environment (no `HOME`/`USERPROFILE` and none of its
+  /// platform alternatives) gives discovery nothing to search: every root
+  /// would silently resolve to absence, indistinguishable from every browser
+  /// being genuinely uninstalled. `from_system_env` must still error here —
+  /// this is the "plausible empty success" the environment-tolerance change
+  /// above must not introduce.
+  #[test]
+  fn completely_bare_environment_is_a_construction_error_on_every_platform() {
+    for platform in [PlatformId::Linux, PlatformId::Macos, PlatformId::Windows] {
+      let Err(error) = DiscoveryContext::from_system_env(platform, BTreeMap::new()) else {
+        panic!("{platform:?}: no home key and no platform alternative must not silently succeed");
+      };
+      let message = error.to_string();
+      assert!(message.contains("is not set"), "{platform:?}: {message}");
+    }
   }
 
   #[test]

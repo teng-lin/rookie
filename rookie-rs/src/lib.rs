@@ -43,7 +43,11 @@ mod windows;
 /// A named function such as [`chrome`] can only ever name the one browser it
 /// was written for. `Request` carries that same selection as a value, so it
 /// reaches any browser [`supported_browsers`] lists — including
-/// registry-only and alternate-channel entries no named function can name.
+/// registry-only entries (registered forks and alternate builds) no named
+/// function can name. It does not add channel selection: like the named
+/// functions, it always resolves one browser's first legacy-compatible
+/// profile — see [`browser`] for that limit and how to cover every profile
+/// instead.
 ///
 /// # Examples
 ///
@@ -53,6 +57,7 @@ mod windows;
 /// let cookies = rookie_cookies::extract(request)?;
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
   browser_id: String,
   domains: Option<Vec<String>>,
@@ -68,7 +73,13 @@ impl Request {
     }
   }
 
-  /// Restricts extraction to the given domains.
+  /// Restricts extraction to the given domains, or clears a prior
+  /// restriction on `None`.
+  ///
+  /// Takes `Option<Vec<String>>` rather than `Vec<String>` (unlike
+  /// [`direct_path::ChromiumPathRequest::domains`](crate::direct_path::ChromiumPathRequest::domains)/
+  /// [`direct_path::DirectPathRequest::domains`](crate::direct_path::DirectPathRequest::domains))
+  /// so [`browser`]'s own `Option` parameter forwards here directly.
   pub fn domains(mut self, domains: Option<Vec<String>>) -> Self {
     self.domains = domains;
     self
@@ -77,13 +88,17 @@ impl Request {
 
 /// Runs one [`Request`] and returns its cookies.
 ///
-/// `Request`/`extract` is the only execution path underneath every named
-/// compatibility function and [`browser`]: they build a `Request` and run it
-/// here rather than dispatching independently.
+/// `Request`/`extract` is the execution path underneath [`browser`] and
+/// every named compatibility function that selects one browser by a fixed
+/// string (e.g. [`chrome`], [`firefox`]) — they build a `Request` and run it
+/// here rather than dispatching independently. [`firefox_profile`] (which
+/// additionally selects a profile) and [`load`] (which iterates a browser
+/// set) do not.
 ///
 /// # Errors
 ///
-/// See [`browser`], which shares this function's error behavior.
+/// See [`browser`], which shares this function's error and selection
+/// behavior.
 ///
 /// # Examples
 ///
@@ -97,10 +112,14 @@ pub fn extract(request: Request) -> Result<Vec<Cookie>> {
 
 /// Extracts cookies from one registered browser by canonical ID or alias.
 ///
-/// Unlike the named selectors (e.g. [`chrome`], [`firefox`]), this reaches
-/// every browser [`supported_browsers`] lists, including registry-only and
-/// alternate-channel entries that have no dedicated named function. It is a
+/// This reaches every browser [`supported_browsers`] lists, including
+/// registry-only entries that have no dedicated named function (e.g.
+/// [`chrome`], [`firefox`]) — but, like those named selectors, it resolves
+/// only the browser's first installation and first legacy-compatible
+/// profile, not every profile of every installed channel. It is a
 /// convenience over [`extract`]`(`[`Request::browser`]`(id).domains(domains))`.
+/// Use [`browser_report`] or [`browser_profiles`] to cover every installation
+/// and profile instead.
 ///
 /// # Arguments
 ///
@@ -125,7 +144,7 @@ pub fn browser(id: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 
 /// Thin compatibility projection over registry-backed discovery/extraction.
 fn named_browser(name: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  extract(Request::browser(name).domains(domains))
+  browser(name, domains)
 }
 
 /// Extracts an explicit Chromium cookie database using registry-resolved key
@@ -1305,5 +1324,39 @@ mod tests {
     );
     assert_eq!(cookies[0].name, "net_cookie");
     assert_eq!(cookies[0].value, "net_val");
+  }
+
+  /// Complements `public_browser_and_extract_reach_registry_only_browsers_no_named_function_can_name`
+  /// (which only asserts on the error path) with a positive case: `browser`/
+  /// `extract(Request::browser(..))` actually resolve and read cookies from
+  /// CocCoc, a registered Chromium fork with no dedicated named function.
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn browser_and_extract_read_real_cookies_from_a_registry_only_browser() {
+    let home = crate::utils::TempDir::new().expect("create temp home");
+    let home_dir = home.path().to_path_buf();
+    let coccoc_dir = home_dir.join("Library/Application Support/Coccoc");
+    let default_dir = coccoc_dir.join("Default");
+    std::fs::create_dir_all(&default_dir).expect("create CocCoc default profile dir");
+    std::fs::write(coccoc_dir.join("Local State"), b"{}").expect("create Local State");
+    seed_test_cookies(&default_dir.join("Cookies"), "coccoc_cookie", "coccoc_val");
+
+    let env = std::collections::BTreeMap::from([(
+      std::ffi::OsString::from("HOME"),
+      home_dir.into_os_string(),
+    )]);
+    let _env_override = browser::registry::EnvOverride::install(env);
+
+    let cookies =
+      browser("coccoc", None).expect("browser(\"coccoc\", ..) should find and parse cookies");
+    assert_eq!(cookies.len(), 1, "expected 1 cookie, got {cookies:?}");
+    assert_eq!(cookies[0].name, "coccoc_cookie");
+    assert_eq!(cookies[0].value, "coccoc_val");
+
+    let cookies = extract(Request::browser("coccoc"))
+      .expect("extract(Request::browser(\"coccoc\")) should find and parse cookies");
+    assert_eq!(cookies.len(), 1, "expected 1 cookie, got {cookies:?}");
+    assert_eq!(cookies[0].name, "coccoc_cookie");
+    assert_eq!(cookies[0].value, "coccoc_val");
   }
 }

@@ -1218,6 +1218,14 @@ pub struct rookie_cookies::Request
 impl rookie_cookies::Request
 pub fn rookie_cookies::Request::browser(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn rookie_cookies::Request::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
+impl core::clone::Clone for rookie_cookies::Request
+pub fn rookie_cookies::Request::clone(&self) -> rookie_cookies::Request
+impl core::cmp::Eq for rookie_cookies::Request
+impl core::cmp::PartialEq for rookie_cookies::Request
+pub fn rookie_cookies::Request::eq(&self, &rookie_cookies::Request) -> bool
+impl core::fmt::Debug for rookie_cookies::Request
+pub fn rookie_cookies::Request::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::Request
 impl core::marker::Freeze for rookie_cookies::Request
 impl core::marker::Send for rookie_cookies::Request
 impl core::marker::Sync for rookie_cookies::Request

@@ -57,10 +57,10 @@ cargo add rookie-cookies anyhow
 ```
 
 ```rust
-use rookie_cookies::chrome;
+use rookie_cookies::browser;
 
 fn main() -> anyhow::Result<()> {
-    let cookies = chrome(Some(vec!["example.com".to_string()]))?;
+    let cookies = browser("chrome", Some(vec!["example.com".to_string()]))?;
     for cookie in cookies {
         println!("{} {}", cookie.domain, cookie.name);
     }

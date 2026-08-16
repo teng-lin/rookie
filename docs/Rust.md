@@ -12,8 +12,33 @@ cargo add rookie-cookies
 use rookie_cookies;
 
 fn main() {
-    let cookies = rookie_cookies::chrome(None).unwrap();
+    let cookies = rookie_cookies::browser("chrome", None).unwrap();
     println!("{cookies:?}");
+}
+```
+
+## One operation, any registered browser
+
+`browser(id, domains)` and the lower-level `extract(Request::browser(id))` are
+the canonical entry point: unlike a per-browser function, `id` can be any
+canonical ID or alias `supported_browsers()` lists, including registered forks
+and alternate builds with no dedicated function. Both resolve the same first
+installation and first legacy-compatible profile the older named functions
+(`chrome`, `firefox`, `brave`, ...) do — use `browser_report`/`browser_profiles`
+to cover every installation and profile instead.
+
+The named per-browser functions (`chrome`, `firefox`, `firefox_profile`,
+`brave`, ...) are `#[deprecated]` since 0.6.0 in favor of `browser`/`extract`
+and remain fully supported through the deprecation window; nothing below stops
+working.
+
+```rust
+fn main() -> rookie_cookies::Result<()> {
+    let request = rookie_cookies::Request::browser("chrome")
+        .domains(Some(vec!["example.com".to_string()]));
+    let cookies = rookie_cookies::extract(request)?;
+    println!("{cookies:?}");
+    Ok(())
 }
 ```
 
