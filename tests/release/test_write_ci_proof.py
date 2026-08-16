@@ -307,6 +307,129 @@ class MainTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertFalse(output.exists())
 
+    def test_manifest_flag_reads_the_digest_from_a_real_manifest_file(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text(
+                json.dumps({"release": {"manifest_digest": MANIFEST_DIGEST}, "artifacts": []}),
+                encoding="utf-8",
+            )
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            proof = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(proof["manifest_digest"], MANIFEST_DIGEST)
+
+    def test_manifest_flag_fails_closed_on_a_missing_digest_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest_path.write_text(json.dumps({"release": {}, "artifacts": []}), encoding="utf-8")
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
+
+    def test_advisory_exits_zero_and_prints_a_warning_annotation_on_failure(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        check_runs["check_runs"] = [
+            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest-digest",
+                    MANIFEST_DIGEST,
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ), mock.patch("builtins.print") as fake_print:
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0, "advisory mode must never exit non-zero")
+            self.assertFalse(output.exists())
+            printed = "\n".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
+            self.assertIn("::warning::", printed)
+            self.assertIn("cargo audit (blocking)", printed)
+
+    def test_advisory_exits_zero_and_writes_the_proof_on_success(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest-digest",
+                    MANIFEST_DIGEST,
+                    "--output",
+                    str(output),
+                    "--advisory",
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(output.exists())
+
 
 class MainArgumentValidationTests(unittest.TestCase):
     def test_rejects_a_short_commit_sha(self) -> None:
@@ -349,7 +472,49 @@ class MainArgumentValidationTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("manifest-digest", result.stderr)
+        self.assertIn("manifest digest", result.stderr)
+
+    def test_manifest_digest_and_manifest_are_mutually_exclusive(self) -> None:
+        script_path = REPOSITORY_ROOT / "scripts/write-ci-proof.py"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--repo",
+                REPO,
+                "--commit-sha",
+                COMMIT_SHA,
+                "--manifest-digest",
+                MANIFEST_DIGEST,
+                "--manifest",
+                "/tmp/unused-manifest.json",
+                "--output",
+                "/tmp/unused-ci-proof.json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed with argument", result.stderr)
+
+    def test_neither_manifest_digest_nor_manifest_is_an_error(self) -> None:
+        script_path = REPOSITORY_ROOT / "scripts/write-ci-proof.py"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--repo",
+                REPO,
+                "--commit-sha",
+                COMMIT_SHA,
+                "--output",
+                "/tmp/unused-ci-proof.json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("one of the arguments", result.stderr)
 
 
 if __name__ == "__main__":

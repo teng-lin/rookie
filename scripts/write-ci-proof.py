@@ -34,8 +34,17 @@ one specific release manifest, RFC 8785 JCS-hashed so it reproduces
 identically regardless of field order or host. "Attested" beyond that digest
 -- real cryptographic signing (Sigstore/OIDC-based attestation) -- is
 explicitly out of scope here, matching how PR 1's R3 already deferred full
-attestation to a later phase; this script is not wired into any
-`publish-*.yml` workflow and holds no mutation authority.
+attestation to a later phase; this script itself never mutates anything and
+holds no publish authority of its own.
+
+Wired into `publish-npm.yml`/`publish-cli.yml`/`publish-py.yml` (release-
+hardening program PR 2 slice 2) with `--advisory`: none of those workflows
+run on a PR's own CI (all three are `workflow_dispatch`-only), so this can't
+be live-validated against a real release before it ships, and a bug here
+must not be able to silently block a real publish. `--advisory` turns any
+failure into a `::warning::` annotation instead of a nonzero exit. Promote
+to hard-blocking (drop `--advisory` at each call site) once it has been
+observed working correctly on a real release -- see docs/RELEASING.md.
 
 Requires the `gh` CLI, authenticated, same as `check-release-controls.py`.
 """
@@ -236,47 +245,95 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="the release commit (40-hex) to verify required checks against",
     )
-    parser.add_argument(
+    digest_source = parser.add_mutually_exclusive_group(required=True)
+    digest_source.add_argument(
         "--manifest-digest",
-        required=True,
         help="release.manifest_digest from write-release-scan-manifest.py -- what this proof is bound to",
     )
+    digest_source.add_argument(
+        "--manifest",
+        type=Path,
+        help="path to a release-scan-manifest.json to read release.manifest_digest from directly",
+    )
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help=(
+            "never exit non-zero: print a GitHub Actions ::warning:: annotation on any "
+            "failure instead of failing the calling workflow step. For release-hardening "
+            "program R5's initial advisory-only rollout into publish-*.yml -- see "
+            "docs/RELEASING.md for the condition to drop this and hard-block instead."
+        ),
+    )
     return parser.parse_args()
+
+
+def _resolve_manifest_digest(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Returns `(digest, problem)` -- exactly one is `None`."""
+    if args.manifest_digest is not None:
+        return args.manifest_digest, None
+    try:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        digest = manifest["release"]["manifest_digest"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        return None, f"could not read release.manifest_digest from {args.manifest}: {error}"
+    if not isinstance(digest, str):
+        return None, f"{args.manifest}: release.manifest_digest is not a string (got {digest!r})"
+    return digest, None
+
+
+def _report_failure(problems: list[str], *, advisory: bool) -> int:
+    summary = "CI proof verification failed:\n" + "\n".join(f"- {problem}" for problem in problems)
+    if advisory:
+        # A single-line ::warning:: annotation, so it's visually loud in the
+        # Actions UI, followed by the full multi-line detail as ordinary log
+        # output (GitHub Actions workflow commands only recognize the first
+        # line of a `::warning::`, so the detail has to go separately to not
+        # be silently dropped).
+        print(
+            "::warning::CI proof verification failed (advisory-only for now, does not "
+            "block publish -- see docs/RELEASING.md and the log below for details)"
+        )
+        print(summary, file=sys.stderr)
+        return 0
+    print(summary, file=sys.stderr)
+    return 1
 
 
 def main() -> int:
     args = parse_args()
+    problems: list[str] = []
 
     if not args.repo:
-        print("error: --repo not given and $GITHUB_REPOSITORY is not set", file=sys.stderr)
-        return 1
+        problems.append("--repo not given and $GITHUB_REPOSITORY is not set")
     if not COMMIT_PATTERN.fullmatch(args.commit_sha):
-        print(f"error: --commit-sha must be a lowercase 40-character commit SHA, got {args.commit_sha!r}", file=sys.stderr)
-        return 1
-    if not DIGEST_PATTERN.fullmatch(args.manifest_digest):
-        print(
-            f"error: --manifest-digest must be a lowercase 64-character SHA-256 hex digest, "
-            f"got {args.manifest_digest!r}",
-            file=sys.stderr,
-        )
-        return 1
+        problems.append(f"--commit-sha must be a lowercase 40-character commit SHA, got {args.commit_sha!r}")
 
-    try:
-        verified, failures = verify_required_checks(args.repo, args.commit_sha)
-    except ControlFailure as error:
-        print(f"CI proof could not be produced: {error}", file=sys.stderr)
-        return 1
+    manifest_digest: str | None = None
+    if not problems:
+        manifest_digest, digest_problem = _resolve_manifest_digest(args)
+        if digest_problem is not None:
+            problems.append(digest_problem)
+        elif not DIGEST_PATTERN.fullmatch(manifest_digest):
+            problems.append(
+                f"manifest digest must be a lowercase 64-character SHA-256 hex digest, got {manifest_digest!r}"
+            )
 
-    if failures:
-        print("CI proof verification failed:", file=sys.stderr)
-        for failure in failures:
-            print(f"- {failure}", file=sys.stderr)
-        return 1
+    verified: list[dict[str, Any]] = []
+    if not problems:
+        try:
+            verified, verification_failures = verify_required_checks(args.repo, args.commit_sha)
+            problems.extend(verification_failures)
+        except ControlFailure as error:
+            problems.append(f"CI proof could not be produced: {error}")
+
+    if problems:
+        return _report_failure(problems, advisory=args.advisory)
 
     proof = {
         "schema_version": 1,
-        "manifest_digest": args.manifest_digest,
+        "manifest_digest": manifest_digest,
         "commit_sha": args.commit_sha,
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "checks": sorted(verified, key=lambda check: check["name"]),
@@ -285,7 +342,7 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
-    print(f"CI proof written for {args.repo}@{args.commit_sha}, bound to manifest digest {args.manifest_digest}.")
+    print(f"CI proof written for {args.repo}@{args.commit_sha}, bound to manifest digest {manifest_digest}.")
     return 0
 
 
