@@ -1,6 +1,8 @@
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::common::secret::SecretBytes;
+
 #[cfg(unix)]
 mod unix;
 #[cfg(not(any(unix, windows)))]
@@ -322,7 +324,7 @@ pub(crate) enum ChromiumKeyRoute<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LegacyCipherOutcome {
   #[cfg_attr(not(windows), allow(dead_code))]
-  Plaintext(Vec<u8>),
+  Plaintext(SecretBytes),
   #[cfg_attr(windows, allow(dead_code))]
   Unsupported(&'static str),
 }
@@ -343,7 +345,7 @@ pub(crate) fn validate_keyed_envelope(encrypted_value: &[u8]) -> anyhow::Result<
 pub(crate) fn decrypt_keyed_candidate(
   encrypted_value: &[u8],
   key: &[u8],
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<SecretBytes> {
   platform::decrypt_keyed_candidate(encrypted_value, key)
 }
 

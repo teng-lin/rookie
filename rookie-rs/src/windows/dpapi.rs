@@ -2,13 +2,23 @@ use std::{ffi::c_void, ptr};
 
 use anyhow::{anyhow, bail, Result};
 use windows::Win32::Security::Cryptography;
+use zeroize::Zeroize;
+
+use crate::common::secret::SecretBytes;
 
 #[link(name = "kernel32")]
 extern "system" {
   fn LocalFree(hmem: *mut c_void) -> *mut c_void;
 }
 
-pub fn decrypt(keydpapi: &[u8]) -> Result<Vec<u8>> {
+unsafe fn copy_native_plaintext_and_wipe(ptr: *mut u8, len: usize) -> SecretBytes {
+  let native_plaintext = std::slice::from_raw_parts_mut(ptr, len);
+  let plaintext = SecretBytes::new(native_plaintext.to_vec());
+  native_plaintext.zeroize();
+  plaintext
+}
+
+pub(crate) fn decrypt(keydpapi: &[u8]) -> Result<SecretBytes> {
   // https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
   // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-localfree
   // https://docs.rs/winapi/latest/winapi/um/dpapi/index.html
@@ -41,8 +51,12 @@ pub fn decrypt(keydpapi: &[u8]) -> Result<Vec<u8>> {
     bail!("CryptUnprotectData returned a null pointer");
   }
 
-  let decrypted_data =
-    unsafe { std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec() };
+  let decrypted_data = unsafe {
+    // `LocalFree` releases bytes without clearing them. Wipe the OS-owned
+    // allocation before attempting the free; the Rust copy is already guarded
+    // so both the success and later-error paths have explicit cleanup.
+    copy_native_plaintext_and_wipe(data_out.pbData, data_out.cbData as usize)
+  };
   // windows 0.51's Foundation::LocalFree wrapper treats the API's null
   // success return as an error, so call the raw Win32 function directly.
   unsafe {
@@ -55,4 +69,24 @@ pub fn decrypt(keydpapi: &[u8]) -> Result<Vec<u8>> {
     }
   };
   Ok(decrypted_data)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn native_plaintext_is_wiped_before_its_buffer_can_be_released() {
+    let sentinel = b"rookie-secret-sentinel-7e8b";
+    let mut native = sentinel.to_vec();
+    let allocation_len = native.len();
+    let copied = unsafe { copy_native_plaintext_and_wipe(native.as_mut_ptr(), native.len()) };
+    // Checking the original length as well as its contents keeps this test from
+    // accepting `Vec::clear`, which discards the logical length without wiping
+    // the backing allocation.
+    assert_eq!(native.len(), allocation_len);
+    assert!(native.iter().all(|byte| *byte == 0));
+    assert_eq!(copied.as_slice(), sentinel);
+    assert!(!format!("{copied:?}").contains("rookie-secret-sentinel"));
+  }
 }

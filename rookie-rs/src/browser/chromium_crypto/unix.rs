@@ -2,6 +2,8 @@ use super::LegacyCipherOutcome;
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use anyhow::{anyhow, Result};
 
+use crate::common::secret::SecretBytes;
+
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 pub(super) const CANDIDATE_KEY_LENGTH: Option<usize> = Some(16);
@@ -13,19 +15,25 @@ pub(super) fn validate_keyed_envelope(_encrypted_value: &[u8]) -> Result<()> {
   Ok(())
 }
 
-pub(super) fn decrypt_keyed_candidate(encrypted_value: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn decrypt_keyed_candidate(encrypted_value: &[u8], key: &[u8]) -> Result<SecretBytes> {
   let key_array: [u8; 16] = key
     .try_into()
     .map_err(|_| anyhow!("Chromium AES-CBC candidate key has an invalid length"))?;
   let iv: [u8; 16] = [b' '; 16];
   let cipher = Aes128CbcDec::new(&key_array.into(), &iv.into());
-  let mut ciphertext = encrypted_value
-    .get(3..)
-    .ok_or_else(|| anyhow!("Chromium encrypted value is shorter than its version prefix"))?
-    .to_vec();
+  let mut plaintext = SecretBytes::new(
+    encrypted_value
+      .get(3..)
+      .ok_or_else(|| anyhow!("Chromium encrypted value is shorter than its version prefix"))?
+      .to_vec(),
+  );
   cipher
-    .decrypt_padded_mut::<Pkcs7>(&mut ciphertext)
-    .map(|plaintext| plaintext.to_vec())
+    .decrypt_padded_mut::<Pkcs7>(plaintext.as_mut_slice())
+    .map(|decrypted| decrypted.len())
+    .map(|plaintext_len| {
+      plaintext.truncate(plaintext_len);
+      plaintext
+    })
     .map_err(|_| anyhow!("Chromium AES-CBC padding validation failed"))
 }
 
@@ -54,7 +62,9 @@ mod tests {
     let expected: Vec<u8> = (0u8..32).collect();
 
     assert_eq!(
-      decrypt_keyed_candidate(&ciphertext, &key).expect("decrypt known answer"),
+      decrypt_keyed_candidate(&ciphertext, &key)
+        .expect("decrypt known answer")
+        .as_slice(),
       expected
     );
     assert!(decrypt_keyed_candidate(&ciphertext, &[0; 15])

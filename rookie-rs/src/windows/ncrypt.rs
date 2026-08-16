@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use windows::{core::w, Win32::Security::Cryptography};
 
+use crate::common::secret::SecretBytes;
+
 /// Frees a CNG object handle on drop so early returns don't leak it.
 struct NcryptObject(Cryptography::NCRYPT_HANDLE);
 
@@ -17,7 +19,7 @@ impl Drop for NcryptObject {
 /// Decrypt data with the CNG key Chrome stores under the "Microsoft Software
 /// Key Storage Provider". Used by the App-Bound v20 key flag 3 introduced in
 /// Chrome 133+.
-pub fn decrypt(keydpapi: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn decrypt(keydpapi: &[u8]) -> Result<SecretBytes> {
   let mut provider_handle = Cryptography::NCRYPT_PROV_HANDLE::default();
   unsafe {
     Cryptography::NCryptOpenStorageProvider(
@@ -42,14 +44,14 @@ pub fn decrypt(keydpapi: &[u8]) -> Result<Vec<u8>> {
   }
   let _key_guard = NcryptObject(key_handle.into());
 
-  let mut output_buffer = vec![0u8; keydpapi.len()];
+  let mut output_buffer = SecretBytes::zeroed(keydpapi.len());
   let mut output_length = 0u32;
   unsafe {
     Cryptography::NCryptDecrypt(
       key_handle,
       Some(keydpapi),
       None,
-      Some(&mut output_buffer),
+      Some(output_buffer.as_mut_slice()),
       &mut output_length,
       Cryptography::NCRYPT_SILENT_FLAG,
     )

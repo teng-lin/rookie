@@ -5,6 +5,8 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, Context, Result};
 
+use crate::common::secret::SecretBytes;
+
 pub(super) const CANDIDATE_KEY_LENGTH: Option<usize> = Some(32);
 
 pub(super) fn validate_keyed_envelope(encrypted_value: &[u8]) -> Result<()> {
@@ -17,13 +19,14 @@ pub(super) fn validate_keyed_envelope(encrypted_value: &[u8]) -> Result<()> {
   Ok(())
 }
 
-pub(super) fn decrypt_keyed_candidate(encrypted_value: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn decrypt_keyed_candidate(encrypted_value: &[u8], key: &[u8]) -> Result<SecretBytes> {
   validate_keyed_envelope(encrypted_value)?;
   let cipher = Aes256Gcm::new_from_slice(key)
     .map_err(|_| anyhow!("Chromium AES-GCM candidate key has an invalid length"))?;
   let nonce = GenericArray::from_slice(&encrypted_value[3..15]);
   cipher
     .decrypt(nonce, &encrypted_value[15..])
+    .map(SecretBytes::new)
     .map_err(|_| anyhow!("Chromium AES-GCM authentication failed"))
 }
 
@@ -47,7 +50,9 @@ mod tests {
     ];
 
     assert_eq!(
-      decrypt_keyed_candidate(&encrypted_value, &key).expect("decrypt known answer"),
+      decrypt_keyed_candidate(&encrypted_value, &key)
+        .expect("decrypt known answer")
+        .as_slice(),
       b"known answer"
     );
     assert!(validate_keyed_envelope(b"v20short")

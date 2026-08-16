@@ -58,6 +58,27 @@ impl SecretBytes {
     Ok(SecretString::new(value))
   }
 
+  /// Converts a suffix to the caller-visible result string without leaving a
+  /// second plaintext allocation behind. Bytes outside the suffix are wiped
+  /// before the allocation is transferred.
+  pub(crate) fn into_output_string_from(mut self, start: usize) -> Result<String, SecretUtf8Error> {
+    let bytes = self.as_slice();
+    let suffix = bytes.get(start..).ok_or(SecretUtf8Error)?;
+    if std::str::from_utf8(suffix).is_err() {
+      return Err(SecretUtf8Error);
+    }
+
+    let mut bytes = self.bytes.take().expect("secret bytes are present");
+    if start > 0 {
+      let suffix_len = bytes.len() - start;
+      bytes.copy_within(start.., 0);
+      bytes[suffix_len..].zeroize();
+      bytes.truncate(suffix_len);
+    }
+    // Safety: the retained suffix was validated before the in-place move.
+    Ok(unsafe { String::from_utf8_unchecked(bytes) })
+  }
+
   #[cfg(windows)]
   pub(crate) fn into_zeroizing_vec(mut self) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(self.bytes.take().expect("secret bytes are present"))
@@ -109,6 +130,11 @@ impl SecretString {
 
   pub(crate) fn as_str(&self) -> &str {
     &self.value
+  }
+
+  #[cfg(target_os = "macos")]
+  pub(crate) fn trimmed(&self) -> Self {
+    Self::new(self.value.trim().to_owned())
   }
 }
 
@@ -189,23 +215,24 @@ mod tests {
 
   const SENTINEL: &str = "rookie-secret-sentinel-7e8b";
 
-  fn observe_drops(test: impl FnOnce()) -> Vec<DropObservation> {
+  fn observe_drops(test: impl FnOnce()) -> (Vec<DropObservation>, std::thread::Result<()>) {
     DROP_OBSERVATIONS.with(|observations| {
       assert!(observations.borrow().is_none());
       *observations.borrow_mut() = Some(Vec::new());
     });
-    test();
-    DROP_OBSERVATIONS.with(|observations| {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+    let observed = DROP_OBSERVATIONS.with(|observations| {
       observations
         .borrow_mut()
         .take()
         .expect("drop observations enabled")
-    })
+    });
+    (observed, outcome)
   }
 
   #[test]
   fn secret_frames_wipe_sentinel_allocations_on_success_and_failure_cleanup() {
-    let observed = observe_drops(|| {
+    let (observed, outcome) = observe_drops(|| {
       let password = SecretString::new(SENTINEL.to_owned());
       let password_clone = password.clone();
       drop(password);
@@ -217,12 +244,29 @@ mod tests {
         .expect_err("invalid UTF-8 must retain and wipe the source frame");
     });
 
+    assert!(outcome.is_ok());
     assert_eq!(observed.len(), 3);
     assert!(observed.iter().all(|(_, original_len, wiped)| {
       *original_len >= SENTINEL.len()
         && wiped.len() == *original_len
         && wiped.iter().all(|byte| *byte == 0)
     }));
+  }
+
+  #[test]
+  fn panic_unwind_wipes_the_full_secret_allocation_before_deallocation() {
+    let (observed, outcome) = observe_drops(|| {
+      let _secret = SecretBytes::new(SENTINEL.as_bytes().to_vec());
+      panic!("intentional unwind after allocating a secret frame");
+    });
+
+    assert!(outcome.is_err());
+    assert_eq!(observed.len(), 1);
+    let (kind, original_len, wiped) = &observed[0];
+    assert_eq!(*kind, SecretKind::Bytes);
+    assert_eq!(*original_len, SENTINEL.len());
+    assert_eq!(wiped.len(), *original_len);
+    assert!(wiped.iter().all(|byte| *byte == 0));
   }
 
   #[test]
@@ -245,6 +289,14 @@ mod tests {
     value.as_mut_slice()[0] = b'R';
     value.truncate(6);
     assert_eq!(value.as_slice(), b"Rookie");
+  }
+
+  #[test]
+  fn output_conversion_reuses_the_secret_frame_and_wipes_removed_prefix() {
+    let value = SecretBytes::new(b"prefixcookie-value".to_vec())
+      .into_output_string_from(6)
+      .expect("valid suffix");
+    assert_eq!(value, "cookie-value");
   }
 
   #[test]

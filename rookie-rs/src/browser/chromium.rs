@@ -1,4 +1,4 @@
-use crate::common::{date, enums::*, sqlite, utils};
+use crate::common::{date, enums::*, secret::SecretBytes, sqlite, utils};
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -215,7 +215,7 @@ impl std::error::Error for ChromiumCookieDecodeError {}
 /// directly, including values longer than 32 bytes.
 fn decode_chromium_cookie_value(
   host_key: &str,
-  plaintext: Vec<u8>,
+  plaintext: SecretBytes,
   schema_version: u32,
 ) -> std::result::Result<String, ChromiumCookieDecodeError> {
   let host_hash_required = schema_version >= CHROMIUM_HOST_HASH_SCHEMA_VERSION;
@@ -226,7 +226,8 @@ fn decode_chromium_cookie_value(
   if plaintext.len() >= CHROMIUM_HOST_HASH_LEN {
     let expected_host_hash = Sha256::digest(host_key.as_bytes());
     if plaintext[..CHROMIUM_HOST_HASH_LEN] == expected_host_hash[..] {
-      return String::from_utf8(plaintext[CHROMIUM_HOST_HASH_LEN..].to_vec())
+      return plaintext
+        .into_output_string_from(CHROMIUM_HOST_HASH_LEN)
         .map_err(|_| ChromiumCookieDecodeError::InvalidUtf8AfterVerifiedHostHash);
     }
 
@@ -234,11 +235,14 @@ fn decode_chromium_cookie_value(
       return Err(ChromiumCookieDecodeError::HostHashMismatch);
     }
 
-    return String::from_utf8(plaintext)
+    return plaintext
+      .into_output_string_from(0)
       .map_err(|_| ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8);
   }
 
-  String::from_utf8(plaintext).map_err(|_| ChromiumCookieDecodeError::UnprefixedInvalidUtf8)
+  plaintext
+    .into_output_string_from(0)
+    .map_err(|_| ChromiumCookieDecodeError::UnprefixedInvalidUtf8)
 }
 
 fn chromium_schema_version(connection: &rusqlite::Connection) -> Result<u32> {
@@ -524,7 +528,7 @@ fn decrypt_encrypted_value_with_cipher_adapter<Validate, Candidate, Legacy>(
 ) -> std::result::Result<String, ChromiumCookieValueError>
 where
   Validate: Fn(&[u8]) -> Result<()>,
-  Candidate: Fn(&[u8], &[u8]) -> Result<Vec<u8>>,
+  Candidate: Fn(&[u8], &[u8]) -> Result<SecretBytes>,
   Legacy: Fn(&[u8]) -> Result<LegacyCipherOutcome>,
 {
   let CipherAdapter {
@@ -1166,6 +1170,10 @@ mod tests {
     let mut plaintext = Sha256::digest(host_key.as_bytes()).to_vec();
     plaintext.extend_from_slice(value);
     plaintext
+  }
+
+  fn secret_bytes(bytes: impl Into<Vec<u8>>) -> SecretBytes {
+    SecretBytes::new(bytes.into())
   }
 
   // (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
@@ -2073,10 +2081,10 @@ mod tests {
         decrypt_candidate: |_: &[u8], key: &[u8]| {
           if key[0] == 0x10 {
             events.borrow_mut().push("candidate-1");
-            Ok(vec![0xff])
+            Ok(secret_bytes(vec![0xff]))
           } else {
             events.borrow_mut().push("candidate-2");
-            Ok(b"decoded".to_vec())
+            Ok(secret_bytes(b"decoded".to_vec()))
           }
         },
         decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
@@ -2103,7 +2111,7 @@ mod tests {
           let call = calls.get() + 1;
           calls.set(call);
           if call == 1 {
-            Ok(vec![0xff])
+            Ok(secret_bytes(vec![0xff]))
           } else {
             Err(anyhow!("later primitive failure"))
           }
@@ -2139,7 +2147,9 @@ mod tests {
         },
         decrypt_legacy: |_: &[u8]| {
           events.borrow_mut().push("legacy");
-          Ok(LegacyCipherOutcome::Plaintext(expected.clone()))
+          Ok(LegacyCipherOutcome::Plaintext(secret_bytes(
+            expected.clone(),
+          )))
         },
       },
     )
@@ -2187,11 +2197,11 @@ mod tests {
   #[test]
   fn decode_cookie_value_strips_only_the_exact_stored_host_hash() {
     let plaintext = host_bound_plaintext(".example.com", b"cookie value");
-    let decoded =
-      decode_chromium_cookie_value(".example.com", plaintext.clone(), 23).expect("host match");
+    let decoded = decode_chromium_cookie_value(".example.com", secret_bytes(plaintext.clone()), 23)
+      .expect("host match");
     assert_eq!(decoded, "cookie value");
     assert_eq!(
-      decode_chromium_cookie_value("example.com", plaintext, 23),
+      decode_chromium_cookie_value("example.com", secret_bytes(plaintext), 23),
       Err(ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8),
       "the leading dot in the stored host is part of the exact hash input"
     );
@@ -2200,14 +2210,15 @@ mod tests {
   #[test]
   fn decode_cookie_value_maps_an_exact_hash_only_plaintext_to_empty() {
     let plaintext = host_bound_plaintext(".example.com", b"");
-    let decoded = decode_chromium_cookie_value(".example.com", plaintext, 23).expect("hash only");
+    let decoded =
+      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 23).expect("hash only");
     assert_eq!(decoded, "");
   }
 
   #[test]
   fn decode_cookie_value_preserves_valid_utf8_when_a_32_byte_prefix_mismatches() {
     let plaintext = b"this old unprefixed value is longer than thirty-two bytes".to_vec();
-    let decoded = decode_chromium_cookie_value(".example.com", plaintext.clone(), 23)
+    let decoded = decode_chromium_cookie_value(".example.com", secret_bytes(plaintext.clone()), 23)
       .expect("old unprefixed value");
     assert_eq!(decoded.as_bytes(), plaintext);
   }
@@ -2217,7 +2228,7 @@ mod tests {
     let mut plaintext = vec![0xff; CHROMIUM_HOST_HASH_LEN];
     plaintext.extend_from_slice(b"must not be stripped");
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", plaintext, 23),
+      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 23),
       Err(ChromiumCookieDecodeError::HostHashMismatchWithInvalidUtf8)
     );
   }
@@ -2225,12 +2236,13 @@ mod tests {
   #[test]
   fn decode_cookie_value_preserves_short_and_old_unprefixed_utf8() {
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", b"short".to_vec(), 23).expect("short value"),
+      decode_chromium_cookie_value(".example.com", secret_bytes(b"short".to_vec()), 23)
+        .expect("short value"),
       "short"
     );
     let old = "x".repeat(CHROMIUM_HOST_HASH_LEN + 8);
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", old.as_bytes().to_vec(), 23)
+      decode_chromium_cookie_value(".example.com", secret_bytes(old.as_bytes().to_vec()), 23)
         .expect("old long value"),
       old
     );
@@ -2239,13 +2251,13 @@ mod tests {
   #[test]
   fn decode_cookie_value_requires_an_exact_host_hash_for_v24_and_later() {
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", b"short".to_vec(), 24),
+      decode_chromium_cookie_value(".example.com", secret_bytes(b"short".to_vec()), 24),
       Err(ChromiumCookieDecodeError::MissingRequiredHostHash)
     );
     assert_eq!(
       decode_chromium_cookie_value(
         ".example.com",
-        b"this valid UTF-8 value has no matching host hash prefix".to_vec(),
+        secret_bytes(b"this valid UTF-8 value has no matching host hash prefix".to_vec()),
         24,
       ),
       Err(ChromiumCookieDecodeError::HostHashMismatch)
@@ -2253,7 +2265,8 @@ mod tests {
 
     let plaintext = host_bound_plaintext(".example.com", b"bound value");
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", plaintext, 24).expect("verified host hash"),
+      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 24)
+        .expect("verified host hash"),
       "bound value"
     );
   }
@@ -2332,7 +2345,7 @@ mod tests {
   fn decode_cookie_value_rejects_invalid_utf8_after_a_verified_hash() {
     let plaintext = host_bound_plaintext(".example.com", &[0xff]);
     assert_eq!(
-      decode_chromium_cookie_value(".example.com", plaintext, 23),
+      decode_chromium_cookie_value(".example.com", secret_bytes(plaintext), 23),
       Err(ChromiumCookieDecodeError::InvalidUtf8AfterVerifiedHostHash)
     );
   }

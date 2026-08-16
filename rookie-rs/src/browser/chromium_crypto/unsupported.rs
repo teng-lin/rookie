@@ -1,13 +1,15 @@
 use super::LegacyCipherOutcome;
 use anyhow::{bail, Result};
 
+use crate::common::secret::SecretBytes;
+
 pub(super) const CANDIDATE_KEY_LENGTH: Option<usize> = None;
 
 pub(super) fn validate_keyed_envelope(_encrypted_value: &[u8]) -> Result<()> {
   Ok(())
 }
 
-pub(super) fn decrypt_keyed_candidate(_encrypted_value: &[u8], _key: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn decrypt_keyed_candidate(_encrypted_value: &[u8], _key: &[u8]) -> Result<SecretBytes> {
   bail!("Chromium keyed cookie decryption is unsupported on this platform")
 }
 

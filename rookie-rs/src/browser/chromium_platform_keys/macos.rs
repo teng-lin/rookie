@@ -1,18 +1,18 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
 use super::create_pbkdf2_key;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
+use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
-use zeroize::Zeroizing;
 
 trait MacosKeychainBackend {
-  fn password(&self, service: &str, user: &str) -> Result<Zeroizing<String>>;
+  fn password(&self, service: &str, user: &str) -> Result<SecretString>;
 }
 
 struct SystemMacosKeychainBackend;
 
 impl MacosKeychainBackend for SystemMacosKeychainBackend {
-  fn password(&self, service: &str, user: &str) -> Result<Zeroizing<String>> {
+  fn password(&self, service: &str, user: &str) -> Result<SecretString> {
     crate::macos::get_osx_keychain_password(service, user)
   }
 }
@@ -109,11 +109,11 @@ mod tests {
 
   struct FakeMacosBackend {
     calls: Cell<usize>,
-    result: Result<Zeroizing<String>>,
+    result: Result<SecretString>,
   }
 
   impl MacosKeychainBackend for FakeMacosBackend {
-    fn password(&self, _service: &str, _user: &str) -> Result<Zeroizing<String>> {
+    fn password(&self, _service: &str, _user: &str) -> Result<SecretString> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -141,7 +141,7 @@ mod tests {
   fn macos_uses_only_the_password_returned_by_keychain() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok(Zeroizing::new("keychain".to_string())),
+      result: Ok(SecretString::new("keychain".to_string())),
     };
     let credentials = macos_credentials();
     let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
@@ -182,7 +182,7 @@ mod tests {
   fn macos_mock_password_is_used_only_when_the_configured_backend_returns_it() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok(Zeroizing::new("mock_password".to_string())),
+      result: Ok(SecretString::new("mock_password".to_string())),
     };
     let credentials = macos_credentials();
     let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
@@ -198,7 +198,7 @@ mod tests {
   fn macos_without_keychain_identity_has_no_implicit_candidates() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok(Zeroizing::new("must not be read".to_string())),
+      result: Ok(SecretString::new("must not be read".to_string())),
     };
     let credentials = ChromiumKeyCredentials::default();
     let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
@@ -213,7 +213,7 @@ mod tests {
   fn macos_registered_missing_identity_is_failure_but_direct_empty_is_not_applicable() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
-      result: Ok(Zeroizing::new("must not be read".to_string())),
+      result: Ok(SecretString::new("must not be read".to_string())),
     };
     let credentials = ChromiumKeyCredentials::default();
 
@@ -261,7 +261,7 @@ mod tests {
       let credentials = ChromiumKeyCredentials::from_legacy_browser(&config);
       let backend = FakeMacosBackend {
         calls: Cell::new(0),
-        result: Ok(Zeroizing::new("must not be read".to_string())),
+        result: Ok(SecretString::new("must not be read".to_string())),
       };
 
       let outcomes =

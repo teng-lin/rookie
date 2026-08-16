@@ -5,6 +5,8 @@ use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine as _};
 use zeroize::Zeroizing;
 
+use crate::common::secret::SecretBytes;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalStateKey<'a> {
   Missing,
@@ -56,13 +58,13 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
     let wrapped_len = decoded_len - 5;
     // Wrap the unwrapped master key immediately so it is zeroized as soon as
     // this scope ends, rather than left in freed heap memory.
-    let v10_key = Zeroizing::new(crate::windows::dpapi::decrypt(&wrapped[5..]).map_err(
-      |error| {
+    let v10_key = crate::windows::dpapi::decrypt(&wrapped[5..])
+      .map(SecretBytes::into_zeroizing_vec)
+      .map_err(|error| {
         anyhow::anyhow!(
           "Failed to unwrap DPAPI encrypted key (decoded_length={decoded_len}, wrapped_length={wrapped_len}): {error}"
         )
-      },
-    )?);
+      })?;
     if v10_key.len() != 32 {
       bail!(
         "DPAPI unwrapped key length was {}, expected 32 (decoded_length={}, wrapped_length={})",
