@@ -24,7 +24,6 @@ mod other;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use other as platform;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn remaining_engine_report(
   browser_id: &BrowserId,
   canonical_id: &str,
