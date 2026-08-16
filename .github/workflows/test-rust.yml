@@ -96,6 +96,12 @@ jobs:
           cargo run --manifest-path rookie-rs/Cargo.toml --bin generate-dto-schema --features dto-schema -- schema/report-dto.schema.json
           python3 scripts/generate-python-dto.py
           git diff --exit-code schema/report-dto.schema.json bindings/python/rookie_cookies/dto.py
+      - name: Check platform cfg locations
+        # See issue #218: cfg-location-allowlist.toml is the only place a
+        # target_os/windows/unix cfg is allowed to appear outside a
+        # capability leaf. This is the final rollout item of that program.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: cargo run -p xtask --locked -- check-cfg-locations
 
   cargo-audit:
     name: cargo audit (blocking)

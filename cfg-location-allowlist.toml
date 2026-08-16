@@ -1,0 +1,110 @@
+# Files permitted to contain a platform-conditional `cfg`/`cfg_attr`
+# attribute (target_os/windows/unix/macos/linux/freebsd/android/ios),
+# checked by `cargo run -p xtask -- check-cfg-locations`. See issue #218
+# ("Contain platform cfg behind capability modules for 0.6.0").
+#
+# `leaves` are capability-leaf modules where platform cfg is the intended,
+# permanent selection or containment mechanism -- module-selection gates in
+# a dispatch mod.rs (the repeated `#[cfg(target_os = "...")] mod x; #[cfg(
+# target_os = "...")] use x as platform;` pattern), a wholesale
+# single-target implementation file, a `shared.rs` helper living inside an
+# already-contained capability directory, or an engine-specific registry
+# leaf (browser/registry/{internet_explorer,safari}.rs) whose internal cfg
+# gates only native acquisition around an otherwise-portable parser, per
+# #218's own "Portable Safari/IE parsers... may remain cross-host testable;
+# native acquisition stays target-gated" invariant. No count limit -- these
+# are expected to carry cfg forever, and to grow as their capability grows.
+#
+# `grandfathered` are core files that still have scattered cfg #218's
+# rollout never targeted for full elimination (the issue's own problem
+# statement names browser/chromium.rs, browser/registry.rs, and lib.rs as
+# the original hot spots; none of the ten merged rollout PRs claim to have
+# fully contained any of them). Each entry pins the exact cfg-attribute
+# count the checker found when this allowlist was created: the checker
+# fails if that count goes UP (new cfg leaking into a core file instead of
+# a leaf) but allows it to go down for free (further containment landing
+# here later doesn't need this file touched). Raising a ceiling needs a
+# one-line reason in the same PR that raises it.
+#
+# Regenerate this list's counts with: `cargo run -p xtask -- list-cfg-locations`.
+
+[leaves]
+paths = [
+  # PR 1 (#219): mechanical Chromium key-provider split.
+  "rookie-rs/src/browser/chromium_platform_keys/mod.rs",
+  "rookie-rs/src/browser/chromium_platform_keys/shared.rs",
+  "rookie-rs/src/browser/chromium_platform_keys/linux.rs",
+  "rookie-rs/src/browser/chromium_platform_keys/macos.rs",
+  "rookie-rs/src/browser/chromium_platform_keys/windows.rs",
+  "rookie-rs/src/browser/chromium_platform_keys/unsupported.rs",
+
+  # PR 3 (#221): cipher adapters.
+  "rookie-rs/src/browser/chromium_crypto/mod.rs",
+  "rookie-rs/src/browser/chromium_crypto/unix.rs",
+  "rookie-rs/src/browser/chromium_crypto/windows.rs",
+  "rookie-rs/src/browser/chromium_crypto/unsupported.rs",
+
+  # PR 4 (#222): database acquisition.
+  "rookie-rs/src/browser/chromium_database_acquisition/mod.rs",
+  "rookie-rs/src/browser/chromium_database_acquisition/windows.rs",
+
+  # PR 5a (#224): deliberate 0.6 Rust direct-path API. mod.rs mixes
+  # selection gates with dependency-free-but-target-scoped source
+  # classification, both accepted parts of this PR's design, not debt.
+  "rookie-rs/src/direct_path/mod.rs",
+  "rookie-rs/src/direct_path/shared.rs",
+  "rookie-rs/src/direct_path/linux.rs",
+  "rookie-rs/src/direct_path/macos.rs",
+  "rookie-rs/src/direct_path/windows.rs",
+  "rookie-rs/src/direct_path/unsupported.rs",
+
+  # Later containment: IE/WebCache registry adapter (#227).
+  "rookie-rs/src/browser/registry/internet_explorer.rs",
+
+  # Later containment: Safari registry adapter (#231).
+  "rookie-rs/src/browser/registry/safari.rs",
+
+  # Later containment: crate-root compatibility dispatch (#233).
+  "rookie-rs/src/compatibility_dispatch/mod.rs",
+  "rookie-rs/src/compatibility_dispatch/linux.rs",
+  "rookie-rs/src/compatibility_dispatch/macos.rs",
+  "rookie-rs/src/compatibility_dispatch/windows.rs",
+  "rookie-rs/src/compatibility_dispatch/unsupported.rs",
+
+  # Later containment: legacy projection dispatch (#242).
+  "rookie-rs/src/browser/legacy/dispatch/mod.rs",
+  "rookie-rs/src/browser/legacy/dispatch/macos.rs",
+  "rookie-rs/src/browser/legacy/dispatch/windows.rs",
+  "rookie-rs/src/browser/legacy/dispatch/other.rs",
+
+  # Later containment: report assembly dispatch (#242).
+  "rookie-rs/src/browser/report_build/dispatch/mod.rs",
+  "rookie-rs/src/browser/report_build/dispatch/macos.rs",
+  "rookie-rs/src/browser/report_build/dispatch/windows.rs",
+  "rookie-rs/src/browser/report_build/dispatch/other.rs",
+]
+
+[grandfathered]
+# Named in #218's own problem statement as the four original hot spots;
+# no rollout PR claims to have fully contained these.
+"rookie-rs/src/browser/chromium.rs" = { max_cfg = 60, reason = "original #218 hot spot, not a rollout target" }
+"rookie-rs/src/browser/registry.rs" = { max_cfg = 27, reason = "original #218 hot spot; includes the IE/Safari leaf call sites" }
+"rookie-rs/src/lib.rs" = { max_cfg = 27, reason = "original #218 hot spot, not a rollout target" }
+
+# Portable parsers/models with some internal native-acquisition gating,
+# never claimed as a completed containment target by name.
+"rookie-rs/src/browser/safari.rs" = { max_cfg = 9, reason = "portable Safari parser; native acquisition gating not yet moved to a leaf" }
+"rookie-rs/src/browser/internet_explorer_model.rs" = { max_cfg = 1, reason = "IE data model, predates #227's registry-adapter containment" }
+
+# Small, low-traffic core files with a handful of legitimate but
+# unreviewed-for-containment branches.
+"rookie-rs/src/browser/mod.rs" = { max_cfg = 2, reason = "crate browser-module root" }
+"rookie-rs/src/browser/outcome.rs" = { max_cfg = 1, reason = "not a rollout target" }
+"rookie-rs/src/browser/report_build.rs" = { max_cfg = 1, reason = "not a rollout target" }
+"rookie-rs/src/browser/report_core.rs" = { max_cfg = 3, reason = "not a rollout target" }
+"rookie-rs/src/common/date.rs" = { max_cfg = 1, reason = "not a rollout target" }
+"rookie-rs/src/common/deadline.rs" = { max_cfg = 3, reason = "not a rollout target" }
+"rookie-rs/src/common/secret.rs" = { max_cfg = 5, reason = "not a rollout target" }
+"rookie-rs/src/common/sqlite.rs" = { max_cfg = 1, reason = "not a rollout target" }
+"rookie-rs/src/config.rs" = { max_cfg = 6, reason = "not a rollout target" }
+"rookie-rs/src/utils.rs" = { max_cfg = 3, reason = "not a rollout target" }
