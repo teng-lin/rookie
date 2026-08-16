@@ -7,10 +7,23 @@ use super::super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, 
 use super::super::chromium_platform_keys::{
   ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession, MacosKeychainCredentials,
 };
-use super::*;
+use super::{
+  browser_definition, embedded_registry, installation_id, is_informational_discovery_issue,
+  normalized_path_bytes, profile_id, BrowserDefinition, BrowserEngine, DiscoveryContext,
+  DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, InstallationRoot, PlatformId, ProfileLocator,
+  ProfileSelection, SourceAcquisition, MAX_DISCOVERY_ISSUE_SAMPLES,
+};
+#[cfg(test)]
+use super::{
+  capability_descriptor, registered_browsers_for, sort_cookies, GlobExpansion, GlobExpansionIssue,
+  RealDiscoveryFs,
+};
 use crate::common::diagnostic::REDACTED_PATH;
+#[cfg(test)]
+use crate::common::enums::Cookie;
 use anyhow::{anyhow, bail, Context, Result};
-use std::collections::HashSet;
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Deserialize)]
@@ -166,7 +179,7 @@ pub(super) struct BrowserInstallation {
   profiles: Vec<ChromiumProfile>,
 }
 
-pub(super) fn legacy_chromium_profile_group(
+fn legacy_chromium_profile_group(
   layout: LegacyChromiumProfileLayout,
   directory_name: &str,
 ) -> Option<u8> {
@@ -183,7 +196,7 @@ pub(super) fn legacy_chromium_profile_group(
   }
 }
 
-pub(super) fn add_legacy_flat_chromium_profiles<F: DiscoveryFs>(
+fn add_legacy_flat_chromium_profiles<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   discovery: &mut ChromiumDiscovery,
 ) {
@@ -241,13 +254,13 @@ impl ChromiumDiscovery {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct LocalStateMetadata {
+struct LocalStateMetadata {
   last_used: Option<String>,
   active_profiles: Vec<String>,
   display_names: BTreeMap<String, String>,
 }
 
-pub(super) fn parse_local_state(contents: &str) -> Result<LocalStateMetadata> {
+fn parse_local_state(contents: &str) -> Result<LocalStateMetadata> {
   let value: serde_json::Value =
     serde_json::from_str(contents).context("parse Local State JSON")?;
   let profile = value.get("profile").and_then(serde_json::Value::as_object);
@@ -289,7 +302,7 @@ pub(super) fn parse_local_state(contents: &str) -> Result<LocalStateMetadata> {
   })
 }
 
-pub(super) fn persistent_candidates<F: DiscoveryFs>(
+fn persistent_candidates<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   profile_path: &Path,
 ) -> Vec<CookieSourceCandidate> {
@@ -316,10 +329,7 @@ pub(super) fn persistent_candidates<F: DiscoveryFs>(
   candidates
 }
 
-pub(super) fn profile_has_source<F: DiscoveryFs>(
-  context: &DiscoveryContext<F>,
-  path: &Path,
-) -> bool {
+fn profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
   context.fs.exists(&path.join("Network/Cookies")) || context.fs.exists(&path.join("Cookies"))
 }
 
@@ -330,7 +340,7 @@ pub(super) fn profile_has_source<F: DiscoveryFs>(
 /// the historical Default, Network, and flat Opera layouts. Generic reports do
 /// not call this gate: they may still return plaintext rows while reporting key
 /// failures for encrypted rows.
-pub(super) fn legacy_windows_local_state<F: DiscoveryFs>(
+fn legacy_windows_local_state<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   source: &Path,
 ) -> Result<Option<(PathBuf, serde_json::Value)>> {
@@ -363,27 +373,24 @@ pub(super) fn legacy_windows_local_state<F: DiscoveryFs>(
 
 // Tencent-derived forks (QQ Browser, Sogou Explorer) write their profile
 // settings to `Preferences_02` and never create a plain `Preferences`.
-pub(super) const CHROMIUM_PROFILE_MARKER_FILES: [&str; 2] = ["Preferences", "Preferences_02"];
+const CHROMIUM_PROFILE_MARKER_FILES: [&str; 2] = ["Preferences", "Preferences_02"];
 
 // Names Chromium reserves next to real profiles in `profile_manager.cc`.
 // Neither holds a user cookie store.
-pub(super) const CHROMIUM_NON_PROFILE_DIRECTORIES: [&str; 2] = ["System Profile", "Guest Profile"];
+const CHROMIUM_NON_PROFILE_DIRECTORIES: [&str; 2] = ["System Profile", "Guest Profile"];
 
-pub(super) fn has_profile_marker_file<F: DiscoveryFs>(
-  context: &DiscoveryContext<F>,
-  path: &Path,
-) -> bool {
+fn has_profile_marker_file<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
   CHROMIUM_PROFILE_MARKER_FILES.iter().any(|marker| {
     let marker = path.join(marker);
     context.fs.exists(&marker) && !context.fs.is_dir(&marker)
   })
 }
 
-pub(super) fn is_chromium_service_directory(name: &str) -> bool {
+fn is_chromium_service_directory(name: &str) -> bool {
   CHROMIUM_NON_PROFILE_DIRECTORIES.contains(&name)
 }
 
-pub(super) fn discover_installation_profiles<F: DiscoveryFs>(
+fn discover_installation_profiles<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   installation: &mut BrowserInstallation,
   seen_profiles: &mut HashSet<Vec<u8>>,
@@ -604,7 +611,7 @@ pub(super) fn discover_browser_with_context<F: DiscoveryFs>(
   discover_browser_with_context_and_selection(context, browser_id, ProfileSelection::AllProfiles)
 }
 
-pub(super) fn discover_browser_with_context_and_selection<F: DiscoveryFs>(
+fn discover_browser_with_context_and_selection<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   selection: ProfileSelection<'_>,
@@ -857,7 +864,7 @@ where
   )
 }
 
-pub(super) fn extract_chromium_with_provider_runtime<F, P>(
+fn extract_chromium_with_provider_runtime<F, P>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   profile_id: Option<&str>,
@@ -879,7 +886,7 @@ where
   )
 }
 
-pub(super) fn extract_chromium_with_provider_and_selection<F, P>(
+fn extract_chromium_with_provider_and_selection<F, P>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   selection: ProfileSelection<'_>,
@@ -897,7 +904,7 @@ where
   )
 }
 
-pub(super) fn extract_chromium_with_provider_and_selection_runtime<F, P>(
+fn extract_chromium_with_provider_and_selection_runtime<F, P>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   selection: ProfileSelection<'_>,
@@ -1216,9 +1223,7 @@ pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<Option<crate:
   }
 }
 
-pub(super) fn project_key_credentials(
-  credentials: Option<&KeyCredentials>,
-) -> ChromiumKeyCredentials {
+fn project_key_credentials(credentials: Option<&KeyCredentials>) -> ChromiumKeyCredentials {
   ChromiumKeyCredentials {
     linux_crypt_name: credentials.and_then(|credentials| credentials.linux_crypt_name.clone()),
     macos_keychain: credentials
@@ -1232,7 +1237,7 @@ pub(super) fn project_key_credentials(
 
 /// Compatibility adapter for direct APIs that still accept `config::Browser`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn provider_input(credentials: &ChromiumKeyCredentials) -> crate::config::Browser {
+fn provider_input(credentials: &ChromiumKeyCredentials) -> crate::config::Browser {
   let keychain = credentials.macos_keychain.as_ref();
   crate::config::Browser {
     paths: Vec::new(),
@@ -1243,11 +1248,9 @@ pub(super) fn provider_input(credentials: &ChromiumKeyCredentials) -> crate::con
   }
 }
 
-pub(super) struct SystemKeyProvider;
+struct SystemKeyProvider;
 
-pub(super) fn key_request_for_installation(
-  installation: &BrowserInstallation,
-) -> ChromiumKeyRequest<'_> {
+fn key_request_for_installation(installation: &BrowserInstallation) -> ChromiumKeyRequest<'_> {
   ChromiumKeyRequest::for_installation(
     &installation.browser_id,
     &installation.key_credentials,
@@ -1278,7 +1281,7 @@ impl KeyProvider<BrowserInstallation> for SystemKeyProvider {
 /// their declared order. Profiles without a usable hint retain the generic
 /// discovery order, so a missing, stale, or malformed hint safely falls back
 /// to the default-first result.
-pub(super) fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
+fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   chrome_profiles_with_runtime(&runtime)
@@ -1295,13 +1298,13 @@ pub(crate) fn chrome_profiles_with_runtime(
 /// Internal generic Chromium listing seam. Public callers reach it through the
 /// cross-engine descriptor API; compatibility wrappers use the same discovery
 /// with [`ProfileSelection::LegacyFirstProfile`].
-pub(super) fn chromium_profiles(browser_id: &str) -> Result<Vec<ChromiumProfile>> {
+fn chromium_profiles(browser_id: &str) -> Result<Vec<ChromiumProfile>> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   chromium_profiles_with_runtime(browser_id, &runtime)
 }
 
-pub(super) fn chromium_profiles_with_runtime(
+fn chromium_profiles_with_runtime(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<ChromiumProfile>> {
@@ -1316,7 +1319,7 @@ pub(super) fn chromium_profiles_with_runtime(
   Ok(profiles)
 }
 
-pub(super) fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
+fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
   profiles.sort_by_key(|profile| {
     if profile.is_last_used {
       (0, 0)
@@ -1335,7 +1338,7 @@ pub(super) fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
 /// is rejected instead of silently trusting an advisory activity hint. The
 /// opaque profile ID is always lossless; callers must use it when a descriptor
 /// marks its display path as lossy.
-pub(super) fn select_chrome_profile(profile: &str) -> Result<ChromiumProfile> {
+fn select_chrome_profile(profile: &str) -> Result<ChromiumProfile> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   select_chrome_profile_with_runtime(profile, &runtime)
@@ -1350,7 +1353,7 @@ pub(crate) fn select_chrome_profile_with_runtime(
   select_chromium_profile(&profiles, profile).cloned()
 }
 
-pub(super) fn select_chromium_profile<'a>(
+fn select_chromium_profile<'a>(
   profiles: &'a [ChromiumProfile],
   selector: &str,
 ) -> Result<&'a ChromiumProfile> {
@@ -1399,9 +1402,7 @@ pub(super) fn select_chromium_profile<'a>(
   }
 }
 
-pub(super) fn describe_chromium_profiles<'a>(
-  profiles: impl Iterator<Item = &'a ChromiumProfile>,
-) -> String {
+fn describe_chromium_profiles<'a>(profiles: impl Iterator<Item = &'a ChromiumProfile>) -> String {
   profiles
     .map(|profile| {
       format!(
@@ -1413,10 +1414,7 @@ pub(super) fn describe_chromium_profiles<'a>(
     .join(", ")
 }
 
-pub(super) fn lost_chromium_profile_error(
-  browser_id: &str,
-  issues: &[DiscoveryIssue],
-) -> Option<String> {
+fn lost_chromium_profile_error(browser_id: &str, issues: &[DiscoveryIssue]) -> Option<String> {
   let lost_profiles = issues
     .iter()
     .filter(|issue| {
@@ -1467,7 +1465,7 @@ pub(crate) struct ChromiumListing {
   pub(crate) all_detected_roots_failed: bool,
 }
 
-pub(super) fn chromium_listing(browser_id: &str) -> Result<ChromiumListing> {
+fn chromium_listing(browser_id: &str) -> Result<ChromiumListing> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   chromium_listing_with_runtime(browser_id, &runtime)
@@ -1492,7 +1490,7 @@ pub(crate) fn chromium_listing_with_runtime(
 
 /// Private generic Chromium report seam covering every registered
 /// Chromium-family browser.
-pub(super) fn chromium_registry_report(
+fn chromium_registry_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
@@ -1525,7 +1523,7 @@ pub(crate) fn chromium_registry_report_with_runtime(
 ///
 /// `None` means the browser has no legacy-compatible cookie source. Real
 /// discovery, key-provider, acquisition, query, or row failures remain errors.
-pub(super) fn legacy_chromium_outcome(
+fn legacy_chromium_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
 ) -> Result<ChromiumRegistryDraft> {
@@ -1553,10 +1551,7 @@ pub(crate) fn legacy_chromium_outcome_with_runtime(
 }
 
 /// Private Milestone 3C ID-based selector/report seam.
-pub(super) fn chrome_profile(
-  profile_id: &str,
-  domains: Option<Vec<String>>,
-) -> Result<ChromiumRegistryDraft> {
+fn chrome_profile(profile_id: &str, domains: Option<Vec<String>>) -> Result<ChromiumRegistryDraft> {
   let context = DiscoveryContext::system()?;
   extract_chromium_with_provider(
     &context,

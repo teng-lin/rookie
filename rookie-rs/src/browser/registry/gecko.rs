@@ -1,22 +1,35 @@
 use super::super::mozilla;
-use super::*;
+use super::{
+  browser_definition, canonical_installation_root, embedded_registry, installation_id,
+  installation_root_is_directory, normalized_path_bytes, profile_id, push_bounded_discovery_issue,
+  retain_completed_engine_work, select_engine_profiles, sort_engine_profiles, BrowserEngine,
+  DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, EngineExtractionDraft,
+  EngineProfileDraft, EngineSourceDraft, InstallationRoot, ProfileLocator, ProfileSelection,
+  SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT,
+  SOURCE_ROLE_SESSION,
+};
+#[cfg(test)]
+use super::{
+  sort_cookies, test_seams, DatabaseAcquisitionStrategy, PlatformId, MAX_DISCOVERY_ISSUE_SAMPLES,
+};
+#[cfg(test)]
+use crate::common::enums::Cookie;
 use anyhow::{bail, Result};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub(super) const GECKO_PERSISTENT_SOURCE: &str = "cookies.sqlite";
+const GECKO_PERSISTENT_SOURCE: &str = "cookies.sqlite";
 
-pub(super) fn gecko_profile_has_source<F: DiscoveryFs>(
-  context: &DiscoveryContext<F>,
-  path: &Path,
-) -> bool {
+fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {
   context.fs.exists(&path.join(GECKO_PERSISTENT_SOURCE))
     || mozilla::SESSION_CANDIDATES
       .iter()
       .any(|(relative, _)| context.fs.exists(&path.join(relative)))
 }
 
-pub(super) fn source_candidate(
+fn source_candidate(
   path: PathBuf,
   role: &'static str,
   format: &'static str,
@@ -73,7 +86,7 @@ pub(super) fn gecko_profiles_with_context<F: DiscoveryFs>(
   Ok(outcome)
 }
 
-pub(super) fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   gecko_profiles_with_runtime(browser_id, &runtime)
@@ -91,12 +104,12 @@ pub(crate) fn gecko_profiles_with_runtime(
   Ok(profiles)
 }
 
-pub(super) struct MarkerlessGeckoProfiles {
+struct MarkerlessGeckoProfiles {
   profiles: Vec<mozilla::MozillaProfile>,
   optional_container_error: Option<anyhow::Error>,
 }
 
-pub(super) fn markerless_gecko_profiles<F: DiscoveryFs>(
+fn markerless_gecko_profiles<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   root: &Path,
 ) -> Result<MarkerlessGeckoProfiles> {
@@ -371,7 +384,7 @@ pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
 /// report. Production takes the same path through
 /// [`gecko_report_with_context`], so the profile selection below is the one
 /// that ships.
-pub(super) fn gecko_report_with_query<F: DiscoveryFs, Q>(
+fn gecko_report_with_query<F: DiscoveryFs, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   profile_id: Option<&str>,
@@ -405,7 +418,7 @@ where
   populate_gecko_sources_with_order(outcome, domains, query, persistent_exists, true)
 }
 
-pub(super) fn populate_gecko_sources_with_order<Q, E>(
+fn populate_gecko_sources_with_order<Q, E>(
   mut outcome: EngineExtractionDraft,
   domains: Option<&[String]>,
   mut query: Q,
@@ -531,7 +544,7 @@ where
   outcome
 }
 
-pub(super) fn gecko_report(
+fn gecko_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
@@ -560,7 +573,7 @@ pub(crate) fn gecko_report_with_runtime(
   Ok(retain_gecko_runtime_stop(outcome, runtime))
 }
 
-pub(super) fn retain_gecko_runtime_stop(
+fn retain_gecko_runtime_stop(
   mut outcome: EngineExtractionDraft,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> EngineExtractionDraft {
@@ -573,7 +586,7 @@ pub(super) fn retain_gecko_runtime_stop(
   outcome
 }
 
-pub(super) fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionDraft) {
+fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionDraft) {
   // Generic Gecko reports remain display-name sorted. The compatibility
   // selector instead uses the default profile when it has cookies.sqlite,
   // then falls back in profiles.ini declaration order within each root.
@@ -594,7 +607,7 @@ pub(super) fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionDraft) {
   });
 }
 
-pub(super) fn select_legacy_gecko_profile(outcome: &mut EngineExtractionDraft) {
+fn select_legacy_gecko_profile(outcome: &mut EngineExtractionDraft) {
   sort_legacy_gecko_profiles(outcome);
   outcome.profiles.truncate(1);
 }
@@ -602,7 +615,7 @@ pub(super) fn select_legacy_gecko_profile(outcome: &mut EngineExtractionDraft) {
 /// Extracts the first persistent Gecko profile through the authoritative
 /// discovery engine. Session-only profiles remain available to reports but do
 /// not silently change the historical named-API contract.
-pub(super) fn legacy_gecko_outcome(
+fn legacy_gecko_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionDraft> {
@@ -633,7 +646,7 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
 
 /// Lists persistent Gecko profiles in the same deterministic registry order
 /// used by the compatibility selector.
-pub(super) fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   legacy_gecko_profiles_with_runtime(browser_id, &runtime)
