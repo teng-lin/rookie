@@ -1182,11 +1182,11 @@ mod tests {
   fn unsupported_native_chromium_options_fail_before_credential_io() {
     let (_directory, path) = chromium_database(&[]);
     let local_state = PathBuf::from("this path must never be read");
-    let local_state_error = chromium_cookies_from_path(
-      ChromiumPathRequest::new(&path)
-        .credentials(ChromiumCredentialSource::LocalStateFile(local_state.clone())),
-    )
-    .unwrap_err();
+    let local_state_error =
+      chromium_cookies_from_path(ChromiumPathRequest::new(&path).credentials(
+        ChromiumCredentialSource::LocalStateFile(local_state.clone()),
+      ))
+      .unwrap_err();
     assert_eq!(
       direct_path_error(&local_state_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
@@ -1297,8 +1297,14 @@ mod tests {
     )
     .unwrap_err();
     let detailed_diagnostic = format!("{detailed_error:#}");
-    assert!(detailed_diagnostic.contains("has no"), "{detailed_diagnostic}");
-    assert!(detailed_diagnostic.contains("identity"), "{detailed_diagnostic}");
+    assert!(
+      detailed_diagnostic.contains("has no"),
+      "{detailed_diagnostic}"
+    );
+    assert!(
+      detailed_diagnostic.contains("identity"),
+      "{detailed_diagnostic}"
+    );
 
     let safari_directory = TempDir::new().unwrap();
     let safari_path = safari_directory.path().join("Cookies.binarycookies");
@@ -1346,10 +1352,7 @@ mod tests {
     assert_eq!(error.kind(), "invalid_options");
     assert_eq!(error.code(), "unknown_browser_id");
     assert_eq!(error.path(), None);
-    assert_eq!(
-      error.source_kind(),
-      Some(CookieSourceKind::ChromiumSqlite)
-    );
+    assert_eq!(error.source_kind(), Some(CookieSourceKind::ChromiumSqlite));
     assert_eq!(error.target_os(), None);
     assert_eq!(error.target_arch(), None);
     assert_eq!(error.invalid_source_reason(), None);

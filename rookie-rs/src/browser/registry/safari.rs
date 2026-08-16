@@ -667,12 +667,9 @@ mod tests {
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
 
-    let error = discover_safari_with_context_using_runtime(
-      &context,
-      "chrome",
-      &runtime,
-      |_, _| unreachable!("engine mismatch must fail before profile discovery starts"),
-    )
+    let error = discover_safari_with_context_using_runtime(&context, "chrome", &runtime, |_, _| {
+      unreachable!("engine mismatch must fail before profile discovery starts")
+    })
     .expect_err("chrome is a Chromium browser id, not a Safari one");
     assert!(
       error.to_string().contains("is not a"),
@@ -742,14 +739,16 @@ mod tests {
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
 
-    let outcome = discover_safari_with_context_using_runtime(&context, "safari", &runtime, |_, _| {
-      unreachable!("a root that cannot be canonicalized must never reach profile discovery")
-    })
-    .expect("a canonicalize failure is a discovery issue, not a hard error");
+    let outcome =
+      discover_safari_with_context_using_runtime(&context, "safari", &runtime, |_, _| {
+        unreachable!("a root that cannot be canonicalized must never reach profile discovery")
+      })
+      .expect("a canonicalize failure is a discovery issue, not a hard error");
     assert!(outcome.profiles.is_empty());
     assert_eq!(outcome.discovery_issues.len(), 1);
     assert_eq!(
-      outcome.discovery_issues[0].code, "installation_canonicalize_failed",
+      outcome.discovery_issues[0].code,
+      "installation_canonicalize_failed",
     );
   }
 
@@ -821,12 +820,8 @@ mod tests {
     .expect("safari_profiles_with_runtime should discover the synthetic legacy home");
     assert_eq!(profiles.profiles.len(), 1);
 
-    let report = safari_report(
-      "safari",
-      None,
-      None,
-    )
-    .expect("safari_report should discover and query the synthetic legacy home");
+    let report = safari_report("safari", None, None)
+      .expect("safari_report should discover and query the synthetic legacy home");
     assert_eq!(report.profiles.len(), 1);
 
     let legacy = legacy_safari_outcome("safari", None)

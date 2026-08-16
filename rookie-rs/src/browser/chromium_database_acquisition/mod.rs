@@ -477,7 +477,10 @@ mod tests {
     };
     let display = database_disallowed.to_string();
     assert!(display.contains("database is share-locked"), "{display}");
-    assert!(display.contains("process shutdown is disabled"), "{display}");
+    assert!(
+      display.contains("process shutdown is disabled"),
+      "{display}"
+    );
     let debug = format!("{database_disallowed:?}");
     assert!(debug.starts_with("WindowsDatabaseLocked {"), "{debug}");
     assert!(debug.contains("locked_file: Database"), "{debug}");
@@ -499,7 +502,10 @@ mod tests {
       os_error: ERROR_LOCK_VIOLATION_CODE,
     };
     let display = wal_allowed.to_string();
-    assert!(display.contains("write-ahead log is share-locked"), "{display}");
+    assert!(
+      display.contains("write-ahead log is share-locked"),
+      "{display}"
+    );
     assert!(
       display.contains("explicit process shutdown did not make it readable"),
       "{display}"
@@ -519,7 +525,8 @@ mod tests {
     );
 
     let retry_error = anyhow!("post-shutdown retry failed");
-    let both = WindowsShadowFallbackFailure::new(&anyhow!("shadow unavailable"), Some(&retry_error));
+    let both =
+      WindowsShadowFallbackFailure::new(&anyhow!("shadow unavailable"), Some(&retry_error));
     let message = both.to_string();
     assert!(message.contains("shadow unavailable"), "{message}");
     assert!(
@@ -539,7 +546,9 @@ mod tests {
       Some(ERROR_SHARING_VIOLATION_CODE)
     );
     assert_eq!(
-      windows_sharing_code(&std::io::Error::from_raw_os_error(ERROR_LOCK_VIOLATION_CODE)),
+      windows_sharing_code(&std::io::Error::from_raw_os_error(
+        ERROR_LOCK_VIOLATION_CODE
+      )),
       Some(ERROR_LOCK_VIOLATION_CODE)
     );
     assert_eq!(
@@ -1198,9 +1207,7 @@ mod tests {
         }
       },
       || panic!("a no-WAL source must not inspect privilege"),
-      |_| -> Result<WindowsFallbackSource<()>> {
-        panic!("a no-WAL source must not be raw-copied")
-      },
+      |_| -> Result<WindowsFallbackSource<()>> { panic!("a no-WAL source must not be raw-copied") },
       |_| true,
     )
     .expect_err("a retry that stays unclassified surfaces the retry error as-is");

@@ -110,9 +110,8 @@ mod tests {
   fn internet_explorer_from_path_is_unsupported_off_windows() {
     let clock = crate::common::deadline::SystemClock;
     let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-    let error =
-      internet_explorer_from_path(PathBuf::from("/tmp/WebCacheV01.dat"), None, &runtime)
-        .unwrap_err();
+    let error = internet_explorer_from_path(PathBuf::from("/tmp/WebCacheV01.dat"), None, &runtime)
+      .unwrap_err();
     assert_eq!(
       error.to_string(),
       "Internet Explorer WebCache files are only supported on Windows"
