@@ -12,6 +12,31 @@ const CHROMIUM_PATH_OPTION_KEYS: &[&str] = &[
   "plaintext_only",
 ];
 
+#[cfg(test)]
+mod tests {
+  use super::CHROMIUM_PATH_OPTION_KEYS;
+
+  /// This binding surface has no way to request a locked-database process
+  /// shutdown: `validate_option_keys` rejects any key outside this fixed
+  /// allowlist, and no destructive-acquisition key is in it. A caller can
+  /// name only the keys listed here — never `force_kill` or
+  /// `locked_database_policy` — so a destructive authorization can only be
+  /// constructed by an in-crate Rust adapter, never through this binding.
+  #[test]
+  fn chromium_path_options_never_expose_a_destructive_acquisition_key() {
+    for destructive_key in [
+      "force_kill",
+      "locked_database_policy",
+      "allow_process_shutdown",
+    ] {
+      assert!(
+        !CHROMIUM_PATH_OPTION_KEYS.contains(&destructive_key),
+        "{destructive_key} must never become a settable Chromium path option"
+      );
+    }
+  }
+}
+
 fn option_value<'py>(
   options: &'py Bound<'py, PyDict>,
   key: &str,
