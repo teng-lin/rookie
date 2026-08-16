@@ -2935,323 +2935,10 @@ fn engine_roots<'a>(
 }
 
 #[cfg(any(target_os = "macos", test))]
-const SAFARI_COOKIE_FILE: &str = "Cookies.binarycookies";
-
-/// Safari's registry root is `{home}/Library`, which every macOS account owns
-/// whether or not Safari is installed, so the root alone proves nothing. Every
-/// location profile discovery reads descends from one of these two Safari-owned
-/// paths: the sandbox container for modern versions, the bare cookie jar for
-/// pre-sandbox ones.
-#[cfg(any(target_os = "macos", test))]
-const SAFARI_INSTALLATION_MARKERS: [&str; 2] = [
-  "Containers/com.apple.Safari",
-  "Cookies/Cookies.binarycookies",
-];
-
-/// Only provable absence of every marker rejects the root. A marker that
-/// cannot be inspected -- the usual shape of a Full Disk Access denial -- keeps
-/// Safari detected so the report explains the denial instead of claiming
-/// Safari is not installed.
-#[cfg(any(target_os = "macos", test))]
-fn has_safari_installation_marker<F: DiscoveryFs>(
-  context: &DiscoveryContext<F>,
-  library: &Path,
-) -> bool {
-  SAFARI_INSTALLATION_MARKERS.iter().any(|marker| {
-    !matches!(
-      context.fs.metadata(&library.join(marker)),
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound
-    )
-  })
-}
-
-/// Crate-private generic Safari seam. Named profiles come from PR #137's
-/// database-first discovery; this adapter only reshapes them, so legacy
-/// `safari()` first-match selection is untouched.
-#[cfg(any(target_os = "macos", test))]
-fn discover_safari_with_context<F: DiscoveryFs>(
-  context: &DiscoveryContext<F>,
-  browser_id: &str,
-) -> Result<EngineExtractionOutcome> {
-  use super::safari;
-
-  let registry = embedded_registry()?;
-  let (definition, roots) = engine_roots(
-    registry,
-    context.platform,
-    browser_id,
-    BrowserEngine::Safari,
-  )?;
-  let mut seen_installations = HashSet::new();
-  let mut seen_profiles = HashSet::new();
-  let mut outcome = EngineExtractionOutcome::default();
-
-  for root in roots {
-    if root.discovery != DiscoveryStrategy::SafariDefaultProfile {
-      continue;
-    }
-    let Some(resolved_root) = context.resolve_template(&root.template) else {
-      continue;
-    };
-    // Non-Chromium registry templates never glob, so the suffix is literal.
-    let root_path = resolved_root.base.join(resolved_root.suffix);
-    if !installation_root_is_directory(context, &root_path, &mut outcome)
-      || !has_safari_installation_marker(context, &root_path)
-    {
-      continue;
-    }
-    let Some(canonical_root) =
-      canonical_installation_root(context, root_path, &mut seen_installations, &mut outcome)
-    else {
-      continue;
-    };
-    let installation_id = installation_id(
-      &definition.canonical_id,
-      &root.root_id,
-      &root.channel,
-      &normalized_path_bytes(&canonical_root),
-    );
-
-    // Safari profile discovery degrades to the default profile instead of
-    // failing, so a canonicalized root is always enumerated.
-    outcome.installations_enumerated += 1;
-    let (profiles, discovery_warning) = safari::discover_safari_profiles(&canonical_root);
-    if let Some(warning) = discovery_warning {
-      // A fallback that still enumerated named profiles is a degradation; one
-      // that failed too means they were never enumerated, which is a loss and
-      // must not be reported at warning severity.
-      let code = match warning {
-        safari::SafariProfileDiscoveryIssue::Degraded(_) => "safari_profile_discovery_degraded",
-        safari::SafariProfileDiscoveryIssue::EnumerationFailed(_) => {
-          "safari_profile_enumeration_failed"
-        }
-      };
-      outcome.discovery_issues.push(DiscoveryIssue::new(
-        code,
-        canonical_root.clone(),
-        warning.message(),
-      ));
-    }
-
-    for (legacy_profile_order, profile) in profiles.into_iter().enumerate() {
-      let selected = match safari::first_existing_cookie_candidate(&profile.cookie_candidates) {
-        Ok(Some(path)) => path.clone(),
-        // A discovered profile with no cookie source is normal absence, not an
-        // extraction failure, so it is not listed as a report profile.
-        Ok(None) => {
-          outcome.discovery_issues.push(DiscoveryIssue::new(
-            "profile_has_no_cookie_source",
-            canonical_root.join(&profile.name),
-            "Safari profile has no cookie source".to_owned(),
-          ));
-          continue;
-        }
-        Err(error) => {
-          outcome.discovery_issues.push(DiscoveryIssue::new(
-            "profile_source_inspection_failed",
-            canonical_root.join(&profile.name),
-            format!("{error:#}"),
-          ));
-          continue;
-        }
-      };
-      let precedence = profile
-        .cookie_candidates
-        .iter()
-        .position(|candidate| candidate == &selected)
-        .map_or(PERSISTENT_SOURCE_PRECEDENCE, |index| {
-          PERSISTENT_SOURCE_PRECEDENCE * (index as u16 + 1)
-        });
-      let source_directory = selected
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| canonical_root.clone());
-      let profile_path = match context.fs.canonicalize(&source_directory) {
-        Ok(path) => path,
-        Err(error) => {
-          outcome.discovery_issues.push(DiscoveryIssue::new(
-            "profile_canonicalize_failed",
-            source_directory,
-            error.to_string(),
-          ));
-          continue;
-        }
-      };
-      if !seen_profiles.insert(normalized_path_bytes(&profile_path)) {
-        outcome.discovery_issues.push(DiscoveryIssue::new(
-          "duplicate_profile",
-          profile_path,
-          "profile is already owned by an earlier registry root".to_owned(),
-        ));
-        continue;
-      }
-      let locator = profile_path
-        .strip_prefix(&canonical_root)
-        .map(ProfileLocator::Relative)
-        .unwrap_or(ProfileLocator::Absolute(&profile_path));
-      let source_path = profile_path.join(SAFARI_COOKIE_FILE);
-      let source = EngineSourceExtraction {
-        path: source_path,
-        role: SOURCE_ROLE_PERSISTENT,
-        format: "safari_binarycookies",
-        precedence,
-        selected: true,
-        cookies: Vec::new(),
-        rows_seen: 0,
-        rows_skipped: 0,
-        acquisition: SourceAcquisition::StableFileImage,
-        // Replaced with the real count once acquisition runs; discovery-only
-        // listings never attempt a read.
-        acquisition_attempts: 0,
-        diagnostics: Vec::new(),
-        error: None,
-        error_stage: SourceFailureStage::Acquisition,
-        row_error: None,
-      };
-      outcome.profiles.push(EngineProfileExtraction {
-        profile_id: profile_id(&installation_id, locator),
-        installation_id: installation_id.clone(),
-        installation_priority: root.priority,
-        legacy_installation_priority: root.priority,
-        legacy_profile_order,
-        legacy_is_default: profile.uuid.is_none(),
-        legacy_eligible: true,
-        installation_path: canonical_root.clone(),
-        legacy_installation_path: canonical_root.clone(),
-        legacy_name: profile.name.clone(),
-        name: profile.name,
-        path: profile_path,
-        is_default: profile.uuid.is_none(),
-        persistent_source_discovered: true,
-        sources: vec![source],
-      });
-    }
-  }
-  sort_engine_profiles(&mut outcome.profiles);
-  Ok(outcome)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn safari_report_with_context<F: DiscoveryFs>(
-  context: &DiscoveryContext<F>,
-  browser_id: &str,
-  profile_id: Option<&str>,
-  domains: Option<&[String]>,
-) -> Result<EngineExtractionOutcome> {
-  safari_report_with_query(context, browser_id, profile_id, domains, |path, domains| {
-    super::safari::safari_based_outcome(path.to_path_buf(), domains.map(<[String]>::to_vec))
-  })
-}
-
-/// The Safari report with its cookie reader injected, for the same reason the
-/// Gecko seam takes one: a test must be able to see that a non-selected
-/// profile's cookie file was never opened, which absence from the report cannot
-/// show. [`safari_report_with_context`] is the production caller.
-#[cfg(any(target_os = "macos", test))]
-fn safari_report_with_query<F, Q>(
-  context: &DiscoveryContext<F>,
-  browser_id: &str,
-  profile_id: Option<&str>,
-  domains: Option<&[String]>,
-  query: Q,
-) -> Result<EngineExtractionOutcome>
-where
-  F: DiscoveryFs,
-  Q: FnMut(&Path, Option<&[String]>) -> Result<super::safari::SafariFileExtraction>,
-{
-  let mut outcome = discover_safari_with_context(context, browser_id)?;
-  select_engine_profiles(
-    &mut outcome,
-    browser_id,
-    ProfileSelection::from_profile_id(profile_id),
-  )?;
-  Ok(populate_safari_sources(outcome, domains, query))
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn populate_safari_sources<Q>(
-  mut outcome: EngineExtractionOutcome,
-  domains: Option<&[String]>,
-  mut query: Q,
-) -> EngineExtractionOutcome
-where
-  Q: FnMut(&Path, Option<&[String]>) -> Result<super::safari::SafariFileExtraction>,
-{
-  for profile in &mut outcome.profiles {
-    for source in &mut profile.sources {
-      match query(&source.path, domains) {
-        Ok(extraction) => {
-          source.rows_seen = extraction.stats.records_seen;
-          source.rows_skipped = extraction.stats.records_skipped;
-          source.acquisition_attempts = extraction.acquisition_attempts;
-          source.row_error = extraction.row_error;
-          source.cookies = extraction.cookies;
-        }
-        Err(error) => {
-          // Exhausting the retries is itself the failure, so report the
-          // attempts spent rather than the placeholder.
-          source.acquisition_attempts = super::safari::STABLE_READ_ATTEMPTS as u32;
-          source.error_stage = match error.downcast_ref::<super::safari::SafariParseFailure>() {
-            Some(failure) => {
-              source.rows_seen = failure.stats.records_seen;
-              source.rows_skipped = failure.stats.records_skipped;
-              source.row_error = Some(format!("{error:#}"));
-              SourceFailureStage::Parse
-            }
-            None => SourceFailureStage::Acquisition,
-          };
-          source.error = Some(format!("{error:#}"));
-        }
-      }
-    }
-  }
-  outcome
-}
+mod safari;
 
 #[cfg(target_os = "macos")]
-pub(crate) fn safari_report(
-  browser_id: &str,
-  profile_id: Option<&str>,
-  domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
-  let context = DiscoveryContext::system()?;
-  safari_report_with_context(&context, browser_id, profile_id, domains.as_deref())
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn select_legacy_safari_profile(
-  outcome: &mut EngineExtractionOutcome,
-  browser_id: &str,
-) -> Result<()> {
-  // The historical named wrapper probed only Safari's two default cookie
-  // locations. Named profiles remain report-capable, but must never become a
-  // fallback when both default locations are absent.
-  outcome.profiles.retain(|profile| profile.is_default);
-  select_engine_profiles(outcome, browser_id, ProfileSelection::LegacyFirstProfile)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn legacy_safari_outcome(
-  browser_id: &str,
-  domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
-  let context = DiscoveryContext::system()?;
-  let mut outcome = discover_safari_with_context(&context, browser_id)?;
-  select_legacy_safari_profile(&mut outcome, browser_id)?;
-  Ok(populate_safari_sources(
-    outcome,
-    domains.as_deref(),
-    |path, domains| {
-      super::safari::safari_based_outcome(path.to_path_buf(), domains.map(<[String]>::to_vec))
-    },
-  ))
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn safari_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
-  let context = DiscoveryContext::system()?;
-  discover_safari_with_context(&context, browser_id)
-}
+pub(crate) use safari::{legacy_safari_outcome, safari_profiles, safari_report};
 
 #[cfg(any(target_os = "windows", test))]
 mod internet_explorer;
@@ -3270,6 +2957,7 @@ pub(crate) mod test_seams {
   use super::internet_explorer::{
     discover_internet_explorer_with_context, internet_explorer_report_with_context,
   };
+  use super::safari::{discover_safari_with_context, safari_report_with_context};
   use super::*;
 
   struct MetadataDeniedFs {
@@ -3564,6 +3252,10 @@ mod tests {
   use super::internet_explorer::{
     discover_internet_explorer_with_context, internet_explorer_report_with_context,
     INTERNET_EXPLORER_COOKIE_FILE,
+  };
+  use super::safari::{
+    discover_safari_with_context, populate_safari_sources, safari_report_with_context,
+    safari_report_with_query, select_legacy_safari_profile, SAFARI_COOKIE_FILE,
   };
   use super::*;
   use rusqlite::params;
@@ -5155,7 +4847,9 @@ mod tests {
       std::fs::write(&path, b"cook\x00\x00\x00\x00").expect("seed Safari cookie file");
       path
     };
-    seed(data.join("Cookies"));
+    let default_source = seed(data.join("Cookies"))
+      .canonicalize()
+      .expect("canonical default Safari source");
     // No profile database, so named profiles come from the directory fallback.
     std::fs::create_dir_all(data.join(format!("Safari/Profiles/{NAMED_PROFILE_UUID}")))
       .expect("create Safari profile marker directory");
@@ -5167,21 +4861,54 @@ mod tests {
     .expect("canonical named Safari source");
 
     let all = safari_report_with_context(&context, "safari", None, None).expect("full report");
+    let canonical_library = library.canonicalize().expect("canonical Safari root");
+    let expected_installation_id = installation_id(
+      "safari",
+      "safari-user-library",
+      "stable",
+      &normalized_path_bytes(&canonical_library),
+    );
+    let default_profile_path = default_source
+      .parent()
+      .expect("default Safari source parent");
+    let expected_default_profile_id = profile_id(
+      &expected_installation_id,
+      ProfileLocator::Relative(
+        default_profile_path
+          .strip_prefix(&canonical_library)
+          .expect("default profile below Safari root"),
+      ),
+    );
+
+    assert_eq!(all.installations_detected, 1);
+    assert_eq!(all.installations_discovered, 1);
+    assert_eq!(all.installations_enumerated, 1);
     assert_eq!(all.profiles.len(), 2);
+    assert_eq!(all.profiles[0].installation_id, expected_installation_id);
+    assert_eq!(all.profiles[0].profile_id, expected_default_profile_id);
+    assert_eq!(all.profiles[0].installation_path, canonical_library);
+    assert_eq!(all.profiles[0].sources[0].path, default_source);
+    assert_eq!(
+      all.profiles[0].sources[0].acquisition,
+      SourceAcquisition::StableFileImage
+    );
+    assert_eq!(all.profiles[0].sources[0].acquisition_attempts, 1);
     let selected = all.profiles[1].profile_id.clone();
     assert_eq!(all.profiles[1].sources[0].path, named_source);
 
+    let domains = vec!["example.com".to_owned(), "mozilla.org".to_owned()];
     let mut read = Vec::new();
     let one = safari_report_with_query(
       &context,
       "safari",
       Some(&selected),
-      None,
-      |path, domains| {
+      Some(&domains),
+      |path, forwarded_domains| {
         read.push(path.to_path_buf());
+        assert_eq!(forwarded_domains, Some(domains.as_slice()));
         crate::browser::safari::safari_based_outcome(
           path.to_path_buf(),
-          domains.map(<[String]>::to_vec),
+          forwarded_domains.map(<[String]>::to_vec),
         )
       },
     )
@@ -5192,9 +4919,20 @@ mod tests {
     assert_eq!(one.profiles[0].profile_id, selected);
     assert_eq!(one.installations_discovered, all.installations_discovered);
 
-    let unknown = safari_report_with_context(&context, "safari", Some("not-a-profile"), None)
-      .expect_err("an unknown profile id is a request error");
+    let mut unknown_queries = 0;
+    let unknown = safari_report_with_query(
+      &context,
+      "safari",
+      Some("not-a-profile"),
+      Some(&domains),
+      |_, _| {
+        unknown_queries += 1;
+        bail!("unknown profile must fail before a source read")
+      },
+    )
+    .expect_err("an unknown profile id is a request error");
     assert!(unknown.to_string().contains("unknown safari profile id"));
+    assert_eq!(unknown_queries, 0);
   }
 
   #[test]
@@ -5231,6 +4969,212 @@ mod tests {
     });
     assert!(outcome.profiles.is_empty());
     assert_eq!(queries, 0);
+  }
+
+  #[test]
+  fn safari_library_requires_a_browser_owned_marker() {
+    let temp = TempDir::new("safari-marker-absence");
+    let context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&context, "safari");
+    std::fs::create_dir_all(&library).expect("create bare Library root");
+
+    let discovery = discover_safari_with_context(&context, "safari")
+      .expect("a bare Library is not a Safari installation");
+
+    assert_eq!(discovery.installations_detected, 0);
+    assert_eq!(discovery.installations_discovered, 0);
+    assert_eq!(discovery.installations_enumerated, 0);
+    assert!(discovery.profiles.is_empty());
+    assert!(discovery.discovery_issues.is_empty());
+  }
+
+  #[test]
+  fn safari_profile_discovery_degradation_keeps_exact_adapter_diagnostic() {
+    let temp = TempDir::new("safari-profile-discovery-degraded");
+    let context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&context, "safari");
+    let cookie_directory = library.join("Containers/com.apple.Safari/Data/Library/Cookies");
+    std::fs::create_dir_all(&cookie_directory).expect("create Safari cookie directory");
+    std::fs::write(cookie_directory.join(SAFARI_COOKIE_FILE), b"cook\0\0\0\0")
+      .expect("seed Safari cookie source");
+    let canonical_library = library.canonicalize().expect("canonical Safari root");
+    let (_, warning) = crate::browser::safari::discover_safari_profiles(&canonical_library);
+    let warning = warning.expect("missing profile database degrades to directory fallback");
+    assert!(matches!(
+      &warning,
+      crate::browser::safari::SafariProfileDiscoveryIssue::Degraded(_)
+    ));
+    let expected_message = warning.message();
+
+    let discovery = discover_safari_with_context(&context, "safari")
+      .expect("degraded Safari profile discovery remains reportable");
+
+    assert_eq!(discovery.installations_detected, 1);
+    assert_eq!(discovery.installations_discovered, 1);
+    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.profiles.len(), 1);
+    assert_eq!(discovery.discovery_issues.len(), 1);
+    let issue = &discovery.discovery_issues[0];
+    assert_eq!(issue.code, "safari_profile_discovery_degraded");
+    assert_eq!(issue.path, canonical_library);
+    assert_eq!(issue.message, expected_message);
+    assert_eq!(issue.occurrences, 1);
+    assert!(is_informational_discovery_issue(issue.code));
+  }
+
+  #[test]
+  fn safari_profile_enumeration_failure_keeps_exact_adapter_diagnostic() {
+    let temp = TempDir::new("safari-profile-enumeration-failed");
+    let context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&context, "safari");
+    let data = library.join("Containers/com.apple.Safari/Data/Library");
+    let cookie_directory = data.join("Cookies");
+    std::fs::create_dir_all(&cookie_directory).expect("create Safari cookie directory");
+    std::fs::write(cookie_directory.join(SAFARI_COOKIE_FILE), b"cook\0\0\0\0")
+      .expect("seed Safari cookie source");
+    std::fs::create_dir_all(data.join("Safari")).expect("create Safari metadata directory");
+    std::fs::write(data.join("Safari/Profiles"), b"not a directory")
+      .expect("block Safari profile directory enumeration");
+    let canonical_library = library.canonicalize().expect("canonical Safari root");
+    let (_, warning) = crate::browser::safari::discover_safari_profiles(&canonical_library);
+    let warning = warning.expect("database and directory fallback both fail");
+    assert!(matches!(
+      &warning,
+      crate::browser::safari::SafariProfileDiscoveryIssue::EnumerationFailed(_)
+    ));
+    let expected_message = warning.message();
+
+    let discovery = discover_safari_with_context(&context, "safari")
+      .expect("failed named-profile enumeration retains the default profile");
+
+    assert_eq!(discovery.installations_detected, 1);
+    assert_eq!(discovery.installations_discovered, 1);
+    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.profiles.len(), 1);
+    assert_eq!(discovery.discovery_issues.len(), 1);
+    let issue = &discovery.discovery_issues[0];
+    assert_eq!(issue.code, "safari_profile_enumeration_failed");
+    assert_eq!(issue.path, canonical_library);
+    assert_eq!(issue.message, expected_message);
+    assert_eq!(issue.occurrences, 1);
+    assert!(!is_informational_discovery_issue(issue.code));
+  }
+
+  #[test]
+  fn safari_default_profile_preserves_modern_then_legacy_candidate_precedence() {
+    let temp = TempDir::new("safari-default-candidate-precedence");
+    let context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&context, "safari");
+    let modern =
+      library.join("Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies");
+    let legacy = library.join("Cookies/Cookies.binarycookies");
+    for source in [&modern, &legacy] {
+      std::fs::create_dir_all(source.parent().expect("Safari source parent"))
+        .expect("create Safari source directory");
+      std::fs::write(source, b"cook\0\0\0\0").expect("seed Safari cookie source");
+    }
+
+    let both = discover_safari_with_context(&context, "safari")
+      .expect("discover modern Safari default source");
+    assert_eq!(both.profiles.len(), 1);
+    assert_eq!(
+      both.profiles[0].sources[0].path,
+      modern.canonicalize().expect("canonical modern source")
+    );
+    assert_eq!(both.profiles[0].sources[0].precedence, 10);
+
+    std::fs::remove_file(&modern).expect("remove modern Safari source");
+    let legacy_only = discover_safari_with_context(&context, "safari")
+      .expect("fall back to pre-sandbox Safari source");
+    assert_eq!(legacy_only.profiles.len(), 1);
+    assert_eq!(
+      legacy_only.profiles[0].sources[0].path,
+      legacy.canonicalize().expect("canonical legacy source")
+    );
+    assert_eq!(legacy_only.profiles[0].sources[0].precedence, 20);
+  }
+
+  #[test]
+  fn safari_marker_inspection_failure_preserves_detected_installation() {
+    let temp = TempDir::new("safari-marker-denied");
+    let real_context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&real_context, "safari");
+    std::fs::create_dir_all(&library).expect("create Library root");
+    let denied_marker = library.join("Containers/com.apple.Safari");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_metadata: Some(denied_marker),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery = discover_safari_with_context(&context, "safari")
+      .expect("marker denial keeps Safari detected");
+
+    assert_eq!(discovery.installations_detected, 1);
+    assert_eq!(discovery.installations_discovered, 1);
+    assert_eq!(discovery.installations_enumerated, 1);
+    assert!(discovery.profiles.is_empty());
+    assert!(discovery
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "profile_has_no_cookie_source"));
+  }
+
+  #[test]
+  fn safari_duplicate_canonical_profile_keeps_default_owner() {
+    const NAMED_PROFILE_UUID: &str = "01234567-89AB-CDEF-0123-456789ABCDEF";
+
+    let temp = TempDir::new("safari-duplicate-profile");
+    let real_context = test_context_for(PlatformId::Macos, temp.path().to_path_buf(), []);
+    let library = test_seams::primary_root_path(&real_context, "safari");
+    let data = library.join("Containers/com.apple.Safari/Data/Library");
+    let default_directory = data.join("Cookies");
+    let named_directory = data.join(format!(
+      "WebKit/WebsiteDataStore/{}/WebsiteData/Cookies",
+      NAMED_PROFILE_UUID.to_ascii_lowercase()
+    ));
+    for directory in [&default_directory, &named_directory] {
+      std::fs::create_dir_all(directory).expect("create Safari cookie directory");
+      std::fs::write(directory.join(SAFARI_COOKIE_FILE), b"cook\0\0\0\0")
+        .expect("seed Safari cookie source");
+    }
+    std::fs::create_dir_all(data.join(format!("Safari/Profiles/{NAMED_PROFILE_UUID}")))
+      .expect("create named Safari profile marker");
+    let shared = temp.path().join("shared-safari-profile");
+    std::fs::create_dir_all(&shared).expect("create canonical shared profile");
+    let shared = shared.canonicalize().expect("canonical shared profile");
+    let canonical_library = library.canonicalize().expect("canonical Safari root");
+    let default_canonicalization_input =
+      canonical_library.join("Containers/com.apple.Safari/Data/Library/Cookies");
+    let named_canonicalization_input = canonical_library.join(format!(
+      "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/{}/WebsiteData/Cookies",
+      NAMED_PROFILE_UUID.to_ascii_lowercase()
+    ));
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        canonical_aliases: BTreeMap::from([
+          (default_canonicalization_input, shared.clone()),
+          (named_canonicalization_input, shared.clone()),
+        ]),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery = discover_safari_with_context(&context, "safari")
+      .expect("deduplicate canonical Safari profiles");
+
+    assert_eq!(discovery.profiles.len(), 1);
+    assert!(discovery.profiles[0].is_default);
+    assert_eq!(discovery.profiles[0].path, shared);
+    let duplicate = discovery
+      .discovery_issues
+      .iter()
+      .find(|issue| issue.code == "duplicate_profile")
+      .expect("duplicate profile issue");
+    assert_eq!(duplicate.occurrences, 1);
   }
 
   #[test]
