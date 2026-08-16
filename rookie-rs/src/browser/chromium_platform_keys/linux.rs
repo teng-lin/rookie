@@ -2,7 +2,7 @@ use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, Key
 use super::create_pbkdf2_key;
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
-use crate::common::deadline::{Clock, Deadline, DeadlineEnforcement, SystemClock};
+use crate::common::deadline::{BoundaryRuntime, Clock, Deadline, DeadlineEnforcement};
 use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
@@ -136,11 +136,11 @@ impl HostKeySession {
   pub(crate) fn retrieve(
     &mut self,
     request: ChromiumKeyRequest<'_>,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes {
     self
       .cache
-      .outcomes_for(request.credentials, &SystemClock, deadline)
+      .outcomes_for(request.credentials, runtime.clock, runtime.deadline)
   }
 
   #[cfg(test)]
@@ -173,10 +173,10 @@ impl<'a> LinuxPlatformKeyProvider<'a> {
 impl KeyProvider<()> for LinuxPlatformKeyProvider<'_> {
   type Keys = ChromiumKeyOutcomes;
 
-  fn keys(&self, _context: &(), deadline: Deadline) -> ChromiumKeyOutcomes {
+  fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
     let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
     let mut session = HostKeySession::new();
-    session.retrieve(ChromiumKeyRequest::direct(&credentials), deadline)
+    session.retrieve(ChromiumKeyRequest::direct(&credentials), runtime)
   }
 
   fn deadline_enforcement(&self) -> DeadlineEnforcement {

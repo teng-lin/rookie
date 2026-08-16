@@ -36,7 +36,6 @@ impl SecretBytes {
     self.as_slice().len()
   }
 
-  #[cfg(target_os = "macos")]
   pub(crate) fn extend_bounded(&mut self, bytes: &[u8], maximum: usize) {
     let Some(value) = self.bytes.as_mut() else {
       return;

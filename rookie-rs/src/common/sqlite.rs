@@ -1,6 +1,6 @@
 use crate::common::{
   boundary::Acquire,
-  deadline::{Clock, Deadline, DeadlineEnforcement, SystemClock},
+  deadline::{BoundaryRuntime, Clock, Deadline, DeadlineEnforcement, SystemClock},
 };
 use crate::utils::TempDir;
 use anyhow::{anyhow, Context, Result};
@@ -183,11 +183,13 @@ impl Deref for SqliteReader {
 #[allow(dead_code)]
 pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   let acquire = BrowserDatabaseAcquire;
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
   debug_assert_eq!(
     acquire.deadline_enforcement(),
     DeadlineEnforcement::Cooperative
   );
-  acquire.open(&path, Deadline::standard())
+  acquire.open(&path, &runtime)
 }
 
 struct BrowserDatabaseAcquire;
@@ -195,12 +197,12 @@ struct BrowserDatabaseAcquire;
 impl Acquire<PathBuf> for BrowserDatabaseAcquire {
   type Source = SqliteReader;
 
-  fn open(&self, path: &PathBuf, deadline: Deadline) -> Result<Self::Source> {
-    let clock = SystemClock;
-    deadline.check(&clock)?;
-    let reader = acquire_browser_database_with_deadline(path.clone(), &clock, deadline)
-      .map_err(|failure| failure.error)?;
-    deadline.check(&clock)?;
+  fn open(&self, path: &PathBuf, runtime: &BoundaryRuntime<'_>) -> Result<Self::Source> {
+    runtime.check()?;
+    let reader =
+      acquire_browser_database_with_deadline(path.clone(), runtime.clock, runtime.deadline)
+        .map_err(|failure| failure.error)?;
+    runtime.check()?;
     Ok(reader)
   }
 
@@ -399,11 +401,22 @@ pub(crate) fn with_browser_database_with_deadline<T, Query>(
 where
   Query: FnMut(&Connection) -> Result<T>,
 {
-  with_browser_database_using_deadline(
-    || acquire_browser_database_with_deadline(path.clone(), clock, deadline),
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  with_browser_database_with_runtime(path, query, &runtime)
+}
+
+pub(crate) fn with_browser_database_with_runtime<T, Query>(
+  path: PathBuf,
+  query: Query,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<BrowserDatabaseOutcome<T>>
+where
+  Query: FnMut(&Connection) -> Result<T>,
+{
+  with_browser_database_using_runtime(
+    || acquire_browser_database_with_deadline(path.clone(), runtime.clock, runtime.deadline),
     query,
-    clock,
-    deadline,
+    runtime,
   )
 }
 
@@ -422,27 +435,27 @@ where
   Query: FnMut(&Connection) -> Result<T>,
 {
   let clock = SystemClock;
-  with_browser_database_using_deadline(acquire, query, &clock, Deadline::standard())
+  let runtime = BoundaryRuntime::standard(&clock);
+  with_browser_database_using_runtime(acquire, query, &runtime)
 }
 
-fn with_browser_database_using_deadline<T, Acquire, Query>(
+fn with_browser_database_using_runtime<T, Acquire, Query>(
   mut acquire: Acquire,
   mut query: Query,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDatabaseOutcome<T>>
 where
   Acquire: FnMut() -> std::result::Result<SqliteReader, DatabaseAcquisitionFailure>,
   Query: FnMut(&Connection) -> Result<T>,
 {
   for attempt in 1..=BROWSER_DATABASE_ATTEMPTS {
-    deadline.check(clock)?;
+    runtime.check()?;
     let reader = match acquire() {
       Ok(reader) => reader,
       Err(failure) => {
         let retryable = is_retryable_snapshot_error(failure.strategy, &failure.error);
         if retryable && attempt < BROWSER_DATABASE_ATTEMPTS {
-          deadline.check(clock)?;
+          runtime.check()?;
           log::debug!(
             "reacquiring browser database after snapshot acquisition attempt {attempt}: {}",
             failure.error
@@ -463,13 +476,13 @@ where
     };
 
     let strategy = reader.strategy();
-    deadline.check(clock)?;
+    runtime.check()?;
     match query(&reader) {
       Ok(value) => {
         // Drop the connection (then its snapshot directory) before returning a
         // value that is independent of the database attempt.
         drop(reader);
-        deadline.check(clock)?;
+        runtime.check()?;
         return Ok(BrowserDatabaseOutcome {
           value,
           strategy,
@@ -482,7 +495,7 @@ where
         // boundary rather than an incidental consequence of loop scoping.
         drop(reader);
         if retryable && attempt < BROWSER_DATABASE_ATTEMPTS {
-          deadline.check(clock)?;
+          runtime.check()?;
           log::debug!(
             "reacquiring browser database after snapshot query attempt {attempt}: {error}"
           );
@@ -930,10 +943,11 @@ mod tests {
   fn query_retries_share_one_decreasing_budget_without_wall_clock_sleep() {
     let clock = ManualClock::default();
     let deadline = Deadline::after(&clock, Duration::from_secs(10));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
     let attempts = Cell::new(0_u32);
     let observed = RefCell::new(Vec::new());
 
-    let error = with_browser_database_using_deadline(
+    let error = with_browser_database_using_runtime(
       || {
         attempts.set(attempts.get() + 1);
         observed.borrow_mut().push(deadline.remaining(&clock));
@@ -945,12 +959,14 @@ mod tests {
         })
       },
       |_| Ok(()),
-      &clock,
-      deadline,
+      &runtime,
     )
     .expect_err("the second attempt consumes the remaining budget");
 
-    assert!(error.is::<crate::common::deadline::BoundaryExpired>());
+    assert_eq!(
+      error.downcast_ref::<crate::common::deadline::BoundaryStop>(),
+      Some(&crate::common::deadline::BoundaryStop::TimedOut)
+    );
     assert_eq!(
       *observed.borrow(),
       [Duration::from_secs(10), Duration::from_secs(3)]

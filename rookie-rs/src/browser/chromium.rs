@@ -6,7 +6,7 @@ use crate::common::{enums::*, sqlite};
 #[cfg(target_os = "windows")]
 use anyhow::Context;
 use anyhow::{anyhow, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use super::chromium_crypto::LegacyCipherOutcome;
@@ -15,8 +15,15 @@ use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, KeyProv
 use super::chromium_decoder::chromium_schema_version;
 use super::chromium_decoder::{
   ChromiumBoundaryDecoder, ChromiumDecodeEvent, ChromiumDecodeIssueCode, ChromiumDecodeSummary,
-  ChromiumReadOnlySource, CookieProjection, EncryptedValuePolicy, MissingBrowserKeyIdentity,
+  ChromiumReadOnlySource, EncryptedValuePolicy, MissingBrowserKeyIdentity,
 };
+/// Selects only the public compatibility shape after the unified decoder has
+/// completed. It is deliberately never visible to the decoder itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CookieProjection {
+  Legacy,
+  Detailed,
+}
 use super::cookie_record::{CookieRecord, UnavailableCode};
 #[cfg(all(test, unix))]
 use super::unseal::decrypt_encrypted_value_with_outcomes;
@@ -89,15 +96,15 @@ pub(crate) fn chromium_based_plaintext_only(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  query_cookies_engine_outcome_mode(
+  let draft = query_cookies_engine_outcome_mode(
     &ChromiumKeyOutcomes::default(),
-    db_path,
+    db_path.clone(),
     domains,
     force_kill,
     CookieProjection::Legacy,
     EncryptedValuePolicy::RejectMissingIdentity,
-  )?
-  .into_legacy_result()
+  )?;
+  project_legacy_draft(&db_path, draft)
 }
 
 /// Detailed counterpart to [`chromium_based_plaintext_only`].
@@ -106,15 +113,15 @@ pub(crate) fn chromium_based_detailed_plaintext_only(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<DetailedCookie>> {
-  query_cookies_engine_outcome_mode(
+  let draft = query_cookies_engine_outcome_mode(
     &ChromiumKeyOutcomes::default(),
-    db_path,
+    db_path.clone(),
     domains,
     force_kill,
     CookieProjection::Detailed,
     EncryptedValuePolicy::RejectMissingIdentity,
-  )?
-  .into_detailed_result()
+  )?;
+  project_detailed_draft(&db_path, draft)
 }
 
 /// Returns cookies from chromium based browser
@@ -188,10 +195,9 @@ pub(crate) fn chromium_based_probe_with_key_outcomes(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProbeResult> {
-  query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill, clock, deadline)
+  query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill, runtime)
 }
 
 /// Row-issue samples are collected against the report contract's bound rather
@@ -354,42 +360,23 @@ impl ChromiumExtractionDraft {
       self.stats.rows_seen
     ))
   }
+}
 
-  pub(crate) fn into_legacy_result(self) -> Result<Vec<Cookie>> {
-    match self.legacy_error {
-      Some(error) => Err(error),
-      None => Ok(self.cookies),
-    }
-  }
+fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Result<Vec<Cookie>> {
+  super::legacy::project_canonical_outcome(
+    "chromium",
+    super::report_build::canonical_direct_chromium_extraction(db_path, draft)?,
+  )
+}
 
-  fn into_detailed_result(self) -> Result<Vec<DetailedCookie>> {
-    match self.legacy_error {
-      Some(error) => Err(error),
-      None => Ok(self.detailed_cookies),
-    }
-  }
-
-  #[cfg(unix)]
-  fn into_probe_result(self) -> Result<ChromiumProbeResult> {
-    match self.legacy_error {
-      Some(error) => Err(error),
-      None => Ok(ChromiumProbeResult {
-        cookies: self.cookies,
-        rows_skipped: self.stats.rows_skipped,
-      }),
-    }
-  }
-
-  #[cfg(any(target_os = "linux", target_os = "macos"))]
-  fn into_detailed_probe_result(self) -> Result<ChromiumDetailedProbeResult> {
-    match self.legacy_error {
-      Some(error) => Err(error),
-      None => Ok(ChromiumDetailedProbeResult {
-        cookies: self.detailed_cookies,
-        rows_skipped: self.stats.rows_skipped,
-      }),
-    }
-  }
+fn project_detailed_draft(
+  db_path: &Path,
+  draft: ChromiumExtractionDraft,
+) -> Result<Vec<DetailedCookie>> {
+  super::legacy::project_canonical_detailed_outcome(
+    "chromium",
+    super::report_build::canonical_direct_chromium_extraction(db_path, draft)?,
+  )
 }
 
 fn query_cookies<Context: ?Sized, Provider>(
@@ -407,8 +394,9 @@ where
     &clock,
     crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
   );
-  let outcomes = retrieve_key_outcomes(provider, context, deadline);
-  query_cookies_with_key_outcomes_deadline(outcomes, db_path, domains, force_kill, &clock, deadline)
+  let runtime = BoundaryRuntime::new(&clock, deadline);
+  let outcomes = retrieve_key_outcomes(provider, context, &runtime);
+  query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
 fn query_detailed_cookies<Context: ?Sized, Provider>(
@@ -426,10 +414,9 @@ where
     &clock,
     crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
   );
-  let outcomes = retrieve_key_outcomes(provider, context, deadline);
-  query_detailed_cookies_with_key_outcomes_deadline(
-    outcomes, db_path, domains, force_kill, &clock, deadline,
-  )
+  let runtime = BoundaryRuntime::new(&clock, deadline);
+  let outcomes = retrieve_key_outcomes(provider, context, &runtime);
+  query_detailed_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
 #[allow(unused_variables)]
@@ -441,34 +428,27 @@ pub(crate) fn query_cookies_with_key_outcomes(
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   let clock = crate::common::deadline::SystemClock;
-  query_cookies_with_key_outcomes_deadline(
-    outcomes,
-    db_path,
-    domains,
-    force_kill,
-    &clock,
-    crate::common::deadline::Deadline::standard(),
-  )
+  let runtime = BoundaryRuntime::standard(&clock);
+  query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-pub(crate) fn query_cookies_with_key_outcomes_deadline(
+pub(crate) fn query_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  query_cookies_engine_outcome_mode_with_deadline(
+  let draft = query_cookies_engine_outcome_mode_with_deadline(
     &outcomes,
-    db_path,
+    db_path.clone(),
     domains,
     force_kill,
     CookieProjection::Legacy,
     EncryptedValuePolicy::UseKeyOutcomes,
-    BoundaryRuntime::new(clock, deadline),
-  )?
-  .into_legacy_result()
+    runtime,
+  )?;
+  project_legacy_draft(&db_path, draft)
 }
 
 #[allow(unused_variables)]
@@ -480,34 +460,27 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes(
   force_kill: bool,
 ) -> Result<Vec<DetailedCookie>> {
   let clock = crate::common::deadline::SystemClock;
-  query_detailed_cookies_with_key_outcomes_deadline(
-    outcomes,
-    db_path,
-    domains,
-    force_kill,
-    &clock,
-    crate::common::deadline::Deadline::standard(),
-  )
+  let runtime = BoundaryRuntime::standard(&clock);
+  query_detailed_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-pub(crate) fn query_detailed_cookies_with_key_outcomes_deadline(
+pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  query_cookies_engine_outcome_mode_with_deadline(
+  let draft = query_cookies_engine_outcome_mode_with_deadline(
     &outcomes,
-    db_path,
+    db_path.clone(),
     domains,
     force_kill,
     CookieProjection::Detailed,
     EncryptedValuePolicy::UseKeyOutcomes,
-    BoundaryRuntime::new(clock, deadline),
-  )?
-  .into_detailed_result()
+    runtime,
+  )?;
+  project_detailed_draft(&db_path, draft)
 }
 
 #[cfg(target_os = "windows")]
@@ -516,14 +489,14 @@ pub(crate) fn query_cookies_with_key_outcomes_without_platform_recovery(
   db_path: PathBuf,
   domains: Option<&[String]>,
 ) -> Result<Vec<Cookie>> {
-  query_cookies_from_database(
+  let draft = query_cookies_from_database(
     outcomes,
-    db_path,
+    db_path.clone(),
     domains,
     CookieProjection::Legacy,
     EncryptedValuePolicy::UseKeyOutcomes,
-  )?
-  .into_legacy_result()
+  )?;
+  project_legacy_draft(&db_path, draft)
 }
 
 #[cfg(target_os = "windows")]
@@ -532,14 +505,14 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery
   db_path: PathBuf,
   domains: Option<&[String]>,
 ) -> Result<Vec<DetailedCookie>> {
-  query_cookies_from_database(
+  let draft = query_cookies_from_database(
     outcomes,
-    db_path,
+    db_path.clone(),
     domains,
     CookieProjection::Detailed,
     EncryptedValuePolicy::UseKeyOutcomes,
-  )?
-  .into_detailed_result()
+  )?;
+  project_detailed_draft(&db_path, draft)
 }
 
 #[cfg(target_os = "windows")]
@@ -547,14 +520,14 @@ pub(crate) fn query_cookies_plaintext_without_platform_recovery(
   db_path: PathBuf,
   domains: Option<&[String]>,
 ) -> Result<Vec<Cookie>> {
-  query_cookies_from_database(
+  let draft = query_cookies_from_database(
     &ChromiumKeyOutcomes::default(),
-    db_path,
+    db_path.clone(),
     domains,
     CookieProjection::Legacy,
     EncryptedValuePolicy::RejectMissingIdentity,
-  )?
-  .into_legacy_result()
+  )?;
+  project_legacy_draft(&db_path, draft)
 }
 
 #[cfg(target_os = "windows")]
@@ -562,14 +535,14 @@ pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
   db_path: PathBuf,
   domains: Option<&[String]>,
 ) -> Result<Vec<DetailedCookie>> {
-  query_cookies_from_database(
+  let draft = query_cookies_from_database(
     &ChromiumKeyOutcomes::default(),
-    db_path,
+    db_path.clone(),
     domains,
     CookieProjection::Detailed,
     EncryptedValuePolicy::RejectMissingIdentity,
-  )?
-  .into_detailed_result()
+  )?;
+  project_detailed_draft(&db_path, draft)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -578,19 +551,22 @@ pub(crate) fn chromium_based_detailed_probe_with_key_outcomes(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumDetailedProbeResult> {
-  query_cookies_engine_outcome_mode_with_deadline(
+  let draft = query_cookies_engine_outcome_mode_with_deadline(
     &outcomes,
-    db_path,
+    db_path.clone(),
     domains,
     force_kill,
     CookieProjection::Detailed,
     EncryptedValuePolicy::UseKeyOutcomes,
-    BoundaryRuntime::new(clock, deadline),
-  )?
-  .into_detailed_probe_result()
+    runtime,
+  )?;
+  let rows_skipped = draft.stats.rows_skipped;
+  Ok(ChromiumDetailedProbeResult {
+    cookies: project_detailed_draft(&db_path, draft)?,
+    rows_skipped,
+  })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -599,22 +575,26 @@ fn query_cookies_probe_with_key_outcomes(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProbeResult> {
-  query_cookies_engine_outcome_mode_with_deadline(
+  let draft = query_cookies_engine_outcome_mode_with_deadline(
     &outcomes,
-    db_path,
+    db_path.clone(),
     domains,
     force_kill,
     CookieProjection::Legacy,
     EncryptedValuePolicy::UseKeyOutcomes,
-    BoundaryRuntime::new(clock, deadline),
-  )?
-  .into_probe_result()
+    runtime,
+  )?;
+  let rows_skipped = draft.stats.rows_skipped;
+  Ok(ChromiumProbeResult {
+    cookies: project_legacy_draft(&db_path, draft)?,
+    rows_skipped,
+  })
 }
 
 #[allow(unused_variables)]
+#[cfg(test)]
 pub(crate) fn query_cookies_engine_outcome(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -632,6 +612,25 @@ pub(crate) fn query_cookies_engine_outcome(
 }
 
 #[allow(unused_variables)]
+pub(crate) fn query_cookies_engine_outcome_with_runtime(
+  outcomes: &ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<ChromiumExtractionDraft> {
+  query_cookies_engine_outcome_mode_with_deadline(
+    outcomes,
+    db_path,
+    domains,
+    force_kill,
+    CookieProjection::Legacy,
+    EncryptedValuePolicy::UseKeyOutcomes,
+    runtime,
+  )
+}
+
+#[allow(unused_variables)]
 fn query_cookies_engine_outcome_mode(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -641,6 +640,7 @@ fn query_cookies_engine_outcome_mode(
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumExtractionDraft> {
   let clock = crate::common::deadline::SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
   query_cookies_engine_outcome_mode_with_deadline(
     outcomes,
     db_path,
@@ -648,7 +648,7 @@ fn query_cookies_engine_outcome_mode(
     force_kill,
     projection,
     encrypted_value_policy,
-    BoundaryRuntime::new(&clock, crate::common::deadline::Deadline::standard()),
+    &runtime,
   )
 }
 
@@ -660,33 +660,31 @@ fn query_cookies_engine_outcome_mode_with_deadline(
   force_kill: bool,
   projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
-  runtime: BoundaryRuntime<'_>,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumExtractionDraft> {
   runtime.check()?;
   #[cfg(target_os = "windows")]
   {
     chromium_database_acquisition::with_force_kill_recovery(&db_path, force_kill, |path| {
-      query_cookies_from_database_with_deadline(
+      query_cookies_from_database_with_runtime(
         outcomes,
         path.to_path_buf(),
         domains.as_deref(),
         projection,
         encrypted_value_policy,
-        runtime.clock,
-        runtime.deadline,
+        runtime,
       )
     })
   }
 
   #[cfg(not(target_os = "windows"))]
-  query_cookies_from_database_with_deadline(
+  query_cookies_from_database_with_runtime(
     outcomes,
     db_path,
     domains.as_deref(),
     projection,
     encrypted_value_policy,
-    runtime.clock,
-    runtime.deadline,
+    runtime,
   )
 }
 
@@ -699,45 +697,41 @@ fn query_cookies_from_database(
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumExtractionDraft> {
   let clock = crate::common::deadline::SystemClock;
-  query_cookies_from_database_with_deadline(
+  let runtime = BoundaryRuntime::standard(&clock);
+  query_cookies_from_database_with_runtime(
     outcomes,
     db_path,
     domains,
     projection,
     encrypted_value_policy,
-    &clock,
-    crate::common::deadline::Deadline::standard(),
+    &runtime,
   )
 }
 
-fn query_cookies_from_database_with_deadline(
+fn query_cookies_from_database_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<&[String]>,
-  projection: CookieProjection,
+  _projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumExtractionDraft> {
   log::info!(
     "Creating SQLite connection to {}",
     db_path.to_str().unwrap_or("")
   );
-  let database = sqlite::with_browser_database_with_deadline(
+  let database = sqlite::with_browser_database_with_runtime(
     db_path,
     |connection| {
-      decode_and_unseal_cookie_records_with_deadline(
+      decode_and_unseal_cookie_records_with_runtime(
         connection,
         domains,
-        projection,
         encrypted_value_policy,
         |record, schema_version| unseal_chromium_record(record, outcomes, schema_version),
-        clock,
-        deadline,
+        runtime,
       )
     },
-    clock,
-    deadline,
+    runtime,
   );
   let database = match database {
     Err(error)
@@ -766,7 +760,6 @@ fn query_cookies_from_database_with_deadline(
 fn decode_and_unseal_cookie_records<Unseal>(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
-  projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
   unseal: Unseal,
 ) -> Result<ChromiumExtractionDraft>
@@ -778,25 +771,22 @@ where
     -> std::result::Result<CookieRecord, Box<(CookieRecord, ChromiumCookieValueError)>>,
 {
   let clock = crate::common::deadline::SystemClock;
-  decode_and_unseal_cookie_records_with_deadline(
+  let runtime = BoundaryRuntime::standard(&clock);
+  decode_and_unseal_cookie_records_with_runtime(
     connection,
     domains,
-    projection,
     encrypted_value_policy,
     unseal,
-    &clock,
-    crate::common::deadline::Deadline::standard(),
+    &runtime,
   )
 }
 
-fn decode_and_unseal_cookie_records_with_deadline<Unseal>(
+fn decode_and_unseal_cookie_records_with_runtime<Unseal>(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
-  projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
   mut unseal: Unseal,
-  clock: &dyn crate::common::deadline::Clock,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumExtractionDraft>
 where
   Unseal: FnMut(
@@ -817,9 +807,7 @@ where
     domains,
   };
   let decoder = ChromiumBoundaryDecoder {
-    projection,
     encrypted_value_policy,
-    clock,
   };
   let _capability = decoder.deadline_enforcement();
   let mut sink = |event| -> Result<()> {
@@ -879,7 +867,7 @@ where
     }
     Ok(())
   };
-  let ChromiumDecodeSummary { rows_seen } = decoder.decode(&source, &mut sink, deadline)?;
+  let ChromiumDecodeSummary { rows_seen } = decoder.decode(&source, &mut sink, runtime)?;
   outcome.stats.rows_seen = rows_seen;
   outcome.stats.provider_failures = failed_provider_tiers.len();
   if outcome.stats.rows_seen > 0 && outcome.stats.rows_skipped == outcome.stats.rows_seen {
@@ -896,22 +884,19 @@ where
     ));
   }
   for record in staged_records {
-    match projection {
-      CookieProjection::Detailed => outcome.detailed_cookies.push(
-        record
-          .into_detailed_cookie()
-          .expect("unseal produced plaintext"),
-      ),
-      CookieProjection::Legacy => {
-        outcome.cookies.push(
-          record
-            .clone()
-            .into_cookie()
-            .expect("unseal produced plaintext"),
-        );
-        outcome.records.push(record);
-      }
-    }
+    outcome.detailed_cookies.push(
+      record
+        .clone()
+        .into_detailed_cookie()
+        .expect("unseal produced plaintext"),
+    );
+    outcome.cookies.push(
+      record
+        .clone()
+        .into_cookie()
+        .expect("unseal produced plaintext"),
+    );
+    outcome.records.push(record);
     outcome.stats.cookies_emitted += 1;
   }
   Ok(outcome)
@@ -937,13 +922,12 @@ fn query_cookies_from_connection_mode(
   connection: &rusqlite::Connection,
   outcomes: &ChromiumKeyOutcomes,
   domains: Option<&[String]>,
-  projection: CookieProjection,
+  _projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumExtractionDraft> {
   decode_and_unseal_cookie_records(
     connection,
     domains,
-    projection,
     encrypted_value_policy,
     |record, schema_version| unseal_chromium_record(record, outcomes, schema_version),
   )
@@ -1217,8 +1201,7 @@ mod tests {
     );
     assert!(extraction.issues.is_empty());
     assert!(extraction.legacy_error.is_none());
-    let detailed = extraction
-      .into_detailed_result()
+    let detailed = project_detailed_draft(&db, extraction)
       .expect("valid detailed rows keep the extraction successful");
     assert_eq!(
       detailed
@@ -1454,7 +1437,7 @@ mod tests {
     fn keys(
       &self,
       _context: &str,
-      _deadline: crate::common::deadline::Deadline,
+      _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
     ) -> ChromiumKeyOutcomes {
       self.calls.set(self.calls.get() + 1);
       self.outcomes.clone()
@@ -1567,7 +1550,6 @@ mod tests {
     let mut decoder = super::super::chromium_decoder::prepare_cookie_decoder(
       &connection,
       None,
-      CookieProjection::Legacy,
       EncryptedValuePolicy::UseKeyOutcomes,
     )
     .expect("prepare decode without key material");
@@ -1616,7 +1598,6 @@ mod tests {
     let outcome = decode_and_unseal_cookie_records(
       &connection,
       None,
-      CookieProjection::Legacy,
       EncryptedValuePolicy::UseKeyOutcomes,
       |mut record, _schema_version| {
         assert!(matches!(
@@ -1679,7 +1660,6 @@ mod tests {
       let outcome = decode_and_unseal_cookie_records(
         &connection,
         None,
-        CookieProjection::Detailed,
         EncryptedValuePolicy::UseKeyOutcomes,
         |mut record, _schema_version| {
           assert!(matches!(
@@ -1704,8 +1684,16 @@ mod tests {
 
     assert!(unwind.is_ok());
     assert!(
-      observed.is_empty(),
-      "the decrypted allocation moves into the public result; the stored plaintext is bypassed"
+      observed
+        .iter()
+        .any(|(len, value)| *len == DECRYPTED.len() && value.iter().all(|byte| *byte == 0)),
+      "the protected decrypted allocation is wiped when the draft is dropped"
+    );
+    assert!(
+      observed
+        .iter()
+        .all(|(len, _)| *len != STORED_PLAINTEXT.len()),
+      "authoritative ciphertext must bypass the stored plaintext"
     );
   }
 
@@ -1732,7 +1720,6 @@ mod tests {
       let error = decode_and_unseal_cookie_records(
         &connection,
         None,
-        CookieProjection::Legacy,
         EncryptedValuePolicy::RejectMissingIdentity,
         |record, schema_version| {
           unseal_chromium_record(record, &ChromiumKeyOutcomes::default(), schema_version)
@@ -1772,7 +1759,6 @@ mod tests {
       let _ = decode_and_unseal_cookie_records(
         &connection,
         None,
-        CookieProjection::Legacy,
         EncryptedValuePolicy::UseKeyOutcomes,
         |mut record, _schema_version| {
           let call = calls.get() + 1;
@@ -1821,14 +1807,13 @@ mod tests {
 
   fn injected_tier_outcome(
     connection: &rusqlite::Connection,
-    projection: CookieProjection,
+    _projection: CookieProjection,
     expected_tier: super::super::cookie_record::CipherTier,
     succeed: bool,
   ) -> ChromiumExtractionDraft {
     decode_and_unseal_cookie_records(
       connection,
       None,
-      projection,
       EncryptedValuePolicy::UseKeyOutcomes,
       |mut record, _schema_version| {
         let actual_tier = match &record.value {
@@ -1877,14 +1862,18 @@ mod tests {
         "plaintext-fallback-must-not-escape"
       );
 
-      let legacy = injected_tier_outcome(&connection, CookieProjection::Legacy, tier, true)
-        .into_legacy_result()
-        .expect("legacy projection succeeds");
+      let legacy = project_legacy_draft(
+        Path::new("in-memory-chromium-fixture"),
+        injected_tier_outcome(&connection, CookieProjection::Legacy, tier, true),
+      )
+      .expect("legacy projection succeeds");
       assert_eq!(legacy[0].value, expected_value);
 
-      let detailed = injected_tier_outcome(&connection, CookieProjection::Detailed, tier, true)
-        .into_detailed_result()
-        .expect("detailed projection succeeds");
+      let detailed = project_detailed_draft(
+        Path::new("in-memory-chromium-fixture"),
+        injected_tier_outcome(&connection, CookieProjection::Detailed, tier, true),
+      )
+      .expect("detailed projection succeeds");
       assert_eq!(detailed[0].cookie.value, expected_value);
       assert_eq!(
         detailed[0].context.top_frame_site_key.as_deref(),
@@ -1903,15 +1892,18 @@ mod tests {
           .contains("plaintext-fallback-must-not-escape")
       );
 
-      let legacy_error = injected_tier_outcome(&connection, CookieProjection::Legacy, tier, false)
-        .into_legacy_result()
-        .expect_err("legacy all-row failure remains an error");
+      let legacy_error = project_legacy_draft(
+        Path::new("in-memory-chromium-fixture"),
+        injected_tier_outcome(&connection, CookieProjection::Legacy, tier, false),
+      )
+      .expect_err("legacy all-row failure remains an error");
       assert!(!format!("{legacy_error:#}").contains("plaintext-fallback-must-not-escape"));
 
-      let detailed_error =
-        injected_tier_outcome(&connection, CookieProjection::Detailed, tier, false)
-          .into_detailed_result()
-          .expect_err("detailed all-row failure remains an error");
+      let detailed_error = project_detailed_draft(
+        Path::new("in-memory-chromium-fixture"),
+        injected_tier_outcome(&connection, CookieProjection::Detailed, tier, false),
+      )
+      .expect_err("detailed all-row failure remains an error");
       assert!(!format!("{detailed_error:#}").contains("plaintext-fallback-must-not-escape"));
     }
   }
@@ -2099,7 +2091,8 @@ mod tests {
       EncryptedValuePolicy::UseKeyOutcomes,
     )
     .expect("detailed extraction");
-    assert!(outcome.cookies.is_empty());
+    assert_eq!(outcome.cookies.len(), 1);
+    assert_eq!(outcome.cookies[0].value, "decrypted detail");
     assert_eq!(outcome.detailed_cookies.len(), 1);
     assert_eq!(outcome.detailed_cookies[0].cookie.value, "decrypted detail");
     assert_ne!(

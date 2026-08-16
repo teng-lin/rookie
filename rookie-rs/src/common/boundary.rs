@@ -1,6 +1,6 @@
 //! The only operations allowed to cross an extraction trust boundary.
 
-use super::deadline::{Deadline, DeadlineEnforcement};
+use super::deadline::{BoundaryRuntime, DeadlineEnforcement};
 
 pub(crate) trait ReadOnlySource {}
 
@@ -20,7 +20,7 @@ where
 pub(crate) trait Acquire<Id: ?Sized> {
   type Source: ReadOnlySource;
 
-  fn open(&self, id: &Id, deadline: Deadline) -> anyhow::Result<Self::Source>;
+  fn open(&self, id: &Id, runtime: &BoundaryRuntime<'_>) -> anyhow::Result<Self::Source>;
 
   fn deadline_enforcement(&self) -> DeadlineEnforcement {
     DeadlineEnforcement::Cooperative
@@ -30,7 +30,7 @@ pub(crate) trait Acquire<Id: ?Sized> {
 pub(crate) trait KeyProvider<Request: ?Sized> {
   type Keys;
 
-  fn keys(&self, request: &Request, deadline: Deadline) -> Self::Keys;
+  fn keys(&self, request: &Request, runtime: &BoundaryRuntime<'_>) -> Self::Keys;
 
   fn deadline_enforcement(&self) -> DeadlineEnforcement {
     DeadlineEnforcement::Cooperative
@@ -44,7 +44,7 @@ pub(crate) trait Decoder<Source: ReadOnlySource, Record> {
     &self,
     source: &Source,
     sink: &mut dyn RecordSink<Record>,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> anyhow::Result<Self::Summary>;
 
   fn deadline_enforcement(&self) -> DeadlineEnforcement;
@@ -55,11 +55,11 @@ impl ReadOnlySource for rusqlite::Connection {}
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::common::deadline::{test_clock::ManualClock, Clock};
+  use crate::common::deadline::{test_clock::ManualClock, Clock, Deadline};
   use std::{cell::RefCell, time::Duration};
 
   struct FakeDecoder<'a> {
-    clock: &'a dyn Clock,
+    _clock: &'a dyn Clock,
   }
 
   impl Decoder<rusqlite::Connection, usize> for FakeDecoder<'_> {
@@ -69,11 +69,11 @@ mod tests {
       &self,
       _source: &rusqlite::Connection,
       sink: &mut dyn RecordSink<usize>,
-      deadline: Deadline,
+      runtime: &BoundaryRuntime<'_>,
     ) -> anyhow::Result<Self::Summary> {
       let mut emitted = 0;
       for record in 0..3 {
-        deadline.check(self.clock)?;
+        runtime.check()?;
         sink.emit(record)?;
         emitted += 1;
       }
@@ -102,7 +102,7 @@ mod tests {
   fn decoder_emits_nothing_after_the_absolute_deadline_without_sleeping() {
     let clock = ManualClock::default();
     let deadline = Deadline::after(&clock, Duration::from_secs(2));
-    let decoder = FakeDecoder { clock: &clock };
+    let decoder = FakeDecoder { _clock: &clock };
     let mut sink = AdvancingSink {
       clock: &clock,
       records: RefCell::new(Vec::new()),
@@ -111,7 +111,7 @@ mod tests {
       .decode(
         &rusqlite::Connection::open_in_memory().unwrap(),
         &mut sink,
-        deadline,
+        &BoundaryRuntime::new(&clock, deadline),
       )
       .expect_err("third emission starts at the deadline");
     assert_eq!(sink.records.into_inner(), [0, 1]);

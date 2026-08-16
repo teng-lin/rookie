@@ -146,17 +146,24 @@ fn run_dbus_with_deadline<T, F>(
 where
   F: Future<Output = zbus::Result<T>>,
 {
-  let remaining = deadline.remaining_for_ipc(clock);
+  let remaining = deadline.ipc_sender_ceiling(clock);
   if remaining.is_zero() {
     bail!("{operation} timed out before starting");
   }
-  future::block_on(future::race(
+  let result = future::block_on(future::race(
     async move { future.await.map_err(anyhow::Error::from) },
     async move {
       Timer::after(remaining).await;
       Err(anyhow::anyhow!("{operation} timed out"))
     },
-  ))
+  ));
+  // The operation future is polled first by `race`. Re-sample the absolute
+  // deadline before accepting its result so a reply observed exactly when the
+  // timer becomes due cannot win by poll order.
+  deadline
+    .check(clock)
+    .with_context(|| format!("{operation} timed out"))?;
+  result
 }
 
 fn libsecret_call<T>(
@@ -769,6 +776,24 @@ mod tests {
       ]
     );
     assert_eq!(source.kwallet_calls.into_inner(), 0);
+    assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
+
+  #[test]
+  fn dbus_reply_at_the_exact_deadline_is_timeout_biased_without_wall_clock_sleep() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+
+    let error = run_dbus_with_deadline(&clock, deadline, "scripted D-Bus reply", async {
+      // The reply future is ready in the same poll that advances the monotonic
+      // clock to the deadline. It must not win merely because `race` polls it
+      // before the timer future.
+      clock.advance(std::time::Duration::from_secs(1));
+      Ok::<_, zbus::Error>("reply")
+    })
+    .expect_err("an exact reply/timeout tie must time out");
+
+    assert!(error.to_string().contains("scripted D-Bus reply timed out"));
     assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
   }
 

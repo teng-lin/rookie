@@ -6,6 +6,9 @@ use super::{
   ProfileSelection, SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE,
   SOURCE_ROLE_PERSISTENT,
 };
+use crate::browser::internet_explorer_model::{
+  InternetExplorerFailure, InternetExplorerFailureStage,
+};
 use crate::common::enums::Cookie;
 use anyhow::Result;
 use std::{
@@ -163,15 +166,23 @@ where
           source.records = rows.records;
         }
         Err(error) => {
-          // WebCache failures are schema or record-enumeration problems, which
-          // the ESE reader reaches only after opening the database.
-          source.error_stage = SourceFailureStage::Parse;
+          source.error_stage = internet_explorer_failure_stage(&error);
           source.error = Some(format!("{error:#}"));
         }
       }
     }
   }
   outcome
+}
+
+fn internet_explorer_failure_stage(error: &anyhow::Error) -> SourceFailureStage {
+  match error
+    .downcast_ref::<InternetExplorerFailure>()
+    .map(InternetExplorerFailure::stage)
+  {
+    Some(InternetExplorerFailureStage::Acquisition) => SourceFailureStage::Acquisition,
+    Some(InternetExplorerFailureStage::Parse) | None => SourceFailureStage::Parse,
+  }
 }
 
 fn query_internet_explorer_non_disruptive<Q>(
@@ -197,7 +208,21 @@ pub(crate) fn internet_explorer_report(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  internet_explorer_report_with_runtime(browser_id, profile_id, domains, &runtime)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn internet_explorer_report_with_runtime(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
+  runtime.check()?;
   internet_explorer_report_with_context(
     &context,
     browser_id,
@@ -205,15 +230,16 @@ pub(crate) fn internet_explorer_report(
     domains.as_deref(),
     |path, domains| {
       query_internet_explorer_non_disruptive(path, domains, |path, domains, force_kill| {
-        crate::browser::internet_explorer::internet_explorer_outcome(path, domains, force_kill).map(
-          |extraction| InternetExplorerRows {
-            cookies: extraction.cookies,
-            records: extraction.records,
-            records_seen: extraction.stats.records_seen,
-            records_skipped: extraction.stats.records_skipped,
-            row_error: extraction.row_error,
-          },
+        crate::browser::internet_explorer::internet_explorer_outcome_with_runtime(
+          path, domains, force_kill, runtime,
         )
+        .map(|extraction| InternetExplorerRows {
+          cookies: extraction.cookies,
+          records: extraction.records,
+          records_seen: extraction.stats.records_seen,
+          records_skipped: extraction.stats.records_skipped,
+          row_error: extraction.row_error,
+        })
       })
     },
   )
@@ -224,7 +250,20 @@ pub(crate) fn legacy_internet_explorer_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  legacy_internet_explorer_outcome_with_runtime(browser_id, domains, &runtime)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
+  runtime.check()?;
   let mut outcome = discover_internet_explorer_with_context(&context, browser_id)?;
   select_engine_profiles(
     &mut outcome,
@@ -236,15 +275,16 @@ pub(crate) fn legacy_internet_explorer_outcome(
     domains.as_deref(),
     |path, domains| {
       query_internet_explorer_non_disruptive(path, domains, |path, domains, force_kill| {
-        crate::browser::internet_explorer::internet_explorer_outcome(path, domains, force_kill).map(
-          |extraction| InternetExplorerRows {
-            cookies: extraction.cookies,
-            records: extraction.records,
-            records_seen: extraction.stats.records_seen,
-            records_skipped: extraction.stats.records_skipped,
-            row_error: extraction.row_error,
-          },
+        crate::browser::internet_explorer::internet_explorer_outcome_with_runtime(
+          path, domains, force_kill, runtime,
         )
+        .map(|extraction| InternetExplorerRows {
+          cookies: extraction.cookies,
+          records: extraction.records,
+          records_seen: extraction.stats.records_seen,
+          records_skipped: extraction.stats.records_skipped,
+          row_error: extraction.row_error,
+        })
       })
     },
   ))
@@ -278,5 +318,30 @@ mod tests {
     .expect("non-disruptive query bridge");
 
     assert!(rows.cookies.is_empty());
+  }
+
+  #[test]
+  fn typed_native_failures_preserve_acquisition_and_parse_stages() {
+    for (native, expected) in [
+      (
+        InternetExplorerFailureStage::Acquisition,
+        SourceFailureStage::Acquisition,
+      ),
+      (
+        InternetExplorerFailureStage::Parse,
+        SourceFailureStage::Parse,
+      ),
+    ] {
+      let error = anyhow::Error::new(InternetExplorerFailure::new(
+        native,
+        anyhow::anyhow!("scripted native failure"),
+      ));
+      assert_eq!(internet_explorer_failure_stage(&error), expected);
+    }
+
+    assert_eq!(
+      internet_explorer_failure_stage(&anyhow::anyhow!("legacy untyped failure")),
+      SourceFailureStage::Parse
+    );
   }
 }

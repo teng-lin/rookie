@@ -430,18 +430,20 @@ fn automatic_chromium_cookies(
     &clock,
     crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
   );
+  let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
+    &runtime,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
       let outcomes = session.retrieve(
         crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
-        deadline,
+        &runtime,
       );
       crate::browser::chromium::chromium_based_probe_with_key_outcomes(
-        outcomes, db_path, domains, false, &clock, deadline,
+        outcomes, db_path, domains, false, &runtime,
       )
     },
     |candidate| (candidate.cookies.len(), candidate.rows_skipped),
@@ -461,18 +463,20 @@ fn automatic_chromium_detailed(
     &clock,
     crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
   );
+  let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
+    &runtime,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
       let outcomes = session.retrieve(
         crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
-        deadline,
+        &runtime,
       );
       crate::browser::chromium::chromium_based_detailed_probe_with_key_outcomes(
-        outcomes, db_path, domains, false, &clock, deadline,
+        outcomes, db_path, domains, false, &runtime,
       )
     },
     |candidate| (candidate.cookies.len(), candidate.rows_skipped),
@@ -489,6 +493,7 @@ fn automatic_chromium_with<Session, Candidate, Output, NewSession, Probe, Score,
   )],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   new_session: NewSession,
   mut probe: Probe,
   score: Score,
@@ -510,6 +515,7 @@ where
   let mut best = None;
   let mut failures = Vec::new();
   for (name, credentials) in identities {
+    runtime.check()?;
     match probe(
       &mut session,
       name,
@@ -534,6 +540,7 @@ where
       }
     }
   }
+  runtime.check()?;
   match best {
     Some((name, result)) => {
       let (cookies, rows_skipped) = score(&result);
@@ -785,10 +792,13 @@ mod tests {
     ];
     let sessions = std::cell::Cell::new(0);
     let mut probed = Vec::new();
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
     let selected = automatic_chromium_with(
       &identities,
       PathBuf::from("unused"),
       None,
+      &runtime,
       || {
         sessions.set(sessions.get() + 1);
       },
@@ -834,11 +844,14 @@ mod tests {
       ),
     ];
     let sessions = std::cell::Cell::new(0);
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
     for projection in ["legacy", "detailed"] {
       let error = automatic_chromium_with(
         &identities,
         PathBuf::from("unused"),
         None,
+        &runtime,
         || sessions.set(sessions.get() + 1),
         |(), name, _credentials, _path, _domains| -> Result<()> {
           anyhow::bail!("{projection} {name} keyring is locked")

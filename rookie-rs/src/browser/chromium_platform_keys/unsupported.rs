@@ -11,10 +11,10 @@ impl HostKeySession {
   pub(crate) fn retrieve(
     &mut self,
     request: ChromiumKeyRequest<'_>,
-    deadline: crate::common::deadline::Deadline,
+    runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes {
     let _ = request;
-    let _ = deadline;
+    let _ = runtime;
     ChromiumKeyOutcomes::default()
   }
 }

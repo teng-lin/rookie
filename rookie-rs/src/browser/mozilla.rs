@@ -1,7 +1,11 @@
+#[cfg(test)]
+use crate::common::deadline::{Clock, Deadline};
 use crate::common::{
+  boundary::{Decoder, ReadOnlySource, RecordSink},
   date,
-  deadline::{Clock, Deadline, SystemClock},
+  deadline::{BoundaryRuntime, BoundaryStop, DeadlineEnforcement, SystemClock},
   enums::*,
+  secret::{SecretBytes, SecretString},
   sqlite, utils,
 };
 use anyhow::{anyhow, bail, Result};
@@ -13,8 +17,11 @@ use std::{
   io::Read,
   path::{Path, PathBuf},
 };
+use zeroize::Zeroize;
 
-use super::cookie_record::{Attributes, CookieRecord, CookieValue, RawValue};
+use super::cookie_record::{
+  Attributes, CookieRecord, CookieValue, Observation, RawValue, SourceRef,
+};
 
 // Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
 // expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
@@ -43,7 +50,11 @@ const MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 =
   note = "use direct_path::cookies_from_path with DirectPathRequest"
 )]
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  project_engine_cookies(query_cookies_engine_outcome(&db_path, domains.as_deref()))
+  let outcome = query_cookies_engine_outcome(&db_path, domains.as_deref());
+  super::legacy::project_canonical_outcome(
+    "firefox",
+    super::report_build::canonical_direct_mozilla_extraction(&db_path, outcome)?,
+  )
 }
 
 /// Returns cookies from a Mozilla profile with container and origin attributes
@@ -56,7 +67,11 @@ pub fn firefox_based_detailed(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
 ) -> Result<Vec<DetailedCookie>> {
-  project_engine_detailed_cookies(query_cookies_engine_outcome(&db_path, domains.as_deref()))
+  let outcome = query_cookies_engine_outcome(&db_path, domains.as_deref());
+  super::legacy::project_canonical_detailed_outcome(
+    "firefox",
+    super::report_build::canonical_direct_mozilla_extraction(&db_path, outcome)?,
+  )
 }
 
 /// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
@@ -70,12 +85,55 @@ fn escape_like_pattern(input: &str) -> String {
 }
 
 struct PersistentCookieQuery {
-  cookies: Vec<Cookie>,
-  detailed_cookies: Vec<DetailedCookie>,
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
   last_row_error: Option<anyhow::Error>,
+}
+
+pub(crate) struct MozillaPersistentReadOnlySource<'a> {
+  pub(crate) connection: &'a rusqlite::Connection,
+  pub(crate) domains: Option<&'a [String]>,
+}
+
+impl ReadOnlySource for MozillaPersistentReadOnlySource<'_> {}
+
+pub(crate) struct MozillaPersistentDecoder;
+
+#[derive(Debug)]
+pub(crate) struct MozillaPersistentDecodeSummary {
+  pub(crate) rows_seen: usize,
+  pub(crate) rows_skipped: usize,
+  pub(crate) last_row_error: Option<anyhow::Error>,
+}
+
+impl Decoder<MozillaPersistentReadOnlySource<'_>, CookieRecord> for MozillaPersistentDecoder {
+  type Summary = MozillaPersistentDecodeSummary;
+
+  fn decode(
+    &self,
+    source: &MozillaPersistentReadOnlySource<'_>,
+    sink: &mut dyn RecordSink<CookieRecord>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Self::Summary> {
+    let query = decode_persistent_cookies(source.connection, source.domains, runtime)?;
+    runtime.check()?;
+    for (ordinal, mut record) in query.records.into_iter().enumerate() {
+      runtime.check()?;
+      record.origin = SourceRef::pending(ordinal);
+      sink.emit(record)?;
+    }
+    runtime.check()?;
+    Ok(MozillaPersistentDecodeSummary {
+      rows_seen: query.rows_seen,
+      rows_skipped: query.rows_skipped,
+      last_row_error: query.last_row_error,
+    })
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    DeadlineEnforcement::Cooperative
+  }
 }
 
 fn mozilla_schema_version(connection: &rusqlite::Connection) -> Result<u32> {
@@ -98,9 +156,11 @@ fn query_persistent_cookies(
   domains: Option<&[String]>,
 ) -> Result<PersistentCookieQuery> {
   let clock = SystemClock;
-  query_persistent_cookies_mode(connection, domains, false, &clock, Deadline::standard())
+  let runtime = BoundaryRuntime::standard(&clock);
+  query_persistent_cookies_with_runtime(connection, domains, &runtime)
 }
 
+#[cfg(test)]
 fn query_persistent_cookies_mode(
   connection: &rusqlite::Connection,
   domains: Option<&[String]>,
@@ -108,7 +168,43 @@ fn query_persistent_cookies_mode(
   clock: &dyn Clock,
   deadline: Deadline,
 ) -> Result<PersistentCookieQuery> {
-  deadline.check(clock)?;
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  query_persistent_cookies_with_runtime(connection, domains, &runtime)
+}
+
+fn query_persistent_cookies_with_runtime(
+  connection: &rusqlite::Connection,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<PersistentCookieQuery> {
+  let source = MozillaPersistentReadOnlySource {
+    connection,
+    domains,
+  };
+  let decoder = MozillaPersistentDecoder;
+  let mut records = Vec::new();
+  let summary = decoder.decode(
+    &source,
+    &mut |record| {
+      records.push(record);
+      Ok(())
+    },
+    runtime,
+  )?;
+  Ok(PersistentCookieQuery {
+    records,
+    rows_seen: summary.rows_seen,
+    rows_skipped: summary.rows_skipped,
+    last_row_error: summary.last_row_error,
+  })
+}
+
+fn decode_persistent_cookies(
+  connection: &rusqlite::Connection,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<PersistentCookieQuery> {
+  runtime.check()?;
   let schema_version = mozilla_schema_version(connection)?;
   let columns = sqlite_table_columns(connection, "moz_cookies")?;
   let optional_column = |name: &str| {
@@ -152,8 +248,6 @@ fn query_persistent_cookies_mode(
 
   query += ";";
 
-  let mut cookies: Vec<Cookie> = vec![];
-  let mut detailed_cookies: Vec<DetailedCookie> = vec![];
   let mut records: Vec<CookieRecord> = vec![];
   let mut last_row_error: Option<anyhow::Error> = None;
   let mut rows_seen = 0;
@@ -162,26 +256,9 @@ fn query_persistent_cookies_mode(
   let mut rows = stmt.query(rusqlite::params_from_iter(domain_filters.iter()))?;
 
   while let Some(row) = {
-    deadline.check(clock)?;
+    runtime.check()?;
     rows.next()?
   } {
-    macro_rules! optional_column {
-      ($index:expr, $name:literal, $type:ty, $default:expr) => {
-        match row.get::<_, Option<$type>>($index) {
-          Ok(value) => value.unwrap_or_else($default),
-          Err(error) => {
-            log::warn!("Failed to read {} from Firefox cookie row: {error}", $name);
-            last_row_error = Some(anyhow!(
-              "failed to read {} from Firefox cookie row: {error}",
-              $name
-            ));
-            rows_skipped += 1;
-            continue;
-          }
-        }
-      };
-    }
-
     let host = match row.get::<_, Option<String>>(0) {
       Ok(host) => host.unwrap_or_default(),
       Err(error) => {
@@ -198,33 +275,41 @@ fn query_persistent_cookies_mode(
       continue;
     }
     rows_seen += 1;
-    let path = optional_column!(1, "path", String, || "/".to_string());
-    let observed_secure = match row.get::<_, Option<bool>>(2) {
-      Ok(value) => value,
+    let (path, raw_path) = match optional_sqlite_string(row, 1) {
+      Ok((Some(value), None)) => (value, None),
+      Ok((None, None)) => ("/".to_owned(), None),
+      Ok((_, raw)) => ("/".to_owned(), raw),
       Err(error) => {
-        log::warn!("Failed to read isSecure from Firefox cookie row: {error}");
+        log::warn!("Failed to read path from Firefox cookie row: {error}");
         last_row_error = Some(anyhow!(
-          "failed to read isSecure from Firefox cookie row: {error}"
+          "failed to read path from Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
         continue;
       }
     };
-    let is_secure = observed_secure.unwrap_or(false);
-    let raw_expiry = match row.get::<_, Option<i64>>(3) {
+    let observed_secure = match optional_sqlite_bool(row, 2) {
       Ok(value) => value,
       Err(error) => {
-        log::warn!("Failed to read expiry from Firefox cookie row: {error}");
+        log::warn!("Failed to inspect isSecure in Firefox cookie row: {error}");
         last_row_error = Some(anyhow!(
-          "failed to read expiry from Firefox cookie row: {error}"
+          "failed to inspect isSecure in Firefox cookie row: {error}"
         ));
         rows_skipped += 1;
         continue;
       }
     };
-    let expires = raw_expiry
-      .and_then(|value| u64::try_from(value).ok())
-      .and_then(|value| persistent_cookie_expiry(value, schema_version));
+    let (observed_expiry, raw_expiry) = match optional_sqlite_expiry(row, 3, schema_version) {
+      Ok(value) => value,
+      Err(error) => {
+        log::warn!("Failed to inspect expiry in Firefox cookie row: {error}");
+        last_row_error = Some(anyhow!(
+          "failed to inspect expiry in Firefox cookie row: {error}"
+        ));
+        rows_skipped += 1;
+        continue;
+      }
+    };
 
     let name: String = match row.get(4) {
       Ok(val) => val,
@@ -245,7 +330,7 @@ fn query_persistent_cookies_mode(
         continue;
       }
     };
-    let observed_http_only = match row.get::<_, Option<bool>>(6) {
+    let observed_http_only = match optional_sqlite_bool(row, 6) {
       Ok(value) => value,
       Err(error) => {
         log::warn!("Failed to read isHttpOnly from Firefox cookie row: {error}");
@@ -256,8 +341,7 @@ fn query_persistent_cookies_mode(
         continue;
       }
     };
-    let http_only = observed_http_only.unwrap_or(false);
-    let observed_same_site = match row.get::<_, Option<i64>>(7) {
+    let observed_same_site = match optional_sqlite_i64(row, 7, -1..=2) {
       Ok(value) => value,
       Err(error) => {
         log::warn!("Failed to read sameSite from Firefox cookie row: {error}");
@@ -268,7 +352,6 @@ fn query_persistent_cookies_mode(
         continue;
       }
     };
-    let same_site = observed_same_site.unwrap_or(SAME_SITE_UNSPECIFIED);
     let (origin_attributes, raw_origin_attributes) = match row.get_ref(8) {
       Ok(rusqlite::types::ValueRef::Null) => (None, None),
       Ok(rusqlite::types::ValueRef::Text(value)) => match std::str::from_utf8(value) {
@@ -286,45 +369,41 @@ fn query_persistent_cookies_mode(
     let mut record = CookieRecord::from_legacy_fields(
       host,
       path,
-      is_secure,
-      expires,
+      matches!(observed_secure, Observation::Known(true)),
+      match &observed_expiry {
+        Observation::Known(expires) => *expires,
+        Observation::Missing | Observation::Unknown(_) => None,
+      },
       name,
-      CookieValue::Plain(crate::common::secret::SecretString::new(value)),
-      http_only,
-      same_site,
+      CookieValue::Plain(SecretString::new(value)),
+      matches!(observed_http_only, Observation::Known(true)),
+      match &observed_same_site {
+        Observation::Known(value) => *value,
+        Observation::Missing | Observation::Unknown(_) => SAME_SITE_UNSPECIFIED,
+      },
       CookieContext::default(),
       rows_seen,
     );
-    record.attributes = Attributes::observed(
-      observed_secure,
-      raw_expiry,
-      expires,
-      observed_http_only,
-      observed_same_site,
-    );
+    record.attributes = Attributes {
+      secure: observed_secure,
+      http_only: observed_http_only,
+      expires: observed_expiry,
+      raw_expires: raw_expiry,
+      same_site: observed_same_site,
+    };
     record.set_context(firefox_cookie_context(origin_attributes));
+    if let Some(raw) = raw_path {
+      record.retain_raw("path", raw);
+    }
     if let Some(raw) = raw_origin_attributes {
+      record.isolation.origin_attributes = Observation::Unknown(raw.clone());
       record.retain_raw("origin_attributes", raw);
     }
-    detailed_cookies.push(
-      record
-        .clone()
-        .into_detailed_cookie()
-        .expect("Firefox rows emit plaintext values"),
-    );
-    cookies.push(
-      record
-        .clone()
-        .into_cookie()
-        .expect("Firefox rows emit plaintext values"),
-    );
     records.push(record);
-    deadline.check(clock)?;
+    runtime.check()?;
   }
-
+  runtime.check()?;
   Ok(PersistentCookieQuery {
-    cookies,
-    detailed_cookies,
     records,
     rows_seen,
     rows_skipped,
@@ -341,6 +420,81 @@ fn sqlite_table_columns(
     .query_map([], |row| row.get::<_, String>(1))?
     .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
   Ok(columns)
+}
+
+fn raw_sqlite_value(value: rusqlite::types::ValueRef<'_>) -> RawValue {
+  match value {
+    rusqlite::types::ValueRef::Null => RawValue::Null,
+    rusqlite::types::ValueRef::Integer(value) => RawValue::Signed(value),
+    rusqlite::types::ValueRef::Real(value) => RawValue::FloatBits(value.to_bits()),
+    rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value).map_or_else(
+      |_| RawValue::Bytes(value.to_vec()),
+      |value| RawValue::Text(value.to_owned()),
+    ),
+    rusqlite::types::ValueRef::Blob(value) => RawValue::Bytes(value.to_vec()),
+  }
+}
+
+fn optional_sqlite_string(
+  row: &rusqlite::Row<'_>,
+  index: usize,
+) -> Result<(Option<String>, Option<RawValue>)> {
+  match row.get_ref(index)? {
+    rusqlite::types::ValueRef::Null => Ok((None, None)),
+    rusqlite::types::ValueRef::Text(value) => match std::str::from_utf8(value) {
+      Ok(value) => Ok((Some(value.to_owned()), None)),
+      Err(_) => Ok((None, Some(RawValue::Bytes(value.to_vec())))),
+    },
+    value => Ok((None, Some(raw_sqlite_value(value)))),
+  }
+}
+
+fn optional_sqlite_bool(row: &rusqlite::Row<'_>, index: usize) -> Result<Observation<bool>> {
+  Ok(match row.get_ref(index)? {
+    rusqlite::types::ValueRef::Null => Observation::Missing,
+    rusqlite::types::ValueRef::Integer(0) => Observation::Known(false),
+    rusqlite::types::ValueRef::Integer(1) => Observation::Known(true),
+    value => Observation::Unknown(raw_sqlite_value(value)),
+  })
+}
+
+fn optional_sqlite_i64(
+  row: &rusqlite::Row<'_>,
+  index: usize,
+  known: std::ops::RangeInclusive<i64>,
+) -> Result<Observation<i64>> {
+  Ok(match row.get_ref(index)? {
+    rusqlite::types::ValueRef::Null => Observation::Missing,
+    rusqlite::types::ValueRef::Integer(value) if known.contains(&value) => {
+      Observation::Known(value)
+    }
+    value => Observation::Unknown(raw_sqlite_value(value)),
+  })
+}
+
+fn optional_sqlite_expiry(
+  row: &rusqlite::Row<'_>,
+  index: usize,
+  schema_version: u32,
+) -> Result<(Observation<Option<u64>>, Observation<RawValue>)> {
+  Ok(match row.get_ref(index)? {
+    rusqlite::types::ValueRef::Null => (Observation::Missing, Observation::Missing),
+    rusqlite::types::ValueRef::Integer(raw) => {
+      let converted = u64::try_from(raw)
+        .ok()
+        .and_then(|value| persistent_cookie_expiry(value, schema_version));
+      let interpreted = if converted.is_some() || raw == 0 {
+        Observation::Known(converted)
+      } else {
+        Observation::Unknown(RawValue::Signed(raw))
+      };
+      (interpreted, Observation::Known(RawValue::Signed(raw)))
+    }
+    value => {
+      let raw = raw_sqlite_value(value);
+      (Observation::Unknown(raw.clone()), Observation::Unknown(raw))
+    }
+  })
 }
 
 fn firefox_cookie_context(origin_attributes: Option<String>) -> CookieContext {
@@ -424,11 +578,60 @@ const MAX_SESSION_COOKIE_DIAGNOSTICS: usize = 8;
 #[derive(Debug)]
 struct SessionCookieParseDraft {
   cookies: Vec<Cookie>,
+  #[cfg(test)]
   detailed_cookies: Vec<DetailedCookie>,
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
   diagnostics: Vec<String>,
+}
+
+pub(crate) struct MozillaSessionReadOnlySource<'a> {
+  pub(crate) bytes: &'a [u8],
+  pub(crate) format: SessionStoreFormat,
+  pub(crate) domains: Option<&'a [String]>,
+}
+
+impl ReadOnlySource for MozillaSessionReadOnlySource<'_> {}
+
+pub(crate) struct MozillaSessionDecoder;
+
+#[derive(Debug)]
+pub(crate) struct MozillaSessionDecodeSummary {
+  rows_seen: usize,
+  rows_skipped: usize,
+  diagnostics: Vec<String>,
+}
+
+impl Decoder<MozillaSessionReadOnlySource<'_>, CookieRecord> for MozillaSessionDecoder {
+  type Summary = MozillaSessionDecodeSummary;
+
+  fn decode(
+    &self,
+    source: &MozillaSessionReadOnlySource<'_>,
+    sink: &mut dyn RecordSink<CookieRecord>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Self::Summary> {
+    let mut parsed = decode_session_source(source, runtime)?;
+    runtime.check()?;
+    for (ordinal, record) in parsed.records.iter_mut().enumerate() {
+      record.origin = SourceRef::pending(ordinal);
+    }
+    for record in parsed.records {
+      runtime.check()?;
+      sink.emit(record)?;
+    }
+    runtime.check()?;
+    Ok(MozillaSessionDecodeSummary {
+      rows_seen: parsed.rows_seen,
+      rows_skipped: parsed.rows_skipped,
+      diagnostics: parsed.diagnostics,
+    })
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    DeadlineEnforcement::Cooperative
+  }
 }
 
 #[derive(Debug)]
@@ -460,7 +663,6 @@ pub(crate) struct MozillaSessionDraft {
   pub(crate) precedence: u16,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
-  pub(crate) detailed_cookies: Vec<DetailedCookie>,
   pub(crate) records: Vec<CookieRecord>,
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
@@ -492,6 +694,9 @@ pub(crate) struct MozillaExtractionDraft {
   /// separate from `persistent_error`.
   pub(crate) persistent_row_error: Option<String>,
   pub(crate) session_sources: Vec<MozillaSessionDraft>,
+  /// Operation termination is retained as a typed boundary result. It is not
+  /// represented as a fabricated session source or flattened diagnostic.
+  pub(crate) boundary_stop: Option<BoundaryStop>,
 }
 
 /// Extract a Mozilla profile with the same authoritative session ordering as
@@ -502,13 +707,20 @@ pub(crate) fn query_cookies_engine_outcome(
   domains: Option<&[String]>,
 ) -> MozillaExtractionDraft {
   let clock = SystemClock;
-  let deadline = Deadline::standard();
+  let runtime = BoundaryRuntime::standard(&clock);
+  query_cookies_engine_outcome_with_runtime(db_path, domains, &runtime)
+}
+
+pub(crate) fn query_cookies_engine_outcome_with_runtime(
+  db_path: &Path,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> MozillaExtractionDraft {
   let mut outcome = MozillaExtractionDraft::default();
-  match sqlite::with_browser_database_with_deadline(
+  match sqlite::with_browser_database_with_runtime(
     db_path.to_path_buf(),
-    |connection| query_persistent_cookies_mode(connection, domains, false, &clock, deadline),
-    &clock,
-    deadline,
+    |connection| query_persistent_cookies_with_runtime(connection, domains, runtime),
+    runtime,
   ) {
     Ok(database) => {
       outcome.persistent_acquisition_strategy = Some(database.strategy());
@@ -517,11 +729,33 @@ pub(crate) fn query_cookies_engine_outcome(
       outcome.persistent_rows_seen = persistent.rows_seen;
       outcome.persistent_rows_skipped = persistent.rows_skipped;
       outcome.persistent_row_error = persistent.last_row_error.map(|error| format!("{error:#}"));
-      outcome.persistent_cookies = persistent.cookies;
-      outcome.persistent_detailed_cookies = persistent.detailed_cookies;
+      outcome.persistent_cookies = persistent
+        .records
+        .iter()
+        .cloned()
+        .map(|record| {
+          record
+            .into_cookie()
+            .expect("Firefox rows emit plaintext values")
+        })
+        .collect();
+      outcome.persistent_detailed_cookies = persistent
+        .records
+        .iter()
+        .cloned()
+        .map(|record| {
+          record
+            .into_detailed_cookie()
+            .expect("Firefox rows emit plaintext values")
+        })
+        .collect();
       outcome.persistent_records = persistent.records;
     }
     Err(error) => {
+      if let Some(stop) = error.downcast_ref::<BoundaryStop>() {
+        outcome.boundary_stop = Some(*stop);
+        return outcome;
+      }
       if let Some(failure) = error.downcast_ref::<sqlite::BrowserDatabaseFailure>() {
         outcome.persistent_acquisition_strategy = failure.strategy;
         outcome.persistent_acquisition_attempts = failure.attempts;
@@ -536,24 +770,11 @@ pub(crate) fn query_cookies_engine_outcome(
   let cookies_dir = db_path.parent().unwrap_or_else(|| Path::new(""));
   for (index, (path, format)) in session_candidates(cookies_dir).into_iter().enumerate() {
     let precedence = session_candidate_precedence(index);
-    if deadline.check(&clock).is_err() {
-      outcome.session_sources.push(MozillaSessionDraft {
-        path,
-        format: format.format_id(),
-        precedence,
-        selected: false,
-        cookies: Vec::new(),
-        detailed_cookies: Vec::new(),
-        records: Vec::new(),
-        rows_seen: 0,
-        rows_skipped: 0,
-        acquisition_attempts: 0,
-        diagnostics: Vec::new(),
-        error: Some("operation deadline expired".to_owned()),
-      });
+    if let Err(stop) = runtime.check() {
+      outcome.boundary_stop = Some(stop);
       break;
     }
-    match parse_session_candidate_with_deadline(&path, &format, domains, &clock, deadline) {
+    match parse_session_path_with_runtime(&path, format, domains, runtime) {
       Ok(success) => {
         let mut diagnostics = success.transient_errors;
         diagnostics.extend(success.parsed.diagnostics);
@@ -563,7 +784,6 @@ pub(crate) fn query_cookies_engine_outcome(
           precedence,
           selected: true,
           cookies: success.parsed.cookies,
-          detailed_cookies: success.parsed.detailed_cookies,
           records: success.parsed.records,
           rows_seen: success.parsed.rows_seen,
           rows_skipped: success.parsed.rows_skipped,
@@ -577,111 +797,47 @@ pub(crate) fn query_cookies_engine_outcome(
       // state is "gone" is missing however it got there. Its retry diagnostics
       // are therefore dropped on purpose: a vanished candidate is not a source.
       Err(failure) if is_missing_session_file(&failure.error) => {}
-      Err(failure) => outcome.session_sources.push(MozillaSessionDraft {
-        path,
-        format: format.format_id(),
-        precedence,
-        selected: false,
-        cookies: Vec::new(),
-        detailed_cookies: Vec::new(),
-        records: Vec::new(),
-        rows_seen: 0,
-        rows_skipped: 0,
-        acquisition_attempts: failure.attempts,
-        diagnostics: failure.transient_errors,
-        error: Some(format!("{:#}", failure.error)),
-      }),
+      Err(failure) => {
+        if let Some(stop) = failure.error.downcast_ref::<BoundaryStop>() {
+          outcome.boundary_stop = Some(*stop);
+          break;
+        }
+        outcome.session_sources.push(MozillaSessionDraft {
+          path,
+          format: format.format_id(),
+          precedence,
+          selected: false,
+          cookies: Vec::new(),
+          records: Vec::new(),
+          rows_seen: 0,
+          rows_skipped: 0,
+          acquisition_attempts: failure.attempts,
+          diagnostics: failure.transient_errors,
+          error: Some(format!("{:#}", failure.error)),
+        });
+      }
     }
   }
   outcome
-}
-
-fn project_engine_cookies(outcome: MozillaExtractionDraft) -> Result<Vec<Cookie>> {
-  project_engine_values(
-    outcome.persistent_cookies,
-    outcome.persistent_error,
-    outcome.persistent_row_error,
-    outcome.persistent_rows_skipped,
-    outcome
-      .session_sources
-      .into_iter()
-      .map(|source| (source.selected, source.cookies, source.error)),
-  )
-}
-
-fn project_engine_detailed_cookies(outcome: MozillaExtractionDraft) -> Result<Vec<DetailedCookie>> {
-  project_engine_values(
-    outcome.persistent_detailed_cookies,
-    outcome.persistent_error,
-    outcome.persistent_row_error,
-    outcome.persistent_rows_skipped,
-    outcome
-      .session_sources
-      .into_iter()
-      .map(|source| (source.selected, source.detailed_cookies, source.error)),
-  )
-}
-
-fn project_engine_values<T>(
-  mut persistent: Vec<T>,
-  persistent_error: Option<String>,
-  persistent_row_error: Option<String>,
-  persistent_rows_skipped: usize,
-  sessions: impl IntoIterator<Item = (bool, Vec<T>, Option<String>)>,
-) -> Result<Vec<T>> {
-  let mut selected_session_succeeded = false;
-  let mut session_failures = Vec::new();
-  for (selected, values, error) in sessions {
-    if selected && error.is_none() {
-      selected_session_succeeded = true;
-      persistent.extend(values);
-    } else if let Some(error) = error {
-      session_failures.push(error);
-    }
-  }
-  if !persistent.is_empty() {
-    return Ok(persistent);
-  }
-  if let Some(error) = persistent_error {
-    return Err(anyhow!(error));
-  }
-  if !selected_session_succeeded && !session_failures.is_empty() {
-    bail!(
-      "all existing Firefox session store candidates failed: {}",
-      session_failures.join("; ")
-    )
-  }
-  if persistent_rows_skipped > 0 {
-    if let Some(error) = persistent_row_error {
-      return Err(anyhow!(error));
-    }
-  }
-  Ok(persistent)
 }
 
 fn session_candidates(cookies_dir: &Path) -> [(PathBuf, SessionStoreFormat); 5] {
   SESSION_CANDIDATES.map(|(relative, format)| (cookies_dir.join(relative), format))
 }
 
-fn parse_session_candidate_with_deadline(
+fn parse_session_path_with_runtime(
   path: &Path,
-  format: &SessionStoreFormat,
+  format: SessionStoreFormat,
   domains: Option<&[String]>,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure> {
   parse_session_candidate_with_runtime(
     path,
-    || match format {
-      SessionStoreFormat::JsonLz4 => {
-        parse_session_cookies_lz4_with_deadline(path, domains, clock, deadline)
-      }
-      SessionStoreFormat::LegacyJson => {
-        parse_legacy_session_cookies_with_deadline(path, domains, clock, deadline)
-      }
+    || {
+      let bytes = read_stable_session_file_with_runtime(path, runtime)?;
+      decode_acquired_session(bytes, format, domains, runtime)
     },
-    clock,
-    deadline,
+    runtime,
   )
 }
 
@@ -694,14 +850,14 @@ where
   F: FnMut() -> Result<SessionCookieParseDraft>,
 {
   let clock = SystemClock;
-  parse_session_candidate_with_runtime(path, parse, &clock, Deadline::standard())
+  let runtime = BoundaryRuntime::standard(&clock);
+  parse_session_candidate_with_runtime(path, parse, &runtime)
 }
 
 fn parse_session_candidate_with_runtime<F>(
   path: &Path,
   mut parse: F,
-  clock: &dyn Clock,
-  deadline: Deadline,
+  runtime: &BoundaryRuntime<'_>,
 ) -> std::result::Result<SessionCandidateSuccess, SessionCandidateFailure>
 where
   F: FnMut() -> Result<SessionCookieParseDraft>,
@@ -710,9 +866,9 @@ where
   let mut attempts = 0;
   let mut transient_errors = Vec::new();
   for attempt in 1..=SESSION_STORE_READ_ATTEMPTS {
-    if let Err(error) = deadline.check(clock) {
+    if let Err(stop) = runtime.check() {
       return Err(SessionCandidateFailure {
-        error: error.into(),
+        error: stop.into(),
         attempts,
         transient_errors,
       });
@@ -720,13 +876,27 @@ where
     attempts = attempt as u32;
     match parse() {
       Ok(parsed) => {
+        if let Err(stop) = runtime.check() {
+          return Err(SessionCandidateFailure {
+            error: stop.into(),
+            attempts,
+            transient_errors,
+          });
+        }
         return Ok(SessionCandidateSuccess {
           parsed,
           attempts,
           transient_errors,
-        })
+        });
       }
       Err(error) if is_missing_session_file(&error) => {
+        return Err(SessionCandidateFailure {
+          error,
+          attempts,
+          transient_errors,
+        })
+      }
+      Err(error) if error.downcast_ref::<BoundaryStop>().is_some() => {
         return Err(SessionCandidateFailure {
           error,
           attempts,
@@ -764,15 +934,15 @@ fn is_missing_session_file(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 fn read_stable_session_file(path: &Path) -> Result<Vec<u8>> {
   let clock = SystemClock;
-  read_stable_session_file_with_deadline(path, &clock, Deadline::standard())
+  let runtime = BoundaryRuntime::standard(&clock);
+  read_stable_session_file_with_runtime(path, &runtime).map(|bytes| bytes.as_slice().to_vec())
 }
 
-fn read_stable_session_file_with_deadline(
+fn read_stable_session_file_with_runtime(
   path: &Path,
-  clock: &dyn Clock,
-  deadline: Deadline,
-) -> Result<Vec<u8>> {
-  deadline.check(clock)?;
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SecretBytes> {
+  runtime.check()?;
   let mut file = fs::File::open(path)?;
   let before = file.metadata()?;
   if before.len() > MAX_SESSION_STORE_BYTES as u64 {
@@ -789,16 +959,17 @@ fn read_stable_session_file_with_deadline(
     .try_reserve_exact(expected_length)
     .map_err(|error| anyhow!("Unable to allocate Firefox session store buffer: {error}"))?;
   bytes.resize(expected_length, 0);
+  let mut bytes = SecretBytes::new(bytes);
   let mut filled = 0;
   while filled < bytes.len() {
-    deadline.check(clock)?;
-    let read = file.read(&mut bytes[filled..])?;
+    runtime.check()?;
+    let read = file.read(&mut bytes.as_mut_slice()[filled..])?;
     if read == 0 {
       return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
     }
     filled += read;
   }
-  deadline.check(clock)?;
+  runtime.check()?;
   let after = file.metadata()?;
 
   let length_changed =
@@ -808,10 +979,11 @@ fn read_stable_session_file_with_deadline(
     bail!("Firefox session store changed while it was being read");
   }
 
+  runtime.check()?;
   Ok(bytes)
 }
 
-fn decompress_session_store(compressed: &[u8]) -> Result<Vec<u8>> {
+fn decompress_session_store(compressed: &[u8]) -> Result<SecretBytes> {
   let advertised = compressed
     .get(..4)
     .ok_or_else(|| anyhow!("Invalid compressed length prefix"))?;
@@ -831,7 +1003,8 @@ fn decompress_session_store(compressed: &[u8]) -> Result<Vec<u8>> {
     .try_reserve_exact(advertised)
     .map_err(|error| anyhow!("Unable to allocate Firefox mozLz4 output buffer: {error}"))?;
   decompressed.resize(advertised, 0);
-  let written = decompress_into(&compressed[4..], &mut decompressed)?;
+  let mut decompressed = SecretBytes::new(decompressed);
+  let written = decompress_into(&compressed[4..], decompressed.as_mut_slice())?;
   if written != advertised {
     bail!("Firefox mozLz4 output length {written} does not match advertised length {advertised}");
   }
@@ -865,23 +1038,22 @@ fn record_session_cookie(
     record.set_context(firefox_session_cookie_context(
       json_cookie.get("originAttributes"),
     ));
+    if let Some(origin_attributes) = json_cookie.get("originAttributes") {
+      match origin_attributes {
+        Value::String(_) | Value::Object(_) => {}
+        value => {
+          let raw = raw_json_value(value);
+          record.isolation.origin_attributes = Observation::Unknown(raw.clone());
+          record.retain_raw("origin_attributes", raw);
+        }
+      }
+      if let Value::Object(attributes) = origin_attributes {
+        preserve_unknown_session_isolation_attributes(&mut record, attributes);
+      }
+    }
     record
   }) {
-    Ok(record) => {
-      outcome.cookies.push(
-        record
-          .clone()
-          .into_cookie()
-          .expect("session record is plaintext"),
-      );
-      outcome.detailed_cookies.push(
-        record
-          .clone()
-          .into_detailed_cookie()
-          .expect("session record is plaintext"),
-      );
-      outcome.records.push(record);
-    }
+    Ok(record) => outcome.records.push(record),
     Err(error) => {
       outcome.rows_skipped += 1;
       if outcome.diagnostics.len() < MAX_SESSION_COOKIE_DIAGNOSTICS {
@@ -893,9 +1065,55 @@ fn record_session_cookie(
   }
 }
 
+fn preserve_unknown_session_isolation_attributes(
+  record: &mut CookieRecord,
+  attributes: &serde_json::Map<String, Value>,
+) {
+  let invalid_u32 = |name: &str| {
+    attributes.get(name).filter(|value| {
+      value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .is_none()
+    })
+  };
+  if let Some(value) = invalid_u32("userContextId") {
+    record.isolation.user_context_id = Observation::Unknown(raw_json_value(value));
+  }
+  if let Some(value) = attributes
+    .get("partitionKey")
+    .filter(|value| !value.is_string())
+  {
+    record.isolation.partition_key = Observation::Unknown(raw_json_value(value));
+  }
+  if let Some(value) = invalid_u32("privateBrowsingId") {
+    record.isolation.private_browsing_id = Observation::Unknown(raw_json_value(value));
+  }
+}
+
+#[cfg(test)]
 fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<SessionCookieParseDraft> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let parsed = parse_session_json_with_runtime(json, domains, &runtime)?;
+  Ok(project_session_records(
+    parsed.records,
+    parsed.rows_seen,
+    parsed.rows_skipped,
+    parsed.diagnostics,
+  ))
+}
+
+fn parse_session_json_with_runtime(
+  json: &Value,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SessionCookieParseDraft> {
+  runtime.check()?;
   let mut outcome = SessionCookieParseDraft {
     cookies: Vec::new(),
+    #[cfg(test)]
     detailed_cookies: Vec::new(),
     records: Vec::new(),
     rows_seen: 0,
@@ -922,6 +1140,7 @@ fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<Sessio
     .transpose()?;
   let mut window_cookie_collections = Vec::new();
   for (window_index, window) in windows.iter().enumerate() {
+    runtime.check()?;
     let window = window
       .as_object()
       .ok_or_else(|| anyhow!("Firefox session state windows[{window_index}] is not an object"))?;
@@ -940,6 +1159,7 @@ fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<Sessio
 
   if let Some(cookies) = top_level_cookies {
     for (cookie_index, json_cookie) in cookies.iter().enumerate() {
+      runtime.check()?;
       record_session_cookie(
         &mut outcome,
         json_cookie,
@@ -947,11 +1167,14 @@ fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<Sessio
         domains,
       );
     }
+    runtime.check()?;
     return Ok(outcome);
   }
 
   for (window_index, cookies) in window_cookie_collections {
+    runtime.check()?;
     for (cookie_index, json_cookie) in cookies.iter().enumerate() {
+      runtime.check()?;
       record_session_cookie(
         &mut outcome,
         json_cookie,
@@ -960,6 +1183,7 @@ fn parse_session_json(json: &Value, domains: Option<&[String]>) -> Result<Sessio
       );
     }
   }
+  runtime.check()?;
   Ok(outcome)
 }
 
@@ -972,21 +1196,16 @@ fn parse_legacy_session_cookies(
   parse_legacy_session_cookies_with_deadline(path, domains, &clock, Deadline::standard())
 }
 
+#[cfg(test)]
 fn parse_legacy_session_cookies_with_deadline(
   path: &Path,
   domains: Option<&[String]>,
   clock: &dyn Clock,
   deadline: Deadline,
 ) -> Result<SessionCookieParseDraft> {
-  let plain = String::from_utf8(read_stable_session_file_with_deadline(
-    path, clock, deadline,
-  )?)?;
-  deadline.check(clock)?;
-  let json: Value = serde_json::from_str(&plain)?;
-  deadline.check(clock)?;
-  let parsed = parse_session_json(&json, domains)?;
-  deadline.check(clock)?;
-  Ok(parsed)
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  let bytes = read_stable_session_file_with_runtime(path, &runtime)?;
+  decode_acquired_session(bytes, SessionStoreFormat::LegacyJson, domains, &runtime)
 }
 
 #[cfg(test)]
@@ -1010,47 +1229,191 @@ fn parse_session_cookies_lz4(
   parse_session_cookies_lz4_with_deadline(path, domains, &clock, Deadline::standard())
 }
 
+#[cfg(test)]
 fn parse_session_cookies_lz4_with_deadline(
   path: &Path,
   domains: Option<&[String]>,
   clock: &dyn Clock,
   deadline: Deadline,
 ) -> Result<SessionCookieParseDraft> {
-  let compressed = read_stable_session_file_with_deadline(path, clock, deadline)?;
-  if !compressed.starts_with(b"mozLz40\0") {
-    bail!("Invalid mozLz40 header");
-  }
-  let compressed = compressed
-    .get(8..)
-    .ok_or_else(|| anyhow!("Invalid compressed length"))?;
-  deadline.check(clock)?;
-  let decompressed = decompress_session_store(compressed)?;
-  deadline.check(clock)?;
-  let plain = String::from_utf8(decompressed)?;
-  let json: Value = serde_json::from_str(&plain)?;
-  deadline.check(clock)?;
-  let parsed = parse_session_json(&json, domains)?;
-  deadline.check(clock)?;
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  let bytes = read_stable_session_file_with_runtime(path, &runtime)?;
+  decode_acquired_session(bytes, SessionStoreFormat::JsonLz4, domains, &runtime)
+}
+
+fn decode_acquired_session(
+  bytes: SecretBytes,
+  format: SessionStoreFormat,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SessionCookieParseDraft> {
+  let source = MozillaSessionReadOnlySource {
+    bytes: bytes.as_slice(),
+    format,
+    domains,
+  };
+  let decoder = MozillaSessionDecoder;
+  let mut records = Vec::new();
+  let summary = decoder.decode(
+    &source,
+    &mut |record| {
+      records.push(record);
+      Ok(())
+    },
+    runtime,
+  )?;
+  runtime.check()?;
+  Ok(project_session_records(
+    records,
+    summary.rows_seen,
+    summary.rows_skipped,
+    summary.diagnostics,
+  ))
+}
+
+fn decode_session_source(
+  source: &MozillaSessionReadOnlySource<'_>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SessionCookieParseDraft> {
+  runtime.check()?;
+  let plain = match source.format {
+    SessionStoreFormat::LegacyJson => SecretBytes::new(source.bytes.to_vec()),
+    SessionStoreFormat::JsonLz4 => {
+      if !source.bytes.starts_with(b"mozLz40\0") {
+        bail!("Invalid mozLz40 header");
+      }
+      let compressed = source
+        .bytes
+        .get(8..)
+        .ok_or_else(|| anyhow!("Invalid compressed length"))?;
+      runtime.check()?;
+      decompress_session_store(compressed)?
+    }
+  };
+  runtime.check()?;
+  let plain = plain.into_secret_string_from(0)?;
+  let mut json: Value = serde_json::from_str(plain.as_str())?;
+  let parsed = runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .and_then(|_| parse_session_json_with_runtime(&json, source.domains, runtime));
+  wipe_json_strings(&mut json);
+  drop(json);
+  drop(plain);
+  let parsed = parsed?;
+  runtime.check()?;
   Ok(parsed)
 }
 
-fn session_cookie_expiry(json_cookie: &Value) -> Result<Option<u64>> {
+fn wipe_json_strings(value: &mut Value) {
+  match value {
+    Value::String(value) => value.zeroize(),
+    Value::Array(values) => values.iter_mut().for_each(wipe_json_strings),
+    Value::Object(values) => {
+      for (mut key, mut value) in std::mem::take(values) {
+        key.zeroize();
+        wipe_json_strings(&mut value);
+      }
+    }
+    Value::Null | Value::Bool(_) | Value::Number(_) => {}
+  }
+}
+
+fn project_session_records(
+  records: Vec<CookieRecord>,
+  rows_seen: usize,
+  rows_skipped: usize,
+  diagnostics: Vec<String>,
+) -> SessionCookieParseDraft {
+  let cookies = records
+    .iter()
+    .cloned()
+    .map(|record| record.into_cookie().expect("session record is plaintext"))
+    .collect();
+  #[cfg(test)]
+  let detailed_cookies = records
+    .iter()
+    .cloned()
+    .map(|record| {
+      record
+        .into_detailed_cookie()
+        .expect("session record is plaintext")
+    })
+    .collect();
+  SessionCookieParseDraft {
+    cookies,
+    #[cfg(test)]
+    detailed_cookies,
+    records,
+    rows_seen,
+    rows_skipped,
+    diagnostics,
+  }
+}
+
+fn session_cookie_expiry(json_cookie: &Value) -> (Observation<Option<u64>>, Observation<RawValue>) {
   let Some(expiry) = json_cookie.get("expiry") else {
-    return Ok(None);
+    return (Observation::Missing, Observation::Missing);
   };
-  let expiry = expiry
-    .as_u64()
-    .ok_or_else(|| anyhow!("session cookie expiry is not a non-negative integer"))?;
+  let Some(expiry) = expiry.as_u64() else {
+    let raw = raw_json_value(expiry);
+    return (Observation::Unknown(raw.clone()), Observation::Unknown(raw));
+  };
+  let raw = Observation::Known(RawValue::Unsigned(expiry));
   if expiry == 0 {
-    Ok(None)
+    (Observation::Known(None), raw)
   } else if expiry <= MAX_PLAUSIBLE_SESSION_EXPIRY_SECONDS {
-    Ok(date::mozilla_timestamp(expiry))
+    (Observation::Known(date::mozilla_timestamp(expiry)), raw)
   } else if expiry < MIN_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS {
-    bail!("session cookie expiry {expiry} has ambiguous seconds/milliseconds scale")
+    (Observation::Unknown(RawValue::Unsigned(expiry)), raw)
   } else if expiry <= MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS {
-    Ok(date::mozilla_timestamp(expiry / 1000))
+    (
+      Observation::Known(date::mozilla_timestamp(expiry / 1000)),
+      raw,
+    )
   } else {
-    bail!("session cookie expiry {expiry} is outside the supported timestamp range")
+    (Observation::Unknown(RawValue::Unsigned(expiry)), raw)
+  }
+}
+
+fn raw_json_value(value: &Value) -> RawValue {
+  match value {
+    Value::Null => RawValue::Null,
+    Value::Bool(value) => RawValue::Bool(*value),
+    Value::Number(value) => value
+      .as_i64()
+      .map(RawValue::Signed)
+      .or_else(|| value.as_u64().map(RawValue::Unsigned))
+      .or_else(|| {
+        value
+          .as_f64()
+          .map(|value| RawValue::FloatBits(value.to_bits()))
+      })
+      .unwrap_or_else(|| RawValue::Text("unrepresentable number".to_owned())),
+    Value::String(value) => RawValue::Text(value.clone()),
+    // Preserve structured future forms as their canonical JSON spelling. The
+    // RawValue debug implementation redacts the contents transitively.
+    Value::Array(_) | Value::Object(_) => RawValue::Text(value.to_string()),
+  }
+}
+
+fn json_bool_observation(json_cookie: &Value, name: &str) -> Observation<bool> {
+  match json_cookie.get(name) {
+    None => Observation::Missing,
+    Some(Value::Bool(value)) => Observation::Known(*value),
+    Some(value) => Observation::Unknown(raw_json_value(value)),
+  }
+}
+
+fn json_same_site_observation(json_cookie: &Value) -> Observation<i64> {
+  match json_cookie.get("sameSite") {
+    None => Observation::Missing,
+    Some(Value::Number(value)) => match value.as_i64() {
+      Some(value @ -1..=2) => Observation::Known(value),
+      Some(value) => Observation::Unknown(RawValue::Signed(value)),
+      None => Observation::Unknown(raw_json_value(&Value::Number(value.clone()))),
+    },
+    Some(value) => Observation::Unknown(raw_json_value(value)),
   }
 }
 
@@ -1063,10 +1426,7 @@ fn create_cookie_record(json_cookie: &Value) -> Result<CookieRecord> {
     .get("path")
     .and_then(|v| v.as_str())
     .unwrap_or("/");
-  let secure = json_cookie
-    .get("secure")
-    .and_then(|v| v.as_bool())
-    .unwrap_or(false);
+  let secure = json_bool_observation(json_cookie, "secure");
   let name = json_cookie
     .get("name")
     .and_then(|v| v.as_str())
@@ -1075,32 +1435,35 @@ fn create_cookie_record(json_cookie: &Value) -> Result<CookieRecord> {
     .get("value")
     .and_then(|v| v.as_str())
     .ok_or_else(|| anyhow!("session cookie has no value"))?;
-  let http_only = json_cookie
-    .get("httponly")
-    .and_then(|v| v.as_bool())
-    .unwrap_or(false);
-  let expires = session_cookie_expiry(json_cookie)?;
-
-  let same_site = json_cookie
-    .get("sameSite")
-    .and_then(|v| v.as_i64())
-    .unwrap_or(SAME_SITE_UNSPECIFIED);
+  let http_only = json_bool_observation(json_cookie, "httponly");
+  let (expires, raw_expires) = session_cookie_expiry(json_cookie);
+  let same_site = json_same_site_observation(json_cookie);
 
   let mut record = CookieRecord::from_legacy_fields(
     host.to_string(),
     path.to_string(),
-    secure,
-    expires,
+    matches!(secure, Observation::Known(true)),
+    match &expires {
+      Observation::Known(expires) => *expires,
+      Observation::Missing | Observation::Unknown(_) => None,
+    },
     name.to_string(),
-    CookieValue::Plain(crate::common::secret::SecretString::new(value.to_string())),
-    http_only,
-    same_site,
+    CookieValue::Plain(SecretString::new(value.to_string())),
+    matches!(http_only, Observation::Known(true)),
+    match &same_site {
+      Observation::Known(value) => *value,
+      Observation::Missing | Observation::Unknown(_) => SAME_SITE_UNSPECIFIED,
+    },
     CookieContext::default(),
     0,
   );
-  if let Some(raw_expiry) = json_cookie.get("expiry").and_then(Value::as_u64) {
-    record.set_raw_expiry(RawValue::Unsigned(raw_expiry));
-  }
+  record.attributes = Attributes {
+    secure,
+    http_only,
+    expires,
+    raw_expires,
+    same_site,
+  };
   Ok(record)
 }
 
@@ -1428,6 +1791,29 @@ mod tests {
   use sha2::{Digest, Sha256};
   use std::io::Write;
   use std::sync::atomic::{AtomicU64, Ordering};
+  use std::time::{Duration, Instant};
+
+  struct TickClock {
+    base: Instant,
+    ticks: AtomicU64,
+  }
+
+  impl Default for TickClock {
+    fn default() -> Self {
+      Self {
+        base: Instant::now(),
+        ticks: AtomicU64::new(0),
+      }
+    }
+  }
+
+  impl Clock for TickClock {
+    fn now(&self) -> Instant {
+      self.base + Duration::from_secs(self.ticks.fetch_add(1, Ordering::SeqCst))
+    }
+
+    fn sleep(&self, _duration: Duration) {}
+  }
 
   // Per-process unique temp paths without pulling in the `tempfile` dep.
   // Each test gets its own subdirectory so they don't collide when run in
@@ -1439,6 +1825,17 @@ mod tests {
       std::env::temp_dir().join(format!("rookie-test-{}-{}-{}", tag, std::process::id(), n));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
+  }
+
+  #[test]
+  fn pure_mozilla_decoder_boundaries_are_platform_neutral() {
+    fn assert_source<T: ReadOnlySource>() {}
+    fn assert_persistent<T: Decoder<MozillaPersistentReadOnlySource<'static>, CookieRecord>>() {}
+    fn assert_session<T: Decoder<MozillaSessionReadOnlySource<'static>, CookieRecord>>() {}
+    assert_source::<MozillaPersistentReadOnlySource<'static>>();
+    assert_source::<MozillaSessionReadOnlySource<'static>>();
+    assert_persistent::<MozillaPersistentDecoder>();
+    assert_session::<MozillaSessionDecoder>();
   }
 
   // (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite)
@@ -1604,11 +2001,16 @@ mod tests {
     .into_value();
     assert_eq!(persistent.rows_seen, 3);
     assert_eq!(persistent.rows_skipped, 0);
-    assert_eq!(persistent.detailed_cookies.len(), 3);
+    let detailed_cookies = persistent
+      .records
+      .iter()
+      .cloned()
+      .map(|record| record.into_detailed_cookie().unwrap())
+      .collect::<Vec<_>>();
+    assert_eq!(detailed_cookies.len(), 3);
     assert!(persistent.last_row_error.is_none());
     assert_eq!(
-      persistent
-        .detailed_cookies
+      detailed_cookies
         .iter()
         .map(|cookie| cookie.cookie.name.as_str())
         .collect::<Vec<_>>(),
@@ -1803,21 +2205,159 @@ mod tests {
   }
 
   #[test]
-  fn session_expiry_classifier_preserves_seconds_converts_milliseconds_and_rejects_gap() {
+  fn session_expiry_classifier_preserves_seconds_converts_milliseconds_and_retains_gap() {
     let cookie = |expiry| serde_json::json!({ "expiry": expiry });
-    assert_eq!(session_cookie_expiry(&serde_json::json!({})).unwrap(), None);
-    assert_eq!(session_cookie_expiry(&cookie(0)).unwrap(), None);
+    assert!(matches!(
+      session_cookie_expiry(&serde_json::json!({})).0,
+      Observation::Missing
+    ));
+    assert!(matches!(
+      session_cookie_expiry(&cookie(0)).0,
+      Observation::Known(None)
+    ));
+    assert!(matches!(
+      session_cookie_expiry(&cookie(1_800_000_000)).0,
+      Observation::Known(Some(1_800_000_000))
+    ));
+    assert!(matches!(
+      session_cookie_expiry(&cookie(1_800_000_000_999_u64)).0,
+      Observation::Known(Some(1_800_000_000))
+    ));
+    assert!(matches!(
+      session_cookie_expiry(&cookie(100_000_000_000_u64)).0,
+      Observation::Unknown(RawValue::Unsigned(100_000_000_000))
+    ));
+  }
+
+  #[test]
+  fn session_decoder_preserves_missing_and_unknown_optional_attributes() {
+    let missing = create_cookie_record(&serde_json::json!({
+      "host": ".example.test", "path": "/", "name": "missing", "value": "one"
+    }))
+    .expect("decode missing optional fields");
+    assert!(matches!(missing.attributes.secure, Observation::Missing));
+    assert!(matches!(missing.attributes.http_only, Observation::Missing));
+    assert!(matches!(missing.attributes.same_site, Observation::Missing));
+    assert!(matches!(missing.attributes.expires, Observation::Missing));
+
+    let unknown = create_cookie_record(&serde_json::json!({
+      "host": ".example.test", "path": "/", "name": "unknown", "value": "two",
+      "secure": 2, "httponly": "sometimes", "sameSite": 9, "expiry": "later"
+    }))
+    .expect("retain unknown optional fields");
+    assert!(matches!(
+      unknown.attributes.secure,
+      Observation::Unknown(RawValue::Signed(2))
+    ));
+    assert!(matches!(
+      unknown.attributes.http_only,
+      Observation::Unknown(RawValue::Text(_))
+    ));
+    assert!(matches!(
+      unknown.attributes.same_site,
+      Observation::Unknown(RawValue::Signed(9))
+    ));
+    assert!(matches!(
+      unknown.attributes.expires,
+      Observation::Unknown(RawValue::Text(_))
+    ));
+    let projected = unknown.into_cookie().unwrap();
+    assert!(!projected.secure);
+    assert!(!projected.http_only);
+    assert_eq!(projected.expires, None);
+  }
+
+  #[test]
+  fn session_decoder_stages_records_and_stops_before_a_later_cookie() {
+    const SENTINEL: &str = "rookie-mozilla-timeout-sentinel";
+    let json = serde_json::json!({
+      "windows": [],
+      "cookies": [
+        {"host": ".example.test", "name": "first", "value": SENTINEL},
+        {"host": ".example.test", "name": "later", "value": "two"}
+      ]
+    });
+    let clock = TickClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(3)));
+    let error = parse_session_json_with_runtime(&json, None, &runtime)
+      .expect_err("second cookie begins at the deadline");
     assert_eq!(
-      session_cookie_expiry(&cookie(1_800_000_000)).unwrap(),
-      Some(1_800_000_000)
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
     );
+    assert!(!format!("{error:#}").contains(SENTINEL));
+  }
+
+  #[test]
+  fn candidate_cannot_report_success_after_its_final_deadline() {
+    use crate::common::deadline::test_clock::ManualClock;
+
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(1)));
+    let failure = parse_session_candidate_with_runtime(
+      Path::new("recovery.jsonlz4"),
+      || {
+        clock.advance(Duration::from_secs(1));
+        Ok(SessionCookieParseDraft {
+          cookies: Vec::new(),
+          detailed_cookies: Vec::new(),
+          records: Vec::new(),
+          rows_seen: 0,
+          rows_skipped: 0,
+          diagnostics: Vec::new(),
+        })
+      },
+      &runtime,
+    )
+    .expect_err("final checkpoint must retain a typed timeout");
     assert_eq!(
-      session_cookie_expiry(&cookie(1_800_000_000_999_u64)).unwrap(),
-      Some(1_800_000_000)
+      failure.error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
     );
-    let ambiguous = session_cookie_expiry(&cookie(100_000_000_000_u64))
-      .expect_err("the scale gap must never be guessed");
-    assert!(format!("{ambiguous:#}").contains("ambiguous seconds/milliseconds scale"));
+    assert_eq!(failure.attempts, 1);
+    assert!(failure.transient_errors.is_empty());
+  }
+
+  #[test]
+  fn persistent_decoder_preserves_non_boolean_sqlite_values() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+      .execute_batch(
+        "CREATE TABLE moz_cookies (
+           host TEXT, path TEXT, isSecure, expiry, name TEXT, value TEXT,
+           isHttpOnly, sameSite, originAttributes
+         );
+         INSERT INTO moz_cookies VALUES
+           ('.example.test', '/', 2, 1700000000, 'unknown', 'protected', -1, 9, 17),
+           ('.example.test', NULL, NULL, NULL, 'missing', 'protected', NULL, NULL, NULL);",
+      )
+      .unwrap();
+    let query = query_persistent_cookies(&connection, None).unwrap();
+    assert_eq!(query.records.len(), 2);
+    let unknown = &query.records[0];
+    assert!(matches!(
+      unknown.attributes.secure,
+      Observation::Unknown(RawValue::Signed(2))
+    ));
+    assert!(matches!(
+      unknown.attributes.http_only,
+      Observation::Unknown(RawValue::Signed(-1))
+    ));
+    assert!(matches!(
+      unknown.attributes.same_site,
+      Observation::Unknown(RawValue::Signed(9))
+    ));
+    assert!(matches!(
+      unknown.isolation.origin_attributes,
+      Observation::Unknown(RawValue::Signed(17))
+    ));
+    let missing = &query.records[1];
+    assert!(matches!(missing.attributes.secure, Observation::Missing));
+    assert!(matches!(missing.attributes.http_only, Observation::Missing));
+    assert!(matches!(missing.attributes.same_site, Observation::Missing));
+    assert!(matches!(missing.attributes.expires, Observation::Missing));
+    assert_eq!(unknown.origin.ordinal, 0);
+    assert_eq!(missing.origin.ordinal, 1);
   }
 
   #[test]
@@ -1956,7 +2496,7 @@ mod tests {
   }
 
   #[test]
-  fn persistent_metadata_type_errors_are_counted_and_skipped_instead_of_defaulted() {
+  fn persistent_optional_metadata_type_errors_are_retained_without_guessing() {
     let dir = unique_tmpdir("ff-persistent-metadata-types");
     let db = dir.join("cookies.sqlite");
     let connection = rusqlite::Connection::open(&db).expect("open fixture");
@@ -1978,9 +2518,35 @@ mod tests {
 
     let outcome = query_cookies_engine_outcome(&db, None);
     assert_eq!(outcome.persistent_rows_seen, 7);
-    assert_eq!(outcome.persistent_rows_skipped, 6);
-    assert_eq!(outcome.persistent_cookies.len(), 1);
-    assert_eq!(outcome.persistent_cookies[0].name, "good");
+    assert_eq!(outcome.persistent_rows_skipped, 1);
+    assert_eq!(outcome.persistent_cookies.len(), 6);
+    let find = |name: &str| {
+      outcome
+        .persistent_records
+        .iter()
+        .find(|record| record.name == name)
+        .expect("retained optional metadata row")
+    };
+    assert!(matches!(
+      find("bad-path").raw.get("path"),
+      Some(RawValue::Bytes(_))
+    ));
+    assert!(matches!(
+      find("bad-secure").attributes.secure,
+      Observation::Unknown(RawValue::Text(_))
+    ));
+    assert!(matches!(
+      find("bad-expiry").attributes.expires,
+      Observation::Unknown(RawValue::Text(_))
+    ));
+    assert!(matches!(
+      find("bad-http").attributes.http_only,
+      Observation::Unknown(RawValue::Text(_))
+    ));
+    assert!(matches!(
+      find("bad-site").attributes.same_site,
+      Observation::Unknown(RawValue::Bytes(_))
+    ));
     assert!(outcome.persistent_row_error.is_some());
     assert!(outcome.persistent_error.is_none());
   }
@@ -2158,7 +2724,7 @@ mod tests {
   }
 
   #[test]
-  fn ambiguous_session_expiry_is_a_skipped_row_with_a_diagnostic() {
+  fn ambiguous_session_expiry_is_retained_as_unknown_metadata() {
     let dir = unique_tmpdir("ff-session-expiry-scale-diagnostic");
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(&db, &[]);
@@ -2182,12 +2748,17 @@ mod tests {
     let source = &outcome.session_sources[0];
     assert!(source.selected);
     assert_eq!(source.rows_seen, 4);
-    assert_eq!(source.rows_skipped, 1);
-    assert_eq!(source.cookies.len(), 3);
+    assert_eq!(source.rows_skipped, 0);
+    assert_eq!(source.cookies.len(), 4);
     assert_eq!(source.cookies[0].expires, None);
     assert_eq!(source.cookies[1].expires, Some(1_800_000_000));
     assert_eq!(source.cookies[2].expires, Some(1_800_000_000));
-    assert!(source.diagnostics[0].contains("ambiguous seconds/milliseconds scale"));
+    assert_eq!(source.cookies[3].expires, None);
+    assert!(source.diagnostics.is_empty());
+    assert!(matches!(
+      source.records[3].attributes.expires,
+      Observation::Unknown(RawValue::Unsigned(100_000_000_000))
+    ));
   }
 
   #[test]
@@ -2832,14 +3403,14 @@ mod tests {
       )
       .expect("insert malformed off-scope candidate");
     let dotted_domains = vec![".example.com.".to_string()];
-    let mut dotted = query_persistent_cookies(&connection, Some(&dotted_domains))
+    let dotted = query_persistent_cookies(&connection, Some(&dotted_domains))
       .expect("leading and trailing dots must not narrow the SQL candidate set");
-    dotted.cookies.sort_by(|a, b| a.name.cmp(&b.name));
-    let dotted_names = dotted
-      .cookies
+    let mut dotted_names = dotted
+      .records
       .iter()
-      .map(|cookie| cookie.name.as_str())
+      .map(|record| record.name.as_str())
       .collect::<Vec<_>>();
+    dotted_names.sort_unstable();
     assert_eq!(
       dotted_names,
       vec!["p-exact", "p-subdomain", "p-trailing-dot"]
@@ -2848,14 +3419,14 @@ mod tests {
     assert_eq!(dotted.rows_skipped, 0);
 
     let mixed_domains = vec!["".to_string(), "example.com".to_string()];
-    let mut mixed = query_persistent_cookies(&connection, Some(&mixed_domains))
+    let mixed = query_persistent_cookies(&connection, Some(&mixed_domains))
       .expect("a blank entry must not broaden a valid allowlist");
-    mixed.cookies.sort_by(|a, b| a.name.cmp(&b.name));
-    let mixed_names = mixed
-      .cookies
+    let mut mixed_names = mixed
+      .records
       .iter()
-      .map(|cookie| cookie.name.as_str())
+      .map(|record| record.name.as_str())
       .collect::<Vec<_>>();
+    mixed_names.sort_unstable();
     assert_eq!(
       mixed_names,
       vec!["p-exact", "p-subdomain", "p-trailing-dot"]

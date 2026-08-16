@@ -1,5 +1,10 @@
-use crate::browser::internet_explorer_model::{CookieColumnLayout, RawCookieRecord};
-use crate::common::deadline::{Deadline, DeadlineEnforcement, SystemClock};
+use crate::browser::internet_explorer_model::{
+  decode_cookie_record, CookieColumnLayout, InternetExplorerFailure, InternetExplorerFailureStage,
+  RawCookieRecord,
+};
+use crate::common::deadline::{
+  BoundaryRuntime, BoundaryStop, Deadline, DeadlineEnforcement, SystemClock,
+};
 use crate::common::enums::Cookie;
 use crate::windows::restart_manager::FileLockStatus;
 use anyhow::{bail, Context, Result};
@@ -16,18 +21,11 @@ pub fn internet_explorer_based(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  let outcome = internet_explorer_outcome(db_path, domains, force_kill)?;
-  if outcome.cookies.is_empty() && outcome.stats.records_skipped > 0 {
-    bail!(
-      "Internet Explorer cookie extraction rejected all {} record(s): {}",
-      outcome.stats.records_skipped,
-      outcome
-        .row_error
-        .as_deref()
-        .unwrap_or("one or more cookie tables or records were unreadable")
-    );
-  }
-  Ok(outcome.cookies)
+  let draft = internet_explorer_outcome(db_path.clone(), domains, force_kill)?;
+  crate::browser::legacy::project_canonical_outcome(
+    "internet_explorer",
+    crate::browser::report_build::canonical_direct_internet_explorer_extraction(&db_path, draft)?,
+  )
 }
 
 /// Record accounting for the private cross-engine report. The legacy
@@ -51,102 +49,133 @@ pub(crate) fn internet_explorer_outcome(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<InternetExplorerDraft> {
-  debug_assert_eq!(deadline_enforcement(), DeadlineEnforcement::Cooperative);
   let clock = SystemClock;
-  let deadline = Deadline::standard();
-  deadline.check(&clock)?;
-  let db = open_database(&db_path, force_kill)?;
-  deadline.check(&clock)?;
-  let mut cookies = Vec::new();
-  let mut canonical_records = Vec::new();
-  let mut stats = InternetExplorerDraftStats::default();
-  let mut row_error = None;
+  let runtime = BoundaryRuntime::standard(&clock);
+  internet_explorer_outcome_with_runtime(db_path, domains, force_kill, &runtime)
+}
 
-  for table in db
-    .iter_tables()
-    .context("Unable to enumerate WebCache tables")?
-  {
-    deadline.check(&clock)?;
-    let table = table.context("Unable to read a WebCache table")?;
-    let table_name = table
-      .name()
-      .context("Unable to read a WebCache table name")?;
+pub(crate) fn internet_explorer_outcome_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<InternetExplorerDraft> {
+  debug_assert_eq!(deadline_enforcement(), DeadlineEnforcement::Cooperative);
+  staged_failure(
+    InternetExplorerFailureStage::Acquisition,
+    runtime.check().map_err(anyhow::Error::from),
+  )?;
+  let db = staged_failure(
+    InternetExplorerFailureStage::Acquisition,
+    open_database(&db_path, force_kill),
+  )?;
+  staged_failure(
+    InternetExplorerFailureStage::Acquisition,
+    runtime.check().map_err(anyhow::Error::from),
+  )?;
+  let extraction = (|| -> Result<InternetExplorerDraft> {
+    let mut cookies = Vec::new();
+    let mut canonical_records = Vec::new();
+    let mut stats = InternetExplorerDraftStats::default();
+    let mut row_error = None;
 
-    if !table_name.starts_with("CookieEntry") {
-      continue;
-    }
+    let mut tables = db
+      .iter_tables()
+      .context("Unable to enumerate WebCache tables")?;
+    while let Some(table) = next_with_runtime(&mut tables, runtime)? {
+      let table = table.context("Unable to read a WebCache table")?;
+      let table_name = table
+        .name()
+        .context("Unable to read a WebCache table name")?;
 
-    let columns = match cookie_column_layout(&table) {
-      Ok(columns) => columns,
-      Err(error) => {
-        let error = error.context(format!("{table_name}: unsupported WebCache cookie schema"));
-        let records = table
-          .iter_records()
-          .with_context(|| format!("{table_name}: unable to enumerate unsupported cookie table"))?;
-        let record_count = records.count();
-        // Even an empty table is one failed extraction input when its schema
-        // is unreadable. Counting that table-level failure keeps legacy and
-        // report callers from mistaking an unsupported empty store for a
-        // successful empty result.
-        let skipped = unsupported_table_skipped_inputs(record_count);
-        stats.records_seen += skipped;
-        stats.records_skipped += skipped;
-        row_error = Some(format!("{error:#}"));
-        log::warn!(
-          "{table_name}: skipping unsupported cookie table containing {record_count} record(s); counted {skipped} skipped input(s): {error:#}"
-        );
+      if !table_name.starts_with("CookieEntry") {
         continue;
       }
-    };
-    let records = table
-      .iter_records()
-      .with_context(|| format!("{table_name}: unable to enumerate cookie records"))?;
-    let mut skipped_records = 0_usize;
 
-    for (record_index, record) in records.enumerate() {
-      deadline.check(&clock)?;
-      let cookie = record
-        .map_err(anyhow::Error::from)
-        .and_then(|record| read_cookie_record(&record, columns))
-        .and_then(|record| record.into_record(domains.as_deref()));
-
-      // Section 5.7 counts rows *relevant to the request*, so a record the
-      // domain filter excluded was never seen for reporting purposes. A record
-      // that failed before it could be tested still counts: it might have
-      // matched.
-      match cookie {
-        Ok(Some(record)) => {
-          stats.records_seen += 1;
-          cookies.push(
-            record
-              .clone()
-              .into_cookie()
-              .expect("Internet Explorer rows emit plaintext values"),
-          );
-          canonical_records.push(record);
-        }
-        Ok(None) => {}
+      let columns = match cookie_column_layout(&table, runtime.clock, runtime.deadline) {
+        Ok(columns) => columns,
         Err(error) => {
-          stats.records_seen += 1;
-          skipped_records += 1;
-          stats.records_skipped += 1;
-          row_error = Some(format!("{table_name}: record {record_index}: {error:#}"));
-          log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
+          let error = error.context(format!("{table_name}: unsupported WebCache cookie schema"));
+          let mut records = table.iter_records().with_context(|| {
+            format!("{table_name}: unable to enumerate unsupported cookie table")
+          })?;
+          let mut record_count = 0_usize;
+          while next_with_runtime(&mut records, runtime)?.is_some() {
+            record_count += 1;
+          }
+          // Even an empty table is one failed extraction input when its schema
+          // is unreadable. Counting that table-level failure keeps legacy and
+          // report callers from mistaking an unsupported empty store for a
+          // successful empty result.
+          let skipped = unsupported_table_skipped_inputs(record_count);
+          stats.records_seen += skipped;
+          stats.records_skipped += skipped;
+          row_error = Some(format!("{error:#}"));
+          log::warn!(
+          "{table_name}: skipping unsupported cookie table containing {record_count} record(s); counted {skipped} skipped input(s): {error:#}"
+        );
+          continue;
         }
+      };
+      let mut records = table
+        .iter_records()
+        .with_context(|| format!("{table_name}: unable to enumerate cookie records"))?;
+      let mut skipped_records = 0_usize;
+      let mut record_index = 0_usize;
+
+      while let Some(record) = next_with_runtime(&mut records, runtime)? {
+        let cookie = record
+          .map_err(anyhow::Error::from)
+          .and_then(|record| read_cookie_record(&record, columns))
+          .and_then(|record| decode_cookie_record(&record, domains.as_deref(), runtime));
+
+        // Section 5.7 counts rows *relevant to the request*, so a record the
+        // domain filter excluded was never seen for reporting purposes. A record
+        // that failed before it could be tested still counts: it might have
+        // matched.
+        match cookie {
+          Ok(Some(record)) => {
+            stats.records_seen += 1;
+            cookies.push(
+              record
+                .clone()
+                .into_cookie()
+                .expect("Internet Explorer rows emit plaintext values"),
+            );
+            canonical_records.push(record);
+          }
+          Ok(None) => {}
+          Err(error) => {
+            // Cooperative boundary expiration is fatal for the source. It is
+            // not a malformed row and must retain its typed cause through the
+            // staged native failure wrapper below.
+            if error.downcast_ref::<BoundaryStop>().is_some() {
+              return Err(error);
+            }
+            stats.records_seen += 1;
+            skipped_records += 1;
+            stats.records_skipped += 1;
+            row_error = Some(format!("{table_name}: record {record_index}: {error:#}"));
+            log::warn!("{table_name}: skipping unreadable cookie record {record_index}: {error:#}");
+          }
+        }
+        record_index += 1;
+      }
+
+      if skipped_records > 0 {
+        log::warn!("{table_name}: skipped {skipped_records} unreadable cookie record(s)");
       }
     }
 
-    if skipped_records > 0 {
-      log::warn!("{table_name}: skipped {skipped_records} unreadable cookie record(s)");
-    }
-  }
-
-  Ok(InternetExplorerDraft {
-    cookies,
-    records: canonical_records,
-    stats,
-    row_error,
-  })
+    runtime.check()?;
+    Ok(InternetExplorerDraft {
+      cookies,
+      records: canonical_records,
+      stats,
+      row_error,
+    })
+  })();
+  staged_failure(InternetExplorerFailureStage::Parse, extraction)
 }
 
 pub(crate) fn deadline_enforcement() -> DeadlineEnforcement {
@@ -158,6 +187,20 @@ pub(crate) fn deadline_enforcement() -> DeadlineEnforcement {
 
 fn unsupported_table_skipped_inputs(record_count: usize) -> usize {
   record_count.max(1)
+}
+
+fn staged_failure<T>(stage: InternetExplorerFailureStage, result: Result<T>) -> Result<T> {
+  result.map_err(|error| anyhow::Error::new(InternetExplorerFailure::new(stage, error)))
+}
+
+fn next_with_runtime<I>(iterator: &mut I, runtime: &BoundaryRuntime<'_>) -> Result<Option<I::Item>>
+where
+  I: Iterator,
+{
+  runtime.check()?;
+  let item = iterator.next();
+  runtime.check()?;
+  Ok(item)
 }
 
 fn open_database(db_path: &Path, force_kill: bool) -> Result<EseDb> {
@@ -194,17 +237,24 @@ fn require_unlocked_database(db_path: &Path, lock_status: FileLockStatus) -> Res
   }
 }
 
-fn cookie_column_layout(table: &Table<'_>) -> Result<CookieColumnLayout> {
-  let column_names = table
+fn cookie_column_layout(
+  table: &Table<'_>,
+  clock: &dyn crate::common::deadline::Clock,
+  deadline: Deadline,
+) -> Result<CookieColumnLayout> {
+  deadline.check(clock)?;
+  let mut columns = table
     .iter_columns()
-    .context("Unable to enumerate columns")?
-    .map(|column| {
+    .context("Unable to enumerate columns")?;
+  let mut column_names = Vec::new();
+  while let Some(column) = next_with_deadline(&mut columns, clock, deadline)? {
+    column_names.push(
       column
         .context("Unable to read column metadata")?
         .name()
-        .context("Unable to read column name")
-    })
-    .collect::<Result<Vec<_>>>()?;
+        .context("Unable to read column name")?,
+    );
+  }
 
   CookieColumnLayout::resolve(&column_names)
 }
@@ -214,7 +264,7 @@ fn read_cookie_record(record: &Record<'_>, columns: CookieColumnLayout) -> Resul
     domain: text_value(record, columns.domain, "RDomain")?,
     path: text_value(record, columns.path, "Path")?,
     name: bytes_value(record, columns.name, "Name")?,
-    value: bytes_value(record, columns.value, "Value")?,
+    value: crate::common::secret::SecretBytes::new(bytes_value(record, columns.value, "Value")?),
     expires: unsigned_value(record, columns.expires, "Expires")?,
     flags: integer_value(record, columns.flags, "Flags")?,
   })
@@ -279,6 +329,8 @@ fn integer_value(record: &Record<'_>, index: i32, field: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::test_clock::ManualClock;
+  use std::cell::Cell;
 
   #[test]
   fn value_conversions_accept_known_webcache_representations() {
@@ -297,6 +349,45 @@ mod tests {
   fn unsupported_empty_table_counts_as_one_failed_input() {
     assert_eq!(unsupported_table_skipped_inputs(0), 1);
     assert_eq!(unsupported_table_skipped_inputs(4), 4);
+  }
+
+  #[test]
+  fn expired_deadline_is_checked_before_advancing_a_native_iterator() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::ZERO);
+    let calls = Cell::new(0_usize);
+    let mut iterator = std::iter::from_fn(|| {
+      calls.set(calls.get() + 1);
+      Some(())
+    });
+
+    let error = next_with_deadline(&mut iterator, &clock, deadline)
+      .expect_err("iterator must not advance at the deadline");
+
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryExpired>()
+      .is_some());
+    assert_eq!(calls.get(), 0);
+  }
+
+  #[test]
+  fn iterator_result_observed_at_the_exact_deadline_is_rejected() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let calls = Cell::new(0_usize);
+    let mut iterator = std::iter::from_fn(|| {
+      calls.set(calls.get() + 1);
+      clock.advance(std::time::Duration::from_secs(1));
+      Some(())
+    });
+
+    let error = next_with_deadline(&mut iterator, &clock, deadline)
+      .expect_err("an exact iterator/deadline tie must time out");
+
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryExpired>()
+      .is_some());
+    assert_eq!(calls.get(), 1);
   }
 
   #[test]

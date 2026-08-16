@@ -46,14 +46,14 @@ pub(super) fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result
         &clock,
         crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
       );
-      let outcomes = browser_id_outcomes(&browser_id, deadline)?;
-      crate::browser::chromium::query_cookies_with_key_outcomes_deadline(
+      let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
+      let outcomes = browser_id_outcomes(&browser_id, &runtime)?;
+      crate::browser::chromium::query_cookies_with_key_outcomes_runtime(
         outcomes,
         request.path,
         request.domains,
         false,
-        &clock,
-        deadline,
+        &runtime,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
@@ -83,14 +83,14 @@ pub(super) fn chromium_cookies_from_path_detailed(
         &clock,
         crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
       );
-      let outcomes = browser_id_outcomes(&browser_id, deadline)?;
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_deadline(
+      let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
+      let outcomes = browser_id_outcomes(&browser_id, &runtime)?;
+      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
         outcomes,
         request.path,
         request.domains,
         false,
-        &clock,
-        deadline,
+        &runtime,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
@@ -117,7 +117,7 @@ fn validate_lock_policy(policy: ChromiumLockedDatabasePolicy) -> Result<()> {
 
 fn browser_id_outcomes(
   browser_id: &str,
-  deadline: crate::common::deadline::Deadline,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<ChromiumKeyOutcomes> {
   if browser_id.is_empty() {
     return Err(invalid_options(
@@ -144,7 +144,7 @@ fn browser_id_outcomes(
       let mut session = HostKeySession::new();
       Ok(session.retrieve(
         ChromiumKeyRequest::for_browser_id(browser_id, &credentials),
-        deadline,
+        runtime,
       ))
     }
   }

@@ -120,21 +120,34 @@ fn supervise_child<C: ChildControl>(
   deadline: Deadline,
 ) -> Result<C::Status> {
   loop {
+    // Timeout wins when process exit and the absolute deadline become
+    // observable at the same boundary.
+    if deadline.remaining(clock).is_zero() {
+      break;
+    }
     if let Some(status) = child.try_wait().context("failed to poll Keychain helper")? {
       return Ok(status);
     }
     let remaining = deadline.remaining(clock);
-    if remaining.is_zero() {
-      break;
-    }
     clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
   }
 
-  child
-    .kill()
-    .context("failed to kill timed-out Keychain helper")?;
+  // A process can exit between the deadline sample and `kill`. Treat that as
+  // a timed-out lookup, but still poll until it is reaped. Preserve a genuine
+  // kill failure if the child never becomes waitable during cleanup.
+  let mut kill_error = child.kill().err();
   let cleanup_deadline = deadline.cleanup_deadline(CLEANUP_GRACE);
   loop {
+    // Cleanup is derived from the original deadline. An exit observed exactly
+    // at the cleanup ceiling does not extend that ceiling by one final poll.
+    if cleanup_deadline.remaining(clock).is_zero() {
+      if let Some(error) = kill_error.take() {
+        return Err(error).context("failed to kill timed-out Keychain helper");
+      }
+      return Err(anyhow!(
+        "macOS Keychain helper did not exit during cleanup grace"
+      ));
+    }
     if let Some(_status) = child
       .try_wait()
       .context("failed to reap timed-out Keychain helper")?
@@ -142,11 +155,6 @@ fn supervise_child<C: ChildControl>(
       return Err(anyhow!("macOS Keychain lookup timed out"));
     }
     let remaining = cleanup_deadline.remaining(clock);
-    if remaining.is_zero() {
-      return Err(anyhow!(
-        "macOS Keychain helper did not exit during cleanup grace"
-      ));
-    }
     clock.sleep(remaining.min(CHILD_POLL_INTERVAL));
   }
 }
@@ -161,6 +169,7 @@ mod tests {
     states: VecDeque<Option<()>>,
     killed: usize,
     polls: usize,
+    kill_error: Option<std::io::ErrorKind>,
   }
 
   impl ChildControl for FakeChild {
@@ -173,7 +182,10 @@ mod tests {
 
     fn kill(&mut self) -> std::io::Result<()> {
       self.killed += 1;
-      Ok(())
+      match self.kill_error {
+        Some(kind) => Err(std::io::Error::new(kind, "scripted kill failure")),
+        None => Ok(()),
+      }
     }
   }
 
@@ -209,6 +221,7 @@ mod tests {
       states: [None, None, None, None, Some(())].into(),
       killed: 0,
       polls: 0,
+      kill_error: None,
     };
     let error = supervise_child(&mut child, &clock, deadline).expect_err("timeout");
     assert!(error.to_string().contains("timed out"));
@@ -218,5 +231,107 @@ mod tests {
       .cleanup_deadline(CLEANUP_GRACE)
       .check(&clock)
       .is_ok());
+  }
+
+  #[test]
+  fn exact_deadline_exit_is_timeout_biased_and_still_reaped() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, CHILD_POLL_INTERVAL);
+    let mut child = FakeChild {
+      // The second state becomes visible exactly when the first poll's sleep
+      // reaches the deadline.
+      states: [None, Some(())].into(),
+      killed: 0,
+      polls: 0,
+      kill_error: None,
+    };
+
+    let error = supervise_child(&mut child, &clock, deadline).expect_err("exact tie times out");
+    assert_eq!(error.to_string(), "macOS Keychain lookup timed out");
+    assert_eq!(child.killed, 1);
+    assert_eq!(child.polls, 2);
+  }
+
+  #[test]
+  fn raced_exit_after_failed_kill_is_still_reaped_as_a_timeout() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::ZERO);
+    let mut child = FakeChild {
+      states: [Some(())].into(),
+      killed: 0,
+      polls: 0,
+      kill_error: Some(std::io::ErrorKind::InvalidInput),
+    };
+
+    let error = supervise_child(&mut child, &clock, deadline).expect_err("lookup timed out");
+    assert_eq!(error.to_string(), "macOS Keychain lookup timed out");
+    assert_eq!(child.killed, 1);
+    assert_eq!(child.polls, 1);
+  }
+
+  #[test]
+  fn genuine_kill_error_is_preserved_after_the_absolute_cleanup_grace() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::ZERO);
+    let mut child = FakeChild {
+      states: VecDeque::new(),
+      killed: 0,
+      polls: 0,
+      kill_error: Some(std::io::ErrorKind::PermissionDenied),
+    };
+
+    let error = supervise_child(&mut child, &clock, deadline).expect_err("kill failed");
+    assert!(error
+      .to_string()
+      .contains("failed to kill timed-out Keychain helper"));
+    assert_eq!(child.killed, 1);
+    assert_eq!(child.polls, 200);
+    assert_eq!(
+      deadline.cleanup_deadline(CLEANUP_GRACE).remaining(&clock),
+      Duration::ZERO
+    );
+  }
+
+  #[test]
+  fn cleanup_exit_at_exact_grace_boundary_does_not_get_an_extra_poll() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::ZERO);
+    let mut states = VecDeque::from(vec![None; 200]);
+    states.push_back(Some(()));
+    let mut child = FakeChild {
+      states,
+      killed: 0,
+      polls: 0,
+      kill_error: None,
+    };
+
+    let error = supervise_child(&mut child, &clock, deadline).expect_err("cleanup ceiling wins");
+    assert!(error
+      .to_string()
+      .contains("did not exit during cleanup grace"));
+    assert_eq!(child.polls, 200, "no poll occurs at the exact ceiling");
+  }
+
+  #[test]
+  fn real_hung_child_is_killed_and_reaped() {
+    let mut child = Command::new("/bin/sleep")
+      .arg("60")
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .expect("spawn hung child");
+    let clock = crate::common::deadline::SystemClock;
+    let deadline = Deadline::after(&clock, Duration::from_millis(25));
+
+    let error = supervise_child(&mut child, &clock, deadline).expect_err("child must time out");
+    let reaped = child.try_wait().expect("child remains waitable");
+    if reaped.is_none() {
+      // Keep a failed assertion from leaving the real helper behind.
+      let _ = child.kill();
+      let _ = child.wait();
+    }
+    assert_eq!(error.to_string(), "macOS Keychain lookup timed out");
+    assert!(reaped.is_some());
   }
 }

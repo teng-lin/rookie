@@ -578,6 +578,7 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("internet_explorer", domains)
 }
 
+#[cfg(test)]
 fn load_from_browsers<F>(
   browser_types: &[(&'static str, F)],
   domains: Option<Vec<String>>,
@@ -641,7 +642,38 @@ where
 /// ```
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let browser_types = compatibility_dispatch::legacy_load_browsers();
-  load_from_browsers(&browser_types, domains)
+  let clock = common::deadline::SystemClock;
+  let runtime = common::deadline::BoundaryRuntime::standard(&clock);
+  let mut cookies = Vec::new();
+  let mut errors = Vec::new();
+  let mut successful_extractions = 0;
+  for (browser_name, _) in browser_types {
+    match browser::legacy::browser_cookies_with_runtime(browser_name, domains.clone(), &runtime) {
+      Ok(browser_cookies) => {
+        successful_extractions += 1;
+        cookies.extend(browser_cookies);
+      }
+      Err(error) if browser::legacy::is_browser_not_installed(&error) => {
+        log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {error}");
+      }
+      Err(error) => {
+        let stopped = error.chain().any(|cause| {
+          cause
+            .downcast_ref::<common::deadline::BoundaryStop>()
+            .is_some()
+        });
+        log::warn!("rookie_cookies::load skipping {browser_name}: {error}");
+        errors.push(format!("{browser_name}: {error}"));
+        if stopped {
+          break;
+        }
+      }
+    }
+  }
+  if successful_extractions == 0 && !errors.is_empty() {
+    bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
+  }
+  Ok(cookies)
 }
 
 #[cfg(test)]

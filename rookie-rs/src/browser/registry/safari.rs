@@ -301,8 +301,34 @@ pub(crate) fn safari_report(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  safari_report_with_runtime(browser_id, profile_id, domains, &runtime)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn safari_report_with_runtime(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  safari_report_with_context(&context, browser_id, profile_id, domains.as_deref())
+  runtime.check()?;
+  let mut outcome = discover_safari_with_context(&context, browser_id)?;
+  select_engine_profiles(
+    &mut outcome,
+    browser_id,
+    ProfileSelection::from_profile_id(profile_id),
+  )?;
+  let outcome = populate_safari_sources(outcome, domains.as_deref(), |path, domains| {
+    query_safari_file(path, domains, |path, domains| {
+      crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
+    })
+  });
+  runtime.check()?;
+  Ok(outcome)
 }
 
 pub(super) fn select_legacy_safari_profile(
@@ -321,13 +347,30 @@ pub(crate) fn legacy_safari_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  legacy_safari_outcome_with_runtime(browser_id, domains, &runtime)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn legacy_safari_outcome_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
+  runtime.check()?;
   let mut outcome = discover_safari_with_context(&context, browser_id)?;
   select_legacy_safari_profile(&mut outcome, browser_id)?;
   Ok(populate_safari_sources(
     outcome,
     domains.as_deref(),
-    |path, domains| query_safari_file(path, domains, crate::browser::safari::safari_based_outcome),
+    |path, domains| {
+      query_safari_file(path, domains, |path, domains| {
+        crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
+      })
+    },
   ))
 }
 
@@ -349,6 +392,7 @@ mod tests {
       installations_detected: 1,
       installations_discovered: 1,
       installations_enumerated: 1,
+      boundary_stop: None,
       profiles: vec![EngineProfileDraft {
         profile_id: "safari-profile".to_owned(),
         installation_id: "safari-installation".to_owned(),

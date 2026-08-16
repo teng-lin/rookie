@@ -1,11 +1,21 @@
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 #[cfg(test)]
 use crate::common::enums::Cookie;
 use crate::common::enums::{CookieContext, SAME_SITE_UNSPECIFIED};
-use crate::common::{date, utils};
+use crate::common::{
+  boundary::{Decoder, ReadOnlySource, RecordSink},
+  date,
+  deadline::{BoundaryRuntime, DeadlineEnforcement},
+  secret::{SecretBytes, SecretString},
+  utils,
+};
 use anyhow::{bail, Result};
 use std::fmt;
 
-use super::cookie_record::{CookieRecord, CookieValue, DomainScope, RawValue};
+use super::cookie_record::{
+  Attributes, CookieRecord, CookieValue, DomainScope, Observation, RawValue,
+};
 
 // WinInet cookie flag bits (`wininet.h`) as stored in the ESE `Flags` column.
 const INTERNET_COOKIE_IS_SECURE: u32 = 0x0000_0001;
@@ -74,14 +84,72 @@ impl CookieColumnLayout {
 /// Keeping decoding independent from libesedb makes the failure semantics
 /// testable on every host: malformed record data is rejected as a unit and the
 /// Windows integration can skip only that record.
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RawCookieRecord {
   pub(crate) domain: String,
   pub(crate) path: String,
   pub(crate) name: Vec<u8>,
-  pub(crate) value: Vec<u8>,
+  pub(crate) value: SecretBytes,
   pub(crate) expires: u64,
   pub(crate) flags: i64,
+}
+
+impl ReadOnlySource for RawCookieRecord {}
+
+/// Platform-neutral decoder for one already-acquired ESE cookie record.
+///
+/// The Windows adapter owns native table traversal and materializes this
+/// source. Decoding itself has no dependency on libesedb or Windows APIs, so
+/// malformed inputs and deadline behavior are testable on every host.
+pub(crate) struct InternetExplorerRecordDecoder<'a> {
+  pub(crate) domains: Option<&'a [String]>,
+}
+
+impl Decoder<RawCookieRecord, CookieRecord> for InternetExplorerRecordDecoder<'_> {
+  type Summary = bool;
+
+  fn decode(
+    &self,
+    source: &RawCookieRecord,
+    sink: &mut dyn RecordSink<CookieRecord>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Self::Summary> {
+    runtime.check()?;
+    let record = source.decode_record(self.domains)?;
+    // Keep the protected record local until the complete row has decoded and
+    // the boundary is still live. An expired row is dropped (and wiped)
+    // without ever reaching the caller's sink.
+    runtime.check()?;
+    let Some(record) = record else {
+      return Ok(false);
+    };
+    sink.emit(record)?;
+    runtime.check()?;
+    Ok(true)
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    DeadlineEnforcement::Cooperative
+  }
+}
+
+pub(crate) fn decode_cookie_record(
+  source: &RawCookieRecord,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Option<CookieRecord>> {
+  let decoder = InternetExplorerRecordDecoder { domains };
+  let mut decoded = Vec::new();
+  decoder.decode(
+    source,
+    &mut |record| {
+      decoded.push(record);
+      Ok(())
+    },
+    runtime,
+  )?;
+  debug_assert!(decoded.len() <= 1, "one ESE row emits at most one cookie");
+  Ok(decoded.pop())
 }
 
 impl fmt::Debug for RawCookieRecord {
@@ -100,7 +168,16 @@ impl fmt::Debug for RawCookieRecord {
 }
 
 impl RawCookieRecord {
+  #[cfg(test)]
   pub(crate) fn into_record(self, domains: Option<&[String]>) -> Result<Option<CookieRecord>> {
+    self.decode_record_owned(domains)
+  }
+
+  fn decode_record(&self, domains: Option<&[String]>) -> Result<Option<CookieRecord>> {
+    self.clone().decode_record_owned(domains)
+  }
+
+  fn decode_record_owned(self, domains: Option<&[String]>) -> Result<Option<CookieRecord>> {
     let domain = self.domain.trim_matches('\0').to_string();
     if !utils::some_domain_in_host(domains, &domain) {
       return Ok(None);
@@ -110,7 +187,7 @@ impl RawCookieRecord {
     if name.is_empty() {
       bail!("`Name` is empty");
     }
-    let value = decode_cookie_text("Value", self.value)?;
+    let value = decode_cookie_secret("Value", self.value)?;
     let flags = self.flags as u32;
 
     let raw_expires = self.expires;
@@ -120,7 +197,7 @@ impl RawCookieRecord {
       flags & INTERNET_COOKIE_IS_SECURE != 0,
       date::internet_explorer_timestamp(self.expires),
       name,
-      CookieValue::Plain(crate::common::secret::SecretString::new(value)),
+      CookieValue::Plain(value),
       flags & INTERNET_COOKIE_HTTPONLY != 0,
       SAME_SITE_UNSPECIFIED,
       CookieContext::default(),
@@ -132,7 +209,19 @@ impl RawCookieRecord {
     record.domain = DomainScope::Unknown {
       raw: record.domain_raw().to_owned(),
     };
-    record.set_raw_expiry(RawValue::Unsigned(raw_expires));
+    record.attributes = Attributes {
+      secure: Observation::Known(flags & INTERNET_COOKIE_IS_SECURE != 0),
+      http_only: Observation::Known(flags & INTERNET_COOKIE_HTTPONLY != 0),
+      expires: match date::internet_explorer_timestamp(raw_expires) {
+        Some(expires) => Observation::Known(Some(expires)),
+        None if raw_expires == 0 => Observation::Known(None),
+        None => Observation::Unknown(RawValue::Unsigned(raw_expires)),
+      },
+      raw_expires: Observation::Known(RawValue::Unsigned(raw_expires)),
+      // WebCache has no SameSite column. Missing evidence must not become a
+      // decoder-authored `-1`; compatibility supplies that only on projection.
+      same_site: Observation::Missing,
+    };
     record.retain_raw("flags", RawValue::Signed(self.flags));
     Ok(Some(record))
   }
@@ -152,9 +241,105 @@ fn decode_cookie_text(field: &str, bytes: Vec<u8>) -> Result<String> {
   Ok(value.trim_matches('\0').to_string())
 }
 
+fn decode_cookie_secret(field: &str, mut bytes: SecretBytes) -> Result<SecretString> {
+  let (start, end) = {
+    let value = bytes.as_slice();
+    let start = value
+      .iter()
+      .position(|byte| *byte != 0)
+      .unwrap_or(value.len());
+    let end = value
+      .iter()
+      .rposition(|byte| *byte != 0)
+      .map_or(0, |index| index + 1);
+    (start, end)
+  };
+  if start >= end {
+    bytes.truncate(0);
+    return bytes
+      .into_secret_string_from(0)
+      .map_err(|error| anyhow::anyhow!("`{field}` is not valid UTF-8: {error}"));
+  }
+  bytes.truncate(end);
+  bytes
+    .into_secret_string_from(start)
+    .map_err(|error| anyhow::anyhow!("`{field}` is not valid UTF-8: {error}"))
+}
+
+/// Stage attached to a fatal native WebCache failure before it enters the
+/// engine-agnostic report ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InternetExplorerFailureStage {
+  Acquisition,
+  Parse,
+}
+
+/// Typed carrier used across the native-reader/registry seam.
+///
+/// Row-level parse failures remain accounted in the draft and do not use this
+/// type. This wrapper is for fatal failures where the report must distinguish
+/// opening/enumerating the source from interpreting its schema or records.
+#[derive(Debug)]
+pub(crate) struct InternetExplorerFailure {
+  stage: InternetExplorerFailureStage,
+  source: anyhow::Error,
+}
+
+impl InternetExplorerFailure {
+  pub(crate) fn new(stage: InternetExplorerFailureStage, error: anyhow::Error) -> Self {
+    Self {
+      stage,
+      source: error,
+    }
+  }
+
+  pub(crate) fn stage(&self) -> InternetExplorerFailureStage {
+    self.stage
+  }
+}
+
+impl fmt::Display for InternetExplorerFailure {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(formatter, "{:#}", self.source)
+  }
+}
+
+impl std::error::Error for InternetExplorerFailure {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    Some(self.source.as_ref())
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::{Clock, Deadline};
+  use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+  };
+
+  struct TickClock {
+    base: Instant,
+    ticks: AtomicU64,
+  }
+
+  impl Default for TickClock {
+    fn default() -> Self {
+      Self {
+        base: Instant::now(),
+        ticks: AtomicU64::new(0),
+      }
+    }
+  }
+
+  impl Clock for TickClock {
+    fn now(&self) -> Instant {
+      self.base + Duration::from_secs(self.ticks.fetch_add(1, Ordering::SeqCst))
+    }
+
+    fn sleep(&self, _duration: Duration) {}
+  }
 
   fn columns(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
@@ -165,7 +350,7 @@ mod tests {
       domain: ".example.com".into(),
       path: "/".into(),
       name: b"session\0".to_vec(),
-      value: b"secret\0".to_vec(),
+      value: SecretBytes::new(b"secret\0".to_vec()),
       expires: 116_444_736_010_000_000,
       flags: i64::from(INTERNET_COOKIE_IS_SECURE | INTERNET_COOKIE_HTTPONLY),
     }
@@ -179,6 +364,14 @@ mod tests {
     assert!(!debug.contains("115, 101, 99, 114, 101, 116"));
     assert!(debug.contains("value: \"<redacted>\""));
     assert!(debug.contains("value_len: 7"));
+  }
+
+  #[test]
+  fn pure_decoder_boundary_compiles_without_native_esedb_types() {
+    fn assert_source<T: ReadOnlySource>() {}
+    fn assert_decoder<T: Decoder<RawCookieRecord, CookieRecord>>() {}
+    assert_source::<RawCookieRecord>();
+    assert_decoder::<InternetExplorerRecordDecoder<'static>>();
   }
 
   #[test]
@@ -278,6 +471,10 @@ mod tests {
       canonical.raw.get("flags"),
       Some(RawValue::Signed(_))
     ));
+    assert!(matches!(
+      canonical.attributes.same_site,
+      Observation::Missing
+    ));
     let cookie = canonical.into_cookie().unwrap();
 
     assert_eq!(cookie.domain, ".example.com");
@@ -293,18 +490,107 @@ mod tests {
   #[test]
   fn malformed_record_text_is_rejected_without_a_partial_cookie() {
     let mut invalid = record();
-    invalid.value = vec![0xff];
+    invalid.value = SecretBytes::new(vec![0xff]);
 
     let error = invalid.into_cookie(None).unwrap_err().to_string();
     assert!(error.contains("`Value` is not valid UTF-8"));
   }
 
   #[test]
+  fn platform_neutral_decoder_rejects_arbitrary_value_bytes_without_panicking() {
+    for length in 0..=64 {
+      let mut raw = record();
+      raw.value = SecretBytes::new(
+        (0..length)
+          .map(|index| (index as u8).wrapping_mul(73).wrapping_add(0xff))
+          .collect(),
+      );
+      let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let clock = crate::common::deadline::SystemClock;
+        let runtime = BoundaryRuntime::standard(&clock);
+        let decoder = InternetExplorerRecordDecoder { domains: None };
+        let mut records = Vec::new();
+        decoder.decode(
+          &raw,
+          &mut |record| {
+            records.push(record);
+            Ok(())
+          },
+          &runtime,
+        )
+      }));
+      assert!(outcome.is_ok(), "value length {length} panicked");
+    }
+  }
+
+  #[test]
   fn domain_filtering_happens_before_sensitive_value_decoding() {
     let mut invalid = record();
-    invalid.value = vec![0xff];
+    invalid.value = SecretBytes::new(vec![0xff]);
 
     let domains = vec!["other.example".to_string()];
     assert!(invalid.into_cookie(Some(&domains)).unwrap().is_none());
+  }
+
+  #[test]
+  fn invalid_filetime_is_unknown_until_compatibility_projection() {
+    let mut raw = record();
+    raw.expires = 1;
+    let canonical = raw.into_record(None).unwrap().unwrap();
+    assert!(matches!(
+      canonical.attributes.expires,
+      Observation::Unknown(RawValue::Unsigned(1))
+    ));
+    assert_eq!(canonical.into_cookie().unwrap().expires, None);
+  }
+
+  #[test]
+  fn decoder_timeout_drops_staged_secret_before_sink_emission() {
+    const SENTINEL: &str = "rookie-ie-timeout-sentinel";
+    let mut raw = record();
+    raw.value = SecretBytes::new([SENTINEL.as_bytes(), &[0]].concat());
+    let clock = TickClock::default();
+    // Deadline construction samples tick zero; decode's first checkpoint sees
+    // tick one and its post-decode checkpoint sees tick two.
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(2)));
+    let decoder = InternetExplorerRecordDecoder { domains: None };
+    let mut emitted = Vec::new();
+    let error = decoder
+      .decode(
+        &raw,
+        &mut |record| {
+          emitted.push(record);
+          Ok(())
+        },
+        &runtime,
+      )
+      .expect_err("deadline expires after the protected row is staged");
+    assert!(emitted.is_empty());
+    assert_eq!(
+      error.downcast_ref::<crate::common::deadline::BoundaryStop>(),
+      Some(&crate::common::deadline::BoundaryStop::TimedOut)
+    );
+    assert!(!format!("{error:#}").contains(SENTINEL));
+  }
+
+  #[test]
+  fn staged_native_failure_retains_typed_boundary_stop() {
+    let error = anyhow::Error::new(InternetExplorerFailure::new(
+      InternetExplorerFailureStage::Parse,
+      anyhow::Error::new(crate::common::deadline::BoundaryStop::TimedOut),
+    ));
+
+    assert_eq!(
+      error
+        .chain()
+        .find_map(|cause| { cause.downcast_ref::<crate::common::deadline::BoundaryStop>() }),
+      Some(&crate::common::deadline::BoundaryStop::TimedOut)
+    );
+    assert_eq!(
+      error
+        .downcast_ref::<InternetExplorerFailure>()
+        .map(InternetExplorerFailure::stage),
+      Some(InternetExplorerFailureStage::Parse)
+    );
   }
 }

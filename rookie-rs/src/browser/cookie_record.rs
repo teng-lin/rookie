@@ -405,6 +405,27 @@ pub(crate) struct CookieRecord {
   pub(crate) origin: SourceRef,
 }
 
+/// A record whose secret-bearing value has completed the unseal stage.
+///
+/// The tuple field is private so only [`CookieRecord::finalize`] can create a
+/// value accepted by the canonical [`Outcome`](super::outcome::Outcome).
+/// This makes an encrypted or unavailable value unrepresentable after
+/// finalization instead of relying on every projector to remember to filter it.
+#[derive(Clone)]
+pub(crate) struct FinalizedCookieRecord(CookieRecord);
+
+impl fmt::Debug for FinalizedCookieRecord {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.0.fmt(formatter)
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FinalizationError {
+  Encrypted,
+  Unavailable(UnavailableCode),
+}
+
 impl fmt::Debug for CookieRecord {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter
@@ -443,6 +464,14 @@ impl CookieRecord {
   pub(crate) fn assign_source(&mut self, source_digest: [u8; 32], ordinal: usize) {
     self.origin = SourceRef::pending(ordinal).with_digest(source_digest);
   }
+
+  pub(crate) fn finalize(self) -> Result<FinalizedCookieRecord, FinalizationError> {
+    match &self.value {
+      CookieValue::Plain(_) => Ok(FinalizedCookieRecord(self)),
+      CookieValue::Encrypted { .. } => Err(FinalizationError::Encrypted),
+      CookieValue::Unavailable(reason) => Err(FinalizationError::Unavailable(reason.code)),
+    }
+  }
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn from_legacy_fields(
     domain: String,
@@ -480,10 +509,6 @@ impl CookieRecord {
     self.raw.insert(name.into(), value);
   }
 
-  pub(crate) fn set_raw_expiry(&mut self, value: RawValue) {
-    self.attributes.raw_expires = Observation::Known(value);
-  }
-
   pub(crate) fn into_cookie(self) -> Result<Cookie, UnavailableReason> {
     let value = match self.value {
       CookieValue::Plain(value) => value.into_output_string(),
@@ -512,6 +537,43 @@ impl CookieRecord {
     self
       .into_cookie()
       .map(|cookie| DetailedCookie { cookie, context })
+  }
+}
+
+impl FinalizedCookieRecord {
+  pub(crate) fn assign_source(&mut self, source_digest: [u8; 32], ordinal: usize) {
+    self.0.assign_source(source_digest, ordinal);
+  }
+
+  #[cfg(test)]
+  pub(crate) fn source_ref(&self) -> &SourceRef {
+    &self.0.origin
+  }
+
+  #[cfg(test)]
+  pub(crate) fn domain_raw(&self) -> &str {
+    self.0.domain_raw()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn name(&self) -> &str {
+    &self.0.name
+  }
+
+  pub(crate) fn into_cookie(self) -> Cookie {
+    // Construction proved this is Plain, so this match is exhaustive over the
+    // sealed invariant and cannot silently discard a record.
+    self
+      .0
+      .into_cookie()
+      .expect("finalized cookie record must contain a plain value")
+  }
+
+  pub(crate) fn into_detailed_cookie(self) -> DetailedCookie {
+    self
+      .0
+      .into_detailed_cookie()
+      .expect("finalized cookie record must contain a plain value")
   }
 }
 

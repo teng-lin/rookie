@@ -7,7 +7,7 @@
 use std::{
   fmt,
   sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
     Arc,
   },
   time::{Duration, Instant},
@@ -76,11 +76,11 @@ impl Deadline {
     }
   }
 
-  /// IPC transports carry only this value, stamped immediately before write.
-  /// A receiver starts it immediately after frame validation, so transit does
-  /// not become an extra budget at every hop.
+  /// A duration ceiling for an IPC sender. This is not a transferable
+  /// deadline: a receiver must also retain the parent absolute deadline (or a
+  /// transport-native absolute timestamp) so transit cannot inflate budget.
   #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-  pub(crate) fn remaining_for_ipc(self, clock: &dyn Clock) -> Duration {
+  pub(crate) fn ipc_sender_ceiling(self, clock: &dyn Clock) -> Duration {
     self.remaining(clock)
   }
 }
@@ -97,16 +97,25 @@ impl fmt::Display for BoundaryExpired {
 impl std::error::Error for BoundaryExpired {}
 
 #[derive(Clone, Default)]
-pub(crate) struct CancellationToken(Arc<AtomicBool>);
+pub(crate) struct CancellationToken(Arc<AtomicU8>);
 
 impl CancellationToken {
   #[cfg_attr(not(test), allow(dead_code))]
   pub(crate) fn cancel(&self) {
-    self.0.store(true, Ordering::Release);
+    self.0.store(1, Ordering::Release);
   }
 
   pub(crate) fn is_cancelled(&self) -> bool {
-    self.0.load(Ordering::Acquire)
+    self.0.load(Ordering::Acquire) == 1
+  }
+
+  #[cfg_attr(not(test), allow(dead_code))]
+  pub(crate) fn exhaust_resources(&self) {
+    self.0.store(2, Ordering::Release);
+  }
+
+  pub(crate) fn is_resource_exhausted(&self) -> bool {
+    self.0.load(Ordering::Acquire) == 2
   }
 }
 
@@ -114,7 +123,20 @@ impl CancellationToken {
 pub(crate) enum BoundaryStop {
   TimedOut,
   Cancelled,
+  ResourceExhausted,
 }
+
+impl fmt::Display for BoundaryStop {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(match self {
+      Self::TimedOut => "operation deadline expired",
+      Self::Cancelled => "operation cancelled",
+      Self::ResourceExhausted => "operation resource budget exhausted",
+    })
+  }
+}
+
+impl std::error::Error for BoundaryStop {}
 
 pub(crate) fn checkpoint(
   clock: &dyn Clock,
@@ -129,6 +151,9 @@ pub(crate) fn checkpoint(
   if cancellation.is_cancelled() {
     return Err(BoundaryStop::Cancelled);
   }
+  if cancellation.is_resource_exhausted() {
+    return Err(BoundaryStop::ResourceExhausted);
+  }
   Ok(())
 }
 
@@ -138,19 +163,41 @@ pub(crate) enum DeadlineEnforcement {
   Enforceable,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct BoundaryRuntime<'a> {
   pub(crate) clock: &'a dyn Clock,
   pub(crate) deadline: Deadline,
+  pub(crate) stop: CancellationToken,
 }
 
 impl<'a> BoundaryRuntime<'a> {
   pub(crate) fn new(clock: &'a dyn Clock, deadline: Deadline) -> Self {
-    Self { clock, deadline }
+    Self {
+      clock,
+      deadline,
+      stop: CancellationToken::default(),
+    }
   }
 
-  pub(crate) fn check(self) -> Result<(), BoundaryExpired> {
-    self.deadline.check(self.clock)
+  #[cfg(test)]
+  pub(crate) fn with_stop(
+    clock: &'a dyn Clock,
+    deadline: Deadline,
+    stop: CancellationToken,
+  ) -> Self {
+    Self {
+      clock,
+      deadline,
+      stop,
+    }
+  }
+
+  pub(crate) fn standard(clock: &'a dyn Clock) -> Self {
+    Self::new(clock, Deadline::after(clock, DEFAULT_EXTRACTION_BUDGET))
+  }
+
+  pub(crate) fn check(&self) -> Result<(), BoundaryStop> {
+    checkpoint(self.clock, self.deadline, &self.stop)
   }
 }
 
@@ -232,13 +279,13 @@ mod tests {
   }
 
   #[test]
-  fn ipc_remaining_duration_decreases_at_every_hop() {
+  fn ipc_sender_ceiling_never_claims_to_replace_the_parent_deadline() {
     let clock = ManualClock::default();
     let deadline = Deadline::after(&clock, Duration::from_secs(9));
     let mut observed = Vec::new();
     for elapsed in [2, 3, 4] {
       clock.advance(Duration::from_secs(elapsed));
-      observed.push(deadline.remaining_for_ipc(&clock));
+      observed.push(deadline.ipc_sender_ceiling(&clock));
     }
     assert_eq!(
       observed,

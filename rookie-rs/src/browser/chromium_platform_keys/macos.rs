@@ -1,7 +1,7 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::create_pbkdf2_key;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
-use crate::common::deadline::{Clock, Deadline, DeadlineEnforcement, SystemClock};
+use crate::common::deadline::{BoundaryRuntime, Clock, Deadline, DeadlineEnforcement};
 use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
@@ -87,9 +87,14 @@ impl HostKeySession {
   pub(crate) fn retrieve(
     &mut self,
     request: ChromiumKeyRequest<'_>,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes {
-    retrieve_macos_key_outcomes(request, &SystemMacosKeychainBackend, &SystemClock, deadline)
+    retrieve_macos_key_outcomes(
+      request,
+      &SystemMacosKeychainBackend,
+      runtime.clock,
+      runtime.deadline,
+    )
   }
 }
 
@@ -106,10 +111,10 @@ impl<'a> MacosPlatformKeyProvider<'a> {
 impl KeyProvider<()> for MacosPlatformKeyProvider<'_> {
   type Keys = ChromiumKeyOutcomes;
 
-  fn keys(&self, _context: &(), deadline: Deadline) -> ChromiumKeyOutcomes {
+  fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
     let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
     let mut session = HostKeySession::new();
-    session.retrieve(ChromiumKeyRequest::direct(&credentials), deadline)
+    session.retrieve(ChromiumKeyRequest::direct(&credentials), runtime)
   }
 
   fn deadline_enforcement(&self) -> DeadlineEnforcement {
@@ -287,7 +292,8 @@ mod tests {
       osx_key_service: None,
       osx_key_user: None,
     };
-    let direct = MacosPlatformKeyProvider::new(&direct_config).keys(&(), deadline);
+    let direct = MacosPlatformKeyProvider::new(&direct_config)
+      .keys(&(), &BoundaryRuntime::new(&clock, deadline));
     assert_eq!(direct.v10, ChromiumKeyOutcome::NotApplicable);
     assert_eq!(backend.calls.get(), 0);
   }

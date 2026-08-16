@@ -7,17 +7,11 @@
 use super::cookie_record::{Attributes, CipherTier, CookieRecord, CookieValue, RawValue};
 use crate::common::{
   boundary::{Decoder, ReadOnlySource, RecordSink},
-  deadline::{Clock, Deadline, DeadlineEnforcement},
+  deadline::{BoundaryRuntime, DeadlineEnforcement},
 };
 use crate::common::{date, enums::*, secret::SecretString, utils};
 use anyhow::{anyhow, Context, Result};
 use std::fmt;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CookieProjection {
-  Legacy,
-  Detailed,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EncryptedValuePolicy {
@@ -184,14 +178,12 @@ pub(super) struct ChromiumReadOnlySource<'a> {
 
 impl ReadOnlySource for ChromiumReadOnlySource<'_> {}
 
-pub(super) struct ChromiumBoundaryDecoder<'a> {
-  pub(super) projection: CookieProjection,
+pub(super) struct ChromiumBoundaryDecoder {
   pub(super) encrypted_value_policy: EncryptedValuePolicy,
-  pub(super) clock: &'a dyn Clock,
 }
 
 impl<'source> Decoder<ChromiumReadOnlySource<'source>, ChromiumDecodeEvent>
-  for ChromiumBoundaryDecoder<'_>
+  for ChromiumBoundaryDecoder
 {
   type Summary = ChromiumDecodeSummary;
 
@@ -199,25 +191,22 @@ impl<'source> Decoder<ChromiumReadOnlySource<'source>, ChromiumDecodeEvent>
     &self,
     source: &ChromiumReadOnlySource<'source>,
     sink: &mut dyn RecordSink<ChromiumDecodeEvent>,
-    deadline: Deadline,
+    runtime: &BoundaryRuntime<'_>,
   ) -> Result<Self::Summary> {
-    let cancellation = crate::common::deadline::CancellationToken::default();
-    crate::common::deadline::checkpoint(self.clock, deadline, &cancellation)
-      .map_err(|stop| anyhow!("Chromium decoder stopped: {stop:?}"))?;
+    runtime.check()?;
     let mut decoder = prepare_cookie_decoder(
       source.connection,
       source.domains,
-      self.projection,
       self.encrypted_value_policy,
     )?;
     let mut cursor = decoder.cursor()?;
     while let Some(event) = {
-      crate::common::deadline::checkpoint(self.clock, deadline, &cancellation)
-        .map_err(|stop| anyhow!("Chromium decoder stopped: {stop:?}"))?;
+      runtime.check()?;
       cursor.next_event()?
     } {
       sink.emit(event)?;
     }
+    runtime.check()?;
     Ok(cursor.summary())
   }
 
@@ -231,7 +220,6 @@ impl<'source> Decoder<ChromiumReadOnlySource<'source>, ChromiumDecodeEvent>
 pub(super) fn prepare_cookie_decoder<'connection>(
   connection: &'connection rusqlite::Connection,
   domains: Option<&[String]>,
-  _projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumCookieDecoder<'connection>> {
   let schema_version = chromium_schema_version(connection)?;
@@ -467,7 +455,6 @@ mod tests {
     type DecoderSignature = for<'connection> fn(
       &'connection rusqlite::Connection,
       Option<&[String]>,
-      CookieProjection,
       EncryptedValuePolicy,
     ) -> Result<ChromiumCookieDecoder<'connection>>;
     let _: DecoderSignature = prepare_cookie_decoder;
@@ -547,13 +534,9 @@ mod tests {
       )
       .expect("seed rows");
 
-    let mut decoder = prepare_cookie_decoder(
-      &connection,
-      None,
-      CookieProjection::Legacy,
-      EncryptedValuePolicy::UseKeyOutcomes,
-    )
-    .expect("prepare decoder");
+    let mut decoder =
+      prepare_cookie_decoder(&connection, None, EncryptedValuePolicy::UseKeyOutcomes)
+        .expect("prepare decoder");
     let mut cursor = decoder.cursor().expect("start cursor");
 
     let first = cursor.next_event().expect("read first").expect("first row");

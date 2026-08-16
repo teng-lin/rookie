@@ -1,7 +1,7 @@
 //! Canonical extraction result shared by every compatibility projection.
 
 use super::{
-  cookie_record::{CookieRecord, SourceRef},
+  cookie_record::{FinalizedCookieRecord, SourceRef},
   report_core::{
     AcquisitionStrategyCode, BrowserId, CookieSourceIdentity, ExtractionStageCode, InstallationId,
     IssueCode, IssueSeverityCode, ProfileId, ProfileIdentity,
@@ -29,6 +29,24 @@ pub(crate) enum ResultStatus {
   Failed,
   #[default]
   NoSources,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompatibilityAbsence {
+  CookieDatabase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompatibilityDisposition {
+  Emit { source_digests: Vec<[u8; 32]> },
+  Absent(CompatibilityAbsence),
+  Failed(Diagnostic),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CompatibilityDecision {
+  pub(crate) browser_id: BrowserId,
+  pub(crate) disposition: CompatibilityDisposition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -221,8 +239,8 @@ pub(crate) struct SourceOutcome {
   pub(crate) source: CookieSourceIdentity,
   pub(crate) selected: bool,
   pub(crate) acquisition_strategy: AcquisitionStrategyCode,
-  pub(crate) records: Vec<CookieRecord>,
-  pub(crate) compatibility_error: Option<Diagnostic>,
+  pub(crate) records: Vec<FinalizedCookieRecord>,
+  source_digest: [u8; 32],
   pub(crate) stats: super::report_core::ExtractionStats,
   pub(crate) failed: bool,
 }
@@ -232,6 +250,7 @@ impl SourceOutcome {
     profile: ProfileIdentity,
     is_default_profile: bool,
     source: CookieSourceIdentity,
+    source_digest: [u8; 32],
     selected: bool,
     acquisition_strategy: AcquisitionStrategyCode,
   ) -> Self {
@@ -242,14 +261,14 @@ impl SourceOutcome {
       selected,
       acquisition_strategy,
       records: Vec::new(),
-      compatibility_error: None,
+      source_digest,
       stats: super::report_core::ExtractionStats::default(),
       failed: false,
     }
   }
 
   pub(crate) fn source_digest(&self) -> [u8; 32] {
-    source_digest(&self.source)
+    self.source_digest
   }
 
   pub(crate) fn assign_provenance(&mut self) {
@@ -275,6 +294,7 @@ pub(crate) struct OutcomeCounters {
   pub(crate) rows_skipped: u64,
   pub(crate) rows_rejected: u64,
   pub(crate) provider_failures: u64,
+  pub(crate) counters_saturated: bool,
 }
 
 #[derive(Debug)]
@@ -285,6 +305,7 @@ pub(crate) struct Outcome {
   pub(crate) counters: OutcomeCounters,
   pub(crate) result_status: ResultStatus,
   pub(crate) termination: Termination,
+  pub(crate) compatibility: Vec<CompatibilityDecision>,
 }
 
 impl Outcome {
@@ -322,6 +343,7 @@ impl Outcome {
       counters.provider_failures = counters
         .provider_failures
         .saturating_add(u64::from(source.stats.provider_failures));
+      counters.counters_saturated |= source.stats.counters_saturated;
     }
     let succeeded = counters.sources_succeeded > 0;
     let has_error = failure_ledger
@@ -346,51 +368,98 @@ impl Outcome {
       counters,
       result_status,
       termination,
+      compatibility: Vec::new(),
     }
   }
 }
 
-fn source_digest(source: &CookieSourceIdentity) -> [u8; 32] {
+pub(crate) fn source_digest(
+  profile: &ProfileIdentity,
+  source: &CookieSourceIdentity,
+  raw_path: &[u8],
+) -> [u8; 32] {
   let mut hasher = Sha256::new();
+  hasher.update(b"rookie-cookie-source\0v1");
   for field in [
+    profile.browser_id.as_str(),
+    profile.installation_id.as_str(),
+    profile.profile_id.as_str(),
     source.role.as_str(),
     source.format.as_str(),
-    source.path.as_str(),
   ] {
     hasher.update(field.len().to_be_bytes());
     hasher.update(field.as_bytes());
   }
   hasher.update(source.precedence.to_be_bytes());
+  hasher.update(raw_path.len().to_be_bytes());
+  hasher.update(raw_path);
   hasher.finalize().into()
 }
 
 fn sanitize_diagnostic(message: &str) -> String {
   let mut sanitized = String::with_capacity(message.len().min(MAX_DIAGNOSTIC_BYTES));
-  for (index, token) in message.split_whitespace().enumerate() {
-    if index > 0 {
-      sanitized.push(' ');
-    }
-    let trimmed = token.trim_start_matches(['\'', '"', '(', '[']);
-    let absolute = trimmed.starts_with('/')
-      || trimmed.starts_with("\\\\?\\")
-      || trimmed.as_bytes().get(..3).is_some_and(|prefix| {
+  let bytes = message.as_bytes();
+  let mut cursor = 0;
+  while cursor < bytes.len() {
+    let is_unix = bytes[cursor] == b'/' && !(cursor >= 2 && &bytes[cursor - 2..cursor] == b":/");
+    let is_drive = bytes
+      .get(cursor..cursor.saturating_add(3))
+      .is_some_and(|prefix| {
         prefix[0].is_ascii_alphabetic() && prefix[1] == b':' && matches!(prefix[2], b'/' | b'\\')
       });
-    if absolute {
-      sanitized.push_str("<path>");
+    let is_unc = bytes
+      .get(cursor..cursor.saturating_add(2))
+      .is_some_and(|prefix| prefix == b"\\\\");
+    if !(is_unix || is_drive || is_unc) {
+      let character = message[cursor..]
+        .chars()
+        .next()
+        .expect("cursor is a UTF-8 boundary");
+      sanitized.push(character);
+      cursor += character.len_utf8();
+      continue;
+    }
+
+    sanitized.push_str("<path>");
+    let quote = cursor
+      .checked_sub(1)
+      .and_then(|index| bytes.get(index).copied())
+      .filter(|byte| matches!(byte, b'\'' | b'"'));
+    cursor += if is_drive {
+      3
+    } else if is_unc {
+      2
     } else {
-      sanitized.push_str(token);
+      1
+    };
+    while cursor < bytes.len() {
+      let byte = bytes[cursor];
+      if quote.is_some_and(|quote| byte == quote)
+        || (quote.is_none()
+          && (byte.is_ascii_whitespace()
+            || matches!(byte, b',' | b';' | b')' | b']' | b'}' | b'\'' | b'"')))
+      {
+        break;
+      }
+      let character = message[cursor..]
+        .chars()
+        .next()
+        .expect("cursor is a UTF-8 boundary");
+      cursor += character.len_utf8();
     }
-    if sanitized.len() >= MAX_DIAGNOSTIC_BYTES {
-      sanitized.truncate(MAX_DIAGNOSTIC_BYTES);
-      break;
+  }
+  if sanitized.len() > MAX_DIAGNOSTIC_BYTES {
+    let mut end = MAX_DIAGNOSTIC_BYTES;
+    while !sanitized.is_char_boundary(end) {
+      end -= 1;
     }
+    sanitized.truncate(end);
   }
   sanitized
 }
 
-pub(crate) fn source_ref(source: &CookieSourceIdentity, ordinal: usize) -> SourceRef {
-  SourceRef::pending(ordinal).with_digest(source_digest(source))
+pub(crate) fn source_ref(source_digest: [u8; 32], ordinal: usize) -> SourceRef {
+  SourceRef::pending(ordinal).with_digest(source_digest)
 }
 
 #[cfg(test)]
@@ -398,10 +467,10 @@ mod tests {
   use super::*;
   use crate::{
     browser::{
-      cookie_record::{CookieValue, DomainScope},
+      cookie_record::FinalizedCookieRecord,
       report_core::{CookieSourceFormatId, CookieSourceRoleId, ExtractionStats},
     },
-    common::{enums::Cookie, secret::SecretString},
+    common::enums::Cookie,
   };
 
   fn profile() -> ProfileIdentity {
@@ -426,23 +495,28 @@ mod tests {
     let mut outcome = SourceOutcome::new(
       profile(),
       true,
-      identity,
+      identity.clone(),
+      source_digest(&profile(), &identity, path.as_bytes()),
       true,
       AcquisitionStrategyCode::live_read_only(),
     );
-    outcome.records.push(CookieRecord::from_cookie(
-      Cookie {
-        domain: ".example.com".to_owned(),
-        path: "/".to_owned(),
-        secure: false,
-        expires: None,
-        name: "sid".to_owned(),
-        value: "same-value".to_owned(),
-        http_only: true,
-        same_site: 1,
-      },
-      SourceRef::pending(0),
-    ));
+    outcome.records.push(
+      super::super::cookie_record::CookieRecord::from_cookie(
+        Cookie {
+          domain: ".example.com".to_owned(),
+          path: "/".to_owned(),
+          secure: false,
+          expires: None,
+          name: "sid".to_owned(),
+          value: "same-value".to_owned(),
+          http_only: true,
+          same_site: 1,
+        },
+        SourceRef::pending(0),
+      )
+      .finalize()
+      .expect("plain fixture finalizes"),
+    );
     outcome.stats = ExtractionStats {
       rows_seen: 1,
       cookies_emitted: 1,
@@ -462,13 +536,14 @@ mod tests {
     );
     assert_eq!(outcome.sources.len(), 2);
     assert_ne!(
-      outcome.sources[0].records[0].origin.source_digest,
-      outcome.sources[1].records[0].origin.source_digest
+      outcome.sources[0].records[0].source_ref().source_digest,
+      outcome.sources[1].records[0].source_ref().source_digest
     );
-    assert_eq!(outcome.sources[0].records[0].origin.ordinal, 0);
+    assert_eq!(outcome.sources[0].records[0].source_ref().ordinal, 0);
     // Identity is chosen by the caller. The model itself never equates or
     // deduplicates these records.
-    let key = |record: &CookieRecord| (record.domain_raw().to_owned(), record.name.to_owned());
+    let key =
+      |record: &FinalizedCookieRecord| (record.domain_raw().to_owned(), record.name().to_owned());
     assert_eq!(
       key(&outcome.sources[0].records[0]),
       key(&outcome.sources[1].records[0])
@@ -477,29 +552,66 @@ mod tests {
 
   #[test]
   fn aggregation_uses_the_full_typed_failure_key() {
-    let scope = FailureScope::Request;
-    let failure = |tier: &str, retryability| Failure {
+    let failure = || Failure {
       code: IssueCode::provider_failed(),
       stage: ExtractionStageCode::decrypt(),
-      scope: scope.clone(),
+      scope: FailureScope::Request,
       cause: FailureCause {
         kind: "credential_provider".to_owned(),
         provider: Some("secret_service".to_owned()),
-        tier: Some(tier.to_owned()),
+        tier: Some("v10".to_owned()),
       },
       severity: IssueSeverityCode::error(),
-      retryability,
+      retryability: Retryability::Retryable,
       occurrences: 1,
       samples: Vec::new(),
       diagnostic: Diagnostic::new_with_secrets("provider failed", &[]),
     };
     let mut ledger = FailureLedger::default();
-    ledger.push(failure("v10", Retryability::Retryable));
-    ledger.push(failure("v11", Retryability::Retryable));
-    ledger.push(failure("v10", Retryability::NotRetryable));
-    ledger.push(failure("v10", Retryability::Retryable));
-    assert_eq!(ledger.as_slice().len(), 3);
+    ledger.push(failure());
+    ledger.push(failure());
+    let mut variants = Vec::new();
+    let mut variant = failure();
+    variant.code = IssueCode::provider_unavailable();
+    variants.push(variant);
+    let mut variant = failure();
+    variant.stage = ExtractionStageCode::query();
+    variants.push(variant);
+    let mut variant = failure();
+    variant.scope = FailureScope::Source {
+      browser_id: BrowserId::known("chrome"),
+      installation_id: "c".repeat(64).parse().expect("installation id"),
+      profile_id: "d".repeat(64).parse().expect("profile id"),
+      source_digest: [7; 32],
+    };
+    variants.push(variant);
+    let mut variant = failure();
+    variant.cause.kind = "key_parse".to_owned();
+    variants.push(variant);
+    let mut variant = failure();
+    variant.cause.provider = Some("kwallet".to_owned());
+    variants.push(variant);
+    let mut variant = failure();
+    variant.cause.tier = Some("v11".to_owned());
+    variants.push(variant);
+    let mut variant = failure();
+    variant.severity = IssueSeverityCode::warning();
+    variants.push(variant);
+    let mut variant = failure();
+    variant.retryability = Retryability::NotRetryable;
+    variants.push(variant);
+    for variant in variants {
+      ledger.push(variant);
+    }
+    assert_eq!(ledger.as_slice().len(), 9);
     assert_eq!(ledger.as_slice()[0].occurrences, 2);
+
+    let mut saturated = failure();
+    saturated.occurrences = u32::MAX;
+    let mut saturated_ledger = FailureLedger::default();
+    saturated_ledger.push(saturated);
+    saturated_ledger.push(failure());
+    assert_eq!(saturated_ledger.as_slice()[0].occurrences, u32::MAX);
   }
 
   #[test]
@@ -515,6 +627,54 @@ mod tests {
     assert!(!diagnostic.as_str().contains(windows_path));
     assert!(diagnostic.as_str().contains("<path>"));
     assert!(diagnostic.as_str().len() <= MAX_DIAGNOSTIC_BYTES);
+
+    let variants = [
+      r"UNC \\server\share\Cookie Store",
+      r"device \\?\C:\Users\alice\Cookies",
+      "path=/Users/alice/Profile/Cookies",
+      "source='/Users/alice/Profile With Spaces/Cookies'",
+      "embedded(/private/tmp/cookie-db)",
+    ];
+    for value in variants {
+      let diagnostic = Diagnostic::new_with_secrets(value, &[]);
+      assert!(diagnostic.as_str().contains("<path>"), "{value:?}");
+      assert!(!diagnostic.as_str().contains("alice"), "{value:?}");
+    }
+
+    for requested in 511..=514 {
+      let prefix = "é".repeat(requested / 2);
+      let diagnostic = Diagnostic::new_with_secrets(format!("{prefix}界界"), &[]);
+      assert!(diagnostic.as_str().len() <= MAX_DIAGNOSTIC_BYTES);
+      assert!(std::str::from_utf8(diagnostic.as_str().as_bytes()).is_ok());
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn provenance_hashes_distinct_raw_non_utf8_paths_and_identity_context() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+    let first = PathBuf::from(OsString::from_vec(b"/tmp/source-\x80".to_vec()));
+    let second = PathBuf::from(OsString::from_vec(b"/tmp/source-\x81".to_vec()));
+    assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+    let identity = CookieSourceIdentity {
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known("mozilla_sqlite"),
+      path: first.to_string_lossy().into_owned(),
+      path_lossy: true,
+      precedence: 10,
+    };
+    use std::os::unix::ffi::OsStrExt;
+    let first_digest = source_digest(&profile(), &identity, first.as_os_str().as_bytes());
+    let second_digest = source_digest(&profile(), &identity, second.as_os_str().as_bytes());
+    assert_ne!(first_digest, second_digest);
+
+    let mut other_profile = profile();
+    other_profile.browser_id = BrowserId::known("librewolf");
+    assert_ne!(
+      first_digest,
+      source_digest(&other_profile, &identity, first.as_os_str().as_bytes())
+    );
   }
 
   #[test]
@@ -534,12 +694,9 @@ mod tests {
   }
 
   #[test]
-  fn canonical_debug_keeps_cookie_values_redacted() {
-    let mut source = source("source");
-    source.records[0].domain = DomainScope::Domain {
-      raw: ".example.com".to_owned(),
-    };
-    source.records[0].value = CookieValue::Plain(SecretString::new("sentinel".to_owned()));
+  fn already_saturated_source_marks_the_outcome_counter() {
+    let mut source = source("saturated-source");
+    source.stats.counters_saturated = true;
     let outcome = Outcome::finalize(
       vec![(profile(), true)],
       vec![source],
@@ -547,6 +704,19 @@ mod tests {
       true,
       Termination::Completed,
     );
-    assert!(!format!("{outcome:?}").contains("sentinel"));
+    assert!(outcome.counters.counters_saturated);
+  }
+
+  #[test]
+  fn canonical_debug_keeps_cookie_values_redacted() {
+    let source = source("source");
+    let outcome = Outcome::finalize(
+      vec![(profile(), true)],
+      vec![source],
+      FailureLedger::default(),
+      true,
+      Termination::Completed,
+    );
+    assert!(!format!("{outcome:?}").contains("same-value"));
   }
 }

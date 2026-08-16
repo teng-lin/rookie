@@ -343,15 +343,17 @@ fn local_state_outcomes(
       InvalidDirectPathOptionsReason::MissingLocalStateFile,
     ));
   }
-  let contents = std::fs::read_to_string(path)
-    .with_context(|| format!("failed to read Chromium Local State {}", path.display()))?;
-  let parsed: serde_json::Value = serde_json::from_str(&contents)
-    .with_context(|| format!("failed to parse Chromium Local State {}", path.display()))?;
+  let clock = crate::common::deadline::SystemClock;
+  let deadline = crate::common::deadline::Deadline::after(
+    &clock,
+    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+  );
+  let runtime = crate::common::deadline::BoundaryRuntime::new(&clock, deadline);
   let credentials = ChromiumKeyCredentials::default();
   let mut session = HostKeySession::new();
   Ok(session.retrieve(
-    ChromiumKeyRequest::for_parsed_local_state(&credentials, &parsed),
-    crate::common::deadline::Deadline::standard(),
+    ChromiumKeyRequest::for_installation("direct_path", &credentials, path, None),
+    &runtime,
   ))
 }
 
