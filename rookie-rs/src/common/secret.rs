@@ -47,6 +47,7 @@ impl SecretBytes {
 
   /// Converts an entire secret frame to a protected string. Invalid UTF-8
   /// keeps ownership in `self`, so the error path wipes the original bytes.
+  #[cfg(any(target_os = "linux", target_os = "macos", test))]
   pub(crate) fn into_secret_string(mut self) -> Result<SecretString, SecretUtf8Error> {
     if std::str::from_utf8(self.as_slice()).is_err() {
       return Err(SecretUtf8Error);
