@@ -1,0 +1,142 @@
+name: Candidate bundle evidence
+
+# Release-hardening program R4: for a PR that adds or changes an
+# artifact/helper cell in release/platform-contract.json, assemble a
+# candidate bundle the same way a real release would, run the R3 consumer
+# harness against it, and record the result as evidence bound to the
+# candidate manifest's digest -- so review-time execution and release-time
+# publication can later be shown to trace back to the same tested bytes.
+# This candidate bundle is never published anywhere; its evidence is not
+# consumed by any publish-*.yml workflow yet (see docs/RELEASING.md).
+
+on:
+  pull_request:
+    paths:
+      - release/platform-contract.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_OPTIONS: --use-system-ca
+
+jobs:
+  check-diff:
+    name: Check for a changed artifact/helper cell
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Diff platform-contract.json cells against the PR base
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The PR's reported base sha, not a recomputed merge-base: adequate
+          # for "does this PR's current branch change a cell relative to
+          # what its base currently shows" -- the question this workflow
+          # exists to answer, not a precise three-way diff.
+          changed_ids="$(python3 scripts/platform_contract.py --diff-cells \
+            "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")"
+          if [ -n "$changed_ids" ]; then
+            echo "changed cells:"
+            echo "$changed_ids"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no cell added or changed relative to the PR base"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  linux-x64:
+    name: Candidate build (Ubuntu x64)
+    needs: check-diff
+    if: needs.check-diff.outputs.changed == 'true'
+    uses: ./.github/workflows/_artifact-smoke.yml
+    with:
+      runner: ubuntu-22.04
+      rust-target: x86_64-unknown-linux-gnu
+      python-target: x86_64
+      npm-platform: linux-x64-gnu
+
+  windows-x64:
+    name: Candidate build (Windows x64)
+    needs: check-diff
+    if: needs.check-diff.outputs.changed == 'true'
+    uses: ./.github/workflows/_artifact-smoke.yml
+    with:
+      runner: windows-2025
+      rust-target: x86_64-pc-windows-msvc
+      python-target: x64
+      npm-platform: win32-x64-msvc
+      cli-features: --features appbound
+
+  macos-arm64:
+    name: Candidate build (macOS ARM64)
+    needs: check-diff
+    if: needs.check-diff.outputs.changed == 'true'
+    uses: ./.github/workflows/_artifact-smoke.yml
+    with:
+      runner: macos-15
+      rust-target: aarch64-apple-darwin
+      python-target: aarch64
+      npm-platform: darwin-arm64
+
+  assemble-candidate-bundle:
+    name: Assemble candidate bundle and run the consumer harness
+    needs: [check-diff, linux-x64, windows-x64, macos-arm64]
+    if: needs.check-diff.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Download every platform's candidate artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-artifacts-*-${{ github.sha }}
+          path: candidate-root
+      - name: Write candidate manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          contract_digest="$(python3 scripts/platform_contract.py --digest)"
+          mapfile -t artifacts < <(find candidate-root -type f | sort)
+          test "${#artifacts[@]}" -gt 0
+          python3 scripts/write-release-scan-manifest.py \
+            --version "0.0.0-candidate" \
+            --source-sha "${{ github.sha }}" \
+            --controller-sha "${{ github.sha }}" \
+            --platform-contract-digest "$contract_digest" \
+            --kind candidate \
+            --root candidate-root \
+            --output candidate-root/candidate-manifest.json \
+            "${artifacts[@]}"
+      - name: Run consumer harness against the candidate bundle
+        run: |
+          python3 scripts/run-consumer-harness.py \
+            --manifest candidate-root/candidate-manifest.json \
+            --artifacts-root candidate-root \
+            --output candidate-root/candidate-evidence.json
+      - name: Upload candidate evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-bundle-evidence-${{ github.sha }}
+          path: |
+            candidate-root/candidate-manifest.json
+            candidate-root/candidate-evidence.json
+          if-no-files-found: error
+          retention-days: 7

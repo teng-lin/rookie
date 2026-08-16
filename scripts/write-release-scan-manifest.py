@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import jcs  # noqa: E402
 import platform_contract  # noqa: E402
 
 
@@ -45,6 +46,16 @@ def main() -> int:
         type=Path,
         default=platform_contract.DEFAULT_CONTRACT_PATH,
         help="path to platform-contract.json, for matching each artifact to its cell's helper_roles",
+    )
+    parser.add_argument(
+        "--kind",
+        choices=("release", "candidate"),
+        default="release",
+        help=(
+            "'release' (default) for a real, publishable bundle; 'candidate' "
+            "for a PR-time bundle assembled the same way but never published "
+            "-- see release-hardening program R4"
+        ),
     )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -105,25 +116,43 @@ def main() -> int:
             }
         )
 
+    release = {
+        "source_sha": args.source_sha,
+        "controller_sha": args.controller_sha,
+        "platform_contract_digest": args.platform_contract_digest,
+        "tag": f"v{args.version}",
+        "version": args.version,
+        # 'release' for a real, publishable bundle; 'candidate' for a PR-time
+        # bundle assembled the same way but never published -- distinguishes
+        # the two at read time so nothing downstream can confuse one for the
+        # other (release-hardening program R4).
+        "kind": args.kind,
+    }
+    artifacts = sorted(records, key=lambda record: str(record["path"]))
+
+    # A whole-manifest digest, over everything above plus `artifacts`,
+    # computed via RFC 8785 JCS so it reproduces identically regardless of
+    # field insertion order or which host wrote the file. Computed before
+    # `manifest_digest` itself is added to `release`, so the digest only
+    # ever covers content that exists independent of the digest -- it cannot
+    # cover itself.
+    manifest_digest = jcs.digest({"release": release, "artifacts": artifacts})
+    release["manifest_digest"] = manifest_digest
+
     document = {
-        # v3 adds `helper_roles` to each artifact record, matched against
-        # platform-contract.json (v2 added controller_sha and
-        # platform_contract_digest to `release`).
+        # v4 adds `release.kind` and `release.manifest_digest` (release-
+        # hardening program R4). v3 added `helper_roles` to each artifact
+        # record, matched against platform-contract.json (v2 added
+        # controller_sha and platform_contract_digest to `release`).
         # `registry_digest` on artifacts is deliberately not populated here:
         # a registry's own digest (npm `dist.integrity`, a PyPI wheel hash,
         # a crates.io checksum) isn't known until after that artifact is
         # actually published, so it can't be in a manifest written before
         # publication. Reconciling pre/post-publish digests is out of scope
         # for this manifest — see the release-hardening program's R6 phase.
-        "schema_version": 3,
-        "release": {
-            "source_sha": args.source_sha,
-            "controller_sha": args.controller_sha,
-            "platform_contract_digest": args.platform_contract_digest,
-            "tag": f"v{args.version}",
-            "version": args.version,
-        },
-        "artifacts": sorted(records, key=lambda record: str(record["path"])),
+        "schema_version": 4,
+        "release": release,
+        "artifacts": artifacts,
     }
     output = args.output.resolve()
     try:

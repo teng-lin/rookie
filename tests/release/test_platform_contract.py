@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
@@ -220,6 +223,144 @@ class ValidationTests(unittest.TestCase):
     def test_artifact_types_without_extra_requirements_are_unaffected(self) -> None:
         contract = {"cells": [base_cell(artifact_id="crate", registry="crates.io", os=None, cpu=None, libc=None)]}
         self.assertEqual(platform_contract.validate(contract, today=date(2026, 1, 1)), [])
+
+
+class DiffCellsTests(unittest.TestCase):
+    def test_no_difference_reports_nothing(self) -> None:
+        contract = {"cells": [base_cell(artifact_id="cli")]}
+        self.assertEqual(platform_contract.diff_cells(contract, copy.deepcopy(contract)), [])
+
+    def test_a_new_cell_in_head_is_reported(self) -> None:
+        base = {"cells": [base_cell(artifact_id="cli")]}
+        head = {"cells": [base_cell(artifact_id="cli"), base_cell(artifact_id="wheel")]}
+        self.assertEqual(platform_contract.diff_cells(base, head), ["wheel"])
+
+    def test_a_changed_cell_is_reported(self) -> None:
+        base = {"cells": [base_cell(artifact_id="cli", os="linux")]}
+        head = {"cells": [base_cell(artifact_id="cli", os="darwin")]}
+        self.assertEqual(platform_contract.diff_cells(base, head), ["cli"])
+
+    def test_a_cell_removed_in_head_is_not_reported(self) -> None:
+        base = {"cells": [base_cell(artifact_id="cli"), base_cell(artifact_id="wheel")]}
+        head = {"cells": [base_cell(artifact_id="cli")]}
+        self.assertEqual(platform_contract.diff_cells(base, head), [])
+
+    def test_results_are_sorted(self) -> None:
+        base = {"cells": []}
+        head = {
+            "cells": [
+                base_cell(artifact_id="wheel"),
+                base_cell(artifact_id="cli"),
+                base_cell(artifact_id="crate"),
+            ]
+        }
+        self.assertEqual(platform_contract.diff_cells(base, head), ["cli", "crate", "wheel"])
+
+
+class DiffCellsCliTests(unittest.TestCase):
+    def _init_repo(self) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+        (root / "release").mkdir()
+        return root
+
+    def _commit_contract(self, root: Path, contract: dict[str, object], message: str) -> str:
+        (root / "release" / "platform-contract.json").write_text(
+            json.dumps(contract), encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+            cwd=root,
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def test_diff_cells_prints_changed_artifact_ids_between_two_real_commits(self) -> None:
+        root = self._init_repo()
+        base_sha = self._commit_contract(
+            root, {"cells": [base_cell(artifact_id="cli")]}, "base"
+        )
+        head_sha = self._commit_contract(
+            root,
+            {"cells": [base_cell(artifact_id="cli"), base_cell(artifact_id="wheel")]},
+            "head",
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY_ROOT / "scripts" / "platform_contract.py"),
+                "--contract",
+                str(root / "release" / "platform-contract.json"),
+                "--diff-cells",
+                base_sha,
+                head_sha,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "wheel")
+
+    def test_diff_cells_prints_nothing_and_exits_zero_when_nothing_changed(self) -> None:
+        root = self._init_repo()
+        contract = {"cells": [base_cell(artifact_id="cli")]}
+        base_sha = self._commit_contract(root, contract, "base")
+        head_sha = self._commit_contract(root, copy.deepcopy(contract), "head (no real change)")
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY_ROOT / "scripts" / "platform_contract.py"),
+                "--contract",
+                str(root / "release" / "platform-contract.json"),
+                "--diff-cells",
+                base_sha,
+                head_sha,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_diff_cells_fails_closed_on_an_unknown_ref(self) -> None:
+        root = self._init_repo()
+        head_sha = self._commit_contract(
+            root, {"cells": [base_cell(artifact_id="cli")]}, "head"
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY_ROOT / "scripts" / "platform_contract.py"),
+                "--contract",
+                str(root / "release" / "platform-contract.json"),
+                "--diff-cells",
+                "0" * 40,
+                head_sha,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("error:", result.stderr)
 
 
 if __name__ == "__main__":

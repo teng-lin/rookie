@@ -67,7 +67,13 @@ def make_pure_python_wheel(path: Path, *, name: str, version: str, platform_tag:
                     archive.write(file_path, file_path.relative_to(staging_path))
 
 
-def write_manifest(path: Path, artifacts_root: Path, artifact_paths: list[Path]) -> None:
+def write_manifest(
+    path: Path,
+    artifacts_root: Path,
+    artifact_paths: list[Path],
+    *,
+    manifest_digest: str | None = None,
+) -> None:
     records = []
     for artifact_path in artifact_paths:
         data = artifact_path.read_bytes()
@@ -78,8 +84,11 @@ def write_manifest(path: Path, artifacts_root: Path, artifact_paths: list[Path])
                 "sha256": hashlib.sha256(data).hexdigest(),
             }
         )
+    release: dict[str, object] = {"version": "0.5.9"}
+    if manifest_digest is not None:
+        release["manifest_digest"] = manifest_digest
     path.write_text(
-        json.dumps({"schema_version": 2, "release": {"version": "0.5.9"}, "artifacts": records}),
+        json.dumps({"schema_version": 2, "release": release, "artifacts": records}),
         encoding="utf-8",
     )
 
@@ -397,6 +406,83 @@ class ConsumerHarnessTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("made-up-artifact-type", result.stderr)
             self.assertIn("has no exercise() routine", result.stderr)
+
+    def test_output_writes_evidence_bound_to_the_manifest_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tarball = root / "rookie-cookies-1.0.0.tgz"
+            make_npm_tarball(tarball, name="rookie-cookies")
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [tarball], manifest_digest="d" * 64)
+            evidence_path = root / "evidence.json"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--manifest",
+                    str(manifest_path),
+                    "--artifacts-root",
+                    str(root),
+                    "--output",
+                    str(evidence_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["manifest_digest"], "d" * 64)
+            self.assertEqual(evidence["schema_version"], 1)
+            self.assertIn("os", evidence["host"])
+            self.assertIn("cpu", evidence["host"])
+            self.assertIn("generated_at", evidence)
+            self.assertEqual(len(evidence["results"]), 1)
+            self.assertEqual(evidence["results"][0]["path"], tarball.name)
+            self.assertIn("structurally verified", evidence["results"][0]["outcome"])
+
+    def test_output_fails_closed_without_a_manifest_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tarball = root / "rookie-cookies-1.0.0.tgz"
+            make_npm_tarball(tarball, name="rookie-cookies")
+            manifest_path = root / "manifest.json"
+            # No manifest_digest= given -- write_manifest() omits the field.
+            write_manifest(manifest_path, root, [tarball])
+            evidence_path = root / "evidence.json"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--manifest",
+                    str(manifest_path),
+                    "--artifacts-root",
+                    str(root),
+                    "--output",
+                    str(evidence_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("manifest_digest", result.stderr)
+            self.assertFalse(evidence_path.exists())
+
+    def test_without_output_flag_no_evidence_file_is_written(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tarball = root / "rookie-cookies-1.0.0.tgz"
+            make_npm_tarball(tarball, name="rookie-cookies")
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [tarball])
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(list(root.glob("evidence*.json")), [])
 
 
 if __name__ == "__main__":

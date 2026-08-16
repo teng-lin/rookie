@@ -52,6 +52,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -409,6 +410,16 @@ def main() -> int:
         default=platform_contract.DEFAULT_CONTRACT_PATH,
         help="path to platform-contract.json, for re-checking each artifact's manifest helper_roles",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "write a structured JSON evidence record to this path, bound to the "
+            "manifest's release.manifest_digest (schema_version 4+; see "
+            "write-release-scan-manifest.py) -- see release-hardening program R4. "
+            "Does not change stdout/exit-code behavior."
+        ),
+    )
     args = parser.parse_args()
 
     contract = platform_contract.load_contract(args.platform_contract)
@@ -427,6 +438,16 @@ def main() -> int:
         parser.error("--manifest and --artifacts-root are required unless --check-native-coverage is given")
 
     manifest = load_manifest(args.manifest)
+
+    manifest_digest = manifest.get("release", {}).get("manifest_digest")
+    if args.output is not None and manifest_digest is None:
+        print(
+            f"{args.manifest}: --output was given but the manifest has no "
+            "release.manifest_digest to bind evidence to (schema_version 4+ "
+            "required; see write-release-scan-manifest.py)",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         verified = verify_artifacts(manifest, args.artifacts_root, contract)
@@ -454,6 +475,22 @@ def main() -> int:
     for artifact_path, outcome in results:
         print(f"{artifact_path}: {outcome}")
     print(f"Consumer harness: {len(results)} artifact(s) verified against {args.manifest}.")
+
+    if args.output is not None:
+        host_os, host_cpu = current_host_npm_os_cpu()
+        evidence = {
+            "schema_version": 1,
+            "manifest_digest": manifest_digest,
+            "host": {"os": host_os, "cpu": host_cpu},
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "results": [
+                {"path": artifact_path, "outcome": outcome}
+                for artifact_path, outcome in results
+            ],
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
     return 0
 
 
