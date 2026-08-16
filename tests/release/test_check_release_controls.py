@@ -29,7 +29,7 @@ GOOD_CREATION_RULESET = {
     "enforcement": "active",
     "conditions": {"ref_name": {"include": ["refs/tags/v*"]}},
     "rules": [{"type": "creation"}],
-    "bypass_actors": [{"actor_id": 5}],
+    "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole"}],
 }
 GOOD_IMMUTABLE_RULESET = {
     "target": "tag",
@@ -99,10 +99,29 @@ class TagRulesetTests(unittest.TestCase):
         self.assertTrue(any("release-tag-immutable" in failure and "missing" in failure for failure in failures))
 
     def test_fails_when_immutable_ruleset_has_a_bypass_actor(self) -> None:
-        overrides = {"rulesets/2": {**GOOD_IMMUTABLE_RULESET, "bypass_actors": [{"actor_id": 5}]}}
+        overrides = {
+            "rulesets/2": {
+                **GOOD_IMMUTABLE_RULESET,
+                "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole"}],
+            }
+        }
         with mock.patch.object(check_release_controls, "gh_api", fake_gh_api_for(overrides)):
             failures = check_release_controls.check_tag_rulesets("owner/repo")
         self.assertTrue(any("release-tag-immutable" in failure and "bypass actor" in failure for failure in failures))
+
+    def test_fails_when_bypass_actor_id_matches_but_type_does_not(self) -> None:
+        # A Team or Integration that happens to share id 5 with the
+        # RepositoryRole "Admin" this ruleset is meant to allow must not be
+        # silently accepted as an equivalent bypass grant.
+        overrides = {
+            "rulesets/1": {
+                **GOOD_CREATION_RULESET,
+                "bypass_actors": [{"actor_id": 5, "actor_type": "Team"}],
+            }
+        }
+        with mock.patch.object(check_release_controls, "gh_api", fake_gh_api_for(overrides)):
+            failures = check_release_controls.check_tag_rulesets("owner/repo")
+        self.assertTrue(any("release-tag-creation" in failure and "bypass actor" in failure for failure in failures))
 
     def test_fails_when_enforcement_is_not_active(self) -> None:
         overrides = {"rulesets/1": {**GOOD_CREATION_RULESET, "enforcement": "disabled"}}

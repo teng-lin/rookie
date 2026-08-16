@@ -111,6 +111,20 @@ def npm_native_packages(contract: dict[str, Any]) -> tuple[str, ...]:
     return tuple(f"rookie-cookies-{platform}" for platform in platforms)
 
 
+# Fields that are optional/artifact-specific in the schema (unlike os/cpu/
+# libc, which every cell has, sometimes null) but that emit_matrix()'s
+# per-artifact-type functions access unconditionally via plain dict
+# indexing. A cell missing one of these passes JSON structure but would
+# otherwise only surface as a raw KeyError from whichever downstream script
+# happens to touch it first — validate() catches it here instead, with a
+# message that names the cell and the missing field.
+REQUIRED_KEYS_BY_ARTIFACT = {
+    "cli": ("target_triple", "runner"),
+    "npm-native": ("target_triple", "runner", "npm_platform"),
+    "wheel": ("cpu",),
+}
+
+
 def _validate_accepted_risk(entry: Any, *, label: str, today: date) -> list[str]:
     failures: list[str] = []
     if not isinstance(entry, dict):
@@ -152,6 +166,10 @@ def validate(contract: dict[str, Any], *, today: date | None = None) -> list[str
         if key in seen_keys:
             failures.append(f"{label}: duplicate cell for {key}")
         seen_keys.add(key)
+
+        for required_key in REQUIRED_KEYS_BY_ARTIFACT.get(artifact_id, ()):
+            if cell.get(required_key) is None:
+                failures.append(f"{label}: missing required field {required_key!r} for artifact_id {artifact_id!r}")
 
         registry = cell.get("registry")
         if registry not in VALID_REGISTRIES:

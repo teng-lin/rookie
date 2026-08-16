@@ -127,6 +127,61 @@ expires = "2026-06-01"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("no longer matches", result.stderr)
 
+    def test_uncovered_unmaintained_warning_fails(self) -> None:
+        report = {
+            "vulnerabilities": {"list": []},
+            "warnings": {"unmaintained": [{"advisory": {"id": "RUSTSEC-2024-0002"}}]},
+        }
+        result = run("", report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RUSTSEC-2024-0002", result.stderr)
+
+    def test_unmaintained_warning_covered_by_exception_passes(self) -> None:
+        exceptions = """
+[[exception]]
+id = "RUSTSEC-2024-0002"
+owner = "@alice"
+rationale = "no maintained alternative yet"
+expires = "2026-06-01"
+"""
+        report = {
+            "vulnerabilities": {"list": []},
+            "warnings": {"unmaintained": [{"advisory": {"id": "RUSTSEC-2024-0002"}}]},
+        }
+        result = run(exceptions, report)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_uncovered_unsound_warning_fails(self) -> None:
+        report = {
+            "vulnerabilities": {"list": []},
+            "warnings": {"unsound": [{"advisory": {"id": "RUSTSEC-2024-0003"}}]},
+        }
+        result = run("", report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RUSTSEC-2024-0003", result.stderr)
+
+    def test_yanked_dependency_always_fails_with_no_exception_path(self) -> None:
+        exceptions = """
+[[exception]]
+id = "RUSTSEC-2024-0001"
+owner = "@alice"
+rationale = "irrelevant to the yanked package"
+expires = "2026-06-01"
+"""
+        report = {
+            "vulnerabilities": {"list": []},
+            "warnings": {"yanked": [{"package": {"name": "leftpad", "version": "1.0.0"}}]},
+        }
+        result = run(exceptions, report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("leftpad@1.0.0", result.stderr)
+
+    def test_report_with_no_warnings_key_still_passes(self) -> None:
+        # cargo audit --json always includes "warnings", but a hand-written
+        # test fixture (or an older cargo-audit) might omit it entirely.
+        result = run("", {"vulnerabilities": {"list": []}})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

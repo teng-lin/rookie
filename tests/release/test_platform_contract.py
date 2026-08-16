@@ -34,6 +34,8 @@ def base_cell(**overrides: object) -> dict[str, object]:
         "helper_roles": [],
         "accepted_risk": None,
         "notes": None,
+        "target_triple": "x86_64-unknown-linux-gnu",
+        "runner": "ubuntu-22.04",
     }
     cell.update(overrides)
     return cell
@@ -118,6 +120,39 @@ class ValidationTests(unittest.TestCase):
 
     def test_native_cell_without_accepted_risk_passes(self) -> None:
         contract = {"cells": [base_cell(execute="native", accepted_risk=None)]}
+        self.assertEqual(platform_contract.validate(contract, today=date(2026, 1, 1)), [])
+
+    def test_cli_cell_missing_target_triple_fails(self) -> None:
+        contract = {"cells": [base_cell(target_triple=None)]}
+        failures = platform_contract.validate(contract, today=date(2026, 1, 1))
+        self.assertTrue(any("target_triple" in failure for failure in failures))
+
+    def test_cli_cell_missing_runner_fails(self) -> None:
+        contract = {"cells": [base_cell(runner=None)]}
+        failures = platform_contract.validate(contract, today=date(2026, 1, 1))
+        self.assertTrue(any("runner" in failure for failure in failures))
+
+    def test_npm_native_cell_missing_npm_platform_fails(self) -> None:
+        contract = {
+            "cells": [
+                base_cell(
+                    artifact_id="npm-native",
+                    registry="npm",
+                    target_triple="x86_64-unknown-linux-gnu",
+                    runner="ubuntu-latest",
+                )
+            ]
+        }
+        failures = platform_contract.validate(contract, today=date(2026, 1, 1))
+        self.assertTrue(any("npm_platform" in failure for failure in failures))
+
+    def test_wheel_cell_missing_cpu_fails(self) -> None:
+        contract = {"cells": [base_cell(artifact_id="wheel", registry="pypi", cpu=None)]}
+        failures = platform_contract.validate(contract, today=date(2026, 1, 1))
+        self.assertTrue(any("cpu" in failure for failure in failures))
+
+    def test_artifact_types_without_extra_requirements_are_unaffected(self) -> None:
+        contract = {"cells": [base_cell(artifact_id="crate", registry="crates.io", os=None, cpu=None, libc=None)]}
         self.assertEqual(platform_contract.validate(contract, today=date(2026, 1, 1)), [])
 
 

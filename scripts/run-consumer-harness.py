@@ -8,13 +8,17 @@ never the source tree, only the packaged/built artifact, extracted into a
 fresh scratch directory outside the git checkout (mirroring the pattern
 scripts/check-packaged-rust-consumer.py already established for the crate).
 
-Scope, honestly: this only covers artifact types that already flow through a
-release-scan-manifest.json today (npm tarballs and the Windows native
-addon). CLI binaries and Python wheels don't yet produce a manifest of their
-own — extending publish-cli.yml/publish-py.yml to do that is follow-up work,
-not part of this harness. Parent-process ownership for Windows App-Bound
-parent-death tests is explicitly out of scope here too — see docs/RELEASING.md
-and issue #230's R3 section.
+Scope, honestly: this recognizes npm tarballs and native `.node` addons
+structurally; every other artifact type (CLI binaries, Python wheels/sdist)
+is still checksum-and-byte-length verified against its manifest — that part
+is universal, not npm-specific — but falls through to a generic
+"checksum-verified only" report with no type-specific exercise routine yet.
+Extending exercise() with CLI/wheel-specific smoke checks is follow-up work.
+`publish-npm.yml`, `publish-cli.yml`, and `publish-py.yml` all now write a
+manifest and call this harness before their respective registry writes.
+Parent-process ownership for Windows App-Bound parent-death tests is
+explicitly out of scope here too — see docs/RELEASING.md and issue #230's
+R3 section.
 
 An artifact this host's OS/CPU can't execute (e.g. a win32 tarball on a
 macOS host) is checksum-verified but not run, and that's reported, not
@@ -86,11 +90,19 @@ def verify_artifacts(manifest: dict[str, Any], artifacts_root: Path) -> list[tup
     return verified
 
 
-def current_host_npm_platform() -> str:
-    """The napi-rs-style platform string (see release/platform-contract.json's npm_platform) for this host."""
+def current_host_npm_os_cpu() -> tuple[str, str]:
+    """The (os, cpu) pair npm package.json's `os`/`cpu` restriction fields use for this host."""
     system = platform.system()
     machine = platform.machine().lower()
     cpu = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(machine, machine)
+    os_name = {"Darwin": "darwin", "Linux": "linux", "Windows": "win32"}.get(system, system.lower())
+    return os_name, cpu
+
+
+def current_host_npm_platform() -> str:
+    """The napi-rs-style platform string (see release/platform-contract.json's npm_platform) for this host."""
+    system = platform.system()
+    os_name, cpu = current_host_npm_os_cpu()
     if system == "Darwin":
         return f"darwin-{cpu}"
     if system == "Linux":
@@ -118,10 +130,16 @@ def exercise_npm_tarball(path: Path, scratch: Path) -> str:
         raise HarnessError(f"{path.name}: extracted tarball has no package/package.json")
     package_json = json.loads(package_json_path.read_text(encoding="utf-8"))
 
-    package_platform = current_host_npm_platform()
+    host_os, host_cpu = current_host_npm_os_cpu()
     os_tags = package_json.get("os", [])
-    if os_tags and not any(package_platform.startswith(tag) for tag in os_tags):
-        return f"checksum-verified only ({path.name} targets {os_tags}, host is {package_platform})"
+    cpu_tags = package_json.get("cpu", [])
+    os_matches = not os_tags or host_os in os_tags
+    cpu_matches = not cpu_tags or host_cpu in cpu_tags
+    if not (os_matches and cpu_matches):
+        return (
+            f"checksum-verified only ({path.name} targets os={os_tags or 'any'}/cpu={cpu_tags or 'any'}, "
+            f"host is {host_os}/{host_cpu})"
+        )
 
     main_entry = package_json.get("main")
     if main_entry:

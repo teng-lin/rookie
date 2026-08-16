@@ -22,6 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # check-release.py's SemVer-floor check (scripts/check-release.py's
+          # latest_published_version) reads `git tag --list 'v*'` and treats
+          # "no tags found" as "nothing published yet" rather than an error —
+          # so a shallow checkout wouldn't fail loudly here, it would just
+          # silently never exercise the downgrade check this job exists to
+          # cover. fetch-depth: 0 matches what every publish-*.yml workflow
+          # already does for the same reason.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:

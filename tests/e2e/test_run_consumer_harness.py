@@ -31,7 +31,14 @@ def write_manifest(path: Path, artifacts_root: Path, artifact_paths: list[Path])
     )
 
 
-def make_npm_tarball(path: Path, *, name: str, os_tags: list[str] | None = None, main: str = "index.js") -> None:
+def make_npm_tarball(
+    path: Path,
+    *,
+    name: str,
+    os_tags: list[str] | None = None,
+    cpu_tags: list[str] | None = None,
+    main: str = "index.js",
+) -> None:
     with tempfile.TemporaryDirectory() as staging:
         staging_path = Path(staging)
         package_dir = staging_path / "package"
@@ -39,6 +46,8 @@ def make_npm_tarball(path: Path, *, name: str, os_tags: list[str] | None = None,
         package_json: dict[str, object] = {"name": name, "version": "1.0.0", "main": main}
         if os_tags is not None:
             package_json["os"] = os_tags
+        if cpu_tags is not None:
+            package_json["cpu"] = cpu_tags
         (package_dir / "package.json").write_text(json.dumps(package_json), encoding="utf-8")
         (package_dir / main).write_text("module.exports = {};", encoding="utf-8")
         with tarfile.open(path, "w:gz") as tar:
@@ -85,6 +94,32 @@ class ConsumerHarnessTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("checksum-verified only", result.stdout)
+
+    def test_reports_checksum_only_for_a_same_os_wrong_cpu_tarball(self) -> None:
+        # Same OS as the host, but the *other* CPU architecture — the os-only
+        # check alone would wrongly call this compatible.
+        import platform as platform_module
+
+        wrong_cpu = "arm64" if platform_module.machine().lower() in ("x86_64", "amd64") else "x64"
+        host_os = {"Darwin": "darwin", "Linux": "linux", "Windows": "win32"}[platform_module.system()]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tarball = root / "rookie-cookies-other-arch-1.0.0.tgz"
+            make_npm_tarball(
+                tarball,
+                name="rookie-cookies-other-arch",
+                os_tags=[host_os],
+                cpu_tags=[wrong_cpu],
+            )
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [tarball])
+
+            result = self.run_harness(root, manifest_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("checksum-verified only", result.stdout)
+            self.assertNotIn("structurally verified", result.stdout)
 
     def test_fails_closed_on_a_sha256_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

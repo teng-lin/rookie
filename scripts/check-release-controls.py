@@ -35,11 +35,15 @@ REQUIRED_DEPLOYMENT_REFS = {("main", "branch"), ("v*", "tag")}
 REQUIRED_TAG_RULESETS = {
     "release-tag-creation": {
         "rule_types": {"creation"},
-        "bypass_actor_ids": {5},
+        # (actor_id, actor_type) pairs, not bare ids: GitHub's bypass actor
+        # ids are only unique *within* an actor_type, so checking id alone
+        # would accept e.g. a Team or Integration that happens to share id 5
+        # with the RepositoryRole "Admin" this is actually meant to allow.
+        "bypass_actors": {(5, "RepositoryRole")},
     },
     "release-tag-immutable": {
         "rule_types": {"deletion", "update"},
-        "bypass_actor_ids": set(),
+        "bypass_actors": set(),
     },
 }
 
@@ -156,11 +160,13 @@ def check_tag_rulesets(repo: str) -> list[str]:
                 f"expected exactly {sorted(expectation['rule_types'])}"
             )
 
-        bypass_ids = {actor["actor_id"] for actor in ruleset.get("bypass_actors", [])}
-        if bypass_ids != expectation["bypass_actor_ids"]:
+        bypass_actors = {
+            (actor["actor_id"], actor["actor_type"]) for actor in ruleset.get("bypass_actors", [])
+        }
+        if bypass_actors != expectation["bypass_actors"]:
             failures.append(
-                f"tag ruleset {name!r}: bypass actor ids are {sorted(bypass_ids)}, "
-                f"expected exactly {sorted(expectation['bypass_actor_ids'])}"
+                f"tag ruleset {name!r}: bypass actors are {sorted(bypass_actors)}, "
+                f"expected exactly {sorted(expectation['bypass_actors'])}"
             )
 
     return failures

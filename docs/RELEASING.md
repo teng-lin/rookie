@@ -411,3 +411,15 @@ packages exist but the root package does not, download the failed run's
 `npm-release-<version>` artifact and publish its unchanged root tarball with
 lifecycle scripts disabled. Do not rebuild or attempt to overwrite any package
 version; npm, PyPI, and crates.io versions are immutable.
+
+For PyPI, `publish-py.yml` no longer passes `skip-existing: true` to
+`pypa/gh-action-pypi-publish`: a partial failure (say, 6 of 9 files uploaded
+before a timeout) means re-dispatching the whole workflow now hits PyPI's hard
+"File already exists" rejection on every already-uploaded file, rather than
+those being silently treated as already-there. Check `pypi.org/project/
+rookie-cookies/<version>/#files` first to see which files actually made it.
+If some are missing, download the failed run's `python-sdist`/
+`python-linux-*`/`python-windows-*`/`python-macos-*` workflow artifacts and
+publish only the missing files by hand with `twine upload <missing files>`
+rather than re-dispatching the workflow against a distribution set that
+partially already exists.

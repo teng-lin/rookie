@@ -18,12 +18,24 @@ fn is_full_sha(value: &str) -> bool {
 /// on disk. Takes precedence over any ambient git discovery below: a
 /// coordinator-built artifact must embed exactly the SHA it was told to
 /// build, not something a vendored/relocated checkout's git history implies.
+///
+/// A *set but malformed* value panics rather than silently falling back to
+/// ambient discovery: a coordinator that intended to pin a SHA and got the
+/// value wrong must see the build fail, not embed a different, unpinned
+/// commit hash with no signal anything went wrong. Only an *unset* variable
+/// falls through to ambient discovery.
 fn injected_source_sha() -> Option<String> {
-  let value = env::var("ROOKIE_COOKIES_SOURCE_SHA").ok()?;
+  let value = match env::var("ROOKIE_COOKIES_SOURCE_SHA") {
+    Ok(value) => value,
+    Err(env::VarError::NotPresent) => return None,
+    Err(env::VarError::NotUnicode(value)) => {
+      panic!("ROOKIE_COOKIES_SOURCE_SHA is not valid UTF-8: {value:?}")
+    }
+  };
   if is_full_sha(&value) {
     Some(value[..7].to_string())
   } else {
-    None
+    panic!("ROOKIE_COOKIES_SOURCE_SHA={value:?} is not a lowercase 40-character hex commit SHA");
   }
 }
 
@@ -129,6 +141,16 @@ fn watch_git_head(dot_git: &Path) -> bool {
 }
 
 fn main() {
+  // Emitting any `cargo:rerun-if-changed` directive (watch_git_head below
+  // does) opts this build script out of Cargo's default "rerun on any
+  // change" behavior — from that point on it reruns *only* for explicitly
+  // declared triggers. Without this line, a release build that reuses a
+  // cargo cache (e.g. actions/cache via Swatinem/rust-cache, which these
+  // publish workflows use) across two different `ROOKIE_COOKIES_SOURCE_SHA`
+  // values would silently keep the *first* build's embedded hash — exactly
+  // the exact-SHA provenance guarantee this file exists to provide.
+  println!("cargo:rerun-if-env-changed=ROOKIE_COOKIES_SOURCE_SHA");
+
   let manifest_dir = env::var("CARGO_MANIFEST_DIR").map(PathBuf::from).ok();
 
   // Bounded to the crate's own manifest dir and its immediate parent (the
@@ -142,15 +164,18 @@ fn main() {
     Some(PathBuf::from("../.git")),
   ];
 
+  // `resolved_git_dir` is set from the *same* candidate that `watch_git_head`
+  // validated, not independently — otherwise a first candidate that exists
+  // but fails validation (e.g. a stale/broken worktree pointer) could still
+  // win the git-dir used for hash computation, even though a later,
+  // different candidate is the one that actually succeeded.
   let mut resolved_git_dir: Option<PathBuf> = None;
   for candidate in candidate_dot_git_paths.iter().flatten() {
     if !candidate.exists() {
       continue;
     }
-    if resolved_git_dir.is_none() {
-      resolved_git_dir = resolve_git_dir(candidate);
-    }
     if watch_git_head(candidate) {
+      resolved_git_dir = resolve_git_dir(candidate);
       break;
     }
   }

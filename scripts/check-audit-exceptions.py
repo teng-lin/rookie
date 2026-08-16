@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Gate `cargo audit` on structured, expiring exceptions.
 
-Every RustSec advisory `cargo audit` reports against the committed
-`Cargo.lock` must have a matching entry in `security/audit-exceptions.toml`
-that carries an owner, a rationale, and an ISO-8601 expiry date that has not
-passed. An advisory with no matching, unexpired entry fails the check; so
-does a malformed or expired entry, even if it currently matches an advisory.
+Every RustSec advisory `cargo audit` reports — vulnerabilities, and the
+`unmaintained`/`unsound` warning categories, which carry advisory IDs in the
+same shape — against the committed `Cargo.lock` must have a matching entry
+in `security/audit-exceptions.toml` that carries an owner, a rationale, and
+an ISO-8601 expiry date that has not passed. An advisory with no matching,
+unexpired entry fails the check; so does a malformed or expired entry, even
+if it currently matches an advisory. A `yanked` warning has no advisory ID
+and no exception path at all: it always fails the check.
 """
 
 from __future__ import annotations
@@ -124,6 +127,35 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def advisory_ids(report: dict[str, Any]) -> set[str]:
+    """Every RUSTSEC advisory ID `cargo audit` reported, from *both* sections.
+
+    `vulnerabilities.list` is the obvious one, but `cargo audit --json` also
+    reports `warnings.unmaintained` and `warnings.unsound` — each carrying an
+    `advisory.id` in the same shape — and a naive reader of only
+    `vulnerabilities` would silently never gate on those advisory classes.
+    """
+    ids = {entry["advisory"]["id"] for entry in report.get("vulnerabilities", {}).get("list", [])}
+    warnings = report.get("warnings", {})
+    for category in ("unmaintained", "unsound"):
+        ids.update(entry["advisory"]["id"] for entry in warnings.get(category, []))
+    return ids
+
+
+def yanked_packages(report: dict[str, Any]) -> list[str]:
+    """`warnings.yanked` entries, as `name@version` — these carry no advisory ID.
+
+    A yanked crate isn't a risk an owner accepts for a time-bounded reason
+    the way an unpatched vulnerability might be; the correct response is
+    always to stop depending on that exact yanked version. So there's no
+    exception path here at all — any yanked dependency blocks unconditionally.
+    """
+    return [
+        f"{entry['package']['name']}@{entry['package']['version']}"
+        for entry in report.get("warnings", {}).get("yanked", [])
+    ]
+
+
 def main() -> int:
     args = parse_args()
     today = args.today or date.today()
@@ -132,17 +164,28 @@ def main() -> int:
     report = (
         json.loads(args.report.read_text(encoding="utf-8")) if args.report else run_cargo_audit()
     )
-    vulnerabilities = report.get("vulnerabilities", {}).get("list", [])
-    found_ids = {vulnerability["advisory"]["id"] for vulnerability in vulnerabilities}
+    found_ids = advisory_ids(report)
+    yanked = yanked_packages(report)
+
+    failed = False
+
+    if yanked:
+        failed = True
+        print("cargo audit found yanked dependencies (no exception path — update them):", file=sys.stderr)
+        for package in yanked:
+            print(f"- {package}", file=sys.stderr)
 
     uncovered = sorted(found_ids - valid_exceptions.keys())
     if uncovered:
+        failed = True
         print(
             f"cargo audit found advisories with no matching, unexpired exception in {args.exceptions}:",
             file=sys.stderr,
         )
         for advisory_id in uncovered:
             print(f"- {advisory_id}", file=sys.stderr)
+
+    if failed:
         return 1
 
     unused = sorted(valid_exceptions.keys() - found_ids)
