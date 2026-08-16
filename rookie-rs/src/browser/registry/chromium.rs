@@ -2866,6 +2866,7 @@ mod tests {
   #[cfg(all(unix, not(target_os = "macos")))]
   #[test]
   fn non_unicode_injected_base_path_is_discovered_without_glob_string_conversion() {
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
     let temp = TempDir::new("non-unicode-base");
