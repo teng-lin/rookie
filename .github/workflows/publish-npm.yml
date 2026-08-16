@@ -16,7 +16,6 @@ env:
 
 permissions:
   contents: read
-  administration: read
 
 concurrency:
   group: publish-npm
@@ -274,6 +273,13 @@ jobs:
   package:
     name: Prepare immutable npm tarballs
     runs-on: ubuntu-latest
+    # A job-level permissions: block replaces, not extends, the workflow's
+    # top-level one -- carry contents forward and add actions: read for
+    # write-ci-proof.py's actions/jobs and actions/runs reads (see the
+    # "Verify non-spoofable CI proof" step below).
+    permissions:
+      contents: read
+      actions: read
     needs:
       - preflight
       - build
@@ -365,6 +371,41 @@ jobs:
           python3 ../../scripts/run-consumer-harness.py \
             --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
             --artifacts-root ../../release-packages/npm
+      # Release-hardening program R5, advisory-only for now (see
+      # docs/RELEASING.md): resolves each required check to its exact
+      # producing job/run rather than trusting a check-run name alone.
+      # --advisory means this always exits 0 (a ::warning:: annotation on
+      # failure, not a job failure) -- this workflow only runs via
+      # workflow_dispatch, so it gets no PR-time CI of its own to validate
+      # the gate against before a real release; promote to hard-blocking
+      # (drop --advisory) once it's been observed working on one.
+      - name: Verify non-spoofable CI proof for this release commit (advisory)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        run: |
+          python3 ../../scripts/write-ci-proof.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit-sha "$RELEASE_SHA" \
+            --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
+            --output ../../release-packages/npm/scan/ci-proof.json \
+            --advisory
+      # A dedicated upload, mirroring publish-cli.yml/publish-py.yml, so a
+      # verification failure (which never writes ci-proof.json at all) is
+      # visible here too, not only via the step's own ::warning:: above --
+      # `if-no-files-found: warn`, not `error`, since a missing file is an
+      # expected possible outcome of --advisory, not itself an error. This is
+      # in addition to, not instead of, the "Upload release tarballs" step
+      # below: that step's whole-directory upload already sweeps up
+      # ci-proof.json on success, but gives no failure signal of its own when
+      # the file was never written, since the rest of scan/ still exists.
+      - name: Upload CI proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-ci-proof
+          path: release-packages/npm/scan/ci-proof.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload release tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -99,7 +99,7 @@ paths = [
 # largest cfg concentrations. Ceilinged like any other core file instead;
 # splitting the genuinely selection-only gates from the rest into a
 # smaller leaf file is a reasonable follow-up, not required here.
-"rookie-rs/src/direct_path/mod.rs" = { max_cfg = 37, reason = "PR 5a (#224); mixes selection gates with substantial non-gate production cfg" }
+"rookie-rs/src/direct_path/mod.rs" = { max_cfg = 38, reason = "PR 5a (#224); mixes selection gates with substantial non-gate production cfg. Raised to 38 in PR #249: one added macOS-only test, split into its own function for failure-attribution clarity." }
 "rookie-rs/src/browser/chromium_crypto/mod.rs" = { max_cfg = 16, reason = "PR 3 (#221); mixes selection gates with substantial non-gate production cfg" }
 
 # Portable parsers/models with some internal native-acquisition gating,

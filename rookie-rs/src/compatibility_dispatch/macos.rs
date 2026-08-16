@@ -96,4 +96,30 @@ mod tests {
     )
     .expect("injected Safari query");
   }
+
+  #[test]
+  fn safari_from_path_reports_a_missing_file_as_an_open_failure() {
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let directory = crate::utils::TempDir::new().unwrap();
+    let missing = directory.path().join("Cookies.binarycookies");
+    let error = safari_from_path(missing, None, &runtime).unwrap_err();
+    let io_error = error
+      .chain()
+      .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+      .expect("a missing file must surface a std::io::Error in the chain");
+    assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+  }
+
+  #[test]
+  fn internet_explorer_from_path_is_unsupported_off_windows() {
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let error = internet_explorer_from_path(PathBuf::from("/tmp/WebCacheV01.dat"), None, &runtime)
+      .unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      "Internet Explorer WebCache files are only supported on Windows"
+    );
+  }
 }

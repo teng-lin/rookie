@@ -250,11 +250,35 @@ that language actually requires is tracked separately in
 
 ## Candidate bundles and CI proof (release-hardening program R4/R5)
 
-Two pieces of release-hardening program #230's "PR 2" are implemented and
-tested, but neither is load-bearing yet — they don't gate any
-`publish-*.yml` workflow, and nothing here changes what publishing requires
-today. They exist to be reviewed and iterated on independently before that
-wiring happens.
+Two pieces of release-hardening program #230's "PR 2": R4 (candidate-bundle
+evidence) is implemented and tested but still not load-bearing — it doesn't
+gate any `publish-*.yml` workflow. R5 (`write-ci-proof.py`) **is** now wired
+into all three publish workflows, but **advisory-only**: `publish-npm.yml`,
+`publish-cli.yml`, and `publish-py.yml` each call it with `--advisory` right
+after writing that release's manifest and running the R3 harness, and before
+the registry-mutating step (immediately after, in the same job, for
+`publish-cli.yml`/`publish-py.yml`; in `publish-npm.yml` the call is in the
+`package` job, which only prepares tarballs — the actual `npm publish` runs
+afterward in the downstream `publish` job that `needs: [preflight,
+package]`). `--advisory` means a verification failure
+prints a `::warning::` annotation instead of failing the job — it never
+blocks a publish yet.
+
+Why advisory rather than hard-blocking immediately: all three workflows are
+`workflow_dispatch`-only, so they never run on this repo's own PR CI — there
+is no way to see the actual gate exercised against a real release before it
+reaches one. A bug in `write-ci-proof.py`'s verification logic would
+otherwise present as *the next real release silently failing to publish*,
+with nothing beforehand to catch it. Advisory-first converts that into a
+loud, visible log annotation on a real release instead, so the mechanism can
+prove itself before it gets the authority to block one.
+
+**Promoting to hard-blocking**: once `--advisory` has been observed
+producing a correct, successful `ci-proof.json` on an actual release (not
+just in the mocked test suite), drop `--advisory` from each of the three
+call sites in `publish-npm.yml`/`publish-cli.yml`/`publish-py.yml`. No other
+change is needed — the verification logic itself doesn't change between the
+two modes.
 
 **R4 — candidate-bundle evidence** (`.github/workflows/candidate-bundle.yml`).
 A PR that adds or changes a cell in `release/platform-contract.json` (checked
@@ -290,13 +314,21 @@ Both scripts have full unit test coverage (`tests/release/test_jcs.py`,
 `tests/e2e/test_release_scan_manifest.py` /
 `tests/e2e/test_run_consumer_harness.py` / `tests/release/test_platform_contract.py`).
 `write-ci-proof.py`'s tests mock every `gh_api` response; anyone changing its
-verification logic should re-run it by hand against a real commit
-(`python3 scripts/write-ci-proof.py --commit-sha <sha> --manifest-digest <64
-hex chars> --output /tmp/ci-proof.json`, read-only against the GitHub API) as
-part of that review, since no CI job currently re-exercises it against live
-data. What's still open: wiring either script into a publish workflow as an
-actual gate, and the rest of #230's PR 2 (R6's digest-safe publication state
-machine and R7's controlled cutover), neither of which is started.
+verification logic should re-run it by hand against a real commit as part of
+that review, since none of the three publish workflows run on this repo's
+own PR CI (`python3 scripts/write-ci-proof.py --repo <owner>/<repo>
+--commit-sha <sha> --manifest-digest <64 hex chars> --output
+/tmp/ci-proof.json`, read-only against the GitHub API — or `--manifest
+<path to a release-scan-manifest.json>` instead of `--manifest-digest` to
+read the digest from a real manifest file directly, matching what the
+publish workflows themselves do).
+
+What's still open: promoting R5 to hard-blocking (see above), R4's evidence
+gate (still not wired into any publish workflow — it produces a standalone
+review artifact on qualifying PRs, not a pass/fail gate, so "advisory" vs
+"blocking" doesn't apply to it the way it does to R5), and the rest of #230's
+PR 2 (R6's digest-safe publication state machine and R7's controlled
+cutover), neither of which is started.
 
 ## Verify
 

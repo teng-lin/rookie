@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  administration: read
 
 concurrency:
   group: publish-pypi
@@ -196,6 +195,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      # For write-ci-proof.py's actions/jobs and actions/runs reads -- see
+      # the "Verify non-spoofable CI proof" step below.
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -242,6 +244,37 @@ jobs:
           python3 scripts/run-consumer-harness.py \
             --manifest release-scan-manifest.json \
             --artifacts-root "$GITHUB_WORKSPACE"
+      # Release-hardening program R5, advisory-only for now (see
+      # docs/RELEASING.md): resolves each required check to its exact
+      # producing job/run rather than trusting a check-run name alone.
+      # --advisory means this always exits 0 (a ::warning:: annotation on
+      # failure, not a job failure) -- this workflow only runs via
+      # workflow_dispatch, so it gets no PR-time CI of its own to validate
+      # the gate against before a real release; promote to hard-blocking
+      # (drop --advisory) once it's been observed working on one.
+      - name: Verify non-spoofable CI proof for this release commit (advisory)
+        run: |
+          python3 scripts/write-ci-proof.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit-sha "$GITHUB_SHA" \
+            --manifest release-scan-manifest.json \
+            --output ci-proof.json \
+            --advisory
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # A separate upload, not folded into "Upload scan manifest" above:
+      # ci-proof.json is written by the step just before this one, after
+      # that upload already ran. `if-no-files-found: warn`, not `error`: the
+      # previous step's --advisory means a verification failure produces a
+      # ::warning:: without ever writing ci-proof.json at all -- a missing
+      # file here is an expected possible outcome, not itself an error.
+      - name: Upload CI proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-ci-proof
+          path: ci-proof.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Publish distributions with trusted publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
