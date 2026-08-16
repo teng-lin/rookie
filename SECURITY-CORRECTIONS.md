@@ -1,0 +1,9 @@
+# Security corrections
+
+Intentional security behavior changes are recorded here even when they differ
+from the compatibility contract in
+[`docs/adr/0001-cookie-extraction-compatibility-and-report-contracts.md`](docs/adr/0001-cookie-extraction-compatibility-and-report-contracts.md).
+
+| Correction | Affected surfaces | Prior behavior | Replacement behavior | Stable code and counters | All-row behavior | Migration | Owner and rationale | Regression |
+|---|---|---|---|---|---|---|---|---|
+| C4a: confidential Linux Secret Service session | Rust, Python, Node, and CLI Chromium extraction on Linux for `v11` cookies | Secret Service passwords were requested through a `plain` session and crossed D-Bus without session encryption. | Passwords are requested only after negotiating `dh-ietf1024-sha256-aes128-cbc-pkcs7`; failed negotiation never retries `plain`. Other independently configured keyring backends may still be attempted. | If every candidate provider fails, encrypted `v11` rows use `provider_failed` at the `decrypt` stage. Discovery counters are unchanged; each affected selected row increments `rows_seen` and `rows_skipped`, and emits no cookie. | A source containing only affected rows remains a succeeded source with zero cookies and an error-severity row issue, so report status is `partial`; legacy Chromium extraction preserves its existing empty-result behavior. | No API migration. Ensure the desktop Secret Service supports confidential sessions or configure a supported KWallet backend. | Security owner: maintainers. Plaintext credential transport on the session bus is not an acceptable fallback. | `linux::tests::confidential_session_negotiation_failure_remains_a_provider_error`; `chromium_platform_keys::linux::tests::linux_keyring_failure_preserves_v10_and_is_scoped_to_v11`; `report_build::tests::an_undecryptable_row_does_not_fail_the_chromium_source` |
