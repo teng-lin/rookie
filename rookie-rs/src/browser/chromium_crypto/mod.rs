@@ -35,10 +35,12 @@ pub(crate) enum ChromiumCipherVersion {
 
 /// A non-empty encrypted blob that is too short to carry a version prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct MalformedChromiumCiphertext {
   pub(crate) observed_len: usize,
 }
 
+#[cfg(test)]
 impl fmt::Display for MalformedChromiumCiphertext {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
@@ -49,6 +51,7 @@ impl fmt::Display for MalformedChromiumCiphertext {
   }
 }
 
+#[cfg(test)]
 impl std::error::Error for MalformedChromiumCiphertext {}
 
 /// Detects a Chromium cipher without unchecked slicing.
@@ -56,6 +59,7 @@ impl std::error::Error for MalformedChromiumCiphertext {}
 /// Unknown `vXX` prefixes remain distinct from unversioned legacy DPAPI. An
 /// unrecognized prefix that does not begin with `v` is the pre-Chrome-80 raw
 /// DPAPI form on Windows; other platforms route it explicitly as unavailable.
+#[cfg(test)]
 pub(crate) fn detect_cipher_version(
   encrypted_value: &[u8],
 ) -> Result<ChromiumCipherVersion, MalformedChromiumCiphertext> {

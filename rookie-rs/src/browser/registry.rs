@@ -6548,6 +6548,8 @@ mod tests {
           rows_seen: 1,
           cookies_emitted: 0,
           rows_skipped: 1,
+          rows_rejected: 0,
+          provider_failures: 1,
         },
         "{browser_id} must count the row rejected by the missing provider"
       );

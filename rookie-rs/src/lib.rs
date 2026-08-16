@@ -1083,7 +1083,7 @@ mod tests {
       .execute(
         "INSERT INTO cookies (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
          VALUES ('.example.com', '/', 0, 0, ?1, ?2, ?3, 0, 0)",
-        rusqlite::params![cookie_name, cookie_value, &b"x"[..]],
+        rusqlite::params![cookie_name, cookie_value, &b""[..]],
       )
       .expect("insert row");
   }

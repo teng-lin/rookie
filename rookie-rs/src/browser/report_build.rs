@@ -112,6 +112,12 @@ fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
         issue_code.occurrences
       )
     }
+    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed => {
+      format!(
+        "{} row(s) unavailable because of {code}",
+        issue_code.occurrences
+      )
+    }
     _ => format!("{} row(s) rejected as {code}", issue_code.occurrences),
   };
   // Name-column and value-column failures share one code, so aggregation merges
@@ -959,6 +965,8 @@ mod tests {
         rows_seen: 0,
         cookies_emitted: 0,
         rows_skipped: 0,
+        rows_rejected: 0,
+        provider_failures: 0,
       },
       row_issues: Vec::new(),
       acquisition: registry::SourceAcquisition::NotAttempted,
@@ -1386,6 +1394,8 @@ mod tests {
       rows_seen: 3,
       cookies_emitted: 1,
       rows_skipped: 2,
+      rows_rejected: 2,
+      provider_failures: 0,
     };
     chromium.row_issues = vec![crate::browser::chromium::ChromiumRowIssue {
       code: crate::browser::chromium::ChromiumRowIssueCode::Decode,

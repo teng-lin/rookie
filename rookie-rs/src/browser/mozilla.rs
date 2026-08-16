@@ -9,6 +9,8 @@ use std::{
   path::{Path, PathBuf},
 };
 
+use super::cookie_record::{CookieRecord, CookieValue};
+
 // Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
 // expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
 const FIREFOX_MILLISECOND_EXPIRY_SCHEMA_VERSION: u32 = 16;
@@ -245,15 +247,16 @@ fn query_persistent_cookies_mode(
     };
     let http_only = optional_column!(6, "isHttpOnly", bool, || false);
     let same_site = optional_column!(7, "sameSite", i64, || SAME_SITE_UNSPECIFIED);
-    let cookie = Cookie {
+    let mut record = CookieRecord {
       domain: host,
       path,
       secure: is_secure,
       expires,
       name,
-      value,
+      value: CookieValue::Plain(value),
       http_only,
       same_site,
+      context: CookieContext::default(),
     };
     if detailed {
       let origin_attributes = match row.get::<_, Option<String>>(8) {
@@ -267,12 +270,18 @@ fn query_persistent_cookies_mode(
           continue;
         }
       };
-      detailed_cookies.push(DetailedCookie {
-        cookie,
-        context: firefox_cookie_context(origin_attributes),
-      });
+      record.context = firefox_cookie_context(origin_attributes);
+      detailed_cookies.push(
+        record
+          .into_detailed_cookie()
+          .expect("Firefox rows emit plaintext values"),
+      );
     } else {
-      cookies.push(cookie);
+      cookies.push(
+        record
+          .into_cookie()
+          .expect("Firefox rows emit plaintext values"),
+      );
     }
   }
 
@@ -860,7 +869,7 @@ fn session_cookie_expiry(json_cookie: &Value) -> Result<Option<u64>> {
   }
 }
 
-pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
+fn create_cookie_record(json_cookie: &Value) -> Result<CookieRecord> {
   let host = json_cookie
     .get("host")
     .and_then(|v| v.as_str())
@@ -892,25 +901,36 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
     .and_then(|v| v.as_i64())
     .unwrap_or(SAME_SITE_UNSPECIFIED);
 
-  Ok(Cookie {
+  Ok(CookieRecord {
     domain: host.to_string(),
     expires,
     http_only,
     name: name.to_string(),
-    value: value.to_string(),
+    value: CookieValue::Plain(value.to_string()),
     path: path.to_string(),
     same_site,
     secure,
+    context: CookieContext::default(),
   })
 }
 
-fn create_detailed_cookie(json_cookie: &Value) -> Result<DetailedCookie> {
-  let cookie = create_cookie(json_cookie)?;
+#[allow(dead_code)]
+pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
+  Ok(
+    create_cookie_record(json_cookie)?
+      .into_cookie()
+      .expect("Firefox session rows emit plaintext values"),
+  )
+}
 
-  Ok(DetailedCookie {
-    cookie,
-    context: firefox_session_cookie_context(json_cookie.get("originAttributes")),
-  })
+fn create_detailed_cookie(json_cookie: &Value) -> Result<DetailedCookie> {
+  let mut record = create_cookie_record(json_cookie)?;
+  record.context = firefox_session_cookie_context(json_cookie.get("originAttributes"));
+  Ok(
+    record
+      .into_detailed_cookie()
+      .expect("Firefox session rows emit plaintext values"),
+  )
 }
 
 fn firefox_session_cookie_context(origin_attributes: Option<&Value>) -> CookieContext {

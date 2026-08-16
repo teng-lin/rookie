@@ -98,16 +98,20 @@ pub(crate) fn internet_explorer_outcome(
       let cookie = record
         .map_err(anyhow::Error::from)
         .and_then(|record| read_cookie_record(&record, columns))
-        .and_then(|record| record.into_cookie(domains.as_deref()));
+        .and_then(|record| record.into_record(domains.as_deref()));
 
       // Section 5.7 counts rows *relevant to the request*, so a record the
       // domain filter excluded was never seen for reporting purposes. A record
       // that failed before it could be tested still counts: it might have
       // matched.
       match cookie {
-        Ok(Some(cookie)) => {
+        Ok(Some(record)) => {
           stats.records_seen += 1;
-          cookies.push(cookie)
+          cookies.push(
+            record
+              .into_cookie()
+              .expect("Internet Explorer rows emit plaintext values"),
+          )
         }
         Ok(None) => {}
         Err(error) => {

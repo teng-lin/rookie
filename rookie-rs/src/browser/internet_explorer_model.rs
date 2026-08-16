@@ -1,6 +1,10 @@
-use crate::common::enums::{Cookie, SAME_SITE_UNSPECIFIED};
+#[cfg(test)]
+use crate::common::enums::Cookie;
+use crate::common::enums::{CookieContext, SAME_SITE_UNSPECIFIED};
 use crate::common::{date, utils};
 use anyhow::{bail, Result};
+
+use super::cookie_record::{CookieRecord, CookieValue};
 
 // WinInet cookie flag bits (`wininet.h`) as stored in the ESE `Flags` column.
 const INTERNET_COOKIE_IS_SECURE: u32 = 0x0000_0001;
@@ -80,7 +84,7 @@ pub(crate) struct RawCookieRecord {
 }
 
 impl RawCookieRecord {
-  pub(crate) fn into_cookie(self, domains: Option<&[String]>) -> Result<Option<Cookie>> {
+  pub(crate) fn into_record(self, domains: Option<&[String]>) -> Result<Option<CookieRecord>> {
     let domain = self.domain.trim_matches('\0').to_string();
     if !utils::some_domain_in_host(domains, &domain) {
       return Ok(None);
@@ -93,16 +97,25 @@ impl RawCookieRecord {
     let value = decode_cookie_text("Value", self.value)?;
     let flags = self.flags as u32;
 
-    Ok(Some(Cookie {
+    Ok(Some(CookieRecord {
       domain,
       path: self.path.trim_matches('\0').to_string(),
       secure: flags & INTERNET_COOKIE_IS_SECURE != 0,
       expires: date::internet_explorer_timestamp(self.expires),
       name,
-      value,
+      value: CookieValue::Plain(value),
       http_only: flags & INTERNET_COOKIE_HTTPONLY != 0,
       same_site: SAME_SITE_UNSPECIFIED,
+      context: CookieContext::default(),
     }))
+  }
+
+  #[cfg(test)]
+  pub(crate) fn into_cookie(self, domains: Option<&[String]>) -> Result<Option<Cookie>> {
+    self
+      .into_record(domains)?
+      .map(|record| record.into_cookie().map_err(anyhow::Error::from))
+      .transpose()
   }
 }
 
