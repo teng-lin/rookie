@@ -664,6 +664,73 @@ fn firefox_browser_flag_discovers_a_seeded_profile() {
   assert_eq!(cookies[0]["value"], "yes");
 }
 
+/// `--browser`/`--path` map `SIGTERM` to cancellation (see
+/// `install_cancel_on_signal` in `main.rs`). This races a `SIGTERM` against
+/// a real (fast) extraction, so it does not deterministically prove
+/// mid-flight cancellation -- that is covered directly in `rookie-rs`'s own
+/// `Request`/`DirectPathRequest` tests with a pre-cancelled handle. What
+/// this proves is the regression that matters at the CLI layer: installing
+/// the signal handler must never turn a signal into a panic or a hang.
+#[cfg(unix)]
+#[test]
+fn sigterm_during_browser_extraction_does_not_panic_or_hang() {
+  let root = unique_tmpdir("sigterm ünicode");
+  let firefox_root = {
+    #[cfg(target_os = "linux")]
+    {
+      root.path().join(".mozilla/firefox")
+    }
+    #[cfg(target_os = "macos")]
+    {
+      root.path().join("Library/Application Support/Firefox")
+    }
+  };
+  let profile = firefox_root.join("Profiles/rookie-ci.default-release");
+  std::fs::create_dir_all(&profile).expect("create Firefox profile");
+  std::fs::write(
+    firefox_root.join("profiles.ini"),
+    "[Profile0]\nName=rookie-ci\nIsRelative=1\n\
+     Path=Profiles/rookie-ci.default-release\nDefault=1\n",
+  )
+  .expect("write profiles.ini");
+  seed_firefox_cookies(
+    &profile.join("cookies.sqlite"),
+    &[(".example.com", "/", false, 0, "n", "v", false, 0)],
+  );
+
+  let mut child = isolated_browser_command(root.path())
+    .args(["--browser", "firefox", "--format", "json"])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .expect("spawn rookie-cookies");
+
+  let pid = child.id();
+  let killed = Command::new("kill")
+    .args(["-TERM", &pid.to_string()])
+    .status()
+    .expect("send SIGTERM");
+  assert!(killed.success(), "the `kill` command itself must succeed");
+
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+  let status = loop {
+    if let Some(status) = child.try_wait().expect("poll rookie-cookies") {
+      break status;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "rookie-cookies did not exit within 10s of SIGTERM"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+  };
+
+  assert_ne!(
+    status.code(),
+    Some(101),
+    "SIGTERM racing a real extraction must not panic"
+  );
+}
+
 #[test]
 fn unfiltered_json_keeps_every_seeded_cookie() {
   let dir = unique_tmpdir("cli-json-unfiltered");
@@ -702,4 +769,51 @@ fn unfiltered_json_keeps_every_seeded_cookie() {
     .collect();
   names.sort_unstable();
   assert_eq!(names, ["id", "tok"]);
+}
+
+/// Reproduces `rookie-cookies --load | head -1`: the reader closes its end
+/// of the pipe (here, we drop it directly) before the CLI has necessarily
+/// finished writing. `println!`'s internal `.unwrap()` turns that into a
+/// panic (exit code 101) since Rust ignores `SIGPIPE` by default; the CLI
+/// must instead exit cleanly.
+#[test]
+fn broken_stdout_pipe_exits_cleanly_instead_of_panicking() {
+  let dir = unique_tmpdir("cli-broken-pipe");
+  let db = dir.path().join("cookies.sqlite");
+  // Enough rows that the JSON write is unlikely to complete in a single
+  // syscall before the parent has closed its end of the pipe.
+  let rows: Vec<MozRow> = (0..2000)
+    .map(|_| {
+      (
+        ".example.com",
+        "/",
+        false,
+        0u64,
+        "name",
+        "value",
+        false,
+        0i64,
+      )
+    })
+    .collect();
+  seed_firefox_cookies(&db, &rows);
+
+  let mut child = Command::new(ROOKIE_BIN)
+    .args(["--path", db.to_str().unwrap(), "--format", "json"])
+    .env("RUST_LOG", "error")
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .expect("spawn rookie-cookies");
+
+  // Close our end of the read pipe before reading anything -- this is what
+  // `head -1` does once it already has the line it wants.
+  drop(child.stdout.take());
+
+  let status = child.wait().expect("wait for rookie-cookies");
+  assert_ne!(
+    status.code(),
+    Some(101),
+    "a closed stdout pipe must not panic (Rust's default panic exit code)"
+  );
 }

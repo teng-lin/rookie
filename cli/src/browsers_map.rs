@@ -1,51 +1,53 @@
 use lazy_static::lazy_static;
-use rookie_cookies::{self, enums::Cookie, Result};
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-// The binary test harness does not invoke `main`, so the otherwise-live map
+/// The legacy `--browser <name>` allowlist and its exact registry IDs.
+///
+/// Each name here doubles as the canonical browser ID
+/// `rookie_cookies::extract`/`Request::browser` resolves, so dispatch needs
+/// no separate function-pointer table: `chrome()`/`firefox()`/etc. already
+/// delegate to exactly that path (`named_browser` -> `browser` -> `extract`),
+/// so calling `extract` directly with one of these names is behaviorally
+/// identical and additionally supports a timeout and cancellation, which the
+/// individual named functions' frozen signatures cannot.
+// The binary test harness does not invoke `main`, so the otherwise-live set
 // construction appears unused only when Cargo builds the bin as a test target.
 #[cfg_attr(test, allow(dead_code))]
-type BrowserFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
+fn browsers_map() -> BTreeSet<&'static str> {
+  let mut set = BTreeSet::new();
 
-#[cfg_attr(test, allow(dead_code))]
-fn browsers_map() -> BTreeMap<&'static str, BrowserFn> {
-  let mut map = BTreeMap::new();
-
-  map.insert("brave", rookie_cookies::brave as BrowserFn);
+  set.insert("brave");
 
   #[cfg(target_os = "linux")]
-  map.insert("cachy", rookie_cookies::cachy as BrowserFn);
+  set.insert("cachy");
 
-  map.insert("chromium", rookie_cookies::chromium as BrowserFn);
-  map.insert("chrome", rookie_cookies::chrome as BrowserFn);
-  map.insert("edge", rookie_cookies::edge as BrowserFn);
-  map.insert("firefox", rookie_cookies::firefox as BrowserFn);
-  map.insert("zen", rookie_cookies::zen as BrowserFn);
+  set.insert("chromium");
+  set.insert("chrome");
+  set.insert("edge");
+  set.insert("firefox");
+  set.insert("zen");
 
   #[cfg(target_os = "windows")]
   {
-    map.insert(
-      "internet_explorer",
-      rookie_cookies::internet_explorer as BrowserFn,
-    );
-    map.insert("octo_browser", rookie_cookies::octo_browser as BrowserFn);
+    set.insert("internet_explorer");
+    set.insert("octo_browser");
   }
-  map.insert("librewolf", rookie_cookies::librewolf as BrowserFn);
-  map.insert("opera", rookie_cookies::opera as BrowserFn);
+  set.insert("librewolf");
+  set.insert("opera");
 
   #[cfg(any(target_os = "macos", target_os = "windows"))]
-  map.insert("opera_gx", rookie_cookies::opera_gx as BrowserFn);
+  set.insert("opera_gx");
 
   #[cfg(target_os = "macos")]
-  map.insert("safari", rookie_cookies::safari as BrowserFn);
+  set.insert("safari");
 
-  map.insert("vivaldi", rookie_cookies::vivaldi as BrowserFn);
+  set.insert("vivaldi");
 
-  map.insert("arc", rookie_cookies::arc as BrowserFn);
+  set.insert("arc");
 
-  map
+  set
 }
 
 lazy_static! {
-  pub static ref BROWSERS_MAP: BTreeMap<&'static str, BrowserFn> = browsers_map();
+  pub static ref BROWSERS_MAP: BTreeSet<&'static str> = browsers_map();
 }
