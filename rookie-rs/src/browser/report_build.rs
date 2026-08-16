@@ -30,6 +30,7 @@ use super::report_core::{
   ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator, TerminationCode,
   MAX_ISSUE_SAMPLES,
 };
+use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{bail, Result};
@@ -1834,16 +1835,27 @@ fn load_extraction_report_with_runtime(
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ExtractionReport> {
   let browsers = registry::registered_browsers()?;
-  let mut outcomes = Vec::with_capacity(browsers.len());
-  for browser in &browsers {
-    match collect_report(browser, None, true, domains.clone(), runtime) {
+  // Browsers are probed concurrently on a small bounded pool sharing this
+  // one deadline/cancellation budget (see `common::concurrency::fan_out`), so
+  // a slow or hung browser no longer starves the others' share of it.
+  // `fan_out` claims browsers in registry order and returns results only for
+  // the contiguous prefix it actually claimed, in that same order -- so
+  // `outcomes` below always ends up in registry order regardless of which
+  // browser's collection finished first, matching the ordering contract the
+  // rest of this module already relies on.
+  let attempts = fan_out(&browsers, DEFAULT_FAN_OUT_WIDTH, runtime, |browser| {
+    collect_report(browser, None, true, domains.clone(), runtime)
+  });
+  let mut outcomes = Vec::with_capacity(attempts.len());
+  for (browser, attempt) in browsers.iter().zip(attempts) {
+    match attempt {
       Ok(outcome) => outcomes.push(outcome),
       // A browser whose whole discovery failed must not erase the other
       // browsers' results; it is recorded as an error-severity issue.
       Err(error) => {
         if let Some(stop) = stop_from_error(&error) {
           outcomes.push(stopped_browser_draft(browser, stop)?);
-          break;
+          continue;
         }
         let id: BrowserId = browser.canonical_id.parse()?;
         outcomes.push(BrowserDraft {

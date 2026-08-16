@@ -81,6 +81,19 @@ checked cooperatively at the same internal boundaries, so they take effect
 mid-extraction rather than only before it starts, but a single long-running
 step between checkpoints is not interrupted mid-step.
 
+## `load()` and `load_report()` probe browsers concurrently
+
+`load(domains)` and `load_report(domains)` probe every registered browser on
+a small bounded worker pool sharing one deadline/cancellation budget, rather
+than one browser at a time — a slow or hung source no longer starves every
+other source's share of that budget. The result is always grouped by browser
+in the same fixed registry order regardless of which browser's extraction
+actually finished first. Once the shared deadline or cancellation trips, no
+not-yet-started browser is attempted, but a browser already in flight at that
+moment still runs to completion and its results are kept — a per-source
+timeout or cancellation never discards a sibling browser's already-completed
+cookies.
+
 ## Firefox profiles
 
 `firefox()` prefers the profile Firefox itself would open, resolved from
