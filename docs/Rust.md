@@ -87,8 +87,10 @@ step between checkpoints is not interrupted mid-step.
 a small bounded worker pool sharing one deadline/cancellation budget, rather
 than one browser at a time — a slow or hung source no longer starves every
 other source's share of that budget. The result is always grouped by browser
-in the same fixed registry order regardless of which browser's extraction
-actually finished first. Once the shared deadline or cancellation trips, no
+in the same fixed order each function attempts browsers in (`load`'s own
+browser list and `load_report`'s registry order are tracked separately, but
+each is internally fixed) regardless of which browser's extraction actually
+finished first. Once the shared deadline or cancellation trips, no
 not-yet-started browser is attempted, but a browser already in flight at that
 moment still runs to completion and its results are kept — a per-source
 timeout or cancellation never discards a sibling browser's already-completed

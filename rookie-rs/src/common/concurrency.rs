@@ -1,39 +1,53 @@
 //! Bounded concurrent fan-out over a shared deadline/cancellation runtime.
 
 use super::deadline::BoundaryRuntime;
+use anyhow::{anyhow, Result};
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Default worker count for [`fan_out`]. Kept small and fixed rather than
-/// scaled to `items.len()` so a `load()`-style fan-out across many browsers
-/// never fires more than this many simultaneous OS-credential-store prompts
-/// (e.g. several concurrent macOS Keychain consent dialogs) at once.
+/// Default worker count for [`fan_out`]. Kept small and fixed, rather than
+/// scaled to `items.len()`, so a `load()`-style fan-out across many browsers
+/// bounds how many simultaneous OS-credential-store prompts (e.g. concurrent
+/// macOS Keychain consent dialogs) a caller can see at once. This still
+/// raises that count from the previous strictly-sequential code's implicit
+/// bound of one at a time to `DEFAULT_FAN_OUT_WIDTH` at a time -- it caps the
+/// increase, it does not eliminate it.
 pub(crate) const DEFAULT_FAN_OUT_WIDTH: usize = 4;
 
 /// Runs `work` over `items` on a bounded pool of `pool_size.min(items.len())`
 /// scoped threads, claiming items in increasing order via a shared cursor.
 ///
 /// A worker only claims the next item after `runtime.check()` succeeds, so
-/// claimed indices are always the contiguous prefix `0..cursor` -- once the
-/// runtime's deadline or cancellation trips, no further item is claimed, but
-/// an item already claimed still runs `work` to completion. The returned
-/// `Vec` holds one result per claimed item, in original `items` order,
+/// once the runtime's deadline or cancellation trips, claiming simply stops;
+/// an item already claimed still runs `work` to completion. Because indices
+/// are handed out by one shared, monotonically increasing cursor, the set of
+/// claimed indices is always the contiguous prefix `0..cursor` of `items`,
+/// with no gaps, regardless of which thread claims which index. The returned
+/// `Vec` holds one result per claimed item, in that original `items` order,
 /// regardless of which thread finished first.
-pub(crate) fn fan_out<T, R>(
+///
+/// A panic inside `work` is caught and converted into an `Err` for that one
+/// item rather than being allowed to unwind across the `work`/thread
+/// boundary -- otherwise one item's panic would tear down every other
+/// worker's already-completed results along with it (`std::thread::scope`
+/// re-panics on join, before this function ever gets to return anything).
+pub(crate) fn fan_out<T, U>(
   items: &[T],
   pool_size: usize,
   runtime: &BoundaryRuntime<'_>,
-  work: impl Fn(&T) -> R + Sync,
-) -> Vec<R>
+  work: impl Fn(&T) -> Result<U> + Sync,
+) -> Vec<Result<U>>
 where
   T: Sync,
-  R: Send,
+  U: Send,
 {
   if items.is_empty() {
     return Vec::new();
   }
   let cursor = AtomicUsize::new(0);
-  let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+  let results: Mutex<Vec<Option<Result<U>>>> = Mutex::new((0..items.len()).map(|_| None).collect());
   let workers = pool_size.min(items.len()).max(1);
 
   std::thread::scope(|scope| {
@@ -46,7 +60,8 @@ where
         if index >= items.len() {
           break;
         }
-        let result = work(&items[index]);
+        let result = catch_unwind(AssertUnwindSafe(|| work(&items[index])))
+          .unwrap_or_else(|panic| Err(anyhow!("extraction panicked: {}", panic_message(&*panic))));
         let mut guard = results.lock().expect("fan_out results mutex");
         guard[index] = Some(result);
       });
@@ -60,6 +75,16 @@ where
     .take_while(Option::is_some)
     .flatten()
     .collect()
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+  if let Some(message) = payload.downcast_ref::<&str>() {
+    (*message).to_owned()
+  } else if let Some(message) = payload.downcast_ref::<String>() {
+    message.clone()
+  } else {
+    "non-string panic payload".to_owned()
+  }
 }
 
 #[cfg(test)]
@@ -78,9 +103,10 @@ mod tests {
       // Earlier items sleep longer, so completion order is reversed
       // relative to input order.
       std::thread::sleep(Duration::from_millis(u64::from(8 - item)));
-      *item
+      Ok(*item)
     });
-    assert_eq!(results, items);
+    let values: Vec<u32> = results.into_iter().map(|result| result.unwrap()).collect();
+    assert_eq!(values, items);
   }
 
   #[test]
@@ -95,6 +121,7 @@ mod tests {
       peak.fetch_max(now_active, Ordering::SeqCst);
       std::thread::sleep(Duration::from_millis(5));
       active.fetch_sub(1, Ordering::SeqCst);
+      Ok(())
     });
     assert!(
       peak.load(Ordering::SeqCst) <= 3,
@@ -119,12 +146,13 @@ mod tests {
       if *item == 2 {
         cancellation.cancel();
       }
-      *item
+      Ok(*item)
     });
     // With a single worker, claiming is strictly sequential: items 0, 1, 2
     // are claimed and run (item 2 requests cancellation on its own way out),
     // and the next claim attempt observes cancellation before claiming item 3.
-    assert_eq!(results, vec![0, 1, 2]);
+    let values: Vec<u32> = results.into_iter().map(|result| result.unwrap()).collect();
+    assert_eq!(values, vec![0, 1, 2]);
     assert_eq!(attempted.load(Ordering::SeqCst), 3);
   }
 
@@ -133,7 +161,32 @@ mod tests {
     let clock = ManualClock::default();
     let runtime = BoundaryRuntime::standard(&clock);
     let items: Vec<u32> = Vec::new();
-    let results = fan_out(&items, 4, &runtime, |item| *item);
+    let results = fan_out(&items, 4, &runtime, |item| Ok(*item));
     assert!(results.is_empty());
+  }
+
+  #[test]
+  fn a_panic_in_one_item_becomes_an_err_for_that_item_without_losing_siblings() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::standard(&clock);
+    let items: Vec<u32> = (0..8).collect();
+    let results = fan_out(&items, 4, &runtime, |item| {
+      if *item == 3 {
+        panic!("simulated deep extraction bug");
+      }
+      Ok(*item)
+    });
+    assert_eq!(results.len(), items.len());
+    for (item, result) in items.iter().zip(results) {
+      if *item == 3 {
+        let message = result.unwrap_err().to_string();
+        assert!(
+          message.contains("simulated deep extraction bug"),
+          "expected the panic message to survive, got: {message}"
+        );
+      } else {
+        assert_eq!(result.unwrap(), *item);
+      }
+    }
   }
 }

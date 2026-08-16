@@ -1018,9 +1018,11 @@ fn finalize_outcomes_with_runtime(
   outcomes: Vec<BrowserDraft>,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Outcome {
-  // A stop observed while acquiring a later browser is already represented on
-  // that browser's draft. All earlier drafts, plus the stopped draft's fully
-  // completed sources, are immutable completed work and must survive even
+  // A stop observed while acquiring one browser is already represented on
+  // that browser's draft. Every other draft in `outcomes` -- earlier AND
+  // later, since browsers are now claimed concurrently and a later-registry
+  // browser can finish before an earlier one notices the shared stop -- is
+  // immutable completed (or partially completed) work and must survive even
   // though the shared stop token is now terminal.
   let has_preexisting_stop = outcomes
     .iter()
@@ -1082,9 +1084,10 @@ fn finalize_outcomes_with_runtime(
         break 'browsers;
       }
     }
-    if outcome_stopped {
-      break;
-    }
+    // Do not `break` here: under concurrent fan-out, a stopped draft is no
+    // longer guaranteed to be the last entry in `outcomes` -- a browser
+    // claimed after it may have already finished successfully. Stopping the
+    // loop here would silently discard that already-completed sibling work.
   }
   let discovered_any_source = !sources.is_empty() || discovery_failed;
   let mut outcome = Outcome::finalize(
@@ -1846,6 +1849,11 @@ fn load_extraction_report_with_runtime(
   let attempts = fan_out(&browsers, DEFAULT_FAN_OUT_WIDTH, runtime, |browser| {
     collect_report(browser, None, true, domains.clone(), runtime)
   });
+  // `fan_out` silently stops claiming further browsers once the runtime
+  // trips, so a shorter-than-`browsers` result set is itself evidence of a
+  // stop even if no individual browser's own attempt happened to observe
+  // and report it. That case is folded in below, after the loop.
+  let claimed = attempts.len();
   let mut outcomes = Vec::with_capacity(attempts.len());
   for (browser, attempt) in browsers.iter().zip(attempts) {
     match attempt {
@@ -1880,6 +1888,15 @@ fn load_extraction_report_with_runtime(
           termination: Termination::Completed,
         });
       }
+    }
+  }
+  if claimed < browsers.len()
+    && !outcomes
+      .iter()
+      .any(|outcome| outcome.termination != Termination::Completed)
+  {
+    if let Some(stop) = runtime.check().err() {
+      outcomes.push(stopped_browser_draft(&browsers[claimed], stop)?);
     }
   }
   Ok(assemble_with_runtime(browsers.len(), outcomes, runtime))
@@ -2214,6 +2231,56 @@ mod tests {
       assert_eq!(cookies.len(), 1);
       assert_eq!(cookies[0].name, "retained");
     }
+  }
+
+  #[test]
+  fn a_stopped_draft_that_is_not_last_still_keeps_every_other_drafts_completed_work() {
+    // Regression test: under concurrent fan-out (see `common::concurrency`),
+    // a registry-later browser can finish successfully even though a
+    // registry-earlier sibling is the one that happened to observe the
+    // shared stop first, so a stopped draft is no longer guaranteed to be
+    // the last entry in `outcomes`. `finalize_outcomes_with_runtime` must
+    // not discard already-completed drafts that appear after it.
+    use crate::common::deadline::test_clock::ManualClock;
+
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::standard(&clock);
+
+    let mut stopped_profile = ProfileDraft::new(identity(), true);
+    stopped_profile
+      .sources
+      .push(completed_source("stopped-browser-source"));
+    let mut stopped = outcome(vec![stopped_profile], false);
+    stopped.termination = Termination::TimedOut;
+
+    let mut later_identity = identity();
+    later_identity.browser_id = BrowserId::known("chrome");
+    let mut later_profile = ProfileDraft::new(later_identity, true);
+    later_profile
+      .sources
+      .push(completed_source("later-browser-source"));
+    let mut later = outcome(vec![later_profile], false);
+    later.browser_id = BrowserId::known("chrome");
+
+    let report = assemble_with_runtime(2, vec![stopped, later], &runtime);
+
+    assert_eq!(
+      report.summary.sources_succeeded, 2,
+      "the later, fully-completed browser's source must survive being listed after a stopped draft"
+    );
+    assert_eq!(report.summary.cookies_emitted, 2);
+    let cookie_names: Vec<&str> = report
+      .profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .flat_map(|source| &source.cookies)
+      .map(|cookie| cookie.name.as_str())
+      .collect();
+    assert!(cookie_names.contains(&"stopped-browser-source"));
+    assert!(
+      cookie_names.contains(&"later-browser-source"),
+      "expected the later browser's cookie to survive, got: {cookie_names:?}"
+    );
   }
 
   #[test]
