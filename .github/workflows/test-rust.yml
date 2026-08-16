@@ -238,6 +238,14 @@ jobs:
             cargo test -p rookie-cookies --no-default-features --locked --lib \
               compatibility_dispatch::
             cargo test -p rookie-cookies --all-features --locked --lib \
+              browser::legacy::dispatch::
+            cargo test -p rookie-cookies --no-default-features --locked --lib \
+              browser::legacy::dispatch::
+            cargo test -p rookie-cookies --all-features --locked --lib \
+              browser::report_build::dispatch::
+            cargo test -p rookie-cookies --no-default-features --locked --lib \
+              browser::report_build::dispatch::
+            cargo test -p rookie-cookies --all-features --locked --lib \
               config::tests::unsupported_target_never_borrows_linux_compatibility_config -- --exact
             cargo test -p rookie-cookies --all-features --locked --test public_contract direct_path_
             cargo run --manifest-path tests/direct_path_consumer/Cargo.toml

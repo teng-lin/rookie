@@ -1023,7 +1023,16 @@ fn aggregate_load_failure(
   errors: &[String],
   stop: Option<common::deadline::BoundaryStop>,
 ) -> anyhow::Error {
-  let summary = format!("all browser extractions failed:\n  {}", errors.join("\n  "));
+  let summary = if errors.is_empty() {
+    // Reachable when the shared deadline/cancellation stopped `load()`
+    // before any browser's own extraction attempt produced an error to
+    // record -- e.g. every browser attempted before the stop was merely
+    // uninstalled (not an "error"), and no browser was ever attempted after
+    // it. `stop` (below) is always `Some` in this branch.
+    "the operation stopped before any browser extraction reported an error".to_owned()
+  } else {
+    format!("all browser extractions failed:\n  {}", errors.join("\n  "))
+  };
   match stop {
     Some(stop) => anyhow::Error::new(stop).context(summary),
     None => anyhow::anyhow!(summary),
@@ -1032,12 +1041,24 @@ fn aggregate_load_failure(
 
 /// Returns cookies from all browsers
 ///
-/// This is a best-effort aggregator: each browser is probed in turn and
-/// individual extraction failures are surfaced via [`log::warn!`] but do not
-/// abort the load (a locked profile or a decrypt failure on one browser should
-/// not lose cookies from the others). Browsers without a discoverable profile
-/// are skipped normally. If you need to know which browsers failed, hook a logger
-/// like `tracing-subscriber` and watch for `rookie_cookies::load` warnings.
+/// This is a best-effort aggregator: browsers are probed concurrently on a
+/// small bounded worker pool (see [`common::concurrency::fan_out`], not part
+/// of the public API) sharing one deadline/cancellation budget, rather than
+/// one at a time -- a slow or hung source no longer starves every other
+/// source's share of that budget. Individual extraction failures are
+/// surfaced via [`log::warn!`] but do not abort the load (a locked profile or
+/// a decrypt failure on one browser should not lose cookies from the
+/// others). Browsers without a discoverable profile are skipped normally. If
+/// you need to know which browsers failed, hook a logger like
+/// `tracing-subscriber` and watch for `rookie_cookies::load` warnings.
+///
+/// The returned cookies are grouped by browser in the same fixed order every
+/// call attempts browsers in ([`load_report`]'s browser ordering is tracked
+/// separately, from the registry rather than this function's own list),
+/// regardless of which browser's extraction actually finished first. Once
+/// the shared deadline or cancellation trips, no not-yet-started browser is
+/// attempted, but a browser already in flight at that moment still runs to
+/// completion and its cookies are kept.
 ///
 /// Returns `Err` only when at least one installed browser is found, every
 /// attempted extraction fails, and none succeeds. The aggregate message lists
@@ -1056,14 +1077,28 @@ fn aggregate_load_failure(
 /// ```
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let browser_types = compatibility_dispatch::legacy_load_browsers();
+  let names: Vec<&str> = browser_types.iter().map(|(name, _)| *name).collect();
   let clock = common::deadline::SystemClock;
   let runtime = common::deadline::BoundaryRuntime::standard(&clock);
+  let results = common::concurrency::fan_out(
+    &names,
+    common::concurrency::DEFAULT_FAN_OUT_WIDTH,
+    &runtime,
+    |browser_name| {
+      browser::legacy::browser_cookies_with_runtime(browser_name, domains.clone(), &runtime)
+    },
+  );
+  // `fan_out` silently stops claiming further browsers once the runtime
+  // trips, so a shorter-than-`names` result set is itself evidence of a
+  // stop even if no individual browser's own attempt happened to observe
+  // and report it (e.g. every claimed browser was merely uninstalled).
+  let attempted = results.len();
   let mut cookies = Vec::new();
   let mut errors = Vec::new();
   let mut terminal_stop = None;
   let mut successful_extractions = 0;
-  for (browser_name, _) in browser_types {
-    match browser::legacy::browser_cookies_with_runtime(browser_name, domains.clone(), &runtime) {
+  for (browser_name, result) in names.iter().copied().zip(results) {
+    match result {
       Ok(browser_cookies) => {
         successful_extractions += 1;
         cookies.extend(browser_cookies);
@@ -1079,14 +1114,16 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
         });
         log::warn!("rookie_cookies::load skipping {browser_name}: {error}");
         errors.push(format!("{browser_name}: {error}"));
-        if let Some(stop) = stopped {
-          terminal_stop = Some(stop);
-          break;
+        if stopped.is_some() && terminal_stop.is_none() {
+          terminal_stop = stopped;
         }
       }
     }
   }
-  if successful_extractions == 0 && !errors.is_empty() {
+  if attempted < names.len() && terminal_stop.is_none() {
+    terminal_stop = runtime.check().err();
+  }
+  if successful_extractions == 0 && (!errors.is_empty() || terminal_stop.is_some()) {
     return Err(aggregate_load_failure(&errors, terminal_stop));
   }
   Ok(cookies)

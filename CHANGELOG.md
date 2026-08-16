@@ -49,6 +49,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that case. Every other function's error type is unchanged. Node's thrown
   error `.status`/`.code` moves from always `Unknown` to `InvalidArg` (request
   faults) or `GenericFailure` (everything else) across every export.
+- Rust's `load()` and `load_report()` now probe registered browsers
+  concurrently on a small bounded worker pool sharing one deadline/
+  cancellation budget, instead of one browser at a time. A slow or hung
+  source no longer starves every other source's share of the shared budget.
+  Results are always grouped by browser in the same fixed registry order
+  regardless of completion order, and a per-source timeout or cancellation
+  stops not-yet-started browsers without discarding results already
+  completed by browsers that were in flight at that moment.
 - **Breaking (0.6.0):** The Python package now requires CPython 3.11 or newer.
   CPython 3.8–3.10 and PyPy are no longer supported, and published wheels move
   from the `cp38-abi3` tag to `cp311-abi3`.
