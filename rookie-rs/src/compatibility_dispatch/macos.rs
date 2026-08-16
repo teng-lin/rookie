@@ -96,4 +96,26 @@ mod tests {
     )
     .expect("injected Safari query");
   }
+
+  #[test]
+  fn safari_from_path_rejects_a_missing_file_without_touching_the_keychain() {
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let missing = PathBuf::from("/nonexistent/Cookies.binarycookies");
+    let error = safari_from_path(missing, None, &runtime).unwrap_err();
+    assert!(format!("{error:#}").contains("Failed to open"));
+  }
+
+  #[test]
+  fn internet_explorer_from_path_is_unsupported_off_windows() {
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let error =
+      internet_explorer_from_path(PathBuf::from("/tmp/WebCacheV01.dat"), None, &runtime)
+        .unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      "Internet Explorer WebCache files are only supported on Windows"
+    );
+  }
 }

@@ -652,6 +652,189 @@ mod tests {
   }
 
   #[test]
+  fn discover_rejects_a_browser_id_that_is_not_the_safari_engine() {
+    use std::collections::BTreeMap;
+
+    let directory = crate::utils::TempDir::new().expect("temporary Safari discovery root");
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(home.join("Library/Cookies")).expect("legacy Safari marker dir");
+    let context = DiscoveryContext {
+      platform: super::super::PlatformId::Macos,
+      home: Some(home),
+      env: BTreeMap::new(),
+      fs: super::super::RealDiscoveryFs,
+    };
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+
+    let error = discover_safari_with_context_using_runtime(
+      &context,
+      "chrome",
+      &runtime,
+      |_, _| unreachable!("engine mismatch must fail before profile discovery starts"),
+    )
+    .expect_err("chrome is a Chromium browser id, not a Safari one");
+    assert!(
+      error.to_string().contains("is not a"),
+      "{error}: expected an engine-mismatch message"
+    );
+  }
+
+  struct CanonicalizeDeniedFs {
+    denied: HashSet<PathBuf>,
+  }
+
+  impl DiscoveryFs for CanonicalizeDeniedFs {
+    fn exists(&self, path: &Path) -> bool {
+      super::super::RealDiscoveryFs.exists(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+      super::super::RealDiscoveryFs.is_dir(path)
+    }
+
+    fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+      super::super::RealDiscoveryFs.metadata(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
+      super::super::RealDiscoveryFs.read_dir(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+      if self.denied.contains(path) {
+        anyhow::bail!("injected canonicalize denial for {}", path.display());
+      }
+      super::super::RealDiscoveryFs.canonicalize(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> Result<String> {
+      super::super::RealDiscoveryFs.read_to_string(path)
+    }
+
+    fn expand_registry_glob(
+      &self,
+      base: &Path,
+      suffix: &str,
+    ) -> Result<super::super::GlobExpansion> {
+      super::super::RealDiscoveryFs.expand_registry_glob(base, suffix)
+    }
+  }
+
+  #[test]
+  fn an_installation_root_that_cannot_be_canonicalized_is_skipped_as_a_discovery_issue() {
+    use std::collections::BTreeMap;
+
+    let directory = crate::utils::TempDir::new().expect("temporary Safari discovery root");
+    let home = directory.path().join("home");
+    let library = home.join("Library");
+    let cookie_dir = library.join("Cookies");
+    std::fs::create_dir_all(&cookie_dir).expect("legacy Safari marker dir");
+    std::fs::write(cookie_dir.join("Cookies.binarycookies"), b"cook").expect("cookie fixture");
+    let context = DiscoveryContext {
+      platform: super::super::PlatformId::Macos,
+      home: Some(home),
+      env: BTreeMap::new(),
+      fs: CanonicalizeDeniedFs {
+        denied: HashSet::from([library.clone()]),
+      },
+    };
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+
+    let outcome = discover_safari_with_context_using_runtime(&context, "safari", &runtime, |_, _| {
+      unreachable!("a root that cannot be canonicalized must never reach profile discovery")
+    })
+    .expect("a canonicalize failure is a discovery issue, not a hard error");
+    assert!(outcome.profiles.is_empty());
+    assert_eq!(outcome.discovery_issues.len(), 1);
+    assert_eq!(
+      outcome.discovery_issues[0].code, "installation_canonicalize_failed",
+    );
+  }
+
+  #[test]
+  fn a_profile_source_directory_that_cannot_be_canonicalized_is_reported_and_skipped() {
+    use std::collections::BTreeMap;
+
+    let directory = crate::utils::TempDir::new().expect("temporary Safari discovery root");
+    let home = directory.path().join("home");
+    let library = home.join("Library");
+    let cookie_dir = library.join("Cookies");
+    std::fs::create_dir_all(&cookie_dir).expect("legacy Safari marker dir");
+    std::fs::write(cookie_dir.join("Cookies.binarycookies"), b"cook").expect("cookie fixture");
+    let context = DiscoveryContext {
+      platform: super::super::PlatformId::Macos,
+      home: Some(home),
+      env: BTreeMap::new(),
+      fs: CanonicalizeDeniedFs {
+        denied: HashSet::from([cookie_dir.clone()]),
+      },
+    };
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+
+    let outcome = discover_safari_with_context_using_runtime(&context, "safari", &runtime, {
+      let cookie_dir = cookie_dir.clone();
+      move |_, _| {
+        Ok((
+          vec![crate::browser::safari::SafariProfile {
+            name: "Default".to_owned(),
+            uuid: None,
+            cookie_candidates: vec![cookie_dir.join("Cookies.binarycookies")],
+          }],
+          None,
+        ))
+      }
+    })
+    .expect("a profile canonicalize failure is a discovery issue, not a hard error");
+    assert!(outcome.profiles.is_empty());
+    assert!(
+      outcome
+        .discovery_issues
+        .iter()
+        .any(|issue| issue.code == "profile_canonicalize_failed"),
+      "{:?}",
+      outcome.discovery_issues
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn real_macos_entry_points_discover_a_legacy_safari_home_via_env_override() {
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+
+    let directory = crate::utils::TempDir::new().expect("temporary Safari home");
+    let home = directory.path().join("home");
+    let cookie_dir = home.join("Library/Cookies");
+    std::fs::create_dir_all(&cookie_dir).expect("legacy Safari marker dir");
+    std::fs::write(cookie_dir.join("Cookies.binarycookies"), b"cook").expect("cookie fixture");
+
+    let env = BTreeMap::from([(OsString::from("HOME"), home.clone().into_os_string())]);
+    let _env_override = super::super::EnvOverride::install(env);
+
+    let profiles = safari_profiles_with_runtime(
+      "safari",
+      &crate::common::deadline::BoundaryRuntime::standard(&crate::common::deadline::SystemClock),
+    )
+    .expect("safari_profiles_with_runtime should discover the synthetic legacy home");
+    assert_eq!(profiles.profiles.len(), 1);
+
+    let report = safari_report(
+      "safari",
+      None,
+      None,
+    )
+    .expect("safari_report should discover and query the synthetic legacy home");
+    assert_eq!(report.profiles.len(), 1);
+
+    let legacy = legacy_safari_outcome("safari", None)
+      .expect("legacy_safari_outcome should discover and query the synthetic legacy home");
+    assert_eq!(legacy.profiles.len(), 1);
+  }
+
+  #[test]
   fn source_population_preserves_rows_attempts_and_failure_stage() {
     let success = populate_safari_sources(discovered_source(), None, |_, _| {
       Ok(crate::browser::safari::SafariFileDraft {

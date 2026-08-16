@@ -467,6 +467,105 @@ mod tests {
   }
 
   #[test]
+  fn windows_database_locked_display_and_debug_cover_every_arm() {
+    let database_disallowed = WindowsDatabaseLocked {
+      locked_file: WindowsLockedFile::Database,
+      locked_path: PathBuf::from("/tmp/Cookies"),
+      has_verified_nonempty_wal: false,
+      shutdown_allowed: false,
+      os_error: ERROR_SHARING_VIOLATION_CODE,
+    };
+    let display = database_disallowed.to_string();
+    assert!(display.contains("database is share-locked"), "{display}");
+    assert!(display.contains("process shutdown is disabled"), "{display}");
+    let debug = format!("{database_disallowed:?}");
+    assert!(debug.starts_with("WindowsDatabaseLocked {"), "{debug}");
+    assert!(debug.contains("locked_file: Database"), "{debug}");
+    assert!(
+      debug.contains("has_verified_nonempty_wal: false"),
+      "{debug}"
+    );
+    assert!(debug.contains("shutdown_allowed: false"), "{debug}");
+    assert!(
+      debug.contains(&format!("os_error: {ERROR_SHARING_VIOLATION_CODE}")),
+      "{debug}"
+    );
+
+    let wal_allowed = WindowsDatabaseLocked {
+      locked_file: WindowsLockedFile::WriteAheadLog,
+      locked_path: PathBuf::from("/tmp/Cookies-wal"),
+      has_verified_nonempty_wal: true,
+      shutdown_allowed: true,
+      os_error: ERROR_LOCK_VIOLATION_CODE,
+    };
+    let display = wal_allowed.to_string();
+    assert!(display.contains("write-ahead log is share-locked"), "{display}");
+    assert!(
+      display.contains("explicit process shutdown did not make it readable"),
+      "{display}"
+    );
+    let debug = format!("{wal_allowed:?}");
+    assert!(debug.contains("locked_file: WriteAheadLog"), "{debug}");
+    assert!(debug.contains("has_verified_nonempty_wal: true"), "{debug}");
+    assert!(debug.contains("shutdown_allowed: true"), "{debug}");
+  }
+
+  #[test]
+  fn windows_shadow_fallback_failure_display_covers_both_diagnostics() {
+    let shadow_only = WindowsShadowFallbackFailure::new(&anyhow!("shadow unavailable"), None);
+    assert_eq!(
+      shadow_only.to_string(),
+      "Windows WAL shadow-copy fallback failed: shadow unavailable"
+    );
+
+    let retry_error = anyhow!("post-shutdown retry failed");
+    let both = WindowsShadowFallbackFailure::new(&anyhow!("shadow unavailable"), Some(&retry_error));
+    let message = both.to_string();
+    assert!(message.contains("shadow unavailable"), "{message}");
+    assert!(
+      message.contains(
+        "ordinary acquisition after explicit process shutdown also failed: post-shutdown retry failed"
+      ),
+      "{message}"
+    );
+  }
+
+  #[test]
+  fn windows_sharing_code_only_recognizes_the_two_known_codes() {
+    assert_eq!(
+      windows_sharing_code(&std::io::Error::from_raw_os_error(
+        ERROR_SHARING_VIOLATION_CODE
+      )),
+      Some(ERROR_SHARING_VIOLATION_CODE)
+    );
+    assert_eq!(
+      windows_sharing_code(&std::io::Error::from_raw_os_error(ERROR_LOCK_VIOLATION_CODE)),
+      Some(ERROR_LOCK_VIOLATION_CODE)
+    );
+    assert_eq!(
+      windows_sharing_code(&std::io::Error::from_raw_os_error(5)),
+      None,
+      "an unrelated OS error code must not be treated as a sharing violation"
+    );
+    assert_eq!(
+      windows_sharing_code(&std::io::Error::other("no OS error code attached")),
+      None
+    );
+  }
+
+  #[test]
+  fn classifier_ignores_errors_without_a_typed_database_failure() {
+    let db = PathBuf::from("live/Cookies");
+    let plain_error = anyhow!("some unrelated failure");
+    assert!(
+      classify_windows_sharing_violation_with_probe(&db, &plain_error, |_, _| {
+        panic!("an error without BrowserDatabaseFailure metadata must never reach the probe")
+      })
+      .is_none()
+    );
+  }
+
+  #[test]
   fn force_kill_maps_to_an_explicit_windows_shutdown_policy() {
     assert_eq!(
       WindowsLockedDatabasePolicy::from_force_kill(false),
@@ -1075,6 +1174,74 @@ mod tests {
 
     assert_eq!(error.to_string(), "shadow schema mismatch");
     assert_eq!(query_calls.get(), 2);
+  }
+
+  #[test]
+  fn successful_shutdown_with_a_still_failing_unclassified_retry_returns_the_retry_error_untyped() {
+    let db = PathBuf::from("no-wal/Cookies");
+    let query_calls = Cell::new(0);
+    let classify_calls = Cell::new(0);
+    let error = with_windows_locked_database_policy(
+      &db,
+      WindowsLockedDatabasePolicy::AllowProcessShutdown,
+      |_| {
+        query_calls.set(query_calls.get() + 1);
+        Err::<(), _>(anyhow!("share denied"))
+      },
+      |_, _| {
+        let call = classify_calls.get() + 1;
+        classify_calls.set(call);
+        if call == 1 {
+          Some(sharing_violation(&db, WindowsLockedFile::Database, false))
+        } else {
+          None
+        }
+      },
+      || panic!("a no-WAL source must not inspect privilege"),
+      |_| -> Result<WindowsFallbackSource<()>> {
+        panic!("a no-WAL source must not be raw-copied")
+      },
+      |_| true,
+    )
+    .expect_err("a retry that stays unclassified surfaces the retry error as-is");
+
+    assert_eq!(error.to_string(), "share denied");
+    assert!(error.downcast_ref::<WindowsDatabaseLocked>().is_none());
+    assert_eq!(query_calls.get(), 2);
+    assert_eq!(classify_calls.get(), 2);
+  }
+
+  #[test]
+  fn failed_shutdown_after_a_failed_shadow_reports_the_shadow_failure_without_a_retry() {
+    let db = PathBuf::from("live/Cookies");
+    let shutdown_calls = Cell::new(0);
+    let error = with_windows_locked_database_policy(
+      &db,
+      WindowsLockedDatabasePolicy::AllowProcessShutdown,
+      |_| Err::<(), _>(anyhow!("share denied")),
+      |_, _| Some(sharing_violation(&db, WindowsLockedFile::Database, true)),
+      || true,
+      |_| Err::<WindowsFallbackSource<()>, _>(anyhow!("shadow unavailable")),
+      |_| {
+        shutdown_calls.set(shutdown_calls.get() + 1);
+        false
+      },
+    )
+    .expect_err("a failed shadow with a failed shutdown remains a typed locked failure");
+
+    assert_eq!(shutdown_calls.get(), 1);
+    let locked = error
+      .downcast_ref::<WindowsDatabaseLocked>()
+      .expect("typed locked context");
+    assert!(locked.shutdown_allowed);
+    let fallback = error
+      .downcast_ref::<WindowsShadowFallbackFailure>()
+      .expect("shadow acquisition diagnostic remains typed");
+    assert!(fallback.shadow_diagnostic.contains("shadow unavailable"));
+    assert!(
+      fallback.retry_diagnostic.is_none(),
+      "shutdown never ran a retry query, so there is no retry diagnostic"
+    );
   }
 
   #[test]
