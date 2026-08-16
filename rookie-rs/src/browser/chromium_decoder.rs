@@ -152,16 +152,30 @@ fn escape_like_pattern(input: &str) -> String {
     .replace('_', "\\_")
 }
 
-pub(super) fn decode_cookie_records<Sink>(
-  connection: &rusqlite::Connection,
+pub(super) struct ChromiumCookieDecoder<'connection> {
+  statement: rusqlite::Statement<'connection>,
+  domains: Option<Vec<String>>,
+  query_domain_filters: Vec<String>,
+  projection: CookieProjection,
+  encrypted_value_policy: EncryptedValuePolicy,
+  schema_version: u32,
+}
+
+pub(super) struct ChromiumCookieCursor<'decoder> {
+  rows: rusqlite::Rows<'decoder>,
+  domains: Option<&'decoder [String]>,
+  projection: CookieProjection,
+  encrypted_value_policy: EncryptedValuePolicy,
+  schema_version: u32,
+  rows_seen: usize,
+}
+
+pub(super) fn prepare_cookie_decoder<'connection>(
+  connection: &'connection rusqlite::Connection,
   domains: Option<&[String]>,
   projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
-  mut sink: Sink,
-) -> Result<ChromiumDecodeSummary>
-where
-  Sink: FnMut(ChromiumDecodeEvent) -> Result<()>,
-{
+) -> Result<ChromiumCookieDecoder<'connection>> {
   let schema_version = chromium_schema_version(connection)?;
   let columns = sqlite_table_columns(connection, "cookies")?;
   let optional_column = |name: &str| {
@@ -204,147 +218,181 @@ where
   }
   query += ";";
 
-  let mut rows_seen = 0;
-  let mut stmt = connection.prepare(query.as_str())?;
-  let query_domain_filters = if apply_sql_domain_filter {
-    domain_filters.as_slice()
-  } else {
-    &[]
-  };
-  let mut rows = stmt.query(rusqlite::params_from_iter(query_domain_filters.iter()))?;
+  Ok(ChromiumCookieDecoder {
+    statement: connection.prepare(query.as_str())?,
+    domains: domains.map(<[String]>::to_vec),
+    query_domain_filters: if apply_sql_domain_filter {
+      domain_filters
+    } else {
+      Vec::new()
+    },
+    projection,
+    encrypted_value_policy,
+    schema_version,
+  })
+}
 
-  while let Some(row) = rows.next()? {
-    let plaintext_only_encrypted =
-      if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-        let encrypted_value = row.get::<_, Option<Vec<u8>>>(6).map_err(|error| {
-          anyhow!(
-            "can't prove that explicit-path Chromium cookie row is plaintext: \
-             failed to read encrypted_value: {error}"
-          )
-        })?;
-        let encrypted_value = encrypted_value.unwrap_or_default();
-        if !encrypted_value.is_empty() {
-          return Err(MissingBrowserKeyIdentity.into());
-        }
-        Some(encrypted_value)
-      } else {
-        None
-      };
-    let host_key = match row.get::<_, Option<String>>(0) {
-      Ok(host_key) => host_key.unwrap_or_default(),
-      Err(error) => {
-        rows_seen += 1;
-        let row_number = rows_seen;
-        sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-          row_number,
-          code: ChromiumDecodeIssueCode::ColumnRead("host_key"),
-          error: anyhow!("failed to read host_key from Chromium cookie row: {error}"),
-        }))?;
-        continue;
-      }
-    };
-    if !utils::some_domain_in_host(domains, &host_key) {
-      continue;
-    }
-    rows_seen += 1;
-    let row_number = rows_seen;
-    macro_rules! read_optional_column {
-      ($index:expr, $type:ty, $name:literal) => {
-        match row.get::<_, Option<$type>>($index) {
-          Ok(value) => value,
-          Err(error) => {
-            sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-              row_number,
-              code: ChromiumDecodeIssueCode::ColumnRead($name),
-              error: anyhow!("failed to read {} from Chromium cookie row: {error}", $name),
-            }))?;
-            continue;
-          }
-        }
-      };
-    }
+impl ChromiumCookieDecoder<'_> {
+  pub(super) fn cursor(&mut self) -> Result<ChromiumCookieCursor<'_>> {
+    let rows = self
+      .statement
+      .query(rusqlite::params_from_iter(self.query_domain_filters.iter()))?;
+    Ok(ChromiumCookieCursor {
+      rows,
+      domains: self.domains.as_deref(),
+      projection: self.projection,
+      encrypted_value_policy: self.encrypted_value_policy,
+      schema_version: self.schema_version,
+      rows_seen: 0,
+    })
+  }
+}
 
-    let path = read_optional_column!(1, String, "path").unwrap_or_else(|| "/".to_string());
-    let is_secure = read_optional_column!(2, bool, "is_secure").unwrap_or(false);
-    let expires = read_optional_column!(3, i64, "expires_utc")
-      .and_then(|value| u64::try_from(value).ok())
-      .and_then(date::chromium_timestamp);
-    let name: String = match row.get(4) {
-      Ok(value) => value,
-      Err(error) => {
-        sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-          row_number,
-          code: ChromiumDecodeIssueCode::ColumnRead("name"),
-          error: anyhow!("failed to read name from row: {error}"),
-        }))?;
-        continue;
-      }
-    };
-    let encrypted_value = if encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
-      plaintext_only_encrypted.expect("plaintext-only mode captured encrypted_value")
-    } else {
-      read_optional_column!(6, Vec<u8>, "encrypted_value").unwrap_or_default()
-    };
-    let http_only = read_optional_column!(7, bool, "is_httponly").unwrap_or(false);
-    let same_site = read_optional_column!(8, i64, "samesite").unwrap_or(SAME_SITE_UNSPECIFIED);
-    let (context, pending_context_failure) = if projection == CookieProjection::Detailed {
-      match chromium_cookie_context(row) {
-        Ok(context) => (context, None),
-        Err(error) => {
-          let column = error.column;
-          (
-            CookieContext::default(),
-            Some(ChromiumRowFailure {
-              row_number,
-              code: ChromiumDecodeIssueCode::ColumnRead(column),
-              error: error.into(),
-            }),
-          )
-        }
-      }
-    } else {
-      (CookieContext::default(), None)
-    };
-    let value = if encrypted_value.is_empty() {
-      let plaintext: String = match row.get(5) {
-        Ok(value) => value,
-        Err(error) => {
-          sink(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
-            row_number,
-            code: ChromiumDecodeIssueCode::ColumnRead("value"),
-            error: anyhow!("failed to read value from row: {error}"),
-          }))?;
-          continue;
-        }
-      };
-      CookieValue::Plain(SecretString::new(plaintext))
-    } else {
-      // Non-empty ciphertext is authoritative. The plaintext column is not
-      // carried forward as a fallback, so later failures cannot expose it.
-      CookieValue::Encrypted {
-        tier: CipherTier::detect(&encrypted_value),
-        bytes: encrypted_value,
-      }
-    };
-    sink(ChromiumDecodeEvent::Record(DecodedChromiumRecord {
-      row_number,
-      schema_version,
-      record: CookieRecord {
-        domain: host_key,
-        path,
-        secure: is_secure,
-        expires,
-        name,
-        value,
-        http_only,
-        same_site,
-        context,
-      },
-      pending_context_failure,
-    }))?;
+impl ChromiumCookieCursor<'_> {
+  pub(super) fn summary(&self) -> ChromiumDecodeSummary {
+    ChromiumDecodeSummary {
+      rows_seen: self.rows_seen,
+    }
   }
 
-  Ok(ChromiumDecodeSummary { rows_seen })
+  /// Pulls exactly one relevant decoded row. The caller owns the returned
+  /// event before SQLite advances again, so ciphertext can be opened and
+  /// discarded synchronously without ever being collected by the decoder.
+  pub(super) fn next_event(&mut self) -> Result<Option<ChromiumDecodeEvent>> {
+    loop {
+      let Some(row) = self.rows.next()? else {
+        return Ok(None);
+      };
+      let plaintext_only_encrypted =
+        if self.encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
+          let encrypted_value = row.get::<_, Option<Vec<u8>>>(6).map_err(|error| {
+            anyhow!(
+              "can't prove that explicit-path Chromium cookie row is plaintext: \
+             failed to read encrypted_value: {error}"
+            )
+          })?;
+          let encrypted_value = encrypted_value.unwrap_or_default();
+          if !encrypted_value.is_empty() {
+            return Err(MissingBrowserKeyIdentity.into());
+          }
+          Some(encrypted_value)
+        } else {
+          None
+        };
+      let host_key = match row.get::<_, Option<String>>(0) {
+        Ok(host_key) => host_key.unwrap_or_default(),
+        Err(error) => {
+          self.rows_seen += 1;
+          return Ok(Some(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number: self.rows_seen,
+            code: ChromiumDecodeIssueCode::ColumnRead("host_key"),
+            error: anyhow!("failed to read host_key from Chromium cookie row: {error}"),
+          })));
+        }
+      };
+      if !utils::some_domain_in_host(self.domains, &host_key) {
+        continue;
+      }
+      self.rows_seen += 1;
+      let row_number = self.rows_seen;
+      macro_rules! read_optional_column {
+        ($index:expr, $type:ty, $name:literal) => {
+          match row.get::<_, Option<$type>>($index) {
+            Ok(value) => value,
+            Err(error) => {
+              return Ok(Some(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+                row_number,
+                code: ChromiumDecodeIssueCode::ColumnRead($name),
+                error: anyhow!("failed to read {} from Chromium cookie row: {error}", $name),
+              })));
+            }
+          }
+        };
+      }
+
+      let path = read_optional_column!(1, String, "path").unwrap_or_else(|| "/".to_string());
+      let is_secure = read_optional_column!(2, bool, "is_secure").unwrap_or(false);
+      let expires = read_optional_column!(3, i64, "expires_utc")
+        .and_then(|value| u64::try_from(value).ok())
+        .and_then(date::chromium_timestamp);
+      let name: String = match row.get(4) {
+        Ok(value) => value,
+        Err(error) => {
+          return Ok(Some(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+            row_number,
+            code: ChromiumDecodeIssueCode::ColumnRead("name"),
+            error: anyhow!("failed to read name from row: {error}"),
+          })));
+        }
+      };
+      let encrypted_value =
+        if self.encrypted_value_policy == EncryptedValuePolicy::RejectMissingIdentity {
+          plaintext_only_encrypted.expect("plaintext-only mode captured encrypted_value")
+        } else {
+          read_optional_column!(6, Vec<u8>, "encrypted_value").unwrap_or_default()
+        };
+      // Preserve the historical plaintext-row column failure ordering: once
+      // an empty encrypted_value establishes plaintext authority, read value
+      // before any later metadata. Non-empty ciphertext still bypasses value.
+      let value = if encrypted_value.is_empty() {
+        let plaintext: String = match row.get(5) {
+          Ok(value) => value,
+          Err(error) => {
+            return Ok(Some(ChromiumDecodeEvent::RowFailure(ChromiumRowFailure {
+              row_number,
+              code: ChromiumDecodeIssueCode::ColumnRead("value"),
+              error: anyhow!("failed to read value from row: {error}"),
+            })));
+          }
+        };
+        CookieValue::Plain(SecretString::new(plaintext))
+      } else {
+        // Non-empty ciphertext is authoritative. The plaintext column is not
+        // carried forward as a fallback, so later failures cannot expose it.
+        CookieValue::Encrypted {
+          tier: CipherTier::detect(&encrypted_value),
+          bytes: encrypted_value,
+        }
+      };
+      let http_only = read_optional_column!(7, bool, "is_httponly").unwrap_or(false);
+      let same_site = read_optional_column!(8, i64, "samesite").unwrap_or(SAME_SITE_UNSPECIFIED);
+      let (context, pending_context_failure) = if self.projection == CookieProjection::Detailed {
+        match chromium_cookie_context(row) {
+          Ok(context) => (context, None),
+          Err(error) => {
+            let column = error.column;
+            (
+              CookieContext::default(),
+              Some(ChromiumRowFailure {
+                row_number,
+                code: ChromiumDecodeIssueCode::ColumnRead(column),
+                error: error.into(),
+              }),
+            )
+          }
+        }
+      } else {
+        (CookieContext::default(), None)
+      };
+
+      return Ok(Some(ChromiumDecodeEvent::Record(DecodedChromiumRecord {
+        row_number,
+        schema_version: self.schema_version,
+        record: CookieRecord {
+          domain: host_key,
+          path,
+          secure: is_secure,
+          expires,
+          name,
+          value,
+          http_only,
+          same_site,
+          context,
+        },
+        pending_context_failure,
+      })));
+    }
+  }
 }
 
 #[cfg(test)]
@@ -360,15 +408,13 @@ mod tests {
 
   #[test]
   fn decoder_signature_is_key_free() {
-    type KeyFreeSink = fn(ChromiumDecodeEvent) -> Result<()>;
-    type DecoderSignature = fn(
-      &rusqlite::Connection,
+    type DecoderSignature = for<'connection> fn(
+      &'connection rusqlite::Connection,
       Option<&[String]>,
       CookieProjection,
       EncryptedValuePolicy,
-      KeyFreeSink,
-    ) -> Result<ChromiumDecodeSummary>;
-    let _: DecoderSignature = decode_cookie_records::<KeyFreeSink>;
+    ) -> Result<ChromiumCookieDecoder<'connection>>;
+    let _: DecoderSignature = prepare_cookie_decoder;
 
     let source = include_str!("chromium_decoder.rs");
     let production_source = source
@@ -415,10 +461,16 @@ mod tests {
         "key-bearing symbol {forbidden} crossed into the decoder module"
       );
     }
+    for forbidden_callback_marker in ["FnMut", "FnOnce", "Sink"] {
+      assert!(
+        !production_source.contains(forbidden_callback_marker),
+        "decoder API admits an external callback through {forbidden_callback_marker}"
+      );
+    }
   }
 
   #[test]
-  fn sink_backpressure_stops_row_decoding_immediately() {
+  fn cursor_is_pull_based_and_never_reads_ahead() {
     let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
     connection
       .execute_batch(
@@ -435,19 +487,31 @@ mod tests {
       )
       .expect("seed rows");
 
-    let mut calls = 0;
-    let error = decode_cookie_records(
+    let mut decoder = prepare_cookie_decoder(
       &connection,
       None,
       CookieProjection::Legacy,
       EncryptedValuePolicy::UseKeyOutcomes,
-      |_event| {
-        calls += 1;
-        anyhow::bail!("sink backpressure sentinel")
-      },
     )
-    .expect_err("sink stops the decoder");
-    assert_eq!(calls, 1, "the decoder must not read ahead after sink error");
-    assert_eq!(error.to_string(), "sink backpressure sentinel");
+    .expect("prepare decoder");
+    let mut cursor = decoder.cursor().expect("start cursor");
+
+    let first = cursor.next_event().expect("read first").expect("first row");
+    assert_eq!(cursor.summary().rows_seen, 1);
+    let ChromiumDecodeEvent::Record(first) = first else {
+      panic!("first row is valid")
+    };
+    assert_eq!(first.record.name, "first");
+
+    let second = cursor
+      .next_event()
+      .expect("read second")
+      .expect("second row");
+    assert_eq!(cursor.summary().rows_seen, 2);
+    let ChromiumDecodeEvent::Record(second) = second else {
+      panic!("second row is valid")
+    };
+    assert_eq!(second.record.name, "second");
+    assert!(cursor.next_event().expect("exhaust cursor").is_none());
   }
 }

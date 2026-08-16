@@ -84,6 +84,9 @@ pub(super) enum ChromiumCookieValueError {
   Decode(ChromiumCookieDecodeError),
   ProviderUnavailable(anyhow::Error),
   ProviderFailed(anyhow::Error),
+  /// A decoder or earlier unseal stage already classified this unavailable
+  /// value. Preserve its taxonomy instead of laundering it through Decrypt.
+  Unavailable(UnavailableReason),
 }
 
 impl ChromiumCookieValueError {
@@ -93,6 +96,7 @@ impl ChromiumCookieValueError {
       Self::Decode(_) => UnavailableCode::Decode,
       Self::ProviderUnavailable(_) => UnavailableCode::ProviderUnavailable,
       Self::ProviderFailed(_) => UnavailableCode::ProviderFailed,
+      Self::Unavailable(reason) => reason.code,
     }
   }
 }
@@ -104,6 +108,7 @@ impl fmt::Display for ChromiumCookieValueError {
         error.fmt(formatter)
       }
       Self::Decode(error) => error.fmt(formatter),
+      Self::Unavailable(reason) => reason.fmt(formatter),
     }
   }
 }
@@ -134,7 +139,7 @@ pub(super) fn unseal_chromium_record(
       record.value = CookieValue::Unavailable(reason.clone());
       return Err(Box::new((
         record,
-        ChromiumCookieValueError::Decrypt(anyhow!(reason)),
+        ChromiumCookieValueError::Unavailable(reason),
       )));
     }
     CookieValue::Encrypted { tier, bytes } => (tier, bytes),
@@ -293,7 +298,7 @@ where
   match last_decode_error {
     Some(error) => Err(ChromiumCookieValueError::Decode(error)),
     None => Err(ChromiumCookieValueError::Decrypt(anyhow!(
-      "decrypt_encrypted_value failed"
+      "no Chromium key candidate decrypted this cookie value"
     ))),
   }
 }

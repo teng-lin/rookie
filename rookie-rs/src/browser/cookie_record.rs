@@ -208,10 +208,13 @@ mod tests {
       CipherTier::Unknown(*b"v99")
     );
     assert_eq!(CipherTier::detect(b"raw dpapi"), CipherTier::LegacyDpapi);
-    assert_eq!(
-      CipherTier::detect(b"v1"),
-      CipherTier::Malformed { observed_len: 2 }
-    );
+    for observed_len in 0..CIPHER_VERSION_PREFIX_LEN {
+      let bytes = vec![b'v'; observed_len];
+      assert_eq!(
+        CipherTier::detect(&bytes),
+        CipherTier::Malformed { observed_len }
+      );
+    }
   }
 
   #[test]
