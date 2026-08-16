@@ -36,6 +36,8 @@ jobs:
           python-version: '3.12'
       - name: Validate platform contract
         run: python scripts/platform_contract.py --validate
+      - name: Check native execution coverage
+        run: python scripts/run-consumer-harness.py --check-native-coverage
       - name: Check release metadata
         run: python scripts/check-release.py
       - name: Test release tooling

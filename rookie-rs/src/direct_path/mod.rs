@@ -857,6 +857,10 @@ mod tests {
       crate::stop_reason(&error),
       Some(crate::StopReason::TimedOut)
     );
+    // A timeout checked during source classification still gets wrapped in a
+    // `DirectPathError` (inspection failed, for whichever reason); `fault_kind`
+    // must not read that wrapping as a caller input mistake.
+    assert_eq!(crate::fault_kind(&error), crate::FaultKind::Engine);
   }
 
   #[test]

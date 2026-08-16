@@ -15,6 +15,7 @@ impl fmt::Debug for RedactedCookieValue {
 pub const SAME_SITE_UNSPECIFIED: i64 = -1;
 
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct Cookie {
   pub domain: String,
   pub path: String,

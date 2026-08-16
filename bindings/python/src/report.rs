@@ -19,7 +19,8 @@ use rookie_core::report::{
 /// :return: A list of browser descriptor dictionaries
 #[pyfunction]
 pub fn supported_browsers(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-  py.detach(rookie_core::supported_browsers)?
+  py.detach(rookie_core::supported_browsers)
+    .map_err(crate::errors::classify_fault)?
     .into_iter()
     .map(|browser| browser_descriptor_dict(py, browser))
     .collect()
@@ -31,7 +32,8 @@ pub fn supported_browsers(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
 /// :return: A list of profile descriptor dictionaries
 #[pyfunction]
 pub fn browser_profiles(py: Python<'_>, browser_id: String) -> PyResult<Vec<Py<PyAny>>> {
-  py.detach(|| rookie_core::browser_profiles(&browser_id))?
+  py.detach(|| rookie_core::browser_profiles(&browser_id))
+    .map_err(crate::errors::classify_fault)?
     .into_iter()
     .map(|profile| profile_descriptor_dict(py, profile))
     .collect()
@@ -45,7 +47,8 @@ pub fn browser_profiles(py: Python<'_>, browser_id: String) -> PyResult<Vec<Py<P
 /// :return: A list of profile descriptor dictionaries
 #[pyfunction]
 pub fn chrome_profiles(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-  py.detach(rookie_core::chrome_profiles)?
+  py.detach(rookie_core::chrome_profiles)
+    .map_err(crate::errors::classify_fault)?
     .into_iter()
     .map(|profile| profile_descriptor_dict(py, profile))
     .collect()
@@ -63,7 +66,9 @@ pub fn chrome_profile(
   profile: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
-  let report = py.detach(|| rookie_core::chrome_profile(&profile, domains))?;
+  let report = py
+    .detach(|| rookie_core::chrome_profile(&profile, domains))
+    .map_err(crate::errors::classify_fault)?;
   report_dict(py, report)
 }
 
@@ -81,8 +86,9 @@ pub fn browser_report(
   profile_id: Option<String>,
   domains: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
-  let report =
-    py.detach(|| rookie_core::browser_report(&browser_id, profile_id.as_deref(), domains))?;
+  let report = py
+    .detach(|| rookie_core::browser_report(&browser_id, profile_id.as_deref(), domains))
+    .map_err(crate::errors::classify_fault)?;
   report_dict(py, report)
 }
 
@@ -93,7 +99,9 @@ pub fn browser_report(
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn load_report(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
-  let report = py.detach(|| rookie_core::load_report(domains))?;
+  let report = py
+    .detach(|| rookie_core::load_report(domains))
+    .map_err(crate::errors::classify_fault)?;
   report_dict(py, report)
 }
 

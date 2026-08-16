@@ -1,6 +1,6 @@
 use crate::{detailed_to_dict, to_dict, PyCancellationHandle};
 use ::rookie_cookies as rookie_core;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyList, PyString};
 use std::path::PathBuf;
@@ -201,10 +201,6 @@ fn chromium_path_request(
   Ok(request)
 }
 
-fn direct_path_runtime_error(error: rookie_core::anyhow::Error) -> PyErr {
-  PyRuntimeError::new_err(format!("{error:?}"))
-}
-
 fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
   // The fallible constructor rejects everything `Duration::from_secs_f64`
   // would otherwise panic on: negative, non-finite, and merely finite values
@@ -238,7 +234,7 @@ pub fn cookies_from_path(
   }
   let cookies = py
     .detach(|| rookie_core::direct_path::cookies_from_path(request))
-    .map_err(direct_path_runtime_error)?;
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -253,7 +249,7 @@ pub fn chromium_cookies_from_path(
   let request = chromium_path_request(path, options)?;
   let cookies = py
     .detach(|| rookie_core::direct_path::chromium_cookies_from_path(request))
-    .map_err(direct_path_runtime_error)?;
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -268,7 +264,7 @@ pub fn chromium_cookies_from_path_detailed(
   let request = chromium_path_request(path, options)?;
   let cookies = py
     .detach(|| rookie_core::direct_path::chromium_cookies_from_path_detailed(request))
-    .map_err(direct_path_runtime_error)?;
+    .map_err(crate::errors::classify_fault)?;
   detailed_to_dict(py, cookies)
 }
 
@@ -284,7 +280,9 @@ pub fn any_browser(
   domains: Option<Vec<String>>,
   key_path: Option<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::any_browser(&db_path, domains, key_path.as_deref()))?;
+  let cookies = py
+    .detach(|| rookie_core::any_browser(&db_path, domains, key_path.as_deref()))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -295,7 +293,9 @@ pub fn any_browser(
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn firefox(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::firefox(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::firefox(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -329,7 +329,9 @@ pub fn firefox_profile(
   profile: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::firefox_profile(&profile, domains))?;
+  let cookies = py
+    .detach(|| rookie_core::firefox_profile(&profile, domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -340,7 +342,9 @@ pub fn firefox_profile(
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn zen(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::zen(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::zen(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -351,7 +355,9 @@ pub fn zen(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAn
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn librewolf(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::librewolf(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::librewolf(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -362,7 +368,9 @@ pub fn librewolf(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<P
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn chrome(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::chrome(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::chrome(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -373,7 +381,9 @@ pub fn chrome(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<P
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn arc(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::arc(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::arc(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -384,7 +394,9 @@ pub fn arc(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAn
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn brave(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::brave(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::brave(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -395,7 +407,9 @@ pub fn brave(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<Py
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn edge(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::edge(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::edge(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -406,7 +420,9 @@ pub fn edge(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyA
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn opera(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::opera(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::opera(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -418,7 +434,9 @@ pub fn opera(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<Py
 #[pyo3(signature = (domains=None))]
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn opera_gx(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::opera_gx(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::opera_gx(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -430,7 +448,9 @@ pub fn opera_gx(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "linux")]
 pub fn cachy(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::cachy(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::cachy(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -441,7 +461,9 @@ pub fn cachy(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<Py
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn chromium(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::chromium(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::chromium(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -452,7 +474,9 @@ pub fn chromium(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn vivaldi(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::vivaldi(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::vivaldi(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -469,7 +493,9 @@ pub fn firefox_based(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::firefox_based(PathBuf::from(&db_path), domains))?;
+  let cookies = py
+    .detach(|| rookie_core::firefox_based(PathBuf::from(&db_path), domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -481,8 +507,9 @@ pub fn firefox_based_detailed(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies =
-    py.detach(|| rookie_core::firefox_based_detailed(PathBuf::from(&db_path), domains))?;
+  let cookies = py
+    .detach(|| rookie_core::firefox_based_detailed(PathBuf::from(&db_path), domains))
+    .map_err(crate::errors::classify_fault)?;
   detailed_to_dict(py, cookies)
 }
 
@@ -493,7 +520,9 @@ pub fn firefox_based_detailed(
 #[pyfunction]
 #[pyo3(signature = (domains=None))]
 pub fn load(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::load(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::load(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -505,7 +534,9 @@ pub fn load(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyA
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "windows")]
 pub fn octo_browser(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::octo_browser(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::octo_browser(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -517,7 +548,9 @@ pub fn octo_browser(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Ve
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "windows")]
 pub fn internet_explorer(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::internet_explorer(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::internet_explorer(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -535,14 +568,16 @@ pub fn chromium_based(
   db_path: String,
   domains: Option<Vec<String>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| {
-    rookie_core::chromium_based(
-      PathBuf::from(&key_path),
-      PathBuf::from(&db_path),
-      domains,
-      false,
-    )
-  })?;
+  let cookies = py
+    .detach(|| {
+      rookie_core::chromium_based(
+        PathBuf::from(&key_path),
+        PathBuf::from(&db_path),
+        domains,
+        false,
+      )
+    })
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 
@@ -575,7 +610,9 @@ pub fn chromium_based_detailed(
 #[pyo3(signature = (domains=None))]
 #[cfg(target_os = "macos")]
 pub fn safari(py: Python<'_>, domains: Option<Vec<String>>) -> PyResult<Vec<Py<PyAny>>> {
-  let cookies = py.detach(|| rookie_core::safari(domains))?;
+  let cookies = py
+    .detach(|| rookie_core::safari(domains))
+    .map_err(crate::errors::classify_fault)?;
   to_dict(py, cookies)
 }
 

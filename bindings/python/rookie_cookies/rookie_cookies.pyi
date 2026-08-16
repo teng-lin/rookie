@@ -49,6 +49,16 @@ class CancellationHandle:
     def cancel(self) -> bool: ...
     def is_cancelled(self) -> bool: ...
 
+class RookieRequestError(ValueError):
+    """
+    The caller's input was invalid -- an unsupported option or an explicit
+    source that does not match its declared kind. Fixable by changing what
+    was passed in.
+    """
+
+class RookieEngineError(RuntimeError):
+    """Extraction or engine failure unrelated to caller input."""
+
 DetailedCookieList = List[DetailedCookie]
 FirefoxProfile = Dict[str, Any]
 FirefoxProfileList = List[FirefoxProfile]

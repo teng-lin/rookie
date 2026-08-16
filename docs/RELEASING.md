@@ -211,6 +211,43 @@ evidence. Do not claim the historical detection is cleared, or close #191,
 until a current checksum-identified scan is recorded or ESET has reclassified
 the exact sample.
 
+## Packaging-proof: what the release pipeline actually verifies
+
+Each publish workflow (`publish-cli.yml`, `publish-npm.yml`, `publish-py.yml`)
+writes a `release-scan-manifest.json` (`scripts/write-release-scan-manifest.py`)
+before its registry-writing step, then runs
+`scripts/run-consumer-harness.py` against it. Together these give every
+shipped artifact:
+
+- **A digest tied to its declared helper roles.** Each manifest record's
+  `helper_roles` is matched against the artifact's cell in
+  `release/platform-contract.json` (by filename — CLI binary target triple,
+  npm package/addon platform, or wheel platform tag) at write time, and
+  re-checked against the *current* contract at verify time — so "client plus
+  every enabled helper role" is one digest-identified, cross-checked unit,
+  not an implicit assumption. `scripts/run-consumer-harness.py
+  --check-native-coverage` (wired into `test-rust.yml`'s per-commit CI) fails
+  if a contract cell claims `execute: "native"` for an artifact type the
+  harness has no real exercise routine for.
+- **Real execution outside the checkout**, where the artifact's declared
+  platform matches the verifying host: the CLI binary's `--version`, and an
+  isolated `pip install` + `import` + `version()` for a Python wheel. An npm
+  tarball is checked structurally (package layout, declared entry point);
+  a native `.node` addon and a Python sdist stay checksum-verified only —
+  see `run-consumer-harness.py`'s module docstring for why.
+
+**What this does not cover**, and why it's out of scope here rather than
+silently skipped: the original PR6 spec (tracked through #225 and #230 R3)
+also called for "each advertised supervised cell passes a parent-death
+canary on its real installed host" and "inability to arm containment rejects
+before spawn." Every helper role (`keychain`, `keyring`, `dpapi`, `appbound`)
+runs in-process today — nothing in this codebase spawns one as a separately
+supervised child process, so there is no containment surface to arm and no
+parent boundary for a canary to watch. That is not something this pipeline
+can honestly claim to check. Building the process-isolation architecture
+that language actually requires is tracked separately in
+[#244](https://github.com/teng-lin/rookie-cookies/issues/244).
+
 ## Verify
 
 Confirm the exact versions on each registry, then smoke-test clean installs:
