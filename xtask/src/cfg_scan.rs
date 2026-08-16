@@ -47,7 +47,9 @@ impl<'ast> Visit<'ast> for CfgVisitor {
       let start = attr.span().start();
       self.hits.push(CfgHit {
         line: start.line,
-        column: start.column,
+        // proc_macro2::LineColumn::column is 0-based; render_hits prints
+        // it directly as `path:line:column`, where 1-based is expected.
+        column: start.column + 1,
         snippet: rendered(attr),
       });
     }
@@ -80,7 +82,7 @@ impl CfgVisitor {
               let start = ident.span().start();
               self.hits.push(CfgHit {
                 line: start.line,
-                column: start.column,
+                column: start.column + 1,
                 snippet: format!("{ident}({}) (inside a macro body)", group.stream()),
               });
             }
@@ -153,6 +155,16 @@ mod tests {
     );
     assert_eq!(found.len(), 1);
     assert!(found[0].snippet.contains("target_os"));
+  }
+
+  #[test]
+  fn reports_a_1_based_column_matching_the_1_based_line() {
+    // proc_macro2::LineColumn::column is 0-based; hits must convert it to
+    // the 1-based convention `path:line:column` output expects.
+    let found = hits("#[cfg(unix)]\nfn a() {}\n");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].line, 1);
+    assert_eq!(found[0].column, 1, "column must be 1-based, not 0-based");
   }
 
   #[test]

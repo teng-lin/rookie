@@ -20,9 +20,9 @@ The lint workflow also enforces the authoritative-discovery boundary: the old
 not add `paths::find_*` calls, and the packaged crate must contain
 `browser_registry.json`.
 
-A separate `cargo run -p xtask -- check-cfg-locations` step enforces issue
-#218's platform-cfg containment: every `target_os`/`windows`/`unix` (etc.)
-`cfg`/`cfg_attr` attribute under `rookie-rs/src` must be in
+A separate `cargo run -p xtask -- check-cfg-locations` step enforces the
+platform-cfg containment of issue #218: every `target_os`/`windows`/`unix`
+(etc.) `cfg`/`cfg_attr` attribute under `rookie-rs/src` must be in
 `cfg-location-allowlist.toml`, either as an unlimited capability leaf or as a
 core file whose current cfg count is ratcheted to never increase without a
 deliberate, reviewed edit to that file.
