@@ -3256,7 +3256,7 @@ pub(crate) fn safari_profiles(browser_id: &str) -> Result<EngineExtractionOutcom
 #[cfg(any(target_os = "windows", test))]
 mod internet_explorer;
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 pub(crate) use internet_explorer::InternetExplorerRows;
 #[cfg(target_os = "windows")]
 pub(crate) use internet_explorer::{
