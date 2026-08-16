@@ -8,6 +8,7 @@
 //!
 //! Closes audit finding C6 in `.sisyphus/plans/test-coverage-audit.md`.
 
+#[cfg(unix)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
