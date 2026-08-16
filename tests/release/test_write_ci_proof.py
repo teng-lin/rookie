@@ -62,11 +62,17 @@ def build_good_fixture(
                 "started_at": "2026-01-01T00:00:00Z",
             }
         )
-        jobs_by_id[check_id] = {"run_id": run_id, "head_sha": commit_sha, "run_attempt": 1}
+        jobs_by_id[check_id] = {
+            "run_id": run_id,
+            "head_sha": commit_sha,
+            "run_attempt": 1,
+            "name": name,
+        }
         runs_by_id[run_id] = {
             "path": path,
             "event": "push",
             "head_sha": commit_sha,
+            "head_branch": "main",
             "conclusion": "success",
             "head_repository": {"full_name": repo},
         }
@@ -147,6 +153,50 @@ class VerifyRequiredChecksTests(unittest.TestCase):
             _verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
 
         self.assertTrue(any("run event is" in failure for failure in failures))
+
+    def test_a_genuine_schedule_triggered_run_is_accepted(self) -> None:
+        # A cron re-run of the same checks (artifact-smoke.yml/e2e.yml both
+        # have a Monday schedule) is exactly as trustworthy as a push run --
+        # rejecting it would be a false failure on a perfectly genuine run.
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        for run in runs.values():
+            run["event"] = "schedule"
+        with mock.patch.object(
+            write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
+        ):
+            verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(verified), len(write_ci_proof.REQUIRED_CHECK_RUNS))
+
+    def test_a_workflow_dispatch_run_against_a_non_main_branch_is_rejected(self) -> None:
+        # workflow_dispatch can target a feature ref (e2e.yml documents this
+        # explicitly for pre-merge validation); head_sha pinning already
+        # makes this hard to exploit, but head_branch is cheap,
+        # unconditional defense-in-depth on top of that.
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        target_run_id = jobs[100]["run_id"]
+        runs[target_run_id]["event"] = "workflow_dispatch"
+        runs[target_run_id]["head_branch"] = "some-feature-branch"
+        with mock.patch.object(
+            write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
+        ):
+            _verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
+
+        self.assertTrue(any("head_branch" in failure for failure in failures))
+
+    def test_a_resolved_job_with_a_mismatched_name_is_rejected(self) -> None:
+        # If check_run.id and job.id were ever allocated from separate ID
+        # spaces, this is what would catch it: the job actually resolved to
+        # must be the job that produced the check-run being verified.
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        jobs[100]["name"] = "some other job entirely"
+        with mock.patch.object(
+            write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
+        ):
+            _verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
+
+        self.assertTrue(any("check-run/job correlation is broken" in failure for failure in failures))
 
     def test_a_forks_head_repository_is_rejected(self) -> None:
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)

@@ -114,7 +114,14 @@ jobs:
         run: |
           set -euo pipefail
           contract_digest="$(python3 scripts/platform_contract.py --digest)"
-          mapfile -t artifacts < <(find candidate-root -type f | sort)
+          # _artifact-smoke.yml's build job uploads target/artifact-smoke-release
+          # as a whole (see tests/artifact_smoke/package_release_artifacts.py),
+          # which includes a provenance.json alongside the cli/python/npm
+          # artifact directories -- that file matches no platform-contract
+          # cell, so write-release-scan-manifest.py fails closed on it if it's
+          # included here. Restrict to the three real artifact directories.
+          mapfile -t artifacts < <(find candidate-root -type f \
+            \( -path '*/cli/*' -o -path '*/python/*' -o -path '*/npm/*' \) | sort)
           test "${#artifacts[@]}" -gt 0
           python3 scripts/write-release-scan-manifest.py \
             --version "0.0.0-candidate" \

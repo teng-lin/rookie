@@ -98,12 +98,26 @@ assert set(_TRUSTED_WORKFLOW_FOR_CHECK) == set(REQUIRED_CHECK_RUNS), (
     "every REQUIRED_CHECK_RUNS name must have a trusted workflow mapping, and vice versa"
 )
 
-# All three trusted workflows above trigger on `push`, and a release commit
-# (checked here) always exists on `main` as its own push-triggered commit
-# (this repo squash-merges PRs, so a pull_request-triggered run's head_sha is
-# the pre-merge branch commit, never the post-merge commit being verified) --
-# so one uniform expected event, not a per-check allowlist, is correct here.
-_TRUSTED_EVENT = "push"
+# All three trusted workflows also trigger on `schedule` and `workflow_dispatch`
+# (see e.g. artifact-smoke.yml's Monday cron, e2e.yml's Monday cron, and
+# every workflow's manual workflow_dispatch trigger) -- rejecting those would
+# produce false failures on a perfectly genuine run: `verify_required_checks`
+# already picks the *most recently started* run for a given check name, so a
+# Monday cron firing while a release commit sits at the tip of `main` would
+# otherwise be rejected even though it re-ran (and re-passed) the exact same
+# checks. `pull_request` is deliberately excluded: this repo squash-merges
+# PRs, so a pull_request-triggered run's head_sha is the pre-merge branch
+# commit, never the post-merge commit being verified here.
+_TRUSTED_EVENTS = {"push", "schedule", "workflow_dispatch"}
+
+# `workflow_dispatch` specifically can target a non-main ref (see
+# e2e.yml's windows-chrome-appbound job comment: "maintainers may explicitly
+# select a trusted feature ref for pre-merge validation with
+# workflow_dispatch") -- head_sha pinning to the exact target commit already
+# makes that hard to exploit (a feature-branch run's head_sha would need to
+# collide with the release commit's own SHA), but head_branch is cheap,
+# unconditional defense-in-depth rather than relying solely on that.
+_TRUSTED_BRANCH = "main"
 
 
 def verify_required_checks(repo: str, commit_sha: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -138,6 +152,19 @@ def verify_required_checks(repo: str, commit_sha: str) -> tuple[list[dict[str, A
         except ControlFailure as error:
             failures.append(f"required check {name!r}: could not resolve producing job: {error}")
             continue
+        # check_run.id == job.id is documented as GitHub's own correlation
+        # key, not a self-reported field -- but nothing structurally
+        # guarantees that assumption stays true. Cross-checking the
+        # resolved job's own name against the check-run's name makes it
+        # self-verifying: if the ID spaces ever diverged, this catches it
+        # immediately instead of silently trusting whatever job that ID
+        # happened to resolve to.
+        if job.get("name") != name:
+            failures.append(
+                f"required check {name!r}: resolved job {latest['id']} is named "
+                f"{job.get('name')!r} -- check-run/job correlation is broken"
+            )
+            continue
         run_id = job.get("run_id")
         try:
             run = gh_api(f"actions/runs/{run_id}", repo=repo)
@@ -152,9 +179,16 @@ def verify_required_checks(repo: str, commit_sha: str) -> tuple[list[dict[str, A
                 f"expected {expected_path!r}"
             )
             continue
-        if run.get("event") != _TRUSTED_EVENT:
+        if run.get("event") not in _TRUSTED_EVENTS:
             failures.append(
-                f"required check {name!r}: run event is {run.get('event')!r}, expected {_TRUSTED_EVENT!r}"
+                f"required check {name!r}: run event is {run.get('event')!r}, "
+                f"expected one of {sorted(_TRUSTED_EVENTS)!r}"
+            )
+            continue
+        if run.get("head_branch") != _TRUSTED_BRANCH:
+            failures.append(
+                f"required check {name!r}: run head_branch is {run.get('head_branch')!r}, "
+                f"expected {_TRUSTED_BRANCH!r}"
             )
             continue
         if job.get("head_sha") != commit_sha or run.get("head_sha") != commit_sha:

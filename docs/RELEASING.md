@@ -273,7 +273,9 @@ test are today two independent, unlinked builds of the same code.
 `scripts/check-release-controls.py`'s existing required-checks preflight
 verifies a commit's checks by name alone against `commits/{sha}/check-runs`
 — it doesn't verify which workflow, run, or repository actually produced
-each one, which the GitHub Checks API doesn't tie to a self-reported name.
+each one, and the GitHub Checks API doesn't tie a check-run's name to any
+particular workflow: any token or App with `checks:write` on the repo can
+post a check-run under an arbitrary name for an arbitrary commit.
 `write-ci-proof.py` resolves every required check to its exact producing job
 and run (`check_run.id == job.id`, then `actions/jobs/{id}` →
 `actions/runs/{run_id}`) and verifies the run's repository, workflow file
@@ -286,12 +288,15 @@ deferred full attestation — this is a digest binding, not a signature.
 Both scripts have full unit test coverage (`tests/release/test_jcs.py`,
 `tests/release/test_write_ci_proof.py`, and the extended
 `tests/e2e/test_release_scan_manifest.py` /
-`tests/e2e/test_run_consumer_harness.py` / `tests/release/test_platform_contract.py`)
-and `write-ci-proof.py` has been exercised against this repo's real Actions
-history, not just mocked fixtures. What's still open: wiring either into a
-publish workflow as an actual gate, and the rest of #230's PR 2 (R6's
-digest-safe publication state machine and R7's controlled cutover), neither
-of which is started.
+`tests/e2e/test_run_consumer_harness.py` / `tests/release/test_platform_contract.py`).
+`write-ci-proof.py`'s tests mock every `gh_api` response; anyone changing its
+verification logic should re-run it by hand against a real commit
+(`python3 scripts/write-ci-proof.py --commit-sha <sha> --manifest-digest <64
+hex chars> --output /tmp/ci-proof.json`, read-only against the GitHub API) as
+part of that review, since no CI job currently re-exercises it against live
+data. What's still open: wiring either script into a publish workflow as an
+actual gate, and the rest of #230's PR 2 (R6's digest-safe publication state
+machine and R7's controlled cutover), neither of which is started.
 
 ## Verify
 
