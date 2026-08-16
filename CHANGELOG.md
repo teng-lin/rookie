@@ -11,6 +11,18 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Python and Node.js now expose canonical `cookies_from_path` / `cookiesFromPath`
   and explicit Chromium path APIs with credential options matching Rust's typed
   direct-path builders. The CLI adds `--browser-id` and `--plaintext-only`.
+- Rust's `Request`, `DirectPathRequest`, and `ChromiumPathRequest` gain
+  `.timeout(Duration)` and a new `CancellationHandle`/`.cancellation(...)` for
+  cooperative, cross-thread cancellation of an in-flight extraction, plus a
+  `stop_reason()` helper to tell a timeout from a cancellation. Python's
+  `cookies_from_path`/`chromium_cookies_from_path(_detailed)` and Node's
+  `cookiesFromPath`/`chromiumCookiesFromPath(Detailed)` and every
+  single-browser export (`firefox`, `chrome`, `safari`, etc.) accept matching
+  `timeout`/`cancellation` (Python, via a new `CancellationHandle` class) or
+  `timeoutMs`/`cancellation` (Node.js, via a new `JsCancellationHandle` class)
+  parameters. The CLI's `--browser` and `--path` modes now cancel cleanly on
+  `SIGINT`/`SIGTERM` instead of aborting mid-extraction, and no longer panics
+  on a closed downstream pipe (e.g. `rookie-cookies --load | head -1`).
 
 ### Changed
 
