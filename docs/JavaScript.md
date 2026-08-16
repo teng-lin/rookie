@@ -77,6 +77,40 @@ installation. Invalid option shapes reject their Promise with `TypeError`
 before database I/O; the functions never throw synchronously. Process shutdown
 is not exposed by the Node binding.
 
+### Timeouts and cancellation
+
+`cookiesFromPath`, `chromiumCookiesFromPath`/`chromiumCookiesFromPathDetailed`,
+and every single-browser export (`firefox`, `chrome`, `brave`, ...) accept
+extra `timeoutMs` and `cancellation` arguments. `cancellation` is a
+`CancellationHandle`, safe to `cancel()` from the JS main thread while
+extraction runs on the worker threadpool:
+
+```js
+import { chrome, CancellationHandle } from "rookie-cookies";
+
+const cancellation = new CancellationHandle();
+const timer = setTimeout(() => cancellation.cancel(), 5000);
+
+try {
+  const cookies = await chrome(undefined, 30000, cancellation);
+  console.log(cookies);
+} catch (error) {
+  if (error.message.includes("operation deadline expired")) {
+    console.log("timed out");
+  } else if (error.message.includes("operation cancelled")) {
+    console.log("cancelled");
+  } else {
+    throw error;
+  }
+} finally {
+  clearTimeout(timer);
+}
+```
+
+Cancellation and timeouts are checked cooperatively, so they take effect
+mid-extraction rather than only before it starts, but a single long-running
+step is not interrupted mid-step.
+
 `anyBrowser()`, the Chromium `*Based` pair, and flat `firefoxBased()` are
 deprecated in 0.6 for removal no earlier than 0.7. Their 0.6 behavior remains
 unchanged, and `firefoxBasedDetailed()` is not deprecated.

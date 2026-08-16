@@ -62,7 +62,7 @@ class RookieCookiesHelpersTest(unittest.TestCase):
     def test_canonical_direct_path_runtime_signatures(self) -> None:
         self.assertEqual(
             str(inspect.signature(rookie_cookies.cookies_from_path)),
-            "(path, domains=None)",
+            "(path, domains=None, timeout=None, cancellation=None)",
         )
         self.assertEqual(
             str(inspect.signature(rookie_cookies.chromium_cookies_from_path)),
@@ -73,7 +73,12 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "def cookies_from_path(\n    path: str, domains: list[str] | None = None",
+            "def cookies_from_path(\n"
+            "    path: str,\n"
+            "    domains: list[str] | None = None,\n"
+            "    timeout: float | None = None,\n"
+            "    cancellation: CancellationHandle | None = None,\n"
+            ") -> CookieList:",
             stub,
         )
         self.assertIn(
@@ -105,6 +110,37 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             )
 
         self.assertEqual([cookie["name"] for cookie in cookies], ["wanted"])
+
+    def test_cookies_from_path_rejects_once_its_timeout_budget_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "cookies.sqlite"
+            _seed_firefox_database(db_path, [(".example.test", "wanted", "value")])
+            with self.assertRaisesRegex(RuntimeError, "operation deadline expired"):
+                rookie_cookies.cookies_from_path(str(db_path), timeout=0.0)
+
+    def test_cookies_from_path_rejects_an_already_cancelled_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "cookies.sqlite"
+            _seed_firefox_database(db_path, [(".example.test", "wanted", "value")])
+            handle = rookie_cookies.CancellationHandle()
+            handle.cancel()
+            with self.assertRaisesRegex(RuntimeError, "operation cancelled"):
+                rookie_cookies.cookies_from_path(str(db_path), cancellation=handle)
+
+    def test_cancellation_handle_tracks_its_own_cancelled_state(self) -> None:
+        handle = rookie_cookies.CancellationHandle()
+        self.assertFalse(handle.is_cancelled())
+        self.assertTrue(handle.cancel())
+        self.assertTrue(handle.is_cancelled())
+        self.assertFalse(handle.cancel())
+
+    def test_timeout_rejects_values_a_duration_cannot_represent(self) -> None:
+        with self.assertRaises(ValueError):
+            rookie_cookies.cookies_from_path("/nonexistent", timeout=1e20)
+        with self.assertRaises(ValueError):
+            rookie_cookies.cookies_from_path("/nonexistent", timeout=-1.0)
+        with self.assertRaises(ValueError):
+            rookie_cookies.cookies_from_path("/nonexistent", timeout=float("nan"))
 
     @unittest.skipUnless(
         sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},

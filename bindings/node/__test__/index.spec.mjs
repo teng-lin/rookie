@@ -27,7 +27,7 @@ const execFileAsync = promisify(execFile);
 // functions are validated while the facade is constructed; this list also
 // guards against the documented facade and its smoke test drifting apart.
 const EXPECTED_EXPORTS = [
-  "JsCancellationHandle",
+  "CancellationHandle",
   "version",
   "toNetscape",
   "anyBrowser",
@@ -135,8 +135,8 @@ test("version returns a non-empty string", (t) => {
 });
 
 test("the generated facade validates required native exports", (t) => {
-  t.throws(() => constructFacade("linux", "JsCancellationHandle"), {
-    message: /native binding function: JsCancellationHandle/,
+  t.throws(() => constructFacade("linux", "CancellationHandle"), {
+    message: /native binding function: CancellationHandle/,
   });
   t.throws(() => constructFacade("linux", "version"), {
     message: /native binding function: version/,
@@ -282,8 +282,8 @@ test("cookiesFromPath classifies Firefox and applies domain filters", async (t) 
   }
 });
 
-test("JsCancellationHandle tracks its own cancelled state", (t) => {
-  const handle = new rookieCookies.JsCancellationHandle();
+test("CancellationHandle tracks its own cancelled state", (t) => {
+  const handle = new rookieCookies.CancellationHandle();
   t.false(handle.isCancelled);
   t.true(handle.cancel(), "the first cancel() call takes effect");
   t.true(handle.isCancelled);
@@ -314,7 +314,7 @@ test("cookiesFromPath rejects when handed an already-cancelled handle", async (t
       dbPath,
       new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
     );
-    const handle = new rookieCookies.JsCancellationHandle();
+    const handle = new rookieCookies.CancellationHandle();
     handle.cancel();
     await t.throwsAsync(
       rookieCookies.cookiesFromPath(dbPath, null, undefined, handle),
@@ -323,6 +323,17 @@ test("cookiesFromPath rejects when handed an already-cancelled handle", async (t
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a migrated single-browser export honors timeoutMs like cookiesFromPath", async (t) => {
+  // Every async_named_browser_fn!-generated export (firefox, chrome, safari,
+  // ...) shares one macro body, so this stands in for the whole family: the
+  // deadline checkpoint runs before any real profile discovery -- proven at
+  // the Rust level by zero_timeout_stops_extraction_before_any_browser_lookup
+  // -- so this needs no installed-browser fixture to be deterministic.
+  await t.throwsAsync(rookieCookies.firefox(null, 0), {
+    message: /operation deadline expired/,
+  });
 });
 
 test("canonical Chromium paths support flat, detailed, and domain projections", async (t) => {
@@ -633,17 +644,17 @@ test("canonical direct-path declarations and compatibility deprecations are exac
   );
   t.true(
     types.includes(
-      "export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: JsCancellationHandle | null): Promise<CookieObject[]>",
+      "export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>",
     ),
   );
   t.true(
     types.includes(
-      "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: JsCancellationHandle | null): Promise<CookieObject[]>",
+      "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>",
     ),
   );
   t.true(
     types.includes(
-      "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: JsCancellationHandle | null): Promise<DetailedCookieObject[]>",
+      "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>",
     ),
   );
   t.regex(types, /@deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`/);
@@ -1031,6 +1042,27 @@ test("patch-loader rejects an unrecognized napi destructure line", (t) => {
 
   t.not(result.status, 0);
   t.regex(result.stderr, /could not find the napi-generated/);
+});
+
+test("patch-loader rejects a registry/#[cfg(...)] platform mismatch on fresh napi output", (t) => {
+  const result = runPatchLoader(({ loader, types }) => {
+    const facadeIndex = types.indexOf("/** rookie-cookies cross-platform facade */");
+    let rawTypes = types.slice(0, facadeIndex === -1 ? types.length : facadeIndex);
+    // browser_registry.json only registers `cachy` on Linux. Simulate the
+    // Rust #[cfg(...)] gate having drifted out of sync with that: on Linux,
+    // as if it stopped compiling there; everywhere else, as if it started
+    // compiling somewhere it shouldn't.
+    if (process.platform === "linux") {
+      rawTypes = rawTypes.replace(/^export declare function cachy\([^\n]*\n/m, "");
+    } else {
+      rawTypes +=
+        "export declare function cachy(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>\n";
+    }
+    return { loader, types: rawTypes };
+  });
+
+  t.not(result.status, 0);
+  t.regex(result.stderr, /'cachy' disagrees with bindings\/node\/src\/lib\.rs/);
 });
 
 test.serial("report extraction runs off the event loop", async (t) => {

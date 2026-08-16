@@ -1086,6 +1086,43 @@ mod tests {
   }
 
   #[test]
+  fn cancelling_from_another_thread_stops_a_running_checkpoint_loop_promptly() {
+    // Proves the cross-thread claim itself: cancellation observed by a loop
+    // that is *already running*, set from a second thread mid-flight, not
+    // just a pre-cancelled handle checked before any work starts.
+    use std::time::{Duration, Instant};
+
+    let handle = CancellationHandle::new();
+    let clock = common::deadline::SystemClock;
+    let deadline = common::deadline::Deadline::after(&clock, Duration::from_secs(30));
+    let token = handle.0.clone();
+
+    let canceller = {
+      let handle = handle.clone();
+      std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        handle.cancel();
+      })
+    };
+
+    let started = Instant::now();
+    let stop = loop {
+      if let Err(stop) = common::deadline::checkpoint(&clock, deadline, &token) {
+        break stop;
+      }
+      std::thread::sleep(Duration::from_millis(5));
+    };
+    let elapsed = started.elapsed();
+    canceller.join().expect("canceller thread must not panic");
+
+    assert_eq!(stop, common::deadline::BoundaryStop::Cancelled);
+    assert!(
+      elapsed < Duration::from_secs(5),
+      "a cross-thread cancellation must stop an in-progress loop promptly, took {elapsed:?}"
+    );
+  }
+
+  #[test]
   fn cancelling_one_clone_cancels_every_clone() {
     let handle = CancellationHandle::new();
     let clone = handle.clone();

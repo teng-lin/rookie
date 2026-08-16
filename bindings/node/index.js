@@ -324,9 +324,9 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { JsCancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
+const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
-module.exports.JsCancellationHandle = JsCancellationHandle
+module.exports.CancellationHandle = CancellationHandle
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
     throw new TypeError(`Expected a native binding function: ${name}`)
@@ -446,7 +446,7 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
 
-module.exports.JsCancellationHandle = requiredNative(JsCancellationHandle, 'JsCancellationHandle')
+module.exports.CancellationHandle = requiredNative(CancellationHandle, 'CancellationHandle')
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')

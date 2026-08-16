@@ -14,15 +14,18 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rust's `Request`, `DirectPathRequest`, and `ChromiumPathRequest` gain
   `.timeout(Duration)` and a new `CancellationHandle`/`.cancellation(...)` for
   cooperative, cross-thread cancellation of an in-flight extraction, plus a
-  `stop_reason()` helper to tell a timeout from a cancellation. Python's
-  `cookies_from_path`/`chromium_cookies_from_path(_detailed)` and Node's
-  `cookiesFromPath`/`chromiumCookiesFromPath(Detailed)` and every
+  `stop_reason()` helper to tell a timeout from a cancellation. Node's
+  `cookiesFromPath`, `chromiumCookiesFromPath(Detailed)`, and every
   single-browser export (`firefox`, `chrome`, `safari`, etc.) accept matching
-  `timeout`/`cancellation` (Python, via a new `CancellationHandle` class) or
-  `timeoutMs`/`cancellation` (Node.js, via a new `JsCancellationHandle` class)
-  parameters. The CLI's `--browser` and `--path` modes now cancel cleanly on
-  `SIGINT`/`SIGTERM` instead of aborting mid-extraction, and no longer panics
-  on a closed downstream pipe (e.g. `rookie-cookies --load | head -1`).
+  `timeoutMs`/`cancellation` parameters, via a new `CancellationHandle` class.
+  Python's `cookies_from_path` gains matching `timeout`/`cancellation` keyword
+  arguments, and `chromium_cookies_from_path(_detailed)` gain matching
+  `timeout`/`cancellation` options-dict keys, via a new `CancellationHandle`
+  class; Python's other named-browser functions (`firefox`, `chrome`, etc.)
+  are unchanged. The CLI's `--browser` and `--path` modes now cancel cleanly
+  on `SIGINT`/`SIGTERM` instead of aborting mid-extraction (a second signal
+  forces an immediate exit), and no longer panics on a closed downstream pipe
+  (e.g. `rookie-cookies --load | head -1`).
 
 ### Changed
 

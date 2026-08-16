@@ -206,12 +206,14 @@ fn direct_path_runtime_error(error: rookie_core::anyhow::Error) -> PyErr {
 }
 
 fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
-  if !seconds.is_finite() || seconds < 0.0 {
-    return Err(PyValueError::new_err(
-      "timeout must be a non-negative, finite number of seconds",
-    ));
-  }
-  Ok(std::time::Duration::from_secs_f64(seconds))
+  // The fallible constructor rejects everything `Duration::from_secs_f64`
+  // would otherwise panic on: negative, non-finite, and merely finite values
+  // too large to represent as a `Duration`.
+  std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+    PyValueError::new_err(
+      "timeout must be a non-negative, finite number of seconds representable as a Duration",
+    )
+  })
 }
 
 /// Extract cookies after identifying an explicit cookie source.

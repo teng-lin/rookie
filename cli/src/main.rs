@@ -36,6 +36,14 @@ fn print_line_or_exit(line: &str) {
 /// Creates a [`CancellationHandle`] and arms `SIGINT`/`SIGTERM` (Ctrl-C, or
 /// a terminal hangup, on Unix; Ctrl-C/Ctrl-Break on Windows) to cancel it.
 ///
+/// Cancellation is cooperative: it takes effect at the next boundary
+/// checkpoint, not instantly. A signal received after the first one (the
+/// caller pressing Ctrl-C again because nothing happened yet, e.g. while
+/// blocked on a non-cooperative wait like a keychain prompt) exits the
+/// process immediately instead of waiting for a checkpoint that may not
+/// come soon -- the conventional "first signal asks nicely, second signal
+/// means it now" escalation.
+///
 /// Only the `--browser`/`--path` extraction modes call this: those are the
 /// only ones built from a [`rookie_cookies::Request`]/`DirectPathRequest`/
 /// `ChromiumPathRequest`, which is what actually observes cancellation.
@@ -49,10 +57,22 @@ fn install_cancel_on_signal() -> CancellationHandle {
   // A signal handler that can't be installed (e.g. a second call, or a
   // hostile embedding environment) leaves the default disposition in place,
   // which still terminates the process -- less gracefully, but not silently
-  // stuck, so an install failure is safe to ignore here.
-  let _ = ctrlc::set_handler(move || {
-    armed.cancel();
-  });
+  // stuck -- so an install failure doesn't need to abort startup, but it is
+  // logged so "Ctrl-C didn't clean up" is diagnosable instead of invisible.
+  if let Err(error) = ctrlc::set_handler(move || {
+    // `cancel()` returns `false` when this handle was already cancelled, so
+    // a repeated signal past the first one exits immediately rather than
+    // being silently ignored while cooperative cancellation is still
+    // pending at its next checkpoint.
+    if !armed.cancel() {
+      std::process::exit(130);
+    }
+  }) {
+    tracing::warn!(
+      %error,
+      "failed to install SIGINT/SIGTERM handler; Ctrl-C will terminate immediately without graceful cancellation"
+    );
+  }
   handle
 }
 

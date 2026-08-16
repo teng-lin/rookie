@@ -26,7 +26,10 @@ use std::time::Duration;
 /// flag that the extraction observes at the same deadline/cancellation
 /// checkpoints a `timeoutMs` budget uses, so cancellation takes effect
 /// mid-extraction rather than only before it starts.
-#[napi]
+// `js_name` keeps the Rust-side `Js`-prefixed identifier (avoiding a name
+// clash with the imported `rookie_cookies::CancellationHandle`) off the
+// public JS API, matching the Python binding's plain `CancellationHandle`.
+#[napi(js_name = "CancellationHandle")]
 pub struct JsCancellationHandle(CancellationHandle);
 
 impl Default for JsCancellationHandle {

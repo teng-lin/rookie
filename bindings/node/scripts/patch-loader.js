@@ -89,7 +89,7 @@ function legacyPlatformDeclarations() {
       const heading = `/** ${nodePlatformDisplayList(platforms)}-only browsers */`
       const declarations = functionNames.map(
         (functionName) =>
-          `export declare function ${functionName}(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: JsCancellationHandle | undefined | null): Promise<Array<CookieObject>>`
+          `export declare function ${functionName}(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>`
       )
       return [heading, ...declarations].join('\n')
     })
@@ -134,7 +134,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { JsCancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
+  'const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
 )
 
 const exportStart = loader.search(
@@ -264,7 +264,7 @@ function platformNative(nativeFunction, name, nodePlatforms, supportedPlatform) 
   return asyncNative(unsupportedPlatform(name, supportedPlatform), name)
 }
 
-module.exports.JsCancellationHandle = requiredNative(JsCancellationHandle, 'JsCancellationHandle')
+module.exports.CancellationHandle = requiredNative(CancellationHandle, 'CancellationHandle')
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
@@ -309,6 +309,17 @@ writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
 
+// Whether `types` is napi's own fresh output (the only case that can be
+// trusted to reflect this build's actual #[cfg(...)] gates) or a *previously
+// patched* file being fed back in, e.g. by a test asserting patch-loader.js
+// is idempotent on its own output. A prior patch run already stripped every
+// legacy platform function's original declaration and replaced it with one
+// unconditional copy per function under the facade marker, for every
+// platform regardless of what this build compiled -- so once that's
+// happened, presence/absence in `types` no longer means anything about this
+// build's #[cfg(...)] gates.
+const isFreshNapiOutput = !types.includes('/** rookie-cookies cross-platform facade */')
+
 const chromiumPathOptionsPattern = /^export interface ChromiumPathOptions \{\n(?:  .*\n)*\}/m
 if (!chromiumPathOptionsPattern.test(types)) {
   throw new Error('patch-loader.js: generated declarations are missing ChromiumPathOptions')
@@ -326,15 +337,15 @@ types = types.replace(
 const canonicalDeclarationPatterns = [
   [
     /^export declare function cookiesFromPath\([^\n]*$/m,
-    'export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: JsCancellationHandle | null): Promise<CookieObject[]>',
+    'export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>',
   ],
   [
     /^export declare function chromiumCookiesFromPath\([^\n]*$/m,
-    'export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: JsCancellationHandle | null): Promise<CookieObject[]>',
+    'export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>',
   ],
   [
     /^export declare function chromiumCookiesFromPathDetailed\([^\n]*$/m,
-    'export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: JsCancellationHandle | null): Promise<DetailedCookieObject[]>',
+    'export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>',
   ],
 ]
 for (const [pattern, declaration] of canonicalDeclarationPatterns) {
@@ -379,6 +390,35 @@ if (undeclared.length > 0) {
   throw new Error(
     `Generated declarations were truncated: missing ${undeclared.join(', ')}`
   )
+}
+
+// The registry-derived platform list only helps if it agrees with the actual
+// `#[cfg(target_os = ...)]` gates in bindings/node/src/lib.rs -- both name the
+// same platforms by hand, in different files. On fresh napi output,
+// `generatedNames` is ground truth for what this build's #[cfg(...)] gates
+// actually compiled; a mismatch here would otherwise surface at import time
+// as a hard crash for every user on the affected platform (`platformNative`
+// calls `requiredNative` eagerly), not just callers of the one drifted
+// function. Runs only on fresh napi output that already passed the
+// completeness check above: an already-patched file's facade re-declares
+// every legacy platform function for every platform (making presence in
+// `types` meaningless there), and a truncated file would make an unrelated
+// omission look like a platform mismatch.
+if (isFreshNapiOutput) {
+  for (const functionName of Object.keys(LEGACY_PLATFORM_FUNCTIONS)) {
+    const registryExpectsThisPlatform = legacyFunctionPlatforms[functionName].includes(
+      process.platform,
+    )
+    const rustCompiledThisPlatform = generatedNames.has(functionName)
+    if (registryExpectsThisPlatform !== rustCompiledThisPlatform) {
+      throw new Error(
+        `patch-loader.js: '${functionName}' disagrees with bindings/node/src/lib.rs on ${process.platform} -- ` +
+          `browser_registry.json says it ${registryExpectsThisPlatform ? 'should' : 'should not'} be compiled here, ` +
+          `but the Rust #[cfg(...)] gate ${rustCompiledThisPlatform ? 'compiled' : 'did not compile'} it. ` +
+          'Keep browser_registry.json and the #[cfg(...)] gate in sync.',
+      )
+    }
+  }
 }
 
 // NAPI-RS emits declarations for the platform doing the build. Remove only
