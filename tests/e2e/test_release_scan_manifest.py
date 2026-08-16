@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -11,6 +12,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "write-release-scan-manifest.py"
+
+JCS_SPEC = importlib.util.spec_from_file_location("jcs", ROOT / "scripts/jcs.py")
+assert JCS_SPEC is not None and JCS_SPEC.loader is not None
+jcs = importlib.util.module_from_spec(JCS_SPEC)
+sys.modules[JCS_SPEC.name] = jcs
+JCS_SPEC.loader.exec_module(jcs)
 
 
 class ReleaseScanManifestTests(unittest.TestCase):
@@ -53,6 +60,19 @@ class ReleaseScanManifestTests(unittest.TestCase):
             )
 
             manifest = json.loads(output.read_text(encoding="utf-8"))
+            expected_digest = jcs.digest(
+                {
+                    "release": {
+                        "source_sha": source_sha,
+                        "controller_sha": controller_sha,
+                        "platform_contract_digest": contract_digest,
+                        "tag": "v0.5.9",
+                        "version": "0.5.9",
+                        "kind": "release",
+                    },
+                    "artifacts": manifest["artifacts"],
+                }
+            )
             self.assertEqual(
                 manifest["release"],
                 {
@@ -61,9 +81,11 @@ class ReleaseScanManifestTests(unittest.TestCase):
                     "platform_contract_digest": contract_digest,
                     "tag": "v0.5.9",
                     "version": "0.5.9",
+                    "kind": "release",
+                    "manifest_digest": expected_digest,
                 },
             )
-            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(manifest["schema_version"], 4)
             self.assertEqual(
                 [record["path"] for record in manifest["artifacts"]],
                 [
@@ -80,6 +102,102 @@ class ReleaseScanManifestTests(unittest.TestCase):
             # roles.
             for record in manifest["artifacts"]:
                 self.assertEqual(record["helper_roles"], ["appbound", "dpapi"])
+
+    def test_kind_defaults_to_release_and_accepts_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_root = Path(temporary) / "release"
+            artifact_root.mkdir()
+            artifact = artifact_root / "rookie-cookies-cli-x86_64-unknown-linux-gnu"
+            artifact.write_bytes(b"cli-binary")
+            output = artifact_root / "manifest.json"
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--version",
+                    "0.5.9",
+                    "--source-sha",
+                    "a" * 40,
+                    "--controller-sha",
+                    "c" * 40,
+                    "--platform-contract-digest",
+                    "d" * 64,
+                    "--kind",
+                    "candidate",
+                    "--root",
+                    str(artifact_root),
+                    "--output",
+                    str(output),
+                    str(artifact),
+                ],
+                check=True,
+            )
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["release"]["kind"], "candidate")
+
+            output.unlink()
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--version",
+                    "0.5.9",
+                    "--source-sha",
+                    "a" * 40,
+                    "--controller-sha",
+                    "c" * 40,
+                    "--platform-contract-digest",
+                    "d" * 64,
+                    "--root",
+                    str(artifact_root),
+                    "--output",
+                    str(output),
+                    str(artifact),
+                ],
+                check=True,
+            )
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["release"]["kind"], "release")
+
+    def test_manifest_digest_changes_when_an_artifact_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_root = Path(temporary) / "release"
+            artifact_root.mkdir()
+            artifact = artifact_root / "rookie-cookies-cli-x86_64-unknown-linux-gnu"
+            output = artifact_root / "manifest.json"
+            common_args = [
+                sys.executable,
+                str(SCRIPT),
+                "--version",
+                "0.5.9",
+                "--source-sha",
+                "a" * 40,
+                "--controller-sha",
+                "c" * 40,
+                "--platform-contract-digest",
+                "d" * 64,
+                "--root",
+                str(artifact_root),
+                "--output",
+                str(output),
+                str(artifact),
+            ]
+
+            artifact.write_bytes(b"first-build")
+            subprocess.run(common_args, check=True)
+            first_digest = json.loads(output.read_text(encoding="utf-8"))["release"][
+                "manifest_digest"
+            ]
+
+            output.unlink()
+            artifact.write_bytes(b"different-build")
+            subprocess.run(common_args, check=True)
+            second_digest = json.loads(output.read_text(encoding="utf-8"))["release"][
+                "manifest_digest"
+            ]
+
+            self.assertNotEqual(first_digest, second_digest)
 
     def test_rejects_artifacts_outside_the_manifest_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
