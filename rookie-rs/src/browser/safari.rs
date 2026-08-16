@@ -1066,6 +1066,11 @@ pub(crate) fn embedded_nul_test_fixture(field: &str, include_valid: bool) -> Vec
 }
 
 #[cfg(test)]
+pub(crate) fn golden_binarycookies_test_fixture() -> Vec<u8> {
+  tests::golden_fixture()
+}
+
+#[cfg(test)]
 pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
   let source = SafariReadOnlySource { bytes };
   let decoder = SafariBoundaryDecoder;
@@ -1317,7 +1322,7 @@ mod tests {
     file
   }
 
-  fn golden_fixture() -> Vec<u8> {
+  pub(super) fn golden_fixture() -> Vec<u8> {
     let cookie = build_cookie_record(&FixtureCookie {
       domain: ".example.test",
       name: "session",

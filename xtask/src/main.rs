@@ -384,6 +384,30 @@ mod tests {
   }
 
   #[test]
+  fn repo_root_resolves_to_the_workspace_root() {
+    let root = repo_root();
+    assert!(root.join("Cargo.toml").is_file());
+    assert!(root.join(SCAN_ROOT).is_dir());
+  }
+
+  /// Exercises the full scan/load/evaluate pipeline against the real
+  /// checkout. Deliberately does not assert on `report.ok`: whether the
+  /// workspace currently passes the cfg-location check is a property of
+  /// the checkout's current contents, not of this function -- asserting
+  /// it here would make an unrelated source edit fail this test instead
+  /// of `cargo run -p xtask -- check-cfg-locations`, which is where that
+  /// signal belongs.
+  #[test]
+  fn cmd_check_cfg_locations_runs_against_the_real_repository() {
+    cmd_check_cfg_locations().expect("scan and allowlist load must succeed against the real repo");
+  }
+
+  #[test]
+  fn cmd_list_cfg_locations_runs_against_the_real_repository() {
+    cmd_list_cfg_locations().expect("scan must succeed against the real repo");
+  }
+
+  #[test]
   fn scan_workspace_fails_closed_on_invalid_rust_source() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");

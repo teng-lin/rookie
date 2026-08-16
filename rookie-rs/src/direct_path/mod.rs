@@ -1182,13 +1182,23 @@ mod tests {
   fn unsupported_native_chromium_options_fail_before_credential_io() {
     let (_directory, path) = chromium_database(&[]);
     let local_state = PathBuf::from("this path must never be read");
-    let local_state_error = chromium_cookies_from_path(
+    let local_state_error =
+      chromium_cookies_from_path(ChromiumPathRequest::new(&path).credentials(
+        ChromiumCredentialSource::LocalStateFile(local_state.clone()),
+      ))
+      .unwrap_err();
+    assert_eq!(
+      direct_path_error(&local_state_error).invalid_options_reason(),
+      Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
+    );
+
+    let detailed_local_state_error = chromium_cookies_from_path_detailed(
       ChromiumPathRequest::new(&path)
         .credentials(ChromiumCredentialSource::LocalStateFile(local_state)),
     )
     .unwrap_err();
     assert_eq!(
-      direct_path_error(&local_state_error).invalid_options_reason(),
+      direct_path_error(&detailed_local_state_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
     );
 
@@ -1259,22 +1269,55 @@ mod tests {
   fn browser_without_target_credentials_reads_plaintext_but_rejects_encrypted_rows() {
     let (_plain_directory, plain_path) = chromium_database(&[("example.test", "plaintext", b"")]);
     let cookies = chromium_cookies_from_path(
-      ChromiumPathRequest::new(plain_path)
+      ChromiumPathRequest::new(&plain_path)
         .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
     )
     .unwrap();
     assert_eq!(cookies[0].value, "plaintext");
+    let detailed = chromium_cookies_from_path_detailed(
+      ChromiumPathRequest::new(plain_path)
+        .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
+    )
+    .unwrap();
+    assert_eq!(detailed[0].cookie.value, "plaintext");
 
     let (_encrypted_directory, encrypted_path) =
       chromium_database(&[("example.test", "", b"v10encrypted")]);
     let error = chromium_cookies_from_path(
-      ChromiumPathRequest::new(encrypted_path)
+      ChromiumPathRequest::new(&encrypted_path)
         .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
     )
     .unwrap_err();
     let diagnostic = format!("{error:#}");
     assert!(diagnostic.contains("has no"), "{diagnostic}");
     assert!(diagnostic.contains("identity"), "{diagnostic}");
+    let detailed_error = chromium_cookies_from_path_detailed(
+      ChromiumPathRequest::new(encrypted_path)
+        .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
+    )
+    .unwrap_err();
+    let detailed_diagnostic = format!("{detailed_error:#}");
+    assert!(
+      detailed_diagnostic.contains("has no"),
+      "{detailed_diagnostic}"
+    );
+    assert!(
+      detailed_diagnostic.contains("identity"),
+      "{detailed_diagnostic}"
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn a_recognized_safari_signature_dispatches_past_classification_on_macos() {
+    let safari_directory = TempDir::new().unwrap();
+    let safari_path = safari_directory.path().join("Cookies.binarycookies");
+    std::fs::write(&safari_path, b"cookfixture-not-a-real-binarycookies-file").unwrap();
+    let safari_error = cookies_from_path(DirectPathRequest::new(&safari_path)).unwrap_err();
+    assert!(
+      safari_error.downcast_ref::<DirectPathError>().is_none(),
+      "a recognized Safari signature must reach the real parser, not stay a classification error: {safari_error:#}"
+    );
   }
 
   #[test]
@@ -1292,6 +1335,131 @@ mod tests {
     );
     assert_eq!(error.target_os(), Some("freebsd"));
     assert_eq!(error.target_arch(), Some("x86_64"));
+    assert_eq!(error.path(), None);
+    assert_eq!(error.invalid_source_reason(), None);
+    assert_eq!(
+      error.to_string(),
+      "safari_binary_cookies extraction is unsupported on freebsd/x86_64"
+    );
+    assert_eq!(
+      format!("{error:?}"),
+      "UnsupportedTarget { source: SafariBinaryCookies, target_os: \"freebsd\", target_arch: \"x86_64\" }"
+    );
+  }
+
+  #[test]
+  fn invalid_options_accessors_are_stable() {
+    let error = DirectPathError::InvalidOptions {
+      source: CookieSourceKind::ChromiumSqlite,
+      reason: InvalidDirectPathOptionsReason::UnknownBrowserId,
+    };
+    assert_eq!(error.kind(), "invalid_options");
+    assert_eq!(error.code(), "unknown_browser_id");
+    assert_eq!(error.path(), None);
+    assert_eq!(error.source_kind(), Some(CookieSourceKind::ChromiumSqlite));
+    assert_eq!(error.target_os(), None);
+    assert_eq!(error.target_arch(), None);
+    assert_eq!(error.invalid_source_reason(), None);
+    assert_eq!(
+      error.invalid_options_reason(),
+      Some(&InvalidDirectPathOptionsReason::UnknownBrowserId)
+    );
+    assert_eq!(
+      error.to_string(),
+      "invalid options for chromium_sqlite: unknown_browser_id"
+    );
+    assert_eq!(
+      format!("{error:?}"),
+      "InvalidOptions { source: ChromiumSqlite, reason: UnknownBrowserId }"
+    );
+  }
+
+  #[test]
+  fn cookie_source_kind_display_covers_every_variant() {
+    for (source, expected) in [
+      (CookieSourceKind::ChromiumSqlite, "chromium_sqlite"),
+      (CookieSourceKind::MozillaSqlite, "mozilla_sqlite"),
+      (
+        CookieSourceKind::SafariBinaryCookies,
+        "safari_binary_cookies",
+      ),
+      (
+        CookieSourceKind::InternetExplorerEse,
+        "internet_explorer_ese",
+      ),
+    ] {
+      assert_eq!(source.to_string(), expected);
+    }
+  }
+
+  #[test]
+  fn invalid_cookie_source_reason_codes_cover_every_variant() {
+    for (reason, expected) in [
+      (
+        InvalidCookieSourceReason::NotARegularFile,
+        "not_a_regular_file",
+      ),
+      (
+        InvalidCookieSourceReason::SourceInspectionFailed,
+        "source_inspection_failed",
+      ),
+      (
+        InvalidCookieSourceReason::UnrecognizedSignature,
+        "unrecognized_signature",
+      ),
+      (
+        InvalidCookieSourceReason::UnsupportedSqliteSchema,
+        "unsupported_sqlite_schema",
+      ),
+      (
+        InvalidCookieSourceReason::AmbiguousSqliteSchema,
+        "ambiguous_sqlite_schema",
+      ),
+      (
+        InvalidCookieSourceReason::ExpectedChromiumSqlite {
+          actual: CookieSourceKind::MozillaSqlite,
+        },
+        "expected_chromium_sqlite",
+      ),
+    ] {
+      assert_eq!(reason.code(), expected);
+    }
+  }
+
+  #[test]
+  fn invalid_direct_path_options_reason_codes_cover_every_variant() {
+    for (reason, expected) in [
+      (
+        InvalidDirectPathOptionsReason::EmptyBrowserId,
+        "empty_browser_id",
+      ),
+      (
+        InvalidDirectPathOptionsReason::MissingLocalStateFile,
+        "missing_local_state_file",
+      ),
+      (
+        InvalidDirectPathOptionsReason::BrowserIdNotSupportedOnTarget,
+        "browser_id_not_supported_on_target",
+      ),
+      (
+        InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget,
+        "local_state_not_supported_on_target",
+      ),
+      (
+        InvalidDirectPathOptionsReason::ProcessShutdownNotSupportedOnTarget,
+        "process_shutdown_not_supported_on_target",
+      ),
+      (
+        InvalidDirectPathOptionsReason::UnknownBrowserId,
+        "unknown_browser_id",
+      ),
+      (
+        InvalidDirectPathOptionsReason::BrowserIdIsNotChromium,
+        "browser_id_is_not_chromium",
+      ),
+    ] {
+      assert_eq!(reason.code(), expected);
+    }
   }
 
   #[cfg(not(target_os = "macos"))]
