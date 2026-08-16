@@ -97,9 +97,10 @@ jobs:
           python3 scripts/generate-python-dto.py
           git diff --exit-code schema/report-dto.schema.json bindings/python/rookie_cookies/dto.py
       - name: Check platform cfg locations
-        # See issue #218: cfg-location-allowlist.toml is the only place a
-        # target_os/windows/unix cfg is allowed to appear outside a
-        # capability leaf. This is the final rollout item of that program.
+        # See issue #218: within rookie-rs/src (this program's actual scope
+        # -- bindings/CLI aren't covered), cfg-location-allowlist.toml is
+        # the only place a target_os/windows/unix cfg is allowed to appear
+        # outside a capability leaf. This is the final rollout item.
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: cargo run -p xtask --locked -- check-cfg-locations
 

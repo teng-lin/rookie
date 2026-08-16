@@ -10,13 +10,16 @@
 //! only asks "does this attribute mention a platform identifier anywhere",
 //! which is all issue #218's allowlist needs.
 
-use proc_macro2::TokenTree;
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::Attribute;
+use syn::{Attribute, Macro};
 
 const PLATFORM_IDENTS: &[&str] = &[
   "target_os",
+  "target_family",
+  "target_vendor",
+  "target_env",
   "windows",
   "unix",
   "macos",
@@ -49,6 +52,44 @@ impl<'ast> Visit<'ast> for CfgVisitor {
       });
     }
     syn::visit::visit_attribute(self, attr);
+  }
+
+  // `syn` cannot parse a macro's body -- `mac.tokens` is opaque, so
+  // `visit_attribute` above never sees a `#[cfg(...)]` written literally
+  // inside a `macro_rules!` definition, or the `#[cfg(...)]` a macro like
+  // `cfg_if::cfg_if!` takes as its own bespoke syntax. Scan the raw token
+  // stream by hand for the same `cfg`/`cfg_attr` name immediately followed
+  // by a parenthesized group -- this only needs to catch the shape, not
+  // parse it as a real attribute.
+  fn visit_macro(&mut self, mac: &'ast Macro) {
+    self.scan_macro_tokens(mac.tokens.clone());
+    syn::visit::visit_macro(self, mac);
+  }
+}
+
+impl CfgVisitor {
+  fn scan_macro_tokens(&mut self, tokens: TokenStream) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+      match tree {
+        TokenTree::Ident(ident) if ident == "cfg" || ident == "cfg_attr" => {
+          if let Some(TokenTree::Group(group)) = trees.get(index + 1) {
+            if group.delimiter() == Delimiter::Parenthesis
+              && tokens_mention_platform(group.stream())
+            {
+              let start = ident.span().start();
+              self.hits.push(CfgHit {
+                line: start.line,
+                column: start.column,
+                snippet: format!("{ident}({}) (inside a macro body)", group.stream()),
+              });
+            }
+          }
+        }
+        TokenTree::Group(group) => self.scan_macro_tokens(group.stream()),
+        TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+      }
+    }
   }
 }
 
@@ -188,5 +229,63 @@ mod tests {
       "#,
     );
     assert_eq!(found.len(), 1);
+  }
+
+  #[test]
+  fn finds_a_cfg_attribute_written_literally_inside_a_macro_rules_body() {
+    // syn cannot parse a macro's body, so this is invisible to
+    // visit_attribute -- only the macro-token scan catches it.
+    let found = hits(
+      r#"
+      macro_rules! gate {
+        () => {
+          #[cfg(target_os = "windows")]
+          fn hidden() {}
+        };
+      }
+      "#,
+    );
+    assert_eq!(found.len(), 1, "found: {found:?}");
+  }
+
+  #[test]
+  fn finds_cfg_if_style_macro_invocations() {
+    let found = hits(
+      r#"
+      cfg_if::cfg_if! {
+        if #[cfg(target_os = "windows")] {
+          fn a() {}
+        } else {
+          fn b() {}
+        }
+      }
+      "#,
+    );
+    assert_eq!(found.len(), 1, "found: {found:?}");
+  }
+
+  #[test]
+  fn ignores_non_platform_cfg_inside_a_macro_body() {
+    let found = hits(
+      r#"
+      macro_rules! gate {
+        () => {
+          #[cfg(test)]
+          fn hidden() {}
+        };
+      }
+      "#,
+    );
+    assert!(found.is_empty(), "expected no hits, got {found:?}");
+  }
+
+  #[test]
+  fn finds_target_family_target_vendor_and_target_env() {
+    assert_eq!(hits(r#"#[cfg(target_family = "unix")] fn a() {}"#).len(), 1);
+    assert_eq!(
+      hits(r#"#[cfg(target_vendor = "apple")] fn a() {}"#).len(),
+      1
+    );
+    assert_eq!(hits(r#"#[cfg(target_env = "msvc")] fn a() {}"#).len(), 1);
   }
 }

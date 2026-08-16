@@ -2839,6 +2839,7 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.119",
+ "tempfile",
  "toml",
  "walkdir",
 ]

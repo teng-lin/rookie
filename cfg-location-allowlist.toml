@@ -38,8 +38,8 @@ paths = [
   "rookie-rs/src/browser/chromium_platform_keys/windows.rs",
   "rookie-rs/src/browser/chromium_platform_keys/unsupported.rs",
 
-  # PR 3 (#221): cipher adapters.
-  "rookie-rs/src/browser/chromium_crypto/mod.rs",
+  # PR 3 (#221): cipher adapters. mod.rs itself is grandfathered below --
+  # it mixes selection gates with substantial non-gate production cfg.
   "rookie-rs/src/browser/chromium_crypto/unix.rs",
   "rookie-rs/src/browser/chromium_crypto/windows.rs",
   "rookie-rs/src/browser/chromium_crypto/unsupported.rs",
@@ -48,10 +48,8 @@ paths = [
   "rookie-rs/src/browser/chromium_database_acquisition/mod.rs",
   "rookie-rs/src/browser/chromium_database_acquisition/windows.rs",
 
-  # PR 5a (#224): deliberate 0.6 Rust direct-path API. mod.rs mixes
-  # selection gates with dependency-free-but-target-scoped source
-  # classification, both accepted parts of this PR's design, not debt.
-  "rookie-rs/src/direct_path/mod.rs",
+  # PR 5a (#224): deliberate 0.6 Rust direct-path API. mod.rs itself is
+  # grandfathered below -- see that entry for why.
   "rookie-rs/src/direct_path/shared.rs",
   "rookie-rs/src/direct_path/linux.rs",
   "rookie-rs/src/direct_path/macos.rs",
@@ -90,6 +88,17 @@ paths = [
 "rookie-rs/src/browser/chromium.rs" = { max_cfg = 60, reason = "original #218 hot spot, not a rollout target" }
 "rookie-rs/src/browser/registry.rs" = { max_cfg = 27, reason = "original #218 hot spot; includes the IE/Safari leaf call sites" }
 "rookie-rs/src/lib.rs" = { max_cfg = 27, reason = "original #218 hot spot, not a rollout target" }
+
+# mod.rs files whose cfg is only *partly* the module-selection gate
+# pattern the `leaves` tier is meant for: reviewed and found to have
+# substantial additional cfg on ordinary production items beyond the
+# `#[cfg(target_os = "...")] mod x; use x as platform;` selectors, so an
+# unlimited leaf would grant unratcheted growth to two of this crate's
+# largest cfg concentrations. Ceilinged like any other core file instead;
+# splitting the genuinely selection-only gates from the rest into a
+# smaller leaf file is a reasonable follow-up, not required here.
+"rookie-rs/src/direct_path/mod.rs" = { max_cfg = 37, reason = "PR 5a (#224); mixes selection gates with substantial non-gate production cfg" }
+"rookie-rs/src/browser/chromium_crypto/mod.rs" = { max_cfg = 16, reason = "PR 3 (#221); mixes selection gates with substantial non-gate production cfg" }
 
 # Portable parsers/models with some internal native-acquisition gating,
 # never claimed as a completed containment target by name.
