@@ -1,7 +1,8 @@
-//! Secret-bearing boundary between key-free decoding and public projection.
+//! Post-decode boundary for Chromium row decryption.
 //!
-//! Row decoders emit `CookieRecord`s and never receive provider outcomes or key
-//! candidates. Chromium key material is inspected only in this module.
+//! Row decoders emit `CookieRecord`s without key/provider dependencies. This is
+//! the only post-decode consumer that combines those records with key outcomes;
+//! provider and crypto modules still retrieve, construct, and use key material.
 
 use super::chromium_crypto::{self, ChromiumKeyOutcomes, ChromiumKeyRoute, LegacyCipherOutcome};
 use super::cookie_record::{

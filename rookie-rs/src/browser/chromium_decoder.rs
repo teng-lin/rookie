@@ -1,7 +1,8 @@
 //! Key-free Chromium SQLite row decoder.
 //!
-//! This module deliberately cannot name provider outcomes or key candidates.
-//! Its output is ciphertext-bearing `CookieRecord`s consumed by `unseal`.
+//! This module intentionally has no key-provider or cipher-implementation
+//! dependencies. It classifies stored values and emits ciphertext-bearing
+//! `CookieRecord`s for the later row-decryption stage.
 
 use super::chromium::{
   ChromiumDecodeEvent, ChromiumEngineExtractionOutcome, ChromiumRowFailure, ChromiumRowIssueCode,
@@ -298,6 +299,13 @@ pub(super) fn decode_cookie_records(
 mod tests {
   use super::*;
 
+  fn rust_identifiers(source: &str) -> std::collections::HashSet<&str> {
+    source
+      .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+      .filter(|identifier| !identifier.is_empty())
+      .collect()
+  }
+
   #[test]
   fn decoder_signature_is_key_free() {
     type DecoderSignature = fn(
@@ -309,9 +317,39 @@ mod tests {
     let _: DecoderSignature = decode_cookie_records;
 
     let source = include_str!("chromium_decoder.rs");
+    let production_source = source
+      .split_once("#[cfg(test)]\nmod tests")
+      .map(|(production, _)| production)
+      .expect("decoder source keeps tests in the final cfg(test) module");
+    let production_identifiers = rust_identifiers(production_source);
+
+    // Every Rust path must spell each module segment as an identifier. Checking
+    // the production token stream therefore catches direct, absolute, grouped,
+    // and aliased imports as well as qualified references elsewhere in code.
+    for forbidden_module in ["chromium_crypto", "chromium_platform_keys", "unseal"] {
+      assert!(
+        !production_identifiers.contains(forbidden_module),
+        "decoder depends on forbidden secret-bearing module {forbidden_module}"
+      );
+    }
+    for (dependency_spelling, expected_identifier) in [
+      ("use super::chromium_crypto as crypto;", "chromium_crypto"),
+      (
+        "use crate::browser::{chromium_platform_keys as providers};",
+        "chromium_platform_keys",
+      ),
+      (
+        "use crate::browser::unseal::unseal_chromium_record as open;",
+        "unseal",
+      ),
+    ] {
+      assert!(
+        rust_identifiers(dependency_spelling).contains(expected_identifier),
+        "boundary scanner missed aliased dependency {dependency_spelling}"
+      );
+    }
+
     for forbidden in [
-      concat!("super::", "chromium_crypto"),
-      concat!("super::", "unseal"),
       concat!("ChromiumKey", "Outcomes"),
       concat!("ChromiumKey", "Provider"),
       concat!("Key", "Candidate"),
@@ -319,7 +357,7 @@ mod tests {
       concat!("decrypt", "_legacy"),
     ] {
       assert!(
-        !source.contains(forbidden),
+        !production_source.contains(forbidden),
         "key-bearing symbol {forbidden} crossed into the decoder module"
       );
     }
