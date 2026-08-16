@@ -778,6 +778,8 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::Extraction
 pub rookie_cookies::report::ExtractionStats::acquisition_attempts: u32
 pub rookie_cookies::report::ExtractionStats::cookies_emitted: u32
 pub rookie_cookies::report::ExtractionStats::counters_saturated: bool
+pub rookie_cookies::report::ExtractionStats::provider_failures: u32
+pub rookie_cookies::report::ExtractionStats::rows_rejected: u32
 pub rookie_cookies::report::ExtractionStats::rows_seen: u32
 pub rookie_cookies::report::ExtractionStats::rows_skipped: u32
 impl core::clone::Clone for rookie_cookies::report::ExtractionStats
@@ -1023,7 +1025,9 @@ pub rookie_cookies::report::ReportStats::cookies_emitted: u32
 pub rookie_cookies::report::ReportStats::counters_saturated: bool
 pub rookie_cookies::report::ReportStats::installations_discovered: u32
 pub rookie_cookies::report::ReportStats::profiles_discovered: u32
+pub rookie_cookies::report::ReportStats::provider_failures: u32
 pub rookie_cookies::report::ReportStats::registered_browsers: u32
+pub rookie_cookies::report::ReportStats::rows_rejected: u32
 pub rookie_cookies::report::ReportStats::rows_seen: u32
 pub rookie_cookies::report::ReportStats::rows_skipped: u32
 pub rookie_cookies::report::ReportStats::sources_failed: u32

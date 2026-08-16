@@ -217,6 +217,8 @@ fn chromium_profile_outcome(
     rows_seen: stats.rows_seen as u64,
     cookies_emitted: stats.cookies_emitted as u64,
     rows_skipped: stats.rows_skipped as u64,
+    rows_rejected: stats.rows_rejected as u64,
+    provider_failures: stats.provider_failures as u64,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
@@ -306,6 +308,8 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
     rows_seen: rows_seen as u64,
     cookies_emitted: cookies.len() as u64,
     rows_skipped: rows_skipped as u64,
+    rows_rejected: 0,
+    provider_failures: 0,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
@@ -663,6 +667,8 @@ fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> Extrac
   summary.rows_seen = totals.rows_seen;
   summary.cookies_emitted = totals.cookies_emitted;
   summary.rows_skipped = totals.rows_skipped;
+  summary.rows_rejected = totals.rows_rejected;
+  summary.provider_failures = totals.provider_failures;
   summary.counters_saturated = totals.counters_saturated || saturated;
 
   let status = report_status(&profiles, &top_level, discovery_failed);
@@ -1391,17 +1397,24 @@ mod tests {
     let mut chromium = chromium_profile(true, None);
     chromium.cookies = vec![cookie("chromium")];
     chromium.stats = crate::browser::chromium::ChromiumExtractionStats {
-      rows_seen: 3,
+      rows_seen: 4,
       cookies_emitted: 1,
-      rows_skipped: 2,
-      rows_rejected: 2,
-      provider_failures: 0,
+      rows_skipped: 3,
+      rows_rejected: 1,
+      provider_failures: 2,
     };
-    chromium.row_issues = vec![crate::browser::chromium::ChromiumRowIssue {
-      code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
-      occurrences: 2,
-      samples: vec!["row 2".to_owned(), "row 3".to_owned()],
-    }];
+    chromium.row_issues = vec![
+      crate::browser::chromium::ChromiumRowIssue {
+        code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
+        occurrences: 1,
+        samples: vec!["row 2".to_owned()],
+      },
+      crate::browser::chromium::ChromiumRowIssue {
+        code: crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed,
+        occurrences: 2,
+        samples: vec!["row 3".to_owned(), "row 4".to_owned()],
+      },
+    ];
     let chromium = chromium_profile_outcome(&BrowserId::known("chrome"), &"d".repeat(64), chromium)
       .expect("adapt Chromium counters");
 
@@ -1423,9 +1436,16 @@ mod tests {
     }
 
     let report = assemble(4, vec![outcome(profiles, false)]);
-    assert_eq!(report.summary.rows_seen, 12);
-    assert_eq!(report.summary.rows_skipped, 8);
+    let chromium_source = &report.profiles[0].sources[0];
+    assert_eq!(chromium_source.stats.rows_rejected, 1);
+    assert_eq!(chromium_source.stats.provider_failures, 2);
+    assert_eq!(report.profiles[0].stats.rows_rejected, 1);
+    assert_eq!(report.profiles[0].stats.provider_failures, 2);
+    assert_eq!(report.summary.rows_seen, 13);
+    assert_eq!(report.summary.rows_skipped, 9);
     assert_eq!(report.summary.cookies_emitted, 4);
+    assert_eq!(report.summary.rows_rejected, 1);
+    assert_eq!(report.summary.provider_failures, 2);
     assert_counter_identity(&report);
   }
 

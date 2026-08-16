@@ -160,7 +160,7 @@ are reserved for request-wide, registry, discovery, and installation problems.
 
 Public counters are `u32`. Wider internal counts saturate at `u32::MAX` and set `counters_saturated`, which avoids implicit Node `u64`/BigInt contracts.
 
-A source succeeds when acquisition, parsing/schema validation, and its filtered query finish, even if zero rows match. `rows_skipped` counts seen rows rejected during parsing, decryption, or decoding.
+A source succeeds when acquisition, parsing/schema validation, and its filtered query finish, even if zero rows match. `rows_skipped` counts every seen row that was not emitted. For Chromium, `rows_rejected` is the subset lost to malformed storage, authentication, or decoding, while `provider_failures` counts distinct failed credential-provider tiers rather than rows; profile and request totals sum those per-source counts. The two additive counters default to zero when older report JSON is deserialized.
 
 Report statuses are:
 

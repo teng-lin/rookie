@@ -156,6 +156,8 @@ pub struct ExtractionStatsObject {
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,
+  pub rows_rejected: u32,
+  pub provider_failures: u32,
   pub acquisition_attempts: u32,
   pub counters_saturated: bool,
 }
@@ -173,6 +175,8 @@ pub struct ReportStatsObject {
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,
+  pub rows_rejected: u32,
+  pub provider_failures: u32,
   pub counters_saturated: bool,
 }
 
@@ -401,6 +405,8 @@ fn extraction_stats_to_js(stats: ExtractionStats) -> ExtractionStatsObject {
     rows_seen: stats.rows_seen,
     cookies_emitted: stats.cookies_emitted,
     rows_skipped: stats.rows_skipped,
+    rows_rejected: stats.rows_rejected,
+    provider_failures: stats.provider_failures,
     acquisition_attempts: stats.acquisition_attempts,
     counters_saturated: stats.counters_saturated,
   }
@@ -418,6 +424,8 @@ fn report_stats_to_js(stats: ReportStats) -> ReportStatsObject {
     rows_seen: stats.rows_seen,
     cookies_emitted: stats.cookies_emitted,
     rows_skipped: stats.rows_skipped,
+    rows_rejected: stats.rows_rejected,
+    provider_failures: stats.provider_failures,
     counters_saturated: stats.counters_saturated,
   }
 }

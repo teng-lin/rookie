@@ -23,6 +23,9 @@ _PLAINTEXT_VALUES = {"Default": "default-value", "Profile 1": "profile-value"}
 # A v10 Chromium blob that cannot produce a cookie. The precise rejection code
 # depends on whether the host's real platform key provider is available.
 _UNDECRYPTABLE = b"v10" + bytes(20)
+# Too short to contain Chromium's three-byte cipher prefix, so this is a
+# platform-independent rejected row rather than a credential-provider result.
+_MALFORMED_CIPHERTEXT = b"v1"
 _CRYPTO_REJECTION_CODES = {
     "decrypt_failed",
     "provider_failed",
@@ -239,7 +242,9 @@ class BrowserReportTest(unittest.TestCase):
                 "counters_saturated",
                 "installations_discovered",
                 "profiles_discovered",
+                "provider_failures",
                 "registered_browsers",
+                "rows_rejected",
                 "rows_seen",
                 "rows_skipped",
                 "sources_failed",
@@ -292,6 +297,8 @@ class BrowserReportTest(unittest.TestCase):
                     "acquisition_attempts",
                     "cookies_emitted",
                     "counters_saturated",
+                    "provider_failures",
+                    "rows_rejected",
                     "rows_seen",
                     "rows_skipped",
                 ],
@@ -342,7 +349,7 @@ class BrowserReportTest(unittest.TestCase):
     ) -> None:
         with _synthetic_home() as home:
             root = _seed_chrome(home, profiles=("Default",))
-            _seed_chromium_profile(root, "Profile 1", _UNDECRYPTABLE)
+            _seed_chromium_profile(root, "Profile 1", _MALFORMED_CIPHERTEXT)
             report = rookie_cookies.browser_report("chrome")
 
         # One profile still produced its cookie, so the request degrades to
@@ -351,6 +358,8 @@ class BrowserReportTest(unittest.TestCase):
         self.assertEqual(report["summary"]["rows_seen"], 2)
         self.assertEqual(report["summary"]["cookies_emitted"], 1)
         self.assertEqual(report["summary"]["rows_skipped"], 1)
+        self.assertEqual(report["summary"]["rows_rejected"], 1)
+        self.assertEqual(report["summary"]["provider_failures"], 0)
 
         by_name = {
             profile["profile"]["display_name"]: profile
@@ -362,12 +371,16 @@ class BrowserReportTest(unittest.TestCase):
         self.assertEqual(healthy["issues"], [])
         self.assertEqual(len(healthy["cookies"]), 1)
         self.assertEqual(healthy["stats"]["rows_skipped"], 0)
+        self.assertEqual(healthy["stats"]["rows_rejected"], 0)
+        self.assertEqual(healthy["stats"]["provider_failures"], 0)
 
         rejected = by_name["Profile 1"]["sources"][0]
         self.assertEqual(rejected["cookies"], [])
         self.assertEqual(rejected["stats"]["rows_seen"], 1)
         self.assertEqual(rejected["stats"]["cookies_emitted"], 0)
         self.assertEqual(rejected["stats"]["rows_skipped"], 1)
+        self.assertEqual(rejected["stats"]["rows_rejected"], 1)
+        self.assertEqual(rejected["stats"]["provider_failures"], 0)
 
         crypto_rejection = next(
             issue
@@ -387,11 +400,14 @@ class BrowserReportTest(unittest.TestCase):
         rejected_rows = rookie_cookies.MAX_ISSUE_SAMPLES + 4
         with _synthetic_home() as home:
             root = _seed_chrome(home, profiles=())
-            _seed_chromium_profile(root, "Default", _UNDECRYPTABLE, rejected_rows)
+            _seed_chromium_profile(
+                root, "Default", _MALFORMED_CIPHERTEXT, rejected_rows
+            )
             report = rookie_cookies.browser_report("chrome")
 
         source = report["profiles"][0]["sources"][0]
         self.assertEqual(source["stats"]["rows_skipped"], rejected_rows)
+        self.assertEqual(source["stats"]["rows_rejected"], rejected_rows)
 
         issue = next(
             i for i in source["issues"] if i["code"] in _CRYPTO_REJECTION_CODES
