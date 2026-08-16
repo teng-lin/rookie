@@ -14,7 +14,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rust's `Request`, `DirectPathRequest`, and `ChromiumPathRequest` gain
   `.timeout(Duration)` and a new `CancellationHandle`/`.cancellation(...)` for
   cooperative, cross-thread cancellation of an in-flight extraction, plus a
-  `stop_reason()` helper to tell a timeout from a cancellation. Node's
+  `stop_reason()` helper reporting why an extraction stopped early --
+  `TimedOut`, `Cancelled`, or `ResourceExhausted`. Node's
   `cookiesFromPath`, `chromiumCookiesFromPath(Detailed)`, and every
   single-browser export (`firefox`, `chrome`, `safari`, etc.) accept matching
   `timeoutMs`/`cancellation` parameters, via a new `CancellationHandle` class.

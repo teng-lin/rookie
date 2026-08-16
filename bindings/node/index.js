@@ -326,7 +326,6 @@ if (!nativeBinding) {
 
 const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding
 
-module.exports.CancellationHandle = CancellationHandle
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
     throw new TypeError(`Expected a native binding function: ${name}`)

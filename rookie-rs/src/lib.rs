@@ -45,8 +45,15 @@ mod windows;
 /// Cloning a handle shares the same cancellation state: calling
 /// [`cancel`](Self::cancel) on any clone cancels the operation every clone
 /// (including the one an in-flight [`Request`] is holding) observes.
-/// Canceling after the call already finished, or a second time, is a no-op
-/// and returns `false`.
+///
+/// This only tracks whether cancellation was *requested* through this
+/// handle, not whether the operation is still running: calling
+/// [`cancel`](Self::cancel) after the call already stopped for an unrelated
+/// reason (it timed out, or completed) still records the request and
+/// returns `true` -- there is nothing left observing it, so the request is
+/// simply harmless, not rejected. Only a second cancellation *through this
+/// same handle* (a repeat call, or a clone that already won the race) is a
+/// no-op and returns `false`.
 #[derive(Clone, Default)]
 pub struct CancellationHandle(pub(crate) common::deadline::CancellationToken);
 
@@ -56,15 +63,18 @@ impl CancellationHandle {
     Self::default()
   }
 
-  /// Requests cancellation. Returns `true` if this call recorded it —
-  /// `false` if the operation already stopped for another reason (it timed
-  /// out, or a different clone of this handle cancelled it first).
+  /// Requests cancellation. Returns `true` the first time this handle (or
+  /// any of its clones) records it, `false` on every call after that --
+  /// see the type-level docs for what this does and does not tell you about
+  /// whether the operation is still running.
   pub fn cancel(&self) -> bool {
     self.0.cancel()
   }
 
   /// Reports whether [`cancel`](Self::cancel) has already been called on
-  /// this handle or any of its clones.
+  /// this handle or any of its clones. Like `cancel`, this does not by
+  /// itself imply the operation is still running -- it reports a request,
+  /// not the extraction's current state.
   pub fn is_cancelled(&self) -> bool {
     self.0.is_cancelled()
   }
@@ -1157,6 +1167,26 @@ mod tests {
       handle, independent,
       "reaching the same cancelled state does not make unrelated handles equal"
     );
+  }
+
+  #[test]
+  fn cancel_after_an_unrelated_timeout_still_records_and_returns_true() {
+    // CancellationHandle only tracks whether cancellation was requested
+    // through it, not whether the operation is still running -- timing out
+    // never touches the handle's own state, so a cancel() afterward is not
+    // rejected as "too late", it just has nothing left to affect.
+    let handle = CancellationHandle::new();
+    let request = Request::browser("unknown-browser-id")
+      .timeout(std::time::Duration::ZERO)
+      .cancellation(handle.clone());
+    let error = extract(request).expect_err("a zero timeout must stop the request");
+    assert_eq!(stop_reason(&error), Some(StopReason::TimedOut));
+
+    assert!(
+      handle.cancel(),
+      "cancel() after an unrelated timeout still records the request"
+    );
+    assert!(handle.is_cancelled());
   }
 
   #[test]

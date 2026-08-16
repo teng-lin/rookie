@@ -137,8 +137,16 @@ loader = loader.replace(
   'const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, testWorkerPanic } = nativeBinding'
 )
 
+// Every napi-generated raw export is a simple self-reexport
+// (`module.exports.name = name`), whatever the name -- unlike this script's
+// own validated exports further down (`module.exports.name = requiredNative(name, 'name')`
+// or an asyncNative(...)/platformNative(...) call), which never take this
+// shape. Matching that shape generically, instead of a specific name like
+// `version`, means a new napi export sorting ahead of every previously
+// known one (as CancellationHandle did) still gets sliced off here instead
+// of surviving as an unvalidated duplicate of its own patched export below.
 const exportStart = loader.search(
-  /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.version = version)/m
+  /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.(\w+) = \1$)/m
 )
 if (exportStart === -1) {
   throw new Error('Generated loader has no export facade')

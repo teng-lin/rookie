@@ -1175,95 +1175,10 @@ pub fn load_report(domains: Option<Vec<String>>) -> AsyncTask<LoadReportTask> {
 
 // Windows only browsers
 
-#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
-pub fn octo_browser(
-  domains: Option<Vec<String>>,
-  timeout_ms: Option<u32>,
-  cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<OctoBrowserTask> {
-  AsyncTask::new(OctoBrowserTask {
-    domains,
-    timeout_ms,
-    cancellation: cancellation.map(|handle| handle.0.clone()),
-  })
-}
-
+async_named_browser_fn!(octo_browser, OctoBrowserTask, "octo_browser");
 #[cfg(target_os = "windows")]
-pub struct OctoBrowserTask {
-  domains: Option<Vec<String>>,
-  timeout_ms: Option<u32>,
-  cancellation: Option<CancellationHandle>,
-}
-
-#[cfg(target_os = "windows")]
-impl Task for OctoBrowserTask {
-  type Output = Vec<Cookie>;
-  type JsValue = Vec<CookieObject>;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      let mut request = Request::browser("octo_browser").domains(self.domains.take());
-      if let Some(ms) = self.timeout_ms {
-        request = request.timeout(Duration::from_millis(ms as u64));
-      }
-      if let Some(handle) = self.cancellation.take() {
-        request = request.cancellation(handle);
-      }
-      rookie_cookies::extract(request)
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
-  }
-
-  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
-    cookies_to_js(output)
-  }
-}
-
-#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
-#[cfg(target_os = "windows")]
-pub fn internet_explorer(
-  domains: Option<Vec<String>>,
-  timeout_ms: Option<u32>,
-  cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<InternetExplorerTask> {
-  AsyncTask::new(InternetExplorerTask {
-    domains,
-    timeout_ms,
-    cancellation: cancellation.map(|handle| handle.0.clone()),
-  })
-}
-
-#[cfg(target_os = "windows")]
-pub struct InternetExplorerTask {
-  domains: Option<Vec<String>>,
-  timeout_ms: Option<u32>,
-  cancellation: Option<CancellationHandle>,
-}
-
-#[cfg(target_os = "windows")]
-impl Task for InternetExplorerTask {
-  type Output = Vec<Cookie>;
-  type JsValue = Vec<CookieObject>;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      let mut request = Request::browser("internet_explorer").domains(self.domains.take());
-      if let Some(ms) = self.timeout_ms {
-        request = request.timeout(Duration::from_millis(ms as u64));
-      }
-      if let Some(handle) = self.cancellation.take() {
-        request = request.cancellation(handle);
-      }
-      rookie_cookies::extract(request)
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
-  }
-
-  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
-    cookies_to_js(output)
-  }
-}
+async_named_browser_fn!(internet_explorer, InternetExplorerTask, "internet_explorer");
 
 #[cfg(target_os = "windows")]
 pub struct ChromiumBasedWinTask {
@@ -1355,50 +1270,8 @@ pub fn chromium_based_detailed(
 
 // MacOS browsers
 
-#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "macos")]
-pub fn safari(
-  domains: Option<Vec<String>>,
-  timeout_ms: Option<u32>,
-  cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<SafariTask> {
-  AsyncTask::new(SafariTask {
-    domains,
-    timeout_ms,
-    cancellation: cancellation.map(|handle| handle.0.clone()),
-  })
-}
-
-#[cfg(target_os = "macos")]
-pub struct SafariTask {
-  domains: Option<Vec<String>>,
-  timeout_ms: Option<u32>,
-  cancellation: Option<CancellationHandle>,
-}
-
-#[cfg(target_os = "macos")]
-impl Task for SafariTask {
-  type Output = Vec<Cookie>;
-  type JsValue = Vec<CookieObject>;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      let mut request = Request::browser("safari").domains(self.domains.take());
-      if let Some(ms) = self.timeout_ms {
-        request = request.timeout(Duration::from_millis(ms as u64));
-      }
-      if let Some(handle) = self.cancellation.take() {
-        request = request.cancellation(handle);
-      }
-      rookie_cookies::extract(request)
-        .map_err(|e| napi::Error::new(Status::Unknown, format!("{e:?}")))
-    })
-  }
-
-  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
-    cookies_to_js(output)
-  }
-}
+async_named_browser_fn!(safari, SafariTask, "safari");
 
 // Unix browsers
 
