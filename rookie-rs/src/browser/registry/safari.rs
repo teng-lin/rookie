@@ -391,11 +391,6 @@ where
         &outcome.profiles[profile_index].sources[source_index].path,
         domains,
       );
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        outcome.boundary_stop.get_or_insert(stop);
-        stop_position = Some((profile_index, source_index));
-        break 'profiles;
-      }
       let source = &mut outcome.profiles[profile_index].sources[source_index];
       match result {
         Ok(extraction) => {
@@ -428,6 +423,15 @@ where
             };
           source.error = Some(format!("{error:#}"));
         }
+      }
+      // The query result above is an atomic source outcome. Commit it before
+      // sampling the shared stop state so a stop that races with the return
+      // cannot discard records and counters that already completed. Only
+      // zero-attempt placeholders after this source are pruned.
+      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+        outcome.boundary_stop.get_or_insert(stop);
+        stop_position = Some((profile_index, source_index + 1));
+        break 'profiles;
       }
     }
   }
@@ -888,6 +892,104 @@ mod tests {
           .expect("legacy projection retains completed Safari work");
       assert_eq!(cookies.len(), 1);
       assert_eq!(cookies[0].name, "retained");
+    }
+  }
+
+  fn stopped_after_success_outcome(
+    stop: crate::common::deadline::BoundaryStop,
+  ) -> EngineExtractionDraft {
+    use crate::common::deadline::{
+      test_clock::ManualClock, BoundaryStop, CancellationToken, Deadline,
+    };
+    use std::time::Duration;
+
+    let clock = ManualClock::default();
+    let token = CancellationToken::default();
+    let runtime = crate::common::deadline::BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, Duration::from_secs(1)),
+      token.clone(),
+    );
+    let mut discovered = discovered_source();
+    discovered.profiles[0]
+      .sources
+      .push(discovered_source_draft(PathBuf::from(
+        "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+      )));
+    let calls = Cell::new(0);
+    let outcome = populate_safari_sources_with_runtime(discovered, None, &runtime, |_, _| {
+      calls.set(calls.get() + 1);
+      let completed = crate::browser::safari::SafariFileDraft {
+        cookies: Vec::new(),
+        records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+          crate::common::enums::Cookie {
+            domain: ".example.com".to_owned(),
+            path: "/".to_owned(),
+            secure: false,
+            expires: None,
+            name: "completed-before-stop".to_owned(),
+            value: "value".to_owned(),
+            http_only: false,
+            same_site: 0,
+          },
+          crate::browser::cookie_record::SourceRef::pending(0),
+        )],
+        stats: crate::browser::safari::SafariExtractionStats {
+          records_seen: 3,
+          records_skipped: 1,
+          records_rejected: 1,
+        },
+        row_error: Some("one malformed record".to_owned()),
+        acquisition_attempts: 2,
+      };
+      match stop {
+        BoundaryStop::TimedOut => clock.advance(Duration::from_secs(1)),
+        BoundaryStop::Cancelled => assert!(token.cancel()),
+        BoundaryStop::ResourceExhausted => assert!(token.exhaust_resources()),
+      }
+      Ok(completed)
+    });
+    assert_eq!(calls.get(), 1, "later placeholders must not be queried");
+    assert_eq!(outcome.boundary_stop, Some(stop));
+    assert_eq!(outcome.profiles[0].sources.len(), 1);
+    outcome
+  }
+
+  #[test]
+  fn successful_source_racing_with_stop_reaches_report_and_legacy_atomically() {
+    use crate::common::deadline::BoundaryStop;
+
+    for (stop, expected_termination) in [
+      (BoundaryStop::TimedOut, "timed_out"),
+      (BoundaryStop::Cancelled, "cancelled"),
+      (BoundaryStop::ResourceExhausted, "resource_exhausted"),
+    ] {
+      let report = crate::browser::report_build::project_engine_report(
+        "safari",
+        stopped_after_success_outcome(stop),
+      )
+      .expect("project the atomically completed Safari source");
+      assert_eq!(report.termination.as_str(), expected_termination);
+      assert_eq!(report.profiles.len(), 1);
+      let source = &report.profiles[0].sources[0];
+      assert_eq!(source.cookies[0].name, "completed-before-stop");
+      assert_eq!(source.stats.rows_seen, 3);
+      assert_eq!(source.stats.rows_skipped, 1);
+      assert_eq!(source.stats.rows_rejected, 1);
+      assert_eq!(source.stats.cookies_emitted, 1);
+      assert_eq!(source.stats.acquisition_attempts, 2);
+      assert_eq!(report.summary.rows_seen, 3);
+      assert_eq!(report.summary.rows_skipped, 1);
+      assert_eq!(report.summary.rows_rejected, 1);
+      assert_eq!(report.summary.cookies_emitted, 1);
+
+      let cookies = crate::browser::legacy::project_engine_outcome(
+        "safari",
+        stopped_after_success_outcome(stop),
+      )
+      .expect("legacy projection retains the atomically completed Safari source");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].name, "completed-before-stop");
     }
   }
 

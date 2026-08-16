@@ -25,31 +25,23 @@ mod decoder_malformed_gate {
   use std::panic::{catch_unwind, AssertUnwindSafe};
 
   type MalformedCase = (&'static str, fn(&[u8]) -> anyhow::Result<()>);
+  type StructuredCase = (&'static str, fn() -> anyhow::Result<()>);
 
   const CORPUS_SEED: u64 = 0x2255_7a11_c0de_f00d;
   const GENERATED_CASES: usize = 64;
-  const CRAFTED_CASES: usize = 12;
+  const CRAFTED_CASES: usize = 8;
   const MAX_CASE_BYTES: usize = 256;
 
   fn malformed_corpus() -> Vec<Vec<u8>> {
-    let jsonlz4 = |plain: &[u8]| {
-      let mut encoded = b"mozLz40\0".to_vec();
-      encoded.extend(lz4_flex::block::compress_prepend_size(plain));
-      encoded
-    };
     let mut corpus = vec![
       Vec::new(),
       vec![0],
       vec![0xff],
       b"COOK".to_vec(),
       b"mozLz40\0".to_vec(),
-      br#"{"windows":[{"cookies":[]}]}}"#.to_vec(),
+      br#"{"windows":[{"cookies":[]}]}"#.to_vec(),
       vec![0; MAX_CASE_BYTES],
       vec![0xff; MAX_CASE_BYTES],
-      [b"mozLz40\0".as_slice(), &u32::MAX.to_le_bytes()].concat(),
-      [b"mozLz40\0".as_slice(), &[32, 0, 0, 0], b"truncated"].concat(),
-      jsonlz4(br#"{"unterminated":true"#),
-      jsonlz4(br#"{"windows":[{"cookies":[{"host":17,"value":{"nested":true}}]}]}"#),
     ];
     let mut state = CORPUS_SEED;
     for case_index in 0..GENERATED_CASES {
@@ -71,20 +63,8 @@ mod decoder_malformed_gate {
 
   #[test]
   fn every_engine_decoder_is_host_neutral_and_unwind_safe_for_malformed_input() {
-    let cases: [MalformedCase; 6] = [
+    let cases: [MalformedCase; 3] = [
       ("chromium", chromium_decoder::malformed_decoder_gate_case),
-      (
-        "mozilla_persistent",
-        mozilla::malformed_persistent_decoder_gate_case,
-      ),
-      (
-        "mozilla_session_legacy_json",
-        mozilla::malformed_legacy_session_decoder_gate_case,
-      ),
-      (
-        "mozilla_session_jsonlz4",
-        mozilla::malformed_jsonlz4_session_decoder_gate_case,
-      ),
       ("safari", safari::malformed_decoder_gate_case),
       (
         "internet_explorer",
@@ -110,6 +90,26 @@ mod decoder_malformed_gate {
           )
         });
       }
+    }
+
+    let structured: [StructuredCase; 3] = [
+      (
+        "mozilla_persistent_sqlite",
+        mozilla::structured_persistent_decoder_gate,
+      ),
+      (
+        "mozilla_session_legacy_json",
+        mozilla::structured_legacy_session_decoder_gate,
+      ),
+      (
+        "mozilla_session_jsonlz4",
+        mozilla::structured_jsonlz4_session_decoder_gate,
+      ),
+    ];
+    for (stage, case) in structured {
+      let result = catch_unwind(AssertUnwindSafe(case));
+      let result = result.unwrap_or_else(|_| panic!("{stage} structured decoder corpus panicked"));
+      result.unwrap_or_else(|error| panic!("{stage} structured decoder corpus failed: {error:#}"));
     }
   }
 }

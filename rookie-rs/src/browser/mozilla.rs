@@ -1885,74 +1885,367 @@ fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
 }
 
 #[cfg(test)]
-pub(super) fn malformed_persistent_decoder_gate_case(bytes: &[u8]) -> Result<()> {
-  let connection = rusqlite::Connection::open_in_memory()?;
-  connection.execute_batch(
-    "CREATE TABLE moz_cookies (
-       host, path, isSecure, expiry, name, value,
-       isHttpOnly, sameSite, originAttributes
-     );",
-  )?;
-  let mut numeric = [0_u8; 8];
-  for (target, source) in numeric.iter_mut().zip(bytes.iter().copied()) {
-    *target = source;
-  }
-  let sqlite_value = |salt: u8| match bytes.first().copied().unwrap_or(0).wrapping_add(salt) % 5 {
-    0 => rusqlite::types::Value::Null,
-    1 => rusqlite::types::Value::Integer(i64::from_le_bytes(numeric)),
-    2 => rusqlite::types::Value::Real(f64::from_bits(u64::from_le_bytes(numeric))),
-    3 => rusqlite::types::Value::Text(String::from_utf8_lossy(bytes).into_owned()),
-    _ => rusqlite::types::Value::Blob(bytes.to_vec()),
-  };
-  connection.execute(
-    "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    rusqlite::params![
-      sqlite_value(0),
-      sqlite_value(1),
-      sqlite_value(2),
-      sqlite_value(3),
-      sqlite_value(4),
-      sqlite_value(5),
-      sqlite_value(6),
-      sqlite_value(7),
-      sqlite_value(8),
-    ],
-  )?;
+fn decode_persistent_gate_connection(
+  connection: &rusqlite::Connection,
+) -> Result<(MozillaPersistentDecodeSummary, Vec<CookieRecord>)> {
   let source = MozillaPersistentReadOnlySource {
-    connection: &connection,
+    connection,
     domains: None,
   };
   let decoder = MozillaPersistentDecoder;
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  let mut sink = |_record| Ok(());
-  let _ = decoder.decode(&source, &mut sink, &runtime);
+  let mut records = Vec::new();
+  let summary = decoder.decode(
+    &source,
+    &mut |record| {
+      records.push(record);
+      Ok(())
+    },
+    &runtime,
+  )?;
+  Ok((summary, records))
+}
+
+#[cfg(test)]
+pub(super) fn structured_persistent_decoder_gate() -> Result<()> {
+  use rusqlite::types::Value as SqlValue;
+
+  const OPTIONAL_COLUMNS: [(&str, &str, usize); 6] = [
+    ("path", "path", 1),
+    ("isSecure", "secure", 2),
+    ("expiry", "expiry", 3),
+    ("isHttpOnly", "http_only", 6),
+    ("sameSite", "same_site", 7),
+    ("originAttributes", "origin_attributes", 8),
+  ];
+  let full_schema = "CREATE TABLE moz_cookies (
+    host TEXT, path, isSecure, expiry, name TEXT, value TEXT,
+    isHttpOnly, sameSite, originAttributes
+  );";
+
+  // Every row keeps the three required fields valid while exactly one
+  // optional field changes shape. This reaches the raw-value branches and the
+  // sink instead of having an early invalid `name` mask the rest of decoding.
+  let connection = rusqlite::Connection::open_in_memory()?;
+  connection.execute_batch(&format!("PRAGMA user_version = 15; {full_schema}"))?;
+  let baseline = vec![
+    SqlValue::Text(".example.com".to_owned()),
+    SqlValue::Text("/".to_owned()),
+    SqlValue::Integer(1),
+    SqlValue::Integer(1_700_000_000),
+    SqlValue::Text("baseline".to_owned()),
+    SqlValue::Text("plain-value".to_owned()),
+    SqlValue::Integer(1),
+    SqlValue::Integer(1),
+    SqlValue::Text("^userContextId=7".to_owned()),
+  ];
+  connection.execute(
+    "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    rusqlite::params_from_iter(baseline.iter()),
+  )?;
+  for (index, (column, _, sqlite_index)) in OPTIONAL_COLUMNS.iter().enumerate() {
+    let mut row = baseline.clone();
+    row[4] = SqlValue::Text(format!("malformed-{column}"));
+    row[*sqlite_index] = match *column {
+      "path" | "expiry" => SqlValue::Blob(vec![0xff, index as u8]),
+      "isSecure" => SqlValue::Text("sometimes".to_owned()),
+      "isHttpOnly" => SqlValue::Real(0.5),
+      "sameSite" => SqlValue::Integer(9),
+      "originAttributes" => SqlValue::Integer(17),
+      _ => unreachable!("the optional corpus is exhaustive"),
+    };
+    connection.execute(
+      "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+      rusqlite::params_from_iter(row.iter()),
+    )?;
+  }
+  let (summary, records) = decode_persistent_gate_connection(&connection)?;
+  assert_eq!(summary.rows_seen, OPTIONAL_COLUMNS.len() + 1);
+  assert_eq!(summary.rows_skipped, 0);
+  assert_eq!(summary.rows_rejected, 0);
+  assert_eq!(records.len(), OPTIONAL_COLUMNS.len() + 1);
+  assert_eq!(records[0].name, "baseline");
+  assert_eq!(records[0].origin.ordinal, 0);
+  for (ordinal, (column, raw_key, _)) in OPTIONAL_COLUMNS.iter().enumerate() {
+    let record = records
+      .iter()
+      .find(|record| record.name == format!("malformed-{column}"))
+      .expect("each independently malformed optional field emits a record");
+    assert_eq!(record.origin.ordinal, (ordinal + 1) as u64);
+    match *column {
+      "path" => assert!(record.raw.contains_key(*raw_key)),
+      "isSecure" => assert!(matches!(record.attributes.secure, Observation::Unknown(_))),
+      "expiry" => {
+        assert!(matches!(record.attributes.expires, Observation::Unknown(_)));
+        assert!(matches!(
+          record.attributes.raw_expires,
+          Observation::Unknown(_)
+        ));
+      }
+      "isHttpOnly" => assert!(matches!(
+        record.attributes.http_only,
+        Observation::Unknown(_)
+      )),
+      "sameSite" => assert!(matches!(
+        record.attributes.same_site,
+        Observation::Unknown(_)
+      )),
+      "originAttributes" => {
+        assert!(record.raw.contains_key(*raw_key));
+        assert!(matches!(
+          record.isolation.origin_attributes,
+          Observation::Unknown(_)
+        ));
+      }
+      _ => unreachable!("the optional corpus is exhaustive"),
+    }
+  }
+
+  // Probe every optional-column absence independently. Each schema still has
+  // a valid host/name/value row and must reach the sink once.
+  for (missing, _, _) in OPTIONAL_COLUMNS {
+    let connection = rusqlite::Connection::open_in_memory()?;
+    let optional_definitions = OPTIONAL_COLUMNS
+      .iter()
+      .filter(|(column, _, _)| *column != missing)
+      .map(|(column, _, _)| *column)
+      .collect::<Vec<_>>()
+      .join(", ");
+    connection.execute_batch(&format!(
+      "PRAGMA user_version = 15;
+       CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT, {optional_definitions});
+       INSERT INTO moz_cookies (host, name, value)
+       VALUES ('.example.com', 'missing-{missing}', 'plain-value');"
+    ))?;
+    let (summary, records) = decode_persistent_gate_connection(&connection)?;
+    assert_eq!(summary.rows_seen, 1);
+    assert_eq!(summary.rows_rejected, 0);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name, format!("missing-{missing}"));
+  }
+
+  // Firefox schema 15 stores seconds; schema 16 and later stores
+  // milliseconds. Both paths preserve the raw integer while emitting the same
+  // interpreted expiry.
+  for (schema, raw_expiry) in [(15, 1_700_000_000_i64), (16, 1_700_000_000_999_i64)] {
+    let connection = rusqlite::Connection::open_in_memory()?;
+    connection.execute_batch(&format!("PRAGMA user_version = {schema}; {full_schema}"))?;
+    connection.execute(
+      "INSERT INTO moz_cookies VALUES (?1, '/', 0, ?2, ?3, ?4, 0, 0, NULL)",
+      rusqlite::params![
+        ".example.com",
+        raw_expiry,
+        format!("schema-{schema}"),
+        "plain-value"
+      ],
+    )?;
+    let (summary, records) = decode_persistent_gate_connection(&connection)?;
+    assert_eq!(summary.rows_seen, 1);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+      records[0]
+        .clone()
+        .into_cookie()
+        .expect("persistent gate record is plaintext")
+        .expires,
+      Some(1_700_000_000)
+    );
+    assert_eq!(
+      records[0].attributes.raw_expires,
+      Observation::Known(RawValue::Signed(raw_expiry))
+    );
+  }
   Ok(())
 }
 
 #[cfg(test)]
-fn malformed_session_decoder_gate_case(bytes: &[u8], format: SessionStoreFormat) -> Result<()> {
+fn encode_session_gate_case(json: &Value, format: SessionStoreFormat) -> Vec<u8> {
+  let plain = serde_json::to_vec(json).expect("serialize structured session gate case");
+  match format {
+    SessionStoreFormat::LegacyJson => plain,
+    SessionStoreFormat::JsonLz4 => {
+      let mut encoded = b"mozLz40\0".to_vec();
+      encoded.extend(lz4_flex::block::compress_prepend_size(&plain));
+      encoded
+    }
+  }
+}
+
+#[cfg(test)]
+fn decode_session_gate_case(
+  json: &Value,
+  format: SessionStoreFormat,
+) -> Result<(MozillaSessionDecodeSummary, Vec<CookieRecord>)> {
+  let bytes = encode_session_gate_case(json, format);
   let source = MozillaSessionReadOnlySource {
-    bytes,
+    bytes: &bytes,
     format,
     domains: None,
   };
   let decoder = MozillaSessionDecoder;
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  let mut sink = |_record| Ok(());
-  let _ = decoder.decode(&source, &mut sink, &runtime);
+  let mut records = Vec::new();
+  let summary = decoder.decode(
+    &source,
+    &mut |record| {
+      records.push(record);
+      Ok(())
+    },
+    &runtime,
+  )?;
+  Ok((summary, records))
+}
+
+#[cfg(test)]
+fn structured_session_decoder_gate(format: SessionStoreFormat) -> Result<()> {
+  let valid = serde_json::json!({
+    "host": ".example.com",
+    "path": "/",
+    "secure": true,
+    "name": "valid",
+    "value": "plain-value",
+    "httponly": true,
+    "sameSite": 1,
+    "expiry": 1_700_000_000_u64,
+    "originAttributes": {"userContextId": 7, "partitionKey": "(https,example.com)"}
+  });
+  let optional_cases = [
+    ("path", serde_json::json!({"future": true})),
+    ("secure", serde_json::json!(2)),
+    ("httponly", serde_json::json!("sometimes")),
+    ("sameSite", serde_json::json!(9)),
+    ("expiry", serde_json::json!("later")),
+    ("originAttributes", serde_json::json!(["future"])),
+  ];
+  let mut optional_records_emitted = 0;
+  for (field, malformed) in optional_cases {
+    let mut changed = valid.clone();
+    changed
+      .as_object_mut()
+      .expect("cookie fixture is an object")
+      .insert(field.to_owned(), malformed);
+    changed
+      .as_object_mut()
+      .expect("cookie fixture is an object")
+      .insert(
+        "name".to_owned(),
+        Value::String(format!("malformed-{field}")),
+      );
+    let envelope = serde_json::json!({"windows": [{"cookies": [valid.clone(), changed]}]});
+    let (summary, records) = decode_session_gate_case(&envelope, format)?;
+    assert_eq!(summary.rows_seen, 2);
+    assert_eq!(summary.rows_skipped, 0);
+    assert_eq!(summary.rows_rejected, 0);
+    assert!(summary.diagnostics.is_empty());
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].name, "valid");
+    assert_eq!(records[0].origin.ordinal, 0);
+    assert_eq!(records[1].name, format!("malformed-{field}"));
+    assert_eq!(records[1].origin.ordinal, 1);
+    assert_eq!(records[1].domain.raw(), ".example.com");
+    match field {
+      "path" => assert_eq!(records[1].path, "/"),
+      "secure" => assert!(matches!(
+        records[1].attributes.secure,
+        Observation::Unknown(_)
+      )),
+      "httponly" => assert!(matches!(
+        records[1].attributes.http_only,
+        Observation::Unknown(_)
+      )),
+      "sameSite" => assert!(matches!(
+        records[1].attributes.same_site,
+        Observation::Unknown(_)
+      )),
+      "expiry" => {
+        assert!(matches!(
+          records[1].attributes.expires,
+          Observation::Unknown(_)
+        ));
+        assert!(matches!(
+          records[1].attributes.raw_expires,
+          Observation::Unknown(_)
+        ));
+      }
+      "originAttributes" => {
+        assert!(records[1].raw.contains_key("origin_attributes"));
+        assert!(matches!(
+          records[1].isolation.origin_attributes,
+          Observation::Unknown(_)
+        ));
+      }
+      _ => unreachable!("the session optional corpus is exhaustive"),
+    }
+    optional_records_emitted += 1;
+  }
+  assert_eq!(optional_records_emitted, 6);
+
+  let mut required_rejections = 0;
+  for field in ["name", "value"] {
+    let mut changed = valid.clone();
+    changed
+      .as_object_mut()
+      .expect("cookie fixture is an object")
+      .insert(field.to_owned(), serde_json::json!({"not": "text"}));
+    let envelope = serde_json::json!({"windows": [{"cookies": [valid.clone(), changed]}]});
+    let (summary, records) = decode_session_gate_case(&envelope, format)?;
+    assert_eq!(summary.rows_seen, 2);
+    assert_eq!(summary.rows_skipped, 1);
+    assert_eq!(summary.rows_rejected, 1);
+    assert_eq!(summary.diagnostics.len(), 1);
+    assert_eq!(records.len(), 1, "the valid sibling still reaches the sink");
+    assert_eq!(records[0].name, "valid");
+    required_rejections += summary.rows_rejected;
+  }
+  assert_eq!(required_rejections, 2);
   Ok(())
 }
 
 #[cfg(test)]
-pub(super) fn malformed_legacy_session_decoder_gate_case(bytes: &[u8]) -> Result<()> {
-  malformed_session_decoder_gate_case(bytes, SessionStoreFormat::LegacyJson)
+pub(super) fn structured_legacy_session_decoder_gate() -> Result<()> {
+  structured_session_decoder_gate(SessionStoreFormat::LegacyJson)
 }
 
 #[cfg(test)]
-pub(super) fn malformed_jsonlz4_session_decoder_gate_case(bytes: &[u8]) -> Result<()> {
-  malformed_session_decoder_gate_case(bytes, SessionStoreFormat::JsonLz4)
+pub(super) fn structured_jsonlz4_session_decoder_gate() -> Result<()> {
+  structured_session_decoder_gate(SessionStoreFormat::JsonLz4)?;
+
+  // These bounded decompression failures exercise header, advertised-size,
+  // and truncated-block stages without allocation proportional to input.
+  let malformed = [
+    b"mozLz40\0".to_vec(),
+    [b"mozLz40\0".as_slice(), &u32::MAX.to_le_bytes()].concat(),
+    [b"mozLz40\0".as_slice(), &[32, 0, 0, 0], b"truncated"].concat(),
+  ];
+  let mut rejected = 0;
+  for bytes in malformed {
+    let source = MozillaSessionReadOnlySource {
+      bytes: &bytes,
+      format: SessionStoreFormat::JsonLz4,
+      domains: None,
+    };
+    let decoder = MozillaSessionDecoder;
+    let clock = SystemClock;
+    let runtime = BoundaryRuntime::standard(&clock);
+    let mut sink_calls = 0;
+    let error = decoder
+      .decode(
+        &source,
+        &mut |_| {
+          sink_calls += 1;
+          Ok(())
+        },
+        &runtime,
+      )
+      .expect_err("malformed mozLz4 input must be rejected before the sink");
+    assert!(!error.to_string().is_empty());
+    assert_eq!(sink_calls, 0);
+    rejected += 1;
+  }
+  assert_eq!(rejected, 3);
+  Ok(())
 }
 
 #[cfg(test)]
