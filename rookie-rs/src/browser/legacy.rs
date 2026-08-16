@@ -113,6 +113,10 @@ fn project_chromium_outcome_with_runtime(
   )
 }
 
+// Only reachable in production through the automatic multi-identity
+// Chromium selection, which is Linux/macOS-only; Windows exercises this via
+// `#[cfg(test)]`.
+#[allow(dead_code)]
 pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> Result<Vec<Cookie>> {
   let selected = selected_records(browser_id, outcome, None)?;
   Ok(
@@ -210,6 +214,8 @@ fn selected_records(
   }
 }
 
+// See `project_canonical_outcome`: only reachable in production on Linux/macOS.
+#[allow(dead_code)]
 pub(crate) fn project_canonical_detailed_outcome(
   browser_id: &str,
   outcome: Outcome,

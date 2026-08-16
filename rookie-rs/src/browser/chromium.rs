@@ -423,6 +423,10 @@ impl ChromiumExtractionDraft {
   }
 }
 
+// Only reachable in production through the automatic multi-identity
+// Chromium selection, which is Linux/macOS-only; Windows exercises this via
+// `#[cfg(test)]`.
+#[allow(dead_code)]
 fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Result<Vec<Cookie>> {
   super::legacy::project_canonical_outcome(
     "chromium",
@@ -444,6 +448,8 @@ fn project_legacy_draft_with_runtime(
   )
 }
 
+// See `project_legacy_draft`: only reachable in production on Linux/macOS.
+#[allow(dead_code)]
 fn project_detailed_draft(
   db_path: &Path,
   draft: ChromiumExtractionDraft,

@@ -1471,6 +1471,10 @@ pub(crate) fn canonical_chromium_extraction_with_runtime(
   ))
 }
 
+// Only reachable in production through the automatic multi-identity
+// Chromium selection, which is Linux/macOS-only; Windows exercises this via
+// `#[cfg(test)]`.
+#[allow(dead_code)]
 pub(crate) fn canonical_direct_chromium_extraction(
   db_path: &std::path::Path,
   draft: super::chromium::ChromiumExtractionDraft,
