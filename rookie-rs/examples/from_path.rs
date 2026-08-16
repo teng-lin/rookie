@@ -20,7 +20,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rookie_cookies::direct_path::DirectPathRequest::new(db_path),
   )?;
   for cookie in cookies {
-    println!("{:?}", cookie);
+    // Cookie's `Debug` output intentionally redacts values. This example is
+    // an explicit export surface, so print the public value field directly.
+    println!(
+      "{} {:?} {:?}={:?}",
+      cookie.domain, cookie.path, cookie.name, cookie.value
+    );
   }
   Ok(())
 }
