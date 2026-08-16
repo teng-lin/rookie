@@ -292,8 +292,8 @@ fn decode_persistent_cookies(
     runtime.check()?;
     rows.next()?
   } {
-    let host = match row.get::<_, Option<String>>(0) {
-      Ok(host) => host.unwrap_or_default(),
+    let host = match row.get::<_, String>(0) {
+      Ok(host) => host,
       Err(error) => {
         log::warn!("Failed to read host from Firefox cookie row: {error}");
         last_row_error = Some(anyhow!(
@@ -2002,6 +2002,68 @@ pub(super) fn structured_persistent_decoder_gate() -> Result<()> {
     }
   }
 
+  // Required fields never borrow the optional metadata policy. Keep one valid
+  // sibling in every fixture, then vary exactly one required field through
+  // NULL and a wrong SQLite storage class. The malformed row is rejected while
+  // the sibling still reaches the sink.
+  for (required, sqlite_index) in [("host", 0), ("name", 4), ("value", 5)] {
+    for malformed in [SqlValue::Null, SqlValue::Blob(vec![0xff, 0x00])] {
+      let connection = rusqlite::Connection::open_in_memory()?;
+      connection.execute_batch(&format!("PRAGMA user_version = 15; {full_schema}"))?;
+      connection.execute(
+        "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params_from_iter(baseline.iter()),
+      )?;
+      let mut row = baseline.clone();
+      row[sqlite_index] = malformed;
+      if required != "name" {
+        row[4] = SqlValue::Text(format!("malformed-required-{required}"));
+      }
+      connection.execute(
+        "INSERT INTO moz_cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params_from_iter(row.iter()),
+      )?;
+
+      let (summary, records) = decode_persistent_gate_connection(&connection)?;
+      assert_eq!(summary.rows_seen, 2);
+      assert_eq!(summary.rows_skipped, 1);
+      assert_eq!(summary.rows_rejected, 1);
+      assert_eq!(records.len(), 1);
+      assert_eq!(records[0].name, "baseline");
+      assert!(summary
+        .last_row_error
+        .as_ref()
+        .is_some_and(|error| format!("{error:#}").contains(required)));
+    }
+  }
+
+  // Omitting a required schema column is a source-level query failure, never
+  // a zero-row success or an optional-column NULL projection.
+  for missing in ["host", "name", "value"] {
+    let connection = rusqlite::Connection::open_in_memory()?;
+    let columns = [
+      "host TEXT",
+      "path",
+      "isSecure",
+      "expiry",
+      "name TEXT",
+      "value TEXT",
+      "isHttpOnly",
+      "sameSite",
+      "originAttributes",
+    ]
+    .into_iter()
+    .filter(|definition| !definition.starts_with(missing))
+    .collect::<Vec<_>>()
+    .join(", ");
+    connection.execute_batch(&format!(
+      "PRAGMA user_version = 15; CREATE TABLE moz_cookies ({columns});"
+    ))?;
+    let error = decode_persistent_gate_connection(&connection)
+      .expect_err("a missing required SQLite column must fail the source query");
+    assert!(format!("{error:#}").contains(missing));
+  }
+
   // Probe every optional-column absence independently. Each schema still has
   // a valid host/name/value row and must reach the sink once.
   for (missing, _, _) in OPTIONAL_COLUMNS {
@@ -3506,7 +3568,7 @@ mod tests {
       .expect("create table");
     conn
       .execute(
-        "INSERT INTO moz_cookies VALUES (NULL, NULL, NULL, -1, 'kept', 'value', NULL, NULL)",
+        "INSERT INTO moz_cookies VALUES ('.example.com', NULL, NULL, -1, 'kept', 'value', NULL, NULL)",
         [],
       )
       .expect("insert cookie with missing metadata");
@@ -3529,7 +3591,7 @@ mod tests {
     let cookie = &cookies[0];
     assert_eq!(cookie.name, "kept");
     assert_eq!(cookie.value, "value");
-    assert_eq!(cookie.domain, "");
+    assert_eq!(cookie.domain, ".example.com");
     assert_eq!(cookie.path, "/");
     assert!(!cookie.secure);
     assert!(!cookie.http_only);
