@@ -12,8 +12,8 @@
 use crate::common::enums::Cookie;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt;
 use std::str::FromStr;
+use std::{cmp::Ordering, fmt};
 
 /// Upper bound on retained samples per aggregated issue.
 ///
@@ -128,6 +128,7 @@ string_identifier!(
 );
 string_identifier!(CipherTierId, "cipher tier", validate_open_identifier);
 string_identifier!(ReportStatusCode, "report status", validate_open_identifier);
+string_identifier!(TerminationCode, "termination", validate_open_identifier);
 string_identifier!(SourceStatusCode, "source status", validate_open_identifier);
 string_identifier!(
   AcquisitionStrategyCode,
@@ -177,6 +178,23 @@ vocabulary!(ReportStatusCode {
   failed => "failed",
   no_sources => "no_sources",
 });
+
+vocabulary!(TerminationCode {
+  completed => "completed",
+  cancelled => "cancelled",
+  timed_out => "timed_out",
+  resource_exhausted => "resource_exhausted",
+});
+
+fn completed_termination() -> TerminationCode {
+  TerminationCode::completed()
+}
+
+pub const EXTRACTION_REPORT_SCHEMA_VERSION: u32 = 1;
+
+fn extraction_report_schema_version() -> u32 {
+  EXTRACTION_REPORT_SCHEMA_VERSION
+}
 
 vocabulary!(SourceStatusCode {
   succeeded => "succeeded",
@@ -322,11 +340,9 @@ pub struct ExtractionStats {
   /// holds and a consumer can read "how much did this source lose?" directly.
   ///
   /// SQL engines reduce candidates in their `WHERE` clause and enforce the
-  /// final host boundary before incrementing these counters. Safari is the
-  /// known deviation: it applies the domain filter after parsing the whole
-  /// file, so it still counts every record. Correcting that means moving the
-  /// filter into the record loop, which is low-level Safari parsing that
-  /// Milestone 4E explicitly does not reimplement.
+  /// final host boundary before incrementing these counters. File decoders,
+  /// including Safari, likewise apply the request filter before incrementing
+  /// their relevant-row counters.
   pub rows_seen: u32,
   pub cookies_emitted: u32,
   pub rows_skipped: u32,
@@ -375,12 +391,28 @@ pub struct ExtractionIssue {
   pub code: IssueCode,
   pub stage: ExtractionStageCode,
   pub severity: IssueSeverityCode,
+  /// Stable machine-readable origin of the failure.
+  #[serde(default)]
+  pub cause: String,
+  /// Credential/provider role when the cause originated at a provider seam.
+  #[serde(default)]
+  pub provider: Option<String>,
+  /// Source-native cipher/provider tier, preserved without message parsing.
+  #[serde(default)]
+  pub tier: Option<String>,
+  /// `retryable`, `not_retryable`, or `unknown`.
+  #[serde(default = "unknown_retryability")]
+  pub retryability: String,
   pub occurrences: u32,
   pub samples: Vec<String>,
   pub browser_id: Option<BrowserId>,
   pub installation_id: Option<InstallationId>,
   pub profile_id: Option<ProfileId>,
   pub message: String,
+}
+
+fn unknown_retryability() -> String {
+  "unknown".to_owned()
 }
 
 /// One attempted cookie source and the cookies it produced.
@@ -417,7 +449,14 @@ pub struct ProfileExtraction {
 #[non_exhaustive]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtractionReport {
+  /// Wire discriminator. Missing values from pre-PR3 JSON deserialize as v1.
+  #[serde(default = "extraction_report_schema_version")]
+  pub schema_version: u32,
   pub status: ReportStatusCode,
+  /// Why execution stopped. This is independent from `status`: a timed-out
+  /// request may still contain complete source outcomes collected earlier.
+  #[serde(default = "completed_termination")]
+  pub termination: TerminationCode,
   pub summary: ReportStats,
   pub profiles: Vec<ProfileExtraction>,
   pub issues: Vec<ExtractionIssue>,
@@ -428,11 +467,20 @@ pub struct ExtractionReport {
 /// builder normalizes ordering, statuses, and aggregate counters.
 #[non_exhaustive]
 #[derive(Debug)]
-pub(crate) struct SourceExtractionOutcome {
+pub(crate) struct SourceDraft {
   pub(crate) source: CookieSourceIdentity,
+  /// Original platform path representation used only for provenance hashing.
+  /// The public `source.path` remains the explicitly marked lossy display form.
+  pub(crate) source_path_bytes: Vec<u8>,
   pub(crate) selected: bool,
   pub(crate) acquisition_strategy: AcquisitionStrategyCode,
   pub(crate) cookies: Vec<Cookie>,
+  /// Canonical records retain source-native metadata which the compatibility
+  /// `Cookie` projection intentionally omits.
+  pub(crate) records: Vec<super::cookie_record::CookieRecord>,
+  /// Typed evidence consumed exactly once by canonical finalization. It never
+  /// reaches either projector as a second policy input.
+  pub(crate) compatibility_evidence: Option<CompatibilityEvidence>,
   pub(crate) stats: ExtractionStats,
   pub(crate) issues: Vec<ExtractionIssue>,
   /// Acquisition, parsing, or the filtered query did not complete. Skipped rows
@@ -442,24 +490,28 @@ pub(crate) struct SourceExtractionOutcome {
 
 #[non_exhaustive]
 #[derive(Debug)]
-pub(crate) struct EngineExtractionOutcome {
+pub(crate) struct ProfileDraft {
   pub(crate) profile: ProfileIdentity,
   pub(crate) is_default: bool,
-  pub(crate) sources: Vec<SourceExtractionOutcome>,
+  pub(crate) sources: Vec<SourceDraft>,
   pub(crate) issues: Vec<ExtractionIssue>,
 }
 
-impl SourceExtractionOutcome {
+impl SourceDraft {
   pub(crate) fn new(
     source: CookieSourceIdentity,
+    source_path: &std::path::Path,
     selected: bool,
     acquisition_strategy: AcquisitionStrategyCode,
   ) -> Self {
     Self {
+      source_path_bytes: raw_path_bytes(source_path),
       source,
       selected,
       acquisition_strategy,
       cookies: Vec::new(),
+      records: Vec::new(),
+      compatibility_evidence: None,
       stats: ExtractionStats::default(),
       issues: Vec::new(),
       failed: false,
@@ -467,7 +519,33 @@ impl SourceExtractionOutcome {
   }
 }
 
-impl EngineExtractionOutcome {
+#[derive(Debug)]
+pub(crate) enum CompatibilityEvidence {
+  AllRowsRejected(String),
+}
+
+fn raw_path_bytes(path: &std::path::Path) -> Vec<u8> {
+  #[cfg(unix)]
+  {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::ffi::OsStrExt;
+    path
+      .as_os_str()
+      .encode_wide()
+      .flat_map(u16::to_le_bytes)
+      .collect()
+  }
+  #[cfg(not(any(unix, windows)))]
+  {
+    path.to_string_lossy().as_bytes().to_vec()
+  }
+}
+
+impl ProfileDraft {
   pub(crate) fn new(profile: ProfileIdentity, is_default: bool) -> Self {
     Self {
       profile,
@@ -561,6 +639,10 @@ pub(crate) fn issue(
     code: IssueCode::known(code),
     stage,
     severity,
+    cause: code.to_owned(),
+    provider: None,
+    tier: None,
+    retryability: "unknown".to_owned(),
     occurrences: 1,
     samples: Vec::new(),
     browser_id: None,
@@ -582,6 +664,11 @@ pub(crate) fn push_aggregated(issues: &mut Vec<ExtractionIssue>, incoming: Extra
   let Some(existing) = issues.iter_mut().find(|issue| {
     issue.code == incoming.code
       && issue.stage == incoming.stage
+      && issue.severity == incoming.severity
+      && issue.cause == incoming.cause
+      && issue.provider == incoming.provider
+      && issue.tier == incoming.tier
+      && issue.retryability == incoming.retryability
       && issue.browser_id == incoming.browser_id
       && issue.installation_id == incoming.installation_id
       && issue.profile_id == incoming.profile_id
@@ -655,25 +742,34 @@ pub(crate) fn sort_cookies(cookies: &mut [Cookie]) {
 
 /// Section 5.5 source ordering: role first, then declared precedence. The sort
 /// is stable, so equal keys keep their engine-declared candidate order.
-pub(crate) fn sort_source_outcomes(sources: &mut [SourceExtractionOutcome]) {
-  sources.sort_by(|left, right| {
-    left
-      .source
-      .role
-      .order_rank()
-      .cmp(&right.source.role.order_rank())
-      .then_with(|| left.source.precedence.cmp(&right.source.precedence))
-  });
+#[cfg(test)]
+pub(crate) fn sort_source_outcomes(sources: &mut [SourceDraft]) {
+  sources.sort_by(|left, right| compare_source_identity(&left.source, &right.source));
 }
 
 pub(crate) fn sort_source_descriptors(sources: &mut [CookieSourceDescriptor]) {
   sources.sort_by(|left, right| {
-    left
-      .role
-      .order_rank()
-      .cmp(&right.role.order_rank())
-      .then_with(|| left.precedence.cmp(&right.precedence))
+    compare_source_order(&left.role, left.precedence, &right.role, right.precedence)
   });
+}
+
+pub(crate) fn compare_source_identity(
+  left: &CookieSourceIdentity,
+  right: &CookieSourceIdentity,
+) -> Ordering {
+  compare_source_order(&left.role, left.precedence, &right.role, right.precedence)
+}
+
+fn compare_source_order(
+  left_role: &CookieSourceRoleId,
+  left_precedence: u16,
+  right_role: &CookieSourceRoleId,
+  right_precedence: u16,
+) -> Ordering {
+  left_role
+    .order_rank()
+    .cmp(&right_role.order_rank())
+    .then_with(|| left_precedence.cmp(&right_precedence))
 }
 
 /// A source succeeded when acquisition, parsing, and the filtered query all
@@ -693,40 +789,6 @@ pub(crate) fn source_status(failed: bool) -> SourceStatusCode {
 /// to `no_sources`, which Section 5.7 defines as discovery completing *without*
 /// an error-severity failure. A profile that ended up with no sources because
 /// something errored has not found "no sources"; it failed to look.
-pub(crate) fn report_status(
-  profiles: &[ProfileExtraction],
-  top_level: &[ExtractionIssue],
-  discovery_failed: bool,
-) -> ReportStatusCode {
-  let succeeded = profiles.iter().any(|profile| {
-    profile
-      .sources
-      .iter()
-      .any(|source| source.status == SourceStatusCode::succeeded())
-  });
-  let attempted = profiles.iter().any(|profile| !profile.sources.is_empty());
-  let has_error = top_level.iter().any(ExtractionIssue::is_error)
-    || profiles.iter().any(|profile| {
-      profile.issues.iter().any(ExtractionIssue::is_error)
-        || profile
-          .sources
-          .iter()
-          .any(|source| source.issues.iter().any(ExtractionIssue::is_error))
-    });
-
-  if succeeded {
-    if has_error {
-      ReportStatusCode::partial()
-    } else {
-      ReportStatusCode::complete()
-    }
-  } else if attempted || discovery_failed || has_error {
-    ReportStatusCode::failed()
-  } else {
-    ReportStatusCode::no_sources()
-  }
-}
-
 /// Wire paths are UTF-8 with an explicit lossy flag; selection always uses the
 /// opaque IDs instead.
 pub(crate) fn display_path(path: &std::path::Path) -> (String, bool) {
@@ -844,7 +906,98 @@ mod tests {
   }
 
   #[test]
-  fn aggregated_issues_bound_samples_and_keep_the_highest_severity() {
+  fn frozen_pre_pr3_report_json_defaults_new_wire_fields() {
+    let opaque = "a".repeat(64);
+    let report: ExtractionReport = serde_json::from_value(serde_json::json!({
+      "status": "partial",
+      "summary": {
+        "registered_browsers": 1,
+        "browsers_detected": 1,
+        "browsers_not_detected": 0,
+        "installations_discovered": 1,
+        "profiles_discovered": 1,
+        "sources_succeeded": 1,
+        "sources_failed": 0,
+        "rows_seen": 1,
+        "cookies_emitted": 1,
+        "rows_skipped": 0,
+        "counters_saturated": false
+      },
+      "profiles": [{
+        "profile": {
+          "browser_id": "chrome",
+          "installation_id": opaque,
+          "profile_id": opaque,
+          "display_name": "Default",
+          "path": "display-only",
+          "path_lossy": false
+        },
+        "sources": [{
+          "source": {
+            "role": "persistent",
+            "format": "chromium_sqlite",
+            "path": "display-only/Cookies",
+            "path_lossy": false,
+            "precedence": 10
+          },
+          "status": "succeeded",
+          "selected": true,
+          "acquisition_strategy": "live_read_only",
+          "cookies": [{
+            "domain": ".example.test",
+            "path": "/",
+            "secure": true,
+            "expires": null,
+            "name": "session",
+            "value": "value",
+            "http_only": true,
+            "same_site": 1
+          }],
+          "stats": {
+            "rows_seen": 1,
+            "cookies_emitted": 1,
+            "rows_skipped": 0,
+            "acquisition_attempts": 1,
+            "counters_saturated": false
+          },
+          "issues": [{
+            "code": "decode_failed",
+            "stage": "decode",
+            "severity": "warning",
+            "occurrences": 1,
+            "samples": [],
+            "browser_id": "chrome",
+            "installation_id": opaque,
+            "profile_id": opaque,
+            "message": "legacy diagnostic"
+          }]
+        }],
+        "stats": {
+          "rows_seen": 1,
+          "cookies_emitted": 1,
+          "rows_skipped": 0,
+          "acquisition_attempts": 1,
+          "counters_saturated": false
+        },
+        "issues": []
+      }],
+      "issues": []
+    }))
+    .expect("the frozen pre-PR3 report remains readable");
+
+    assert_eq!(report.schema_version, EXTRACTION_REPORT_SCHEMA_VERSION);
+    assert_eq!(report.termination, TerminationCode::completed());
+    assert_eq!(report.summary.rows_rejected, 0);
+    assert_eq!(report.summary.provider_failures, 0);
+    let issue = &report.profiles[0].sources[0].issues[0];
+    assert_eq!(issue.cause, "");
+    assert_eq!(issue.provider, None);
+    assert_eq!(issue.tier, None);
+    assert_eq!(issue.retryability, "unknown");
+  }
+
+  #[test]
+  fn aggregated_issues_bound_samples_and_keep_severities_distinct() {
     let mut issues = Vec::new();
     for index in 0..MAX_ISSUE_SAMPLES + 4 {
       push_aggregated(
@@ -872,18 +1025,23 @@ mod tests {
         "escalated",
       ),
     );
-    assert_eq!(issues[0].severity, IssueSeverityCode::error());
-    assert_eq!(issues[0].message, "escalated");
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].severity, IssueSeverityCode::warning());
+    assert_eq!(issues[1].severity, IssueSeverityCode::error());
+    assert_eq!(issues[1].message, "escalated");
   }
 
   #[test]
   fn source_outcomes_sort_persistent_before_session_then_by_precedence() {
     let mut sources = vec![
+      source(CookieSourceRoleId::known("future_z"), 1),
       source(CookieSourceRoleId::session(), 20),
       source(CookieSourceRoleId::persistent(), 20),
+      source(CookieSourceRoleId::known("future_a"), 2),
       source(CookieSourceRoleId::session(), 10),
-      source(CookieSourceRoleId::known("future_role"), 1),
+      source(CookieSourceRoleId::known("future_a"), 1),
       source(CookieSourceRoleId::persistent(), 10),
+      source(CookieSourceRoleId::known("future_a"), 1),
     ];
     sort_source_outcomes(&mut sources);
     let order = sources
@@ -897,13 +1055,34 @@ mod tests {
         ("persistent".to_owned(), 20),
         ("session".to_owned(), 10),
         ("session".to_owned(), 20),
-        ("future_role".to_owned(), 1),
+        ("future_a".to_owned(), 1),
+        ("future_a".to_owned(), 1),
+        ("future_a".to_owned(), 2),
+        ("future_z".to_owned(), 1),
       ]
     );
+
+    let mut descriptors = sources
+      .iter()
+      .rev()
+      .map(|source| CookieSourceDescriptor {
+        role: source.source.role.clone(),
+        format: source.source.format.clone(),
+        path: source.source.path.clone(),
+        path_lossy: source.source.path_lossy,
+        precedence: source.source.precedence,
+      })
+      .collect::<Vec<_>>();
+    sort_source_descriptors(&mut descriptors);
+    let descriptor_order = descriptors
+      .iter()
+      .map(|source| (source.role.to_string(), source.precedence))
+      .collect::<Vec<_>>();
+    assert_eq!(descriptor_order, order);
   }
 
-  fn source(role: CookieSourceRoleId, precedence: u16) -> SourceExtractionOutcome {
-    SourceExtractionOutcome::new(
+  fn source(role: CookieSourceRoleId, precedence: u16) -> SourceDraft {
+    SourceDraft::new(
       CookieSourceIdentity {
         role,
         format: CookieSourceFormatId::known("chromium_sqlite"),
@@ -911,6 +1090,7 @@ mod tests {
         path_lossy: false,
         precedence,
       },
+      std::path::Path::new("/tmp/source"),
       true,
       AcquisitionStrategyCode::live_read_only(),
     )

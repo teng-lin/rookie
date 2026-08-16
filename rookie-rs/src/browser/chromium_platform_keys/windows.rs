@@ -1,10 +1,14 @@
-use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
+use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes};
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyRequest, LocalStateInput};
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose, Engine as _};
 use zeroize::Zeroizing;
 
+use crate::browser::outcome::Retryability;
+use crate::common::deadline::BoundaryRuntime;
+#[cfg(test)]
+use crate::common::deadline::{Deadline, SystemClock};
 use crate::common::secret::SecretBytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,21 +33,35 @@ fn local_state_key<'a>(local_state: &'a serde_json::Value, field: &str) -> Local
 }
 
 trait WindowsKeyBackend {
-  fn retrieve_v10(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>>;
+  fn retrieve_v10(
+    &self,
+    encoded_key: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Vec<Zeroizing<Vec<u8>>>>;
   fn appbound_compiled(&self) -> bool;
-  fn privileged(&self) -> bool;
-  fn retrieve_v20(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>>;
+  fn privileged(&self, runtime: &BoundaryRuntime<'_>) -> Result<bool>;
+  fn retrieve_v20(
+    &self,
+    encoded_key: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Vec<Zeroizing<Vec<u8>>>>;
 }
 
 struct SystemWindowsKeyBackend;
 
 impl WindowsKeyBackend for SystemWindowsKeyBackend {
-  fn retrieve_v10(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  fn retrieve_v10(
+    &self,
+    encoded_key: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    runtime.check()?;
     let wrapped: Vec<u8> = general_purpose::STANDARD
       .decode(encoded_key)
       .map_err(|error| {
         anyhow::anyhow!("Failed to decode Local State os_crypt.encrypted_key as base64: {error}")
       })?;
+    runtime.check()?;
     let decoded_len = wrapped.len();
     if decoded_len <= 5 {
       bail!(
@@ -55,6 +73,7 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
       bail!("Local State os_crypt.encrypted_key is missing DPAPI prefix");
     }
 
+    runtime.check()?;
     let wrapped_len = decoded_len - 5;
     // Wrap the unwrapped master key immediately so it is zeroized as soon as
     // this scope ends, rather than left in freed heap memory.
@@ -65,6 +84,7 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
           "Failed to unwrap DPAPI encrypted key (decoded_length={decoded_len}, wrapped_length={wrapped_len}): {error}"
         )
       })?;
+    runtime.check()?;
     if v10_key.len() != 32 {
       bail!(
         "DPAPI unwrapped key length was {}, expected 32 (decoded_length={}, wrapped_length={})",
@@ -80,14 +100,24 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
     cfg!(feature = "appbound")
   }
 
-  fn privileged(&self) -> bool {
-    privilege::user::privileged()
+  fn privileged(&self, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
+    runtime.check()?;
+    let privileged = privilege::user::privileged();
+    runtime.check()?;
+    Ok(privileged)
   }
 
-  fn retrieve_v20(&self, encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  fn retrieve_v20(
+    &self,
+    encoded_key: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    runtime.check()?;
     #[cfg(feature = "appbound")]
     {
-      crate::windows::appbound::get_keys(encoded_key)
+      let keys = crate::windows::appbound::get_keys(encoded_key)?;
+      runtime.check()?;
+      Ok(keys)
     }
 
     #[cfg(not(feature = "appbound"))]
@@ -98,6 +128,7 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
   }
 }
 
+#[cfg(test)]
 fn retrieve_windows_key_outcomes<B>(
   local_state: &serde_json::Value,
   backend: &B,
@@ -105,58 +136,121 @@ fn retrieve_windows_key_outcomes<B>(
 where
   B: WindowsKeyBackend,
 {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::new(&clock, Deadline::standard());
+  retrieve_windows_key_outcomes_with_runtime(local_state, backend, &runtime)
+}
+
+fn checked_boundary<T>(
+  runtime: &BoundaryRuntime<'_>,
+  operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+  runtime.check()?;
+  let result = operation();
+  runtime.check()?;
+  result
+}
+
+fn provider_failure(message: String) -> ChromiumKeyOutcomes {
+  ChromiumKeyOutcomes {
+    v10: ChromiumKeyOutcome::failure(message.clone()),
+    v11: ChromiumKeyOutcome::NotApplicable,
+    v20: ChromiumKeyOutcome::failure(message),
+  }
+}
+
+fn retrieve_windows_key_outcomes_with_runtime<B>(
+  local_state: &serde_json::Value,
+  backend: &B,
+  runtime: &BoundaryRuntime<'_>,
+) -> ChromiumKeyOutcomes
+where
+  B: WindowsKeyBackend,
+{
+  if let Err(error) = runtime.check() {
+    return provider_failure(error.to_string());
+  }
   let v10 = match local_state_key(local_state, "encrypted_key") {
     LocalStateKey::Missing => ChromiumKeyOutcome::NotApplicable,
     LocalStateKey::InvalidType => {
       ChromiumKeyOutcome::failure("Local State os_crypt.encrypted_key must be a base64 string")
     }
     LocalStateKey::Encoded(encoded) => outcome_from_result(
-      backend.retrieve_v10(encoded),
+      checked_boundary(runtime, || backend.retrieve_v10(encoded, runtime)),
       "Chromium v10 provider returned no key candidates",
     ),
   };
 
-  let v20 = match local_state_key(local_state, "app_bound_encrypted_key") {
-    LocalStateKey::Missing => ChromiumKeyOutcome::NotApplicable,
-    LocalStateKey::InvalidType => ChromiumKeyOutcome::failure(
-      "Local State os_crypt.app_bound_encrypted_key must be a base64 string",
-    ),
-    LocalStateKey::Encoded(_) if !backend.appbound_compiled() => {
-      ChromiumKeyOutcome::failure("Chromium v20 app-bound provider is unavailable in this build")
-    }
-    LocalStateKey::Encoded(_) if !backend.privileged() => ChromiumKeyOutcome::failure(
-      "Chromium v20 app-bound key retrieval requires administrator privileges",
-    ),
-    // The AES256/ChaCha20 elevation keys used to unwrap the app-bound master
-    // key are extracted specifically from Google Chrome's elevation_service.exe
-    // (see windows/appbound/mod.rs). Other Chromium-based vendors (Brave, Edge,
-    // Vivaldi, Opera, ...) can also write an app_bound_encrypted_key using their
-    // own vendor-specific elevation service with different keys, which will
-    // safely fail to unwrap here. We don't know which named browser produced
-    // this Local State at this layer, so we can't say definitively that's what
-    // happened - but surface it as a possibility rather than a bare decryption
-    // error, so it isn't mistaken for a generic bug.
-    LocalStateKey::Encoded(encoded) => {
-      // Only reassure the caller that legacy cookies are unaffected when v10
-      // actually succeeded - v10 is retrieved independently and can itself have
-      // failed (or been absent) for the same Local State.
-      let legacy_note = if matches!(v10, ChromiumKeyOutcome::Success(_)) {
-        "legacy v10/v11 cookies are unaffected"
-      } else {
-        "legacy v10/v11 cookies may also have failed to decrypt - check the v10 outcome separately"
-      };
-      match backend.retrieve_v20(encoded) {
-        Ok(candidates) => ChromiumKeyOutcome::success_zeroizing(candidates).unwrap_or_else(|| {
-          ChromiumKeyOutcome::failure(format!(
-            "Chromium v20 provider returned no key candidates. This vendor may use \
+  let v20 = if let Err(error) = runtime.check() {
+    ChromiumKeyOutcome::failure(error.to_string())
+  } else {
+    match local_state_key(local_state, "app_bound_encrypted_key") {
+      LocalStateKey::Missing => ChromiumKeyOutcome::NotApplicable,
+      LocalStateKey::InvalidType => ChromiumKeyOutcome::failure_with_retryability(
+        "Local State os_crypt.app_bound_encrypted_key must be a base64 string",
+        Retryability::NotRetryable,
+      ),
+      LocalStateKey::Encoded(encoded) if general_purpose::STANDARD.decode(encoded).is_err() => {
+        ChromiumKeyOutcome::failure_with_retryability(
+          "Local State os_crypt.app_bound_encrypted_key is not valid base64",
+          Retryability::NotRetryable,
+        )
+      }
+      LocalStateKey::Encoded(_) if !backend.appbound_compiled() => {
+        ChromiumKeyOutcome::failure("Chromium v20 app-bound provider is unavailable in this build")
+      }
+      // The AES256/ChaCha20 elevation keys used to unwrap the app-bound master
+      // key are extracted specifically from Google Chrome's elevation_service.exe
+      // (see windows/appbound/mod.rs). Other Chromium-based vendors (Brave, Edge,
+      // Vivaldi, Opera, ...) can also write an app_bound_encrypted_key using their
+      // own vendor-specific elevation service with different keys, which will
+      // safely fail to unwrap here. We don't know which named browser produced
+      // this Local State at this layer, so we can't say definitively that's what
+      // happened - but surface it as a possibility rather than a bare decryption
+      // error, so it isn't mistaken for a generic bug.
+      LocalStateKey::Encoded(encoded) => {
+        let privileged = match checked_boundary(runtime, || backend.privileged(runtime)) {
+          Ok(privileged) => privileged,
+          Err(error) => {
+            return ChromiumKeyOutcomes {
+              v10,
+              v11: ChromiumKeyOutcome::NotApplicable,
+              v20: ChromiumKeyOutcome::failure(error.to_string()),
+            }
+          }
+        };
+        if !privileged {
+          return ChromiumKeyOutcomes {
+            v10,
+            v11: ChromiumKeyOutcome::NotApplicable,
+            v20: ChromiumKeyOutcome::failure(
+              "Chromium v20 app-bound key retrieval requires administrator privileges",
+            ),
+          };
+        }
+        // Only reassure the caller that legacy cookies are unaffected when v10
+        // actually succeeded - v10 is retrieved independently and can itself have
+        // failed (or been absent) for the same Local State.
+        let legacy_note = if matches!(v10, ChromiumKeyOutcome::Success(_)) {
+          "legacy v10/v11 cookies are unaffected"
+        } else {
+          "legacy v10/v11 cookies may also have failed to decrypt - check the v10 outcome separately"
+        };
+        match checked_boundary(runtime, || backend.retrieve_v20(encoded, runtime)) {
+          Ok(candidates) => {
+            ChromiumKeyOutcome::success_zeroizing(candidates).unwrap_or_else(|| {
+              ChromiumKeyOutcome::failure(format!(
+                "Chromium v20 provider returned no key candidates. This vendor may use \
              app-bound elevation keys rookie doesn't have (only Google Chrome's are \
              known); {legacy_note}."
-          ))
-        }),
-        Err(error) => ChromiumKeyOutcome::failure(format!(
-          "App-Bound v20 decryption failed: {error}. This vendor may use elevation \
+              ))
+            })
+          }
+          Err(error) => ChromiumKeyOutcome::failure(format!(
+            "App-Bound v20 decryption failed: {error}. This vendor may use elevation \
            keys rookie doesn't have (only Google Chrome's are known); {legacy_note}."
-        )),
+          )),
+        }
       }
     }
   };
@@ -169,28 +263,58 @@ where
 }
 
 trait LocalStateReader {
-  fn read_to_string(&self, path: &std::path::Path) -> Result<String>;
+  fn read_to_string(&self, path: &std::path::Path, runtime: &BoundaryRuntime<'_>)
+    -> Result<String>;
 }
 
 struct SystemLocalStateReader;
 
 impl LocalStateReader for SystemLocalStateReader {
-  fn read_to_string(&self, path: &std::path::Path) -> Result<String> {
-    std::fs::read_to_string(path).map_err(anyhow::Error::from)
+  fn read_to_string(
+    &self,
+    path: &std::path::Path,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<String> {
+    runtime.check()?;
+    let contents = std::fs::read_to_string(path).map_err(anyhow::Error::from)?;
+    runtime.check()?;
+    Ok(contents)
   }
 }
 
+#[cfg(test)]
 fn host_key_outcomes<R>(request: ChromiumKeyRequest<'_>, reader: &R) -> ChromiumKeyOutcomes
 where
   R: LocalStateReader,
 {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::new(&clock, Deadline::standard());
+  host_key_outcomes_with_runtime(request, reader, &SystemWindowsKeyBackend, &runtime)
+}
+
+fn host_key_outcomes_with_runtime<R, B>(
+  request: ChromiumKeyRequest<'_>,
+  reader: &R,
+  backend: &B,
+  runtime: &BoundaryRuntime<'_>,
+) -> ChromiumKeyOutcomes
+where
+  R: LocalStateReader,
+  B: WindowsKeyBackend,
+{
+  if let Err(error) = runtime.check() {
+    return provider_failure(error.to_string());
+  }
   let parsed;
   let local_state = match request.local_state {
     LocalStateInput::Parsed(local_state) => local_state,
     LocalStateInput::Path(path) => {
-      parsed = reader
-        .read_to_string(path)
-        .and_then(|contents| serde_json::from_str(&contents).map_err(anyhow::Error::from));
+      parsed =
+        checked_boundary(runtime, || reader.read_to_string(path, runtime)).and_then(|contents| {
+          checked_boundary(runtime, || {
+            serde_json::from_str(&contents).map_err(anyhow::Error::from)
+          })
+        });
       match &parsed {
         Ok(local_state) => local_state,
         Err(error) => {
@@ -208,7 +332,7 @@ where
     }
     LocalStateInput::NotApplicable => return ChromiumKeyOutcomes::default(),
   };
-  retrieve_windows_key_outcomes(local_state, &SystemWindowsKeyBackend)
+  retrieve_windows_key_outcomes_with_runtime(local_state, backend, runtime)
 }
 
 pub(crate) struct HostKeySession;
@@ -218,29 +342,17 @@ impl HostKeySession {
     Self
   }
 
-  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
-    host_key_outcomes(request, &SystemLocalStateReader)
-  }
-}
-
-pub(crate) struct WindowsPlatformKeyProvider<'a> {
-  local_state: &'a serde_json::Value,
-}
-
-impl<'a> WindowsPlatformKeyProvider<'a> {
-  pub(crate) fn new(local_state: &'a serde_json::Value) -> Self {
-    Self { local_state }
-  }
-}
-
-impl ChromiumKeyProvider<()> for WindowsPlatformKeyProvider<'_> {
-  fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
-    let credentials = super::ChromiumKeyCredentials::default();
-    let mut session = HostKeySession::new();
-    session.retrieve(ChromiumKeyRequest::for_parsed_local_state(
-      &credentials,
-      self.local_state,
-    ))
+  pub(crate) fn retrieve(
+    &mut self,
+    request: ChromiumKeyRequest<'_>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
+    host_key_outcomes_with_runtime(
+      request,
+      &SystemLocalStateReader,
+      &SystemWindowsKeyBackend,
+      runtime,
+    )
   }
 }
 
@@ -256,7 +368,11 @@ mod tests {
   }
 
   impl LocalStateReader for CountingLocalStateReader {
-    fn read_to_string(&self, _path: &std::path::Path) -> Result<String> {
+    fn read_to_string(
+      &self,
+      _path: &std::path::Path,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<String> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -276,7 +392,11 @@ mod tests {
   }
 
   impl WindowsKeyBackend for FakeWindowsBackend {
-    fn retrieve_v10(&self, _encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    fn retrieve_v10(
+      &self,
+      _encoded_key: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
       self.v10_calls.set(self.v10_calls.get() + 1);
       self
         .v10_result
@@ -289,11 +409,15 @@ mod tests {
       self.compiled
     }
 
-    fn privileged(&self) -> bool {
-      self.privileged
+    fn privileged(&self, _runtime: &BoundaryRuntime<'_>) -> Result<bool> {
+      Ok(self.privileged)
     }
 
-    fn retrieve_v20(&self, _encoded_key: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    fn retrieve_v20(
+      &self,
+      _encoded_key: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
       self.v20_calls.set(self.v20_calls.get() + 1);
       self
         .v20_result
@@ -519,6 +643,41 @@ mod tests {
   }
 
   #[test]
+  fn malformed_app_bound_metadata_is_typed_not_retryable_before_provider_access() {
+    let backend = windows_backend(Ok(vec![vec![0x10; 32]]), Ok(vec![vec![0x20; 32]]));
+    let outcomes = retrieve_windows_key_outcomes(
+      &windows_local_state(serde_json::json!("legacy"), serde_json::json!("not-base64")),
+      &backend,
+    );
+
+    assert_eq!(backend.v20_calls.get(), 0);
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V20)
+    else {
+      panic!("malformed app-bound metadata must be a key failure");
+    };
+    assert_eq!(failure.retryability(), Retryability::NotRetryable);
+    assert!(failure.message().contains("not valid base64"));
+  }
+
+  #[test]
+  fn transient_app_bound_provider_failure_remains_typed_retryable() {
+    let backend = windows_backend(
+      Ok(vec![]),
+      Err(anyhow::anyhow!("transient provider failure")),
+    );
+    let outcomes = retrieve_windows_key_outcomes(
+      &serde_json::json!({"os_crypt": {"app_bound_encrypted_key": "YXBwYm91bmQ="}}),
+      &backend,
+    );
+
+    let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V20)
+    else {
+      panic!("provider failure remains typed");
+    };
+    assert_eq!(failure.retryability(), Retryability::Retryable);
+  }
+
+  #[test]
   fn windows_missing_appbound_metadata_does_not_call_v20() {
     let backend = windows_backend(Ok(vec![vec![0x10; 32]]), Ok(vec![vec![0x20; 32]]));
     let state = serde_json::json!({"os_crypt": {"encrypted_key": "legacy"}});
@@ -531,6 +690,244 @@ mod tests {
         tier: ChromiumKeyTier::V20
       }
     );
+  }
+
+  struct AdvancingLocalStateReader {
+    calls: Cell<usize>,
+    elapsed: std::time::Duration,
+  }
+
+  impl LocalStateReader for AdvancingLocalStateReader {
+    fn read_to_string(
+      &self,
+      _path: &std::path::Path,
+      runtime: &BoundaryRuntime<'_>,
+    ) -> Result<String> {
+      self.calls.set(self.calls.get() + 1);
+      runtime.clock.sleep(self.elapsed);
+      Ok("{}".to_string())
+    }
+  }
+
+  struct AdvancingWindowsBackend {
+    v10_calls: Cell<usize>,
+    privilege_calls: Cell<usize>,
+    v20_calls: Cell<usize>,
+    v10_elapsed: std::time::Duration,
+    privilege_elapsed: std::time::Duration,
+    v20_elapsed: std::time::Duration,
+  }
+
+  impl AdvancingWindowsBackend {
+    fn new() -> Self {
+      Self {
+        v10_calls: Cell::new(0),
+        privilege_calls: Cell::new(0),
+        v20_calls: Cell::new(0),
+        v10_elapsed: std::time::Duration::ZERO,
+        privilege_elapsed: std::time::Duration::ZERO,
+        v20_elapsed: std::time::Duration::ZERO,
+      }
+    }
+  }
+
+  impl WindowsKeyBackend for AdvancingWindowsBackend {
+    fn retrieve_v10(
+      &self,
+      _encoded_key: &str,
+      runtime: &BoundaryRuntime<'_>,
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+      self.v10_calls.set(self.v10_calls.get() + 1);
+      runtime.clock.sleep(self.v10_elapsed);
+      Ok(vec![Zeroizing::new(vec![0x10; 32])])
+    }
+
+    fn appbound_compiled(&self) -> bool {
+      true
+    }
+
+    fn privileged(&self, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
+      self.privilege_calls.set(self.privilege_calls.get() + 1);
+      runtime.clock.sleep(self.privilege_elapsed);
+      Ok(true)
+    }
+
+    fn retrieve_v20(
+      &self,
+      _encoded_key: &str,
+      runtime: &BoundaryRuntime<'_>,
+    ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+      self.v20_calls.set(self.v20_calls.get() + 1);
+      runtime.clock.sleep(self.v20_elapsed);
+      Ok(vec![Zeroizing::new(vec![0x20; 32])])
+    }
+  }
+
+  fn failure_message(outcome: &ChromiumKeyOutcome) -> &str {
+    let ChromiumKeyOutcome::Failure(failure) = outcome else {
+      panic!("expected provider failure, got {outcome:?}");
+    };
+    failure.message()
+  }
+
+  #[test]
+  fn cancelled_runtime_starts_no_windows_key_provider_actions() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop,
+    );
+    let backend = AdvancingWindowsBackend::new();
+    let state = serde_json::json!({
+      "os_crypt": {
+        "encrypted_key": "legacy",
+        "app_bound_encrypted_key": "appbound"
+      }
+    });
+
+    let outcomes = retrieve_windows_key_outcomes_with_runtime(&state, &backend, &runtime);
+
+    assert_eq!(backend.v10_calls.get(), 0);
+    assert_eq!(backend.privilege_calls.get(), 0);
+    assert_eq!(backend.v20_calls.get(), 0);
+    assert!(failure_message(&outcomes.v10).contains("operation cancelled"));
+    assert!(failure_message(&outcomes.v20).contains("operation cancelled"));
+  }
+
+  #[test]
+  fn resource_stop_after_local_state_read_prevents_all_key_provider_actions() {
+    struct ResourceStoppingReader {
+      calls: Cell<usize>,
+      stop: crate::common::deadline::CancellationToken,
+    }
+
+    impl LocalStateReader for ResourceStoppingReader {
+      fn read_to_string(
+        &self,
+        _path: &std::path::Path,
+        _runtime: &BoundaryRuntime<'_>,
+      ) -> Result<String> {
+        self.calls.set(self.calls.get() + 1);
+        self.stop.exhaust_resources();
+        Ok(r#"{"os_crypt":{"encrypted_key":"legacy"}}"#.to_owned())
+      }
+    }
+
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let reader = ResourceStoppingReader {
+      calls: Cell::new(0),
+      stop,
+    };
+    let backend = AdvancingWindowsBackend::new();
+    let credentials = super::super::ChromiumKeyCredentials::default();
+
+    let outcomes = host_key_outcomes_with_runtime(
+      ChromiumKeyRequest::for_installation(
+        "chrome",
+        &credentials,
+        std::path::Path::new("Local State"),
+        None,
+      ),
+      &reader,
+      &backend,
+      &runtime,
+    );
+
+    assert_eq!(reader.calls.get(), 1);
+    assert_eq!(backend.v10_calls.get(), 0);
+    assert_eq!(backend.privilege_calls.get(), 0);
+    assert_eq!(backend.v20_calls.get(), 0);
+    assert!(failure_message(&outcomes.v10).contains("resource budget exhausted"));
+    assert!(failure_message(&outcomes.v20).contains("resource budget exhausted"));
+  }
+
+  #[test]
+  fn local_state_read_completing_at_deadline_cannot_start_key_providers() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let reader = AdvancingLocalStateReader {
+      calls: Cell::new(0),
+      elapsed: std::time::Duration::from_secs(1),
+    };
+    let backend = AdvancingWindowsBackend::new();
+    let credentials = super::super::ChromiumKeyCredentials::default();
+
+    let outcomes = host_key_outcomes_with_runtime(
+      ChromiumKeyRequest::for_installation(
+        "chrome",
+        &credentials,
+        std::path::Path::new("Local State"),
+        None,
+      ),
+      &reader,
+      &backend,
+      &runtime,
+    );
+
+    assert_eq!(reader.calls.get(), 1);
+    assert_eq!(backend.v10_calls.get(), 0);
+    assert_eq!(backend.privilege_calls.get(), 0);
+    assert!(failure_message(&outcomes.v10).contains("operation deadline expired"));
+    assert!(failure_message(&outcomes.v20).contains("operation deadline expired"));
+  }
+
+  #[test]
+  fn dpapi_completion_at_deadline_is_rejected_by_the_provider_checkpoint() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let mut backend = AdvancingWindowsBackend::new();
+    backend.v10_elapsed = std::time::Duration::from_secs(1);
+    let state = serde_json::json!({"os_crypt": {"encrypted_key": "legacy"}});
+
+    let outcomes = retrieve_windows_key_outcomes_with_runtime(&state, &backend, &runtime);
+
+    assert_eq!(backend.v10_calls.get(), 1);
+    assert!(failure_message(&outcomes.v10).contains("operation deadline expired"));
+    assert_eq!(backend.privilege_calls.get(), 0);
+    assert_eq!(backend.v20_calls.get(), 0);
+  }
+
+  #[test]
+  fn privilege_completion_at_deadline_prevents_v20_retrieval() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let mut backend = AdvancingWindowsBackend::new();
+    backend.privilege_elapsed = std::time::Duration::from_secs(1);
+    let state = serde_json::json!({"os_crypt": {"app_bound_encrypted_key": "appbound"}});
+
+    let outcomes = retrieve_windows_key_outcomes_with_runtime(&state, &backend, &runtime);
+
+    assert_eq!(backend.privilege_calls.get(), 1);
+    assert_eq!(backend.v20_calls.get(), 0);
+    assert!(failure_message(&outcomes.v20).contains("operation deadline expired"));
+  }
+
+  #[test]
+  fn v20_completion_at_deadline_is_rejected_by_the_provider_checkpoint() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let mut backend = AdvancingWindowsBackend::new();
+    backend.v20_elapsed = std::time::Duration::from_secs(1);
+    let state = serde_json::json!({"os_crypt": {"app_bound_encrypted_key": "appbound"}});
+
+    let outcomes = retrieve_windows_key_outcomes_with_runtime(&state, &backend, &runtime);
+
+    assert_eq!(backend.privilege_calls.get(), 1);
+    assert_eq!(backend.v20_calls.get(), 1);
+    assert!(failure_message(&outcomes.v20).contains("operation deadline expired"));
   }
 
   #[cfg(not(feature = "appbound"))]

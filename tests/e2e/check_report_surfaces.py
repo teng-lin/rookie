@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,7 @@ def librewolf_root(home: Path) -> Path:
 
 def seed_database(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(
             """
             CREATE TABLE moz_cookies (
@@ -75,6 +76,64 @@ def seed_database(path: Path, value: str) -> None:
             "INSERT INTO moz_cookies VALUES (?, '/', 0, 1700000000, ?, ?, 0, 0)",
             (".example.test", f"profile-{value}", value),
         )
+
+
+def seed_provider_failure_database(home: Path) -> tuple[str, dict[str, Any]]:
+    """Create a discovered encrypted source with one deterministic provider failure."""
+    if sys.platform == "darwin":
+        browser_id = "coccoc"
+        root = home / "Library/Application Support/Coccoc"
+        tier = "v10"
+    elif sys.platform == "win32":
+        browser_id = "chrome"
+        root = home / "AppData/Local/Google/Chrome/User Data"
+        tier = "v20"
+    else:
+        browser_id = "chrome"
+        root = home / ".config/google-chrome"
+        tier = "v11"
+
+    database = root / "Default/Network/Cookies"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    local_state: dict[str, Any] = {
+        "profile": {"info_cache": {"Default": {"name": "Default"}}}
+    }
+    if sys.platform == "win32":
+        # A present but malformed App-Bound key selects the v20 provider and
+        # fails before any OS credential access, so this fixture is stable on
+        # developer machines and CI alike.
+        local_state["os_crypt"] = {"app_bound_encrypted_key": "not-base64"}
+    root.joinpath("Local State").write_text(
+        json.dumps(local_state),
+        encoding="utf-8",
+    )
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO meta VALUES ('version', '23');
+            CREATE TABLE cookies (
+              host_key TEXT NOT NULL, path TEXT, is_secure INTEGER,
+              expires_utc INTEGER, name TEXT NOT NULL, value TEXT NOT NULL,
+              encrypted_value BLOB NOT NULL, is_httponly INTEGER,
+              samesite INTEGER
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO cookies VALUES (?, '/', 1, 0, ?, '', ?, 1, 1)",
+            (".provider.test", "provider-fixture", tier.encode("ascii") + b"fixture"),
+        )
+    return browser_id, {
+        "code": "provider_failed",
+        "stage": "decrypt",
+        "severity": "error",
+        "cause": "credential_provider",
+        "provider": "platform_key_provider",
+        "tier": tier,
+        "retryability": "not_retryable" if sys.platform == "win32" else "retryable",
+        "occurrences": 1,
+    }
 
 
 def seed_home(home: Path) -> None:
@@ -141,18 +200,79 @@ def invoke(command: list[str], surface: str, request: list[str], env: dict[str, 
     )
 
 
-def compare(request: list[str], launchers: dict[str, list[str]], env: dict[str, str]) -> Any:
+def validate_raw_report(surface: str, value: Any) -> None:
+    if not isinstance(value, dict) or "status" not in value:
+        return
+    schema_key = "schemaVersion" if surface == "node" else "schema_version"
+    assert value.get(schema_key) == 1, (surface, value)
+    assert "termination" in value, (surface, value)
+
+    issue_keys = {"cause", "provider", "tier", "retryability"}
+
+    def walk(item: Any) -> None:
+        if isinstance(item, list):
+            for child in item:
+                walk(child)
+        elif isinstance(item, dict):
+            if {"code", "stage", "severity", "occurrences"}.issubset(item):
+                missing = issue_keys.difference(item)
+                assert not missing, (surface, missing, item)
+                if item["cause"] == "credential_provider":
+                    assert item["provider"], (surface, item)
+                    assert item["tier"], (surface, item)
+                    assert item["retryability"] in {
+                        "retryable",
+                        "not_retryable",
+                    }, (surface, item)
+            for child in item.values():
+                walk(child)
+
+    walk(value)
+
+
+def compare(
+    request: list[str],
+    launchers: dict[str, list[str]],
+    env: dict[str, str],
+    expected_provider_issue: dict[str, Any] | None = None,
+) -> Any:
     observed: dict[str, Any] = {}
     for surface, command in launchers.items():
         result = invoke(command, surface, request, env)
         if result.returncode != 0:
             raise AssertionError(f"{surface} {request} failed: {result.stderr}")
-        observed[surface] = normalize(json.loads(result.stdout))
+        raw = json.loads(result.stdout)
+        validate_raw_report(surface, raw)
+        if expected_provider_issue is not None:
+            provider_issues = credential_provider_issues(raw)
+            assert len(provider_issues) == 1, (surface, provider_issues, raw)
+            issue = provider_issues[0]
+            for key, expected in expected_provider_issue.items():
+                assert key in issue, (surface, key, issue)
+                assert issue[key] == expected, (surface, key, issue, expected)
+        observed[surface] = normalize(raw)
     reference = observed["rust"]
     for surface, value in observed.items():
         if value != reference:
             raise AssertionError(f"{request}: {surface} differs from Rust\n{value!r}\n{reference!r}")
     return reference
+
+
+def credential_provider_issues(value: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+
+    def walk(item: Any) -> None:
+        if isinstance(item, list):
+            for child in item:
+                walk(child)
+        elif isinstance(item, dict):
+            if item.get("cause") == "credential_provider":
+                found.append(item)
+            for child in item.values():
+                walk(child)
+
+    walk(value)
+    return found
 
 
 def main() -> None:
@@ -204,6 +324,26 @@ def main() -> None:
         for browser_id in registry_only_ids:
             registry_only = compare(["report", browser_id], launchers, env)
             assert registry_only["status"] == "no_sources"
+
+        provider_browser, expected_provider_issue = seed_provider_failure_database(home)
+        # Linux providers share D-Bus. A nonexistent address makes both Secret
+        # Service and KWallet fail immediately and deterministically, without
+        # consulting a developer workstation's live session bus.
+        provider_env = env.copy()
+        if sys.platform.startswith("linux"):
+            provider_env["DBUS_SESSION_BUS_ADDRESS"] = (
+                f"unix:path={home / 'missing-session-bus'}"
+            )
+        provider_report = compare(
+            ["report", provider_browser],
+            launchers,
+            provider_env,
+            expected_provider_issue=expected_provider_issue,
+        )
+        provider_issues = credential_provider_issues(provider_report)
+        assert len(provider_issues) == 1, provider_report
+        for key, expected in expected_provider_issue.items():
+            assert provider_issues[0][key] == expected, (key, provider_issues[0], expected)
 
         compare(["load-report"], launchers, env)
 

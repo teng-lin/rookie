@@ -1,20 +1,28 @@
-use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
+use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::create_pbkdf2_key;
 use super::shared::outcome_from_result;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
+use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
+#[cfg(test)]
+use crate::common::deadline::{Clock, Deadline};
 use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
 
 trait LinuxKeyringBackend {
-  fn passwords(&self, crypt_name: &str) -> Result<Vec<SecretString>>;
+  fn passwords(&self, crypt_name: &str, runtime: &BoundaryRuntime<'_>)
+    -> Result<Vec<SecretString>>;
 }
 
 struct SystemLinuxKeyringBackend;
 
 impl LinuxKeyringBackend for SystemLinuxKeyringBackend {
-  fn passwords(&self, crypt_name: &str) -> Result<Vec<SecretString>> {
-    crate::linux::get_passwords(crypt_name)
+  fn passwords(
+    &self,
+    crypt_name: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Vec<SecretString>> {
+    crate::linux::get_passwords_with_runtime(crypt_name, runtime)
   }
 }
 
@@ -27,17 +35,29 @@ fn linux_v10_outcome() -> ChromiumKeyOutcome {
   .expect("Linux v10 has two fixed candidates")
 }
 
-fn retrieve_linux_v11_outcome<B>(crypt_name: &str, backend: &B) -> ChromiumKeyOutcome
+fn retrieve_linux_v11_outcome<B>(
+  crypt_name: &str,
+  backend: &B,
+  runtime: &BoundaryRuntime<'_>,
+) -> ChromiumKeyOutcome
 where
   B: LinuxKeyringBackend,
 {
   let salt = b"saltysalt";
-  let candidates = backend.passwords(crypt_name).map(|passwords| {
-    passwords
-      .into_iter()
-      .map(|password| create_pbkdf2_key(&password, salt, 1))
-      .collect()
-  });
+  let candidates = runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .and_then(|()| backend.passwords(crypt_name, runtime))
+    .and_then(|passwords| {
+      runtime.check().map_err(anyhow::Error::from)?;
+      Ok(passwords)
+    })
+    .map(|passwords| {
+      passwords
+        .into_iter()
+        .map(|password| create_pbkdf2_key(&password, salt, 1))
+        .collect()
+    });
   outcome_from_result(
     candidates,
     "Chromium v11 keyring provider returned no key candidates",
@@ -61,14 +81,19 @@ impl LinuxKeyOutcomeCache {
     }
   }
 
-  fn outcomes_for(&mut self, credentials: &ChromiumKeyCredentials) -> ChromiumKeyOutcomes {
-    self.outcomes_for_with_backend(credentials, &SystemLinuxKeyringBackend)
+  fn outcomes_for(
+    &mut self,
+    credentials: &ChromiumKeyCredentials,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
+    self.outcomes_for_with_backend(credentials, &SystemLinuxKeyringBackend, runtime)
   }
 
   fn outcomes_for_with_backend<B>(
     &mut self,
     credentials: &ChromiumKeyCredentials,
     backend: &B,
+    runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes
   where
     B: LinuxKeyringBackend,
@@ -82,7 +107,7 @@ impl LinuxKeyOutcomeCache {
       Some(crypt_name) => self
         .v11_by_crypt_name
         .entry(crypt_name.to_string())
-        .or_insert_with(|| retrieve_linux_v11_outcome(crypt_name, backend))
+        .or_insert_with(|| retrieve_linux_v11_outcome(crypt_name, backend, runtime))
         .clone(),
     };
 
@@ -108,8 +133,12 @@ impl HostKeySession {
     }
   }
 
-  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
-    self.cache.outcomes_for(request.credentials)
+  pub(crate) fn retrieve(
+    &mut self,
+    request: ChromiumKeyRequest<'_>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
+    self.cache.outcomes_for(request.credentials, runtime)
   }
 
   #[cfg(test)]
@@ -117,13 +146,16 @@ impl HostKeySession {
     &mut self,
     request: ChromiumKeyRequest<'_>,
     backend: &B,
+    clock: &dyn Clock,
+    deadline: Deadline,
   ) -> ChromiumKeyOutcomes
   where
     B: LinuxKeyringBackend,
   {
+    let runtime = BoundaryRuntime::new(clock, deadline);
     self
       .cache
-      .outcomes_for_with_backend(request.credentials, backend)
+      .outcomes_for_with_backend(request.credentials, backend, &runtime)
   }
 }
 
@@ -137,11 +169,19 @@ impl<'a> LinuxPlatformKeyProvider<'a> {
   }
 }
 
-impl ChromiumKeyProvider<()> for LinuxPlatformKeyProvider<'_> {
-  fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
+impl KeyProvider<()> for LinuxPlatformKeyProvider<'_> {
+  type Keys = ChromiumKeyOutcomes;
+
+  fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
     let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
     let mut session = HostKeySession::new();
-    session.retrieve(ChromiumKeyRequest::direct(&credentials))
+    session.retrieve(ChromiumKeyRequest::direct(&credentials), runtime)
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    // Connection establishment and every D-Bus reply wait are raced against
+    // the same remaining absolute budget.
+    DeadlineEnforcement::Enforceable
   }
 }
 
@@ -170,7 +210,11 @@ mod tests {
   }
 
   impl LinuxKeyringBackend for FakeLinuxBackend {
-    fn passwords(&self, _crypt_name: &str) -> Result<Vec<SecretString>> {
+    fn passwords(
+      &self,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<Vec<SecretString>> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -195,7 +239,52 @@ mod tests {
     B: LinuxKeyringBackend,
   {
     let mut session = HostKeySession::new();
-    session.retrieve_with_backend(ChromiumKeyRequest::direct(credentials), backend)
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    session.retrieve_with_backend(
+      ChromiumKeyRequest::direct(credentials),
+      backend,
+      &clock,
+      deadline,
+    )
+  }
+
+  fn cached_outcomes_with_backend<B>(
+    cache: &mut LinuxKeyOutcomeCache,
+    credentials: &ChromiumKeyCredentials,
+    backend: &B,
+  ) -> ChromiumKeyOutcomes
+  where
+    B: LinuxKeyringBackend,
+  {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    cache.outcomes_for_with_backend(credentials, backend, &runtime)
+  }
+
+  #[test]
+  fn cancelled_runtime_does_not_start_the_linux_keyring_backend() {
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Ok(vec![SecretString::new("must not be read".to_owned())]),
+    };
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop,
+    );
+
+    let outcome = retrieve_linux_v11_outcome("chrome", &backend, &runtime);
+
+    assert_eq!(backend.calls.get(), 0);
+    let ChromiumKeyOutcome::Failure(failure) = outcome else {
+      panic!("cancelled provider must be a typed key outcome failure");
+    };
+    assert!(failure.message().contains("operation cancelled"));
   }
 
   #[test]
@@ -307,9 +396,12 @@ mod tests {
     };
     let mut cache = LinuxKeyOutcomeCache::new();
 
-    let chrome = cache.outcomes_for_with_backend(&linux_credentials(Some("chrome")), &backend);
-    let vivaldi = cache.outcomes_for_with_backend(&linux_credentials(Some("chrome")), &backend);
-    let brave = cache.outcomes_for_with_backend(&linux_credentials(Some("brave")), &backend);
+    let chrome =
+      cached_outcomes_with_backend(&mut cache, &linux_credentials(Some("chrome")), &backend);
+    let vivaldi =
+      cached_outcomes_with_backend(&mut cache, &linux_credentials(Some("chrome")), &backend);
+    let brave =
+      cached_outcomes_with_backend(&mut cache, &linux_credentials(Some("brave")), &backend);
 
     assert_eq!(backend.calls.get(), 2, "one call per distinct crypt name");
     assert_eq!(
@@ -332,8 +424,10 @@ mod tests {
     };
     let mut cache = LinuxKeyOutcomeCache::new();
 
-    let first = cache.outcomes_for_with_backend(&linux_credentials(Some("chromium")), &backend);
-    let second = cache.outcomes_for_with_backend(&linux_credentials(Some("chromium")), &backend);
+    let first =
+      cached_outcomes_with_backend(&mut cache, &linux_credentials(Some("chromium")), &backend);
+    let second =
+      cached_outcomes_with_backend(&mut cache, &linux_credentials(Some("chromium")), &backend);
 
     assert_eq!(backend.calls.get(), 1);
     for outcomes in [&first, &second] {
@@ -353,14 +447,16 @@ mod tests {
     };
     let credentials = linux_credentials(Some("chrome"));
     let request = ChromiumKeyRequest::direct(&credentials);
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
 
     let mut first_session = HostKeySession::new();
-    first_session.retrieve_with_backend(request, &backend);
-    first_session.retrieve_with_backend(request, &backend);
+    first_session.retrieve_with_backend(request, &backend, &clock, deadline);
+    first_session.retrieve_with_backend(request, &backend, &clock, deadline);
     assert_eq!(backend.calls.get(), 1, "one lookup inside a probe session");
 
     let mut second_session = HostKeySession::new();
-    second_session.retrieve_with_backend(request, &backend);
+    second_session.retrieve_with_backend(request, &backend, &clock, deadline);
     assert_eq!(
       backend.calls.get(),
       2,
@@ -373,7 +469,8 @@ mod tests {
     };
     let mut failing_session = HostKeySession::new();
     for _ in 0..2 {
-      let outcomes = failing_session.retrieve_with_backend(request, &failing_backend);
+      let outcomes =
+        failing_session.retrieve_with_backend(request, &failing_backend, &clock, deadline);
       let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V11)
       else {
         panic!("failed session lookup must stay typed");
@@ -387,7 +484,7 @@ mod tests {
     );
 
     let mut retried_session = HostKeySession::new();
-    retried_session.retrieve_with_backend(request, &failing_backend);
+    retried_session.retrieve_with_backend(request, &failing_backend, &clock, deadline);
     assert_eq!(
       failing_backend.calls.get(),
       2,

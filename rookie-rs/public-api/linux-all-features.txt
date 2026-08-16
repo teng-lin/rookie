@@ -689,14 +689,18 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::EngineI
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::EngineId
 #[non_exhaustive] pub struct rookie_cookies::report::ExtractionIssue
 pub rookie_cookies::report::ExtractionIssue::browser_id: core::option::Option<rookie_cookies::report::BrowserId>
+pub rookie_cookies::report::ExtractionIssue::cause: alloc::string::String
 pub rookie_cookies::report::ExtractionIssue::code: rookie_cookies::report::IssueCode
 pub rookie_cookies::report::ExtractionIssue::installation_id: core::option::Option<rookie_cookies::report::InstallationId>
 pub rookie_cookies::report::ExtractionIssue::message: alloc::string::String
 pub rookie_cookies::report::ExtractionIssue::occurrences: u32
 pub rookie_cookies::report::ExtractionIssue::profile_id: core::option::Option<rookie_cookies::report::ProfileId>
+pub rookie_cookies::report::ExtractionIssue::provider: core::option::Option<alloc::string::String>
+pub rookie_cookies::report::ExtractionIssue::retryability: alloc::string::String
 pub rookie_cookies::report::ExtractionIssue::samples: alloc::vec::Vec<alloc::string::String>
 pub rookie_cookies::report::ExtractionIssue::severity: rookie_cookies::report::IssueSeverityCode
 pub rookie_cookies::report::ExtractionIssue::stage: rookie_cookies::report::ExtractionStageCode
+pub rookie_cookies::report::ExtractionIssue::tier: core::option::Option<alloc::string::String>
 impl core::clone::Clone for rookie_cookies::report::ExtractionIssue
 pub fn rookie_cookies::report::ExtractionIssue::clone(&self) -> rookie_cookies::report::ExtractionIssue
 impl core::cmp::Eq for rookie_cookies::report::ExtractionIssue
@@ -718,8 +722,10 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::Extraction
 #[non_exhaustive] pub struct rookie_cookies::report::ExtractionReport
 pub rookie_cookies::report::ExtractionReport::issues: alloc::vec::Vec<rookie_cookies::report::ExtractionIssue>
 pub rookie_cookies::report::ExtractionReport::profiles: alloc::vec::Vec<rookie_cookies::report::ProfileExtraction>
+pub rookie_cookies::report::ExtractionReport::schema_version: u32
 pub rookie_cookies::report::ExtractionReport::status: rookie_cookies::report::ReportStatusCode
 pub rookie_cookies::report::ExtractionReport::summary: rookie_cookies::report::ReportStats
+pub rookie_cookies::report::ExtractionReport::termination: rookie_cookies::report::TerminationCode
 impl core::fmt::Debug for rookie_cookies::report::ExtractionReport
 pub fn rookie_cookies::report::ExtractionReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl serde_core::ser::Serialize for rookie_cookies::report::ExtractionReport
@@ -1149,6 +1155,46 @@ impl core::marker::Sync for rookie_cookies::report::SourceStatusCode
 impl core::marker::Unpin for rookie_cookies::report::SourceStatusCode
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::SourceStatusCode
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::SourceStatusCode
+pub struct rookie_cookies::report::TerminationCode(_)
+impl rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::as_str(&self) -> &str
+impl rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::cancelled() -> Self
+pub fn rookie_cookies::report::TerminationCode::completed() -> Self
+pub fn rookie_cookies::report::TerminationCode::resource_exhausted() -> Self
+pub fn rookie_cookies::report::TerminationCode::timed_out() -> Self
+impl core::clone::Clone for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::clone(&self) -> rookie_cookies::report::TerminationCode
+impl core::cmp::Eq for rookie_cookies::report::TerminationCode
+impl core::cmp::Ord for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::cmp(&self, &rookie_cookies::report::TerminationCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::eq(&self, &rookie_cookies::report::TerminationCode) -> bool
+impl core::cmp::PartialOrd for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::partial_cmp(&self, &rookie_cookies::report::TerminationCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::as_ref(&self) -> &str
+impl core::fmt::Debug for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rookie_cookies::report::TerminationCode
+impl core::str::traits::FromStr for rookie_cookies::report::TerminationCode
+pub type rookie_cookies::report::TerminationCode::Err = anyhow::Error
+pub fn rookie_cookies::report::TerminationCode::from_str(&str) -> anyhow::Result<Self>
+impl serde_core::ser::Serialize for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::report::TerminationCode
+pub fn rookie_cookies::report::TerminationCode::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+impl core::marker::Freeze for rookie_cookies::report::TerminationCode
+impl core::marker::Send for rookie_cookies::report::TerminationCode
+impl core::marker::Sync for rookie_cookies::report::TerminationCode
+impl core::marker::Unpin for rookie_cookies::report::TerminationCode
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::report::TerminationCode
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::report::TerminationCode
+pub const rookie_cookies::report::EXTRACTION_REPORT_SCHEMA_VERSION: u32
 pub const rookie_cookies::report::MAX_ISSUE_SAMPLES: usize
 #[non_exhaustive] pub struct rookie_cookies::MozillaProfile
 pub rookie_cookies::MozillaProfile::is_default: bool

@@ -55,18 +55,20 @@ pub(super) fn any_browser(
   key_path: Option<&str>,
 ) -> Result<Vec<Cookie>> {
   let cookies_path = PathBuf::from(cookies_path);
-  match crate::direct_path::classify_cookie_source_legacy(&cookies_path)? {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  match crate::direct_path::classify_cookie_source_legacy_with_runtime(&cookies_path, &runtime)? {
     crate::direct_path::CookieSourceKind::MozillaSqlite => {
-      crate::firefox_based(cookies_path, domains)
+      crate::browser::mozilla::firefox_based_with_runtime(cookies_path, domains, &runtime)
     }
     crate::direct_path::CookieSourceKind::ChromiumSqlite => {
-      platform::chromium_from_path(cookies_path, domains, key_path)
+      platform::chromium_from_path(cookies_path, domains, key_path, &runtime)
     }
     crate::direct_path::CookieSourceKind::SafariBinaryCookies => {
-      platform::safari_from_path(cookies_path, domains)
+      platform::safari_from_path(cookies_path, domains, &runtime)
     }
     crate::direct_path::CookieSourceKind::InternetExplorerEse => {
-      platform::internet_explorer_from_path(cookies_path, domains)
+      platform::internet_explorer_from_path(cookies_path, domains, &runtime)
     }
   }
 }
@@ -170,7 +172,7 @@ mod tests {
       .expect_err("classification fails before target-specific validation");
     assert_eq!(
       error.to_string(),
-      format!("unsupported cookie source format: {}", path.display())
+      "unsupported cookie source format: <path>"
     );
   }
 
@@ -207,7 +209,7 @@ mod tests {
       .expect_err("legacy non-Windows classification rejects ESE");
     assert_eq!(
       error.to_string(),
-      format!("unsupported cookie source format: {}", path.display())
+      "unsupported cookie source format: <path>"
     );
   }
 

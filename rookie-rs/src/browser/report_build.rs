@@ -6,22 +6,32 @@
 //! [`crate::browser_report`], and [`crate::load_report`].
 
 use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
+use super::cookie_record::{CookieRecord, FinalizationError, LegacyProjectionSemantics};
+use super::outcome::{
+  CompatibilityAbsence, CompatibilityDecision, CompatibilityDisposition, Diagnostic, Failure,
+  FailureLedger, FailureScope, Outcome, ResultStatus, Retryability, SourceOutcome, Termination,
+};
 use super::registry::{
-  self, ChromiumProfileExtraction, ChromiumProfileFailure, ChromiumRegistryReport, DiscoveryIssue,
-  EngineProfileExtraction, EngineSourceExtraction, RegisteredBrowser, SourceAcquisition,
-  SourceFailureStage, SOURCE_ROLE_PERSISTENT,
+  self, ChromiumProfileDraft, ChromiumProfileFailure, ChromiumRegistryDraft, DiscoveryIssue,
+  EngineProfileDraft, EngineSourceDraft, RegisteredBrowser, SourceAcquisition, SourceFailureStage,
+  SOURCE_ROLE_PERSISTENT,
 };
+#[cfg(test)]
+use super::report_core::SourceStatusCode;
 use super::report_core::{
-  display_path, issue, push_aggregated, report_status, sort_cookies, sort_source_descriptors,
-  sort_source_outcomes, source_status, AcquisitionStrategyCode, BrowserCapabilitiesDescriptor,
-  BrowserDescriptor, BrowserId, CipherTierId, CookieSourceDescriptor, CookieSourceFormatId,
-  CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineExtractionOutcome, EngineId,
+  compare_source_identity, display_path, issue, push_aggregated, sort_cookies,
+  sort_source_descriptors, source_status, AcquisitionStrategyCode, BrowserCapabilitiesDescriptor,
+  BrowserDescriptor, BrowserId, CipherTierId, CompatibilityEvidence, CookieSourceDescriptor,
+  CookieSourceFormatId, CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineId,
   ExtractionIssue, ExtractionReport, ExtractionStageCode, InstallationId, IssueSeverityCode,
-  ProfileDescriptor, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, SourceExtraction,
-  SourceExtractionOutcome, SourceStatusCode, StatsAccumulator, MAX_ISSUE_SAMPLES,
+  ProfileDescriptor, ProfileDraft, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats,
+  ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator, TerminationCode,
+  MAX_ISSUE_SAMPLES,
 };
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{bail, Result};
+use std::collections::BTreeMap;
 
 /// Discovery problems that do not prevent source enumeration. Everything else
 /// is an error, because it stopped an installation or profile from being read.
@@ -46,11 +56,12 @@ fn discovery_severity(code: &str) -> IssueSeverityCode {
 
 fn discovery_issue(browser_id: &BrowserId, discovery: &DiscoveryIssue) -> ExtractionIssue {
   let (path, _) = display_path(&discovery.path);
+  let message = crate::common::diagnostic::sanitize(&discovery.message);
   issue(
     discovery.code,
     ExtractionStageCode::discovery(),
     discovery_severity(discovery.code),
-    format!("{path}: {}", discovery.message),
+    format!("{path}: {message}"),
   )
   .with_occurrences(discovery.occurrences)
   // Aggregation keeps one message per code, so the path travels as a sample
@@ -131,9 +142,27 @@ fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
       .collect(),
     _ => issue_code.samples.clone(),
   };
-  issue(code, stage, IssueSeverityCode::error(), message)
+  let mut issue = issue(code, stage, IssueSeverityCode::error(), message)
     .with_occurrences(u32::try_from(issue_code.occurrences).unwrap_or(u32::MAX))
-    .with_samples(samples)
+    .with_samples(samples);
+  if matches!(
+    issue_code.code,
+    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed
+  ) {
+    issue.cause = "credential_provider".to_owned();
+    issue.provider.clone_from(&issue_code.provider);
+    issue.tier.clone_from(&issue_code.tier);
+    issue.retryability = match issue_code.retryability {
+      Retryability::Retryable => "retryable",
+      Retryability::NotRetryable => "not_retryable",
+      Retryability::Unknown => "unknown",
+    }
+    .to_owned();
+    if let Some(cause) = &issue_code.cause {
+      issue.message = cause.clone();
+    }
+  }
+  issue
 }
 
 fn profile_identity(
@@ -157,17 +186,19 @@ fn profile_identity(
 fn chromium_profile_outcome(
   browser_id: &BrowserId,
   installation_id: &str,
-  extraction: ChromiumProfileExtraction,
-) -> Result<EngineExtractionOutcome> {
-  let ChromiumProfileExtraction {
+  extraction: ChromiumProfileDraft,
+) -> Result<ProfileDraft> {
+  let ChromiumProfileDraft {
     profile,
+    #[cfg(test)]
     cookies,
+    records,
     stats,
     row_issues,
     acquisition,
     acquisition_attempts,
     failure,
-    legacy_error: _,
+    legacy_error,
   } = extraction;
   let identity = profile_identity(
     browser_id,
@@ -176,7 +207,7 @@ fn chromium_profile_outcome(
     &profile.display_name,
     &profile.path,
   )?;
-  let mut outcome = EngineExtractionOutcome::new(identity, profile.is_default);
+  let mut outcome = ProfileDraft::new(identity, profile.is_default);
 
   let Some(candidate) = profile
     .persistent_candidates
@@ -203,13 +234,14 @@ fn chromium_profile_outcome(
     return Ok(outcome);
   };
 
-  let mut source = SourceExtractionOutcome::new(
+  let mut source = SourceDraft::new(
     source_identity(
       &candidate.path,
       SOURCE_ROLE_PERSISTENT,
       "chromium_sqlite",
       candidate.precedence,
     ),
+    &candidate.path,
     true,
     acquisition_code(acquisition),
   );
@@ -222,7 +254,12 @@ fn chromium_profile_outcome(
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
-  source.cookies = cookies;
+  #[cfg(test)]
+  {
+    source.cookies = cookies;
+  }
+  source.records = records;
+  source.compatibility_evidence = legacy_error.map(CompatibilityEvidence::AllRowsRejected);
   for row in &row_issues {
     push_aggregated(&mut source.issues, row_issue(row));
   }
@@ -246,8 +283,8 @@ fn chromium_profile_outcome(
 
 fn engine_profile_outcome(
   browser_id: &BrowserId,
-  profile: EngineProfileExtraction,
-) -> Result<EngineExtractionOutcome> {
+  profile: EngineProfileDraft,
+) -> Result<ProfileDraft> {
   let identity = profile_identity(
     browser_id,
     &profile.installation_id,
@@ -255,7 +292,7 @@ fn engine_profile_outcome(
     &profile.name,
     &profile.path,
   )?;
-  let mut outcome = EngineExtractionOutcome::new(identity, profile.is_default);
+  let mut outcome = ProfileDraft::new(identity, profile.is_default);
   for source in profile.sources {
     outcome.sources.push(engine_source_outcome(source));
   }
@@ -266,9 +303,8 @@ fn engine_profile_outcome(
     // justified its admission - a Gecko session candidate, since a
     // discovered persistent source always projects into `sources` - is gone
     // by the time of extraction. That is a real failure, not the "nothing
-    // was ever there" case `no_sources` means. Safari and Internet Explorer
-    // profiles always carry a pre-populated source slot (see their registry
-    // discovery), so this branch is unreachable for them.
+    // was ever there" case `no_sources` means. Discovery-only profiles on a
+    // stopped draft are pruned before this adapter and never reach this branch.
     push_aggregated(
       &mut outcome.issues,
       issue(
@@ -282,16 +318,18 @@ fn engine_profile_outcome(
   Ok(outcome)
 }
 
-fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutcome {
-  let EngineSourceExtraction {
+fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
+  let EngineSourceDraft {
     path,
     role,
     format,
     precedence,
     selected,
     cookies,
+    records,
     rows_seen,
     rows_skipped,
+    rows_rejected,
     acquisition,
     acquisition_attempts,
     diagnostics,
@@ -299,21 +337,28 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
     error_stage,
     row_error,
   } = source;
-  let mut outcome = SourceExtractionOutcome::new(
+  let mut outcome = SourceDraft::new(
     source_identity(&path, role, format, precedence),
+    &path,
     selected,
     acquisition_code(acquisition),
   );
+  let cookies_emitted = if records.is_empty() {
+    cookies.len()
+  } else {
+    records.len()
+  };
   outcome.stats = CounterSet {
     rows_seen: rows_seen as u64,
-    cookies_emitted: cookies.len() as u64,
+    cookies_emitted: cookies_emitted as u64,
     rows_skipped: rows_skipped as u64,
-    rows_rejected: 0,
+    rows_rejected: rows_rejected as u64,
     provider_failures: 0,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
   outcome.cookies = cookies;
+  outcome.records = records;
   for diagnostic in diagnostics {
     push_aggregated(
       &mut outcome.issues,
@@ -366,22 +411,60 @@ fn engine_source_outcome(source: EngineSourceExtraction) -> SourceExtractionOutc
 }
 
 /// One registered browser's contribution to a report.
-struct BrowserOutcome {
+struct BrowserDraft {
+  browser_id: BrowserId,
+  compatibility_family: CompatibilityFamily,
   detected: bool,
   installations_discovered: usize,
   /// Every detected root failed enumeration, so an empty profile list means
   /// "could not look", not "nothing installed". Section 5.7 makes this the
   /// difference between a `failed` report and a `no_sources` one.
   discovery_failed: bool,
-  profiles: Vec<EngineExtractionOutcome>,
+  profiles: Vec<ProfileDraft>,
   issues: Vec<ExtractionIssue>,
+  termination: Termination,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompatibilityFamily {
+  Chromium,
+  Gecko,
+  Safari,
+  InternetExplorer,
+}
+
+fn engine_compatibility_family(browser_id: &BrowserId) -> CompatibilityFamily {
+  match browser_id.as_str() {
+    "safari" => CompatibilityFamily::Safari,
+    "internet_explorer" => CompatibilityFamily::InternetExplorer,
+    _ => CompatibilityFamily::Gecko,
+  }
+}
+
+fn termination_from_stop(stop: BoundaryStop) -> Termination {
+  match stop {
+    BoundaryStop::TimedOut => Termination::TimedOut,
+    BoundaryStop::Cancelled => Termination::Cancelled,
+    BoundaryStop::ResourceExhausted => Termination::ResourceExhausted,
+  }
+}
+
+fn stop_from_error(error: &anyhow::Error) -> Option<BoundaryStop> {
+  error
+    .chain()
+    .find_map(|cause| cause.downcast_ref::<BoundaryStop>().copied())
 }
 
 fn chromium_browser_outcome(
   browser_id: &BrowserId,
-  report: ChromiumRegistryReport,
-) -> Result<BrowserOutcome> {
-  let mut outcome = BrowserOutcome {
+  report: ChromiumRegistryDraft,
+) -> Result<BrowserDraft> {
+  let termination = report
+    .boundary_stop
+    .map_or(Termination::Completed, termination_from_stop);
+  let mut outcome = BrowserDraft {
+    browser_id: browser_id.clone(),
+    compatibility_family: CompatibilityFamily::Chromium,
     // Discovery counts, not the post-selection list: a profile-selected report
     // must not claim the installations it filtered out were never there. A root
     // that existed but could not be read also counts as detected -- otherwise
@@ -391,6 +474,7 @@ fn chromium_browser_outcome(
     discovery_failed: report.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
+    termination,
   };
   for discovery in &report.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -409,14 +493,23 @@ fn chromium_browser_outcome(
 
 fn engine_browser_outcome(
   browser_id: &BrowserId,
-  engine: registry::EngineExtractionOutcome,
-) -> Result<BrowserOutcome> {
-  let mut outcome = BrowserOutcome {
+  mut engine: registry::EngineExtractionDraft,
+) -> Result<BrowserDraft> {
+  if engine.boundary_stop.is_some() {
+    registry::retain_completed_engine_work(&mut engine);
+  }
+  let termination = engine
+    .boundary_stop
+    .map_or(Termination::Completed, termination_from_stop);
+  let mut outcome = BrowserDraft {
+    browser_id: browser_id.clone(),
+    compatibility_family: engine_compatibility_family(browser_id),
     detected: engine.installations_discovered > 0 || engine.installations_detected > 0,
     installations_discovered: engine.installations_discovered,
     discovery_failed: engine.all_detected_roots_failed(),
     profiles: Vec::new(),
     issues: Vec::new(),
+    termination,
   };
   for discovery in &engine.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -468,63 +561,85 @@ fn collect_report(
   profile_id: Option<&str>,
   extract: bool,
   domains: Option<Vec<String>>,
-) -> Result<BrowserOutcome> {
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<BrowserDraft> {
+  runtime.check()?;
   let browser_id: BrowserId = browser.canonical_id.parse()?;
   match browser.engine {
     "chromium" => {
       let report = if extract {
-        registry::chromium_registry_report(&browser.canonical_id, profile_id, domains)?
+        registry::chromium_registry_report_with_runtime(
+          &browser.canonical_id,
+          profile_id,
+          domains,
+          runtime,
+        )?
       } else {
-        return chromium_listing_outcome(&browser_id, &browser.canonical_id);
+        return chromium_listing_outcome(&browser_id, &browser.canonical_id, runtime);
       };
       chromium_browser_outcome(&browser_id, report)
     }
     "gecko" => {
       let engine = if extract {
-        registry::gecko_report(&browser.canonical_id, profile_id, domains)?
+        registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?
       } else {
-        registry::gecko_profiles(&browser.canonical_id)?
+        registry::gecko_profiles_with_runtime(&browser.canonical_id, runtime)?
       };
       engine_browser_outcome(&browser_id, engine)
     }
     #[cfg(target_os = "macos")]
     "safari" => {
       let engine = if extract {
-        registry::safari_report(&browser.canonical_id, profile_id, domains)?
+        registry::safari_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?
       } else {
-        registry::safari_profiles(&browser.canonical_id)?
+        registry::safari_profiles_with_runtime(&browser.canonical_id, runtime)?
       };
       engine_browser_outcome(&browser_id, engine)
     }
     #[cfg(target_os = "windows")]
     "internet_explorer" => {
       let engine = if extract {
-        registry::internet_explorer_report(&browser.canonical_id, profile_id, domains)?
+        registry::internet_explorer_report_with_runtime(
+          &browser.canonical_id,
+          profile_id,
+          domains,
+          runtime,
+        )?
       } else {
-        registry::internet_explorer_profiles(&browser.canonical_id)?
+        registry::internet_explorer_profiles_with_runtime(&browser.canonical_id, runtime)?
       };
       engine_browser_outcome(&browser_id, engine)
     }
     // A registered browser whose engine has no adapter compiled into this
     // build is reported as undetected rather than silently skipped.
-    _ => Ok(BrowserOutcome {
+    _ => Ok(BrowserDraft {
+      browser_id: browser_id.clone(),
+      compatibility_family: engine_compatibility_family(&browser_id),
       detected: false,
       installations_discovered: 0,
       discovery_failed: false,
       profiles: Vec::new(),
       issues: Vec::new(),
+      termination: Termination::Completed,
     }),
   }
 }
 
-fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Result<BrowserOutcome> {
-  let listing = registry::chromium_listing(canonical_id)?;
-  let mut outcome = BrowserOutcome {
+fn chromium_listing_outcome(
+  browser_id: &BrowserId,
+  canonical_id: &str,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<BrowserDraft> {
+  let listing = registry::chromium_listing_with_runtime(canonical_id, runtime)?;
+  let mut outcome = BrowserDraft {
+    browser_id: browser_id.clone(),
+    compatibility_family: CompatibilityFamily::Chromium,
     detected: listing.installations_discovered > 0,
     installations_discovered: listing.installations_discovered,
     discovery_failed: listing.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
+    termination: Termination::Completed,
   };
   for discovery in &listing.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -537,18 +652,19 @@ fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Resul
       &profile.display_name,
       &profile.path,
     )?;
-    let mut engine = EngineExtractionOutcome::new(identity, profile.is_default);
+    let mut engine = ProfileDraft::new(identity, profile.is_default);
     for candidate in &profile.persistent_candidates {
       if !candidate.exists {
         continue;
       }
-      engine.sources.push(SourceExtractionOutcome::new(
+      engine.sources.push(SourceDraft::new(
         source_identity(
           &candidate.path,
           SOURCE_ROLE_PERSISTENT,
           "chromium_sqlite",
           candidate.precedence,
         ),
+        &candidate.path,
         candidate.selected,
         AcquisitionStrategyCode::not_attempted(),
       ));
@@ -558,54 +674,120 @@ fn chromium_listing_outcome(browser_id: &BrowserId, canonical_id: &str) -> Resul
   Ok(outcome)
 }
 
-fn finish_profile(mut engine: EngineExtractionOutcome) -> ProfileExtraction {
-  sort_source_outcomes(&mut engine.sources);
-  let mut stats = StatsAccumulator::default();
-  // Engines raise profile and source issues without context because the
-  // enclosing profile is implied by where they sit. That holds only while the
-  // report keeps its shape: a consumer that flattens every issue into one list
-  // -- which the CLI and bindings do -- cannot tell which profile an issue came
-  // from. The identity is known here, so stamp it once.
-  let identity = &engine.profile;
-  let stamp = |issue: ExtractionIssue| {
-    issue.with_context(
-      Some(&identity.browser_id),
-      Some(&identity.installation_id),
-      Some(&identity.profile_id),
-    )
-  };
-  let sources = engine
-    .sources
-    .into_iter()
-    .map(|mut source| {
-      sort_cookies(&mut source.cookies);
-      stats.add(&source.stats);
-      let issues = source.issues.into_iter().map(stamp).collect();
-      SourceExtraction {
-        source: source.source,
-        status: source_status(source.failed),
-        selected: source.selected,
-        acquisition_strategy: source.acquisition_strategy,
-        cookies: source.cookies,
-        stats: source.stats,
-        issues,
-      }
-    })
-    .collect::<Vec<_>>();
-  let issues = engine.issues.into_iter().map(stamp).collect();
-  ProfileExtraction {
-    profile: engine.profile,
-    sources,
-    stats: stats.into_stats(),
+fn canonicalize_profile(
+  engine: ProfileDraft,
+  profiles: &mut Vec<(ProfileIdentity, bool)>,
+  sources: &mut Vec<SourceOutcome>,
+  ledger: &mut FailureLedger,
+  compatibility_evidence: &mut BTreeMap<[u8; 32], Diagnostic>,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Option<BoundaryStop> {
+  let ProfileDraft {
+    profile,
+    is_default,
+    sources: engine_sources,
     issues,
+  } = engine;
+  let profile_scope = FailureScope::Profile {
+    browser_id: profile.browser_id.clone(),
+    installation_id: profile.installation_id.clone(),
+    profile_id: profile.profile_id.clone(),
+  };
+  for issue in issues {
+    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      profiles.push((profile, is_default));
+      return Some(stop);
+    }
+    ledger.push(Failure::from_issue(issue, profile_scope.clone(), &[]));
   }
+  for source in engine_sources {
+    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      profiles.push((profile, is_default));
+      return Some(stop);
+    }
+    let source_digest =
+      super::outcome::source_digest(&profile, &source.source, &source.source_path_bytes);
+    let secrets = source
+      .cookies
+      .iter()
+      .map(|cookie| cookie.value.as_str())
+      .collect::<Vec<_>>();
+    let mut canonical = SourceOutcome::new(
+      profile.clone(),
+      is_default,
+      source.source,
+      source_digest,
+      source.selected,
+      source.acquisition_strategy,
+    );
+    canonical.stats = source.stats;
+    canonical.failed = source.failed;
+    let source_scope = FailureScope::Source {
+      browser_id: profile.browser_id.clone(),
+      installation_id: profile.installation_id.clone(),
+      profile_id: profile.profile_id.clone(),
+      source_digest: canonical.source_digest(),
+    };
+    for issue in source.issues {
+      ledger.push(Failure::from_issue(issue, source_scope.clone(), &secrets));
+    }
+    if let Some(CompatibilityEvidence::AllRowsRejected(message)) = source.compatibility_evidence {
+      compatibility_evidence.insert(
+        source_digest,
+        Diagnostic::new_with_secrets(message, &secrets),
+      );
+    }
+    drop(secrets);
+    let draft_records = if source.records.is_empty() {
+      source
+        .cookies
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, cookie)| {
+          CookieRecord::from_cookie(cookie, super::outcome::source_ref(source_digest, ordinal))
+        })
+        .collect()
+    } else {
+      source.records
+    };
+    for record in draft_records {
+      match record.finalize() {
+        Ok(record) => canonical.records.push(record),
+        Err(error) => {
+          canonical.stats.cookies_emitted = canonical.stats.cookies_emitted.saturating_sub(1);
+          increment_counter(
+            &mut canonical.stats.rows_skipped,
+            &mut canonical.stats.counters_saturated,
+          );
+          increment_counter(
+            &mut canonical.stats.rows_rejected,
+            &mut canonical.stats.counters_saturated,
+          );
+          let kind = match error {
+            FinalizationError::Encrypted => "encrypted",
+            FinalizationError::Unavailable(_) => "unavailable",
+          };
+          ledger.push(Failure::from_issue(
+            issue(
+              "invalid_final_record",
+              ExtractionStageCode::decode(),
+              IssueSeverityCode::error(),
+              format!("{kind} cookie value rejected before canonical finalization"),
+            ),
+            source_scope.clone(),
+            &[],
+          ));
+        }
+      }
+    }
+    sources.push(canonical);
+  }
+  profiles.push((profile, is_default));
+  runtime.and_then(|runtime| runtime.check().err())
 }
 
-/// Adds to a wire counter, recording any clamp. Every `ReportStats` counter is
-/// `u32` for exact Node/TypeScript representation, so a count that hits the
-/// ceiling must set `counters_saturated` rather than quietly read as exact.
-fn add_saturating(counter: &mut u32, amount: u32, saturated: &mut bool) {
-  match counter.checked_add(amount) {
+fn increment_counter(counter: &mut u32, saturated: &mut bool) {
+  match counter.checked_add(1) {
     Some(value) => *counter = value,
     None => {
       *counter = u32::MAX;
@@ -614,6 +796,235 @@ fn add_saturating(counter: &mut u32, amount: u32, saturated: &mut bool) {
   }
 }
 
+#[cfg(test)]
+fn project_canonical_report(outcome: Outcome) -> ExtractionReport {
+  project_canonical_report_with_runtime(outcome, None)
+}
+
+fn project_canonical_report_with_runtime(
+  mut outcome: Outcome,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> ExtractionReport {
+  debug_assert_eq!(outcome.counters.sources_discovered, outcome.sources.len());
+  // An extraction stop belongs to work that attempted to start after these
+  // sources completed. Projecting the immutable completed sources must not
+  // discard them merely because the shared token is now terminal.
+  let projection_runtime = (outcome.termination == Termination::Completed)
+    .then_some(runtime)
+    .flatten();
+  let mut failures = outcome.failure_ledger.into_vec();
+  let mut profiles = Vec::with_capacity(outcome.profiles.len());
+  let mut projection_stop = None;
+  for (identity, is_default) in outcome.profiles {
+    if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
+      projection_stop = Some(stop);
+      break;
+    }
+    let mut stats = StatsAccumulator::default();
+    let mut public_sources = Vec::new();
+    let mut retained_sources = Vec::new();
+    for source in outcome.sources {
+      if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
+        projection_stop = Some(stop);
+        break;
+      }
+      if source.profile.browser_id != identity.browser_id
+        || source.profile.installation_id != identity.installation_id
+        || source.profile.profile_id != identity.profile_id
+      {
+        retained_sources.push(source);
+        continue;
+      }
+      let digest = source.source_digest();
+      debug_assert_eq!(source.is_default_profile, is_default);
+      let semantics = LegacyProjectionSemantics::for_source_format(source.source.format.as_str());
+      let mut finalized_records = Vec::with_capacity(source.records.len());
+      for record in source.records {
+        if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
+          projection_stop = Some(stop);
+          break;
+        }
+        finalized_records.push(record);
+      }
+      if projection_stop.is_some() {
+        break;
+      }
+      let mut source_issues = Vec::new();
+      let mut retained_failures = Vec::new();
+      for failure in failures {
+        match &failure.scope {
+          FailureScope::Source {
+            browser_id,
+            installation_id,
+            profile_id,
+            source_digest,
+          } if browser_id == &identity.browser_id
+            && installation_id == &identity.installation_id
+            && profile_id == &identity.profile_id
+            && source_digest == &digest =>
+          {
+            source_issues.push(failure.into_issue())
+          }
+          _ => retained_failures.push(failure),
+        }
+      }
+      failures = retained_failures;
+      let mut cookies = finalized_records
+        .into_iter()
+        .map(|record| record.into_cookie_with_semantics(semantics))
+        .collect::<Vec<_>>();
+      sort_cookies(&mut cookies);
+      stats.add(&source.stats);
+      public_sources.push(SourceExtraction {
+        source: source.source,
+        status: source_status(source.failed),
+        selected: source.selected,
+        acquisition_strategy: source.acquisition_strategy,
+        cookies,
+        stats: source.stats,
+        issues: source_issues,
+      });
+      if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
+        projection_stop = Some(stop);
+        break;
+      }
+    }
+    outcome.sources = retained_sources;
+    public_sources.sort_by(|left, right| compare_source_identity(&left.source, &right.source));
+
+    let mut profile_issues = Vec::new();
+    let mut retained_failures = Vec::new();
+    for failure in failures {
+      match &failure.scope {
+        FailureScope::Profile {
+          browser_id,
+          installation_id,
+          profile_id,
+        } if browser_id == &identity.browser_id
+          && installation_id == &identity.installation_id
+          && profile_id == &identity.profile_id =>
+        {
+          profile_issues.push(failure.into_issue())
+        }
+        _ => retained_failures.push(failure),
+      }
+    }
+    failures = retained_failures;
+    profiles.push(ProfileExtraction {
+      profile: identity,
+      sources: public_sources,
+      stats: stats.into_stats(),
+      issues: profile_issues,
+    });
+    if projection_stop.is_some() {
+      break;
+    }
+  }
+  if let Some(stop) = projection_stop {
+    outcome.termination = termination_from_stop(stop);
+    let projected_sources = profiles
+      .iter()
+      .map(|profile| profile.sources.len())
+      .sum::<usize>();
+    if projected_sources < outcome.counters.sources_discovered {
+      outcome.result_status = if projected_sources == 0 {
+        ResultStatus::Failed
+      } else {
+        ResultStatus::Partial
+      };
+    }
+    outcome.counters.sources_succeeded = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .filter(|source| source.status.as_str() == "succeeded")
+      .count();
+    outcome.counters.sources_failed = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .filter(|source| source.status.as_str() == "failed")
+      .count();
+    outcome.counters.rows_seen = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .map(|source| u64::from(source.stats.rows_seen))
+      .sum();
+    outcome.counters.cookies_emitted = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .map(|source| u64::from(source.stats.cookies_emitted))
+      .sum();
+    outcome.counters.rows_skipped = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .map(|source| u64::from(source.stats.rows_skipped))
+      .sum();
+    outcome.counters.rows_rejected = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .map(|source| u64::from(source.stats.rows_rejected))
+      .sum();
+    outcome.counters.provider_failures = profiles
+      .iter()
+      .flat_map(|profile| &profile.sources)
+      .map(|source| u64::from(source.stats.provider_failures))
+      .sum();
+  }
+  let issues = failures.into_iter().map(Failure::into_issue).collect();
+  let mut saturated = outcome.counters.counters_saturated;
+  let summary = ReportStats {
+    registered_browsers: narrow(outcome.counters.registered_browsers, &mut saturated),
+    browsers_detected: narrow(outcome.counters.browsers_detected, &mut saturated),
+    browsers_not_detected: narrow(outcome.counters.browsers_not_detected, &mut saturated),
+    installations_discovered: narrow(outcome.counters.installations_discovered, &mut saturated),
+    profiles_discovered: narrow(outcome.counters.profiles_discovered, &mut saturated),
+    sources_succeeded: narrow(outcome.counters.sources_succeeded, &mut saturated),
+    sources_failed: narrow(outcome.counters.sources_failed, &mut saturated),
+    rows_seen: u32::try_from(outcome.counters.rows_seen).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    cookies_emitted: u32::try_from(outcome.counters.cookies_emitted).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    rows_skipped: u32::try_from(outcome.counters.rows_skipped).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    rows_rejected: u32::try_from(outcome.counters.rows_rejected).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    provider_failures: u32::try_from(outcome.counters.provider_failures).unwrap_or_else(|_| {
+      saturated = true;
+      u32::MAX
+    }),
+    counters_saturated: saturated,
+  };
+  let status = match outcome.result_status {
+    ResultStatus::Complete => ReportStatusCode::complete(),
+    ResultStatus::Partial => ReportStatusCode::partial(),
+    ResultStatus::Failed => ReportStatusCode::failed(),
+    ResultStatus::NoSources => ReportStatusCode::no_sources(),
+  };
+  ExtractionReport {
+    schema_version: super::report_core::EXTRACTION_REPORT_SCHEMA_VERSION,
+    status,
+    termination: match outcome.termination {
+      Termination::Completed => TerminationCode::completed(),
+      Termination::Cancelled => TerminationCode::cancelled(),
+      Termination::TimedOut => TerminationCode::timed_out(),
+      Termination::ResourceExhausted => TerminationCode::resource_exhausted(),
+    },
+    summary,
+    profiles,
+    issues,
+  }
+}
+
+/// Adds to a wire counter, recording any clamp. Every `ReportStats` counter is
+/// `u32` for exact Node/TypeScript representation, so a count that hits the
+/// ceiling must set `counters_saturated` rather than quietly read as exact.
 fn narrow(value: usize, saturated: &mut bool) -> u32 {
   u32::try_from(value).unwrap_or_else(|_| {
     *saturated = true;
@@ -621,62 +1032,750 @@ fn narrow(value: usize, saturated: &mut bool) -> u32 {
   })
 }
 
-fn assemble(registered_browsers: usize, outcomes: Vec<BrowserOutcome>) -> ExtractionReport {
-  let mut saturated = false;
-  let mut summary = ReportStats {
-    registered_browsers: narrow(registered_browsers, &mut saturated),
-    ..ReportStats::default()
-  };
-  let mut top_level = Vec::new();
-  let mut profiles = Vec::new();
-  let mut counters = StatsAccumulator::default();
-  let mut discovery_failed = false;
+fn finalize_outcomes(registered_browsers: usize, outcomes: Vec<BrowserDraft>) -> Outcome {
+  finalize_outcomes_with_runtime(registered_browsers, outcomes, None)
+}
 
-  for outcome in outcomes {
+fn finalize_outcomes_with_runtime(
+  registered_browsers: usize,
+  outcomes: Vec<BrowserDraft>,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Outcome {
+  // A stop observed while acquiring a later browser is already represented on
+  // that browser's draft. All earlier drafts, plus the stopped draft's fully
+  // completed sources, are immutable completed work and must survive even
+  // though the shared stop token is now terminal.
+  let has_preexisting_stop = outcomes
+    .iter()
+    .any(|outcome| outcome.termination != Termination::Completed);
+  let mut profiles = Vec::new();
+  let mut sources = Vec::new();
+  let mut ledger = FailureLedger::default();
+  let mut browsers_detected = 0;
+  let mut browsers_not_detected = 0;
+  let mut installations_discovered = 0;
+  let mut discovery_failed = false;
+  let mut termination = Termination::Completed;
+  let mut compatibility_inputs = Vec::with_capacity(outcomes.len());
+  let mut compatibility_evidence = BTreeMap::new();
+
+  'browsers: for outcome in outcomes {
+    let outcome_stopped = outcome.termination != Termination::Completed;
+    let finalization_runtime = (!has_preexisting_stop && !outcome_stopped)
+      .then_some(runtime)
+      .flatten();
+    if let Some(stop) = finalization_runtime.and_then(|runtime| runtime.check().err()) {
+      termination = termination_from_stop(stop);
+      break;
+    }
+    if outcome_stopped && termination == Termination::Completed {
+      termination = outcome.termination;
+    }
+    compatibility_inputs.push((outcome.browser_id.clone(), outcome.compatibility_family));
     discovery_failed |= outcome.discovery_failed;
     if outcome.detected {
-      add_saturating(&mut summary.browsers_detected, 1, &mut saturated);
+      browsers_detected += 1;
     } else {
-      add_saturating(&mut summary.browsers_not_detected, 1, &mut saturated);
+      browsers_not_detected += 1;
     }
-    let discovered = narrow(outcome.installations_discovered, &mut saturated);
-    add_saturating(
-      &mut summary.installations_discovered,
-      discovered,
-      &mut saturated,
-    );
+    installations_discovered += outcome.installations_discovered;
     for issue in outcome.issues {
-      push_aggregated(&mut top_level, issue);
+      if let Some(stop) = finalization_runtime.and_then(|runtime| runtime.check().err()) {
+        termination = termination_from_stop(stop);
+        break 'browsers;
+      }
+      let scope = issue
+        .browser_id
+        .clone()
+        .map_or(FailureScope::Request, |browser_id| FailureScope::Browser {
+          browser_id,
+        });
+      ledger.push(Failure::from_issue(issue, scope, &[]));
     }
     for engine in outcome.profiles {
-      let profile = finish_profile(engine);
-      add_saturating(&mut summary.profiles_discovered, 1, &mut saturated);
-      for source in &profile.sources {
-        if source.status == SourceStatusCode::succeeded() {
-          add_saturating(&mut summary.sources_succeeded, 1, &mut saturated);
-        } else {
-          add_saturating(&mut summary.sources_failed, 1, &mut saturated);
-        }
+      if let Some(stop) = canonicalize_profile(
+        engine,
+        &mut profiles,
+        &mut sources,
+        &mut ledger,
+        &mut compatibility_evidence,
+        finalization_runtime,
+      ) {
+        termination = termination_from_stop(stop);
+        break 'browsers;
       }
-      counters.add(&profile.stats);
-      profiles.push(profile);
+    }
+    if outcome_stopped {
+      break;
+    }
+  }
+  let discovered_any_source = !sources.is_empty() || discovery_failed;
+  let mut outcome = Outcome::finalize(
+    profiles,
+    sources,
+    ledger,
+    discovered_any_source,
+    termination,
+  );
+  outcome.counters.registered_browsers = registered_browsers;
+  outcome.counters.browsers_detected = browsers_detected;
+  outcome.counters.browsers_not_detected = browsers_not_detected;
+  outcome.counters.installations_discovered = installations_discovered;
+  let compatibility_runtime = (!has_preexisting_stop
+    && outcome.termination == Termination::Completed)
+    .then_some(runtime)
+    .flatten();
+  for (browser_id, family) in compatibility_inputs {
+    if let Some(stop) = compatibility_runtime.and_then(|runtime| runtime.check().err()) {
+      outcome.termination = termination_from_stop(stop);
+      break;
+    }
+    outcome.compatibility.push(compatibility_decision(
+      &outcome,
+      &compatibility_evidence,
+      browser_id,
+      family,
+    ));
+  }
+  outcome
+}
+
+fn compatibility_decision(
+  outcome: &Outcome,
+  compatibility_evidence: &BTreeMap<[u8; 32], Diagnostic>,
+  browser_id: BrowserId,
+  family: CompatibilityFamily,
+) -> CompatibilityDecision {
+  let disposition = compatibility_disposition(outcome, compatibility_evidence, &browser_id, family);
+  CompatibilityDecision {
+    browser_id,
+    disposition,
+  }
+}
+
+fn compatibility_disposition(
+  outcome: &Outcome,
+  compatibility_evidence: &BTreeMap<[u8; 32], Diagnostic>,
+  browser_id: &BrowserId,
+  family: CompatibilityFamily,
+) -> CompatibilityDisposition {
+  let Some((profile, _)) = outcome
+    .profiles
+    .iter()
+    .find(|(profile, _)| &profile.browser_id == browser_id)
+  else {
+    let failures = outcome.failure_ledger.as_slice().iter().filter(|failure| {
+      failure_browser_id(failure) == Some(browser_id)
+        && !registry::is_informational_discovery_issue(failure.code.as_str())
+    });
+    if family == CompatibilityFamily::Chromium {
+      let diagnostics = failures
+        .clone()
+        .map(|failure| failure.diagnostic.as_str())
+        .take(MAX_ISSUE_SAMPLES)
+        .collect::<Vec<_>>()
+        .join("; ");
+      if failures
+        .clone()
+        .any(|failure| failure.code.as_str().starts_with("profile_"))
+      {
+        return CompatibilityDisposition::Failed(Diagnostic::new_with_secrets(
+          format!(
+            "every discovered {} profile failed discovery: {diagnostics}",
+            browser_id.as_str()
+          ),
+          &[],
+        ));
+      }
+      if outcome.counters.browsers_detected > 0 {
+        return CompatibilityDisposition::Failed(Diagnostic::new_with_secrets(
+          format!(
+            "every detected {} installation failed profile enumeration: {diagnostics}",
+            browser_id.as_str()
+          ),
+          &[],
+        ));
+      }
+    }
+    if let Some(failure) = failures.into_iter().next() {
+      return CompatibilityDisposition::Failed(failure.diagnostic.clone());
+    }
+    return CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase);
+  };
+
+  let sources = outcome.sources.iter().filter(|source| {
+    source.profile.browser_id == profile.browser_id
+      && source.profile.installation_id == profile.installation_id
+      && source.profile.profile_id == profile.profile_id
+  });
+  let mut persistent = None;
+  let mut sessions = Vec::new();
+  for source in sources {
+    match source.source.role.as_str() {
+      registry::SOURCE_ROLE_PERSISTENT if source.selected && persistent.is_none() => {
+        persistent = Some(source)
+      }
+      registry::SOURCE_ROLE_SESSION => sessions.push(source),
+      _ => {}
     }
   }
 
-  let totals = counters.into_stats();
-  summary.rows_seen = totals.rows_seen;
-  summary.cookies_emitted = totals.cookies_emitted;
-  summary.rows_skipped = totals.rows_skipped;
-  summary.rows_rejected = totals.rows_rejected;
-  summary.provider_failures = totals.provider_failures;
-  summary.counters_saturated = totals.counters_saturated || saturated;
+  let source_failure = |source: &SourceOutcome| {
+    if !source.failed {
+      return None;
+    }
+    outcome.failure_ledger.as_slice().iter().find(|failure| {
+      matches!(
+        &failure.scope,
+        FailureScope::Source { source_digest, .. }
+          if source_digest == &source.source_digest()
+      ) && failure.severity == IssueSeverityCode::error()
+    })
+  };
+  let all_rows_failure = |source: &SourceOutcome| {
+    if !source.records.is_empty() || source.stats.rows_skipped == 0 {
+      return None;
+    }
+    let scoped = |failure: &&Failure| {
+      matches!(
+        &failure.scope,
+        FailureScope::Source { source_digest, .. }
+          if source_digest == &source.source_digest()
+      )
+    };
+    outcome
+      .failure_ledger
+      .as_slice()
+      .iter()
+      .filter(scoped)
+      .find(|failure| failure.code.as_str() == "all_rows_rejected")
+      .or_else(|| {
+        outcome
+          .failure_ledger
+          .as_slice()
+          .iter()
+          .filter(scoped)
+          .find(|failure| {
+            matches!(
+              failure.code.as_str(),
+              "row_read_failed" | "column_read_failed" | "decode_failed" | "decrypt_failed"
+            )
+          })
+      })
+  };
+  let all_rows_diagnostic = |source: &SourceOutcome, fallback: &str| {
+    if let Some(diagnostic) = compatibility_evidence.get(&source.source_digest()) {
+      return Some(diagnostic.clone());
+    }
+    all_rows_failure(source).map(|failure| {
+      if failure
+        .diagnostic
+        .as_str()
+        .ends_with("row(s) could not be read")
+      {
+        Diagnostic::new_with_secrets(fallback, &[])
+      } else {
+        failure.diagnostic.clone()
+      }
+    })
+  };
+  let failed =
+    |source: &SourceOutcome| source_failure(source).map(|failure| failure.diagnostic.clone());
 
-  let status = report_status(&profiles, &top_level, discovery_failed);
-  ExtractionReport {
-    status,
-    summary,
-    profiles,
-    issues: top_level,
+  match family {
+    CompatibilityFamily::Chromium => {
+      let Some(source) = persistent else {
+        return CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase);
+      };
+      if let Some(diagnostic) =
+        all_rows_diagnostic(source, "all Chromium cookie rows failed to decode")
+      {
+        return CompatibilityDisposition::Failed(diagnostic);
+      }
+      if let Some(failure) = source_failure(source) {
+        return CompatibilityDisposition::Failed(failure.diagnostic.clone());
+      }
+      CompatibilityDisposition::Emit {
+        source_digests: vec![source.source_digest()],
+      }
+    }
+    CompatibilityFamily::Gecko => {
+      let mut selected = Vec::new();
+      let mut deferred = None;
+      let mut persistent_succeeded = false;
+      let mut persistent_has_records = false;
+      if let Some(source) = persistent {
+        if let Some(diagnostic) =
+          all_rows_diagnostic(source, "all Firefox cookie database rows failed to decode")
+        {
+          deferred = Some(diagnostic);
+        } else if let Some(failure) = source_failure(source) {
+          deferred = Some(failure.diagnostic.clone());
+        } else {
+          persistent_succeeded = true;
+          persistent_has_records = !source.records.is_empty();
+          selected.push(source.source_digest());
+        }
+      }
+
+      let mut session_failures = Vec::new();
+      let mut session_succeeded = false;
+      for source in sessions {
+        if let Some(diagnostic) = failed(source) {
+          session_failures.push(diagnostic);
+        } else {
+          session_succeeded = true;
+          selected.push(source.source_digest());
+        }
+      }
+      // A successfully decoded session candidate is authoritative even when
+      // it contains zero cookies, and therefore rescues a failed persistent
+      // source without inventing another candidate.
+      if session_succeeded || persistent_has_records {
+        return CompatibilityDisposition::Emit {
+          source_digests: selected,
+        };
+      }
+      if !session_failures.is_empty() {
+        let details = session_failures
+          .iter()
+          .map(Diagnostic::as_str)
+          .collect::<Vec<_>>()
+          .join("; ");
+        return CompatibilityDisposition::Failed(Diagnostic::new_with_secrets(
+          format!("all existing Firefox session store candidates failed: {details}"),
+          &[],
+        ));
+      }
+      if let Some(diagnostic) = deferred {
+        CompatibilityDisposition::Failed(diagnostic)
+      } else {
+        debug_assert!(persistent_succeeded || selected.is_empty());
+        CompatibilityDisposition::Emit {
+          source_digests: selected,
+        }
+      }
+    }
+    CompatibilityFamily::Safari => {
+      let Some(source) = persistent else {
+        return CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase);
+      };
+      if source.records.is_empty() {
+        if let Some(failure) = source_failure(source) {
+          return CompatibilityDisposition::Failed(failure.diagnostic.clone());
+        }
+      }
+      CompatibilityDisposition::Emit {
+        source_digests: vec![source.source_digest()],
+      }
+    }
+    CompatibilityFamily::InternetExplorer => {
+      let Some(source) = persistent else {
+        return CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase);
+      };
+      if let Some(diagnostic) = all_rows_diagnostic(
+        source,
+        "all Internet Explorer WebCache records failed to decode",
+      ) {
+        return CompatibilityDisposition::Failed(diagnostic);
+      }
+      if let Some(failure) = source_failure(source) {
+        return CompatibilityDisposition::Failed(failure.diagnostic.clone());
+      }
+      CompatibilityDisposition::Emit {
+        source_digests: vec![source.source_digest()],
+      }
+    }
+  }
+}
+
+fn failure_browser_id(failure: &Failure) -> Option<&BrowserId> {
+  match &failure.scope {
+    FailureScope::Request => None,
+    FailureScope::Browser { browser_id }
+    | FailureScope::Profile { browser_id, .. }
+    | FailureScope::Source { browser_id, .. } => Some(browser_id),
+  }
+}
+
+#[cfg(test)]
+fn assemble(registered_browsers: usize, outcomes: Vec<BrowserDraft>) -> ExtractionReport {
+  project_canonical_report(finalize_outcomes(registered_browsers, outcomes))
+}
+
+fn assemble_with_runtime(
+  registered_browsers: usize,
+  outcomes: Vec<BrowserDraft>,
+  runtime: &BoundaryRuntime<'_>,
+) -> ExtractionReport {
+  let outcome = finalize_outcomes_with_runtime(registered_browsers, outcomes, Some(runtime));
+  project_canonical_report_with_runtime(outcome, Some(runtime))
+}
+
+pub(crate) fn canonical_engine_extraction(
+  browser_id: &str,
+  engine: registry::EngineExtractionDraft,
+) -> Result<Outcome> {
+  let browser_id: BrowserId = browser_id.parse()?;
+  Ok(finalize_outcomes(
+    1,
+    vec![engine_browser_outcome(&browser_id, engine)?],
+  ))
+}
+
+#[cfg(test)]
+pub(crate) fn project_engine_report(
+  browser_id: &str,
+  engine: registry::EngineExtractionDraft,
+) -> Result<ExtractionReport> {
+  Ok(project_canonical_report(canonical_engine_extraction(
+    browser_id, engine,
+  )?))
+}
+
+pub(crate) fn canonical_engine_extraction_with_runtime(
+  browser_id: &str,
+  engine: registry::EngineExtractionDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Outcome> {
+  let browser_id: BrowserId = browser_id.parse()?;
+  Ok(finalize_outcomes_with_runtime(
+    1,
+    vec![engine_browser_outcome(&browser_id, engine)?],
+    Some(runtime),
+  ))
+}
+
+#[cfg(test)]
+pub(crate) fn canonical_chromium_extraction(
+  browser_id: &str,
+  report: ChromiumRegistryDraft,
+) -> Result<Outcome> {
+  let browser_id: BrowserId = browser_id.parse()?;
+  Ok(finalize_outcomes(
+    1,
+    vec![chromium_browser_outcome(&browser_id, report)?],
+  ))
+}
+
+pub(crate) fn canonical_chromium_extraction_with_runtime(
+  browser_id: &str,
+  report: ChromiumRegistryDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Outcome> {
+  let browser_id: BrowserId = browser_id.parse()?;
+  Ok(finalize_outcomes_with_runtime(
+    1,
+    vec![chromium_browser_outcome(&browser_id, report)?],
+    Some(runtime),
+  ))
+}
+
+// Only reachable in production through the automatic multi-identity
+// Chromium selection, which is Linux/macOS-only; Windows exercises this via
+// `#[cfg(test)]`.
+#[allow(dead_code)]
+pub(crate) fn canonical_direct_chromium_extraction(
+  db_path: &std::path::Path,
+  draft: super::chromium::ChromiumExtractionDraft,
+) -> Result<Outcome> {
+  canonical_direct_chromium_extraction_impl(db_path, draft, None)
+}
+
+pub(crate) fn canonical_direct_chromium_extraction_with_runtime(
+  db_path: &std::path::Path,
+  draft: super::chromium::ChromiumExtractionDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Outcome> {
+  canonical_direct_chromium_extraction_impl(db_path, draft, Some(runtime))
+}
+
+fn canonical_direct_chromium_extraction_impl(
+  db_path: &std::path::Path,
+  draft: super::chromium::ChromiumExtractionDraft,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Result<Outcome> {
+  let browser_id = BrowserId::known("chromium");
+  let profile = ProfileIdentity {
+    browser_id: browser_id.clone(),
+    installation_id: "0".repeat(64).parse()?,
+    profile_id: "1".repeat(64).parse()?,
+    display_name: "direct".to_owned(),
+    path: display_path(db_path.parent().unwrap_or(db_path)).0,
+    path_lossy: db_path.parent().unwrap_or(db_path).to_str().is_none(),
+  };
+  let mut profile_draft = ProfileDraft::new(profile, true);
+  let mut source = SourceDraft::new(
+    source_identity(
+      db_path,
+      SOURCE_ROLE_PERSISTENT,
+      "chromium_sqlite",
+      registry::PERSISTENT_SOURCE_PRECEDENCE,
+    ),
+    db_path,
+    true,
+    acquisition_code(draft.acquisition_strategy.into()),
+  );
+  source.stats = CounterSet {
+    rows_seen: draft.stats.rows_seen as u64,
+    cookies_emitted: draft.stats.cookies_emitted as u64,
+    rows_skipped: draft.stats.rows_skipped as u64,
+    rows_rejected: draft.stats.rows_rejected as u64,
+    provider_failures: draft.stats.provider_failures as u64,
+    acquisition_attempts: u64::from(draft.acquisition_attempts),
+  }
+  .into_stats();
+  #[cfg(test)]
+  {
+    source.cookies = draft.cookies;
+  }
+  source.records = draft.records;
+  source.compatibility_evidence = draft
+    .legacy_error
+    .map(|error| CompatibilityEvidence::AllRowsRejected(format!("{error:#}")));
+  for row in &draft.issues {
+    push_aggregated(&mut source.issues, row_issue(row));
+  }
+  profile_draft.sources.push(source);
+  Ok(finalize_outcomes_with_runtime(
+    1,
+    vec![BrowserDraft {
+      browser_id,
+      compatibility_family: CompatibilityFamily::Chromium,
+      detected: true,
+      installations_discovered: 1,
+      discovery_failed: false,
+      profiles: vec![profile_draft],
+      issues: Vec::new(),
+      termination: Termination::Completed,
+    }],
+    runtime,
+  ))
+}
+
+pub(crate) fn canonical_direct_mozilla_extraction_with_runtime(
+  db_path: &std::path::Path,
+  draft: super::mozilla::MozillaExtractionDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Outcome> {
+  canonical_direct_mozilla_extraction_impl(db_path, draft, Some(runtime))
+}
+
+fn canonical_direct_mozilla_extraction_impl(
+  db_path: &std::path::Path,
+  draft: super::mozilla::MozillaExtractionDraft,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Result<Outcome> {
+  let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
+  #[cfg(test)]
+  let persistent_cookies = draft.persistent_cookies;
+  let mut sources = Vec::new();
+  if draft.persistent_attempted {
+    sources.push(registry::EngineSourceDraft {
+      path: db_path.to_path_buf(),
+      role: registry::SOURCE_ROLE_PERSISTENT,
+      format: super::mozilla::PERSISTENT_FORMAT_ID,
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      selected: true,
+      cookies: {
+        #[cfg(test)]
+        {
+          persistent_cookies
+        }
+        #[cfg(not(test))]
+        {
+          Vec::new()
+        }
+      },
+      records: draft.persistent_records,
+      rows_seen: draft.persistent_rows_seen,
+      rows_skipped: draft.persistent_rows_skipped,
+      rows_rejected: draft.persistent_rows_rejected,
+      acquisition: draft.persistent_acquisition_strategy.into(),
+      acquisition_attempts: draft.persistent_acquisition_attempts,
+      diagnostics: Vec::new(),
+      error: draft.persistent_error,
+      error_stage: match draft.persistent_failure_kind {
+        Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
+        _ => SourceFailureStage::Acquisition,
+      },
+      row_error: draft.persistent_row_error,
+    });
+  }
+  sources.extend(
+    draft
+      .session_sources
+      .into_iter()
+      .map(|source| registry::EngineSourceDraft {
+        path: source.path,
+        role: registry::SOURCE_ROLE_SESSION,
+        format: source.format,
+        precedence: source.precedence,
+        selected: source.selected,
+        cookies: {
+          #[cfg(test)]
+          {
+            source.cookies
+          }
+          #[cfg(not(test))]
+          {
+            Vec::new()
+          }
+        },
+        records: source.records,
+        rows_seen: source.rows_seen,
+        rows_skipped: source.rows_skipped,
+        rows_rejected: source.rows_rejected,
+        acquisition: SourceAcquisition::StableFileImage,
+        acquisition_attempts: source.acquisition_attempts,
+        diagnostics: source.diagnostics,
+        error: source.error,
+        error_stage: SourceFailureStage::Parse,
+        row_error: None,
+      }),
+  );
+  let engine = registry::EngineExtractionDraft {
+    profiles: vec![registry::EngineProfileDraft {
+      profile_id: "1".repeat(64),
+      installation_id: "0".repeat(64),
+      installation_priority: 0,
+      legacy_installation_priority: 0,
+      legacy_profile_order: 0,
+      legacy_is_default: true,
+      legacy_eligible: true,
+      installation_path: profile_path.clone(),
+      legacy_installation_path: profile_path.clone(),
+      name: "direct".to_owned(),
+      legacy_name: "direct".to_owned(),
+      path: profile_path,
+      is_default: true,
+      persistent_source_discovered: true,
+      sources,
+    }],
+    discovery_issues: Vec::new(),
+    installations_discovered: 1,
+    installations_detected: 1,
+    installations_enumerated: 1,
+    boundary_stop: draft.boundary_stop,
+  };
+  match runtime {
+    Some(runtime) => canonical_engine_extraction_with_runtime("firefox", engine, runtime),
+    None => canonical_engine_extraction("firefox", engine),
+  }
+}
+
+pub(crate) fn canonical_direct_safari_extraction_with_runtime(
+  db_path: &std::path::Path,
+  draft: super::safari::SafariFileDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Outcome> {
+  canonical_direct_engine_source(
+    "safari",
+    db_path,
+    "safari_binarycookies",
+    SourceAcquisition::StableFileImage,
+    {
+      #[cfg(test)]
+      {
+        draft.cookies
+      }
+      #[cfg(not(test))]
+      {
+        Vec::new()
+      }
+    },
+    draft.records,
+    draft.stats.records_seen,
+    draft.stats.records_skipped,
+    draft.stats.records_rejected,
+    draft.acquisition_attempts,
+    draft.row_error,
+    Some(runtime),
+  )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
+  db_path: &std::path::Path,
+  draft: super::internet_explorer::InternetExplorerDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Outcome> {
+  canonical_direct_engine_source(
+    "internet_explorer",
+    db_path,
+    "internet_explorer_ese",
+    SourceAcquisition::EseDatabase,
+    Vec::new(),
+    draft.records,
+    draft.stats.records_seen,
+    draft.stats.records_skipped,
+    draft.stats.records_rejected,
+    1,
+    draft.row_error,
+    Some(runtime),
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn canonical_direct_engine_source(
+  browser_id: &str,
+  db_path: &std::path::Path,
+  format: &'static str,
+  acquisition: SourceAcquisition,
+  cookies: Vec<crate::common::enums::Cookie>,
+  records: Vec<CookieRecord>,
+  rows_seen: usize,
+  rows_skipped: usize,
+  rows_rejected: usize,
+  acquisition_attempts: u32,
+  row_error: Option<String>,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Result<Outcome> {
+  let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
+  let engine = registry::EngineExtractionDraft {
+    profiles: vec![registry::EngineProfileDraft {
+      profile_id: "1".repeat(64),
+      installation_id: "0".repeat(64),
+      installation_priority: 0,
+      legacy_installation_priority: 0,
+      legacy_profile_order: 0,
+      legacy_is_default: true,
+      legacy_eligible: true,
+      installation_path: profile_path.clone(),
+      legacy_installation_path: profile_path.clone(),
+      name: "direct".to_owned(),
+      legacy_name: "direct".to_owned(),
+      path: profile_path,
+      is_default: true,
+      persistent_source_discovered: true,
+      sources: vec![registry::EngineSourceDraft {
+        path: db_path.to_path_buf(),
+        role: registry::SOURCE_ROLE_PERSISTENT,
+        format,
+        precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+        selected: true,
+        cookies,
+        records,
+        rows_seen,
+        rows_skipped,
+        rows_rejected,
+        acquisition,
+        acquisition_attempts,
+        diagnostics: Vec::new(),
+        error: None,
+        error_stage: SourceFailureStage::Parse,
+        row_error,
+      }],
+    }],
+    discovery_issues: Vec::new(),
+    installations_discovered: 1,
+    installations_detected: 1,
+    installations_enumerated: 1,
+    boundary_stop: None,
+  };
+  match runtime {
+    Some(runtime) => canonical_engine_extraction_with_runtime(browser_id, engine, runtime),
+    None => canonical_engine_extraction(browser_id, engine),
   }
 }
 
@@ -687,30 +1786,50 @@ pub(crate) fn browser_extraction_report(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<ExtractionReport> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  browser_extraction_report_with_runtime(browser_id, profile_id, domains, &runtime)
+}
+
+fn browser_extraction_report_with_runtime(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<ExtractionReport> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let canonical_id = &browser.canonical_id;
-  let mut outcome = collect_report(&browser, profile_id, true, domains)?;
+  let mut outcome = match collect_report(&browser, profile_id, true, domains, runtime) {
+    Ok(outcome) => outcome,
+    Err(error) => match stop_from_error(&error) {
+      Some(stop) => stopped_browser_draft(&browser, stop)?,
+      None => return Err(error),
+    },
+  };
   // Every engine seam now applies the selection itself, before it acquires a
   // single source, so by here the list is already narrowed. This stays as the
   // boundary check for the one case no engine covers: a registered browser
   // whose engine has no adapter compiled into this build reports no profiles at
   // all, and an unknown profile id must still be a request error there.
-  if let Some(profile_id) = profile_id {
-    if !outcome
-      .profiles
-      .iter()
-      .any(|profile| profile.profile.profile_id.as_str() == profile_id)
-    {
-      bail!("unknown {canonical_id} profile id {profile_id:?}")
+  if outcome.termination == Termination::Completed {
+    if let Some(profile_id) = profile_id {
+      if !outcome
+        .profiles
+        .iter()
+        .any(|profile| profile.profile.profile_id.as_str() == profile_id)
+      {
+        bail!("unknown {canonical_id} profile id {profile_id:?}")
+      }
+      outcome
+        .profiles
+        .retain(|profile| profile.profile.profile_id.as_str() == profile_id);
     }
-    outcome
-      .profiles
-      .retain(|profile| profile.profile.profile_id.as_str() == profile_id);
   }
   // A browser whose roots were found but could not be read is detected-and-
   // failed, not absent. Saying "not detected" beside a `failed` status would
   // describe two different worlds in one report.
-  if !outcome.detected && !outcome.discovery_failed {
+  if !outcome.detected && !outcome.discovery_failed && outcome.termination == Termination::Completed
+  {
     let id: BrowserId = canonical_id.parse()?;
     push_aggregated(
       &mut outcome.issues,
@@ -723,22 +1842,42 @@ pub(crate) fn browser_extraction_report(
       .with_context(Some(&id), None, None),
     );
   }
-  Ok(assemble(1, vec![outcome]))
+  Ok(assemble_with_runtime(1, vec![outcome], runtime))
 }
 
 /// Private `load_report` seam. Uninstalled registered browsers are summarized
 /// in counters instead of emitting a per-browser warning.
 pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<ExtractionReport> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  load_extraction_report_with_runtime(domains, &runtime)
+}
+
+fn load_extraction_report_with_runtime(
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<ExtractionReport> {
   let browsers = registry::registered_browsers()?;
   let mut outcomes = Vec::with_capacity(browsers.len());
   for browser in &browsers {
-    match collect_report(browser, None, true, domains.clone()) {
+    match collect_report(browser, None, true, domains.clone(), runtime) {
       Ok(outcome) => outcomes.push(outcome),
       // A browser whose whole discovery failed must not erase the other
       // browsers' results; it is recorded as an error-severity issue.
       Err(error) => {
+        if let Some(stop) = stop_from_error(&error) {
+          outcomes.push(stopped_browser_draft(browser, stop)?);
+          break;
+        }
         let id: BrowserId = browser.canonical_id.parse()?;
-        outcomes.push(BrowserOutcome {
+        outcomes.push(BrowserDraft {
+          browser_id: id.clone(),
+          compatibility_family: match browser.engine {
+            "chromium" => CompatibilityFamily::Chromium,
+            "safari" => CompatibilityFamily::Safari,
+            "internet_explorer" => CompatibilityFamily::InternetExplorer,
+            _ => CompatibilityFamily::Gecko,
+          },
           detected: false,
           installations_discovered: 0,
           discovery_failed: true,
@@ -750,11 +1889,12 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
             format!("{error:#}"),
           )
           .with_context(Some(&id), None, None)],
+          termination: Termination::Completed,
         });
       }
     }
   }
-  Ok(assemble(browsers.len(), outcomes))
+  Ok(assemble_with_runtime(browsers.len(), outcomes, runtime))
 }
 
 /// Private `browser_profiles` seam. An unknown ID fails; a known browser with
@@ -762,17 +1902,40 @@ pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<Ext
 /// detected root failed enumeration fails rather than returning an
 /// indistinguishable empty list.
 pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<ProfileDescriptor>> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
   let browser = registry::resolve_registered_browser(browser_id)?;
-  let outcome = collect_report(&browser, None, false, None)?;
+  let outcome = collect_report(&browser, None, false, None, &runtime)?;
   profile_descriptors_from_outcome(browser_id, outcome)
+}
+
+fn stopped_browser_draft(browser: &RegisteredBrowser, stop: BoundaryStop) -> Result<BrowserDraft> {
+  let browser_id: BrowserId = browser.canonical_id.parse()?;
+  Ok(BrowserDraft {
+    browser_id,
+    compatibility_family: match browser.engine {
+      "chromium" => CompatibilityFamily::Chromium,
+      "safari" => CompatibilityFamily::Safari,
+      "internet_explorer" => CompatibilityFamily::InternetExplorer,
+      _ => CompatibilityFamily::Gecko,
+    },
+    detected: false,
+    installations_discovered: 0,
+    discovery_failed: false,
+    profiles: Vec::new(),
+    issues: Vec::new(),
+    termination: termination_from_stop(stop),
+  })
 }
 
 /// Chrome-specific listing whose first entry follows the advisory `Local
 /// State` activity hints. The generic `browser_profiles("chrome")` path keeps
 /// its frozen default-first order.
 pub(crate) fn chrome_profile_descriptors() -> Result<Vec<ProfileDescriptor>> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
   let browser_id = BrowserId::known("chrome");
-  registry::chrome_profiles()?
+  registry::chrome_profiles_with_runtime(&runtime)?
     .into_iter()
     .map(|profile| chromium_profile_descriptor(&browser_id, profile))
     .collect()
@@ -786,8 +1949,10 @@ pub(crate) fn chrome_profile_report(
   profile: &str,
   domains: Option<Vec<String>>,
 ) -> Result<ExtractionReport> {
-  let profile = registry::select_chrome_profile(profile)?;
-  browser_extraction_report("chrome", Some(&profile.profile_id), domains)
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let profile = registry::select_chrome_profile_with_runtime(profile, &runtime)?;
+  browser_extraction_report_with_runtime("chrome", Some(&profile.profile_id), domains, &runtime)
 }
 
 fn chromium_profile_descriptor(
@@ -831,7 +1996,7 @@ fn chromium_profile_descriptor(
 
 fn profile_descriptors_from_outcome(
   browser_id: &str,
-  outcome: BrowserOutcome,
+  outcome: BrowserDraft,
 ) -> Result<Vec<ProfileDescriptor>> {
   // An empty list must mean "looked, found nothing". Roots that all failed to
   // enumerate are one way to lose everything; profiles that were all found and
@@ -900,7 +2065,7 @@ fn profile_descriptors_from_outcome(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::browser::report_core::{ReportStatusCode, SourceExtractionOutcome};
+  use crate::browser::report_core::{ReportStatusCode, SourceDraft};
   use std::path::PathBuf;
 
   fn identity() -> ProfileIdentity {
@@ -914,14 +2079,16 @@ mod tests {
     }
   }
 
-  fn source(failed: bool) -> SourceExtractionOutcome {
-    let mut source = SourceExtractionOutcome::new(
+  fn source(failed: bool) -> SourceDraft {
+    let source_path = PathBuf::from("/profiles/default/cookies.sqlite");
+    let mut source = SourceDraft::new(
       source_identity(
-        &PathBuf::from("/profiles/default/cookies.sqlite"),
+        &source_path,
         SOURCE_ROLE_PERSISTENT,
         "mozilla_sqlite",
         registry::PERSISTENT_SOURCE_PRECEDENCE,
       ),
+      &source_path,
       true,
       AcquisitionStrategyCode::live_read_only(),
     );
@@ -929,26 +2096,256 @@ mod tests {
     source
   }
 
-  fn outcome(profiles: Vec<EngineExtractionOutcome>, discovery_failed: bool) -> BrowserOutcome {
-    BrowserOutcome {
+  fn completed_source(name: &str) -> SourceDraft {
+    let mut source = source(false);
+    source.cookies.push(crate::common::enums::Cookie {
+      domain: ".example.test".to_owned(),
+      path: "/".to_owned(),
+      secure: false,
+      expires: None,
+      name: name.to_owned(),
+      value: format!("secret-{name}"),
+      http_only: true,
+      same_site: 1,
+    });
+    source.stats.rows_seen = 1;
+    source.stats.cookies_emitted = 1;
+    source
+  }
+
+  fn outcome(profiles: Vec<ProfileDraft>, discovery_failed: bool) -> BrowserDraft {
+    BrowserDraft {
+      browser_id: BrowserId::known("firefox"),
+      compatibility_family: CompatibilityFamily::Gecko,
       detected: true,
       installations_discovered: 1,
       discovery_failed,
       profiles,
       issues: Vec::new(),
+      termination: Termination::Completed,
     }
   }
 
-  fn status(outcome: BrowserOutcome) -> ReportStatusCode {
+  fn status(outcome: BrowserDraft) -> ReportStatusCode {
     assemble(1, vec![outcome]).status
+  }
+
+  #[test]
+  fn cancellation_and_resource_exhaustion_reach_the_report_wire_without_source_errors() {
+    use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+    use std::time::Duration;
+
+    for (stop, expected) in [
+      (BoundaryStop::Cancelled, "cancelled"),
+      (BoundaryStop::ResourceExhausted, "resource_exhausted"),
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      match stop {
+        BoundaryStop::Cancelled => assert!(token.cancel()),
+        BoundaryStop::ResourceExhausted => assert!(token.exhaust_resources()),
+        BoundaryStop::TimedOut => unreachable!("covered separately"),
+      }
+      let runtime = BoundaryRuntime::with_stop(
+        &clock,
+        Deadline::after(&clock, Duration::from_secs(10)),
+        token,
+      );
+      let report = browser_extraction_report_with_runtime("firefox", None, None, &runtime)
+        .expect("typed stop becomes a report termination");
+      assert_eq!(report.termination.as_str(), expected);
+      assert!(report.issues.is_empty());
+      let wire = serde_json::to_value(report).expect("serialize stopped report");
+      assert_eq!(wire["termination"], expected);
+    }
+
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::ZERO));
+    let report = browser_extraction_report_with_runtime("firefox", None, None, &runtime)
+      .expect("expired runtime becomes a report termination");
+    assert_eq!(report.termination.as_str(), "timed_out");
+    assert!(report.issues.is_empty());
+  }
+
+  #[test]
+  fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection() {
+    use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+    use std::time::Duration;
+
+    for (stop, termination) in [
+      (BoundaryStop::TimedOut, Termination::TimedOut),
+      (BoundaryStop::Cancelled, Termination::Cancelled),
+      (
+        BoundaryStop::ResourceExhausted,
+        Termination::ResourceExhausted,
+      ),
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let deadline = match stop {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(token.cancel());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(token.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+      let stopped = || {
+        let mut profile = ProfileDraft::new(identity(), true);
+        profile.sources.push(completed_source("retained"));
+        let mut browser = outcome(vec![profile], false);
+        browser.termination = termination;
+        browser
+      };
+
+      let report = assemble_with_runtime(1, vec![stopped()], &runtime);
+      let expected_termination = match stop {
+        BoundaryStop::TimedOut => "timed_out",
+        BoundaryStop::Cancelled => "cancelled",
+        BoundaryStop::ResourceExhausted => "resource_exhausted",
+      };
+      assert_eq!(report.termination.as_str(), expected_termination);
+      assert_eq!(report.status.as_str(), "complete");
+      assert_eq!(report.summary.sources_succeeded, 1);
+      assert_eq!(report.summary.rows_seen, 1);
+      assert_eq!(report.summary.cookies_emitted, 1);
+      assert_eq!(report.profiles[0].sources[0].stats.rows_seen, 1);
+      assert_eq!(report.profiles[0].sources[0].stats.cookies_emitted, 1);
+      assert_eq!(report.profiles[0].sources[0].cookies.len(), 1);
+      assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
+
+      let canonical = finalize_outcomes_with_runtime(1, vec![stopped()], Some(&runtime));
+      let cookies = super::super::legacy::project_canonical_outcome_with_runtime(
+        "firefox", canonical, &runtime,
+      )
+      .expect("completed legacy source survives a later typed stop");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].name, "retained");
+    }
+  }
+
+  #[test]
+  fn stopped_empty_legacy_outcome_returns_the_typed_boundary_stop() {
+    use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+    use std::time::Duration;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let deadline = match stop {
+        BoundaryStop::TimedOut => Deadline::after(&clock, Duration::ZERO),
+        BoundaryStop::Cancelled => {
+          assert!(token.cancel());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+        BoundaryStop::ResourceExhausted => {
+          assert!(token.exhaust_resources());
+          Deadline::after(&clock, Duration::from_secs(10))
+        }
+      };
+      let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+      let mut browser = outcome(Vec::new(), false);
+      browser.termination = termination_from_stop(stop);
+      let canonical = finalize_outcomes_with_runtime(1, vec![browser], Some(&runtime));
+      let error = super::super::legacy::project_canonical_outcome_with_runtime(
+        "firefox", canonical, &runtime,
+      )
+      .expect_err("a stopped empty legacy outcome remains a typed stop");
+      assert!(error
+        .chain()
+        .any(|cause| cause.downcast_ref::<BoundaryStop>() == Some(&stop)));
+    }
+  }
+
+  #[test]
+  fn finalization_and_projection_share_runtime_and_keep_completed_partial_sources() {
+    use crate::common::deadline::{CancellationToken, Clock, Deadline};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct CancellingClock {
+      base: Instant,
+      calls: AtomicUsize,
+      cancel_on_call: usize,
+      token: CancellationToken,
+    }
+
+    impl Clock for CancellingClock {
+      fn now(&self) -> Instant {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.cancel_on_call {
+          assert!(self.token.cancel());
+        }
+        self.base + Duration::from_millis(call as u64)
+      }
+
+      fn sleep(&self, _duration: Duration) {}
+    }
+
+    let token = CancellationToken::default();
+    let clock = CancellingClock {
+      base: Instant::now(),
+      calls: AtomicUsize::new(0),
+      // Finalization consumes the first eight samples. Projection completes
+      // the first source on sample twelve, where cancellation must stop the
+      // second source without discarding the first.
+      cancel_on_call: 12,
+      token: token.clone(),
+    };
+    let deadline = Deadline::after(&clock, Duration::from_secs(60));
+    let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
+    let mut profile = ProfileDraft::new(identity(), true);
+    for (index, name) in ["first", "second"].into_iter().enumerate() {
+      let path = PathBuf::from(format!("/profiles/default/cookies-{index}.sqlite"));
+      let mut source = SourceDraft::new(
+        source_identity(
+          &path,
+          SOURCE_ROLE_PERSISTENT,
+          "mozilla_sqlite",
+          registry::PERSISTENT_SOURCE_PRECEDENCE + index as u16,
+        ),
+        &path,
+        true,
+        AcquisitionStrategyCode::live_read_only(),
+      );
+      source.cookies.push(crate::common::enums::Cookie {
+        domain: ".example.test".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires: None,
+        name: name.to_owned(),
+        value: format!("secret-{name}"),
+        http_only: false,
+        same_site: -1,
+      });
+      source.stats.rows_seen = 1;
+      source.stats.cookies_emitted = 1;
+      profile.sources.push(source);
+    }
+
+    let report = assemble_with_runtime(1, vec![outcome(vec![profile], false)], &runtime);
+    assert_eq!(report.termination.as_str(), "cancelled");
+    assert_eq!(report.status.as_str(), "partial");
+    assert_eq!(report.profiles.len(), 1);
+    assert_eq!(report.profiles[0].sources.len(), 1);
+    assert_eq!(report.profiles[0].sources[0].cookies[0].name, "first");
+    assert!(report.issues.is_empty());
   }
 
   fn chromium_profile(
     selected_candidate: bool,
     failure: Option<ChromiumProfileFailure>,
-  ) -> registry::ChromiumProfileExtraction {
+  ) -> registry::ChromiumProfileDraft {
     let path = PathBuf::from("/chrome/Default");
-    registry::ChromiumProfileExtraction {
+    registry::ChromiumProfileDraft {
       profile: registry::ChromiumProfile {
         profile_id: "c".repeat(64),
         installation_id: "d".repeat(64),
@@ -967,6 +2364,7 @@ mod tests {
         }],
       },
       cookies: Vec::new(),
+      records: Vec::new(),
       stats: crate::browser::chromium::ChromiumExtractionStats {
         rows_seen: 0,
         cookies_emitted: 0,
@@ -1028,7 +2426,7 @@ mod tests {
   /// rejected session candidate keeps `selected = false` per Section 5.7.
   #[test]
   fn engine_adapter_orders_sources_and_preserves_session_selection() {
-    let profile = registry::EngineProfileExtraction {
+    let profile = registry::EngineProfileDraft {
       profile_id: "c".repeat(64),
       installation_id: "d".repeat(64),
       installation_priority: 0,
@@ -1088,16 +2486,18 @@ mod tests {
     precedence: u16,
     selected: bool,
     error: Option<&str>,
-  ) -> registry::EngineSourceExtraction {
-    registry::EngineSourceExtraction {
+  ) -> registry::EngineSourceDraft {
+    registry::EngineSourceDraft {
       path: PathBuf::from("/firefox/Profiles/default").join(name),
       role,
       format: "mozilla_sqlite",
       precedence,
       selected,
       cookies: Vec::new(),
+      records: Vec::new(),
       rows_seen: 0,
       rows_skipped: 0,
+      rows_rejected: 0,
       acquisition: registry::SourceAcquisition::StableFileImage,
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
@@ -1188,8 +2588,47 @@ mod tests {
   }
 
   #[test]
+  fn rejecting_an_invalid_record_marks_already_maxed_row_counters_saturated() {
+    use crate::{
+      browser::cookie_record::{CookieValue, SourceRef, UnavailableCode, UnavailableReason},
+      common::enums::Cookie,
+    };
+
+    let mut draft = source(false);
+    draft.stats.rows_seen = 1;
+    draft.stats.cookies_emitted = 1;
+    draft.stats.rows_skipped = u32::MAX;
+    draft.stats.rows_rejected = u32::MAX;
+    let mut record = CookieRecord::from_cookie(
+      Cookie {
+        domain: ".example.test".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires: None,
+        name: "invalid".to_owned(),
+        value: "sentinel".to_owned(),
+        http_only: false,
+        same_site: 0,
+      },
+      SourceRef::pending(0),
+    );
+    record.value = CookieValue::Unavailable(UnavailableReason {
+      code: UnavailableCode::Decode,
+      message: "rejected".to_owned(),
+    });
+    draft.records.push(record);
+    let mut profile = ProfileDraft::new(identity(), true);
+    profile.sources.push(draft);
+
+    let report = assemble(1, vec![outcome(vec![profile], false)]);
+    assert_eq!(report.summary.rows_skipped, u32::MAX);
+    assert_eq!(report.summary.rows_rejected, u32::MAX);
+    assert!(report.summary.counters_saturated);
+  }
+
+  #[test]
   fn a_profile_without_sources_is_no_sources_rather_than_failed() {
-    let profile = EngineExtractionOutcome::new(identity(), true);
+    let profile = ProfileDraft::new(identity(), true);
     assert_eq!(
       status(outcome(vec![profile], false)),
       ReportStatusCode::no_sources()
@@ -1200,7 +2639,7 @@ mod tests {
   fn a_root_that_could_not_be_enumerated_is_failed_not_no_sources() {
     // Identical profile shape to the case above; only the discovery signal
     // separates "nothing to read" from "could not look".
-    let profile = EngineExtractionOutcome::new(identity(), true);
+    let profile = ProfileDraft::new(identity(), true);
     assert_eq!(
       status(outcome(vec![profile], true)),
       ReportStatusCode::failed()
@@ -1216,7 +2655,7 @@ mod tests {
     // Same zero-source shape as the `no_sources` case, but the profile lost
     // something. Section 5.7 reserves `no_sources` for discovery that completed
     // without an error-severity failure.
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.issues.push(issue(
       "profile_extraction_failed",
       ExtractionStageCode::acquisition(),
@@ -1231,7 +2670,7 @@ mod tests {
 
   #[test]
   fn an_info_issue_with_no_sources_stays_no_sources() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.issues.push(issue(
       "profile_has_no_cookie_source",
       ExtractionStageCode::discovery(),
@@ -1246,7 +2685,7 @@ mod tests {
 
   #[test]
   fn an_attempted_source_that_failed_is_failed() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(true));
     assert_eq!(
       status(outcome(vec![profile], false)),
@@ -1256,7 +2695,7 @@ mod tests {
 
   #[test]
   fn a_zero_row_source_still_succeeds_and_completes() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(false));
     let report = assemble(1, vec![outcome(vec![profile], false)]);
     assert_eq!(report.status, ReportStatusCode::complete());
@@ -1266,7 +2705,7 @@ mod tests {
 
   #[test]
   fn an_error_issue_beside_a_succeeding_source_is_partial() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(false));
     let mut browser = outcome(vec![profile], false);
     browser.issues.push(issue(
@@ -1280,7 +2719,7 @@ mod tests {
 
   #[test]
   fn a_recovered_discovery_problem_does_not_downgrade_a_complete_report() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(source(false));
     let mut browser = outcome(vec![profile], false);
     // Both codes fall back to another discovery strategy, so the report lost
@@ -1323,14 +2762,37 @@ mod tests {
       .find(|issue| issue.code.as_str() == "duplicate_profile")
       .expect("aggregated duplicate issue");
     assert_eq!(issue.occurrences, 5);
-    assert_eq!(issue.samples, vec!["/profiles/0", "/profiles/1"]);
+    assert_eq!(issue.samples, vec!["<path>", "<path>"]);
+  }
+
+  #[test]
+  fn public_discovery_diagnostics_sanitize_paths_embedded_in_messages() {
+    let message = "failed /private/secret/profile/Cookies, also C:\\Users\\Secret\\Cookies";
+    let issue = discovery_issue(
+      &BrowserId::known("firefox"),
+      &registry::DiscoveryIssue {
+        code: "profile_enumeration_failed",
+        path: PathBuf::from("/profiles/default"),
+        message: message.to_owned(),
+        occurrences: 1,
+      },
+    );
+    assert!(!issue.message.contains("/private/secret"));
+    assert!(!issue.message.contains(r"C:\Users\Secret"));
+    assert!(
+      issue
+        .message
+        .matches(crate::common::diagnostic::REDACTED_PATH)
+        .count()
+        >= 2
+    );
   }
   /// Safari and Internet Explorer report skipped rows without keeping the
   /// underlying error. Deriving the row issue from that error alone let a
   /// report claim `complete` while cookies had been dropped.
   #[test]
   fn skipped_rows_without_a_row_error_still_degrade_the_report() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     let mut source = engine_source("Cookies.binarycookies", "persistent", 10, true, None);
     source.rows_seen = 3;
     source.rows_skipped = 2;
@@ -1406,11 +2868,19 @@ mod tests {
     chromium.row_issues = vec![
       crate::browser::chromium::ChromiumRowIssue {
         code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
+        provider: None,
+        tier: None,
+        cause: None,
+        retryability: Retryability::Unknown,
         occurrences: 1,
         samples: vec!["row 2".to_owned()],
       },
       crate::browser::chromium::ChromiumRowIssue {
         code: crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed,
+        provider: Some("platform_key_provider".to_owned()),
+        tier: Some("v11".to_owned()),
+        cause: Some("keyring unavailable".to_owned()),
+        retryability: Retryability::Retryable,
         occurrences: 2,
         samples: vec!["row 3".to_owned(), "row 4".to_owned()],
       },
@@ -1430,7 +2900,7 @@ mod tests {
       source.rows_seen = 3;
       source.rows_skipped = 2;
       source.row_error = Some(format!("{name} rejected two records"));
-      let mut profile = EngineExtractionOutcome::new(identity(), true);
+      let mut profile = ProfileDraft::new(identity(), true);
       profile.sources.push(engine_source_outcome(source));
       profiles.push(profile);
     }
@@ -1451,7 +2921,7 @@ mod tests {
 
   #[test]
   fn a_source_that_skipped_nothing_reports_no_row_issue() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.sources.push(engine_source_outcome(engine_source(
       "cookies.sqlite",
       "persistent",
@@ -1498,6 +2968,10 @@ mod tests {
         &mut issues,
         row_issue(&ChromiumRowIssue {
           code: ChromiumRowIssueCode::ColumnRead(column),
+          provider: None,
+          tier: None,
+          cause: None,
+          retryability: Retryability::Unknown,
           occurrences: 1,
           samples: vec![format!("row {row}")],
         }),
@@ -1510,13 +2984,29 @@ mod tests {
       vec!["name column, row 1", "value column, row 7"]
     );
   }
+
+  #[test]
+  fn provider_failure_retryability_reaches_the_canonical_report_issue() {
+    let issue = row_issue(&ChromiumRowIssue {
+      code: ChromiumRowIssueCode::ProviderFailed,
+      provider: Some("platform_key_provider".to_owned()),
+      tier: Some("v20".to_owned()),
+      cause: Some("malformed App-Bound Local State".to_owned()),
+      retryability: Retryability::NotRetryable,
+      occurrences: 1,
+      samples: vec!["row 1".to_owned()],
+    });
+    assert_eq!(issue.code.as_str(), "provider_failed");
+    assert_eq!(issue.retryability, "not_retryable");
+    assert_eq!(issue.tier.as_deref(), Some("v20"));
+  }
   /// Profile and source issues carry no context from the engines, because the
   /// enclosing profile is implied structurally. Consumers that flatten every
   /// issue into one list -- the CLI and the bindings do -- lose that, so the
   /// identity is stamped on before the report leaves the builder.
   #[test]
   fn profile_and_source_issues_carry_their_profile_context() {
-    let mut profile = EngineExtractionOutcome::new(identity(), true);
+    let mut profile = ProfileDraft::new(identity(), true);
     profile.issues.push(issue(
       "profile_extraction_failed",
       ExtractionStageCode::acquisition(),
@@ -1721,11 +3211,7 @@ mod engine_chain_tests {
         .find(|issue| issue.code.as_str() == "installation_metadata_failed")
         .expect("stable root metadata issue");
       assert!(issue.is_error(), "{name}");
-      assert_eq!(
-        issue.samples,
-        [root.to_string_lossy().into_owned()],
-        "{name}"
-      );
+      assert_eq!(issue.samples, ["<path>"], "{name}");
       assert!(
         report
           .issues
@@ -1968,18 +3454,22 @@ mod engine_chain_tests {
     let engine =
       test_seams::internet_explorer_report(&context, "internet_explorer", None, None, |_, _| {
         Ok(InternetExplorerRows {
-          cookies: vec![crate::common::enums::Cookie {
-            domain: ".example.com".to_owned(),
-            path: "/".to_owned(),
-            secure: false,
-            expires: None,
-            name: "ie-cookie".to_owned(),
-            value: "value".to_owned(),
-            http_only: false,
-            same_site: 0,
-          }],
+          records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+            crate::common::enums::Cookie {
+              domain: ".example.com".to_owned(),
+              path: "/".to_owned(),
+              secure: false,
+              expires: None,
+              name: "ie-cookie".to_owned(),
+              value: "value".to_owned(),
+              http_only: false,
+              same_site: 0,
+            },
+            crate::browser::cookie_record::SourceRef::pending(0),
+          )],
           records_seen: 1,
           records_skipped: 0,
+          records_rejected: 0,
           row_error: None,
         })
       })
@@ -2092,6 +3582,19 @@ mod engine_chain_tests {
     assert_eq!(report.status, ReportStatusCode::partial());
     assert_eq!(report.summary.sources_succeeded, 1);
     assert_eq!(report.summary.sources_failed, 0);
+    let diagnostics = source
+      .issues
+      .iter()
+      .flat_map(|issue| {
+        std::iter::once(issue.message.as_str()).chain(issue.samples.iter().map(String::as_str))
+      })
+      .collect::<Vec<_>>();
+    assert!(diagnostics
+      .iter()
+      .all(|text| !text.contains("plaintext sentinel must not escape")));
+    assert!(diagnostics
+      .iter()
+      .all(|text| text.len() <= crate::browser::outcome::MAX_DIAGNOSTIC_BYTES));
   }
 
   /// Selecting a profile narrows which installations are extracted, but must
@@ -2137,7 +3640,7 @@ mod engine_chain_tests {
   /// counters included.
   fn post_filtered_report(
     browser: &BrowserId,
-    engine: registry::EngineExtractionOutcome,
+    engine: registry::EngineExtractionDraft,
     profile_id: &str,
   ) -> ExtractionReport {
     let mut outcome = engine_browser_outcome(browser, engine).expect("adapt the engine outcome");
@@ -2149,7 +3652,7 @@ mod engine_chain_tests {
 
   fn selected_report(
     browser: &BrowserId,
-    engine: registry::EngineExtractionOutcome,
+    engine: registry::EngineExtractionDraft,
   ) -> ExtractionReport {
     assemble(
       1,
@@ -2264,18 +3767,22 @@ mod engine_chain_tests {
     // profile could not pass by coincidence.
     let rows = |path: &std::path::Path, _: Option<&[String]>| {
       Ok(InternetExplorerRows {
-        cookies: vec![crate::common::enums::Cookie {
-          domain: ".example.com".to_owned(),
-          path: "/".to_owned(),
-          secure: false,
-          expires: None,
-          name: format!("{}", path.display()),
-          value: "value".to_owned(),
-          http_only: false,
-          same_site: 0,
-        }],
+        records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+          crate::common::enums::Cookie {
+            domain: ".example.com".to_owned(),
+            path: "/".to_owned(),
+            secure: false,
+            expires: None,
+            name: format!("{}", path.display()),
+            value: "value".to_owned(),
+            http_only: false,
+            same_site: 0,
+          },
+          crate::browser::cookie_record::SourceRef::pending(0),
+        )],
         records_seen: 1,
         records_skipped: 0,
+        records_rejected: 0,
         row_error: None,
       })
     };
@@ -2409,6 +3916,18 @@ mod engine_chain_tests {
     assert_eq!(source.issues.len(), 1);
     assert_eq!(source.issues[0].code.as_str(), "provider_failed");
     assert_eq!(source.issues[0].stage.as_str(), "decrypt");
+    assert_eq!(source.issues[0].cause, "credential_provider");
+    assert_eq!(
+      source.issues[0].provider.as_deref(),
+      Some("platform_key_provider")
+    );
+    assert_eq!(source.issues[0].tier.as_deref(), Some("v11"));
+    assert_eq!(source.issues[0].retryability, "retryable");
+    let wire = serde_json::to_value(&report).expect("provider failure serializes");
+    let wire_issue = &wire["profiles"][0]["sources"][0]["issues"][0];
+    for key in ["cause", "provider", "tier", "retryability"] {
+      assert!(wire_issue.get(key).is_some(), "missing {key}: {wire_issue}");
+    }
     assert_eq!(report.status, ReportStatusCode::partial());
   }
 }

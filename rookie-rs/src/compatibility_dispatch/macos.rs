@@ -19,14 +19,12 @@ pub(super) fn chromium_from_path(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
   _key_path: Option<&str>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  chromium_from_path_with(
-    cookies_path,
-    domains,
-    crate::direct_path::legacy_automatic_chromium,
-  )
+  crate::direct_path::legacy_automatic_chromium_with_runtime(cookies_path, domains, runtime)
 }
 
+#[cfg(test)]
 fn chromium_from_path_with<F>(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -41,10 +39,12 @@ where
 pub(super) fn safari_from_path(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  safari_from_path_with(cookies_path, domains, crate::safari_based)
+  crate::browser::safari::safari_based_with_runtime(cookies_path, domains, runtime)
 }
 
+#[cfg(test)]
 fn safari_from_path_with<F>(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -59,6 +59,7 @@ where
 pub(super) fn internet_explorer_from_path(
   _cookies_path: PathBuf,
   _domains: Option<Vec<String>>,
+  _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   bail!("Internet Explorer WebCache files are only supported on Windows")
 }

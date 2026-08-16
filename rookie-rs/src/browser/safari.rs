@@ -1,4 +1,16 @@
-use crate::common::{date, enums::*, sqlite, utils};
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
+#[cfg(test)]
+use crate::common::deadline::{Clock, Deadline};
+use crate::common::{
+  boundary::{Decoder, ReadOnlySource, RecordSink},
+  date,
+  deadline::{BoundaryRuntime, BoundaryStop, DeadlineEnforcement, SystemClock},
+  diagnostic::REDACTED_PATH,
+  enums::*,
+  secret::{SecretBytes, SecretString},
+  sqlite, utils,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use std::{
@@ -8,8 +20,11 @@ use std::{
   time::SystemTime,
   vec::Vec,
 };
+use zeroize::Zeroize;
 
-use super::cookie_record::{CookieRecord, CookieValue};
+use super::cookie_record::{
+  Attributes, CookieRecord, CookieValue, Observation, RawValue, SourceRef,
+};
 
 /// `Cookies.binarycookies` is a per-user metadata store and is normally only a
 /// few MiB. Keep a generous ceiling so a corrupt or replaced file cannot make
@@ -36,7 +51,22 @@ const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
   note = "use direct_path::cookies_from_path with DirectPathRequest"
 )]
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  safari_based_outcome(db_path, domains).map(|outcome| outcome.cookies)
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  safari_based_with_runtime(db_path, domains, &runtime)
+}
+
+pub(crate) fn safari_based_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  let draft = safari_based_outcome_with_runtime(db_path.clone(), domains, runtime)?;
+  super::legacy::project_canonical_outcome_with_runtime(
+    "safari",
+    super::report_build::canonical_direct_safari_extraction_with_runtime(&db_path, draft, runtime)?,
+    runtime,
+  )
 }
 
 /// Row accounting for the private cross-engine report. The legacy
@@ -45,6 +75,7 @@ pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Ve
 pub(crate) struct SafariExtractionStats {
   pub(crate) records_seen: usize,
   pub(crate) records_skipped: usize,
+  pub(crate) records_rejected: usize,
 }
 
 /// Context attached to failures raised after acquisition succeeded, so the
@@ -62,8 +93,10 @@ impl std::fmt::Display for SafariParseFailure {
 }
 
 #[derive(Debug)]
-pub(crate) struct SafariFileExtraction {
+pub(crate) struct SafariFileDraft {
+  #[cfg(test)]
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) records: Vec<CookieRecord>,
   pub(crate) stats: SafariExtractionStats,
   /// Last row/page parse error when valid records were still recovered.
   pub(crate) row_error: Option<String>,
@@ -72,12 +105,82 @@ pub(crate) struct SafariFileExtraction {
   pub(crate) acquisition_attempts: u32,
 }
 
+#[cfg(test)]
+type SafariParseResult = (
+  Vec<Cookie>,
+  Vec<CookieRecord>,
+  SafariExtractionStats,
+  Option<anyhow::Error>,
+);
+
+type SafariRecordParseResult = (
+  Vec<CookieRecord>,
+  SafariExtractionStats,
+  Option<anyhow::Error>,
+);
+
+pub(crate) struct SafariReadOnlySource<'a> {
+  pub(crate) bytes: &'a [u8],
+}
+
+impl ReadOnlySource for SafariReadOnlySource<'_> {}
+
+pub(crate) struct SafariBoundaryDecoder;
+
+#[derive(Debug)]
+pub(crate) struct SafariDecodeSummary {
+  pub(crate) stats: SafariExtractionStats,
+  pub(crate) row_error: Option<anyhow::Error>,
+}
+
+impl Decoder<SafariReadOnlySource<'_>, CookieRecord> for SafariBoundaryDecoder {
+  type Summary = SafariDecodeSummary;
+
+  fn decode(
+    &self,
+    source: &SafariReadOnlySource<'_>,
+    sink: &mut dyn RecordSink<CookieRecord>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Self::Summary> {
+    let (mut records, stats, row_error) =
+      parse_content_records_with_runtime(source.bytes, runtime)?;
+    runtime.check()?;
+    for (ordinal, record) in records.iter_mut().enumerate() {
+      runtime.check()?;
+      record.origin = SourceRef::pending(ordinal);
+    }
+    // No record crosses the sink boundary until every page and record has
+    // decoded and the final deadline checkpoint has succeeded.
+    for record in records {
+      runtime.check()?;
+      sink.emit(record)?;
+    }
+    runtime.check()?;
+    Ok(SafariDecodeSummary { stats, row_error })
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    DeadlineEnforcement::Cooperative
+  }
+}
+
 pub(crate) fn safari_based_outcome(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
-) -> Result<SafariFileExtraction> {
+) -> Result<SafariFileDraft> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  safari_based_outcome_with_runtime(db_path, domains, &runtime)
+}
+
+pub(crate) fn safari_based_outcome_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SafariFileDraft> {
+  runtime.check()?;
   let mut file = File::open(&db_path).context(format!(
-    "Failed to open {}\n\
+    "Failed to open {REDACTED_PATH}\n\
       Make sure you have full disk access for the current process.\n\
       For example, in VSCode or Terminal:\n\
       1. Open Settings\n\
@@ -86,14 +189,29 @@ pub(crate) fn safari_based_outcome(
       ---\n\
       You can also open the disk access page with: \n\
       open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\
-      ",
-    db_path.display()
+      "
   ))?;
-  let (bs, acquisition_attempts) = read_stable_cookie_file(&mut file, &db_path)?;
+  runtime.check()?;
+  let (bs, acquisition_attempts) =
+    read_stable_cookie_file_with_runtime(&mut file, &db_path, || {}, runtime)?;
   // Tagged so the report can name the stage that actually failed instead of
   // flattening every Safari failure into acquisition.
-  let (cookies, mut stats, row_error) = parse_content(&bs).map_err(|error| {
-    if error.downcast_ref::<SafariParseFailure>().is_some() {
+  let source = SafariReadOnlySource { bytes: &bs };
+  let decoder = SafariBoundaryDecoder;
+  let mut records = Vec::new();
+  let summary = crate::common::boundary::decode(
+    &decoder,
+    &source,
+    &mut |record| {
+      records.push(record);
+      Ok(())
+    },
+    runtime,
+  )
+  .map_err(|error| {
+    if error.downcast_ref::<SafariParseFailure>().is_some()
+      || error.downcast_ref::<BoundaryStop>().is_some()
+    {
       error
     } else {
       error.context(SafariParseFailure {
@@ -101,14 +219,15 @@ pub(crate) fn safari_based_outcome(
       })
     }
   })?;
-
+  let mut stats = summary.stats;
+  let row_error = summary.row_error;
   // Filter cookies by domain if domains are specified
-  let cookies = match &domains {
+  let records = match &domains {
     Some(domain_filters) => {
-      let parsed = cookies.len();
-      let cookies = cookies
+      let parsed = records.len();
+      let records = records
         .into_iter()
-        .filter(|cookie| utils::some_domain_in_host(Some(domain_filters), &cookie.domain))
+        .filter(|record| utils::some_domain_in_host(Some(domain_filters), record.domain_raw()))
         .collect::<Vec<_>>();
       // Report counters describe request-relevant records. Successfully
       // decoded cookies excluded by the domain filter were never seen from
@@ -116,13 +235,26 @@ pub(crate) fn safari_based_outcome(
       // their domains could not necessarily be inspected.
       stats.records_seen = stats
         .records_seen
-        .saturating_sub(parsed.saturating_sub(cookies.len()));
-      cookies
+        .saturating_sub(parsed.saturating_sub(records.len()));
+      records
     }
-    None => cookies,
+    None => records,
   };
-  Ok(SafariFileExtraction {
+  runtime.check()?;
+  #[cfg(test)]
+  let cookies = records
+    .iter()
+    .cloned()
+    .map(|record| {
+      record
+        .into_cookie()
+        .expect("Safari rows emit plaintext values")
+    })
+    .collect::<Vec<_>>();
+  Ok(SafariFileDraft {
+    #[cfg(test)]
     cookies,
+    records,
     stats,
     row_error: row_error.map(|error| format!("{error:#}")),
     acquisition_attempts,
@@ -141,16 +273,16 @@ struct FileImageMetadata {
   inode: u64,
 }
 
-fn image_metadata(file: &File, db_path: &Path) -> Result<FileImageMetadata> {
+fn image_metadata(file: &File, _db_path: &Path) -> Result<FileImageMetadata> {
   file
     .metadata()
-    .with_context(|| format!("Failed to inspect {}", db_path.display()))
+    .with_context(|| format!("Failed to inspect {REDACTED_PATH}"))
     .map(file_image_metadata)
 }
 
 fn path_image_metadata(db_path: &Path) -> Result<FileImageMetadata> {
   std::fs::metadata(db_path)
-    .with_context(|| format!("Failed to inspect Safari cookie path {}", db_path.display()))
+    .with_context(|| format!("Failed to inspect Safari cookie path {REDACTED_PATH}"))
     .map(file_image_metadata)
 }
 
@@ -173,24 +305,43 @@ fn file_image_metadata(metadata: std::fs::Metadata) -> FileImageMetadata {
 /// from silently becoming the extraction result when it does not.
 /// Returns the stable image and how many acquisition attempts it took, so a
 /// report can state the real attempt count instead of assuming one.
+#[cfg(test)]
 fn read_stable_cookie_file(file: &mut File, db_path: &Path) -> Result<(Vec<u8>, u32)> {
   read_stable_cookie_file_with(file, db_path, || {})
+    .map(|(bytes, attempts)| (bytes.as_slice().to_vec(), attempts))
 }
 
+#[cfg(test)]
 fn read_stable_cookie_file_with<F>(
   file: &mut File,
   db_path: &Path,
+  after_read: F,
+) -> Result<(SecretBytes, u32)>
+where
+  F: FnMut(),
+{
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  read_stable_cookie_file_with_runtime(file, db_path, after_read, &runtime)
+}
+
+fn read_stable_cookie_file_with_runtime<F>(
+  file: &mut File,
+  db_path: &Path,
   mut after_read: F,
-) -> Result<(Vec<u8>, u32)>
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(SecretBytes, u32)>
 where
   F: FnMut(),
 {
   let mut last_change = None;
   for attempt in 1..=STABLE_READ_ATTEMPTS {
+    runtime.check()?;
     let fd_before = image_metadata(file, db_path)?;
     let path_before = path_image_metadata(db_path)?;
-    let first_bytes = read_cookie_file(file, db_path, fd_before.len)?;
+    let first_bytes = read_cookie_file_with_runtime(file, db_path, fd_before.len, runtime)?;
     after_read();
+    runtime.check()?;
     let fd_after = image_metadata(file, db_path)?;
     let path_after = path_image_metadata(db_path)?;
     // Comparing descriptor metadata alone misses an atomic rename: the old
@@ -204,11 +355,16 @@ where
       // A writer can preserve metadata while rewriting in place. Reopen and
       // compare a second complete, bounded image before accepting either one.
       let mut verification =
-        File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+        File::open(db_path).with_context(|| format!("Failed to reopen {REDACTED_PATH}"))?;
       let verification_before = image_metadata(&verification, db_path)?;
       let verification_path_before = path_image_metadata(db_path)?;
-      let verification_bytes =
-        read_cookie_file(&mut verification, db_path, verification_before.len)?;
+      let verification_bytes = read_cookie_file_with_runtime(
+        &mut verification,
+        db_path,
+        verification_before.len,
+        runtime,
+      )?;
+      runtime.check()?;
       let verification_after = image_metadata(&verification, db_path)?;
       let verification_path_after = path_image_metadata(db_path)?;
       if verification_before == verification_path_before
@@ -219,6 +375,7 @@ where
         && first_bytes == verification_bytes
       {
         *file = verification;
+        runtime.check()?;
         return Ok((first_bytes, attempt as u32));
       }
       last_change = Some((
@@ -239,20 +396,24 @@ where
         path_after,
       ));
     }
-    *file =
-      File::open(db_path).with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+    *file = File::open(db_path).with_context(|| format!("Failed to reopen {REDACTED_PATH}"))?;
+    runtime.check()?;
   }
   bail!(
-    "Safari cookie file {} changed during each of {STABLE_READ_ATTEMPTS} acquisition attempts: {last_change:?}",
-    db_path.display()
+    "Safari cookie file {REDACTED_PATH} changed during each of {STABLE_READ_ATTEMPTS} acquisition attempts: {last_change:?}"
   )
 }
 
-fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Result<Vec<u8>> {
+fn read_cookie_file_with_runtime(
+  file: &mut impl Read,
+  _db_path: &Path,
+  advertised_len: u64,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SecretBytes> {
+  runtime.check()?;
   if advertised_len > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
-      "Safari cookie file {} is too large: {advertised_len} bytes exceeds the {} byte limit",
-      db_path.display(),
+      "Safari cookie file {REDACTED_PATH} is too large: {advertised_len} bytes exceeds the {} byte limit",
       MAX_BINARY_COOKIES_FILE_SIZE
     );
   }
@@ -263,28 +424,57 @@ fn read_cookie_file(file: &mut File, db_path: &Path, advertised_len: u64) -> Res
   bytes
     .try_reserve_exact(initial_capacity)
     .context("Failed to reserve memory for Safari cookie file")?;
+  let mut bytes = SecretBytes::new(bytes);
 
   // `metadata` is only a snapshot. Limit the read as well in case the file is
   // replaced or grows between the size check and `read_to_end`.
-  file
-    .take(MAX_BINARY_COOKIES_FILE_SIZE + 1)
-    .read_to_end(&mut bytes)
-    .with_context(|| format!("Failed to read {}", db_path.display()))?;
+  let mut remaining = MAX_BINARY_COOKIES_FILE_SIZE + 1;
+  // The read frame can contain an entire cookie value. Wipe every completed
+  // chunk immediately after copying it; SecretBytes' wiping Drop covers read
+  // errors, deadline exits, and unwinds before the next checkpoint.
+  let mut chunk = SecretBytes::new(vec![0_u8; 64 * 1024]);
+  while remaining > 0 {
+    runtime.check()?;
+    let requested = usize::try_from(remaining.min(chunk.len() as u64)).unwrap_or(chunk.len());
+    let read = file
+      .read(&mut chunk.as_mut_slice()[..requested])
+      .with_context(|| format!("Failed to read {REDACTED_PATH}"))?;
+    if read == 0 {
+      break;
+    }
+    bytes.extend_bounded(
+      &chunk.as_slice()[..read],
+      MAX_BINARY_COOKIES_FILE_SIZE as usize + 1,
+    );
+    chunk.as_mut_slice().zeroize();
+    remaining = remaining.saturating_sub(read as u64);
+  }
   if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_BINARY_COOKIES_FILE_SIZE {
     bail!(
-      "Safari cookie file {} grew beyond the {} byte limit while it was read",
-      db_path.display(),
+      "Safari cookie file {REDACTED_PATH} grew beyond the {} byte limit while it was read",
       MAX_BINARY_COOKIES_FILE_SIZE
     );
   }
-
+  runtime.check()?;
   Ok(bytes)
 }
 
 /// Parse one page and retain any valid records. The optional error is the last
 /// malformed record encountered. The caller preserves it as a row diagnostic
 /// even when another record on the page was valid.
-fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
+#[cfg(test)]
+fn parse_page(bs: &[u8]) -> Result<SafariParseResult> {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let (records, stats, row_error) = parse_page_records_with_runtime(bs, &runtime)?;
+  Ok(project_safari_records(records, stats, row_error))
+}
+
+fn parse_page_records_with_runtime(
+  bs: &[u8],
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SafariRecordParseResult> {
+  runtime.check()?;
   if slice(bs, 0, 4)? != [0x00, 0x00, 0x01, 0x00] {
     bail!("bad page header");
   }
@@ -300,29 +490,29 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
     bail!("bad page trailer");
   }
 
-  let mut cookies: Vec<Cookie> = vec![];
+  let mut records: Vec<CookieRecord> = vec![];
   let mut last_error = None;
   let mut error_count = 0usize;
   let mut stats = SafariExtractionStats::default();
   for (index, raw_offset) in parsed_table.into_iter().enumerate() {
+    runtime.check()?;
     stats.records_seen += 1;
-    let result = (|| {
+    let result: Result<CookieRecord> = (|| {
       let offset = usize::try_from(raw_offset)
         .context("Safari cookie offset does not fit in memory address space")?;
       let length = usize::try_from(slice(bs, offset, 4).map(LittleEndian::read_u32)?)
         .context("Safari cookie length does not fit in memory address space")?;
       let record = slice(bs, offset, length)?;
-      parse_cookie::<LittleEndian>(record)?
-        .into_cookie()
-        .map_err(anyhow::Error::from)
+      parse_cookie::<LittleEndian>(record)
     })()
     .with_context(|| format!("Failed to parse Safari cookie record {index}"));
 
     match result {
-      Ok(cookie) => cookies.push(cookie),
+      Ok(record) => records.push(record),
       Err(error) => {
         error_count += 1;
         stats.records_skipped += 1;
+        stats.records_rejected += 1;
         if error_count <= MAX_LOGGED_RECORD_ERRORS_PER_PAGE {
           log::warn!("Skipping malformed Safari cookie record {index}: {error:#}");
         } else if error_count == MAX_LOGGED_RECORD_ERRORS_PER_PAGE + 1 {
@@ -333,6 +523,7 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
           let remaining = count.saturating_sub(index + 1);
           stats.records_seen += remaining;
           stats.records_skipped += remaining;
+          stats.records_rejected += remaining;
           let error = error.context(format!(
             "Safari page recovery limit reached after {error_count} malformed records; \
              {remaining} remaining record(s) were skipped without parsing"
@@ -346,8 +537,8 @@ fn parse_page(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<a
       }
     }
   }
-
-  Ok((cookies, stats, last_error))
+  runtime.check()?;
+  Ok((records, stats, last_error))
 }
 
 fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
@@ -362,8 +553,8 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
   let value_off = T::read_u32(&bs[0x1c..0x20]) as usize;
 
   // i/OS/X to Unix timestamp +(1 Jan 2001 epoch seconds).
-  let expires = T::read_f64(&bs[0x28..0x30]);
-  let expires = date::safari_timestamp(expires);
+  let raw_expires = T::read_f64(&bs[0x28..0x30]);
+  let expires = date::safari_timestamp(raw_expires);
 
   let url = slice_to(bs, url_off, name_off).and_then(c_str)?;
   let name = slice_to(bs, name_off, path_off).and_then(c_str)?;
@@ -373,17 +564,32 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
   let is_secure = (flags & 0x01) == 0x01;
   let is_http_only = (flags & 0x04) == 0x04;
 
-  let cookie = CookieRecord {
-    expires,
-    domain: url,
-    http_only: is_http_only,
-    name,
+  let mut cookie = CookieRecord::from_legacy_fields(
+    url,
     path,
-    value: CookieValue::Plain(crate::common::secret::SecretString::new(value)),
-    same_site: SAME_SITE_UNSPECIFIED,
-    secure: is_secure,
-    context: CookieContext::default(),
+    is_secure,
+    expires,
+    name,
+    CookieValue::Plain(SecretString::new(value)),
+    is_http_only,
+    SAME_SITE_UNSPECIFIED,
+    CookieContext::default(),
+    0,
+  );
+  cookie.attributes = Attributes {
+    secure: Observation::Known(is_secure),
+    http_only: Observation::Known(is_http_only),
+    expires: match expires {
+      Some(expires) => Observation::Known(Some(expires)),
+      None if raw_expires == 0.0 => Observation::Known(None),
+      None => Observation::Unknown(RawValue::FloatBits(raw_expires.to_bits())),
+    },
+    raw_expires: Observation::Known(RawValue::FloatBits(raw_expires.to_bits())),
+    // BinaryCookies does not encode SameSite. Retain absence and let the
+    // compatibility projection supply SAME_SITE_UNSPECIFIED.
+    same_site: Observation::Missing,
   };
+  cookie.retain_raw("flags", RawValue::Unsigned(u64::from(flags)));
   Ok(cookie)
 }
 
@@ -402,9 +608,31 @@ fn record_page_failure(stats: &mut SafariExtractionStats, page: Option<&[u8]>) {
   let skipped = page.and_then(declared_page_record_count).unwrap_or(1);
   stats.records_seen = stats.records_seen.saturating_add(skipped);
   stats.records_skipped = stats.records_skipped.saturating_add(skipped);
+  stats.records_rejected = stats.records_rejected.saturating_add(skipped);
 }
 
-fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Option<anyhow::Error>)> {
+#[cfg(test)]
+fn parse_content(bs: &[u8]) -> Result<SafariParseResult> {
+  let clock = SystemClock;
+  parse_content_with_deadline(bs, &clock, Deadline::standard())
+}
+
+#[cfg(test)]
+fn parse_content_with_deadline(
+  bs: &[u8],
+  clock: &dyn Clock,
+  deadline: Deadline,
+) -> Result<SafariParseResult> {
+  let runtime = BoundaryRuntime::new(clock, deadline);
+  let (records, stats, row_error) = parse_content_records_with_runtime(bs, &runtime)?;
+  Ok(project_safari_records(records, stats, row_error))
+}
+
+fn parse_content_records_with_runtime(
+  bs: &[u8],
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SafariRecordParseResult> {
+  runtime.check()?;
   // Magic bytes: "COOK" = 0x636F6F6B
   if slice(bs, 0, 4)? != [0x63, 0x6f, 0x6f, 0x6b] {
     bail!("not a cookie file");
@@ -417,11 +645,12 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Optio
     .checked_mul(4)
     .and_then(|table_len| table_len.checked_add(8))
     .ok_or_else(|| anyhow!("Safari page data offset overflow"))?;
-  let mut cookies: Vec<Cookie> = vec![];
+  let mut records: Vec<CookieRecord> = vec![];
   let mut last_error = None;
   let mut stats = SafariExtractionStats::default();
 
   for (index, raw_length) in page_lengths.into_iter().enumerate() {
+    runtime.check()?;
     let length = usize::try_from(raw_length)
       .context("Safari page length does not fit in memory address space")?;
     let next_offset = match offset.checked_add(length) {
@@ -437,16 +666,21 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Optio
 
     match slice(bs, offset, length)
       .with_context(|| format!("Failed to read Safari page {index}"))
-      .and_then(parse_page)
+      .and_then(|page| parse_page_records_with_runtime(page, runtime))
     {
-      Ok((page_cookies, page_stats, page_error)) => {
-        cookies.extend(page_cookies);
+      Ok((page_records, page_stats, page_error)) => {
+        records.extend(page_records);
         stats.records_seen += page_stats.records_seen;
         stats.records_skipped += page_stats.records_skipped;
+        stats.records_rejected += page_stats.records_rejected;
         if let Some(error) = page_error {
           last_error = Some(error);
         }
       }
+      // A boundary stop is operation state, never malformed input. Returning
+      // it immediately prevents a valid earlier page from turning a timeout
+      // on a later page into partial success plus a bogus row diagnostic.
+      Err(error) if error.downcast_ref::<BoundaryStop>().is_some() => return Err(error),
       Err(error) => {
         log::warn!("Skipping malformed Safari page {index}: {error:#}");
         record_page_failure(&mut stats, bs.get(offset..next_offset));
@@ -456,13 +690,33 @@ fn parse_content(bs: &[u8]) -> Result<(Vec<Cookie>, SafariExtractionStats, Optio
     offset = next_offset;
   }
 
-  if cookies.is_empty() {
+  runtime.check()?;
+  if records.is_empty() {
     if let Some(error) = last_error {
       return Err(error.context(SafariParseFailure { stats }));
     }
   }
 
-  Ok((cookies, stats, last_error))
+  runtime.check()?;
+  Ok((records, stats, last_error))
+}
+
+#[cfg(test)]
+fn project_safari_records(
+  records: Vec<CookieRecord>,
+  stats: SafariExtractionStats,
+  row_error: Option<anyhow::Error>,
+) -> SafariParseResult {
+  let cookies = records
+    .iter()
+    .cloned()
+    .map(|record| {
+      record
+        .into_cookie()
+        .expect("Safari rows emit plaintext values")
+    })
+    .collect();
+  (cookies, records, stats, row_error)
 }
 
 fn slice(bs: &[u8], off: usize, len: usize) -> Result<&[u8]> {
@@ -602,66 +856,85 @@ fn named_profile(library: &Path, uuid: String, title: String) -> SafariProfile {
 /// Returns a successful (including zero-row) profile DB result. The common
 /// SQLite acquisition layer copies a live WAL pair, avoiding the silent
 /// omission of recently-created profiles that immutable reads cause.
-fn named_profiles_from_database(library: &Path) -> Result<Vec<(String, String)>> {
+fn named_profiles_from_database(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<(String, String)>> {
   let database = safari_tabs_database_path(library);
-  sqlite::with_browser_database(database, |connection| {
-    let mut statement = connection.prepare(
-      "SELECT external_uuid, title FROM bookmarks \
+  sqlite::with_browser_database_with_runtime(
+    database,
+    |connection| {
+      runtime.check()?;
+      let mut statement = connection.prepare(
+        "SELECT external_uuid, title FROM bookmarks \
        WHERE type = ?1 AND subtype = ?2 AND external_uuid != ?3 \
        ORDER BY external_uuid COLLATE BINARY, title COLLATE BINARY",
-    )?;
-    let mut rows = statement.query(rusqlite::params![
-      SAFARI_PROFILE_TYPE,
-      SAFARI_PROFILE_SUBTYPE,
-      DEFAULT_PROFILE_SENTINEL
-    ])?;
-    let mut profiles = Vec::new();
-    while let Some(row) = rows.next()? {
-      let uuid = row.get::<_, Option<String>>(0)?.unwrap_or_default();
-      let title = row.get::<_, Option<String>>(1)?.unwrap_or_default();
-      if is_canonical_uuid(&uuid) {
-        profiles.push((uuid, title));
-      } else if !uuid.is_empty() {
-        log::warn!("Skipping Safari profile row with invalid external UUID {uuid:?}");
+      )?;
+      runtime.check()?;
+      let mut rows = statement.query(rusqlite::params![
+        SAFARI_PROFILE_TYPE,
+        SAFARI_PROFILE_SUBTYPE,
+        DEFAULT_PROFILE_SENTINEL
+      ])?;
+      runtime.check()?;
+      let mut profiles = Vec::new();
+      loop {
+        runtime.check()?;
+        let row = rows.next()?;
+        runtime.check()?;
+        let Some(row) = row else {
+          break;
+        };
+        let uuid = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+        let title = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+        if is_canonical_uuid(&uuid) {
+          profiles.push((uuid, title));
+        } else if !uuid.is_empty() {
+          log::warn!("Skipping Safari profile row with invalid external UUID {uuid:?}");
+        }
       }
-    }
-    Ok(profiles)
-  })
+      runtime.check()?;
+      Ok(profiles)
+    },
+    runtime,
+  )
   .map(|outcome| outcome.into_value())
 }
 
-fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>> {
+fn named_profiles_from_directory(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<(String, String)>> {
   let directory = library.join("Containers/com.apple.Safari/Data/Library/Safari/Profiles");
-  let entries = match fs::read_dir(&directory) {
+  runtime.check()?;
+  let entries = fs::read_dir(&directory);
+  runtime.check()?;
+  let mut entries = match entries {
     Ok(entries) => entries,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
     Err(error) => {
-      return Err(error).with_context(|| {
-        format!(
-          "Failed to enumerate Safari profile directory {}",
-          directory.display()
-        )
-      })
+      return Err(error)
+        .with_context(|| format!("Failed to enumerate Safari profile directory {REDACTED_PATH}"))
     }
   };
   let mut profiles = Vec::new();
-  for entry in entries {
+  loop {
+    runtime.check()?;
+    let entry = entries.next();
+    runtime.check()?;
+    let Some(entry) = entry else {
+      break;
+    };
     let entry = entry.with_context(|| {
-      format!(
-        "Failed to read an entry in Safari profile directory {}",
-        directory.display()
-      )
+      format!("Failed to read an entry in Safari profile directory {REDACTED_PATH}")
     })?;
-    if entry
+    runtime.check()?;
+    let file_type = entry
       .file_type()
-      .with_context(|| {
-        format!(
-          "Failed to inspect Safari profile entry {}",
-          entry.path().display()
-        )
-      })?
-      .is_dir()
-    {
+      .with_context(|| format!("Failed to inspect Safari profile entry {REDACTED_PATH}"))?
+      .is_dir();
+    runtime.check()?;
+    if file_type {
       if let Ok(uuid) = entry.file_name().into_string() {
         if is_canonical_uuid(&uuid) {
           profiles.push((uuid, String::new()));
@@ -669,7 +942,9 @@ fn named_profiles_from_directory(library: &Path) -> Result<Vec<(String, String)>
       }
     }
   }
+  runtime.check()?;
   profiles.sort_by(|left, right| left.0.cmp(&right.0));
+  runtime.check()?;
   Ok(profiles)
 }
 
@@ -694,50 +969,94 @@ impl SafariProfileDiscoveryIssue {
   }
 }
 
-pub(crate) fn discover_safari_profiles(
+fn discover_safari_profiles_with<Database, Directory>(
   library: &Path,
-) -> (Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>) {
+  runtime: &BoundaryRuntime<'_>,
+  database: Database,
+  directory: Directory,
+) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)>
+where
+  Database: FnOnce(&Path, &BoundaryRuntime<'_>) -> Result<Vec<(String, String)>>,
+  Directory: FnOnce(&Path, &BoundaryRuntime<'_>) -> Result<Vec<(String, String)>>,
+{
+  runtime.check()?;
   let mut profiles = vec![default_profile(library)];
-  let (named, warning) = match named_profiles_from_database(library) {
+  let (named, warning) = match database(library, runtime) {
     Ok(profiles) => (profiles, None),
     Err(error) => {
-      let database = safari_tabs_database_path(library);
-      match named_profiles_from_directory(library) {
+      // A terminal database result must never be flattened into an ordinary
+      // discovery degradation or reset into a fresh fallback budget.
+      runtime.check()?;
+      match directory(library, runtime) {
         Ok(profiles) => (profiles, Some(SafariProfileDiscoveryIssue::Degraded(format!(
-          "Safari profile database acquisition/query failed at {}; using directory fallback (Full Disk Access may be required): {error:#}",
-          database.display()
+          "Safari profile database acquisition/query failed at {REDACTED_PATH}; using directory fallback (Full Disk Access may be required): {error:#}"
         )))),
-        Err(directory_error) => (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
-          "Safari profile database acquisition/query failed at {}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}",
-          database.display()
-        )))),
+        Err(directory_error) => {
+          runtime.check()?;
+          (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
+            "Safari profile database acquisition/query failed at {REDACTED_PATH}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}"
+          ))))
+        }
       }
     }
   };
+  runtime.check()?;
   let mut seen = std::collections::BTreeSet::new();
-  profiles.extend(named.into_iter().filter_map(|(uuid, title)| {
-    seen
-      .insert(uuid.to_ascii_uppercase())
-      .then(|| named_profile(library, uuid, title))
-  }));
+  for (uuid, title) in named {
+    runtime.check()?;
+    if seen.insert(uuid.to_ascii_uppercase()) {
+      profiles.push(named_profile(library, uuid, title));
+    }
+  }
+  runtime.check()?;
   disambiguate_profile_names(&mut profiles);
-  (profiles, warning)
+  runtime.check()?;
+  Ok((profiles, warning))
+}
+
+pub(crate) fn discover_safari_profiles_with_runtime(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)> {
+  discover_safari_profiles_with(
+    library,
+    runtime,
+    named_profiles_from_database,
+    named_profiles_from_directory,
+  )
+}
+
+#[cfg(test)]
+pub(crate) fn discover_safari_profiles(
+  library: &Path,
+) -> (Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>) {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  discover_safari_profiles_with_runtime(library, &runtime)
+    .expect("the standard profile-discovery runtime remains active")
 }
 
 /// Crate-private generic adapter. It is intentionally separate from the
 /// legacy API so a broken named profile cannot hide cookies selected by the
 /// historical default-path-first `safari()` function.
-pub(crate) fn first_existing_cookie_candidate(candidates: &[PathBuf]) -> Result<Option<&PathBuf>> {
+pub(crate) fn first_existing_cookie_candidate_with_runtime<'a>(
+  candidates: &'a [PathBuf],
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Option<&'a PathBuf>> {
   for path in candidates {
-    match fs::metadata(path) {
+    runtime.check()?;
+    let metadata = fs::metadata(path);
+    runtime.check()?;
+    match metadata {
       Ok(_) => return Ok(Some(path)),
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
       Err(error) => {
         return Err(error)
-          .with_context(|| format!("Failed to inspect Safari cookie source {}", path.display()))
+          .with_context(|| format!("Failed to inspect Safari cookie source {REDACTED_PATH}"))
       }
     }
   }
+  runtime.check()?;
   Ok(None)
 }
 
@@ -747,15 +1066,157 @@ pub(crate) fn embedded_nul_test_fixture(field: &str, include_valid: bool) -> Vec
 }
 
 #[cfg(test)]
+pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+  let source = SafariReadOnlySource { bytes };
+  let decoder = SafariBoundaryDecoder;
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let mut sink = |_record| Ok(());
+  let _ = decoder.decode(&source, &mut sink, &runtime);
+  Ok(())
+}
+
+#[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::test_clock::ManualClock;
   use std::{
     fs,
     panic::{catch_unwind, UnwindSafe},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
   };
 
   const COOKIE_HEADER_LEN: usize = 0x38;
+
+  struct ChunkWipeReader {
+    step: u8,
+    fail_after_first: bool,
+  }
+
+  impl Read for ChunkWipeReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+      assert!(
+        buffer.iter().all(|byte| *byte == 0),
+        "the previous Safari read chunk must be wiped before reuse"
+      );
+      match self.step {
+        0 => {
+          self.step = 1;
+          buffer[..3].copy_from_slice(b"one");
+          Ok(3)
+        }
+        1 if self.fail_after_first => {
+          buffer[..3].copy_from_slice(b"two");
+          Err(std::io::Error::other("scripted Safari read failure"))
+        }
+        1 => {
+          self.step = 2;
+          buffer[..3].copy_from_slice(b"two");
+          Ok(3)
+        }
+        _ => Ok(0),
+      }
+    }
+  }
+
+  struct TickClock {
+    base: Instant,
+    ticks: AtomicU64,
+  }
+
+  impl Default for TickClock {
+    fn default() -> Self {
+      Self {
+        base: Instant::now(),
+        ticks: AtomicU64::new(0),
+      }
+    }
+  }
+
+  impl Clock for TickClock {
+    fn now(&self) -> Instant {
+      self.base + Duration::from_secs(self.ticks.fetch_add(1, Ordering::SeqCst))
+    }
+
+    fn sleep(&self, _duration: Duration) {}
+  }
+
+  #[test]
+  fn stable_read_starts_no_verification_or_retry_after_deadline() {
+    let directory = crate::utils::TempDir::new().expect("temporary directory");
+    let path = directory.path().join("Cookies.binarycookies");
+    fs::write(&path, golden_fixture()).expect("write Safari fixture");
+    let mut file = File::open(&path).expect("open Safari fixture");
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let callbacks = std::cell::Cell::new(0_u32);
+
+    let error = read_stable_cookie_file_with_runtime(
+      &mut file,
+      &path,
+      || {
+        callbacks.set(callbacks.get() + 1);
+        clock.advance(std::time::Duration::from_secs(1));
+      },
+      &runtime,
+    )
+    .expect_err("deadline expires after the first chunked read");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+    assert_eq!(callbacks.get(), 1);
+    assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
+
+  #[test]
+  fn safari_file_reader_wipes_each_completed_chunk_before_reuse() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+    );
+    let mut reader = ChunkWipeReader {
+      step: 0,
+      fail_after_first: false,
+    };
+
+    let bytes =
+      read_cookie_file_with_runtime(&mut reader, Path::new("Cookies.binarycookies"), 6, &runtime)
+        .expect("scripted chunks are readable");
+
+    assert_eq!(bytes.as_slice(), b"onetwo");
+  }
+
+  #[test]
+  fn safari_file_reader_wipes_the_previous_chunk_before_a_read_error() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+    );
+    let mut reader = ChunkWipeReader {
+      step: 0,
+      fail_after_first: true,
+    };
+
+    let error =
+      read_cookie_file_with_runtime(&mut reader, Path::new("Cookies.binarycookies"), 6, &runtime)
+        .expect_err("the scripted second read fails");
+
+    assert!(format!("{error:#}").contains("scripted Safari read failure"));
+  }
+
+  #[test]
+  fn pure_binarycookies_decoder_boundary_is_platform_neutral() {
+    fn assert_source<T: ReadOnlySource>() {}
+    fn assert_decoder<T: Decoder<SafariReadOnlySource<'static>, CookieRecord>>() {}
+    assert_source::<SafariReadOnlySource<'static>>();
+    assert_decoder::<SafariBoundaryDecoder>();
+  }
 
   struct FixtureCookie<'a> {
     domain: &'a str,
@@ -931,7 +1392,7 @@ mod tests {
 
   #[test]
   fn golden_binarycookies_fixture_round_trips_cookie_fields() {
-    let (cookies, stats, row_error) =
+    let (cookies, records, stats, row_error) =
       parse_content(&golden_fixture()).expect("parse golden fixture");
     assert_eq!(cookies.len(), 1);
     assert_eq!(stats.records_seen, 1);
@@ -947,6 +1408,89 @@ mod tests {
     assert!(cookie.http_only);
     assert_eq!(cookie.expires, Some(1_728_307_200));
     assert_eq!(cookie.same_site, SAME_SITE_UNSPECIFIED);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+      records[0].attributes.raw_expires,
+      crate::browser::cookie_record::Observation::Known(RawValue::FloatBits(_))
+    ));
+    assert!(matches!(
+      records[0].raw.get("flags"),
+      Some(RawValue::Unsigned(_))
+    ));
+    assert!(matches!(
+      records[0].attributes.same_site,
+      Observation::Missing
+    ));
+    assert_eq!(records[0].origin.ordinal, 0);
+  }
+
+  #[test]
+  fn non_finite_expiry_is_unknown_metadata_not_a_malformed_record() {
+    let record = build_cookie_record(&FixtureCookie {
+      domain: ".expiry.test",
+      name: "non-finite",
+      path: "/",
+      value: "protected",
+      flags: 0,
+      expires: f64::NAN,
+    });
+    let (cookies, records, stats, row_error) =
+      parse_content(&build_file(&[build_page(&[record])])).expect("retain unknown expiry");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].expires, None);
+    assert_eq!(stats.records_seen, 1);
+    assert_eq!(stats.records_skipped, 0);
+    assert!(row_error.is_none());
+    assert!(matches!(
+      records[0].attributes.expires,
+      Observation::Unknown(RawValue::FloatBits(_))
+    ));
+  }
+
+  #[test]
+  fn timeout_after_valid_page_is_not_caught_as_malformed_later_input() {
+    const SENTINEL: &str = "rookie-safari-timeout-sentinel";
+    let page = |name: &'static str, value: &'static str| {
+      build_page(&[build_cookie_record(&FixtureCookie {
+        domain: ".deadline.test",
+        name,
+        path: "/",
+        value,
+        flags: 0,
+        expires: 0.0,
+      })])
+    };
+    let bytes = SecretBytes::new(build_file(&[page("first", SENTINEL), page("later", "two")]));
+    let clock = TickClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(6)));
+    let error = parse_content_records_with_runtime(bytes.as_slice(), &runtime)
+      .expect_err("the second page starts at the deadline");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+    assert!(error.downcast_ref::<SafariParseFailure>().is_none());
+    assert!(!format!("{error:#}").contains(SENTINEL));
+  }
+
+  #[test]
+  fn final_deadline_check_prevents_success_after_last_valid_page() {
+    let page = build_page(&[build_cookie_record(&FixtureCookie {
+      domain: ".deadline.test",
+      name: "only",
+      path: "/",
+      value: "protected",
+      flags: 0,
+      expires: 0.0,
+    })]);
+    let clock = TickClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(6)));
+    let error = parse_content_records_with_runtime(&build_file(&[page]), &runtime)
+      .expect_err("the final checkpoint reaches the deadline");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
   }
 
   #[test]
@@ -986,13 +1530,14 @@ mod tests {
       usize::try_from(LittleEndian::read_u32(&page[8..12])).expect("first record offset");
     LittleEndian::write_u32(&mut page[first_record..first_record + 4], u32::MAX);
 
-    let (cookies, stats, row_error) =
+    let (cookies, _records, stats, row_error) =
       parse_content(&build_file(&[page])).expect("retain good record");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good");
     assert_eq!(cookies[0].value, "kept");
     assert_eq!(stats.records_seen, 2);
     assert_eq!(stats.records_skipped, 1);
+    assert_eq!(stats.records_rejected, 1);
     assert!(row_error.is_some());
   }
 
@@ -1011,6 +1556,7 @@ mod tests {
         .expect("malformed record retains row accounting");
       assert_eq!(failure.stats.records_seen, 1, "{field}");
       assert_eq!(failure.stats.records_skipped, 1, "{field}");
+      assert_eq!(failure.stats.records_rejected, 1, "{field}");
     }
   }
 
@@ -1018,7 +1564,7 @@ mod tests {
   fn embedded_nul_record_does_not_discard_a_valid_cookie() {
     for field in ["domain", "name", "path", "value"] {
       let fixture = embedded_nul_fixture(field, true);
-      let (cookies, stats, row_error) =
+      let (cookies, _records, stats, row_error) =
         parse_content(&fixture).expect("retain the valid Safari record");
       assert_eq!(cookies.len(), 1, "{field}");
       assert_eq!(cookies[0].domain, ".good.test", "{field}");
@@ -1027,6 +1573,7 @@ mod tests {
       assert_eq!(cookies[0].value, "kept", "{field}");
       assert_eq!(stats.records_seen, 2, "{field}");
       assert_eq!(stats.records_skipped, 1, "{field}");
+      assert_eq!(stats.records_rejected, 1, "{field}");
       assert!(
         row_error
           .expect("malformed record is reported")
@@ -1068,7 +1615,7 @@ mod tests {
       expires: 0.0,
     })]);
 
-    let (cookies, stats, row_error) =
+    let (cookies, _records, stats, row_error) =
       parse_content(&build_file(&[bad_page, good_page])).expect("retain good page");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-page");
@@ -1089,8 +1636,9 @@ mod tests {
       expires: 0.0,
     })]);
 
-    let (cookies, stats, row_error) = parse_content(&build_file(&[truncated_page, good_page]))
-      .expect("a later valid page remains recoverable");
+    let (cookies, _records, stats, row_error) =
+      parse_content(&build_file(&[truncated_page, good_page]))
+        .expect("a later valid page remains recoverable");
     assert_eq!(cookies.len(), 1);
     assert_eq!(stats.records_seen, 2);
     assert_eq!(stats.records_skipped, 1);
@@ -1163,7 +1711,7 @@ mod tests {
     }
     page.extend_from_slice(&good);
 
-    let (cookies, stats, error) = parse_page(&page).expect("page framing remains valid");
+    let (cookies, _records, stats, error) = parse_page(&page).expect("page framing remains valid");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "good-before-limit");
     assert_eq!(stats.records_seen, count);
@@ -1265,7 +1813,10 @@ mod tests {
     let mut file = File::open(&path).expect("reopen sparse fixture");
     let error = read_stable_cookie_file(&mut file, &path).expect_err("oversized file should fail");
     fs::remove_file(&path).expect("remove sparse fixture");
-    assert!(format!("{error:#}").contains("too large"));
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("too large"));
+    assert!(diagnostic.contains(REDACTED_PATH));
+    assert!(!diagnostic.contains(path.to_string_lossy().as_ref()));
   }
 
   #[cfg(unix)]
@@ -1297,7 +1848,7 @@ mod tests {
     })
     .expect("reopen and acquire replacement image");
     let (image, attempts) = image;
-    assert_eq!(image, new);
+    assert_eq!(image.as_slice(), new);
     // The first attempt saw the file change underneath it, so the stable image
     // came from the retry -- the count the report must show.
     assert_eq!(attempts, 2);
@@ -1339,7 +1890,7 @@ mod tests {
     })
     .expect("retry and acquire rewritten image");
     let (image, attempts) = image;
-    assert_eq!(image, new);
+    assert_eq!(image.as_slice(), new);
     assert_eq!(attempts, 2);
     fs::remove_file(&path).expect("remove fixture");
   }
@@ -1432,6 +1983,36 @@ mod tests {
       1,
       "directory fallback must not override a readable zero-row DB"
     );
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn expiring_profile_database_does_not_reset_the_budget_for_directory_fallback() {
+    let library = temp_library("profile-runtime-fallback");
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let directory_calls = std::cell::Cell::new(0);
+
+    let error = discover_safari_profiles_with(
+      &library,
+      &runtime,
+      |_, _| {
+        clock.advance(Duration::from_secs(1));
+        Err(anyhow!("scripted profile database failure"))
+      },
+      |_, _| {
+        directory_calls.set(directory_calls.get() + 1);
+        Ok(Vec::new())
+      },
+    )
+    .expect_err("the shared deadline expires with the database attempt");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+    assert_eq!(directory_calls.get(), 0, "fallback must not start");
     fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
   }
 

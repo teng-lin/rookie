@@ -4,16 +4,16 @@
 //! dependencies. It classifies stored values and emits ciphertext-bearing
 //! `CookieRecord`s for the later row-decryption stage.
 
-use super::cookie_record::{CipherTier, CookieRecord, CookieValue};
+use super::cookie_record::{
+  Attributes, CipherTier, CookieRecord, CookieValue, Observation, RawValue,
+};
+use crate::common::{
+  boundary::{Decoder, ReadOnlySource, RecordSink},
+  deadline::{BoundaryRuntime, DeadlineEnforcement},
+};
 use crate::common::{date, enums::*, secret::SecretString, utils};
 use anyhow::{anyhow, Context, Result};
 use std::fmt;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CookieProjection {
-  Legacy,
-  Detailed,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EncryptedValuePolicy {
@@ -73,52 +73,85 @@ pub(super) struct ChromiumDecodeSummary {
   pub(super) rows_seen: usize,
 }
 
-#[derive(Debug)]
-pub(super) struct ChromiumContextColumnError {
-  pub(super) column: &'static str,
-  source: rusqlite::Error,
-}
-
-impl fmt::Display for ChromiumContextColumnError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(
-      formatter,
-      "failed to read {} from Chromium cookie row: {}",
-      self.column, self.source
-    )
+fn raw_sqlite_value(value: rusqlite::types::ValueRef<'_>) -> RawValue {
+  match value {
+    rusqlite::types::ValueRef::Null => RawValue::Null,
+    rusqlite::types::ValueRef::Integer(value) => RawValue::Signed(value),
+    rusqlite::types::ValueRef::Real(value) => RawValue::FloatBits(value.to_bits()),
+    rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value)
+      .map(RawValue::text)
+      .unwrap_or_else(|_| RawValue::bytes(value.to_vec())),
+    rusqlite::types::ValueRef::Blob(value) => RawValue::bytes(value.to_vec()),
   }
 }
 
-impl std::error::Error for ChromiumContextColumnError {
-  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-    Some(&self.source)
+fn chromium_bool_observation(row: &rusqlite::Row<'_>, index: usize) -> Observation<bool> {
+  match row.get_ref(index) {
+    Ok(rusqlite::types::ValueRef::Null) | Err(_) => Observation::Missing,
+    Ok(rusqlite::types::ValueRef::Integer(0)) => Observation::Known(false),
+    Ok(rusqlite::types::ValueRef::Integer(1)) => Observation::Known(true),
+    Ok(value) => Observation::Unknown(raw_sqlite_value(value)),
   }
 }
 
-fn chromium_cookie_context(
-  row: &rusqlite::Row<'_>,
-) -> std::result::Result<CookieContext, ChromiumContextColumnError> {
-  let read = |column, source| ChromiumContextColumnError { column, source };
-  Ok(CookieContext {
-    top_frame_site_key: row
-      .get::<_, Option<String>>(9)
-      .map_err(|error| read("top_frame_site_key", error))?,
-    has_cross_site_ancestor: row
-      .get::<_, Option<i64>>(10)
-      .map_err(|error| read("has_cross_site_ancestor", error))?
-      .map(|value| value != 0),
-    source_scheme: row
-      .get::<_, Option<i64>>(11)
-      .map_err(|error| read("source_scheme", error))?,
-    source_port: row
-      .get::<_, Option<i64>>(12)
-      .map_err(|error| read("source_port", error))?,
-    is_persistent: row
-      .get::<_, Option<i64>>(13)
-      .map_err(|error| read("is_persistent", error))?
-      .map(|value| value != 0),
-    ..CookieContext::default()
-  })
+type ChromiumContextFields = (
+  CookieContext,
+  Observation<bool>,
+  Observation<bool>,
+  Vec<(&'static str, RawValue)>,
+);
+
+fn chromium_cookie_context(row: &rusqlite::Row<'_>) -> ChromiumContextFields {
+  let mut unknown = Vec::new();
+  let text = |index, name, unknown: &mut Vec<_>| match row.get_ref(index) {
+    Ok(rusqlite::types::ValueRef::Null) => None,
+    Ok(rusqlite::types::ValueRef::Text(value)) => match std::str::from_utf8(value) {
+      Ok(value) => Some(value.to_owned()),
+      Err(_) => {
+        unknown.push((name, RawValue::bytes(value.to_vec())));
+        None
+      }
+    },
+    Ok(value) => {
+      unknown.push((name, raw_sqlite_value(value)));
+      None
+    }
+    Err(_) => None,
+  };
+  let integer = |index, name, unknown: &mut Vec<_>| match row.get_ref(index) {
+    Ok(rusqlite::types::ValueRef::Null) => None,
+    Ok(rusqlite::types::ValueRef::Integer(value)) => Some(value),
+    Ok(value) => {
+      unknown.push((name, raw_sqlite_value(value)));
+      None
+    }
+    Err(_) => None,
+  };
+  let has_cross_site_ancestor = chromium_bool_observation(row, 10);
+  let is_persistent = chromium_bool_observation(row, 13);
+  if let Observation::Unknown(raw) = &has_cross_site_ancestor {
+    unknown.push(("has_cross_site_ancestor", raw.clone()));
+  }
+  if let Observation::Unknown(raw) = &is_persistent {
+    unknown.push(("is_persistent", raw.clone()));
+  }
+  let known = |value: &Observation<bool>| match value {
+    Observation::Known(value) => Some(*value),
+    Observation::Missing | Observation::Unknown(_) => None,
+  };
+  (
+    CookieContext {
+      top_frame_site_key: text(9, "top_frame_site_key", &mut unknown),
+      has_cross_site_ancestor: known(&has_cross_site_ancestor),
+      source_scheme: integer(11, "source_scheme", &mut unknown),
+      source_port: integer(12, "source_port", &mut unknown),
+      is_persistent: known(&is_persistent),
+      ..CookieContext::default()
+    },
+    has_cross_site_ancestor,
+    is_persistent,
+    unknown,
+  )
 }
 
 pub(super) fn chromium_schema_version(connection: &rusqlite::Connection) -> Result<u32> {
@@ -156,7 +189,6 @@ pub(super) struct ChromiumCookieDecoder<'connection> {
   statement: rusqlite::Statement<'connection>,
   domains: Option<Vec<String>>,
   query_domain_filters: Vec<String>,
-  projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
   schema_version: u32,
 }
@@ -164,16 +196,60 @@ pub(super) struct ChromiumCookieDecoder<'connection> {
 pub(super) struct ChromiumCookieCursor<'decoder> {
   rows: rusqlite::Rows<'decoder>,
   domains: Option<&'decoder [String]>,
-  projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
   schema_version: u32,
   rows_seen: usize,
 }
 
+pub(super) struct ChromiumReadOnlySource<'a> {
+  pub(super) connection: &'a rusqlite::Connection,
+  pub(super) domains: Option<&'a [String]>,
+}
+
+impl ReadOnlySource for ChromiumReadOnlySource<'_> {}
+
+pub(super) struct ChromiumBoundaryDecoder {
+  pub(super) encrypted_value_policy: EncryptedValuePolicy,
+}
+
+impl<'source> Decoder<ChromiumReadOnlySource<'source>, ChromiumDecodeEvent>
+  for ChromiumBoundaryDecoder
+{
+  type Summary = ChromiumDecodeSummary;
+
+  fn decode(
+    &self,
+    source: &ChromiumReadOnlySource<'source>,
+    sink: &mut dyn RecordSink<ChromiumDecodeEvent>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<Self::Summary> {
+    runtime.check()?;
+    let mut decoder = prepare_cookie_decoder(
+      source.connection,
+      source.domains,
+      self.encrypted_value_policy,
+    )?;
+    let mut cursor = decoder.cursor()?;
+    while let Some(event) = {
+      runtime.check()?;
+      cursor.next_event()?
+    } {
+      sink.emit(event)?;
+    }
+    runtime.check()?;
+    Ok(cursor.summary())
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    // SQLite progress is checkpointed between rows. A VFS syscall may still
+    // block inside SQLite, so this remains truthfully cooperative.
+    DeadlineEnforcement::Cooperative
+  }
+}
+
 pub(super) fn prepare_cookie_decoder<'connection>(
   connection: &'connection rusqlite::Connection,
   domains: Option<&[String]>,
-  projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumCookieDecoder<'connection>> {
   let schema_version = chromium_schema_version(connection)?;
@@ -185,9 +261,19 @@ pub(super) fn prepare_cookie_decoder<'connection>(
       format!("NULL AS {name}")
     }
   };
+  let encrypted_value = if columns.contains("encrypted_value") {
+    "CAST(encrypted_value AS BLOB)".to_owned()
+  } else {
+    "NULL AS encrypted_value".to_owned()
+  };
   let mut query = format!(
-    "SELECT host_key, path, is_secure, expires_utc, name, value, \
-     CAST(encrypted_value AS BLOB), is_httponly, samesite, {}, {}, {}, {}, {} FROM cookies ",
+    "SELECT host_key, {}, {}, {}, name, value, \
+     {encrypted_value}, {}, {}, {}, {}, {}, {}, {} FROM cookies ",
+    optional_column("path"),
+    optional_column("is_secure"),
+    optional_column("expires_utc"),
+    optional_column("is_httponly"),
+    optional_column("samesite"),
     optional_column("top_frame_site_key"),
     optional_column("has_cross_site_ancestor"),
     optional_column("source_scheme"),
@@ -226,7 +312,6 @@ pub(super) fn prepare_cookie_decoder<'connection>(
     } else {
       Vec::new()
     },
-    projection,
     encrypted_value_policy,
     schema_version,
   })
@@ -240,7 +325,6 @@ impl ChromiumCookieDecoder<'_> {
     Ok(ChromiumCookieCursor {
       rows,
       domains: self.domains.as_deref(),
-      projection: self.projection,
       encrypted_value_policy: self.encrypted_value_policy,
       schema_version: self.schema_version,
       rows_seen: 0,
@@ -311,8 +395,10 @@ impl ChromiumCookieCursor<'_> {
       }
 
       let path = read_optional_column!(1, String, "path").unwrap_or_else(|| "/".to_string());
-      let is_secure = read_optional_column!(2, bool, "is_secure").unwrap_or(false);
-      let expires = read_optional_column!(3, i64, "expires_utc")
+      let observed_secure = chromium_bool_observation(row, 2);
+      let is_secure = matches!(observed_secure, Observation::Known(true));
+      let raw_expires = read_optional_column!(3, i64, "expires_utc");
+      let expires = raw_expires
         .and_then(|value| u64::try_from(value).ok())
         .and_then(date::chromium_timestamp);
       let name: String = match row.get(4) {
@@ -354,45 +440,100 @@ impl ChromiumCookieCursor<'_> {
           bytes: encrypted_value,
         }
       };
-      let http_only = read_optional_column!(7, bool, "is_httponly").unwrap_or(false);
-      let same_site = read_optional_column!(8, i64, "samesite").unwrap_or(SAME_SITE_UNSPECIFIED);
-      let (context, pending_context_failure) = if self.projection == CookieProjection::Detailed {
-        match chromium_cookie_context(row) {
-          Ok(context) => (context, None),
-          Err(error) => {
-            let column = error.column;
-            (
-              CookieContext::default(),
-              Some(ChromiumRowFailure {
-                row_number,
-                code: ChromiumDecodeIssueCode::ColumnRead(column),
-                error: error.into(),
-              }),
-            )
-          }
-        }
-      } else {
-        (CookieContext::default(), None)
-      };
+      let observed_http_only = chromium_bool_observation(row, 7);
+      let http_only = matches!(observed_http_only, Observation::Known(true));
+      let observed_same_site = read_optional_column!(8, i64, "samesite");
+      let same_site = observed_same_site.unwrap_or(SAME_SITE_UNSPECIFIED);
+      let (context, has_cross_site_ancestor, is_persistent, raw_context) =
+        chromium_cookie_context(row);
 
+      let mut record = CookieRecord::from_legacy_fields(
+        host_key, path, is_secure, expires, name, value, http_only, same_site, context, row_number,
+      );
+      record.attributes =
+        Attributes::observed(None, raw_expires, expires, None, observed_same_site);
+      record.attributes.secure = observed_secure;
+      record.attributes.http_only = observed_http_only;
+      record.isolation.has_cross_site_ancestor = has_cross_site_ancestor;
+      record.isolation.is_persistent = is_persistent;
+      let raw_secure = match &record.attributes.secure {
+        Observation::Unknown(raw) => Some(raw.clone()),
+        Observation::Missing | Observation::Known(_) => None,
+      };
+      let raw_http_only = match &record.attributes.http_only {
+        Observation::Unknown(raw) => Some(raw.clone()),
+        Observation::Missing | Observation::Known(_) => None,
+      };
+      if let Some(raw) = raw_secure {
+        record.retain_raw("is_secure", raw);
+      }
+      if let Some(raw) = raw_http_only {
+        record.retain_raw("is_httponly", raw);
+      }
+      for (name, value) in raw_context {
+        record.retain_raw(name, value);
+      }
       return Ok(Some(ChromiumDecodeEvent::Record(DecodedChromiumRecord {
         row_number,
         schema_version: self.schema_version,
-        record: CookieRecord {
-          domain: host_key,
-          path,
-          secure: is_secure,
-          expires,
-          name,
-          value,
-          http_only,
-          same_site,
-          context,
-        },
-        pending_context_failure,
+        record,
+        pending_context_failure: None,
       })));
     }
   }
+}
+
+#[cfg(test)]
+pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+  let connection = rusqlite::Connection::open_in_memory()?;
+  connection.execute_batch(
+    "CREATE TABLE meta (key TEXT, value TEXT);
+     INSERT INTO meta VALUES ('version', '23');
+     CREATE TABLE cookies (
+       host_key TEXT, path TEXT, is_secure, expires_utc INTEGER,
+       name, value TEXT, encrypted_value BLOB, is_httponly,
+       samesite
+     );",
+  )?;
+  let mut numeric = [0_u8; 8];
+  for (target, source) in numeric.iter_mut().zip(bytes.iter().copied()) {
+    *target = source;
+  }
+  let sqlite_value = |salt: u8| match bytes.first().copied().unwrap_or(0).wrapping_add(salt) % 5 {
+    0 => rusqlite::types::Value::Null,
+    1 => rusqlite::types::Value::Integer(i64::from_le_bytes(numeric)),
+    2 => rusqlite::types::Value::Real(f64::from_bits(u64::from_le_bytes(numeric))),
+    3 => rusqlite::types::Value::Text(String::from_utf8_lossy(bytes).into_owned()),
+    _ => rusqlite::types::Value::Blob(bytes.to_vec()),
+  };
+  connection.execute(
+    "INSERT INTO cookies VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    rusqlite::params![
+      sqlite_value(0),
+      sqlite_value(1),
+      sqlite_value(2),
+      sqlite_value(3),
+      sqlite_value(4),
+      sqlite_value(5),
+      bytes,
+      sqlite_value(6),
+      sqlite_value(7),
+    ],
+  )?;
+  let source = ChromiumReadOnlySource {
+    connection: &connection,
+    domains: None,
+  };
+  let decoder = ChromiumBoundaryDecoder {
+    encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+  };
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  let mut sink = |_event| Ok(());
+  // This cross-engine gate promises only that malformed input completes
+  // without unwinding. A decoder is free to reject the generated row.
+  let _ = decoder.decode(&source, &mut sink, &runtime);
+  Ok(())
 }
 
 #[cfg(test)]
@@ -411,7 +552,6 @@ mod tests {
     type DecoderSignature = for<'connection> fn(
       &'connection rusqlite::Connection,
       Option<&[String]>,
-      CookieProjection,
       EncryptedValuePolicy,
     ) -> Result<ChromiumCookieDecoder<'connection>>;
     let _: DecoderSignature = prepare_cookie_decoder;
@@ -461,12 +601,16 @@ mod tests {
         "key-bearing symbol {forbidden} crossed into the decoder module"
       );
     }
-    for forbidden_callback_marker in ["FnMut", "FnOnce", "Sink"] {
+    for forbidden_callback_marker in ["FnMut", "FnOnce"] {
       assert!(
         !production_source.contains(forbidden_callback_marker),
         "decoder API admits an external callback through {forbidden_callback_marker}"
       );
     }
+    assert!(
+      production_source.contains("RecordSink"),
+      "decoded records must cross only the bounded sink contract"
+    );
   }
 
   #[test]
@@ -487,13 +631,9 @@ mod tests {
       )
       .expect("seed rows");
 
-    let mut decoder = prepare_cookie_decoder(
-      &connection,
-      None,
-      CookieProjection::Legacy,
-      EncryptedValuePolicy::UseKeyOutcomes,
-    )
-    .expect("prepare decoder");
+    let mut decoder =
+      prepare_cookie_decoder(&connection, None, EncryptedValuePolicy::UseKeyOutcomes)
+        .expect("prepare decoder");
     let mut cursor = decoder.cursor().expect("start cursor");
 
     let first = cursor.next_event().expect("read first").expect("first row");
@@ -513,5 +653,128 @@ mod tests {
     };
     assert_eq!(second.record.name, "second");
     assert!(cursor.next_event().expect("exhaust cursor").is_none());
+  }
+
+  #[test]
+  fn boolean_columns_preserve_invalid_raw_values_and_decoder_provenance() {
+    let connection = rusqlite::Connection::open_in_memory().expect("open fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE meta (key TEXT, value TEXT);
+         INSERT INTO meta VALUES ('version', '23');
+         CREATE TABLE cookies (
+           host_key TEXT, path TEXT, is_secure, expires_utc INTEGER,
+           name TEXT, value TEXT, encrypted_value BLOB, is_httponly,
+           samesite INTEGER, top_frame_site_key TEXT,
+           has_cross_site_ancestor, source_scheme INTEGER, source_port INTEGER,
+           is_persistent
+         );
+         INSERT INTO cookies VALUES
+           ('.example.test', '/', 0, 0, 'known', 'v', X'', 1, 0, '', 0, 0, 443, 1),
+           ('.example.test', '/', 2, 0, 'integer', 'v', X'', -1, 0, '', 2, 0, 443, -1),
+           ('.example.test', '/', 'true', 0, 'text', 'v', X'', 'false', 0, '', 'yes', 0, 443, 'no'),
+           ('.example.test', '/', X'01', 0, 'blob', 'v', X'', X'00', 0, '', X'01', 0, 443, X'00'),
+           ('.example.test', '/', 1, 0, 'context-text', 'v', X'', 0, 0, '', 'yes', 0, 443, 'no'),
+           ('.example.test', '/', 1, 0, 'context-blob', 'v', X'', 0, 0, '', X'01', 0, 443, X'00'),
+           ('.example.test', '/', 0.5, 0, 'real', 'v', X'', -0.5, 0, '', 1.5, 0, 443, -1.5);",
+      )
+      .expect("seed boolean variants");
+
+    let mut decoder =
+      prepare_cookie_decoder(&connection, None, EncryptedValuePolicy::UseKeyOutcomes)
+        .expect("prepare decoder");
+    let mut cursor = decoder.cursor().expect("start cursor");
+    let mut records = Vec::new();
+    let mut failures = Vec::new();
+    while let Some(event) = cursor.next_event().expect("decode row") {
+      match event {
+        ChromiumDecodeEvent::Record(decoded) => records.push(decoded.record),
+        ChromiumDecodeEvent::RowFailure(failure) => failures.push(failure.code),
+      }
+    }
+
+    assert!(failures.is_empty());
+    assert_eq!(records.len(), 7);
+    assert_eq!(records[0].attributes.secure, Observation::Known(false));
+    assert_eq!(records[0].attributes.http_only, Observation::Known(true));
+    assert_eq!(
+      records[0].isolation.has_cross_site_ancestor,
+      Observation::Known(false)
+    );
+    assert_eq!(records[0].isolation.is_persistent, Observation::Known(true));
+
+    assert_eq!(
+      records[1].attributes.secure,
+      Observation::Unknown(RawValue::Signed(2))
+    );
+    assert_eq!(
+      records[1].attributes.http_only,
+      Observation::Unknown(RawValue::Signed(-1))
+    );
+    assert_eq!(
+      records[1].isolation.has_cross_site_ancestor,
+      Observation::Unknown(RawValue::Signed(2))
+    );
+    assert_eq!(
+      records[1].isolation.is_persistent,
+      Observation::Unknown(RawValue::Signed(-1))
+    );
+    assert_eq!(
+      records[1].isolation.has_cross_site_ancestor,
+      Observation::Unknown(RawValue::Signed(2))
+    );
+    assert_eq!(
+      records[1].isolation.is_persistent,
+      Observation::Unknown(RawValue::Signed(-1))
+    );
+    assert_eq!(records[1].raw.get("is_secure"), Some(&RawValue::Signed(2)));
+    assert_eq!(
+      records[2].attributes.secure,
+      Observation::Unknown(RawValue::text("true"))
+    );
+    assert_eq!(
+      records[2].attributes.http_only,
+      Observation::Unknown(RawValue::text("false"))
+    );
+    assert_eq!(
+      records[2].raw.get("has_cross_site_ancestor"),
+      Some(&RawValue::text("yes"))
+    );
+    assert_eq!(
+      records[2].isolation.is_persistent,
+      Observation::Unknown(RawValue::text("no"))
+    );
+    assert_eq!(
+      records[3].attributes.secure,
+      Observation::Unknown(RawValue::bytes(vec![1]))
+    );
+    assert_eq!(
+      records[3].attributes.http_only,
+      Observation::Unknown(RawValue::bytes(vec![0]))
+    );
+    assert_eq!(
+      records[3].raw.get("has_cross_site_ancestor"),
+      Some(&RawValue::bytes(vec![1]))
+    );
+    assert_eq!(
+      records[3].isolation.is_persistent,
+      Observation::Unknown(RawValue::bytes(vec![0]))
+    );
+    assert_eq!(
+      records[6].attributes.secure,
+      Observation::Unknown(RawValue::FloatBits(0.5_f64.to_bits()))
+    );
+    assert_eq!(
+      records[6].isolation.has_cross_site_ancestor,
+      Observation::Unknown(RawValue::FloatBits(1.5_f64.to_bits()))
+    );
+    assert_eq!(records[0].origin.ordinal, 1);
+    assert_eq!(records[1].origin.ordinal, 2);
+    assert_eq!(records[2].origin.ordinal, 3);
+    assert_eq!(records[3].origin.ordinal, 4);
+    assert_eq!(records[4].origin.ordinal, 5);
+    assert_eq!(records[5].origin.ordinal, 6);
+    assert_eq!(records[6].origin.ordinal, 7);
+    assert_eq!(records[0].origin.source_digest, [0; 32]);
   }
 }

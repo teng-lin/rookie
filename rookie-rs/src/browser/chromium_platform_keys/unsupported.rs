@@ -8,8 +8,13 @@ impl HostKeySession {
     Self
   }
 
-  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
+  pub(crate) fn retrieve(
+    &mut self,
+    request: ChromiumKeyRequest<'_>,
+    runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
     let _ = request;
+    let _ = runtime;
     ChromiumKeyOutcomes::default()
   }
 }

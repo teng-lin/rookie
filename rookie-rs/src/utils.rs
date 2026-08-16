@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::common::diagnostic::REDACTED_PATH;
 use anyhow::Result;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
@@ -27,7 +28,7 @@ impl TempDir {
   pub fn new() -> Result<Self> {
     let path = std::env::temp_dir().join(random_string(10, ".tmp", ""));
     create_private_dir(&path)?;
-    log::trace!("created dir {}", path.display());
+    log::trace!("created private directory {REDACTED_PATH}");
     Ok(Self { path })
   }
 
@@ -40,9 +41,8 @@ impl Drop for TempDir {
   fn drop(&mut self) {
     if let Err(err) = fs::remove_dir_all(&self.path) {
       log::warn!(
-        "failed to remove temporary directory {}: {err}. It may hold a copy of \
-         browser cookie data and should be deleted manually",
-        self.path.display()
+        "failed to remove temporary directory {REDACTED_PATH}: {err}. It may hold a copy of \
+         browser cookie data",
       );
     }
   }
@@ -56,15 +56,14 @@ fn create_private_dir(path: &Path) -> Result<()> {
   fs::DirBuilder::new()
     .mode(0o700)
     .create(path)
-    .with_context(|| format!("Can't create temporary directory {}", path.display()))
+    .with_context(|| format!("Can't create temporary directory {REDACTED_PATH}"))
 }
 
 #[cfg(not(unix))]
 fn create_private_dir(path: &Path) -> Result<()> {
   use anyhow::Context;
 
-  fs::create_dir(path)
-    .with_context(|| format!("Can't create temporary directory {}", path.display()))
+  fs::create_dir(path).with_context(|| format!("Can't create temporary directory {REDACTED_PATH}"))
 }
 
 #[cfg(test)]

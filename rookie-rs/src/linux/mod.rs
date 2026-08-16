@@ -1,13 +1,18 @@
 #[cfg(test)]
 use anyhow::anyhow;
 use anyhow::{bail, Context, Result};
+use async_io::Timer;
+use futures_lite::future;
 use std::collections::HashMap;
+use std::future::Future;
 use zbus::{
-  blocking::Connection,
   zvariant::{DynamicType, ObjectPath, OwnedObjectPath, OwnedValue, Value},
-  Message,
+  Connection, Message,
 };
 
+#[cfg(test)]
+use crate::common::deadline::SystemClock;
+use crate::common::deadline::{BoundaryRuntime, BoundaryStop, Deadline, CLEANUP_GRACE};
 use crate::common::secret::SecretString;
 
 mod confidential;
@@ -22,36 +27,62 @@ const LIBSECRET_SCHEMAS: [&str; 2] = [
   "chrome_libsecret_os_crypt_password_v1",
 ];
 
-/// Gets Chromium's password from either Secret Service or KWallet.
-///
-/// A successful backend is enough to continue, but if every configured
-/// backend fails the individual diagnostics are preserved in the returned
-/// error. Secret values are never included in those diagnostics.
-///
-/// Each returned password is wrapped in `SecretString` so it is wiped from
-/// memory when the caller drops it rather than left in freed heap memory.
-pub(crate) fn get_passwords(unix_crypt_name: &str) -> Result<Vec<SecretString>> {
-  get_passwords_with_source(&SystemLinuxKeyringSource, unix_crypt_name)
+pub(crate) fn get_passwords_with_runtime(
+  unix_crypt_name: &str,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<SecretString>> {
+  get_passwords_with_source_and_runtime(&SystemLinuxKeyringSource, unix_crypt_name, runtime)
 }
 
 trait LinuxKeyringSource {
-  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<SecretString>;
-  fn kwallet_password(&self, crypt_name: &str) -> Result<SecretString>;
+  fn libsecret_password(
+    &self,
+    schema: &str,
+    crypt_name: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<SecretString>;
+  fn kwallet_password(
+    &self,
+    crypt_name: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<SecretString>;
 }
 
 struct SystemLinuxKeyringSource;
 
 impl LinuxKeyringSource for SystemLinuxKeyringSource {
-  fn libsecret_password(&self, schema: &str, crypt_name: &str) -> Result<SecretString> {
-    get_password_libsecret(schema, crypt_name)
+  fn libsecret_password(
+    &self,
+    schema: &str,
+    crypt_name: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<SecretString> {
+    get_password_libsecret(schema, crypt_name, runtime)
   }
 
-  fn kwallet_password(&self, crypt_name: &str) -> Result<SecretString> {
-    get_password_kdewallet(crypt_name)
+  fn kwallet_password(
+    &self,
+    crypt_name: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<SecretString> {
+    get_password_kdewallet(crypt_name, runtime)
   }
 }
 
+#[cfg(test)]
 fn get_passwords_with_source<S>(source: &S, crypt_name: &str) -> Result<Vec<SecretString>>
+where
+  S: LinuxKeyringSource,
+{
+  let runtime = BoundaryRuntime::new(&SystemClock, Deadline::standard());
+  get_passwords_with_source_and_runtime(source, crypt_name, &runtime)
+}
+
+fn get_passwords_with_source_and_runtime<S>(
+  source: &S,
+  crypt_name: &str,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<SecretString>>
 where
   S: LinuxKeyringSource,
 {
@@ -59,15 +90,29 @@ where
   let mut failures = Vec::new();
 
   for schema in LIBSECRET_SCHEMAS {
-    match source.libsecret_password(schema, crypt_name) {
+    if let Err(stop) = runtime.check() {
+      return stop_or_collected(stop, passwords);
+    }
+    let result = source.libsecret_password(schema, crypt_name, runtime);
+    match result {
       Ok(password) => push_unique(&mut passwords, password),
       Err(error) => failures.push(format!("Secret Service schema '{schema}': {error:#}")),
     }
+    if let Err(stop) = runtime.check() {
+      return stop_or_collected(stop, passwords);
+    }
   }
 
-  match source.kwallet_password(crypt_name) {
+  if let Err(stop) = runtime.check() {
+    return stop_or_collected(stop, passwords);
+  }
+  let result = source.kwallet_password(crypt_name, runtime);
+  match result {
     Ok(password) => push_unique(&mut passwords, password),
     Err(error) => failures.push(format!("KWallet: {error:#}")),
+  }
+  if let Err(stop) = runtime.check() {
+    return stop_or_collected(stop, passwords);
   }
 
   if passwords.is_empty() {
@@ -85,6 +130,19 @@ where
   Ok(passwords)
 }
 
+/// A late stop must not erase keys already retrieved: partial keyring
+/// results are still usable for decryption, unlike an empty set.
+fn stop_or_collected(
+  stop: BoundaryStop,
+  passwords: Vec<SecretString>,
+) -> Result<Vec<SecretString>> {
+  if passwords.is_empty() {
+    Err(stop.into())
+  } else {
+    Ok(passwords)
+  }
+}
+
 fn push_unique(values: &mut Vec<SecretString>, value: SecretString) {
   if !values
     .iter()
@@ -94,16 +152,72 @@ fn push_unique(values: &mut Vec<SecretString>, value: SecretString) {
   }
 }
 
-fn libsecret_call<T>(connection: &Connection, method: &str, args: T) -> zbus::Result<Message>
+fn run_dbus_with_runtime<T, F>(
+  runtime: &BoundaryRuntime<'_>,
+  operation: &'static str,
+  future: F,
+) -> Result<T>
+where
+  F: Future<Output = zbus::Result<T>>,
+{
+  runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("{operation} stopped before starting"))?;
+  let stop_runtime = runtime.clone();
+  let result = future::block_on(future::race(
+    async move { future.await.map_err(anyhow::Error::from) },
+    async move {
+      loop {
+        if let Err(stop) = stop_runtime.check() {
+          return Err(anyhow::Error::new(stop).context(format!("{operation} stopped")));
+        }
+        let remaining = stop_runtime
+          .deadline
+          .remaining(stop_runtime.clock)
+          .min(std::time::Duration::from_millis(10));
+        Timer::after(remaining).await;
+      }
+    },
+  ));
+  // The operation future is polled first by `race`. Re-sample the absolute
+  // deadline before accepting its result so a reply observed exactly when the
+  // timer becomes due cannot win by poll order.
+  runtime
+    .check()
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("{operation} stopped"))?;
+  result
+}
+
+fn dbus_method_timeout(runtime: &BoundaryRuntime<'_>) -> Result<std::time::Duration> {
+  runtime.check()?;
+  let remaining = runtime.deadline.remaining(runtime.clock);
+  if remaining.is_zero() {
+    return Err(BoundaryStop::TimedOut.into());
+  }
+  Ok(remaining)
+}
+
+fn libsecret_call<T>(
+  connection: &Connection,
+  method: &'static str,
+  args: T,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Message>
 where
   T: serde::ser::Serialize + DynamicType,
 {
-  connection.call_method(
-    Some("org.freedesktop.secrets"),
-    "/org/freedesktop/secrets",
-    Some("org.freedesktop.Secret.Service"),
+  run_dbus_with_runtime(
+    runtime,
     method,
-    &args,
+    connection.call_method(
+      Some("org.freedesktop.secrets"),
+      "/org/freedesktop/secrets",
+      Some("org.freedesktop.Secret.Service"),
+      method,
+      &args,
+    ),
   )
 }
 
@@ -130,18 +244,23 @@ const KWALLET_ENDPOINTS: [KWalletEndpoint; 2] = [
 fn kwallet_call<T>(
   connection: &Connection,
   endpoint: KWalletEndpoint,
-  method: &str,
+  method: &'static str,
   args: T,
-) -> zbus::Result<Message>
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Message>
 where
   T: serde::ser::Serialize + DynamicType,
 {
-  connection.call_method(
-    Some(endpoint.service),
-    endpoint.path,
-    Some("org.kde.KWallet"),
+  run_dbus_with_runtime(
+    runtime,
     method,
-    &args,
+    connection.call_method(
+      Some(endpoint.service),
+      endpoint.path,
+      Some("org.kde.KWallet"),
+      method,
+      &args,
+    ),
   )
 }
 
@@ -163,12 +282,14 @@ trait SecretServiceBackend {
   fn get_secret(&self, item: &str) -> Result<SecretString>;
 }
 
-struct DbusSecretServiceBackend {
+struct DbusSecretServiceBackend<'a> {
   connection: Connection,
+  runtime: BoundaryRuntime<'a>,
 }
 
 struct DbusConfidentialTransport<'a> {
   connection: &'a Connection,
+  runtime: BoundaryRuntime<'a>,
 }
 
 impl confidential::Transport for DbusConfidentialTransport<'_> {
@@ -177,6 +298,7 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
       self.connection,
       "OpenSession",
       &(algorithm, Value::new(client_public_key)),
+      &self.runtime,
     )
     .context("Secret Service OpenSession failed")?;
     let (output, session): (OwnedValue, OwnedObjectPath) = message
@@ -198,6 +320,7 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
       self.connection,
       "GetSecrets",
       &(vec![item_path.clone()], session_path),
+      &self.runtime,
     )?;
     type DbusSecret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
     let mut secrets: HashMap<OwnedObjectPath, DbusSecret> = message
@@ -215,20 +338,27 @@ impl confidential::Transport for DbusConfidentialTransport<'_> {
   }
 }
 
-impl DbusSecretServiceBackend {
-  fn connect() -> Result<Self> {
+impl<'a> DbusSecretServiceBackend<'a> {
+  fn connect(runtime: &BoundaryRuntime<'a>) -> Result<Self> {
+    let remaining =
+      dbus_method_timeout(runtime).context("session D-Bus connection timed out before starting")?;
+    let builder = zbus::connection::Builder::session()
+      .context("failed to resolve the session D-Bus address")?
+      .method_timeout(remaining);
     Ok(Self {
-      connection: Connection::session().context("failed to connect to the session D-Bus")?,
+      connection: run_dbus_with_runtime(runtime, "session D-Bus connection", builder.build())
+        .context("failed to connect to the session D-Bus")?,
+      runtime: runtime.clone(),
     })
   }
 }
 
-impl SecretServiceBackend for DbusSecretServiceBackend {
+impl SecretServiceBackend for DbusSecretServiceBackend<'_> {
   fn search_items(&self, schema: &str, crypt_name: &str) -> Result<SecretSearchResult> {
     let mut attributes = HashMap::<&str, &str>::new();
     attributes.insert("xdg:schema", schema);
     attributes.insert("application", crypt_name);
-    let message = libsecret_call(&self.connection, "SearchItems", &attributes)
+    let message = libsecret_call(&self.connection, "SearchItems", &attributes, &self.runtime)
       .context("Secret Service SearchItems failed")?;
     let body = message.body();
     let (unlocked, locked): (Vec<ObjectPath>, Vec<ObjectPath>) = body
@@ -246,8 +376,8 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
       .map(|path| ObjectPath::try_from(path.as_str()))
       .collect::<std::result::Result<Vec<_>, _>>()
       .context("Secret Service returned an invalid locked item path")?;
-    let message =
-      libsecret_call(&self.connection, "Unlock", &paths).context("Secret Service Unlock failed")?;
+    let message = libsecret_call(&self.connection, "Unlock", &paths, &self.runtime)
+      .context("Secret Service Unlock failed")?;
     let body = message.body();
     let (unlocked, prompt): (Vec<ObjectPath>, ObjectPath) = body
       .deserialize()
@@ -266,14 +396,19 @@ impl SecretServiceBackend for DbusSecretServiceBackend {
     confidential::get_secret(
       &DbusConfidentialTransport {
         connection: &self.connection,
+        runtime: self.runtime.clone(),
       },
       item,
     )
   }
 }
 
-fn get_password_libsecret(schema: &str, crypt_name: &str) -> Result<SecretString> {
-  let backend = DbusSecretServiceBackend::connect()?;
+fn get_password_libsecret(
+  schema: &str,
+  crypt_name: &str,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<SecretString> {
+  let backend = DbusSecretServiceBackend::connect(runtime)?;
   get_password_libsecret_with_backend(&backend, schema, crypt_name)
 }
 
@@ -315,6 +450,7 @@ trait KWalletBackend {
 struct DbusKWalletBackend<'a> {
   connection: &'a Connection,
   endpoint: KWalletEndpoint,
+  runtime: BoundaryRuntime<'a>,
 }
 
 fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
@@ -327,8 +463,14 @@ fn ensure_kwallet_return_code(operation: &str, code: i32) -> Result<()> {
 
 impl KWalletBackend for DbusKWalletBackend<'_> {
   fn network_wallet(&self) -> Result<String> {
-    let message = kwallet_call(self.connection, self.endpoint, "networkWallet", ())
-      .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
+    let message = kwallet_call(
+      self.connection,
+      self.endpoint,
+      "networkWallet",
+      (),
+      &self.runtime,
+    )
+    .with_context(|| format!("KWallet {} networkWallet failed", self.endpoint.version))?;
     message
       .body()
       .deserialize()
@@ -341,6 +483,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "open",
       (wallet, 0_i64, APP_ID),
+      &self.runtime,
     )
     .with_context(|| format!("KWallet {} open failed", self.endpoint.version))?;
     let handle: i32 = message
@@ -359,6 +502,7 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       self.endpoint,
       "readPassword",
       (handle, folder, key, APP_ID),
+      &self.runtime,
     )
     .with_context(|| format!("KWallet {} readPassword failed", self.endpoint.version))?;
     message
@@ -369,11 +513,13 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
   }
 
   fn close(&self, handle: i32) -> Result<()> {
+    let cleanup_runtime = kwallet_cleanup_runtime(&self.runtime);
     let message = kwallet_call(
       self.connection,
       self.endpoint,
       "close",
       (handle, false, APP_ID),
+      &cleanup_runtime,
     )
     .with_context(|| format!("KWallet {} close failed", self.endpoint.version))?;
     let code: i32 = message
@@ -382,6 +528,19 @@ impl KWalletBackend for DbusKWalletBackend<'_> {
       .context("KWallet close returned an invalid response")?;
     ensure_kwallet_return_code("close", code)
   }
+}
+
+fn kwallet_cleanup_runtime<'a>(runtime: &BoundaryRuntime<'a>) -> BoundaryRuntime<'a> {
+  // Cleanup must ignore the request stop token so an opened native handle is
+  // still closed, but an early cancellation/resource stop must not inherit the
+  // request's entire remaining budget. A timeout retains only the unused part
+  // of its original absolute cleanup grace.
+  let remaining = runtime
+    .deadline
+    .cleanup_deadline(CLEANUP_GRACE)
+    .remaining(runtime.clock)
+    .min(CLEANUP_GRACE);
+  BoundaryRuntime::new(runtime.clock, Deadline::after(runtime.clock, remaining))
 }
 
 struct KWalletHandle<'a, B: KWalletBackend + ?Sized> {
@@ -423,12 +582,19 @@ impl<B: KWalletBackend + ?Sized> Drop for KWalletHandle<'_, B> {
   }
 }
 
-fn get_password_kdewallet(crypt_name: &str) -> Result<SecretString> {
-  let connection = Connection::session().context("failed to connect to the session D-Bus")?;
+fn get_password_kdewallet(crypt_name: &str, runtime: &BoundaryRuntime<'_>) -> Result<SecretString> {
+  let remaining = dbus_method_timeout(runtime)
+    .context("session D-Bus connection timed out before KWallet lookup")?;
+  let builder = zbus::connection::Builder::session()
+    .context("failed to resolve the session D-Bus address")?
+    .method_timeout(remaining);
+  let connection = run_dbus_with_runtime(runtime, "session D-Bus connection", builder.build())
+    .context("failed to connect to the session D-Bus")?;
   get_password_kdewallet_with_fallback(|endpoint| {
     let backend = DbusKWalletBackend {
       connection: &connection,
       endpoint,
+      runtime: runtime.clone(),
     };
     get_password_kdewallet_with_backend(&backend, crypt_name)
   })
@@ -481,10 +647,28 @@ pub fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::test_clock::ManualClock;
   use std::{cell::RefCell, collections::VecDeque};
 
   fn secret(value: &str) -> SecretString {
     SecretString::new(value.to_owned())
+  }
+
+  #[test]
+  fn zero_dbus_budget_is_a_typed_timeout_after_the_clock_advances() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+    );
+    runtime.check().expect("budget starts live");
+    clock.advance(std::time::Duration::from_secs(1));
+
+    let error = dbus_method_timeout(&runtime).expect_err("advanced deadline is exhausted");
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
   }
 
   struct FakeKeyringSource {
@@ -493,7 +677,12 @@ mod tests {
   }
 
   impl LinuxKeyringSource for FakeKeyringSource {
-    fn libsecret_password(&self, _schema: &str, _crypt_name: &str) -> Result<SecretString> {
+    fn libsecret_password(
+      &self,
+      _schema: &str,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
       self
         .libsecret
         .borrow_mut()
@@ -501,7 +690,11 @@ mod tests {
         .expect("one result per schema")
     }
 
-    fn kwallet_password(&self, _crypt_name: &str) -> Result<SecretString> {
+    fn kwallet_password(
+      &self,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
       self
         .kwallet
         .borrow_mut()
@@ -542,6 +735,230 @@ mod tests {
     let passwords = get_passwords_with_source(&source, "chrome").unwrap();
     let passwords: Vec<&str> = passwords.iter().map(|password| password.as_str()).collect();
     assert_eq!(passwords, ["candidate"]);
+  }
+
+  struct CancelingKeyringSource {
+    stop: crate::common::deadline::CancellationToken,
+  }
+
+  impl LinuxKeyringSource for CancelingKeyringSource {
+    fn libsecret_password(
+      &self,
+      _schema: &str,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
+      self.stop.cancel();
+      Ok(secret("first schema key"))
+    }
+
+    fn kwallet_password(
+      &self,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
+      panic!("a stop after the first schema must end the search before KWallet")
+    }
+  }
+
+  #[test]
+  fn a_late_stop_keeps_a_key_already_retrieved_instead_of_discarding_it() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let source = CancelingKeyringSource { stop };
+
+    let passwords = get_passwords_with_source_and_runtime(&source, "chrome", &runtime)
+      .expect("a retrieved key survives a stop that lands right after it");
+    let passwords: Vec<&str> = passwords.iter().map(|password| password.as_str()).collect();
+    assert_eq!(passwords, ["first schema key"]);
+  }
+
+  struct BudgetSource {
+    remaining: RefCell<Vec<std::time::Duration>>,
+    kwallet_calls: RefCell<usize>,
+  }
+
+  impl LinuxKeyringSource for BudgetSource {
+    fn libsecret_password(
+      &self,
+      _schema: &str,
+      _crypt_name: &str,
+      runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
+      self
+        .remaining
+        .borrow_mut()
+        .push(runtime.deadline.remaining(runtime.clock));
+      let elapsed = if self.remaining.borrow().len() == 1 {
+        7
+      } else {
+        3
+      };
+      runtime.clock.sleep(std::time::Duration::from_secs(elapsed));
+      bail!("scripted provider failure")
+    }
+
+    fn kwallet_password(
+      &self,
+      _crypt_name: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
+      *self.kwallet_calls.borrow_mut() += 1;
+      bail!("KWallet must not start after the absolute deadline")
+    }
+  }
+
+  #[test]
+  fn fallbacks_share_one_decreasing_absolute_budget_without_wall_clock_sleep() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(10));
+    let source = BudgetSource {
+      remaining: RefCell::new(Vec::new()),
+      kwallet_calls: RefCell::new(0),
+    };
+
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let error = get_passwords_with_source_and_runtime(&source, "chrome", &runtime)
+      .expect_err("the second fallback consumes the remaining budget");
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::TimedOut));
+    assert_eq!(
+      source.remaining.into_inner(),
+      [
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(3),
+      ]
+    );
+    assert_eq!(source.kwallet_calls.into_inner(), 0);
+    assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
+
+  #[test]
+  fn dbus_reply_at_the_exact_deadline_is_timeout_biased_without_wall_clock_sleep() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+
+    let error = run_dbus_with_runtime(&runtime, "scripted D-Bus reply", async {
+      // The reply future is ready in the same poll that advances the monotonic
+      // clock to the deadline. It must not win merely because `race` polls it
+      // before the timer future.
+      clock.advance(std::time::Duration::from_secs(1));
+      Ok::<_, zbus::Error>("reply")
+    })
+    .expect_err("an exact reply/timeout tie must time out");
+
+    assert!(error.to_string().contains("scripted D-Bus reply stopped"));
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::TimedOut));
+    assert_eq!(deadline.remaining(&clock), std::time::Duration::ZERO);
+  }
+
+  #[test]
+  fn dbus_wait_observes_cancellation_while_the_provider_is_pending() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(&clock, deadline, stop.clone());
+
+    let error = run_dbus_with_runtime(&runtime, "scripted pending D-Bus call", async move {
+      stop.cancel();
+      futures_lite::future::pending::<zbus::Result<()>>().await
+    })
+    .expect_err("cancellation stops a pending provider call");
+
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::Cancelled));
+  }
+
+  #[test]
+  fn dbus_wait_observes_resource_exhaustion_while_the_provider_is_pending() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(&clock, deadline, stop.clone());
+
+    let error = run_dbus_with_runtime(&runtime, "scripted pending D-Bus call", async move {
+      stop.exhaust_resources();
+      futures_lite::future::pending::<zbus::Result<()>>().await
+    })
+    .expect_err("resource exhaustion stops a pending provider call");
+
+    assert!(error
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .is_some_and(|stop| *stop == crate::common::deadline::BoundaryStop::ResourceExhausted));
+  }
+
+  #[test]
+  fn kwallet_cleanup_after_early_cancellation_is_capped_to_one_grace_window() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(30)),
+      stop.clone(),
+    );
+    clock.advance(std::time::Duration::from_secs(1));
+    stop.cancel();
+
+    let cleanup = kwallet_cleanup_runtime(&runtime);
+
+    assert_eq!(cleanup.deadline.remaining(&clock), CLEANUP_GRACE);
+    assert!(cleanup.check().is_ok(), "cleanup ignores cancellation");
+    clock.advance(CLEANUP_GRACE);
+    assert_eq!(
+      cleanup.check(),
+      Err(crate::common::deadline::BoundaryStop::TimedOut)
+    );
+  }
+
+  #[test]
+  fn kwallet_cleanup_after_resource_exhaustion_is_capped_to_one_grace_window() {
+    let clock = ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(30)),
+      stop.clone(),
+    );
+    clock.advance(std::time::Duration::from_secs(1));
+    stop.exhaust_resources();
+
+    let cleanup = kwallet_cleanup_runtime(&runtime);
+
+    assert_eq!(cleanup.deadline.remaining(&clock), CLEANUP_GRACE);
+    assert!(
+      cleanup.check().is_ok(),
+      "cleanup ignores resource exhaustion"
+    );
+    clock.advance(CLEANUP_GRACE);
+    assert_eq!(
+      cleanup.check(),
+      Err(crate::common::deadline::BoundaryStop::TimedOut)
+    );
+  }
+
+  #[test]
+  fn kwallet_timeout_cleanup_keeps_only_the_original_remaining_grace() {
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(30));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    clock.advance(std::time::Duration::from_secs(31));
+
+    let cleanup = kwallet_cleanup_runtime(&runtime);
+
+    assert_eq!(
+      cleanup.deadline.remaining(&clock),
+      std::time::Duration::from_secs(1)
+    );
   }
 
   #[derive(Default)]

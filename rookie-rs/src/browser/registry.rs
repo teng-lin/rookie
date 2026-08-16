@@ -7,15 +7,19 @@
 
 #![allow(dead_code)]
 
-use super::chromium::{query_cookies_engine_outcome, ChromiumExtractionStats, ChromiumRowIssue};
+use super::chromium::{
+  query_cookies_engine_outcome_with_runtime, ChromiumExtractionStats, ChromiumRowIssue,
+};
 #[cfg(all(test, target_os = "macos"))]
 use super::chromium_crypto::ChromiumKeyOutcome;
-use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, ChromiumKeyProvider};
+use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, KeyProvider};
 use super::chromium_platform_keys::{
   ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession, MacosKeychainCredentials,
 };
 use super::mozilla;
+#[cfg(test)]
 use super::report_core::sort_cookies;
+use crate::common::diagnostic::REDACTED_PATH;
 use crate::common::enums::Cookie;
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{anyhow, bail, Context, Result};
@@ -521,7 +525,7 @@ impl DiscoveryFs for RealDiscoveryFs {
 
   fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = std::fs::read_dir(path)
-      .with_context(|| format!("read directory {}", path.display()))?
+      .with_context(|| format!("read directory {REDACTED_PATH}"))?
       .map(|entry| entry.map(|entry| entry.path()))
       .collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|path| normalized_path_bytes(path));
@@ -531,11 +535,11 @@ impl DiscoveryFs for RealDiscoveryFs {
   fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
     path
       .canonicalize()
-      .with_context(|| format!("canonicalize {}", path.display()))
+      .with_context(|| format!("canonicalize {REDACTED_PATH}"))
   }
 
   fn read_to_string(&self, path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))
+    std::fs::read_to_string(path).with_context(|| format!("read {REDACTED_PATH}"))
   }
 
   fn expand_registry_glob(&self, base: &Path, suffix: &str) -> Result<GlobExpansion> {
@@ -993,22 +997,16 @@ fn legacy_windows_local_state<F: DiscoveryFs>(
   if context.platform != PlatformId::Windows {
     return Ok(None);
   }
-  let parent = source.parent().ok_or_else(|| {
-    anyhow!(
-      "Chromium cookie database has no parent: {}",
-      source.display()
-    )
-  })?;
+  let parent = source
+    .parent()
+    .ok_or_else(|| anyhow!("Chromium cookie database has no parent: {REDACTED_PATH}"))?;
   let candidates =
     ["../../Local State", "../Local State", "Local State"].map(|relative| parent.join(relative));
   let local_state = candidates
     .iter()
     .find(|candidate| context.fs.exists(candidate))
     .ok_or_else(|| {
-      anyhow!(
-        "can't find Local State for Chromium cookie database {}",
-        source.display()
-      )
+      anyhow!("can't find Local State for Chromium cookie database {REDACTED_PATH}")
     })?;
   let canonical = context
     .fs
@@ -1017,7 +1015,7 @@ fn legacy_windows_local_state<F: DiscoveryFs>(
   let contents = context
     .fs
     .read_to_string(&canonical)
-    .with_context(|| format!("read Local State {}", canonical.display()))?;
+    .with_context(|| format!("read Local State {REDACTED_PATH}"))?;
   let value =
     serde_json::from_str::<serde_json::Value>(&contents).context("Can't read Local State JSON")?;
   Ok(Some((canonical, value)))
@@ -1499,9 +1497,11 @@ fn normalized_path_bytes(path: &Path) -> Vec<u8> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ChromiumProfileExtraction {
+pub(crate) struct ChromiumProfileDraft {
   pub(crate) profile: ChromiumProfile,
+  #[cfg(test)]
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) records: Vec<super::cookie_record::CookieRecord>,
   pub(crate) stats: ChromiumExtractionStats,
   pub(crate) row_issues: Vec<ChromiumRowIssue>,
   pub(crate) acquisition: SourceAcquisition,
@@ -1530,15 +1530,15 @@ pub(crate) enum ChromiumProfileFailure {
 }
 
 #[derive(Debug)]
-pub(crate) struct ChromiumInstallationExtraction {
+pub(crate) struct ChromiumInstallationDraft {
   pub(crate) installation_id: String,
   pub(crate) channel: String,
-  pub(crate) profiles: Vec<ChromiumProfileExtraction>,
+  pub(crate) profiles: Vec<ChromiumProfileDraft>,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct ChromiumRegistryReport {
-  pub(crate) installations: Vec<ChromiumInstallationExtraction>,
+pub(crate) struct ChromiumRegistryDraft {
+  pub(crate) installations: Vec<ChromiumInstallationDraft>,
   /// Roots that existed on disk, including ones that then failed to read.
   /// A root that was found and could not be opened is detected-but-unreadable,
   /// never absent.
@@ -1552,6 +1552,10 @@ pub(crate) struct ChromiumRegistryReport {
   /// Every detected root failed enumeration, so an empty installation list is a
   /// failure rather than an absent browser.
   pub(crate) all_detected_roots_failed: bool,
+  /// Typed request stop observed after discovery or a completed source. It is
+  /// finalized independently from result status and never stringified as a
+  /// profile/source failure.
+  pub(crate) boundary_stop: Option<crate::common::deadline::BoundaryStop>,
 }
 
 fn extract_chromium_with_provider<F, P>(
@@ -1560,17 +1564,37 @@ fn extract_chromium_with_provider<F, P>(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
   provider: &P,
-) -> Result<ChromiumRegistryReport>
+) -> Result<ChromiumRegistryDraft>
 where
   F: DiscoveryFs,
-  P: ChromiumKeyProvider<BrowserInstallation>,
+  P: KeyProvider<BrowserInstallation, Keys = ChromiumKeyOutcomes>,
 {
-  extract_chromium_with_provider_and_selection(
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  extract_chromium_with_provider_runtime(
+    context, browser_id, profile_id, domains, provider, &runtime,
+  )
+}
+
+fn extract_chromium_with_provider_runtime<F, P>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  provider: &P,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ChromiumRegistryDraft>
+where
+  F: DiscoveryFs,
+  P: KeyProvider<BrowserInstallation, Keys = ChromiumKeyOutcomes>,
+{
+  extract_chromium_with_provider_and_selection_runtime(
     context,
     browser_id,
     ProfileSelection::from_profile_id(profile_id),
     domains,
     provider,
+    runtime,
   )
 }
 
@@ -1580,11 +1604,31 @@ fn extract_chromium_with_provider_and_selection<F, P>(
   selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   provider: &P,
-) -> Result<ChromiumRegistryReport>
+) -> Result<ChromiumRegistryDraft>
 where
   F: DiscoveryFs,
-  P: ChromiumKeyProvider<BrowserInstallation>,
+  P: KeyProvider<BrowserInstallation, Keys = ChromiumKeyOutcomes>,
 {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  extract_chromium_with_provider_and_selection_runtime(
+    context, browser_id, selection, domains, provider, &runtime,
+  )
+}
+
+fn extract_chromium_with_provider_and_selection_runtime<F, P>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  selection: ProfileSelection<'_>,
+  domains: Option<Vec<String>>,
+  provider: &P,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ChromiumRegistryDraft>
+where
+  F: DiscoveryFs,
+  P: KeyProvider<BrowserInstallation, Keys = ChromiumKeyOutcomes>,
+{
+  runtime.check()?;
   let mut discovery = discover_browser_with_context_and_selection(context, browser_id, selection)?;
   if selection == ProfileSelection::LegacyFirstProfile {
     // Generic discovery prefers declared profiles over a flat installation
@@ -1637,14 +1681,18 @@ where
     _ => None,
   };
 
-  let mut report = ChromiumRegistryReport {
+  let mut report = ChromiumRegistryDraft {
     all_detected_roots_failed: discovery.all_detected_roots_failed(),
     installations_detected: discovery.detected_roots,
     installations_discovered: discovery.installations.len(),
     discovery_issues: discovery.issues,
-    ..ChromiumRegistryReport::default()
+    ..ChromiumRegistryDraft::default()
   };
   for mut installation in discovery.installations {
+    if let Err(stop) = runtime.check() {
+      report.boundary_stop = Some(stop);
+      break;
+    }
     let selected_profiles = installation
       .profiles
       .iter()
@@ -1659,7 +1707,7 @@ where
       .collect::<Vec<_>>();
     if selected_profiles.is_empty() {
       if selection == ProfileSelection::AllProfiles {
-        report.installations.push(ChromiumInstallationExtraction {
+        report.installations.push(ChromiumInstallationDraft {
           installation_id: installation.installation_id,
           channel: installation.channel,
           profiles: Vec::new(),
@@ -1681,13 +1729,32 @@ where
     }
     // The provider is installation-scoped, so Local State/keyring work happens
     // exactly once and the independent tier outcomes are reused by every profile.
-    let key_outcomes = retrieve_key_outcomes(provider, &installation);
+    let key_outcomes = match retrieve_key_outcomes(provider, &installation, runtime) {
+      Ok(outcomes) => outcomes,
+      Err(error) => {
+        if let Some(stop) = error.downcast_ref::<crate::common::deadline::BoundaryStop>() {
+          report.boundary_stop = Some(*stop);
+          break;
+        }
+        return Err(error);
+      }
+    };
+    if let Err(stop) = runtime.check() {
+      report.boundary_stop = Some(stop);
+      break;
+    }
     let mut profile_extractions = Vec::with_capacity(selected_profiles.len());
     for profile in selected_profiles {
+      if let Err(stop) = runtime.check() {
+        report.boundary_stop = Some(stop);
+        break;
+      }
       let Some(source) = profile.selected_source().map(Path::to_path_buf) else {
-        profile_extractions.push(ChromiumProfileExtraction {
+        profile_extractions.push(ChromiumProfileDraft {
           profile,
+          #[cfg(test)]
           cookies: Vec::new(),
+          records: Vec::new(),
           stats: ChromiumExtractionStats::default(),
           row_issues: Vec::new(),
           acquisition: SourceAcquisition::NotAttempted,
@@ -1697,8 +1764,17 @@ where
         });
         continue;
       };
-      match query_cookies_engine_outcome(&key_outcomes, source, domains.clone(), false) {
-        Ok(mut outcome) => {
+      match query_cookies_engine_outcome_with_runtime(
+        &key_outcomes,
+        source,
+        domains.clone(),
+        false,
+        runtime,
+      ) {
+        Ok(outcome) => {
+          #[cfg(test)]
+          let mut outcome = outcome;
+          #[cfg(test)]
           if selection != ProfileSelection::LegacyFirstProfile {
             sort_cookies(&mut outcome.cookies);
           }
@@ -1706,9 +1782,11 @@ where
             .legacy_error
             .as_ref()
             .map(|error| format!("{error:#}"));
-          profile_extractions.push(ChromiumProfileExtraction {
+          profile_extractions.push(ChromiumProfileDraft {
             profile,
+            #[cfg(test)]
             cookies: outcome.cookies,
+            records: outcome.records,
             stats: outcome.stats,
             row_issues: outcome.issues,
             acquisition: outcome.acquisition_strategy.into(),
@@ -1723,10 +1801,19 @@ where
           });
         }
         Err(error) => {
+          if let Some(stop) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<crate::common::deadline::BoundaryStop>())
+          {
+            report.boundary_stop = Some(*stop);
+            break;
+          }
           let failure = error.downcast_ref::<crate::common::sqlite::BrowserDatabaseFailure>();
-          profile_extractions.push(ChromiumProfileExtraction {
+          profile_extractions.push(ChromiumProfileDraft {
             profile,
+            #[cfg(test)]
             cookies: Vec::new(),
+            records: Vec::new(),
             stats: ChromiumExtractionStats::default(),
             row_issues: Vec::new(),
             acquisition: failure.and_then(|failure| failure.strategy).into(),
@@ -1737,11 +1824,19 @@ where
         }
       }
     }
-    report.installations.push(ChromiumInstallationExtraction {
+    report.installations.push(ChromiumInstallationDraft {
       installation_id: installation.installation_id,
       channel: installation.channel,
       profiles: profile_extractions,
     });
+    if report.boundary_stop.is_some() {
+      break;
+    }
+  }
+  if report.boundary_stop.is_none() {
+    if let Err(stop) = runtime.check() {
+      report.boundary_stop = Some(stop);
+    }
   }
   Ok(report)
 }
@@ -1851,7 +1946,7 @@ fn provider_input(credentials: &ChromiumKeyCredentials) -> crate::config::Browse
   }
 }
 
-struct SystemChromiumKeyProvider;
+struct SystemKeyProvider;
 
 fn key_request_for_installation(installation: &BrowserInstallation) -> ChromiumKeyRequest<'_> {
   ChromiumKeyRequest::for_installation(
@@ -1862,11 +1957,17 @@ fn key_request_for_installation(installation: &BrowserInstallation) -> ChromiumK
   )
 }
 
-impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
-  fn retrieve(&self, installation: &BrowserInstallation) -> ChromiumKeyOutcomes {
+impl KeyProvider<BrowserInstallation> for SystemKeyProvider {
+  type Keys = ChromiumKeyOutcomes;
+
+  fn keys(
+    &self,
+    installation: &BrowserInstallation,
+    runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
     let request = key_request_for_installation(installation);
     let mut session = HostKeySession::new();
-    session.retrieve(request)
+    session.retrieve(request, runtime)
   }
 }
 
@@ -1879,7 +1980,15 @@ impl ChromiumKeyProvider<BrowserInstallation> for SystemChromiumKeyProvider {
 /// discovery order, so a missing, stale, or malformed hint safely falls back
 /// to the default-first result.
 pub(crate) fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
-  let mut profiles = chromium_profiles("chrome")?;
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  chrome_profiles_with_runtime(&runtime)
+}
+
+pub(crate) fn chrome_profiles_with_runtime(
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<ChromiumProfile>> {
+  let mut profiles = chromium_profiles_with_runtime("chrome", runtime)?;
   prefer_active_profiles(&mut profiles);
   Ok(profiles)
 }
@@ -1888,11 +1997,24 @@ pub(crate) fn chrome_profiles() -> Result<Vec<ChromiumProfile>> {
 /// cross-engine descriptor API; compatibility wrappers use the same discovery
 /// with [`ProfileSelection::LegacyFirstProfile`].
 pub(crate) fn chromium_profiles(browser_id: &str) -> Result<Vec<ChromiumProfile>> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  chromium_profiles_with_runtime(browser_id, &runtime)
+}
+
+pub(crate) fn chromium_profiles_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<ChromiumProfile>> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  profiles_for_listing(
+  runtime.check()?;
+  let profiles = profiles_for_listing(
     browser_id,
     discover_browser_with_context(&context, browser_id)?,
-  )
+  )?;
+  runtime.check()?;
+  Ok(profiles)
 }
 
 fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
@@ -1915,7 +2037,17 @@ fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
 /// opaque profile ID is always lossless; callers must use it when a descriptor
 /// marks its display path as lossy.
 pub(crate) fn select_chrome_profile(profile: &str) -> Result<ChromiumProfile> {
-  let profiles = chrome_profiles()?;
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  select_chrome_profile_with_runtime(profile, &runtime)
+}
+
+pub(crate) fn select_chrome_profile_with_runtime(
+  profile: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ChromiumProfile> {
+  let profiles = chrome_profiles_with_runtime(runtime)?;
+  runtime.check()?;
   select_chromium_profile(&profiles, profile).cloned()
 }
 
@@ -1973,9 +2105,7 @@ fn describe_chromium_profiles<'a>(profiles: impl Iterator<Item = &'a ChromiumPro
     .map(|profile| {
       format!(
         "{} ({}, {})",
-        profile.display_name,
-        profile.path.display(),
-        profile.profile_id
+        profile.display_name, REDACTED_PATH, profile.profile_id
       )
     })
     .collect::<Vec<_>>()
@@ -1989,7 +2119,12 @@ fn lost_chromium_profile_error(browser_id: &str, issues: &[DiscoveryIssue]) -> O
       issue.code.starts_with("profile_") && !is_informational_discovery_issue(issue.code)
     })
     .take(MAX_DISCOVERY_ISSUE_SAMPLES)
-    .map(|issue| format!("{}: {}", issue.path.display(), issue.message))
+    .map(|issue| {
+      format!(
+        "{REDACTED_PATH}: {}",
+        crate::common::diagnostic::sanitize(&issue.message)
+      )
+    })
     .collect::<Vec<_>>();
   (!lost_profiles.is_empty()).then(|| {
     format!(
@@ -2029,8 +2164,20 @@ pub(crate) struct ChromiumListing {
 }
 
 pub(crate) fn chromium_listing(browser_id: &str) -> Result<ChromiumListing> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  chromium_listing_with_runtime(browser_id, &runtime)
+}
+
+pub(crate) fn chromium_listing_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ChromiumListing> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
+  runtime.check()?;
   let discovery = discover_browser_with_context(&context, browser_id)?;
+  runtime.check()?;
   Ok(ChromiumListing {
     profiles: discovery.profiles(),
     installations_discovered: discovery.installations.len(),
@@ -2045,14 +2192,28 @@ pub(crate) fn chromium_registry_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
-) -> Result<ChromiumRegistryReport> {
+) -> Result<ChromiumRegistryDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  chromium_registry_report_with_runtime(browser_id, profile_id, domains, &runtime)
+}
+
+pub(crate) fn chromium_registry_report_with_runtime(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ChromiumRegistryDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  extract_chromium_with_provider(
+  runtime.check()?;
+  extract_chromium_with_provider_runtime(
     &context,
     browser_id,
     profile_id,
     domains,
-    &SystemChromiumKeyProvider,
+    &SystemKeyProvider,
+    runtime,
   )
 }
 
@@ -2060,61 +2221,45 @@ pub(crate) fn chromium_registry_report(
 ///
 /// `None` means the browser has no legacy-compatible cookie source. Real
 /// discovery, key-provider, acquisition, query, or row failures remain errors.
-pub(crate) fn legacy_chromium_cookies(
+pub(crate) fn legacy_chromium_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
-) -> Result<Option<Vec<Cookie>>> {
+) -> Result<ChromiumRegistryDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  legacy_chromium_outcome_with_runtime(browser_id, domains, &runtime)
+}
+
+pub(crate) fn legacy_chromium_outcome_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ChromiumRegistryDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  let report = extract_chromium_with_provider_and_selection(
+  runtime.check()?;
+  extract_chromium_with_provider_and_selection_runtime(
     &context,
     browser_id,
     ProfileSelection::LegacyFirstProfile,
     domains,
-    &SystemChromiumKeyProvider,
-  )?;
-  project_legacy_chromium_report(browser_id, report)
-}
-
-fn project_legacy_chromium_report(
-  browser_id: &str,
-  report: ChromiumRegistryReport,
-) -> Result<Option<Vec<Cookie>>> {
-  if report.all_detected_roots_failed {
-    bail!("every detected {browser_id} installation failed profile enumeration")
-  }
-  let Some(profile) = report
-    .installations
-    .into_iter()
-    .flat_map(|installation| installation.profiles)
-    .next()
-  else {
-    if let Some(error) = lost_chromium_profile_error(browser_id, &report.discovery_issues) {
-      bail!(error)
-    }
-    return Ok(None);
-  };
-  if let Some(error) = profile.legacy_error {
-    bail!(error)
-  }
-  match profile.failure {
-    Some(ChromiumProfileFailure::NoSource) => Ok(None),
-    Some(ChromiumProfileFailure::Extraction(error)) => bail!(error),
-    None => Ok(Some(profile.cookies)),
-  }
+    &SystemKeyProvider,
+    runtime,
+  )
 }
 
 /// Private Milestone 3C ID-based selector/report seam.
 pub(crate) fn chrome_profile(
   profile_id: &str,
   domains: Option<Vec<String>>,
-) -> Result<ChromiumRegistryReport> {
+) -> Result<ChromiumRegistryDraft> {
   let context = DiscoveryContext::system()?;
   extract_chromium_with_provider(
     &context,
     "chrome",
     Some(profile_id),
     domains,
-    &SystemChromiumKeyProvider,
+    &SystemKeyProvider,
   )
 }
 
@@ -2127,15 +2272,17 @@ pub(crate) const PERSISTENT_SOURCE_PRECEDENCE: u16 = 10;
 /// Source-level outcome shared by the non-Chromium adapters. It is deliberately
 /// crate-private: 4E owns the final cross-engine DTO freeze.
 #[derive(Debug)]
-pub(crate) struct EngineSourceExtraction {
+pub(crate) struct EngineSourceDraft {
   pub(crate) path: PathBuf,
   pub(crate) role: &'static str,
   pub(crate) format: &'static str,
   pub(crate) precedence: u16,
   pub(crate) selected: bool,
   pub(crate) cookies: Vec<Cookie>,
+  pub(crate) records: Vec<super::cookie_record::CookieRecord>,
   pub(crate) rows_seen: usize,
   pub(crate) rows_skipped: usize,
+  pub(crate) rows_rejected: usize,
   pub(crate) acquisition: SourceAcquisition,
   pub(crate) acquisition_attempts: u32,
   pub(crate) diagnostics: Vec<String>,
@@ -2177,7 +2324,7 @@ impl From<Option<DatabaseAcquisitionStrategy>> for SourceAcquisition {
 }
 
 #[derive(Debug)]
-pub(crate) struct EngineProfileExtraction {
+pub(crate) struct EngineProfileDraft {
   pub(crate) profile_id: String,
   pub(crate) installation_id: String,
   pub(crate) installation_priority: u16,
@@ -2202,12 +2349,12 @@ pub(crate) struct EngineProfileExtraction {
   pub(crate) path: PathBuf,
   pub(crate) is_default: bool,
   pub(crate) persistent_source_discovered: bool,
-  pub(crate) sources: Vec<EngineSourceExtraction>,
+  pub(crate) sources: Vec<EngineSourceDraft>,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct EngineExtractionOutcome {
-  pub(crate) profiles: Vec<EngineProfileExtraction>,
+pub(crate) struct EngineExtractionDraft {
+  pub(crate) profiles: Vec<EngineProfileDraft>,
   pub(crate) discovery_issues: Vec<DiscoveryIssue>,
   /// Distinct installations that were resolved and owned by this browser.
   /// Duplicates and roots that failed to canonicalize are excluded, matching
@@ -2218,15 +2365,36 @@ pub(crate) struct EngineExtractionOutcome {
   pub(crate) installations_detected: usize,
   /// Roots whose profile enumeration completed, even when it found nothing.
   pub(crate) installations_enumerated: usize,
+  /// Typed request stop observed while populating sources. Keeping it outside
+  /// source diagnostics prevents timeouts/cancellation from becoming fake
+  /// source failures.
+  pub(crate) boundary_stop: Option<crate::common::deadline::BoundaryStop>,
 }
 
-impl EngineExtractionOutcome {
+impl EngineExtractionDraft {
   /// Section 5.7: when every applicable detected root fails enumeration the
   /// result is `failed`/`Err`, never an empty list indistinguishable from a
   /// browser that is simply not installed.
   pub(crate) fn all_detected_roots_failed(&self) -> bool {
     self.installations_detected > 0 && self.installations_enumerated == 0
   }
+}
+
+/// Drops discovery-only source slots after a typed request stop. A source is
+/// committed atomically by its adapter only after at least one acquisition
+/// attempt completes; leaving a zero-attempt slot behind would fabricate a
+/// successful zero-row source during canonicalization. Profiles that then own
+/// no completed sources are likewise discovery placeholders, not extraction
+/// failures.
+pub(crate) fn retain_completed_engine_work(outcome: &mut EngineExtractionDraft) {
+  for profile in &mut outcome.profiles {
+    profile
+      .sources
+      .retain(|source| source.acquisition_attempts > 0);
+  }
+  outcome
+    .profiles
+    .retain(|profile| !profile.sources.is_empty());
 }
 
 /// Narrows a discovered engine outcome to the one requested profile, before any
@@ -2239,7 +2407,7 @@ impl EngineExtractionOutcome {
 /// counters and discovery issues stay exactly what an unselected run reports --
 /// selecting a profile must not make the other installations look absent.
 fn select_engine_profiles(
-  outcome: &mut EngineExtractionOutcome,
+  outcome: &mut EngineExtractionDraft,
   browser_id: &str,
   selection: ProfileSelection<'_>,
 ) -> Result<()> {
@@ -2283,16 +2451,18 @@ fn source_candidate(
   role: &'static str,
   format: &'static str,
   precedence: u16,
-) -> EngineSourceExtraction {
-  EngineSourceExtraction {
+) -> EngineSourceDraft {
+  EngineSourceDraft {
     path,
     role,
     format,
     precedence,
     selected: false,
     cookies: Vec::new(),
+    records: Vec::new(),
     rows_seen: 0,
     rows_skipped: 0,
+    rows_rejected: 0,
     acquisition: SourceAcquisition::NotAttempted,
     acquisition_attempts: 0,
     diagnostics: Vec::new(),
@@ -2307,7 +2477,7 @@ fn source_candidate(
 fn gecko_profiles_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let mut outcome = discover_gecko_with_context(context, browser_id)?;
   for profile in &mut outcome.profiles {
     if profile.persistent_source_discovered {
@@ -2333,9 +2503,22 @@ fn gecko_profiles_with_context<F: DiscoveryFs>(
   Ok(outcome)
 }
 
-pub(crate) fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+pub(crate) fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  gecko_profiles_with_runtime(browser_id, &runtime)
+}
+
+pub(crate) fn gecko_profiles_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
-  gecko_profiles_with_context(&context, browser_id)
+  runtime.check()?;
+  let profiles = gecko_profiles_with_context(&context, browser_id)?;
+  runtime.check()?;
+  Ok(profiles)
 }
 
 const MAX_DISCOVERY_ISSUE_SAMPLES: usize = 32;
@@ -2408,7 +2591,7 @@ fn canonical_installation_root<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   root_path: PathBuf,
   seen_installations: &mut HashSet<Vec<u8>>,
-  outcome: &mut EngineExtractionOutcome,
+  outcome: &mut EngineExtractionDraft,
 ) -> Option<PathBuf> {
   outcome.installations_detected += 1;
   let canonical_root = match context.fs.canonicalize(&root_path) {
@@ -2447,7 +2630,7 @@ fn canonical_installation_root<F: DiscoveryFs>(
 fn installation_root_is_directory<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   root_path: &Path,
-  outcome: &mut EngineExtractionOutcome,
+  outcome: &mut EngineExtractionDraft,
 ) -> bool {
   match context.fs.metadata(root_path) {
     Ok(metadata) => metadata.is_dir(),
@@ -2474,7 +2657,7 @@ fn installation_root_is_directory<F: DiscoveryFs>(
 fn discover_gecko_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   let registry = embedded_registry()?;
   let definition = browser_definition(registry, context.platform, browser_id)?;
   if definition.engine != BrowserEngine::Gecko {
@@ -2484,7 +2667,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
   roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
   let mut seen_installations = HashSet::new();
   let mut seen_profiles: HashMap<Vec<u8>, usize> = HashMap::new();
-  let mut outcome = EngineExtractionOutcome::default();
+  let mut outcome = EngineExtractionDraft::default();
 
   for root in roots {
     if root.discovery != DiscoveryStrategy::MozillaProfilesIni {
@@ -2668,7 +2851,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
         .unwrap_or(ProfileLocator::Absolute(&profile_path));
       let legacy_is_default = declared_profile.is_default;
       seen_profiles.insert(profile_key, outcome.profiles.len());
-      outcome.profiles.push(EngineProfileExtraction {
+      outcome.profiles.push(EngineProfileDraft {
         profile_id: profile_id(&installation_id, locator),
         installation_id: installation_id.clone(),
         installation_priority: root.priority,
@@ -2694,7 +2877,7 @@ fn discover_gecko_with_context<F: DiscoveryFs>(
 /// Section 5.5 ordering: installations by registry priority then normalized
 /// path, then profiles default-first, by locale-independent lowercase name, raw
 /// name, and finally normalized path.
-fn sort_engine_profiles(profiles: &mut [EngineProfileExtraction]) {
+fn sort_engine_profiles(profiles: &mut [EngineProfileDraft]) {
   profiles.sort_by(|left, right| {
     left
       .installation_priority
@@ -2718,7 +2901,7 @@ fn gecko_report_with_context<F: DiscoveryFs>(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<&[String]>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
   gecko_report_with_query(
     context,
     browser_id,
@@ -2739,9 +2922,9 @@ fn gecko_report_with_query<F: DiscoveryFs, Q>(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<EngineExtractionOutcome>
+) -> Result<EngineExtractionDraft>
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaEngineExtractionOutcome,
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
 {
   let mut outcome = discover_gecko_with_context(context, browser_id)?;
   select_engine_profiles(
@@ -2755,29 +2938,31 @@ where
 }
 
 fn populate_gecko_sources<Q, E>(
-  outcome: EngineExtractionOutcome,
+  outcome: EngineExtractionDraft,
   domains: Option<&[String]>,
   query: Q,
   persistent_exists: E,
-) -> EngineExtractionOutcome
+) -> EngineExtractionDraft
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaEngineExtractionOutcome,
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
   E: FnMut(&Path) -> bool,
 {
   populate_gecko_sources_with_order(outcome, domains, query, persistent_exists, true)
 }
 
 fn populate_gecko_sources_with_order<Q, E>(
-  mut outcome: EngineExtractionOutcome,
+  mut outcome: EngineExtractionDraft,
   domains: Option<&[String]>,
   mut query: Q,
   mut persistent_exists: E,
   sort_output: bool,
-) -> EngineExtractionOutcome
+) -> EngineExtractionDraft
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaEngineExtractionOutcome,
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
   E: FnMut(&Path) -> bool,
 {
+  #[cfg(not(test))]
+  let _ = sort_output;
   for profile in &mut outcome.profiles {
     let persistent = profile.path.join("cookies.sqlite");
     // The Mozilla outcome also owns session fallback. A missing persistent DB
@@ -2790,12 +2975,17 @@ where
     // reported instead of vanishing. Inferring from the query alone would
     // silence a database that appeared and was corrupt or locked.
     let extraction = query(&persistent, domains);
-    if profile.persistent_source_discovered || persistent_exists(&persistent) {
+    let boundary_stop = extraction.boundary_stop;
+    if extraction.persistent_attempted
+      && (profile.persistent_source_discovered || persistent_exists(&persistent))
+    {
+      #[cfg(test)]
       let mut persistent_cookies = extraction.persistent_cookies;
+      #[cfg(test)]
       if sort_output {
         sort_cookies(&mut persistent_cookies);
       }
-      profile.sources.push(EngineSourceExtraction {
+      profile.sources.push(EngineSourceDraft {
         path: persistent,
         role: SOURCE_ROLE_PERSISTENT,
         format: mozilla::PERSISTENT_FORMAT_ID,
@@ -2803,7 +2993,18 @@ where
         selected: true,
         rows_seen: extraction.persistent_rows_seen,
         rows_skipped: extraction.persistent_rows_skipped,
-        cookies: persistent_cookies,
+        rows_rejected: extraction.persistent_rows_rejected,
+        cookies: {
+          #[cfg(test)]
+          {
+            persistent_cookies
+          }
+          #[cfg(not(test))]
+          {
+            Vec::new()
+          }
+        },
+        records: extraction.persistent_records,
         acquisition: extraction.persistent_acquisition_strategy.into(),
         acquisition_attempts: extraction.persistent_acquisition_attempts,
         // `diagnostics` carries acquisition retry notes, which a report renders
@@ -2824,11 +3025,14 @@ where
     }
     profile
       .sources
-      .extend(extraction.session_sources.into_iter().map(|mut source| {
+      .extend(extraction.session_sources.into_iter().map(|source| {
+        #[cfg(test)]
+        let mut source = source;
+        #[cfg(test)]
         if sort_output {
           sort_cookies(&mut source.cookies);
         }
-        EngineSourceExtraction {
+        EngineSourceDraft {
           path: source.path,
           role: SOURCE_ROLE_SESSION,
           format: source.format,
@@ -2836,7 +3040,18 @@ where
           selected: source.selected,
           rows_seen: source.rows_seen,
           rows_skipped: source.rows_skipped,
-          cookies: source.cookies,
+          rows_rejected: source.rows_rejected,
+          cookies: {
+            #[cfg(test)]
+            {
+              source.cookies
+            }
+            #[cfg(not(test))]
+            {
+              Vec::new()
+            }
+          },
+          records: source.records,
           acquisition: SourceAcquisition::StableFileImage,
           acquisition_attempts: source.acquisition_attempts,
           diagnostics: source.diagnostics,
@@ -2850,6 +3065,13 @@ where
           row_error: None,
         }
       }));
+    if boundary_stop.is_some() {
+      outcome.boundary_stop = boundary_stop;
+      break;
+    }
+  }
+  if outcome.boundary_stop.is_some() {
+    retain_completed_engine_work(&mut outcome);
   }
   outcome
 }
@@ -2858,12 +3080,45 @@ pub(crate) fn gecko_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
-  let context = DiscoveryContext::system()?;
-  gecko_report_with_context(&context, browser_id, profile_id, domains.as_deref())
+) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  gecko_report_with_runtime(browser_id, profile_id, domains, &runtime)
 }
 
-fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionOutcome) {
+pub(crate) fn gecko_report_with_runtime(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
+  let context = DiscoveryContext::system()?;
+  runtime.check()?;
+  let outcome = gecko_report_with_query(
+    &context,
+    browser_id,
+    profile_id,
+    domains.as_deref(),
+    |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
+  )?;
+  Ok(retain_gecko_runtime_stop(outcome, runtime))
+}
+
+fn retain_gecko_runtime_stop(
+  mut outcome: EngineExtractionDraft,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> EngineExtractionDraft {
+  if let Err(stop) = runtime.check() {
+    outcome.boundary_stop.get_or_insert(stop);
+  }
+  if outcome.boundary_stop.is_some() {
+    retain_completed_engine_work(&mut outcome);
+  }
+  outcome
+}
+
+fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionDraft) {
   // Generic Gecko reports remain display-name sorted. The compatibility
   // selector instead uses the default profile when it has cookies.sqlite,
   // then falls back in profiles.ini declaration order within each root.
@@ -2884,7 +3139,7 @@ fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionOutcome) {
   });
 }
 
-fn select_legacy_gecko_profile(outcome: &mut EngineExtractionOutcome) {
+fn select_legacy_gecko_profile(outcome: &mut EngineExtractionDraft) {
   sort_legacy_gecko_profiles(outcome);
   outcome.profiles.truncate(1);
 }
@@ -2895,25 +3150,51 @@ fn select_legacy_gecko_profile(outcome: &mut EngineExtractionOutcome) {
 pub(crate) fn legacy_gecko_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionOutcome> {
+) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  legacy_gecko_outcome_with_runtime(browser_id, domains, &runtime)
+}
+
+pub(crate) fn legacy_gecko_outcome_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
+  runtime.check()?;
   let mut outcome = discover_gecko_with_context(&context, browser_id)?;
   select_legacy_gecko_profile(&mut outcome);
-  Ok(populate_gecko_sources_with_order(
+  let outcome = populate_gecko_sources_with_order(
     outcome,
     domains.as_deref(),
-    mozilla::query_cookies_engine_outcome,
+    |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
     |path| context.fs.exists(path),
     false,
-  ))
+  );
+  Ok(retain_gecko_runtime_stop(outcome, runtime))
 }
 
 /// Lists persistent Gecko profiles in the same deterministic registry order
 /// used by the compatibility selector.
-pub(crate) fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionOutcome> {
+pub(crate) fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  legacy_gecko_profiles_with_runtime(browser_id, &runtime)
+}
+
+pub(crate) fn legacy_gecko_profiles_with_runtime(
+  browser_id: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<EngineExtractionDraft> {
+  runtime.check()?;
   let context = DiscoveryContext::system()?;
+  runtime.check()?;
   let mut outcome = discover_gecko_with_context(&context, browser_id)?;
+  runtime.check()?;
   sort_legacy_gecko_profiles(&mut outcome);
+  runtime.check()?;
   Ok(outcome)
 }
 
@@ -2938,7 +3219,9 @@ fn engine_roots<'a>(
 mod safari;
 
 #[cfg(target_os = "macos")]
-pub(crate) use safari::{legacy_safari_outcome, safari_profiles, safari_report};
+pub(crate) use safari::{
+  legacy_safari_outcome_with_runtime, safari_profiles_with_runtime, safari_report_with_runtime,
+};
 
 #[cfg(any(target_os = "windows", test))]
 mod internet_explorer;
@@ -2947,7 +3230,8 @@ mod internet_explorer;
 pub(crate) use internet_explorer::InternetExplorerRows;
 #[cfg(target_os = "windows")]
 pub(crate) use internet_explorer::{
-  internet_explorer_profiles, internet_explorer_report, legacy_internet_explorer_outcome,
+  internet_explorer_profiles_with_runtime, internet_explorer_report_with_runtime,
+  legacy_internet_explorer_outcome_with_runtime,
 };
 
 /// Context-injected engine seams for the cross-engine report tests. They keep
@@ -3034,7 +3318,7 @@ pub(crate) mod test_seams {
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
     denied: PathBuf,
-  ) -> Result<EngineExtractionOutcome> {
+  ) -> Result<EngineExtractionDraft> {
     let denied_context = DiscoveryContext {
       platform: context.platform,
       home: context.home.clone(),
@@ -3162,10 +3446,16 @@ pub(crate) mod test_seams {
     profile_id: Option<&str>,
     domains: Option<Vec<String>>,
     keys: ChromiumKeyOutcomes,
-  ) -> Result<ChromiumRegistryReport> {
+  ) -> Result<ChromiumRegistryDraft> {
     struct FixedKeys(ChromiumKeyOutcomes);
-    impl ChromiumKeyProvider<BrowserInstallation> for FixedKeys {
-      fn retrieve(&self, _installation: &BrowserInstallation) -> ChromiumKeyOutcomes {
+    impl KeyProvider<BrowserInstallation> for FixedKeys {
+      type Keys = ChromiumKeyOutcomes;
+
+      fn keys(
+        &self,
+        _installation: &BrowserInstallation,
+        _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+      ) -> ChromiumKeyOutcomes {
         self.0.clone()
       }
     }
@@ -3187,7 +3477,7 @@ pub(crate) mod test_seams {
     browser_id: &str,
     profile_id: Option<&str>,
     domains: Option<&[String]>,
-  ) -> Result<EngineExtractionOutcome> {
+  ) -> Result<EngineExtractionDraft> {
     gecko_report_with_context(context, browser_id, profile_id, domains)
   }
 
@@ -3201,7 +3491,7 @@ pub(crate) mod test_seams {
     browser_id: &str,
     domains: Option<&[String]>,
     mut on_before_query: R,
-  ) -> Result<EngineExtractionOutcome>
+  ) -> Result<EngineExtractionDraft>
   where
     R: FnMut(&Path),
   {
@@ -3220,7 +3510,7 @@ pub(crate) mod test_seams {
   pub(crate) fn gecko_profiles(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
-  ) -> Result<EngineExtractionOutcome> {
+  ) -> Result<EngineExtractionDraft> {
     gecko_profiles_with_context(context, browser_id)
   }
 
@@ -3229,7 +3519,7 @@ pub(crate) mod test_seams {
     browser_id: &str,
     profile_id: Option<&str>,
     domains: Option<&[String]>,
-  ) -> Result<EngineExtractionOutcome> {
+  ) -> Result<EngineExtractionDraft> {
     safari_report_with_context(context, browser_id, profile_id, domains)
   }
 
@@ -3239,7 +3529,7 @@ pub(crate) mod test_seams {
     profile_id: Option<&str>,
     domains: Option<&[String]>,
     query: Q,
-  ) -> Result<EngineExtractionOutcome>
+  ) -> Result<EngineExtractionDraft>
   where
     Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
   {
@@ -5264,9 +5554,9 @@ mod tests {
       assert_eq!(profile.sources.len(), 1);
       assert_eq!(
         profile.sources[0].acquisition,
-        SourceAcquisition::EseDatabase
+        SourceAcquisition::NotAttempted
       );
-      assert_eq!(profile.sources[0].acquisition_attempts, 1);
+      assert_eq!(profile.sources[0].acquisition_attempts, 0);
     }
     let rediscovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("rediscover both WebCache roots");
@@ -5284,9 +5574,10 @@ mod tests {
     );
     let rows = |_: &Path, _: Option<&[String]>| {
       Ok(InternetExplorerRows {
-        cookies: Vec::new(),
+        records: Vec::new(),
         records_seen: 0,
         records_skipped: 0,
+        records_rejected: 0,
         row_error: None,
       })
     };
@@ -5459,9 +5750,10 @@ mod tests {
     let outcome =
       internet_explorer_report_with_context(&context, "internet_explorer", None, None, |_, _| {
         Ok(InternetExplorerRows {
-          cookies: Vec::new(),
+          records: Vec::new(),
           records_seen: 2,
           records_skipped: 1,
+          records_rejected: 1,
           row_error: Some("invalid WebCache record".to_owned()),
         })
       })
@@ -5470,6 +5762,7 @@ mod tests {
     let source = &outcome.profiles[0].sources[0];
     assert_eq!(source.rows_seen, 2);
     assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.rows_rejected, 1);
     assert_eq!(source.row_error.as_deref(), Some("invalid WebCache record"));
   }
 
@@ -5667,11 +5960,14 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
-      |_, _| mozilla::MozillaEngineExtractionOutcome {
+      |_, _| mozilla::MozillaExtractionDraft {
+        persistent_attempted: true,
+        persistent_acquisition_attempts: 1,
         persistent_rows_seen: 2,
         persistent_rows_skipped: 1,
+        persistent_rows_rejected: 1,
         persistent_row_error: Some("failed to read value from row: invalid utf-8".to_owned()),
-        ..mozilla::MozillaEngineExtractionOutcome::default()
+        ..mozilla::MozillaExtractionDraft::default()
       },
       |path| path.exists(),
     );
@@ -5684,6 +5980,117 @@ mod tests {
     assert!(source.diagnostics.is_empty());
     assert!(source.error.is_none());
     assert_eq!(source.rows_skipped, 1);
+    assert_eq!(source.rows_rejected, 1);
+  }
+
+  fn stopped_gecko_adapter_outcome(
+    stop: crate::common::deadline::BoundaryStop,
+  ) -> EngineExtractionDraft {
+    let profiles = (0..3)
+      .map(|index| {
+        let path = PathBuf::from(format!("/profiles/gecko-{index}"));
+        EngineProfileDraft {
+          profile_id: format!("{index:064x}"),
+          installation_id: "0".repeat(64),
+          installation_priority: 10,
+          legacy_installation_priority: 10,
+          legacy_profile_order: index,
+          legacy_is_default: index == 0,
+          legacy_eligible: true,
+          installation_path: PathBuf::from("/profiles"),
+          legacy_installation_path: PathBuf::from("/profiles"),
+          name: format!("profile-{index}"),
+          legacy_name: format!("profile-{index}"),
+          path,
+          is_default: index == 0,
+          persistent_source_discovered: true,
+          sources: Vec::new(),
+        }
+      })
+      .collect();
+    let discovered = EngineExtractionDraft {
+      profiles,
+      discovery_issues: Vec::new(),
+      installations_discovered: 1,
+      installations_detected: 1,
+      installations_enumerated: 1,
+      boundary_stop: None,
+    };
+    let calls = std::cell::Cell::new(0);
+    let populated = populate_gecko_sources(
+      discovered,
+      None,
+      |_, _| {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+          mozilla::MozillaExtractionDraft {
+            persistent_attempted: true,
+            persistent_cookies: vec![Cookie {
+              domain: ".example.com".to_owned(),
+              path: "/".to_owned(),
+              secure: false,
+              expires: None,
+              name: "retained".to_owned(),
+              value: "value".to_owned(),
+              http_only: false,
+              same_site: 0,
+            }],
+            persistent_rows_seen: 1,
+            persistent_acquisition_strategy: Some(
+              DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
+            ),
+            persistent_acquisition_attempts: 1,
+            ..mozilla::MozillaExtractionDraft::default()
+          }
+        } else {
+          mozilla::MozillaExtractionDraft {
+            boundary_stop: Some(stop),
+            ..mozilla::MozillaExtractionDraft::default()
+          }
+        }
+      },
+      |_| true,
+    );
+    assert_eq!(calls.get(), 2, "later profiles must not be queried");
+    populated
+  }
+
+  #[test]
+  fn gecko_adapter_report_and_legacy_drop_interrupted_discovery_placeholders() {
+    use crate::common::deadline::BoundaryStop;
+
+    for (stop, expected_termination) in [
+      (BoundaryStop::TimedOut, "timed_out"),
+      (BoundaryStop::Cancelled, "cancelled"),
+      (BoundaryStop::ResourceExhausted, "resource_exhausted"),
+    ] {
+      let populated = stopped_gecko_adapter_outcome(stop);
+      assert_eq!(populated.boundary_stop, Some(stop));
+      assert_eq!(populated.profiles.len(), 1);
+      assert_eq!(populated.profiles[0].sources.len(), 1);
+
+      let report = crate::browser::report_build::project_engine_report(
+        "firefox",
+        stopped_gecko_adapter_outcome(stop),
+      )
+      .expect("project stopped Gecko report");
+      assert_eq!(report.termination.as_str(), expected_termination);
+      assert_eq!(report.profiles.len(), 1);
+      assert_eq!(report.profiles[0].sources.len(), 1);
+      assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
+      assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("profile_extraction_failed"));
+
+      let cookies = crate::browser::legacy::project_engine_outcome(
+        "firefox",
+        stopped_gecko_adapter_outcome(stop),
+      )
+      .expect("legacy projection retains completed Gecko work");
+      assert_eq!(cookies.len(), 1);
+      assert_eq!(cookies[0].name, "retained");
+    }
   }
 
   #[test]
@@ -5923,8 +6330,70 @@ mod tests {
     calls: RefCell<BTreeMap<String, usize>>,
   }
 
-  impl ChromiumKeyProvider<BrowserInstallation> for CountingProvider {
-    fn retrieve(&self, installation: &BrowserInstallation) -> ChromiumKeyOutcomes {
+  #[test]
+  fn provider_consuming_the_request_budget_prevents_profile_acquisition() {
+    use crate::common::deadline::{test_clock::ManualClock, BoundaryStop, Deadline};
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    struct BudgetConsumer<'a> {
+      clock: &'a ManualClock,
+      calls: Cell<usize>,
+    }
+
+    impl KeyProvider<BrowserInstallation> for BudgetConsumer<'_> {
+      type Keys = ChromiumKeyOutcomes;
+
+      fn keys(
+        &self,
+        _installation: &BrowserInstallation,
+        runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+      ) -> ChromiumKeyOutcomes {
+        runtime.check().expect("provider starts inside the budget");
+        self.calls.set(self.calls.get() + 1);
+        self.clock.advance(Duration::from_secs(1));
+        ChromiumKeyOutcomes::default()
+      }
+    }
+
+    let temp = TempDir::new("provider-consumes-budget");
+    let context = test_context(temp.path().join("home"));
+    let root = channel_root(&context, "stable");
+    write_local_state(
+      &root,
+      serde_json::json!({"profile": {"info_cache": {"Default": {"name": "Person 1"}}}}),
+    );
+    seed_cookie(&root.join("Default"), true, "must-not-decode", "value");
+
+    let clock = ManualClock::default();
+    let runtime = crate::common::deadline::BoundaryRuntime::new(
+      &clock,
+      Deadline::after(&clock, Duration::from_secs(1)),
+    );
+    let provider = BudgetConsumer {
+      clock: &clock,
+      calls: Cell::new(0),
+    };
+    let report =
+      extract_chromium_with_provider_runtime(&context, "chrome", None, None, &provider, &runtime)
+        .expect("typed stop is retained in the draft");
+
+    assert_eq!(provider.calls.get(), 1);
+    assert_eq!(report.boundary_stop, Some(BoundaryStop::TimedOut));
+    assert!(
+      report.installations.is_empty(),
+      "no profile query may start"
+    );
+  }
+
+  impl KeyProvider<BrowserInstallation> for CountingProvider {
+    type Keys = ChromiumKeyOutcomes;
+
+    fn keys(
+      &self,
+      installation: &BrowserInstallation,
+      _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+    ) -> ChromiumKeyOutcomes {
       *self
         .calls
         .borrow_mut()
@@ -6482,7 +6951,9 @@ mod tests {
         profiles: Vec::new(),
       };
 
-      let outcomes = SystemChromiumKeyProvider.retrieve(&installation);
+      let clock = crate::common::deadline::SystemClock;
+      let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+      let outcomes = SystemKeyProvider.keys(&installation, &runtime);
       let ChromiumKeyOutcome::Failure(failure) = &outcomes.v10 else {
         panic!("{browser_id} v10 must fail typed, got {:?}", outcomes.v10);
       };
@@ -6522,14 +6993,9 @@ mod tests {
         .expect("store an encrypted cookie value");
       drop(connection);
 
-      let report = extract_chromium_with_provider(
-        &context,
-        browser_id,
-        None,
-        None,
-        &SystemChromiumKeyProvider,
-      )
-      .expect("a missing keychain identity is a per-profile error, not a discovery failure");
+      let report =
+        extract_chromium_with_provider(&context, browser_id, None, None, &SystemKeyProvider)
+          .expect("a missing keychain identity is a per-profile error, not a discovery failure");
 
       let profiles = report
         .installations
@@ -6897,9 +7363,8 @@ mod tests {
       &CountingProvider::default(),
     )
     .expect("extract default Linux Chrome profile");
-    let cookies = project_legacy_chromium_report("chrome", report)
-      .expect("project legacy Chrome report")
-      .expect("Chrome cookie source");
+    let cookies = crate::browser::legacy::project_chromium_outcome("chrome", report)
+      .expect("project legacy Chrome report");
 
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "network-cookie");
@@ -7160,7 +7625,7 @@ mod tests {
       .discovery_issues
       .iter()
       .any(|issue| issue.code == "installation_glob_expand_failed"));
-    let error = project_legacy_chromium_report("octo_browser", report)
+    let error = crate::browser::legacy::project_chromium_outcome("octo_browser", report)
       .expect_err("named projection must preserve a total discovery failure");
     assert!(error
       .to_string()
@@ -8430,7 +8895,7 @@ mod tests {
       &CountingProvider::default(),
     )
     .expect("retain failed legacy discovery");
-    let error = project_legacy_chromium_report("chrome", report)
+    let error = crate::browser::legacy::project_chromium_outcome("chrome", report)
       .expect_err("named extraction must surface lost profiles");
     assert!(error
       .to_string()

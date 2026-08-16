@@ -79,6 +79,7 @@ if (profiles.length === 0) {
 // `undefined`, which is the "every profile" argument, so the query silently
 // widens instead of returning nothing.
 const report = await browserReport("chrome", profiles[0].profile.profileId, ["example.com"]);
+if (report.schemaVersion !== 1) throw new Error("unsupported report schema");
 
 console.log(report.status, report.summary.cookiesEmitted);
 for (const profile of report.profiles) {
@@ -95,6 +96,13 @@ A profile's cookie stream is its `selected` sources whose `status` is
 that was attempted and rejected in favour of another candidate can still report
 `succeeded`, so filtering on status alone would double-count a profile whose
 engine tried more than one candidate.
+
+`schemaVersion` versions the serialized report shape; reject a value your
+consumer does not understand. `termination` describes why execution stopped
+and is independent from `status`: its current vocabulary is `completed`,
+`timed_out`, `cancelled`, and `resource_exhausted`. For example, a timed-out
+request can still have `status: "partial"` and retain sources that completed
+before the deadline.
 
 `supportedBrowsers()` lists what is registered for the running OS, which is not
 the same as what is installed. `loadReport()` is the report-shaped counterpart
@@ -116,11 +124,11 @@ empty profile list, or to a report whose `status` is `no_sources`. Extraction
 failures are likewise not errors — they arrive as a resolved report whose
 `status` and `issues` describe them.
 
-Every identifier and code — `status`, `role`, `format`, `acquisitionStrategy`,
-issue `code`/`stage`/`severity` — is an open string, so compare against a known
-value and keep a fallback branch rather than switching exhaustively. Every
-counter is an ordinary JavaScript number, never a `BigInt`; a count that would
-overflow is clamped and sets `countersSaturated`.
+Every identifier and code — `status`, `termination`, `role`, `format`,
+`acquisitionStrategy`, issue `code`/`stage`/`severity` — is an open string, so
+compare against a known value and keep a fallback branch rather than switching
+exhaustively. Every counter is an ordinary JavaScript number, never a `BigInt`;
+a count that would overflow is clamped and sets `countersSaturated`.
 
 ## Explicit paths
 

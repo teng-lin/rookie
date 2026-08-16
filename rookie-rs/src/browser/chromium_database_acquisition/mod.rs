@@ -4,7 +4,11 @@
 //! characterized on every host. Native file probing, shadow-copy acquisition,
 //! privilege inspection, and Restart Manager calls live in the Windows leaf.
 
-use crate::common::sqlite;
+use crate::common::{
+  deadline::BoundaryRuntime,
+  diagnostic::{sanitize, REDACTED_PATH},
+  sqlite,
+};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -53,7 +57,7 @@ struct WindowsSharingViolation {
 
 /// Typed context for a Windows browser database that ordinary acquisition
 /// could not read because another process denied file sharing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct WindowsDatabaseLocked {
   pub(crate) locked_file: WindowsLockedFile,
   pub(crate) locked_path: PathBuf,
@@ -75,10 +79,22 @@ impl std::fmt::Display for WindowsDatabaseLocked {
     };
     write!(
       formatter,
-      "Windows browser {file} is share-locked at {} (OS error {}); {policy}",
-      self.locked_path.display(),
+      "Windows browser {file} is share-locked at {REDACTED_PATH} (OS error {}); {policy}",
       self.os_error
     )
+  }
+}
+
+impl std::fmt::Debug for WindowsDatabaseLocked {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("WindowsDatabaseLocked")
+      .field("locked_file", &self.locked_file)
+      .field("locked_path", &REDACTED_PATH)
+      .field("has_verified_nonempty_wal", &self.has_verified_nonempty_wal)
+      .field("shutdown_allowed", &self.shutdown_allowed)
+      .field("os_error", &self.os_error)
+      .finish()
   }
 }
 
@@ -98,8 +114,8 @@ struct WindowsShadowFallbackFailure {
 impl WindowsShadowFallbackFailure {
   fn new(shadow_error: &anyhow::Error, retry_error: Option<&anyhow::Error>) -> Self {
     Self {
-      shadow_diagnostic: format!("{shadow_error:#}"),
-      retry_diagnostic: retry_error.map(|error| format!("{error:#}")),
+      shadow_diagnostic: sanitize(&format!("{shadow_error:#}")),
+      retry_diagnostic: retry_error.map(|error| sanitize(&format!("{error:#}"))),
     }
   }
 }
@@ -126,6 +142,12 @@ impl std::error::Error for WindowsShadowFallbackFailure {}
 struct WindowsFallbackSource<Guard> {
   path: PathBuf,
   _guard: Guard,
+}
+
+struct WindowsRecoveryRequest<'a> {
+  db_path: &'a Path,
+  policy: WindowsLockedDatabasePolicy,
+  runtime: &'a BoundaryRuntime<'a>,
 }
 
 fn windows_locked_error(
@@ -183,6 +205,43 @@ fn is_sqlite_cant_open(error: &anyhow::Error) -> bool {
   })
 }
 
+fn classify_windows_sharing_violation_with_fallible_probe<Probe>(
+  db_path: &Path,
+  error: &anyhow::Error,
+  mut probe: Probe,
+) -> Result<Option<WindowsSharingViolation>>
+where
+  Probe: FnMut(&Path, bool) -> Result<Option<WindowsSharingViolation>>,
+{
+  let Some(failure) = error.downcast_ref::<sqlite::BrowserDatabaseFailure>() else {
+    return Ok(None);
+  };
+  if failure.kind != sqlite::BrowserDatabaseFailureKind::Acquisition {
+    return Ok(None);
+  }
+
+  let direct_code = sharing_code_in_error_chain(error);
+  if direct_code.is_none() && !is_sqlite_cant_open(error) {
+    return Ok(None);
+  }
+
+  if let Some(mut violation) = probe(db_path, direct_code.is_some())? {
+    if failure.strategy == Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot) {
+      violation.has_verified_nonempty_wal = true;
+    }
+    return Ok(Some(violation));
+  }
+
+  Ok(direct_code.map(|os_error| WindowsSharingViolation {
+    locked_file: WindowsLockedFile::Database,
+    locked_path: db_path.to_path_buf(),
+    has_verified_nonempty_wal: failure.strategy
+      == Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot),
+    os_error,
+  }))
+}
+
+#[cfg(test)]
 fn classify_windows_sharing_violation_with_probe<Probe>(
   db_path: &Path,
   error: &anyhow::Error,
@@ -191,35 +250,22 @@ fn classify_windows_sharing_violation_with_probe<Probe>(
 where
   Probe: FnMut(&Path, bool) -> Option<WindowsSharingViolation>,
 {
-  let failure = error.downcast_ref::<sqlite::BrowserDatabaseFailure>()?;
-  if failure.kind != sqlite::BrowserDatabaseFailureKind::Acquisition {
-    return None;
-  }
-
-  let direct_code = sharing_code_in_error_chain(error);
-  if direct_code.is_none() && !is_sqlite_cant_open(error) {
-    return None;
-  }
-
-  if let Some(mut violation) = probe(db_path, direct_code.is_some()) {
-    if failure.strategy == Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot) {
-      violation.has_verified_nonempty_wal = true;
-    }
-    return Some(violation);
-  }
-
-  direct_code.map(|os_error| WindowsSharingViolation {
-    locked_file: WindowsLockedFile::Database,
-    locked_path: db_path.to_path_buf(),
-    has_verified_nonempty_wal: failure.strategy
-      == Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot),
-    os_error,
+  classify_windows_sharing_violation_with_fallible_probe(db_path, error, |path, include_wal| {
+    Ok(probe(path, include_wal))
   })
+  .expect("infallible test probe")
 }
 
-fn with_windows_locked_database_policy<T, Guard, Query, Classify, IsAdmin, Shadow, Shutdown>(
-  db_path: &Path,
-  policy: WindowsLockedDatabasePolicy,
+fn with_windows_locked_database_policy_with_runtime<
+  T,
+  Guard,
+  Query,
+  Classify,
+  IsAdmin,
+  Shadow,
+  Shutdown,
+>(
+  request: WindowsRecoveryRequest<'_>,
   mut query: Query,
   mut classify: Classify,
   mut is_admin: IsAdmin,
@@ -227,28 +273,58 @@ fn with_windows_locked_database_policy<T, Guard, Query, Classify, IsAdmin, Shado
   mut shutdown: Shutdown,
 ) -> Result<T>
 where
-  Query: FnMut(&Path) -> Result<T>,
-  Classify: FnMut(&Path, &anyhow::Error) -> Option<WindowsSharingViolation>,
-  IsAdmin: FnMut() -> bool,
-  Shadow: FnMut(&Path) -> Result<WindowsFallbackSource<Guard>>,
-  Shutdown: FnMut(&Path) -> bool,
+  Query: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<T>,
+  Classify:
+    FnMut(&Path, &anyhow::Error, &BoundaryRuntime<'_>) -> Result<Option<WindowsSharingViolation>>,
+  IsAdmin: FnMut(&BoundaryRuntime<'_>) -> Result<bool>,
+  Shadow: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<WindowsFallbackSource<Guard>>,
+  Shutdown: FnMut(&Path, &BoundaryRuntime<'_>) -> Result<bool>,
 {
-  let ordinary_error = match query(db_path) {
+  let WindowsRecoveryRequest {
+    db_path,
+    policy,
+    runtime,
+  } = request;
+  runtime.check()?;
+  let ordinary_error = match query(db_path, runtime) {
     Ok(value) => return Ok(value),
-    Err(error) => error,
+    Err(error) => {
+      runtime.check()?;
+      error
+    }
   };
-  let Some(violation) = classify(db_path, &ordinary_error) else {
+  let violation = classify(db_path, &ordinary_error, runtime);
+  runtime.check()?;
+  let Some(violation) = violation? else {
     return Err(ordinary_error);
   };
 
   let mut shadow_error = None;
-  if violation.has_verified_nonempty_wal && is_admin() {
-    match shadow(db_path) {
+  let is_admin = if violation.has_verified_nonempty_wal {
+    runtime.check()?;
+    let result = is_admin(runtime);
+    runtime.check()?;
+    result?
+  } else {
+    false
+  };
+  if violation.has_verified_nonempty_wal && is_admin {
+    runtime.check()?;
+    let shadow_result = shadow(db_path, runtime);
+    runtime.check()?;
+    match shadow_result {
       Ok(source) => {
         // The guard keeps the static shadow directory alive for the complete
         // query. A query/decode failure on this acquired source is final and
         // never grants permission to terminate the live browser.
-        return query(&source.path);
+        runtime.check()?;
+        return match query(&source.path, runtime) {
+          Ok(value) => Ok(value),
+          Err(error) => {
+            runtime.check()?;
+            Err(error)
+          }
+        };
       }
       Err(error) if !policy.allows_process_shutdown() => {
         return Err(windows_locked_after_shadow_failure(
@@ -266,24 +342,41 @@ where
     }
   }
 
-  if policy.allows_process_shutdown() && shutdown(&violation.locked_path) {
-    return query(db_path).map_err(|error| {
-      if let Some(shadow_error) = &shadow_error {
-        let retry_violation = classify(db_path, &error).unwrap_or_else(|| violation.clone());
-        return windows_locked_after_shadow_failure(
-          ordinary_error,
-          &retry_violation,
-          policy,
-          shadow_error,
-          Some(&error),
-        );
-      }
-      if let Some(retry_violation) = classify(db_path, &error) {
-        error.context(windows_locked_error(&retry_violation, policy))
-      } else {
+  let shutdown_succeeded = if policy.allows_process_shutdown() {
+    runtime.check()?;
+    let result = shutdown(&violation.locked_path, runtime);
+    runtime.check()?;
+    result?
+  } else {
+    false
+  };
+  if shutdown_succeeded {
+    runtime.check()?;
+    let retry_error = match query(db_path, runtime) {
+      Ok(value) => return Ok(value),
+      Err(error) => {
+        runtime.check()?;
         error
       }
-    });
+    };
+    let retry_violation = classify(db_path, &retry_error, runtime);
+    runtime.check()?;
+    let retry_violation = retry_violation?;
+    if let Some(shadow_error) = &shadow_error {
+      let retry_violation = retry_violation.unwrap_or_else(|| violation.clone());
+      return Err(windows_locked_after_shadow_failure(
+        ordinary_error,
+        &retry_violation,
+        policy,
+        shadow_error,
+        Some(&retry_error),
+      ));
+    }
+    return if let Some(retry_violation) = retry_violation {
+      Err(retry_error.context(windows_locked_error(&retry_violation, policy)))
+    } else {
+      Err(retry_error)
+    };
   }
 
   if let Some(shadow_error) = &shadow_error {
@@ -297,6 +390,39 @@ where
   }
 
   Err(ordinary_error.context(windows_locked_error(&violation, policy)))
+}
+
+#[cfg(test)]
+fn with_windows_locked_database_policy<T, Guard, Query, Classify, IsAdmin, Shadow, Shutdown>(
+  db_path: &Path,
+  policy: WindowsLockedDatabasePolicy,
+  mut query: Query,
+  mut classify: Classify,
+  mut is_admin: IsAdmin,
+  mut shadow: Shadow,
+  mut shutdown: Shutdown,
+) -> Result<T>
+where
+  Query: FnMut(&Path) -> Result<T>,
+  Classify: FnMut(&Path, &anyhow::Error) -> Option<WindowsSharingViolation>,
+  IsAdmin: FnMut() -> bool,
+  Shadow: FnMut(&Path) -> Result<WindowsFallbackSource<Guard>>,
+  Shutdown: FnMut(&Path) -> bool,
+{
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  with_windows_locked_database_policy_with_runtime(
+    WindowsRecoveryRequest {
+      db_path,
+      policy,
+      runtime: &runtime,
+    },
+    |path, _| query(path),
+    |path, error, _| Ok(classify(path, error)),
+    |_| Ok(is_admin()),
+    |path, _| shadow(path),
+    |path, _| Ok(shutdown(path)),
+  )
 }
 
 #[cfg(test)]
@@ -353,6 +479,105 @@ mod tests {
   }
 
   #[test]
+  fn cancelled_windows_recovery_does_not_start_any_action() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop,
+    );
+    let query_calls = Cell::new(0);
+
+    let error = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: Path::new("Cookies"),
+        policy: WindowsLockedDatabasePolicy::AllowProcessShutdown,
+        runtime: &runtime,
+      },
+      |_, _| {
+        query_calls.set(query_calls.get() + 1);
+        Ok(())
+      },
+      |_, _, _| panic!("cancelled recovery must not classify"),
+      |_| panic!("cancelled recovery must not inspect privilege"),
+      |_, _| -> Result<WindowsFallbackSource<()>> {
+        panic!("cancelled recovery must not acquire a shadow")
+      },
+      |_, _| panic!("cancelled recovery must not stop processes"),
+    )
+    .expect_err("cancelled recovery");
+
+    assert_eq!(
+      error.downcast_ref::<crate::common::deadline::BoundaryStop>(),
+      Some(&crate::common::deadline::BoundaryStop::Cancelled)
+    );
+    assert_eq!(query_calls.get(), 0);
+  }
+
+  #[test]
+  fn resource_stop_after_privilege_check_prevents_shadow_and_shutdown_actions() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let db = PathBuf::from("Cookies");
+    let query_calls = Cell::new(0);
+    let privilege_calls = Cell::new(0);
+    let shadow_calls = Cell::new(0);
+    let shutdown_calls = Cell::new(0);
+
+    let error = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: &db,
+        policy: WindowsLockedDatabasePolicy::AllowProcessShutdown,
+        runtime: &runtime,
+      },
+      |_, _| {
+        query_calls.set(query_calls.get() + 1);
+        Err::<(), _>(anyhow!("share denied"))
+      },
+      |_, _, _| {
+        Ok(Some(sharing_violation(
+          &db,
+          WindowsLockedFile::Database,
+          true,
+        )))
+      },
+      |_| {
+        privilege_calls.set(privilege_calls.get() + 1);
+        stop.exhaust_resources();
+        Ok(true)
+      },
+      |_, _| {
+        shadow_calls.set(shadow_calls.get() + 1);
+        Ok(WindowsFallbackSource {
+          path: PathBuf::from("shadow"),
+          _guard: (),
+        })
+      },
+      |_, _| {
+        shutdown_calls.set(shutdown_calls.get() + 1);
+        Ok(true)
+      },
+    )
+    .expect_err("resource stop");
+
+    assert_eq!(
+      error.downcast_ref::<crate::common::deadline::BoundaryStop>(),
+      Some(&crate::common::deadline::BoundaryStop::ResourceExhausted)
+    );
+    assert_eq!(query_calls.get(), 1);
+    assert_eq!(privilege_calls.get(), 1);
+    assert_eq!(shadow_calls.get(), 0);
+    assert_eq!(shutdown_calls.get(), 0);
+  }
+
+  #[test]
   fn windows_policy_attempts_ordinary_query_before_any_fallback() {
     let db = PathBuf::from("ordinary/Cookies");
     let calls = RefCell::new(Vec::new());
@@ -374,6 +599,145 @@ mod tests {
 
     assert_eq!(value, "ordinary value");
     assert_eq!(*calls.borrow(), vec!["ordinary"]);
+  }
+
+  #[test]
+  fn successful_ordinary_query_commits_before_a_racing_stop() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+
+    let value = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: Path::new("Cookies"),
+        policy: WindowsLockedDatabasePolicy::AllowProcessShutdown,
+        runtime: &runtime,
+      },
+      |_, _| {
+        stop.cancel();
+        Ok("ordinary value")
+      },
+      |_, _, _| panic!("a completed ordinary query must not be classified"),
+      |_| panic!("a completed ordinary query must not inspect privilege"),
+      |_, _| -> Result<WindowsFallbackSource<()>> {
+        panic!("a completed ordinary query must not acquire a shadow")
+      },
+      |_, _| panic!("a completed ordinary query must not stop a process"),
+    )
+    .expect("completed ordinary result commits");
+
+    assert_eq!(value, "ordinary value");
+    assert_eq!(
+      runtime.check(),
+      Err(crate::common::deadline::BoundaryStop::Cancelled)
+    );
+  }
+
+  #[test]
+  fn successful_shadow_query_commits_before_a_racing_stop() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let db = PathBuf::from("live/Cookies");
+    let query_calls = Cell::new(0);
+
+    let value = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: &db,
+        policy: WindowsLockedDatabasePolicy::NonDisruptive,
+        runtime: &runtime,
+      },
+      |_, _| {
+        query_calls.set(query_calls.get() + 1);
+        if query_calls.get() == 1 {
+          Err(anyhow!("share denied"))
+        } else {
+          stop.cancel();
+          Ok("shadow value")
+        }
+      },
+      |_, _, _| {
+        Ok(Some(sharing_violation(
+          &db,
+          WindowsLockedFile::Database,
+          true,
+        )))
+      },
+      |_| Ok(true),
+      |_, _| {
+        Ok(WindowsFallbackSource {
+          path: PathBuf::from("shadow/Cookies"),
+          _guard: (),
+        })
+      },
+      |_, _| panic!("a completed shadow query must not stop a process"),
+    )
+    .expect("completed shadow result commits");
+
+    assert_eq!(value, "shadow value");
+    assert_eq!(query_calls.get(), 2);
+    assert_eq!(
+      runtime.check(),
+      Err(crate::common::deadline::BoundaryStop::Cancelled)
+    );
+  }
+
+  #[test]
+  fn successful_post_shutdown_retry_commits_before_a_racing_stop() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let db = PathBuf::from("live/Cookies");
+    let query_calls = Cell::new(0);
+
+    let value = with_windows_locked_database_policy_with_runtime(
+      WindowsRecoveryRequest {
+        db_path: &db,
+        policy: WindowsLockedDatabasePolicy::AllowProcessShutdown,
+        runtime: &runtime,
+      },
+      |_, _| {
+        query_calls.set(query_calls.get() + 1);
+        if query_calls.get() == 1 {
+          Err(anyhow!("share denied"))
+        } else {
+          stop.cancel();
+          Ok("retry value")
+        }
+      },
+      |_, _, _| {
+        Ok(Some(sharing_violation(
+          &db,
+          WindowsLockedFile::Database,
+          false,
+        )))
+      },
+      |_| Ok(false),
+      |_, _| -> Result<WindowsFallbackSource<()>> {
+        panic!("a no-WAL source must not acquire a shadow")
+      },
+      |_, _| Ok(true),
+    )
+    .expect("completed post-shutdown retry commits");
+
+    assert_eq!(value, "retry value");
+    assert_eq!(query_calls.get(), 2);
+    assert_eq!(
+      runtime.check(),
+      Err(crate::common::deadline::BoundaryStop::Cancelled)
+    );
   }
 
   #[test]

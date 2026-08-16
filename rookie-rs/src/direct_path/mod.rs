@@ -128,7 +128,7 @@ impl InvalidDirectPathOptionsReason {
 /// A stable direct-path request error carried inside the returned
 /// [`anyhow::Error`] chain.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DirectPathError {
   InvalidSource {
     path: PathBuf,
@@ -143,6 +143,33 @@ pub enum DirectPathError {
     target_os: &'static str,
     target_arch: &'static str,
   },
+}
+
+impl fmt::Debug for DirectPathError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::InvalidSource { reason, .. } => formatter
+        .debug_struct("InvalidSource")
+        .field("path", &crate::common::diagnostic::REDACTED_PATH)
+        .field("reason", reason)
+        .finish(),
+      Self::InvalidOptions { source, reason } => formatter
+        .debug_struct("InvalidOptions")
+        .field("source", source)
+        .field("reason", reason)
+        .finish(),
+      Self::UnsupportedTarget {
+        source,
+        target_os,
+        target_arch,
+      } => formatter
+        .debug_struct("UnsupportedTarget")
+        .field("source", source)
+        .field("target_os", target_os)
+        .field("target_arch", target_arch)
+        .finish(),
+    }
+  }
 }
 
 impl DirectPathError {
@@ -221,10 +248,11 @@ impl fmt::Display for DirectPathError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::InvalidSource { path, reason } => {
+        let _ = path;
         write!(
           formatter,
           "invalid cookie source {}: {}",
-          path.display(),
+          crate::common::diagnostic::REDACTED_PATH,
           reason.code()
         )
       }
@@ -334,34 +362,43 @@ impl ChromiumPathRequest {
 
 /// Extracts cookies after identifying the explicit source by signature/schema.
 pub fn cookies_from_path(request: DirectPathRequest) -> Result<Vec<Cookie>> {
-  let source = classify_cookie_source(&request.path)?;
-  platform::cookies_from_path(request, source)
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  let source = classify_cookie_source(&request.path, &runtime)?;
+  platform::cookies_from_path(request, source, &runtime)
 }
 
 /// Extracts cookies from an explicit Chromium SQLite database.
 pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Cookie>> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   #[cfg(not(target_os = "windows"))]
   {
-    let source = classify_cookie_source(&request.path)?;
+    let source = classify_cookie_source(&request.path, &runtime)?;
     require_chromium_source(&request.path, source)?;
   }
-  platform::chromium_cookies_from_path(request)
+  platform::chromium_cookies_from_path(request, &runtime)
 }
 
 /// Detailed counterpart to [`chromium_cookies_from_path`].
 pub fn chromium_cookies_from_path_detailed(
   request: ChromiumPathRequest,
 ) -> Result<Vec<DetailedCookie>> {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   #[cfg(not(target_os = "windows"))]
   {
-    let source = classify_cookie_source(&request.path)?;
+    let source = classify_cookie_source(&request.path, &runtime)?;
     require_chromium_source(&request.path, source)?;
   }
-  platform::chromium_cookies_from_path_detailed(request)
+  platform::chromium_cookies_from_path_detailed(request, &runtime)
 }
 
-fn classify_cookie_source(path: &Path) -> Result<CookieSourceKind> {
-  platform::classify_cookie_source(path).map_err(|error| invalid_source_error(path, error))
+fn classify_cookie_source(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  platform::classify_cookie_source(path, runtime).map_err(|error| invalid_source_error(path, error))
 }
 
 fn invalid_source_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
@@ -386,6 +423,7 @@ fn require_chromium_source(path: &Path, source: CookieSourceKind) -> Result<()> 
   )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn invalid_options(reason: InvalidDirectPathOptionsReason) -> anyhow::Error {
   DirectPathError::InvalidOptions {
     source: CookieSourceKind::ChromiumSqlite,
@@ -423,22 +461,26 @@ fn automatic_chromium_cookies(
   ids: &[&'static str],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   let identities = automatic_identities(ids)?;
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
+    runtime,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
-      let outcomes = session
-        .retrieve(crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials));
+      let outcomes = session.retrieve(
+        crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
+        runtime,
+      );
       crate::browser::chromium::chromium_based_probe_with_key_outcomes(
-        outcomes, db_path, domains, false,
+        outcomes, db_path, domains, false, runtime,
       )
     },
-    |candidate| (candidate.cookies.len(), candidate.rows_skipped),
-    |candidate| candidate.cookies,
+    |candidate| (candidate.cookie_count(), candidate.rows_skipped),
+    |candidate| candidate.project_committed(),
   )
 }
 
@@ -447,22 +489,26 @@ fn automatic_chromium_detailed(
   ids: &[&'static str],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
   let identities = automatic_identities(ids)?;
   automatic_chromium_with(
     &identities,
     db_path,
     domains,
+    runtime,
     crate::browser::chromium_platform_keys::HostKeySession::new,
     |session, _name, credentials, db_path, domains| {
-      let outcomes = session
-        .retrieve(crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials));
+      let outcomes = session.retrieve(
+        crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
+        runtime,
+      );
       crate::browser::chromium::chromium_based_detailed_probe_with_key_outcomes(
-        outcomes, db_path, domains, false,
+        outcomes, db_path, domains, false, runtime,
       )
     },
-    |candidate| (candidate.cookies.len(), candidate.rows_skipped),
-    |candidate| candidate.cookies,
+    |candidate| (candidate.cookie_count(), candidate.rows_skipped),
+    |candidate| candidate.project_committed(),
   )
 }
 
@@ -475,6 +521,7 @@ fn automatic_chromium_with<Session, Candidate, Output, NewSession, Probe, Score,
   )],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   new_session: NewSession,
   mut probe: Probe,
   score: Score,
@@ -490,12 +537,18 @@ where
     Option<Vec<String>>,
   ) -> Result<Candidate>,
   Score: Fn(&Candidate) -> (usize, usize),
-  Finish: FnOnce(Candidate) -> Output,
+  Finish: FnOnce(Candidate) -> Result<Output>,
 {
   let mut session = new_session();
   let mut best = None;
   let mut failures = Vec::new();
   for (name, credentials) in identities {
+    // Before any completed candidate exists, a boundary stop is the request's
+    // result. Once a candidate completes, it is committed: later probes may
+    // fail or observe a stop, but cannot erase already-decoded work.
+    if best.is_none() {
+      runtime.check()?;
+    }
     match probe(
       &mut session,
       name,
@@ -520,6 +573,9 @@ where
       }
     }
   }
+  if best.is_none() {
+    runtime.check()?;
+  }
   match best {
     Some((name, result)) => {
       let (cookies, rows_skipped) = score(&result);
@@ -528,7 +584,7 @@ where
         cookies,
         rows_skipped
       );
-      Ok(finish(result))
+      finish(result)
     }
     None => anyhow::bail!(
       "no Chromium configuration decoded the cookie database:\n  {}",
@@ -538,25 +594,80 @@ where
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn legacy_automatic_chromium(
+pub(crate) fn legacy_automatic_chromium_with_runtime(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  platform::automatic_chromium(db_path, domains)
+  platform::automatic_chromium(db_path, domains, runtime)
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn legacy_windows_chromium_with_runtime(
+  local_state: PathBuf,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  let mut request = ChromiumPathRequest::new(db_path)
+    .credentials(ChromiumCredentialSource::LocalStateFile(local_state));
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  if force_kill {
+    request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+  }
+  platform::chromium_cookies_from_path(request, runtime)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn legacy_windows_chromium_detailed_with_runtime(
+  local_state: PathBuf,
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<DetailedCookie>> {
+  let mut request = ChromiumPathRequest::new(db_path)
+    .credentials(ChromiumCredentialSource::LocalStateFile(local_state));
+  if let Some(domains) = domains {
+    request = request.domains(domains);
+  }
+  if force_kill {
+    request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+  }
+  platform::chromium_cookies_from_path_detailed(request, runtime)
+}
+
+#[cfg(test)]
 pub(crate) fn classify_cookie_source_legacy(path: &Path) -> Result<CookieSourceKind> {
-  match platform::classify_cookie_source(path) {
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  classify_cookie_source_legacy_with_runtime(path, &runtime)
+}
+
+pub(crate) fn classify_cookie_source_legacy_with_runtime(
+  path: &Path,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<CookieSourceKind> {
+  match platform::classify_cookie_source(path, runtime) {
     #[cfg(not(target_os = "windows"))]
     Ok(CookieSourceKind::InternetExplorerEse) => {
-      anyhow::bail!("unsupported cookie source format: {}", path.display())
+      anyhow::bail!(
+        "unsupported cookie source format: {}",
+        crate::common::diagnostic::REDACTED_PATH
+      )
     }
     Err(error)
       if shared::classification_reason(&error)
         == Some(InvalidCookieSourceReason::UnrecognizedSignature)
         && error.root_cause().to_string() == "unsupported cookie source signature" =>
     {
-      anyhow::bail!("unsupported cookie source format: {}", path.display())
+      anyhow::bail!(
+        "unsupported cookie source format: {}",
+        crate::common::diagnostic::REDACTED_PATH
+      )
     }
     result => result,
   }
@@ -567,6 +678,7 @@ mod tests {
   use super::*;
   use crate::utils::TempDir;
 
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
   fn chromium_database(rows: &[(&str, &str, &[u8])]) -> (TempDir, PathBuf) {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("Cookies");
@@ -622,7 +734,10 @@ mod tests {
   #[test]
   fn invalid_source_is_typed_without_discarding_io_error() {
     let directory = TempDir::new().unwrap();
-    let missing = directory.path().join("missing");
+    let missing = directory
+      .path()
+      .join("absolute path sentinel with spaces")
+      .join("missing");
     let error = cookies_from_path(DirectPathRequest::new(&missing)).unwrap_err();
     let typed = direct_path_error(&error);
     assert_eq!(typed.kind(), "invalid_source");
@@ -633,6 +748,10 @@ mod tests {
       Some(&InvalidCookieSourceReason::NotARegularFile)
     );
     assert!(error.downcast_ref::<std::io::Error>().is_some());
+    let diagnostic = format!("{error:#}");
+    assert!(!diagnostic.contains(missing.to_string_lossy().as_ref()));
+    assert!(diagnostic.contains(crate::common::diagnostic::REDACTED_PATH));
+    assert!(!format!("{typed:?}").contains(missing.to_string_lossy().as_ref()));
   }
 
   #[test]
@@ -771,10 +890,13 @@ mod tests {
     ];
     let sessions = std::cell::Cell::new(0);
     let mut probed = Vec::new();
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
     let selected = automatic_chromium_with(
       &identities,
       PathBuf::from("unused"),
       None,
+      &runtime,
       || {
         sessions.set(sessions.get() + 1);
       },
@@ -787,7 +909,7 @@ mod tests {
         })
       },
       |candidate| (candidate.cookies, candidate.rows_skipped),
-      |candidate| candidate.identity,
+      |candidate| Ok(candidate.identity),
     )
     .unwrap();
 
@@ -808,6 +930,63 @@ mod tests {
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   #[test]
+  fn automatic_selection_preserves_a_completed_candidate_through_later_stops() {
+    #[derive(Debug)]
+    struct Candidate(&'static str);
+
+    let identities = [
+      (
+        "first",
+        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+      ),
+      (
+        "second",
+        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+      ),
+    ];
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = crate::common::deadline::BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+    let mut probes = Vec::new();
+
+    let selected = automatic_chromium_with(
+      &identities,
+      PathBuf::from("unused"),
+      None,
+      &runtime,
+      || (),
+      |(), name, _credentials, _path, _domains| {
+        probes.push(name);
+        if name == "first" {
+          stop.cancel();
+          Ok(Candidate(name))
+        } else {
+          runtime.check()?;
+          unreachable!("the stopped second probe cannot produce a candidate")
+        }
+      },
+      |_| (1, 0),
+      |candidate| {
+        assert_eq!(
+          runtime.check(),
+          Err(crate::common::deadline::BoundaryStop::Cancelled),
+          "finish observes the racing stop without discarding the committed candidate"
+        );
+        Ok(candidate.0)
+      },
+    )
+    .expect("completed candidate survives leading, post-loop, and finish stop checks");
+
+    assert_eq!(selected, "first");
+    assert_eq!(probes, vec!["first", "second"]);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
   fn automatic_selection_preserves_all_failures_and_one_session_per_projection() {
     let identities = [
       (
@@ -820,17 +999,20 @@ mod tests {
       ),
     ];
     let sessions = std::cell::Cell::new(0);
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
     for projection in ["legacy", "detailed"] {
       let error = automatic_chromium_with(
         &identities,
         PathBuf::from("unused"),
         None,
+        &runtime,
         || sessions.set(sessions.get() + 1),
         |(), name, _credentials, _path, _domains| -> Result<()> {
           anyhow::bail!("{projection} {name} keyring is locked")
         },
         |()| (0, 0),
-        |()| (),
+        |()| Ok(()),
       )
       .unwrap_err();
       let diagnostic = error.to_string();
@@ -1035,7 +1217,7 @@ mod tests {
     let error = classify_cookie_source_legacy(&path).unwrap_err();
     assert_eq!(
       error.to_string(),
-      format!("unsupported cookie source format: {}", path.display())
+      "unsupported cookie source format: <path>"
     );
   }
 
@@ -1047,7 +1229,7 @@ mod tests {
     let error = classify_cookie_source_legacy(&path).unwrap_err();
     assert_eq!(
       error.to_string(),
-      format!("unsupported cookie source format: {}", path.display())
+      "unsupported cookie source format: <path>"
     );
   }
 }

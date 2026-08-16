@@ -1,6 +1,8 @@
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::browser::outcome::Retryability;
+pub(crate) use crate::common::boundary::KeyProvider;
 use crate::common::secret::SecretBytes;
 
 #[cfg(unix)]
@@ -71,6 +73,7 @@ pub(crate) struct KeyCandidate {
 }
 
 impl KeyCandidate {
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   pub(crate) fn from_zeroizing(bytes: Zeroizing<Vec<u8>>) -> Self {
     Self { bytes }
   }
@@ -126,6 +129,7 @@ pub(crate) struct NonEmptyKeyCandidates {
 }
 
 impl NonEmptyKeyCandidates {
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   fn from_candidates(candidates: Vec<KeyCandidate>) -> Option<Self> {
     if candidates.is_empty() {
       return None;
@@ -133,6 +137,13 @@ impl NonEmptyKeyCandidates {
     Some(Self { candidates })
   }
 
+  #[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows", test)),
+    expect(
+      dead_code,
+      reason = "unsupported targets cannot construct a candidate route"
+    )
+  )]
   fn as_slice(&self) -> &[KeyCandidate] {
     &self.candidates
   }
@@ -142,6 +153,7 @@ impl NonEmptyKeyCandidates {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChromiumKeyFailure {
   message: String,
+  retryability: Retryability,
 }
 
 impl ChromiumKeyFailure {
@@ -151,17 +163,34 @@ impl ChromiumKeyFailure {
   pub(crate) fn new(message: impl Into<String>) -> Self {
     Self {
       message: message.into(),
+      retryability: Retryability::Retryable,
+    }
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn new_with_retryability(
+    message: impl Into<String>,
+    retryability: Retryability,
+  ) -> Self {
+    Self {
+      message: message.into(),
+      retryability,
     }
   }
 
   pub(crate) fn message(&self) -> &str {
     &self.message
   }
+
+  pub(crate) fn retryability(&self) -> Retryability {
+    self.retryability
+  }
 }
 
 /// Retrieval state for exactly one configured key tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChromiumKeyOutcome {
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   Success(NonEmptyKeyCandidates),
   NotApplicable,
   #[allow(dead_code)]
@@ -179,6 +208,7 @@ impl ChromiumKeyOutcome {
     Self::success_zeroizing(candidates.into_iter().map(Zeroizing::new).collect())
   }
 
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
   pub(crate) fn success_zeroizing(candidates: Vec<Zeroizing<Vec<u8>>>) -> Option<Self> {
     NonEmptyKeyCandidates::from_candidates(
       candidates
@@ -192,6 +222,17 @@ impl ChromiumKeyOutcome {
   #[allow(dead_code)]
   pub(crate) fn failure(message: impl Into<String>) -> Self {
     Self::Failure(ChromiumKeyFailure::new(message))
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn failure_with_retryability(
+    message: impl Into<String>,
+    retryability: Retryability,
+  ) -> Self {
+    Self::Failure(ChromiumKeyFailure::new_with_retryability(
+      message,
+      retryability,
+    ))
   }
 }
 
@@ -258,6 +299,7 @@ impl ChromiumKeyOutcomes {
     };
 
     match self.outcome(tier) {
+      #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
       ChromiumKeyOutcome::Success(candidates) => ChromiumKeyRoute::Candidates {
         tier,
         candidates: candidates.as_slice(),
@@ -270,6 +312,13 @@ impl ChromiumKeyOutcomes {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChromiumKeyRoute<'a> {
+  #[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows", test)),
+    expect(
+      dead_code,
+      reason = "unsupported targets cannot construct a candidate route"
+    )
+  )]
   Candidates {
     tier: ChromiumKeyTier,
     candidates: &'a [KeyCandidate],
@@ -349,22 +398,15 @@ pub(crate) fn decrypt_legacy(encrypted_value: &[u8]) -> anyhow::Result<LegacyCip
   platform::decrypt_legacy(encrypted_value)
 }
 
-/// Injection seam for installation-scoped key retrieval.
-///
-/// The generic context lets Milestone 1B introduce its installation model
-/// without making any of these types public or changing row extraction again.
-pub(crate) trait ChromiumKeyProvider<Context: ?Sized> {
-  fn retrieve(&self, context: &Context) -> ChromiumKeyOutcomes;
-}
-
 pub(crate) fn retrieve_key_outcomes<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
-) -> ChromiumKeyOutcomes
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> anyhow::Result<ChromiumKeyOutcomes>
 where
-  Provider: ChromiumKeyProvider<Context>,
+  Provider: KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
 {
-  provider.retrieve(context)
+  crate::common::boundary::keys(provider, context, runtime)
 }
 
 /// Provider used only to bridge the current untyped platform retrievers.
@@ -383,8 +425,14 @@ impl LegacySharedKeyProvider {
 }
 
 #[cfg(test)]
-impl ChromiumKeyProvider<()> for LegacySharedKeyProvider {
-  fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
+impl KeyProvider<()> for LegacySharedKeyProvider {
+  type Keys = ChromiumKeyOutcomes;
+
+  fn keys(
+    &self,
+    _context: &(),
+    _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
     self.outcomes.clone()
   }
 }
@@ -512,8 +560,14 @@ mod tests {
     outcomes: ChromiumKeyOutcomes,
   }
 
-  impl ChromiumKeyProvider<str> for RecordingProvider {
-    fn retrieve(&self, context: &str) -> ChromiumKeyOutcomes {
+  impl KeyProvider<str> for RecordingProvider {
+    type Keys = ChromiumKeyOutcomes;
+
+    fn keys(
+      &self,
+      context: &str,
+      _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+    ) -> ChromiumKeyOutcomes {
       self.calls.set(self.calls.get() + 1);
       self.contexts.borrow_mut().push(context.to_string());
       self.outcomes.clone()
@@ -532,7 +586,9 @@ mod tests {
       },
     };
 
-    let outcomes = retrieve_key_outcomes(&provider, "installation-1");
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let outcomes = retrieve_key_outcomes(&provider, "installation-1", &runtime).unwrap();
     assert_eq!(provider.calls.get(), 1);
     assert_eq!(provider.contexts.borrow().as_slice(), ["installation-1"]);
     assert!(matches!(outcomes.v10, ChromiumKeyOutcome::Success(_)));
@@ -543,7 +599,9 @@ mod tests {
   #[test]
   fn legacy_provider_keeps_current_shared_candidate_behavior() {
     let provider = LegacySharedKeyProvider::new(vec![vec![0x2a; 16]]);
-    let outcomes = retrieve_key_outcomes(&provider, &());
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let outcomes = retrieve_key_outcomes(&provider, &(), &runtime).unwrap();
     for cipher in [
       ChromiumCipherVersion::V10,
       ChromiumCipherVersion::V11,
@@ -559,7 +617,9 @@ mod tests {
   #[test]
   fn legacy_provider_maps_an_empty_historical_list_to_not_applicable() {
     let provider = LegacySharedKeyProvider::new(vec![]);
-    let outcomes = retrieve_key_outcomes(&provider, &());
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+    let outcomes = retrieve_key_outcomes(&provider, &(), &runtime).unwrap();
     assert_eq!(outcomes, ChromiumKeyOutcomes::default());
   }
 }

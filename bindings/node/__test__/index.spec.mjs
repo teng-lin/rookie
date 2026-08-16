@@ -238,9 +238,24 @@ test("firefoxBasedDetailed preserves colliding container identities", async (t) 
     t.deepEqual(
       Object.fromEntries(records.map(({ cookie, context }) => [
         cookie.value,
-        context.userContextId,
+        {
+          topFrameSiteKey: context.topFrameSiteKey,
+          partitionKey: context.partitionKey,
+          userContextId: context.userContextId,
+        },
       ])),
-      { work: 2, personal: 1 },
+      {
+        work: {
+          topFrameSiteKey: null,
+          partitionKey: "(https,work.example)",
+          userContextId: 2,
+        },
+        personal: {
+          topFrameSiteKey: null,
+          partitionKey: "(https,personal.example)",
+          userContextId: 1,
+        },
+      },
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -764,7 +779,9 @@ Path=Profiles/work
       [{ role: "persistent", format: "mozilla_sqlite", precedence: 10 }],
     );
 
+    t.is(report.schemaVersion, 1);
     t.is(report.status, "complete");
+    t.is(report.termination, "completed");
     t.deepEqual(report.issues, []);
     t.is(report.profiles.length, 1, "profileId must restrict the report");
     const [extracted] = report.profiles;
@@ -1040,6 +1057,15 @@ Path=Profiles/work
     );
     const observed = JSON.parse(stdout);
 
+    t.deepEqual(observed.reportKeys, [
+      "schemaVersion",
+      "status",
+      "termination",
+      "summary",
+      "profiles",
+      "issues",
+    ]);
+
     for (const key of [...observed.firefoxKeys, ...observed.absentKeys]) {
       t.false(key.includes("_"), `report key ${key} must be camelCase`);
     }
@@ -1061,6 +1087,10 @@ Path=Profiles/work
       "code",
       "stage",
       "severity",
+      "cause",
+      "provider",
+      "tier",
+      "retryability",
       "occurrences",
       "samples",
       "browserId",
@@ -1085,6 +1115,10 @@ Path=Profiles/work
     t.truthy(observed.requestIssue, "an absent browser must report an issue");
     t.deepEqual(observed.requestIssueKeys, issueKeys);
     t.is(observed.requestIssue.browserId, "chrome");
+    t.is(observed.requestIssue.cause, "browser_not_detected");
+    t.is(observed.requestIssue.provider, null);
+    t.is(observed.requestIssue.tier, null);
+    t.is(observed.requestIssue.retryability, "unknown");
     t.is(observed.requestIssue.installationId, null);
     t.is(observed.requestIssue.profileId, null);
   } finally {

@@ -18,7 +18,6 @@ fn unix_timestamp(timestamp: u64) -> Option<u64> {
   Some(timestamp)
 }
 
-#[cfg(any(target_os = "macos", test))]
 pub fn safari_timestamp(timestamp: f64) -> Option<u64> {
   if timestamp == 0.0 || !timestamp.is_finite() {
     return None;
@@ -29,7 +28,7 @@ pub fn safari_timestamp(timestamp: f64) -> Option<u64> {
   }
   Some(unix_timestamp as u64)
 }
-#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn internet_explorer_timestamp(timestamp: u64) -> Option<u64> {
   if timestamp == 0 {
     return None;

@@ -57,6 +57,7 @@ for profile in browser_profiles("chrome"):
     print(profile["profile"]["profile_id"], profile["profile"]["display_name"])
 
 report = browser_report("chrome", domains=["example.com"])
+assert report["schema_version"] == 1
 for profile in report["profiles"]:
     for source in profile["sources"]:
         if source["selected"] and source["status"] == "succeeded":
@@ -70,13 +71,21 @@ browser ID or a profile ID this browser did not yield — raises, as a
 `RuntimeError` whose message is a diagnostic rather than a stable contract.
 `load_report()` covers every registered browser in one report.
 
+`schema_version` versions the serialized report shape; reject a value your
+consumer does not understand. `termination` describes why execution stopped
+and is independent from `status`: its current vocabulary is `completed`,
+`timed_out`, `cancelled`, and `resource_exhausted`. For example, a timed-out
+request can still have status `partial` and retain sources that completed
+before the deadline.
+
 An issue counts every occurrence in `occurrences` but keeps at most
 `MAX_ISSUE_SAMPLES` entries in `samples`; comparing the two tells a truncated
 excerpt from a complete one.
 
-Every identifier and code (`status`, `engine`, `role`, `format`, `severity`, …)
-is an open snake_case string, so compare against a known value and keep a
-fallback: a build newer than your code can return one you have not seen.
+Every identifier and code (`status`, `termination`, `engine`, `role`, `format`,
+`severity`, …) is an open snake_case string, so compare against a known value
+and keep a fallback: a build newer than your code can return one you have not
+seen.
 
 ## Explicit paths
 

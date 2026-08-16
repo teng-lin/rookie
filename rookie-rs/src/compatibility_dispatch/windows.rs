@@ -20,10 +20,21 @@ pub(super) fn chromium_from_path(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
   key_path: Option<&str>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  chromium_from_path_with(cookies_path, domains, key_path, crate::chromium_based)
+  let key_path = key_path.context(
+    "a Chromium Local State key file is required for a Chromium cookie database on Windows",
+  )?;
+  crate::direct_path::legacy_windows_chromium_with_runtime(
+    PathBuf::from(key_path),
+    cookies_path,
+    domains,
+    false,
+    runtime,
+  )
 }
 
+#[cfg(test)]
 fn chromium_from_path_with<F>(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -42,6 +53,7 @@ where
 pub(super) fn safari_from_path(
   _cookies_path: PathBuf,
   _domains: Option<Vec<String>>,
+  _runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   bail!("Safari binary cookie files are only supported on macOS")
 }
@@ -49,10 +61,17 @@ pub(super) fn safari_from_path(
 pub(super) fn internet_explorer_from_path(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  internet_explorer_from_path_with(cookies_path, domains, crate::internet_explorer_based)
+  crate::browser::internet_explorer::internet_explorer_based_with_runtime(
+    cookies_path,
+    domains,
+    false,
+    runtime,
+  )
 }
 
+#[cfg(test)]
 fn internet_explorer_from_path_with<F>(
   cookies_path: PathBuf,
   domains: Option<Vec<String>>,

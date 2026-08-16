@@ -22,6 +22,7 @@
 //! test. It creates Local State and Cookies fixtures for the current user, so
 //! it needs neither Chrome nor a pre-existing profile.
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod helpers {
   use std::env;
   use std::path::PathBuf;

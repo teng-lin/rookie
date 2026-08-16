@@ -269,6 +269,29 @@ CLI rules are:
 - A registry-only browser without `--report` is a usage error.
 - Existing no-selector behavior remains legacy `load()`.
 
+### 10. Canonical finalization and termination
+
+Engine adapters may retain private decoding drafts, but they are not outcomes
+and must not be projected directly. They feed one finalized outcome whose
+source-owned records preserve source-native domain scope, isolation state, raw
+attributes, raw timestamps, and source digest plus ordinal. The compatibility
+and grouped-report views are pure projections of that finalized state; sorting
+the report view never reorders canonical emission/provenance order.
+
+Failure aggregation uses the complete `(code, stage, scope, cause, severity,
+retryability)` key. Diagnostic text and samples are sanitized and bounded at
+the canonical ingress, and provider/tier cause is carried structurally rather
+than recovered from messages. Report JSON adds the `schema_version: 1`
+discriminator, `cause`, `provider`, `tier`, and `retryability` to each issue,
+and `termination` to the report. Node exposes the discriminator as
+`schemaVersion`; Rust, Python, and CLI use `schema_version`. Deserialization
+defaults keep older report JSON readable.
+
+`status` describes extraction completeness (`complete`, `partial`, `failed`,
+or `no_sources`). `termination` independently describes why work stopped
+(`completed`, `cancelled`, `timed_out`, or `resource_exhausted`). A discovered
+source whose query succeeds with zero rows is complete, not `no_sources`.
+
 ## Consequences
 
 Positive consequences:
@@ -285,4 +308,6 @@ Costs and constraints:
 - Every new public DTO must ship consistently across all bindings.
 - New browser support requires OS- and tier-specific evidence, not path recognition alone.
 
-Rich cookie metadata, CookieEditor output, a non-terminating Windows locked-handle provider, and changing legacy functions to all-profile defaults remain deferred.
+The public/binding surface for rich canonical cookie metadata, CookieEditor
+output, a non-terminating Windows locked-handle provider, and changing legacy
+functions to all-profile defaults remain deferred.

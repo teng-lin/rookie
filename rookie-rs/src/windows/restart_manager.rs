@@ -1,3 +1,4 @@
+use crate::common::deadline::BoundaryRuntime;
 use anyhow::{bail, Result};
 use std::{os::windows::ffi::OsStrExt, path::Path};
 use windows::{
@@ -72,20 +73,27 @@ fn encode_restart_manager_path(file_path: &Path) -> Result<Vec<u16>> {
 pub(crate) unsafe fn release_file_lock(
   file_path: &Path,
   force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<FileLockStatus> {
+  runtime.check()?;
   let file_path = encode_restart_manager_path(file_path)?;
+  runtime.check()?;
   let mut session = 0_u32;
   let mut session_key_buffer = [0_u16; (CCH_RM_SESSION_KEY as usize) + 1];
-  check_restart_manager(
-    "RmStartSession",
-    RmStartSession(&mut session, 0, PWSTR(session_key_buffer.as_mut_ptr())),
-  )?;
+  let start_result = RmStartSession(&mut session, 0, PWSTR(session_key_buffer.as_mut_ptr()));
+  if WIN32_ERROR(start_result) != ERROR_SUCCESS {
+    runtime.check()?;
+    check_restart_manager("RmStartSession", start_result)?;
+    unreachable!("a failed Restart Manager session cannot pass result validation");
+  }
   let session = RestartManagerSession(session);
+  runtime.check()?;
 
-  check_restart_manager(
-    "RmRegisterResources",
-    RmRegisterResources(session.0, Some(&[PCWSTR(file_path.as_ptr())]), None, None),
-  )?;
+  runtime.check()?;
+  let register_result =
+    RmRegisterResources(session.0, Some(&[PCWSTR(file_path.as_ptr())]), None, None);
+  runtime.check()?;
+  check_restart_manager("RmRegisterResources", register_result)?;
 
   // A count-only query avoids a fixed-size process buffer. ERROR_MORE_DATA is
   // the documented response when affected processes exist and no buffer was
@@ -93,6 +101,7 @@ pub(crate) unsafe fn release_file_lock(
   let mut needed = 0_u32;
   let mut supplied = 0_u32;
   let mut reboot_reasons = 0_u32;
+  runtime.check()?;
   let query_result = RmGetList(
     session.0,
     &mut needed,
@@ -100,6 +109,7 @@ pub(crate) unsafe fn release_file_lock(
     None,
     &mut reboot_reasons,
   );
+  runtime.check()?;
   let process_count = affected_process_count(query_result, needed, supplied)?;
   if process_count == 0 {
     return Ok(FileLockStatus::Unlocked);
@@ -109,10 +119,10 @@ pub(crate) unsafe fn release_file_lock(
     return Ok(FileLockStatus::Locked { process_count });
   }
 
-  check_restart_manager(
-    "RmShutdown",
-    RmShutdown(session.0, RmForceShutdown.0 as u32, None),
-  )?;
+  runtime.check()?;
+  let shutdown_result = RmShutdown(session.0, RmForceShutdown.0 as u32, None);
+  runtime.check()?;
+  check_restart_manager("RmShutdown", shutdown_result)?;
   Ok(FileLockStatus::Released { process_count })
 }
 

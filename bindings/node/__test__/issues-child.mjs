@@ -32,6 +32,7 @@ process.stdout.write(
   JSON.stringify({
     firefoxKeys: [...collectKeys(firefox)].sort(),
     absentKeys: [...collectKeys(absent)].sort(),
+    reportKeys: Object.keys(firefox),
     sourceIssue: sourceIssue ?? null,
     sourceIssueKeys: sourceIssue ? Object.keys(sourceIssue) : null,
     requestIssue: requestIssue ?? null,

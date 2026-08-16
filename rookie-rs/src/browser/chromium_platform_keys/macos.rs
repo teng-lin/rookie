@@ -1,32 +1,54 @@
-use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, ChromiumKeyProvider};
+use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::create_pbkdf2_key;
 use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
+#[cfg(test)]
+use crate::common::deadline::Deadline;
+use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
 use crate::common::secret::SecretString;
 use crate::config::Browser;
 use anyhow::Result;
 
 trait MacosKeychainBackend {
-  fn password(&self, service: &str, user: &str) -> Result<SecretString>;
+  fn password(
+    &self,
+    service: &str,
+    user: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<SecretString>;
 }
 
 struct SystemMacosKeychainBackend;
 
 impl MacosKeychainBackend for SystemMacosKeychainBackend {
-  fn password(&self, service: &str, user: &str) -> Result<SecretString> {
-    crate::macos::get_osx_keychain_password(service, user)
+  fn password(
+    &self,
+    service: &str,
+    user: &str,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> Result<SecretString> {
+    crate::macos::get_osx_keychain_password_with_runtime(service, user, runtime)
   }
 }
 
 fn retrieve_macos_key_outcomes<B>(
   request: ChromiumKeyRequest<'_>,
   backend: &B,
+  runtime: &BoundaryRuntime<'_>,
 ) -> ChromiumKeyOutcomes
 where
   B: MacosKeychainBackend,
 {
   let v10 = match request.credentials.macos_keychain.as_ref() {
     Some(credentials) if !credentials.service.is_empty() && !credentials.account.is_empty() => {
-      match backend.password(&credentials.service, &credentials.account) {
+      let password = runtime
+        .check()
+        .map_err(anyhow::Error::from)
+        .and_then(|()| backend.password(&credentials.service, &credentials.account, runtime))
+        .and_then(|password| {
+          runtime.check().map_err(anyhow::Error::from)?;
+          Ok(password)
+        });
+      match password {
         Ok(password) => ChromiumKeyOutcome::success_zeroizing(vec![create_pbkdf2_key(
           &password,
           b"saltysalt",
@@ -64,8 +86,12 @@ impl HostKeySession {
     Self
   }
 
-  pub(crate) fn retrieve(&mut self, request: ChromiumKeyRequest<'_>) -> ChromiumKeyOutcomes {
-    retrieve_macos_key_outcomes(request, &SystemMacosKeychainBackend)
+  pub(crate) fn retrieve(
+    &mut self,
+    request: ChromiumKeyRequest<'_>,
+    runtime: &BoundaryRuntime<'_>,
+  ) -> ChromiumKeyOutcomes {
+    retrieve_macos_key_outcomes(request, &SystemMacosKeychainBackend, runtime)
   }
 }
 
@@ -79,11 +105,17 @@ impl<'a> MacosPlatformKeyProvider<'a> {
   }
 }
 
-impl ChromiumKeyProvider<()> for MacosPlatformKeyProvider<'_> {
-  fn retrieve(&self, _context: &()) -> ChromiumKeyOutcomes {
+impl KeyProvider<()> for MacosPlatformKeyProvider<'_> {
+  type Keys = ChromiumKeyOutcomes;
+
+  fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
     let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
     let mut session = HostKeySession::new();
-    session.retrieve(ChromiumKeyRequest::direct(&credentials))
+    session.retrieve(ChromiumKeyRequest::direct(&credentials), runtime)
+  }
+
+  fn deadline_enforcement(&self) -> DeadlineEnforcement {
+    DeadlineEnforcement::Enforceable
   }
 }
 
@@ -113,7 +145,12 @@ mod tests {
   }
 
   impl MacosKeychainBackend for FakeMacosBackend {
-    fn password(&self, _service: &str, _user: &str) -> Result<SecretString> {
+    fn password(
+      &self,
+      _service: &str,
+      _user: &str,
+      _runtime: &BoundaryRuntime<'_>,
+    ) -> Result<SecretString> {
       self.calls.set(self.calls.get() + 1);
       self
         .result
@@ -137,6 +174,12 @@ mod tests {
     ChromiumKeyRequest::direct(credentials)
   }
 
+  fn deadline() -> (crate::common::deadline::test_clock::ManualClock, Deadline) {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let deadline = Deadline::after(&clock, std::time::Duration::from_secs(1));
+    (clock, deadline)
+  }
+
   #[test]
   fn macos_uses_only_the_password_returned_by_keychain() {
     let backend = FakeMacosBackend {
@@ -144,7 +187,9 @@ mod tests {
       result: Ok(SecretString::new("keychain".to_string())),
     };
     let credentials = macos_credentials();
-    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
+    let (clock, deadline) = deadline();
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend, &runtime);
     assert_eq!(backend.calls.get(), 1);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
@@ -163,13 +208,40 @@ mod tests {
   }
 
   #[test]
+  fn cancelled_runtime_does_not_start_the_keychain_backend() {
+    let backend = FakeMacosBackend {
+      calls: Cell::new(0),
+      result: Ok(SecretString::new("must not be read".to_owned())),
+    };
+    let credentials = macos_credentials();
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop,
+    );
+
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend, &runtime);
+
+    assert_eq!(backend.calls.get(), 0);
+    let ChromiumKeyOutcome::Failure(failure) = outcomes.v10 else {
+      panic!("cancelled Keychain provider must fail explicitly");
+    };
+    assert!(failure.message().contains("operation cancelled"));
+  }
+
+  #[test]
   fn macos_keychain_failure_is_a_typed_provider_failure() {
     let backend = FakeMacosBackend {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("keychain unavailable")),
     };
     let credentials = macos_credentials();
-    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
+    let (clock, deadline) = deadline();
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend, &runtime);
     assert_eq!(backend.calls.get(), 1);
     let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V10)
     else {
@@ -185,7 +257,9 @@ mod tests {
       result: Ok(SecretString::new("mock_password".to_string())),
     };
     let credentials = macos_credentials();
-    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
+    let (clock, deadline) = deadline();
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend, &runtime);
     assert_eq!(
       candidate_bytes(&outcomes, ChromiumCipherVersion::V10),
       [Vec::from(
@@ -201,7 +275,9 @@ mod tests {
       result: Ok(SecretString::new("must not be read".to_string())),
     };
     let credentials = ChromiumKeyCredentials::default();
-    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend);
+    let (clock, deadline) = deadline();
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend, &runtime);
     assert_eq!(backend.calls.get(), 0);
     assert!(matches!(
       outcomes.route(ChromiumCipherVersion::V10),
@@ -217,6 +293,8 @@ mod tests {
     };
     let credentials = ChromiumKeyCredentials::default();
 
+    let (clock, deadline) = deadline();
+    let runtime = BoundaryRuntime::new(&clock, deadline);
     let registered = retrieve_macos_key_outcomes(
       ChromiumKeyRequest::for_installation(
         "coccoc",
@@ -225,6 +303,7 @@ mod tests {
         None,
       ),
       &backend,
+      &runtime,
     );
     let ChromiumKeyOutcome::Failure(failure) = registered.v10 else {
       panic!("registered missing identity must fail explicitly");
@@ -238,7 +317,8 @@ mod tests {
       osx_key_service: None,
       osx_key_user: None,
     };
-    let direct = MacosPlatformKeyProvider::new(&direct_config).retrieve(&());
+    let direct = MacosPlatformKeyProvider::new(&direct_config)
+      .keys(&(), &BoundaryRuntime::new(&clock, deadline));
     assert_eq!(direct.v10, ChromiumKeyOutcome::NotApplicable);
     assert_eq!(backend.calls.get(), 0);
   }
@@ -264,8 +344,10 @@ mod tests {
         result: Ok(SecretString::new("must not be read".to_string())),
       };
 
+      let (clock, deadline) = deadline();
+      let runtime = BoundaryRuntime::new(&clock, deadline);
       let outcomes =
-        retrieve_macos_key_outcomes(ChromiumKeyRequest::direct(&credentials), &backend);
+        retrieve_macos_key_outcomes(ChromiumKeyRequest::direct(&credentials), &backend, &runtime);
       let ChromiumKeyOutcome::Failure(failure) = outcomes.v10 else {
         panic!("partial or blank direct identity must fail explicitly");
       };
