@@ -13,12 +13,14 @@ use super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, Chromiu
 #[cfg(test)]
 use super::chromium_decoder::{chromium_schema_version, ChromiumContextColumnError};
 use super::cookie_record::{CookieRecord, UnavailableCode};
+#[cfg(all(test, unix))]
+use super::unseal::decrypt_encrypted_value_with_outcomes;
 use super::unseal::unseal_chromium_record;
 #[cfg(test)]
 use super::unseal::{
   decode_chromium_cookie_value, decrypt_encrypted_value,
-  decrypt_encrypted_value_with_cipher_adapter, decrypt_encrypted_value_with_outcomes,
-  ChromiumCookieDecodeError, ChromiumCookieValueError, CipherAdapter,
+  decrypt_encrypted_value_with_cipher_adapter, ChromiumCookieDecodeError, ChromiumCookieValueError,
+  CipherAdapter,
 };
 #[cfg(test)]
 use sha2::{Digest, Sha256};
