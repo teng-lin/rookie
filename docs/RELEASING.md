@@ -156,6 +156,18 @@ gh workflow run publish-npm.yml --ref main -f version="$VERSION"
 Do not start all three commands together. Wait for each workflow to finish and
 verify its registry before dispatching the next one.
 
+For pre-releases (such as `0.6.0-alpha.1`), `publish-npm.yml` derives the npm
+dist-tag from the version's pre-release identifier (e.g., `alpha`) and refuses
+to publish a pre-release under `latest`. An explicit tag can be supplied
+instead via `-f tag=`:
+
+```console
+gh workflow run publish-npm.yml --ref main -f version="$VERSION" -f tag="alpha"
+```
+
+pip and cargo skip pre-release versions by default, so PyPI and crates.io
+need no equivalent tag handling.
+
 The npm workflow builds and tests four native targets, verifies every expected
 binary, and publishes these prepared native tarballs before the root package:
 
