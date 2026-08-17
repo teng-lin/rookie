@@ -61,6 +61,19 @@ function Close-BrowserGracefully {
     if (-not (Get-Process $script:browserProcess -ErrorAction SilentlyContinue)) { return }
     Start-Sleep -Milliseconds 500
   }
+
+  # Chromium forks (especially Brave) often keep crashpad/GPU/utility
+  # processes after the last window closes. The graceful close already
+  # proved the product did not kill the live browser during extraction.
+  $leftover = @(Get-Process $script:browserProcess -ErrorAction SilentlyContinue)
+  if ($leftover.Count -eq 0) { return }
+  Write-Host ("{0} still had {1} process(es) after CloseMainWindow; stopping leftovers" -f `
+    $script:targetBrowser, $leftover.Count)
+  $leftover | Stop-Process -Force -ErrorAction SilentlyContinue
+  for ($i = 1; $i -le 20; $i++) {
+    if (-not (Get-Process $script:browserProcess -ErrorAction SilentlyContinue)) { return }
+    Start-Sleep -Milliseconds 250
+  }
   throw "$script:targetBrowser did not exit after a graceful window close"
 }
 
@@ -129,6 +142,8 @@ try {
     "--new-window",
     "--disable-background-mode",
     "--disable-background-networking",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=BackgroundMode",
     "--disable-component-update",
     "--disable-sync",
     "http://127.0.0.1:8765/set"
@@ -179,6 +194,8 @@ try {
     "--new-window",
     "--disable-background-mode",
     "--disable-background-networking",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=BackgroundMode",
     "--disable-component-update",
     "--disable-sync",
     "http://127.0.0.1:8765/wal"
