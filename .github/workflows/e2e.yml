@@ -27,6 +27,10 @@ on:
         description: Run only the elevated Windows App-Bound canary
         type: boolean
         default: false
+      multi_browser:
+        description: Run the hosted App-Bound canary on Chrome, Edge, and Brave
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -498,15 +502,27 @@ jobs:
           }
 
   windows-chrome-appbound:
-    name: e2e windows × chrome (App-Bound v20 canary)
+    name: e2e windows × ${{ matrix.browser }} (App-Bound v20 canary)
     # Default-profile App-Bound extraction is elevated. Pull requests never run
     # it; scheduled/push runs use main, while maintainers may explicitly select
     # a trusted feature ref for pre-merge validation with workflow_dispatch.
+    # Chrome and Edge ship on windows-2025. Brave is installed machine-wide
+    # in this job. CocCoc and Avast stay out of the hosted matrix.
     if: >-
       github.event_name == 'schedule' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'release') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch'
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: ${{ fromJson(
+          (github.event_name == 'schedule' || github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v') || inputs.multi_browser)
+          && '["chrome", "edge", "brave"]'
+          || '["chrome"]'
+          ) }}
     timeout-minutes: 35
     defaults:
       run:
@@ -521,6 +537,68 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install machine-wide Brave
+        if: matrix.browser == 'brave'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-BraveMachineExe {
+            @(
+              "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
+              "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe"
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+
+          if (-not (Get-BraveMachineExe)) {
+            $installed = $false
+            try {
+              Write-Host "Installing Brave via winget (machine scope)"
+              & winget install -e --id Brave.Brave --scope machine `
+                --accept-package-agreements --accept-source-agreements `
+                --disable-interactivity --source winget
+              $installed = [bool](Get-BraveMachineExe)
+            } catch {
+              Write-Host "winget install failed: $_"
+            }
+
+            if (-not $installed) {
+              Write-Host "Installing Brave via Chocolatey"
+              & choco install brave -y --no-progress
+              $installed = [bool](Get-BraveMachineExe)
+            }
+
+            if (-not $installed) {
+              Write-Host "Installing Brave via standalone system-level setup"
+              $installer = Join-Path $env:RUNNER_TEMP "BraveBrowserStandaloneSetup.exe"
+              Invoke-WebRequest -Uri "https://laptop-updates.brave.com/latest/winx64" `
+                -OutFile $installer
+              $setup = Start-Process -FilePath $installer `
+                -ArgumentList "--install","--silent","--system-level" `
+                -Wait -PassThru
+              if ($setup.ExitCode -ne 0 -and $setup.ExitCode -ne 3010) {
+                throw "Brave standalone installer exited $($setup.ExitCode)"
+              }
+            }
+          }
+
+          $deadline = [datetime]::UtcNow.AddMinutes(3)
+          while (-not (Get-BraveMachineExe) -and [datetime]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          $exe = Get-BraveMachineExe
+          if (-not $exe) {
+            throw "Brave machine-wide install did not produce brave.exe under Program Files"
+          }
+          Write-Host "Brave installed: $exe"
+
+          Get-Process brave -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          $userData = Join-Path $env:LOCALAPPDATA `
+            "BraveSoftware\Brave-Browser\User Data"
+          if (Test-Path $userData) {
+            Write-Host "Removing installer-created Brave profile so the canary starts empty"
+            Remove-Item $userData -Recurse -Force
+          }
+
       - name: Enforce App-Bound host and identity preconditions
         run: |
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -534,28 +612,60 @@ jobs:
             throw "App-Bound canary requires the runner process to be elevated"
           }
 
-          $chromeCandidates = @(
-            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
-          )
-          $chromePath = $chromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $chromePath) {
-            throw "machine-wide Chrome was not found below Program Files"
-          }
-          $chromePath = (Resolve-Path $chromePath).Path
-          $chromeVersion = (Get-Item $chromePath).VersionInfo.FileVersion
-          Write-Host "System Chrome: $chromePath ($chromeVersion)"
+          $targetBrowser = "${{ matrix.browser }}"
+          Write-Host "Target Browser: $targetBrowser"
 
-          $userDataDir = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
-          $expectedDir = [IO.Path]::GetFullPath(
-            (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) `
-              "Google\Chrome\User Data")
-          )
-          if ([IO.Path]::GetFullPath($userDataDir) -ne $expectedDir) {
-            throw "Chrome user-data dir is not the current user's real default"
+          if ($targetBrowser -eq "chrome") {
+            $browserCandidates = @(
+              "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+              "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
+            )
+            $userDataDir = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
+            $procName = "chrome"
+          } elseif ($targetBrowser -eq "edge") {
+            $browserCandidates = @(
+              "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+              "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            )
+            $userDataDir = Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data"
+            $procName = "msedge"
+          } elseif ($targetBrowser -eq "brave") {
+            $browserCandidates = @(
+              "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
+              "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe",
+              "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\Application\brave.exe"
+            )
+            $userDataDir = Join-Path $env:LOCALAPPDATA "BraveSoftware\Brave-Browser\User Data"
+            $procName = "brave"
+          } elseif ($targetBrowser -eq "coccoc") {
+            $browserCandidates = @(
+              "$env:ProgramFiles\CocCoc\Browser\Application\browser.exe",
+              "${env:ProgramFiles(x86)}\CocCoc\Browser\Application\browser.exe",
+              "$env:LOCALAPPDATA\CocCoc\Browser\Application\browser.exe"
+            )
+            $userDataDir = Join-Path $env:LOCALAPPDATA "CocCoc\Browser\User Data"
+            $procName = "browser"
+          } elseif ($targetBrowser -eq "avast") {
+            $browserCandidates = @(
+              "$env:ProgramFiles\AVAST Software\Browser\Application\AvastBrowser.exe",
+              "${env:ProgramFiles(x86)}\AVAST Software\Browser\Application\AvastBrowser.exe"
+            )
+            $userDataDir = Join-Path $env:LOCALAPPDATA "AVAST Software\Browser\User Data"
+            $procName = "AvastBrowser"
+          } else {
+            throw "unsupported App-Bound canary browser '$targetBrowser'"
           }
-          if (Get-Process chrome -ErrorAction SilentlyContinue) {
-            throw "Chrome was already running; refusing to reuse an unknown profile session"
+
+          $browserPath = $browserCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $browserPath) {
+            throw "machine-wide $targetBrowser was not found below Program Files"
+          }
+          $browserPath = (Resolve-Path $browserPath).Path
+          $browserVersion = (Get-Item $browserPath).VersionInfo.FileVersion
+          Write-Host "System $($targetBrowser): $browserPath ($browserVersion)"
+
+          if (Get-Process $procName -ErrorAction SilentlyContinue) {
+            throw "$targetBrowser was already running; refusing to reuse an unknown profile session"
           }
           $existingCookieDbs = @(
             (Join-Path $userDataDir "Default\Network\Cookies"),
@@ -565,26 +675,13 @@ jobs:
             throw "default profile already contains a Cookies database; refusing to inspect it"
           }
 
-          foreach ($policyPath in @(
-            "HKLM:\Software\Policies\Google\Chrome",
-            "HKCU:\Software\Policies\Google\Chrome"
-          )) {
-            $policy = Get-ItemProperty $policyPath `
-              -Name ApplicationBoundEncryptionEnabled -ErrorAction SilentlyContinue
-            if ($null -ne $policy) {
-              $value = $policy.ApplicationBoundEncryptionEnabled
-              Write-Host "$policyPath ApplicationBoundEncryptionEnabled=$value"
-              if ($value -eq 0) {
-                throw "App-Bound encryption is disabled by policy"
-              }
-            }
-          }
-
           Get-CimInstance Win32_OperatingSystem |
             Select-Object Caption, Version, BuildNumber | Format-List
-          Write-Host "Default Chrome user-data dir: $userDataDir"
+          Write-Host "Default $targetBrowser user-data dir: $userDataDir"
           $requestLog = Join-Path $env:RUNNER_TEMP "rookie-e2e-browser-requests.log"
-          "ROOKIE_E2E_CHROME_PATH=$chromePath" | Out-File $env:GITHUB_ENV -Append
+          "ROOKIE_E2E_TARGET_BROWSER=$targetBrowser" | Out-File $env:GITHUB_ENV -Append
+          "ROOKIE_E2E_BROWSER_PATH=$browserPath" | Out-File $env:GITHUB_ENV -Append
+          "ROOKIE_E2E_CHROME_PATH=$browserPath" | Out-File $env:GITHUB_ENV -Append
           "ROOKIE_E2E_USER_DATA_DIR=$userDataDir" | Out-File $env:GITHUB_ENV -Append
           "ROOKIE_E2E_WINDOWS_SID=$($identity.User.Value)" | Out-File $env:GITHUB_ENV -Append
           "ROOKIE_E2E_REQUEST_LOG=$requestLog" | Out-File $env:GITHUB_ENV -Append

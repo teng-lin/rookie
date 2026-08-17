@@ -85,8 +85,23 @@ def main() -> int:
         discovery_value = os.environ.get(
             "ROOKIE_E2E_DISCOVERY_COOKIE_VALUE", expected_value
         )
+        browser_name = os.environ.get("ROOKIE_E2E_TARGET_BROWSER", "chrome").lower()
+        browser_fns = {
+            "chrome": rookie_cookies.chrome,
+            "google-chrome": rookie_cookies.chrome,
+            "edge": rookie_cookies.edge,
+            "msedge": rookie_cookies.edge,
+            "brave": rookie_cookies.brave,
+        }
+        browser_fn = browser_fns.get(browser_name)
+        if browser_fn is None:
+            print(
+                f"unsupported ROOKIE_E2E_TARGET_BROWSER {browser_name!r}",
+                file=sys.stderr,
+            )
+            return 2
         results.append(
-            ("chrome", rookie_cookies.chrome([domain]), discovery_name, discovery_value)
+            (browser_name, browser_fn([domain]), discovery_name, discovery_value)
         )
 
     for surface, result, surface_name, surface_value in results:

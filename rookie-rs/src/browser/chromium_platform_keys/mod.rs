@@ -108,6 +108,28 @@ impl<'a> ChromiumKeyRequest<'a> {
     }
   }
 
+  /// Windows path-only requests have a Local State file but no registry id.
+  /// App-Bound host resolution infers the vendor from the user-data path.
+  #[cfg(target_os = "windows")]
+  pub(crate) fn for_local_state_file(
+    credentials: &'a ChromiumKeyCredentials,
+    local_state_path: &'a Path,
+  ) -> Self {
+    Self {
+      browser_id: None,
+      credentials,
+      local_state: LocalStateInput::Path(local_state_path),
+    }
+  }
+
+  #[cfg(target_os = "windows")]
+  fn local_state_path(&self) -> Option<&'a Path> {
+    match self.local_state {
+      LocalStateInput::Path(path) => Some(path),
+      LocalStateInput::Parsed(_) | LocalStateInput::NotApplicable => None,
+    }
+  }
+
   #[cfg(test)]
   pub(crate) fn browser_id(&self) -> Option<&'a str> {
     self.browser_id

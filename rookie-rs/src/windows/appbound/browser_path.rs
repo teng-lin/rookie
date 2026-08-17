@@ -1,5 +1,7 @@
-use anyhow::{bail, Result};
-use std::path::{Path, PathBuf};
+use anyhow::{anyhow, bail, Result};
+use std::path::PathBuf;
+
+use crate::browser::appbound_host::{canonical_browser_id, AppBoundHost};
 
 pub struct BrowserExeMeta {
   pub exe_name: &'static str,
@@ -64,15 +66,7 @@ pub const KNOWN_BROWSERS: &[(&str, BrowserExeMeta)] = &[
 ];
 
 pub fn get_browser_meta(name: &str) -> Option<&'static BrowserExeMeta> {
-  let lower = name.to_ascii_lowercase();
-  let key = match lower.as_str() {
-    "google-chrome" | "google_chrome" | "chrome" | "chromium" => "chrome",
-    "brave" | "brave-browser" => "brave",
-    "edge" | "msedge" | "microsoft-edge" => "edge",
-    "coccoc" | "coc_coc" => "coccoc",
-    "avast" | "avastbrowser" => "avast",
-    _ => return None,
-  };
+  let key = canonical_browser_id(name)?;
   KNOWN_BROWSERS
     .iter()
     .find(|(k, _)| *k == key)
@@ -199,33 +193,25 @@ fn query_registry_app_paths(
   }
 }
 
-/// Resolves the full path to a browser executable by name or checks all known browsers.
-pub fn find_browser_executable(browser_hint: Option<&str>) -> Result<PathBuf> {
-  if let Some(hint) = browser_hint {
-    if let Some(meta) = get_browser_meta(hint) {
-      if let Some(path) = find_executable_by_meta(meta) {
-        return Ok(path);
-      }
-    } else {
-      // If hint is an existing file path directly
-      let p = Path::new(hint);
-      if p.is_file() {
-        return Ok(p.to_path_buf());
+/// Resolves the executable for a required App-Bound host.
+///
+/// Unknown or missing installs are errors. This never walks other vendors.
+pub fn find_browser_executable(host: &AppBoundHost) -> Result<PathBuf> {
+  match host {
+    AppBoundHost::Executable(path) => {
+      if path.is_file() {
+        Ok(path.clone())
+      } else {
+        bail!("App-Bound host executable does not exist")
       }
     }
-  }
-
-  // If no specific hint or hint failed, try all known browsers in priority order
-  for (_, meta) in KNOWN_BROWSERS {
-    if let Some(path) = find_executable_by_meta(meta) {
-      return Ok(path);
+    AppBoundHost::Browser(id) => {
+      let meta = get_browser_meta(id)
+        .ok_or_else(|| anyhow!("App-Bound host {id:?} is not a known Chromium vendor"))?;
+      find_executable_by_meta(meta)
+        .ok_or_else(|| anyhow!("Could not find {} for App-Bound host {id}", meta.exe_name))
     }
   }
-
-  bail!(
-    "Could not find any installed Chromium browser executable for App-Bound decryption (hint={:?})",
-    browser_hint
-  )
 }
 
 fn find_executable_by_meta(meta: &BrowserExeMeta) -> Option<PathBuf> {
@@ -273,5 +259,16 @@ mod tests {
     std::env::set_var("ROOKIE_TEST_ENV_VAR", "my_custom_value");
     let expanded = expand_env_string("prefix/%ROOKIE_TEST_ENV_VAR%/suffix");
     assert_eq!(expanded, "prefix/my_custom_value/suffix");
+  }
+
+  #[test]
+  fn missing_executable_host_does_not_search_other_vendors() {
+    let error = find_browser_executable(&AppBoundHost::Executable(PathBuf::from(
+      "C:\\definitely-not-installed\\msedge.exe",
+    )))
+    .expect_err("missing host exe must fail");
+    let message = error.to_string();
+    assert!(message.contains("does not exist"), "{message}");
+    assert!(!message.contains("any installed Chromium"), "{message}");
   }
 }
