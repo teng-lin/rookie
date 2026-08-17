@@ -212,24 +212,29 @@ pub fn get_keys_with_hint(
   key64: &str,
   browser_hint: Option<&str>,
 ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  let mode = std::env::var("ROOKIE_E2E_APPBOUND_MODE").unwrap_or_default();
   let mut errors: Vec<String> = Vec::new();
 
-  // Primary: COM RPC injection into spawned browser (unprivileged)
-  match retrieve_via_injection(key64, browser_hint) {
-    Ok(key) => return Ok(vec![key]),
-    Err(e) => {
-      log::debug!("App-Bound COM reflective injection failed: {e}");
-      errors.push(format!("COM injection: {e}"));
+  if mode != "elevated_only" {
+    // Primary: COM RPC injection into spawned browser (unprivileged)
+    match retrieve_via_injection(key64, browser_hint) {
+      Ok(key) => return Ok(vec![key]),
+      Err(e) => {
+        log::debug!("App-Bound COM reflective injection failed: {e}");
+        errors.push(format!("COM injection: {e}"));
+      }
     }
   }
 
-  // Fallback: In-process elevated SYSTEM impersonation
-  match get_keys_elevated_fallback(key64) {
-    Ok(keys) if !keys.is_empty() => return Ok(keys),
-    Ok(_) => {}
-    Err(e) => {
-      log::debug!("App-Bound elevated DPAPI fallback failed: {e}");
-      errors.push(format!("Elevated fallback: {e}"));
+  if mode != "injection_only" {
+    // Fallback: In-process elevated SYSTEM impersonation
+    match get_keys_elevated_fallback(key64) {
+      Ok(keys) if !keys.is_empty() => return Ok(keys),
+      Ok(_) => {}
+      Err(e) => {
+        log::debug!("App-Bound elevated DPAPI fallback failed: {e}");
+        errors.push(format!("Elevated fallback: {e}"));
+      }
     }
   }
 

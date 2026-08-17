@@ -327,6 +327,38 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore]
+fn extracts_seeded_cookie_via_injection_only() {
+  std::env::set_var("ROOKIE_E2E_APPBOUND_MODE", "injection_only");
+  let db_path = helpers::resolve_db_path();
+  let key_path = helpers::resolve_key_path();
+  let domain = helpers::domain();
+
+  let cookies =
+    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]), false)
+      .unwrap_or_else(|e| panic!("rookie_cookies::chromium_based (injection_only) failed: {e}",));
+
+  helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore]
+fn extracts_seeded_cookie_via_elevated_fallback_only() {
+  std::env::set_var("ROOKIE_E2E_APPBOUND_MODE", "elevated_only");
+  let db_path = helpers::resolve_db_path();
+  let key_path = helpers::resolve_key_path();
+  let domain = helpers::domain();
+
+  let cookies =
+    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]), false)
+      .unwrap_or_else(|e| panic!("rookie_cookies::chromium_based (elevated_only) failed: {e}",));
+
+  helpers::assert_seeded(&cookies, &domain);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore]
 fn extracts_seeded_cookie_through_default_chrome_discovery() {
   if std::env::var("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY").as_deref() != Ok("1") {
     eprintln!("default Chrome discovery check was not requested");
