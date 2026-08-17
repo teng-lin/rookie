@@ -76,7 +76,18 @@ if (process.platform === "win32") {
 results = results.map(([surface, cookies]) => [surface, cookies, expectedName, expectedValue]);
 if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
   const browserName = (process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome").toLowerCase();
-  const browserFn = rookieCookies[browserName] ?? rookieCookies.chrome;
+  const browserFns = {
+    chrome: rookieCookies.chrome,
+    "google-chrome": rookieCookies.chrome,
+    edge: rookieCookies.edge,
+    msedge: rookieCookies.edge,
+    brave: rookieCookies.brave,
+  };
+  const browserFn = browserFns[browserName];
+  if (!browserFn) {
+    console.error(`unsupported ROOKIE_E2E_TARGET_BROWSER '${browserName}'`);
+    process.exit(2);
+  }
   results.push([
     browserName,
     await browserFn([domain]),

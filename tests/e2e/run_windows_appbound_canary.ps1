@@ -2,7 +2,17 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $script:targetBrowser = if ($env:ROOKIE_E2E_TARGET_BROWSER) { $env:ROOKIE_E2E_TARGET_BROWSER.ToLower() } else { "chrome" }
-$script:browserProcess = if ($script:targetBrowser -eq "edge") { "msedge" } else { $script:targetBrowser }
+$script:processNames = @{
+  chrome = "chrome"
+  edge = "msedge"
+  brave = "brave"
+  coccoc = "browser"
+  avast = "AvastBrowser"
+}
+if (-not $script:processNames.ContainsKey($script:targetBrowser)) {
+  throw "unsupported ROOKIE_E2E_TARGET_BROWSER '$($script:targetBrowser)'"
+}
+$script:browserProcess = $script:processNames[$script:targetBrowser]
 $script:browserPath = if ($env:ROOKIE_E2E_BROWSER_PATH) { $env:ROOKIE_E2E_BROWSER_PATH } else { $env:ROOKIE_E2E_CHROME_PATH }
 
 function Get-RequestLogSnapshot {

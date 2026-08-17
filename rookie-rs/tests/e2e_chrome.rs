@@ -368,12 +368,17 @@ fn extracts_seeded_cookie_through_default_chrome_discovery() {
   let browser_name =
     std::env::var("ROOKIE_E2E_TARGET_BROWSER").unwrap_or_else(|_| "chrome".to_string());
   let cookies = match browser_name.to_ascii_lowercase().as_str() {
-    "edge" => rookie_cookies::edge(Some(vec![domain.clone()]))
+    "chrome" | "google-chrome" => rookie_cookies::chrome(Some(vec![domain.clone()]))
+      .unwrap_or_else(|error| panic!("rookie_cookies::chrome failed: {error}")),
+    "edge" | "msedge" => rookie_cookies::edge(Some(vec![domain.clone()]))
       .unwrap_or_else(|error| panic!("rookie_cookies::edge failed: {error}")),
     "brave" => rookie_cookies::brave(Some(vec![domain.clone()]))
       .unwrap_or_else(|error| panic!("rookie_cookies::brave failed: {error}")),
-    _ => rookie_cookies::chrome(Some(vec![domain.clone()]))
-      .unwrap_or_else(|error| panic!("rookie_cookies::chrome failed: {error}")),
+    "coccoc" => rookie_cookies::browser("coccoc", Some(vec![domain.clone()]))
+      .unwrap_or_else(|error| panic!("rookie_cookies::browser(coccoc) failed: {error}")),
+    "avast" => rookie_cookies::browser("avast", Some(vec![domain.clone()]))
+      .unwrap_or_else(|error| panic!("rookie_cookies::browser(avast) failed: {error}")),
+    other => panic!("unsupported ROOKIE_E2E_TARGET_BROWSER {other:?}"),
   };
   helpers::assert_discovered(&cookies, &domain);
 }
