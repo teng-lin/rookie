@@ -28,6 +28,41 @@
         }
       },
       {
+        "canonical_id": "avast",
+        "aliases": [
+          "avastbrowser"
+        ],
+        "display_name": "Avast Secure Browser",
+        "engine": "chromium",
+        "roots": [
+          {
+            "root_id": "avast-stable-local",
+            "template": "{local_app_data}/AVAST Software/Browser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 10
+          },
+          {
+            "root_id": "avast-stable-roaming",
+            "template": "{roaming_app_data}/AVAST Software/Browser/User Data",
+            "channel": "stable",
+            "discovery": "chromium_user_data",
+            "priority": 20
+          }
+        ],
+        "capabilities": {
+          "declared_persistent_formats": [
+            "chromium_sqlite"
+          ],
+          "declared_session_formats": [],
+          "declared_decryption_tiers": [
+            "legacy_dpapi",
+            "v10",
+            "v20"
+          ]
+        }
+      },
+      {
         "canonical_id": "brave",
         "aliases": [],
         "display_name": "Brave",
@@ -97,7 +132,8 @@
           "declared_session_formats": [],
           "declared_decryption_tiers": [
             "legacy_dpapi",
-            "v10"
+            "v10",
+            "v20"
           ]
         }
       },
@@ -263,7 +299,8 @@
           "declared_session_formats": [],
           "declared_decryption_tiers": [
             "legacy_dpapi",
-            "v10"
+            "v10",
+            "v20"
           ]
         }
       },
@@ -396,7 +433,8 @@
           "declared_session_formats": [],
           "declared_decryption_tiers": [
             "legacy_dpapi",
-            "v10"
+            "v10",
+            "v20"
           ]
         }
       },

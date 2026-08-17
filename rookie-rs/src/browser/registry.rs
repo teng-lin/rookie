@@ -2141,11 +2141,12 @@ mod tests {
   #[test]
   fn only_browsers_with_known_elevation_keys_declare_v20() {
     let registry = embedded_registry().expect("registry");
-    // rookie holds Google Chrome's app-bound elevation keys and no other
-    // vendor's, so v20 stays a Chrome-only declaration. Other Chromium
-    // browsers do write `app_bound_encrypted_key`; restating declarations as
-    // browser-truth means teaching `capability_descriptor` a per-browser key
-    // axis first, or `available_decryption_tiers` will overclaim.
+    // rookie supports Chrome, Brave, Edge, CocCoc, and Avast for Windows App-Bound v20
+    // via COM reflective injection.
+    let supported_v20_browsers: std::collections::BTreeSet<&str> =
+      ["chrome", "brave", "edge", "coccoc", "avast"]
+        .into_iter()
+        .collect();
     for definitions in registry.platforms.values() {
       for definition in definitions {
         if definition
@@ -2154,7 +2155,11 @@ mod tests {
           .iter()
           .any(|tier| tier == "v20")
         {
-          assert_eq!(definition.canonical_id, "chrome");
+          assert!(
+            supported_v20_browsers.contains(definition.canonical_id.as_str()),
+            "unexpected browser declaring v20: {}",
+            definition.canonical_id
+          );
         }
       }
     }

@@ -1866,6 +1866,7 @@ mod tests {
         ]
         .as_slice(),
         [
+          "avast",
           "browser_from_vought",
           "coccoc",
           "dc_browser",
@@ -2063,7 +2064,7 @@ mod tests {
   }
 
   #[test]
-  fn windows_coccoc_claims_plaintext_and_v10_without_app_bound() {
+  fn windows_coccoc_claims_decryption_tiers_including_v20() {
     let registry = embedded_registry().expect("valid embedded registry");
     let definition = browser_definition(registry, PlatformId::Windows, "coccoc").expect("CocCoc");
     let descriptor = capability_descriptor(definition, PlatformId::Windows);
@@ -2071,11 +2072,16 @@ mod tests {
     assert!(descriptor.declared_session_formats.is_empty());
     assert_eq!(
       descriptor.declared_decryption_tiers,
-      ["legacy_dpapi", "v10"]
+      ["legacy_dpapi", "v10", "v20"]
     );
+    let expected_available = if cfg!(feature = "appbound") {
+      vec!["legacy_dpapi", "v10", "v20"]
+    } else {
+      vec!["legacy_dpapi", "v10"]
+    };
     assert_eq!(
       descriptor.available_decryption_tiers,
-      ["legacy_dpapi", "v10"]
+      expected_available.as_slice()
     );
   }
 
@@ -3072,14 +3078,17 @@ mod tests {
     );
     let edge = browser_definition(registry, PlatformId::Windows, "edge").expect("Windows Edge");
     let edge_descriptor = capability_descriptor(edge, PlatformId::Windows);
-    assert!(!edge_descriptor
+    assert!(edge_descriptor
       .declared_decryption_tiers
       .iter()
       .any(|tier| tier == "v20"));
-    assert!(!edge_descriptor
-      .available_decryption_tiers
-      .iter()
-      .any(|tier| tier == "v20"));
+    assert_eq!(
+      edge_descriptor
+        .available_decryption_tiers
+        .iter()
+        .any(|tier| tier == "v20"),
+      cfg!(feature = "appbound")
+    );
   }
 
   #[test]

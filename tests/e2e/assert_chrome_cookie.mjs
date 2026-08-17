@@ -75,9 +75,11 @@ if (process.platform === "win32") {
 
 results = results.map(([surface, cookies]) => [surface, cookies, expectedName, expectedValue]);
 if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
+  const browserName = (process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome").toLowerCase();
+  const browserFn = rookieCookies[browserName] ?? rookieCookies.chrome;
   results.push([
-    "chrome",
-    await rookieCookies.chrome([domain]),
+    browserName,
+    await browserFn([domain]),
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_VALUE ?? expectedValue,
   ]);

@@ -85,8 +85,10 @@ def main() -> int:
         discovery_value = os.environ.get(
             "ROOKIE_E2E_DISCOVERY_COOKIE_VALUE", expected_value
         )
+        browser_name = os.environ.get("ROOKIE_E2E_TARGET_BROWSER", "chrome").lower()
+        browser_fn = getattr(rookie_cookies, browser_name, rookie_cookies.chrome)
         results.append(
-            ("chrome", rookie_cookies.chrome([domain]), discovery_name, discovery_value)
+            (browser_name, browser_fn([domain]), discovery_name, discovery_value)
         )
 
     for surface, result, surface_name, surface_value in results:
