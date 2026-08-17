@@ -80,6 +80,10 @@ paths = [
   "rookie-rs/src/browser/report_build/dispatch/macos.rs",
   "rookie-rs/src/browser/report_build/dispatch/windows.rs",
   "rookie-rs/src/browser/report_build/dispatch/other.rs",
+
+  # Windows App-Bound COM reflective injection
+  "rookie-rs/src/windows/appbound/browser_path.rs",
+  "rookie-rs/src/windows/appbound/injector.rs",
 ]
 
 [grandfathered]

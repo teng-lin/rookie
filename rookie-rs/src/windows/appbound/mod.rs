@@ -1,6 +1,7 @@
 /*
-See https://github.com/runassu/chrome_v20_decryption/blob/main/decrypt_chrome_v20_cookie.py
-cargo build --release --features appbound
+Chrome v20 App-Bound Encryption Key Retrieval:
+- Reflective COM injection into spawned browser process (unprivileged, Chrome 127+)
+- In-process DPAPI/CNG SYSTEM impersonation fallback (elevated, Chrome 127-133+)
 */
 use anyhow::{anyhow, bail, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
@@ -14,7 +15,12 @@ use zeroize::Zeroizing;
 
 use crate::common::secret::SecretBytes;
 
+pub mod browser_path;
+pub mod constants;
 mod impersonate;
+pub mod injector;
+pub mod payload;
+pub mod pe;
 
 // Keys extracted from Chrome's elevation_service.exe, used to unwrap the
 // app-bound v20 master key. See the reference implementation linked above.
@@ -153,48 +159,103 @@ fn derive_legacy_tail_key(user_decrypted: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
   aead_decrypt::<Aes256Gcm>(AES256_ELEVATION_KEY, iv_and_ciphertext)
 }
 
-pub fn get_keys(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+/// Retrieves the Chrome v20 App-Bound master key using reflective COM injection into a spawned browser process.
+pub fn retrieve_via_injection(
+  key64: &str,
+  browser_hint: Option<&str>,
+) -> Result<Zeroizing<Vec<u8>>> {
+  let payload_bytes = payload::get_payload()
+    .ok_or_else(|| anyhow!("App-Bound injection payload not available for this architecture"))?;
+  let exe_path = browser_path::find_browser_executable(browser_hint)?;
+
+  let key_u8 = BASE64_STANDARD.decode(key64)?;
+  let stripped_key = if key_u8.starts_with(b"APPB") {
+    &key_u8[4..]
+  } else {
+    &key_u8[..]
+  };
+  let stripped_b64 = BASE64_STANDARD.encode(stripped_key);
+
+  injector::inject_and_extract_key(&exe_path, payload_bytes, &stripped_b64)
+}
+
+/// Unwraps the App-Bound master key using in-process DPAPI/CNG with elevated SYSTEM impersonation.
+fn get_keys_elevated_fallback(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
   let mut keys: Vec<Zeroizing<Vec<u8>>> = Vec::new();
 
   let key_u8 = BASE64_STANDARD.decode(key64)?;
   if !key_u8.starts_with(b"APPB") {
-    bail!("key not starts with APPB")
+    bail!("key does not start with APPB");
   }
   let system_decrypted = decrypt_dpapi(&key_u8[4..], true)?;
   let user_decrypted = decrypt_dpapi(&system_decrypted, false)?;
 
-  // Candidate 1: some Chrome builds use the trailing 32 bytes as the key directly.
+  // Candidate 1: trailing 32 bytes
   if user_decrypted.len() >= 32 {
     keys.push(Zeroizing::new(
       user_decrypted[user_decrypted.len() - 32..].to_vec(),
     ));
   }
 
-  // Candidate 2: derive the wrapped v20 master key from the key blob. For a v20
-  // browser this is the only path that yields a working key, so a failure here
-  // means every cookie fails to decrypt — log it at warn, not debug.
+  // Candidate 2: derive the wrapped v20 master key
   match parse_key_blob_content(&user_decrypted) {
     Ok(content) => match derive_v20_master_key(content) {
       Ok(Some(master_key)) => keys.push(master_key),
       Ok(None) => log::warn!("app-bound v20 master key derivation yielded no key"),
-      // A recognized wrapping scheme (one of Chrome's own flag bytes) failed to
-      // unwrap - most likely a CNG/DPAPI environment problem, not a vendor
-      // mismatch. Propagate it rather than silently falling back to the
-      // low-confidence trailing-bytes candidate and reporting success, which
-      // would surface as a generic decrypt failure far downstream instead of
-      // this specific, actionable diagnostic.
       Err(err) => bail!("Failed to derive app-bound v20 master key: {err}"),
     },
     Err(err) => {
       log::warn!("Failed to parse app-bound key blob framing: {err}");
-      match derive_legacy_tail_key(&user_decrypted) {
-        Some(master_key) => keys.push(master_key),
-        None => log::warn!("Legacy app-bound key fallback yielded no key"),
+      if let Some(master_key) = derive_legacy_tail_key(&user_decrypted) {
+        keys.push(master_key);
       }
     }
   }
 
   Ok(keys)
+}
+
+/// Retrieves candidate v20 master keys, attempting non-elevated COM injection first,
+/// with fallback to elevated DPAPI impersonation if available.
+pub fn get_keys_with_hint(
+  key64: &str,
+  browser_hint: Option<&str>,
+) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  let mode = std::env::var("ROOKIE_E2E_APPBOUND_MODE").unwrap_or_default();
+  let mut errors: Vec<String> = Vec::new();
+
+  if mode != "elevated_only" {
+    // Primary: COM RPC injection into spawned browser (unprivileged)
+    match retrieve_via_injection(key64, browser_hint) {
+      Ok(key) => return Ok(vec![key]),
+      Err(e) => {
+        log::debug!("App-Bound COM reflective injection failed: {e}");
+        errors.push(format!("COM injection: {e}"));
+      }
+    }
+  }
+
+  if mode != "injection_only" {
+    // Fallback: In-process elevated SYSTEM impersonation
+    match get_keys_elevated_fallback(key64) {
+      Ok(keys) if !keys.is_empty() => return Ok(keys),
+      Ok(_) => {}
+      Err(e) => {
+        log::debug!("App-Bound elevated DPAPI fallback failed: {e}");
+        errors.push(format!("Elevated fallback: {e}"));
+      }
+    }
+  }
+
+  bail!(
+    "Failed to retrieve Chrome v20 App-Bound master key ({})",
+    errors.join("; ")
+  )
+}
+
+#[allow(dead_code)]
+pub fn get_keys(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  get_keys_with_hint(key64, None)
 }
 
 #[cfg(test)]

@@ -187,29 +187,55 @@ try {
   $env:ROOKIE_E2E_DISCOVERY_COOKIE_NAME = "rookie_ci"
   $env:ROOKIE_E2E_DISCOVERY_COOKIE_VALUE = "bar"
 
-  Write-Host "Identity before elevated extraction:"
+  Write-Host "Identity before extraction:"
   whoami /user
   $extractSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   if ($extractSid -ne $env:ROOKIE_E2E_WINDOWS_SID) {
     throw "extraction user differs from the Chrome seed user"
   }
 
-  cargo test --test e2e_chrome -- --ignored --nocapture
-  if ($LASTEXITCODE -ne 0) { throw "Rust App-Bound extraction failed" }
+  Write-Host "=== PASS 1: Test COM Injection ONLY (no elevation fallback) ==="
+  $env:ROOKIE_E2E_APPBOUND_MODE = "injection_only"
+
+  cargo test --test e2e_chrome -- extracts_seeded_cookie_via_injection_only --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw "Rust App-Bound COM injection (injection_only) failed" }
   Assert-ChromeAlive
 
   & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
-  if ($LASTEXITCODE -ne 0) { throw "Python App-Bound extraction failed" }
+  if ($LASTEXITCODE -ne 0) { throw "Python App-Bound COM injection (injection_only) failed" }
   Assert-ChromeAlive
 
   node tests/e2e/assert_chrome_cookie.mjs
-  if ($LASTEXITCODE -ne 0) { throw "Node App-Bound extraction failed" }
+  if ($LASTEXITCODE -ne 0) { throw "Node App-Bound COM injection (injection_only) failed" }
   Assert-ChromeAlive
 
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
     "$walCookiesDb" --key-path "$localState"
-  if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound extraction failed" }
+  if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound COM injection (injection_only) failed" }
   Assert-ChromeAlive
+
+  Write-Host "=== PASS 2: Test Elevated DPAPI Fallback ONLY (no COM injection) ==="
+  $env:ROOKIE_E2E_APPBOUND_MODE = "elevated_only"
+
+  cargo test --test e2e_chrome -- extracts_seeded_cookie_via_elevated_fallback_only --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw "Rust App-Bound elevated fallback (elevated_only) failed" }
+  Assert-ChromeAlive
+
+  & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
+  if ($LASTEXITCODE -ne 0) { throw "Python App-Bound elevated fallback (elevated_only) failed" }
+  Assert-ChromeAlive
+
+  node tests/e2e/assert_chrome_cookie.mjs
+  if ($LASTEXITCODE -ne 0) { throw "Node App-Bound elevated fallback (elevated_only) failed" }
+  Assert-ChromeAlive
+
+  & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
+    "$walCookiesDb" --key-path "$localState"
+  if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound elevated fallback (elevated_only) failed" }
+  Assert-ChromeAlive
+
+  Write-Host "=== PASS 3: Test Default Chrome Discovery (Auto Mode) ==="
+  Remove-Item Env:\ROOKIE_E2E_APPBOUND_MODE -ErrorAction SilentlyContinue
 
   # Chrome currently uses rollback-journal mode for its real default Cookies
   # database and share-denies live readers. The non-disruptive extraction
