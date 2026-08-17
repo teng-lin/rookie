@@ -39,7 +39,6 @@ trait WindowsKeyBackend {
     runtime: &BoundaryRuntime<'_>,
   ) -> Result<Vec<Zeroizing<Vec<u8>>>>;
   fn appbound_compiled(&self) -> bool;
-  fn privileged(&self, runtime: &BoundaryRuntime<'_>) -> Result<bool>;
   fn retrieve_v20(
     &self,
     encoded_key: &str,
@@ -99,13 +98,6 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
 
   fn appbound_compiled(&self) -> bool {
     cfg!(feature = "appbound")
-  }
-
-  fn privileged(&self, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
-    runtime.check()?;
-    let privileged = privilege::user::privileged();
-    runtime.check()?;
-    Ok(privileged)
   }
 
   fn retrieve_v20(
@@ -357,7 +349,6 @@ mod tests {
     v10_calls: Cell<usize>,
     v20_calls: Cell<usize>,
     compiled: bool,
-    privileged: bool,
     v10_result: Result<Vec<Zeroizing<Vec<u8>>>>,
     v20_result: Result<Vec<Zeroizing<Vec<u8>>>>,
   }
@@ -378,10 +369,6 @@ mod tests {
 
     fn appbound_compiled(&self) -> bool {
       self.compiled
-    }
-
-    fn privileged(&self, _runtime: &BoundaryRuntime<'_>) -> Result<bool> {
-      Ok(self.privileged)
     }
 
     fn retrieve_v20(
@@ -407,7 +394,6 @@ mod tests {
       v10_calls: Cell::new(0),
       v20_calls: Cell::new(0),
       compiled: true,
-      privileged: true,
       v10_result: v10_result.map(|candidates| candidates.into_iter().map(Zeroizing::new).collect()),
       v20_result: v20_result.map(|candidates| candidates.into_iter().map(Zeroizing::new).collect()),
     }
@@ -680,10 +666,8 @@ mod tests {
 
   struct AdvancingWindowsBackend {
     v10_calls: Cell<usize>,
-    privilege_calls: Cell<usize>,
     v20_calls: Cell<usize>,
     v10_elapsed: std::time::Duration,
-    privilege_elapsed: std::time::Duration,
     v20_elapsed: std::time::Duration,
   }
 
@@ -691,10 +675,8 @@ mod tests {
     fn new() -> Self {
       Self {
         v10_calls: Cell::new(0),
-        privilege_calls: Cell::new(0),
         v20_calls: Cell::new(0),
         v10_elapsed: std::time::Duration::ZERO,
-        privilege_elapsed: std::time::Duration::ZERO,
         v20_elapsed: std::time::Duration::ZERO,
       }
     }
@@ -713,12 +695,6 @@ mod tests {
 
     fn appbound_compiled(&self) -> bool {
       true
-    }
-
-    fn privileged(&self, runtime: &BoundaryRuntime<'_>) -> Result<bool> {
-      self.privilege_calls.set(self.privilege_calls.get() + 1);
-      runtime.clock.sleep(self.privilege_elapsed);
-      Ok(true)
     }
 
     fn retrieve_v20(
@@ -761,7 +737,6 @@ mod tests {
     let outcomes = retrieve_windows_key_outcomes_with_runtime(&state, None, &backend, &runtime);
 
     assert_eq!(backend.v10_calls.get(), 0);
-    assert_eq!(backend.privilege_calls.get(), 0);
     assert_eq!(backend.v20_calls.get(), 0);
     assert!(failure_message(&outcomes.v10).contains("operation cancelled"));
     assert!(failure_message(&outcomes.v20).contains("operation cancelled"));
@@ -814,7 +789,6 @@ mod tests {
 
     assert_eq!(reader.calls.get(), 1);
     assert_eq!(backend.v10_calls.get(), 0);
-    assert_eq!(backend.privilege_calls.get(), 0);
     assert_eq!(backend.v20_calls.get(), 0);
     assert!(failure_message(&outcomes.v10).contains("resource budget exhausted"));
     assert!(failure_message(&outcomes.v20).contains("resource budget exhausted"));
@@ -846,7 +820,6 @@ mod tests {
 
     assert_eq!(reader.calls.get(), 1);
     assert_eq!(backend.v10_calls.get(), 0);
-    assert_eq!(backend.privilege_calls.get(), 0);
     assert!(failure_message(&outcomes.v10).contains("operation deadline expired"));
     assert!(failure_message(&outcomes.v20).contains("operation deadline expired"));
   }
@@ -864,7 +837,6 @@ mod tests {
 
     assert_eq!(backend.v10_calls.get(), 1);
     assert!(failure_message(&outcomes.v10).contains("operation deadline expired"));
-    assert_eq!(backend.privilege_calls.get(), 0);
     assert_eq!(backend.v20_calls.get(), 0);
   }
 

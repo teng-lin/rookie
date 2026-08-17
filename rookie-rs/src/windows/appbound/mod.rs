@@ -239,6 +239,7 @@ pub fn get_keys_with_hint(
   )
 }
 
+#[allow(dead_code)]
 pub fn get_keys(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
   get_keys_with_hint(key64, None)
 }

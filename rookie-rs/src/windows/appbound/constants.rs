@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub const BOOTSTRAP_MARKER_OFFSET: usize = 0x28;
 pub const BOOTSTRAP_KEY_STATUS_OFFSET: usize = 0x29;
 pub const BOOTSTRAP_KEY_STATUS_READY: u8 = 0x01;
