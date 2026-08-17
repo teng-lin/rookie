@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
 pub struct BrowserExeMeta {

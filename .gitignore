@@ -8,5 +8,6 @@ node_modules/
 *.lockb
 *.exe
 *.bin
+!rookie-rs/src/windows/appbound/native/*.bin
 *.dll
 impersonate.h

@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail, Result};
-use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -74,7 +73,6 @@ impl ProcessHandlesGuard {
   }
 
   fn terminate(&mut self, exit_code: u32) {
-    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 
     if !self.terminated && !self.h_process.is_invalid() {
@@ -362,7 +360,7 @@ pub fn inject_and_extract_key(
   // Terminate the temporary browser process
   proc_guard.terminate(0);
 
-  if let Some(key) = scratch.key {
+  if let Some(key) = scratch.key.take() {
     if key.len() == BOOTSTRAP_KEY_LEN {
       return Ok(Zeroizing::new(key));
     }
