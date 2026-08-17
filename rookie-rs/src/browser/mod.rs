@@ -1,3 +1,4 @@
+pub(crate) mod appbound_host;
 pub(crate) mod chromium;
 pub(crate) mod chromium_crypto;
 #[cfg(any(target_os = "windows", test))]

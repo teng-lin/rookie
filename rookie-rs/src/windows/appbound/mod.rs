@@ -159,14 +159,14 @@ fn derive_legacy_tail_key(user_decrypted: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
   aead_decrypt::<Aes256Gcm>(AES256_ELEVATION_KEY, iv_and_ciphertext)
 }
 
-/// Retrieves the Chrome v20 App-Bound master key using reflective COM injection into a spawned browser process.
+/// Retrieves the v20 App-Bound master key using reflective COM injection into a spawned browser process.
 pub fn retrieve_via_injection(
   key64: &str,
-  browser_hint: Option<&str>,
+  host: &crate::browser::appbound_host::AppBoundHost,
 ) -> Result<Zeroizing<Vec<u8>>> {
   let payload_bytes = payload::get_payload()
     .ok_or_else(|| anyhow!("App-Bound injection payload not available for this architecture"))?;
-  let exe_path = browser_path::find_browser_executable(browser_hint)?;
+  let exe_path = browser_path::find_browser_executable(host)?;
 
   let key_u8 = BASE64_STANDARD.decode(key64)?;
   let stripped_key = if key_u8.starts_with(b"APPB") {
@@ -217,16 +217,15 @@ fn get_keys_elevated_fallback(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
 
 /// Retrieves candidate v20 master keys, attempting non-elevated COM injection first,
 /// with fallback to elevated DPAPI impersonation if available.
-pub fn get_keys_with_hint(
+pub fn get_keys(
   key64: &str,
-  browser_hint: Option<&str>,
+  host: &crate::browser::appbound_host::AppBoundHost,
 ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
   let mode = std::env::var("ROOKIE_E2E_APPBOUND_MODE").unwrap_or_default();
   let mut errors: Vec<String> = Vec::new();
 
   if mode != "elevated_only" {
-    // Primary: COM RPC injection into spawned browser (unprivileged)
-    match retrieve_via_injection(key64, browser_hint) {
+    match retrieve_via_injection(key64, host) {
       Ok(key) => return Ok(vec![key]),
       Err(e) => {
         log::debug!("App-Bound COM reflective injection failed: {e}");
@@ -236,7 +235,6 @@ pub fn get_keys_with_hint(
   }
 
   if mode != "injection_only" {
-    // Fallback: In-process elevated SYSTEM impersonation
     match get_keys_elevated_fallback(key64) {
       Ok(keys) if !keys.is_empty() => return Ok(keys),
       Ok(_) => {}
@@ -248,14 +246,9 @@ pub fn get_keys_with_hint(
   }
 
   bail!(
-    "Failed to retrieve Chrome v20 App-Bound master key ({})",
+    "Failed to retrieve App-Bound v20 master key ({})",
     errors.join("; ")
   )
-}
-
-#[allow(dead_code)]
-pub fn get_keys(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
-  get_keys_with_hint(key64, None)
 }
 
 #[cfg(test)]

@@ -432,7 +432,7 @@ fn local_state_outcomes(
   let credentials = ChromiumKeyCredentials::default();
   let mut session = HostKeySession::new();
   Ok(session.retrieve(
-    ChromiumKeyRequest::for_installation("direct_path", &credentials, path, None),
+    ChromiumKeyRequest::for_local_state_file(&credentials, path),
     runtime,
   ))
 }
