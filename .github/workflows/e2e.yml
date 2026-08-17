@@ -582,7 +582,7 @@ jobs:
           }
           $browserPath = (Resolve-Path $browserPath).Path
           $browserVersion = (Get-Item $browserPath).VersionInfo.FileVersion
-          Write-Host "System $targetBrowser: $browserPath ($browserVersion)"
+          Write-Host "System $($targetBrowser): $browserPath ($browserVersion)"
 
           if (Get-Process $procName -ErrorAction SilentlyContinue) {
             throw "$targetBrowser was already running; refusing to reuse an unknown profile session"
