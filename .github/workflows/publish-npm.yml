@@ -7,6 +7,11 @@ on:
         description: Version to publish from the matching v-prefixed tag
         required: true
         type: string
+      tag:
+        description: npm dist-tag (default: latest for stable, alpha/prerelease tag for prerelease)
+        required: false
+        type: string
+        default: ""
 
 env:
   DEBUG: napi:*
@@ -442,8 +447,17 @@ jobs:
         shell: bash
         run: |
           test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 5
+          npm_tag="${{ inputs.tag }}"
+          if [ -z "$npm_tag" ]; then
+            if [[ "$RELEASE_VERSION" == *-* ]]; then
+              npm_tag="$(echo "$RELEASE_VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([a-zA-Z0-9]+).*/\1/')"
+            else
+              npm_tag="latest"
+            fi
+          fi
+          echo "Verified publish inputs (target npm dist-tag: $npm_tag)"
           for tarball in release-packages/*.tgz; do
-            npm publish "./$tarball" --dry-run --access public --ignore-scripts
+            npm publish "./$tarball" --dry-run --access public --ignore-scripts --tag "$npm_tag"
           done
       - name: Re-verify release tag still points at the packaged commit
         shell: bash
@@ -485,6 +499,15 @@ jobs:
       - name: Publish
         shell: bash
         run: |
+          npm_tag="${{ inputs.tag }}"
+          if [ -z "$npm_tag" ]; then
+            if [[ "$RELEASE_VERSION" == *-* ]]; then
+              npm_tag="$(echo "$RELEASE_VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([a-zA-Z0-9]+).*/\1/')"
+            else
+              npm_tag="latest"
+            fi
+          fi
+          echo "Publishing to npm with dist-tag: $npm_tag"
           native_packages=(
             rookie-cookies-darwin-arm64
             rookie-cookies-darwin-x64
@@ -504,7 +527,7 @@ jobs:
               echo "$package_name@$RELEASE_VERSION is already published with identical contents"
               return 0
             fi
-            npm publish "./$tarball" --access public --ignore-scripts --provenance
+            npm publish "./$tarball" --access public --ignore-scripts --provenance --tag "$npm_tag"
           }
           for package in "${native_packages[@]}"; do
             publish_tarball "$package" "release-packages/$package-$RELEASE_VERSION.tgz"
