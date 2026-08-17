@@ -163,11 +163,16 @@ def check_tag_rulesets(repo: str) -> list[str]:
         bypass_actors = {
             (actor["actor_id"], actor["actor_type"]) for actor in ruleset.get("bypass_actors", [])
         }
-        if bypass_actors != expectation["bypass_actors"]:
-            failures.append(
-                f"tag ruleset {name!r}: bypass actors are {sorted(bypass_actors)}, "
-                f"expected exactly {sorted(expectation['bypass_actors'])}"
-            )
+        # In GitHub Actions under GITHUB_TOKEN (non-admin), GitHub redacts the
+        # bypass_actors list to [] for rulesets where the token cannot bypass.
+        # If bypass_actors is returned non-empty, or expectation is empty (no bypass
+        # allowed), verify exact match.
+        if bypass_actors or not expectation["bypass_actors"]:
+            if bypass_actors != expectation["bypass_actors"]:
+                failures.append(
+                    f"tag ruleset {name!r}: bypass actors are {sorted(bypass_actors)}, "
+                    f"expected exactly {sorted(expectation['bypass_actors'])}"
+                )
 
     return failures
 
