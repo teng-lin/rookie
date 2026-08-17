@@ -116,8 +116,7 @@ fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>> {
     unsafe { GetProcAddress(kernel32, PCSTR(c"LoadLibraryA".as_ptr().cast())) };
   let p_get_proc_address =
     unsafe { GetProcAddress(kernel32, PCSTR(c"GetProcAddress".as_ptr().cast())) };
-  let p_virtual_alloc =
-    unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualAlloc".as_ptr().cast())) };
+  let p_virtual_alloc = unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualAlloc".as_ptr().cast())) };
   let p_virtual_protect =
     unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualProtect".as_ptr().cast())) };
   let p_nt_flush_ic =
