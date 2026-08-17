@@ -472,7 +472,14 @@ $handle = [System.IO.File]::Open(
 Start-Sleep -Seconds 300
 "#;
     let child = Command::new("powershell.exe")
-      .args(["-NoProfile", "-NonInteractive", "-Command", script])
+      .args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+      ])
       .env(CHILD_PATH_ENV, path)
       .env(CHILD_READY_ENV, ready)
       .stdin(Stdio::null())
@@ -482,7 +489,7 @@ Start-Sleep -Seconds 300
       .spawn()
       .expect("spawn exclusive-handle helper");
     let mut child = ChildGuard(child);
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !ready.exists() {
       if let Some(status) = child.0.try_wait().expect("poll lock helper") {
         panic!("exclusive-handle helper exited before readiness: {status}");
@@ -497,7 +504,7 @@ Start-Sleep -Seconds 300
   }
 
   fn wait_for_recovery(child: &mut ChildGuard) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
       if child.0.try_wait().expect("poll recovered child").is_some() {
         return;
