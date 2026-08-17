@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       tag:
-        description: npm dist-tag (default: latest for stable, alpha/prerelease tag for prerelease)
+        description: "npm dist-tag (default: latest for stable, alpha/prerelease tag for prerelease)"
         required: false
         type: string
         default: ""
@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_sha: ${{ steps.release.outputs.sha }}
+      npm_tag: ${{ steps.tag.outputs.npm_tag }}
     defaults:
       run:
         working-directory: .
@@ -70,6 +71,39 @@ jobs:
           git merge-base --is-ancestor "$release_sha" origin/main
           python scripts/check-release.py "$RELEASE_VERSION"
           echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
+      - name: Resolve npm dist-tag
+        id: tag
+        env:
+          NPM_TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          npm_tag="$NPM_TAG_INPUT"
+          is_prerelease=false
+          [[ "$RELEASE_VERSION" == *-* ]] && is_prerelease=true
+          if [ -z "$npm_tag" ]; then
+            if [ "$is_prerelease" = true ]; then
+              # Anchored bash regex, unlike sed, has no silent-passthrough
+              # failure mode: if it doesn't match, npm_tag stays unset below
+              # and we fail loudly instead of publishing under a bogus tag.
+              if [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-([a-zA-Z0-9]+) ]]; then
+                npm_tag="${BASH_REMATCH[1]}"
+              else
+                echo "::error::cannot derive an npm dist-tag from '$RELEASE_VERSION'; pass tag= explicitly" >&2
+                exit 1
+              fi
+            else
+              npm_tag="latest"
+            fi
+          fi
+          # Whether derived or explicitly supplied, a prerelease must never
+          # land on `latest` -- this is the one invariant docs/RELEASING.md
+          # promises callers.
+          if [ "$npm_tag" = "latest" ] && [ "$is_prerelease" = true ]; then
+            echo "::error::refusing to publish prerelease $RELEASE_VERSION under npm dist-tag 'latest'; pass tag= explicitly" >&2
+            exit 1
+          fi
+          echo "Resolved npm dist-tag: $npm_tag"
+          echo "npm_tag=$npm_tag" >> "$GITHUB_OUTPUT"
       - name: Verify live release controls
         run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "${{ steps.release.outputs.sha }}"
         env:
@@ -445,19 +479,14 @@ jobs:
         run: npm install --global npm@11.5.1
       - name: Verify publish inputs
         shell: bash
+        env:
+          NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
         run: |
+          set -euo pipefail
           test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 5
-          npm_tag="${{ inputs.tag }}"
-          if [ -z "$npm_tag" ]; then
-            if [[ "$RELEASE_VERSION" == *-* ]]; then
-              npm_tag="$(echo "$RELEASE_VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([a-zA-Z0-9]+).*/\1/')"
-            else
-              npm_tag="latest"
-            fi
-          fi
-          echo "Verified publish inputs (target npm dist-tag: $npm_tag)"
+          echo "Verified publish inputs (target npm dist-tag: $NPM_TAG)"
           for tarball in release-packages/*.tgz; do
-            npm publish "./$tarball" --dry-run --access public --ignore-scripts --tag "$npm_tag"
+            npm publish "./$tarball" --dry-run --access public --ignore-scripts --tag "$NPM_TAG"
           done
       - name: Re-verify release tag still points at the packaged commit
         shell: bash
@@ -498,16 +527,11 @@ jobs:
           fi
       - name: Publish
         shell: bash
+        env:
+          NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
         run: |
-          npm_tag="${{ inputs.tag }}"
-          if [ -z "$npm_tag" ]; then
-            if [[ "$RELEASE_VERSION" == *-* ]]; then
-              npm_tag="$(echo "$RELEASE_VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+-([a-zA-Z0-9]+).*/\1/')"
-            else
-              npm_tag="latest"
-            fi
-          fi
-          echo "Publishing to npm with dist-tag: $npm_tag"
+          set -euo pipefail
+          echo "Publishing to npm with dist-tag: $NPM_TAG"
           native_packages=(
             rookie-cookies-darwin-arm64
             rookie-cookies-darwin-x64
@@ -527,7 +551,7 @@ jobs:
               echo "$package_name@$RELEASE_VERSION is already published with identical contents"
               return 0
             fi
-            npm publish "./$tarball" --access public --ignore-scripts --provenance --tag "$npm_tag"
+            npm publish "./$tarball" --access public --ignore-scripts --provenance --tag "$NPM_TAG"
           }
           for package in "${native_packages[@]}"; do
             publish_tarball "$package" "release-packages/$package-$RELEASE_VERSION.tgz"
