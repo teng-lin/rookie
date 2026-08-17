@@ -2,6 +2,7 @@ import http.cookiejar
 from sys import platform
 from typing import Any, Dict, List, Optional, TypedDict
 
+from . import dto as dto
 from .rookie_cookies import (
     MAX_ISSUE_SAMPLES,
     CancellationHandle,
@@ -43,6 +44,7 @@ __all__ = [
     "ChromiumPathOptions",
     "RookieEngineError",
     "RookieRequestError",
+    "dto",
     "any_browser",
     "arc",
     "brave",
