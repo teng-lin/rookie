@@ -5,7 +5,9 @@ artifacts therefore ship the SQLite amalgamation selected by the locked
 `libsqlite3-sys` dependency rather than the target host's SQLite library.
 
 Release operators should re-check this inventory as part of the steps in
-[releasing.md](releasing.md).
+[releasing.md](releasing.md). Extraction-behavior corrections (not version
+pins) are in [security-corrections.md](security-corrections.md). Index:
+[security.md](security.md).
 
 ## Current inventory
 

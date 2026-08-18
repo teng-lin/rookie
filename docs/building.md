@@ -114,6 +114,6 @@ Real browsers (libsecret / Keychain / DPAPI `v10`) and the elevated Windows
 The crate **bundles** SQLite (`rusqlite` / `libsqlite3-sys`); it does not use
 the host library. Locked versions, source ID, and the 90-day review policy:
 [sqlite-security.md](sqlite-security.md). Do not change those pins as part of
-an ordinary local build.
+an ordinary local build. Other security notes: [security.md](security.md).
 
 Publish steps: [releasing.md](releasing.md).

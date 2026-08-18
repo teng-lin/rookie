@@ -3,8 +3,9 @@
 Operator runbook for cutting a `rookie-cookies` version. Language guides live
 with the packages ([python](../bindings/python/README.md),
 [javascript](../bindings/node/README.md), [rust](../rookie-rs/README.md)).
-Build and test: [building.md](building.md), [testing.md](testing.md),
-[sqlite-security.md](sqlite-security.md).
+Build and test: [building.md](building.md), [testing.md](testing.md).
+Security record: [security.md](security.md) (re-check
+[sqlite-security.md](sqlite-security.md) before each release).
 
 One version across three ecosystems:
 
