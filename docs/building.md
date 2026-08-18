@@ -111,4 +111,9 @@ Real browsers (libsecret / Keychain / DPAPI `v10`) and the elevated Windows
 **v20** canary for **Chrome, Edge, and Brave** are documented in
 [testing.md](testing.md). Do not assume `cargo test` covered them.
 
+The crate **bundles** SQLite (`rusqlite` / `libsqlite3-sys`); it does not use
+the host library. Locked versions, source ID, and the 90-day review policy:
+[sqlite-security.md](sqlite-security.md). Do not change those pins as part of
+an ordinary local build.
+
 Publish steps: [releasing.md](releasing.md).

@@ -170,7 +170,7 @@ does not export browser private keys. A decrypted cookie is not always enough
 to replay a protected Chrome session.
 
 Platform quirks (Keychain prompts, Safari Full Disk Access):
-[docs/general.md](docs/general.md).
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Documentation
 
@@ -178,6 +178,8 @@ Platform quirks (Keychain prompts, Safari Full Disk Access):
 | --- | --- |
 | Language guides | [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md) |
 | Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) |
+| Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Bundled SQLite inventory | [docs/sqlite-security.md](docs/sqlite-security.md) |
 | Design | [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
 | Examples | [python](examples/python) · [javascript](examples/javascript) · [rust](examples/rust) |
 

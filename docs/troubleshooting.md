@@ -1,6 +1,7 @@
-# Gotchas and operational notes
+# Troubleshooting
 
-Platform quirks that affect cookie extraction. For the recommended 0.6.0 API,
+Platform quirks that show up as empty results, permission errors, or password
+prompts. For the recommended 0.6.0 API,
 see [bindings/python/README.md](../bindings/python/README.md),
 [bindings/node/README.md](../bindings/node/README.md), and
 [rookie-rs/README.md](../rookie-rs/README.md).
