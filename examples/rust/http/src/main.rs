@@ -1,6 +1,6 @@
 use regex::Regex;
 use reqwest::blocking::Client;
-use rookie_cookies::{brave, common::enums::CookieToString};
+use rookie_cookies::{read, ReadRequest};
 
 fn extract_username(html: &str) -> &str {
   let re = Regex::new(r#"<meta name="user-login" content="(.+)">"#).unwrap();
@@ -14,12 +14,15 @@ fn extract_username(html: &str) -> &str {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt::init();
-  // Create a custom cookie store
+  let snapshot = read(ReadRequest::browser("brave").profile("Default"))?;
   let client = Client::new();
-  let cookies = brave(Some(vec!["github.com".into()]))?;
-  let response = client.get("https://github.com/")
-    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
-    .header("Cookie", cookies.to_string()) // <- try to comment
+  let response = client
+    .get("https://github.com/")
+    .header(
+      "User-Agent",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+    )
+    .header("Cookie", snapshot.header("https://github.com/")?)
     .send()?;
 
   let content = response.text()?;

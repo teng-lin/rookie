@@ -1271,6 +1271,10 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "safari",
     "chromiumBased",
     "chromiumBasedDetailed",
+    "read",
+    "fromPath",
+    "profiles",
+    "report",
     ...REPORT_FUNCTIONS,
   ];
   const callPattern = new RegExp(`\\b(?:${asyncApis.join("|")})\\s*\\(`, "g");

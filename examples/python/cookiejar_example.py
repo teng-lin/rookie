@@ -1,5 +1,6 @@
-from rookie_cookies import brave, to_cookiejar
+"""Load a browser profile into http.cookiejar (stdlib owns send-match)."""
 
-cookies = brave()
-cj = to_cookiejar(cookies)
+from rookie_cookies import jar
+
+cj = jar(browser="brave", profile="Default")
 print(cj)
