@@ -77,6 +77,7 @@ gh_api = check_release_controls.gh_api
 ControlFailure = check_release_controls.ControlFailure
 COMMIT_PATTERN = check_release_controls.COMMIT_PATTERN
 REQUIRED_CHECK_RUNS = check_release_controls.REQUIRED_CHECK_RUNS
+fetch_all_check_runs = check_release_controls.fetch_all_check_runs
 _ARTIFACT_SMOKE_SUB_JOBS = check_release_controls._ARTIFACT_SMOKE_SUB_JOBS
 _ARTIFACT_SMOKE_PLATFORMS = check_release_controls._ARTIFACT_SMOKE_PLATFORMS
 
@@ -133,9 +134,10 @@ def verify_required_checks(repo: str, commit_sha: str) -> tuple[list[dict[str, A
     verified: list[dict[str, Any]] = []
     failures: list[str] = []
 
-    response = gh_api(f"commits/{commit_sha}/check-runs?per_page=100", repo=repo)
     by_name: dict[str, list[dict[str, Any]]] = {}
-    for run in response.get("check_runs", []):
+    # Pass this module's gh_api alias so tests that patch write_ci_proof.gh_api
+    # still intercept the check-runs fetches inside fetch_all_check_runs.
+    for run in fetch_all_check_runs(repo, commit_sha, api=gh_api):
         by_name.setdefault(run["name"], []).append(run)
 
     for name in REQUIRED_CHECK_RUNS:

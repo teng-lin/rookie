@@ -186,6 +186,45 @@ class RequiredChecksTests(unittest.TestCase):
             failures = check_release_controls.check_required_checks("owner/repo", "a" * 40)
         self.assertEqual(failures, [])
 
+    def test_pages_past_the_first_hundred_check_runs(self) -> None:
+        # A required check that only appears on page 2 must still count; a
+        # single-page fetch is what blocked publish-cli for v0.6.0-beta.1.
+        required = list(check_release_controls.REQUIRED_CHECK_RUNS)
+        filler = [
+            {
+                "name": f"noise-{index}",
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-01-01T00:00:00Z",
+            }
+            for index in range(100)
+        ]
+        page1 = {"total_count": 100 + len(required), "check_runs": filler}
+        page2 = {
+            "total_count": 100 + len(required),
+            "check_runs": [
+                {
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                }
+                for name in required
+            ],
+        }
+        commit = "a" * 40
+
+        def fake_gh_api(path: str, *, repo: str):
+            if path == f"commits/{commit}/check-runs?per_page=100&page=1":
+                return page1
+            if path == f"commits/{commit}/check-runs?per_page=100&page=2":
+                return page2
+            raise AssertionError(f"unexpected gh_api call: {path}")
+
+        with mock.patch.object(check_release_controls, "gh_api", fake_gh_api):
+            failures = check_release_controls.check_required_checks("owner/repo", commit)
+        self.assertEqual(failures, [])
+
 
 class GhApiEncodingTests(unittest.TestCase):
     def test_decodes_gh_api_stdout_as_utf8(self) -> None:
