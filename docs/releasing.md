@@ -1,18 +1,23 @@
 # Releasing
 
-`rookie-cookies` uses one version across three ecosystems:
+Operator runbook for cutting a `rookie-cookies` version. Language guides live
+with the packages ([python](../bindings/python/README.md),
+[javascript](../bindings/node/README.md), [rust](../rookie-rs/README.md)).
+Build and test: [building.md](building.md), [testing.md](testing.md),
+[sqlite-security.md](sqlite-security.md).
 
-- crates.io: `rookie-cookies`
-- PyPI: `rookie-cookies` wheels and source distribution
-- npm: `rookie-cookies` plus four native platform packages
+One version across three ecosystems:
 
-Related docs: [building.md](building.md), [testing.md](testing.md),
-[sqlite-security.md](sqlite-security.md), and the user guides under
-[python](../bindings/python/README.md) /
-[javascript](../bindings/node/README.md) /
-[rust](../rookie-rs/README.md).
-The tree may still publish `0.6.0-alpha.x` builds while documenting the **0.6.0**
-API surface.
+- crates.io: `rookie-cookies` (`publish-crate.yml`, crate README is
+  `rookie-rs/README.md`)
+- PyPI: `rookie-cookies` wheels and sdist (`publish-py.yml`)
+- npm: `rookie-cookies` plus four native platform packages (`publish-npm.yml`)
+
+CLI GitHub-release assets: `publish-cli.yml`. Retry one missing CLI target
+from `main` with `retry-cli-asset.yml`.
+
+The tree may still publish `0.6.0-alpha.x` while documenting the **0.6.0** API
+surface.
 
 Registry releases are immutable and the npm publication is not atomic. Every
 release workflow therefore runs only by manual dispatch, and every one refuses
@@ -371,7 +376,9 @@ Create the GitHub release only after all three registry checks pass.
 
 After the GitHub release exists, dispatch `publish-cli.yml` from the matching
 tag to build and attach the `rookie-cookies` CLI binary for macOS (arm64 and
-x86_64), Linux x86_64, and Windows x86_64.
+x86_64), Linux x86_64, and Windows x86_64. A later failed matrix leg is
+retried with `retry-cli-asset.yml`, not by re-dispatching the whole workflow
+(see "A failed platform leg does not auto-retry").
 
 Each CLI asset is uploaded with a same-named `.sha256` sidecar. Each matrix leg
 also uploads a `cli-scan-manifest-<target>` workflow artifact containing a
@@ -485,14 +492,27 @@ is why it's gone: re-dispatching the whole workflow after a partial failure now
 fails loudly on every leg that already succeeded, instead of silently risking
 them.
 
-To retry only the leg that actually failed, build and attach it by hand for
-that one target instead of re-dispatching the workflow — see "Retrying a tag
-that predates the hardened workflow" below for the exact commands (the same
-manual per-target build-and-upload path, whatever the reason for the retry).
-Automatic digest-safe retry — detecting `present_identical` vs.
-`present_mismatch` per artifact and skipping/failing accordingly instead of
-requiring a manual fallback — is out of scope for this PR; it lands with the
-release-hardening program's R6 phase.
+To retry only the leg that actually failed, dispatch
+`.github/workflows/retry-cli-asset.yml` from **reviewed `main`** (so you get
+today's retry definition) and pass the immutable tag plus the missing target.
+That workflow builds the binary from the **tag commit**, not from `main`, and
+does not `--clobber`.
+
+```console
+gh workflow run retry-cli-asset.yml --ref main \
+  -f tag="v$VERSION" \
+  -f target=x86_64-pc-windows-msvc
+```
+
+Valid `target` values: `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`. Windows still adds
+`--features appbound`.
+
+If that workflow is unavailable (or you must attach to a pre-hardened tag
+without using Actions), build and upload that one target by hand — see
+"Retrying a tag that predates the hardened workflow" below. Automatic
+digest-safe retry (`present_identical` vs `present_mismatch`) is still
+tracked with the release-hardening program's R6 phase.
 
 ### Retrying a tag that predates the hardened workflow
 

@@ -30,4 +30,3 @@ Callers who passed a non-id string to `browser_report` and depended on a request
 ## References
 
 - Follow-up job API: [ADR 0004](0004-read-is-the-recommended-entry.md)
-- Historical note: [consolidated-implementation-plan.md](../design/consolidated-implementation-plan.md)
