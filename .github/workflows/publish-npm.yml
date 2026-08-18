@@ -180,6 +180,11 @@ jobs:
             .cargo-cache
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+      - name: Install Linux packages
+        if: runner.os == 'Linux' && !matrix.settings.docker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus
       - name: Install dependencies
         run: npm ci
 
@@ -273,6 +278,46 @@ jobs:
         shell: bash
       - name: Test bindings
         run: npm test
+  test-linux-arm64-gnu-binding:
+    name: Test bindings on Linux-arm64-gnu - node@${{ matrix.node }}
+    needs:
+      - preflight
+      - build
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "22"
+          - "24"
+          - "26"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
+      - name: Setup node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: ./bindings/node/package-lock.json
+      - name: Install Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus
+      - name: Install dependencies
+        run: npm ci
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bindings-aarch64-unknown-linux-gnu
+          path: .
+      - name: List packages
+        run: ls -R .
+        shell: bash
+      - name: Test bindings
+        run: npm test
   test-linux-x64-gnu-binding:
     name: Test bindings on Linux-x64-gnu - node@${{ matrix.node }}
     needs:
@@ -325,6 +370,7 @@ jobs:
       - build
       - test-macOS-windows-binding
       - test-linux-x64-gnu-binding
+      - test-linux-arm64-gnu-binding
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

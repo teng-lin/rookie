@@ -75,7 +75,7 @@ jobs:
   linux:
     name: Build Linux wheel (${{ matrix.target }})
     needs: [preflight, load-contract]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.load-contract.outputs.linux_matrix) }}

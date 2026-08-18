@@ -90,12 +90,12 @@ jobs:
         run: |
           npm install --global npm@11.5.1
           npm ci
-      - name: Build native Node binding outside Linux
-        if: runner.os != 'Linux'
+      - name: Build native Node binding on the runner
+        if: runner.os != 'Linux' || runner.arch == 'ARM64'
         working-directory: bindings/node
         run: npm run build -- --target ${{ inputs.rust-target }} --cargo-flags=--locked
       - name: Build native Node binding in the pinned release container
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.arch == 'X64'
         env:
           RUST_TARGET: ${{ inputs.rust-target }}
         shell: bash

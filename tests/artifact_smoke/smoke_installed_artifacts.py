@@ -452,6 +452,7 @@ def main() -> int:
 
     npm_platform = args.expected_npm_platform
     package_names = {
+        "linux-arm64-gnu": "rookie-cookies-linux-arm64-gnu",
         "linux-x64-gnu": "rookie-cookies-linux-x64-gnu",
         "win32-x64-msvc": "rookie-cookies-win32-x64-msvc",
         "darwin-arm64": "rookie-cookies-darwin-arm64",

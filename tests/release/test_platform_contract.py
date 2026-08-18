@@ -56,6 +56,7 @@ class RealContractTests(unittest.TestCase):
             (
                 "rookie-cookies-darwin-arm64",
                 "rookie-cookies-darwin-x64",
+                "rookie-cookies-linux-arm64-gnu",
                 "rookie-cookies-linux-x64-gnu",
                 "rookie-cookies-win32-x64-msvc",
             ),
@@ -102,8 +103,10 @@ class MatchCellForArtifactTests(unittest.TestCase):
                 "linux",
                 "x86_64",
             ),
-            "rookie_cookies-1.0.0-cp311-abi3-manylinux_2_17_i686.manylinux2014_i686.whl": ("linux", "x86"),
-            "rookie_cookies-1.0.0-cp311-abi3-manylinux_2_17_armv7l.whl": ("linux", "armv7"),
+            "rookie_cookies-1.0.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl": (
+                "linux",
+                "aarch64",
+            ),
             "rookie_cookies-1.0.0-cp311-abi3-win_amd64.whl": ("win32", "x64"),
             "rookie_cookies-1.0.0-cp311-abi3-macosx_11_0_arm64.whl": ("darwin", "aarch64"),
         }
@@ -300,7 +303,7 @@ class DiffCellsTests(unittest.TestCase):
 class RealContractDiffCellsTests(unittest.TestCase):
     """Regression coverage against the actual committed contract, not just
     synthetic fixtures -- this is exactly the shape of input that exposed
-    the artifact_id-collision bug (9 real `wheel` cells)."""
+    the artifact_id-collision bug (several real `wheel` cells)."""
 
     def test_changing_a_non_last_real_wheel_cell_is_detected(self) -> None:
         contract = platform_contract.load_contract()

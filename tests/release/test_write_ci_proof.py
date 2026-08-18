@@ -36,7 +36,7 @@ def build_good_fixture(
     """A fully genuine pass for every REQUIRED_CHECK_RUNS entry: all checks
     named `"{platform} / {sub_job}"` share one artifact-smoke.yml run (that's
     really how they're produced), all seven `"e2e ..."` checks share one
-    e2e.yml run, and `"cargo audit (blocking)"` gets its own test-rust.yml
+    e2e.yml run, and `"check (ubuntu-latest)"` gets its own test-rust.yml
     run -- mirroring the real repo's actual run topology, not one run per
     check."""
     check_runs: list[dict[str, object]] = []
@@ -116,15 +116,15 @@ class VerifyRequiredChecksTests(unittest.TestCase):
     def test_missing_check_run_fails(self) -> None:
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
         check_runs["check_runs"] = [
-            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+            entry for entry in check_runs["check_runs"] if entry["name"] != "check (ubuntu-latest)"
         ]
         with mock.patch.object(
             write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
         ):
             verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
 
-        self.assertTrue(any("cargo audit (blocking)" in failure and "no check run found" in failure for failure in failures))
-        self.assertNotIn("cargo audit (blocking)", {check["name"] for check in verified})
+        self.assertTrue(any("check (ubuntu-latest)" in failure and "no check run found" in failure for failure in failures))
+        self.assertNotIn("check (ubuntu-latest)", {check["name"] for check in verified})
 
     def test_a_check_run_pointing_at_the_wrong_workflow_fails(self) -> None:
         # A forged check-run: right name, right commit, right conclusion --
@@ -133,7 +133,7 @@ class VerifyRequiredChecksTests(unittest.TestCase):
         # check-release-controls.py checks) would have accepted this.
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
         target_run_id = jobs[100]["run_id"]  # first REQUIRED_CHECK_RUNS entry
-        runs[target_run_id]["path"] = ".github/workflows/lint.yml"
+        runs[target_run_id]["path"] = ".github/workflows/not-trusted.yml"
         with mock.patch.object(
             write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
         ):
@@ -279,7 +279,7 @@ class MainTests(unittest.TestCase):
     def test_failures_are_reported_and_no_proof_is_written(self) -> None:
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
         check_runs["check_runs"] = [
-            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+            entry for entry in check_runs["check_runs"] if entry["name"] != "check (ubuntu-latest)"
         ]
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "ci-proof.json"
@@ -476,7 +476,7 @@ class MainTests(unittest.TestCase):
     def test_advisory_exits_zero_and_prints_a_warning_annotation_on_failure(self) -> None:
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
         check_runs["check_runs"] = [
-            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+            entry for entry in check_runs["check_runs"] if entry["name"] != "check (ubuntu-latest)"
         ]
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "ci-proof.json"
@@ -524,7 +524,7 @@ class MainTests(unittest.TestCase):
             detail = "\n".join(
                 str(call.args[0]) for call in fake_print.call_args_list if call.args and call.kwargs.get("file")
             )
-            self.assertIn("cargo audit (blocking)", detail)
+            self.assertIn("check (ubuntu-latest)", detail)
 
     def test_advisory_and_manifest_flag_together_report_the_real_failure(self) -> None:
         # The exact combination every publish workflow actually uses --
@@ -534,7 +534,7 @@ class MainTests(unittest.TestCase):
         # bypassing the --advisory wrapper) would be caught here.
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
         check_runs["check_runs"] = [
-            entry for entry in check_runs["check_runs"] if entry["name"] != "cargo audit (blocking)"
+            entry for entry in check_runs["check_runs"] if entry["name"] != "check (ubuntu-latest)"
         ]
         with tempfile.TemporaryDirectory() as temporary:
             manifest_path = Path(temporary) / "release-scan-manifest.json"

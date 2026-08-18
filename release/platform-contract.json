@@ -153,6 +153,31 @@
     {
       "artifact_id": "npm-native",
       "registry": "npm",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "gnu",
+      "features": [
+        "keyring"
+      ],
+      "runtime_floor": {
+        "node": "22"
+      },
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": null,
+      "notes": "Built natively on ubuntu-24.04-arm. No QEMU and no x86_64 napi-rs Docker image.",
+      "npm_platform": "linux-arm64-gnu",
+      "target_triple": "aarch64-unknown-linux-gnu",
+      "runner": "ubuntu-24.04-arm"
+    },
+    {
+      "artifact_id": "npm-native",
+      "registry": "npm",
       "os": "win32",
       "cpu": "x64",
       "libc": "msvc",
@@ -247,6 +272,26 @@
     {
       "artifact_id": "cli",
       "registry": "github-release",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "gnu",
+      "features": [],
+      "runtime_floor": {},
+      "build": true,
+      "advertise": true,
+      "publish": true,
+      "execute": "native",
+      "helper_roles": [
+        "keyring"
+      ],
+      "accepted_risk": null,
+      "notes": "Built and uploaded from ubuntu-24.04-arm. publish-cli.yml still does not run the release binary before attach.",
+      "target_triple": "aarch64-unknown-linux-gnu",
+      "runner": "ubuntu-24.04-arm"
+    },
+    {
+      "artifact_id": "cli",
+      "registry": "github-release",
       "os": "win32",
       "cpu": "x64",
       "libc": "msvc",
@@ -291,29 +336,8 @@
         "keyring"
       ],
       "accepted_risk": null,
-      "notes": "Runs on ubuntu-latest, the matching native architecture; Python module tests in test-rust.yml exercise the crate on this arch."
-    },
-    {
-      "artifact_id": "wheel",
-      "registry": "pypi",
-      "os": "linux",
-      "cpu": "x86",
-      "libc": "manylinux",
-      "features": [
-        "keyring"
-      ],
-      "runtime_floor": {
-        "python": "3.11"
-      },
-      "build": true,
-      "advertise": true,
-      "publish": true,
-      "execute": "native",
-      "helper_roles": [
-        "keyring"
-      ],
-      "accepted_risk": null,
-      "notes": "32-bit x86 runs natively on the x86_64 runner CPU (no QEMU), but is not covered by any test job."
+      "notes": "Runs on ubuntu-latest, the matching native architecture; Python module tests in test-rust.yml exercise the crate on this arch.",
+      "runner": "ubuntu-latest"
     },
     {
       "artifact_id": "wheel",
@@ -330,90 +354,13 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "qemu",
+      "execute": "native",
       "helper_roles": [
         "keyring"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "maturin-action cross-compiles this target via QEMU-backed manylinux Docker images on an x86_64 runner; the resulting wheel is never executed before publishing.",
-        "expires": "2026-12-31"
-      },
-      "notes": null
-    },
-    {
-      "artifact_id": "wheel",
-      "registry": "pypi",
-      "os": "linux",
-      "cpu": "armv7",
-      "libc": "manylinux",
-      "features": [
-        "keyring"
-      ],
-      "runtime_floor": {
-        "python": "3.11"
-      },
-      "build": true,
-      "advertise": true,
-      "publish": true,
-      "execute": "qemu",
-      "helper_roles": [
-        "keyring"
-      ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Same QEMU cross-compile as aarch64; never executed before publishing.",
-        "expires": "2026-12-31"
-      },
-      "notes": null
-    },
-    {
-      "artifact_id": "wheel",
-      "registry": "pypi",
-      "os": "linux",
-      "cpu": "s390x",
-      "libc": "manylinux",
-      "features": [
-        "keyring"
-      ],
-      "runtime_floor": {
-        "python": "3.11"
-      },
-      "build": true,
-      "advertise": true,
-      "publish": true,
-      "execute": "qemu",
-      "helper_roles": [],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Same QEMU cross-compile; s390x is a server/mainframe architecture with no realistic desktop-browser cookie store to read, so helper_roles is empty even though the crate is compiled with the same feature set.",
-        "expires": "2026-12-31"
-      },
-      "notes": "Worth revisiting whether this target should be advertised at all, given no real usage is expected on this architecture."
-    },
-    {
-      "artifact_id": "wheel",
-      "registry": "pypi",
-      "os": "linux",
-      "cpu": "ppc64le",
-      "libc": "manylinux",
-      "features": [
-        "keyring"
-      ],
-      "runtime_floor": {
-        "python": "3.11"
-      },
-      "build": true,
-      "advertise": true,
-      "publish": true,
-      "execute": "qemu",
-      "helper_roles": [],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Same QEMU cross-compile and same no-realistic-desktop-usage reasoning as s390x.",
-        "expires": "2026-12-31"
-      },
-      "notes": "Worth revisiting whether this target should be advertised at all, given no real usage is expected on this architecture."
+      "accepted_risk": null,
+      "notes": "Built on ubuntu-24.04-arm, the matching native architecture. No QEMU.",
+      "runner": "ubuntu-24.04-arm"
     },
     {
       "artifact_id": "wheel",

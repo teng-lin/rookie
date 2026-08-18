@@ -6,9 +6,17 @@ crypto coverage.
 
 | Layer | What it proves | Where |
 | --- | --- | --- |
-| Deterministic | Contracts, fixtures, lint, public API, packaged consumers | `test-rust.yml`, `lint.yml`, local `cargo test` |
-| Real browsers | Seeded Chrome / Firefox profiles plus Windows App-Bound **v20** | `e2e.yml` |
-| Installed artifacts | Shipped CLI, wheel, and npm tarballs in a clean directory | `artifact-smoke.yml` (PRs via `e2e.yml`) |
+| Deterministic | Contracts, fixtures, lint, public API, packaged consumers | `test-rust.yml` (`check` job), local `cargo test` |
+| Real browsers | Seeded profiles plus Windows App-Bound **v20** | `e2e.yml` (Chrome/Firefox), `e2e-release.yml` (Edge/Chromium/Brave nightly + claimed fixtures on release) |
+| Installed artifacts | Shipped CLI, wheel, and npm tarballs in a clean directory | `artifact-smoke.yml` (main / nightly / manual; not PRs) |
+
+CI has three lanes. A pull request is not the full product.
+
+| Lane | Trigger | What runs |
+| --- | --- | --- |
+| **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
+| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist, Chrome/Firefox/Edge/Chromium e2e, plus installed Brave/Opera/Vivaldi/LibreWolf/Zen/Arc/Yandex/Opera GX/DuckDuckGo where a silent installer exists. Artifact smoke. |
+| **Release** | `v*` tag, GitHub Release, or `workflow_dispatch` on `e2e-release.yml` | Nightly hosted browsers again, plus engine fixtures for every other claimed id. App-Bound Chrome+Edge+Brave. macOS Intel artifact smoke (schedule/manual). Safari and Internet Explorer stay **manual** (FDA / ESE). |
 
 ## Local commands
 
@@ -45,11 +53,15 @@ Ignored real-browser Rust tests (`rookie-rs/tests/e2e_chrome.rs`,
 
 ## Deterministic CI
 
-`.github/workflows/test-rust.yml` and `lint.yml` run on every pull request.
+`.github/workflows/test-rust.yml` runs on every pull request and on push to
+`main`. The **nightly** schedule (or `workflow_dispatch` with suite `nightly`)
+expands the language matrix.
+
+**Every pull request** — one `check (${{ os }})` job per OS.
 
 - **fmt**, Clippy (`-D warnings`), workspace tests, **and**
   `--no-default-features` so the non-`appbound` Windows branch cannot rot.
-- **cargo-audit** against `security/audit-exceptions.toml` (blocking).
+- **cargo-audit** against `security/audit-exceptions.toml` (blocking; Ubuntu).
 - **Public API snapshots** (`scripts/check-public-api.py`) on Linux, macOS, and
   Windows.
 - **Authoritative discovery:** `config.json` and `common/paths.rs` must stay
@@ -57,14 +69,21 @@ Ignored real-browser Rust tests (`rookie-rs/tests/e2e_chrome.rs`,
 - **cfg allowlist:** `cargo run -p xtask -- check-cfg-locations`.
 - **DTO schema + generated Python dataclasses** must match `report_core.rs`.
 - **Release metadata** (`check-release.py`, platform contract, consumer
-  harness coverage).
+  harness coverage) and `tests/e2e/test_browser_coverage.py`.
+- **Node:** native module **built and tested** on a staggered trio (Ubuntu 22,
+  macOS 24, Windows 26) so a PR compiles on every supported Node line. Loader
+  `index.js` / `index.d.ts` must match `patch-loader.js`.
+- **Python:** `cp311-abi3` wheel built and `tests/python` run on Ubuntu 3.12,
+  macOS 3.13, and Windows 3.14.
+
+**Nightly only**
+
+- Node: addon built on **22** on all three OSes, then tests on the full
+  3 OS × 22/24/26 product (proves a 22-built addon loads on 24 and 26).
+- Python build+tests on the full 3 OS × 3.11–3.14 product.
 - **FreeBSD VM:** Mozilla `--path` works; Chromium SQLite is unsupported there
   (typed error). No `--allow-process-shutdown`.
-- **Node:** native module built once on Node.js **22**, then tested without
-  rebuild on **22 / 24 / 26** (Ubuntu, macOS, Windows). Loader
-  `index.js` / `index.d.ts` must match `patch-loader.js`.
-- **Python:** one `cp311-abi3` wheel, then `tests/python` on CPython
-  **3.11–3.14**.
+- manylinux / Windows / macOS Intel wheel packaging jobs and the Python sdist.
 
 On Windows, `cargo test` also generates a current-user **DPAPI `v10`** Cookies
 + `Local State` fixture. That is deterministic and does **not** require Chrome.
@@ -72,10 +91,12 @@ On Windows, `cargo test` also generates a current-user **DPAPI `v10`** Cookies
 CLI snapshot tests use a generated Firefox database (JSON/Netscape, stderr
 logs, errors, help/version, profiles, spaces/Unicode paths).
 
-## Real-browser E2E (pull requests)
+## Real-browser E2E (nightly / main)
 
-`.github/workflows/e2e.yml` starts a loopback cookie server, seeds a disposable
-profile, then asserts the same cookie through **Rust, Python, Node, and CLI**.
+`.github/workflows/e2e.yml` is **not** a pull-request job. It runs on push to
+`main`, the nightly schedule, and `workflow_dispatch`. It starts a loopback
+cookie server, seeds a disposable profile, then asserts the same cookie
+through **Rust, Python, Node, and CLI**.
 
 | Runner | Browser and crypto | Surfaces |
 | --- | --- | --- |
@@ -114,8 +135,8 @@ Hosted **v20 / App-Bound** coverage is the `windows-chrome-appbound` job in
 | When | Browsers |
 | --- | --- |
 | Push to `main` | **Chrome** only |
-| Weekly schedule, `v*` tag / release, or `workflow_dispatch` with **multi_browser** | **Chrome, Edge, and Brave** |
-| `workflow_dispatch` with **appbound_only** | Canary only (skips the PR-style matrix) |
+| Nightly schedule, `v*` tag / release, or `workflow_dispatch` with **multi_browser** | **Chrome, Edge, and Brave** |
+| `workflow_dispatch` with **appbound_only** | Canary only (skips the Chrome/Firefox matrix) |
 | Pull requests | **Never** (elevated, default-profile, trusted-ref) |
 
 Chrome and Edge come from the `windows-2025` image. Brave is installed
@@ -153,14 +174,29 @@ the same way the workflow does (`maturin develop --locked`,
 `cargo build -p rookie-cookies-cli --release --locked`, Node
 `npm ci --omit=optional && npm run build`).
 
+## Claimed-browser E2E (release / manual)
+
+`.github/workflows/e2e-release.yml` covers every cell in
+`tests/e2e/browser_coverage.json`, which must stay 1:1 with
+`rookie-rs/browser_registry.json`. A new registry browser that is missing
+from that file fails PR metadata tests.
+
+| Lane in the matrix | What it is |
+| --- | --- |
+| `nightly_hosted` | Image or silent-install real browsers. Catalog: `tests/e2e/install_claimed_browser.py`. |
+| `release_fixture` | No silent installer on GitHub runners (Cachy — deprecated; Cốc Cốc, Avast, QQ, Sogou, 360, Octo, Vought, DC Browser). Engine fixture + `supported_browsers()`. |
+| `manual` | Safari (Full Disk Access) and Internet Explorer (ESE). Not GitHub-hosted. |
+
+`e2e-release.yml` runs extra hosted browsers on the nightly schedule. The fixture matrix is tag / GitHub Release / `workflow_dispatch` only. It is never a required pull-request check.
+
 ## Installed artifact smoke
 
-`.github/workflows/artifact-smoke.yml` (standalone on main / schedule /
-dispatch; PRs call the same reusable workflow from `e2e.yml`):
+`.github/workflows/artifact-smoke.yml` (main / schedule / dispatch). Not a
+pull-request job.
 
 | Lane | When |
 | --- | --- |
-| Ubuntu x64, Windows x64 (`--features appbound` on the CLI), macOS ARM64 | PRs + standalone |
+| Ubuntu x64, Windows x64 (`--features appbound` on the CLI), macOS ARM64 | push to `main`, nightly-adjacent schedule, manual |
 | macOS Intel | schedule / manual only |
 
 Build once, upload, download in a clean consumer directory, then install:

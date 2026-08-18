@@ -1,0 +1,24 @@
+{
+  "name": "rookie-cookies-linux-arm64-gnu",
+  "version": "0.6.0-beta.1",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "rookie_cookies.linux-arm64-gnu.node",
+  "files": [
+    "rookie_cookies.linux-arm64-gnu.node",
+    "LICENSE.md"
+  ],
+  "description": "Load cookies from any browser on any platform",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": "https://github.com/teng-lin/rookie-cookies",
+  "libc": [
+    "glibc"
+  ]
+}

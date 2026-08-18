@@ -90,7 +90,8 @@ DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # _artifact-smoke.yml (workflow_call renders as "<caller job> / <callee
 # job>", and the run this resolves to is always the *caller's* run --
 # reusable workflows execute inside the caller's run, not a separate one);
-# "cargo audit (blocking)" is test-rust.yml's own job.
+# "check (ubuntu-latest)" is test-rust.yml's combined Linux job (fmt,
+# package, metadata, cargo-audit, clippy, tests, public API).
 _TRUSTED_WORKFLOW_FOR_CHECK: dict[str, str] = {
     "e2e ubuntu × chrome (libsecret)": ".github/workflows/e2e.yml",
     "e2e ubuntu × firefox": ".github/workflows/e2e.yml",
@@ -99,7 +100,7 @@ _TRUSTED_WORKFLOW_FOR_CHECK: dict[str, str] = {
     "e2e windows × firefox": ".github/workflows/e2e.yml",
     "e2e windows × chrome (App-Bound v20 canary)": ".github/workflows/e2e.yml",
     "e2e windows × chrome (legacy DPAPI)": ".github/workflows/e2e.yml",
-    "cargo audit (blocking)": ".github/workflows/test-rust.yml",
+    "check (ubuntu-latest)": ".github/workflows/test-rust.yml",
 }
 for _platform in _ARTIFACT_SMOKE_PLATFORMS:
     for _sub_job in _ARTIFACT_SMOKE_SUB_JOBS:
@@ -109,7 +110,7 @@ assert set(_TRUSTED_WORKFLOW_FOR_CHECK) == set(REQUIRED_CHECK_RUNS), (
 )
 
 # All three trusted workflows also trigger on `schedule` and `workflow_dispatch`
-# (see e.g. artifact-smoke.yml's Monday cron, e2e.yml's Monday cron, and
+# (see e.g. artifact-smoke.yml's Monday cron, e2e.yml's nightly cron, and
 # every workflow's manual workflow_dispatch trigger) -- rejecting those would
 # produce false failures on a perfectly genuine run: `verify_required_checks`
 # already picks the *most recently started* run for a given check name, so a

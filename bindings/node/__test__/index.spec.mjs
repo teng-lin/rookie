@@ -189,6 +189,7 @@ test("all packages advertise the supported Node.js engine range", (t) => {
     ["root", new URL("../package.json", import.meta.url)],
     ["darwin-arm64", new URL("../npm/darwin-arm64/package.json", import.meta.url)],
     ["darwin-x64", new URL("../npm/darwin-x64/package.json", import.meta.url)],
+    ["linux-arm64-gnu", new URL("../npm/linux-arm64-gnu/package.json", import.meta.url)],
     ["linux-x64-gnu", new URL("../npm/linux-x64-gnu/package.json", import.meta.url)],
     ["win32-x64-msvc", new URL("../npm/win32-x64-msvc/package.json", import.meta.url)],
   ];
