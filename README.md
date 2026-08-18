@@ -5,9 +5,10 @@
 [![crates.io](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
 [![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](LICENSE.md)
 
-One Rust engine, on Linux, macOS, and Windows, that turns authorized local
-browser logins—including Chrome, Edge, and Brave App-Bound **v20**—into a
-session you reuse from **Rust**, **Python**, **JavaScript**, or the CLI.
+`rookie-cookies` is a fast, cross-platform cookie extraction toolkit — a Rust
+core with native Python and JavaScript bindings and a CLI — that pulls cookies
+from every major browser, including support for the latest Chrome v20 App-Bound
+Encryption (ABE).
 
 This is a maintained fork of
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie), which is
