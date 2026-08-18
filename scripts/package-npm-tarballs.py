@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 def npm_pack(npm: str, package: Path, output: Path, *, cwd: Path) -> Path:
@@ -51,6 +52,15 @@ def main() -> int:
     if npm is None:
         parser.error("npm was not found on PATH")
     node_root = args.node_root.resolve()
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("sync-node-license.py")),
+            "--node-root",
+            str(node_root),
+        ],
+        check=True,
+    )
     npm_root = node_root / "npm"
     platforms = args.platforms or sorted(
         path.name for path in npm_root.iterdir() if (path / "package.json").is_file()

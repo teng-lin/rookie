@@ -34,7 +34,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/teng-lin/rookie-cookies"
-Documentation = "https://github.com/teng-lin/rookie-cookies/blob/main/docs/Python.md"
+Documentation = "https://github.com/teng-lin/rookie-cookies/blob/main/bindings/python/README.md"
 Repository = "https://github.com/teng-lin/rookie-cookies"
 Issues = "https://github.com/teng-lin/rookie-cookies/issues"
 

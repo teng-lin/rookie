@@ -1,5 +1,21 @@
-// Compatibility APIs remain callable through 0.6 while their downstream use
-// is deprecated. Internal adapters intentionally exercise those exact paths.
+//! Extract cookies from local browser profiles (Linux, macOS, Windows).
+//!
+//! The recommended 0.6 entry is [`read`] with [`ReadRequest`]:
+//!
+//! ```no_run
+//! use rookie_cookies::{read, ReadRequest};
+//!
+//! let snapshot = read(ReadRequest::browser("chrome").profile("Default"))?;
+//! let _header = snapshot.header("https://example.com/")?;
+//! # Ok::<(), rookie_cookies::anyhow::Error>(())
+//! ```
+//!
+//! Named helpers such as [`chrome`] stay as a compatibility bridge and are
+//! deprecated. There is no crate-root `get` or `report` function. Full guide:
+//! the crate `README.md` (also the crates.io landing page).
+//!
+//! Compatibility APIs remain callable through 0.6 while their downstream use
+//! is deprecated. Internal adapters intentionally exercise those exact paths.
 #![allow(deprecated)]
 
 // Public

@@ -30,7 +30,7 @@ parent-death-canary / arm-containment-before-spawn semantics from the
 original PR6 spec are not implemented here or anywhere else in this
 codebase: no helper role is spawned as a separately supervised child
 process today (each runs in-process), so there is no containment surface to
-arm — see docs/RELEASING.md's "Packaging-proof: what this harness actually
+arm — see docs/releasing.md's "Packaging-proof: what this harness actually
 proves" section for the honest accounting of what is and isn't covered, and
 issue #230's R3 section for prior context.
 

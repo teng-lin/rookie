@@ -1,21 +1,36 @@
 name: Feature request
-description: Suggest an idea for this project
-title: "[Feature Request]: "
+description: Propose an API, browser, or platform change
+title: "[Feature]: "
 labels: ["feature request"]
-assignees:
-  - thewh1teagle
 body:
   - type: markdown
     attributes:
       value: |
-        💚💜 Thank you for interest. ❤️💛
-        *Please prioritize checking existing issues first.  
-        I will repay with higher-quality code.*
+        Search existing issues first. New work should fit the 0.6 `read` / `jar`
+        job API ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+        Named helpers (`chrome()`, …) are a compatibility bridge and will break later.
+        Do **not** attach real cookie values or browser database files.
   - type: textarea
     id: describe-the-feature
     attributes:
-      label: Describe the feature
-      description: Also tell us why you think it useful
-      placeholder: Description...
+      label: What should change?
+      description: The behavior or API you want, and why the current surface is not enough.
     validations:
       required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where would this live?
+      multiple: true
+      options:
+        - Python
+        - Node.js
+        - Rust
+        - CLI
+        - Docs
+        - Unsure
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Existing APIs (`read`, `report`, path builders) or other tools.

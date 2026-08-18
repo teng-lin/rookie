@@ -23,7 +23,7 @@ import platform_contract  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_REPOSITORY = "https://github.com/teng-lin/rookie-cookies"
-PYTHON_DOCUMENTATION = f"{CANONICAL_REPOSITORY}/blob/main/docs/Python.md"
+PYTHON_DOCUMENTATION = f"{CANONICAL_REPOSITORY}/blob/main/bindings/python/README.md"
 ISSUE_TRACKER = f"{CANONICAL_REPOSITORY}/issues"
 NODE_ENGINE_RANGE = ">=22"
 SEMVER_PATTERN = re.compile(

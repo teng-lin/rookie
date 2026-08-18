@@ -3,7 +3,7 @@
 
 R0 wants Windows npm `.node` and CLI `.exe` scans to become evidence records
 bound to artifact SHA-256, scanner/signature versions, result, reviewer, and
-timestamp — not the free-form issue-comment prose docs/RELEASING.md's
+timestamp — not the free-form issue-comment prose docs/releasing.md's
 "Checksum-identified Windows scan" section describes today. This is the
 operator-run tool that produces that record: run it, by hand, on the
 disposable VM after scanning, against the same release-scan-manifest.json

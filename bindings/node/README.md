@@ -1,68 +1,48 @@
-# rookie-cookies
+# rookie-cookies (Node.js)
 
-Extract cookies from web browsers
-Bindings for [rookie-cookies](https://github.com/teng-lin/rookie-cookies)
+Extract cookies from local browsers on Linux, macOS, and Windows.
 
-Browser extraction functions return Promises and must be awaited. When migrating
-from v0.5.7 or earlier, add `await` (or use `.then(...)`) for every extraction
-call. `version()` remains synchronous.
+This file is the **JavaScript guide** (npm landing page and repo tutorial).
+Rust stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
+The tree may still publish as `0.6.0-alpha.x`. The recommended 0.6 entry is
+`read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 
-Node.js 22 or newer is required. The binding is tested on Node.js 22, 24, and
-26. Node.js 18 and 20 are no longer supported.
+**Node.js ≥ 22** (tested 22, 24, 26). Every extraction export returns a
+**Promise** — always `await`. `version()` is synchronous.
 
-## Usage
-
-```typescript
-import { chrome } from "rookie-cookies";
-
-const cookies = await chrome();
-for (const cookie of cookies) {
-  console.log(cookie);
-}
+```console
+npm install rookie-cookies
 ```
 
-## Firefox profiles
+## Recommended 0.6.0 usage
 
-```typescript
-import { firefoxProfile, firefoxProfiles } from "rookie-cookies";
+```js
+import { read } from "rookie-cookies";
 
-for (const profile of await firefoxProfiles()) {
-  console.log(profile.name, profile.path, profile.isDefault);
-}
-
-const cookies = await firefoxProfile("work", ["example.com"]);
+const snapshot = await read({ browser: "chrome", profile: "Default" });
+console.log(snapshot.cookies, snapshot.warnings);
+console.log(snapshot.header("https://example.com/"));
 ```
 
-## Chrome profiles
+Pass `profile` for session cookies. `read` never URL-filters. There is **no**
+top-level `header()` — call `ReadResult.header(url)` on the snapshot.
 
-`chrome()` keeps its legacy default-first selection. `chromeProfiles()` instead
-uses Chrome's advisory activity hints and safely falls back to generic order
-when they are missing or invalid. `chromeProfile()` returns a grouped report,
-so profile/source provenance and typed issues remain visible.
+- No-profile `await read({ browser: "chrome" })` matches legacy `chrome()`
+  (persistent / legacy-eligible cookies).
+- Naming `profile` includes session cookies.
 
-```typescript
-import { chromeProfile, chromeProfiles } from "rookie-cookies";
-
-const profiles = await chromeProfiles();
-if (profiles.length > 0) {
-  const report = await chromeProfile(profiles[0].profile.profileId, ["example.com"]);
-  console.log(report.status);
-}
-```
-
-Profile IDs and non-lossy full paths are unambiguous. When
-`profile.pathLossy` is true, the display path cannot round-trip as a selector,
-so use the profile ID. A repeated display or directory name rejects instead of
-silently choosing a channel.
+Named helpers (`chrome()`, `brave()`, `load()`) still work and also return
+Promises. They are the compatibility bridge from
+[`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) / `@rookie-rs/api`
+and will break in a later major version. Prefer `read` for new code.
 
 ## Reports
 
-The named functions above return a flat cookie array from one source. The
-report APIs instead cover every installation and profile of a browser and keep
-failures visible: cookies stay attached to the source they came from, alongside
-that source's status, acquisition strategy, counters, and diagnostics.
+Named helpers return a flat `CookieObject[]` from one source. Report APIs cover
+every installation and profile and keep failures on the object (camelCase
+fields).
 
-```typescript
+```js
 import { browserProfiles, browserReport, loadReport, supportedBrowsers } from "rookie-cookies";
 
 for (const browser of await supportedBrowsers()) {
@@ -71,68 +51,57 @@ for (const browser of await supportedBrowsers()) {
 
 const profiles = await browserProfiles("chrome");
 if (profiles.length === 0) {
-  return;
-}
-
-// Passing an explicit profile ID restricts the report to that profile. Do not
-// reach for `profiles[0]?.profile.profileId` here: on an empty list that yields
-// `undefined`, which is the "every profile" argument, so the query silently
-// widens instead of returning nothing.
-const report = await browserReport("chrome", profiles[0].profile.profileId, ["example.com"]);
-if (report.schemaVersion !== 1) throw new Error("unsupported report schema");
-
-console.log(report.status, report.summary.cookiesEmitted);
-for (const profile of report.profiles) {
-  for (const source of profile.sources) {
-    if (source.selected && source.status === "succeeded") {
-      console.log(profile.profile.displayName, source.source.path, source.cookies.length);
+  // absent browser — not an exception
+} else {
+  // Pass an explicit profileId. `undefined` means every profile, so do not
+  // use `profiles[0]?.profile.profileId` on an empty list.
+  const report = await browserReport("chrome", profiles[0].profile.profileId, ["example.com"]);
+  if (report.schemaVersion !== 1) throw new Error("unsupported report schema");
+  console.log(report.status, report.summary.cookiesEmitted);
+  for (const profile of report.profiles) {
+    for (const source of profile.sources) {
+      if (source.selected && source.status === "succeeded") {
+        console.log(profile.profile.displayName, source.source.path, source.cookies.length);
+      }
     }
   }
 }
 ```
 
-A profile's cookie stream is its `selected` sources whose `status` is
-`succeeded`, concatenated in the order they appear. Both halves matter: a source
-that was attempted and rejected in favour of another candidate can still report
-`succeeded`, so filtering on status alone would double-count a profile whose
-engine tried more than one candidate.
+Job-layer aliases:
 
-`schemaVersion` versions the serialized report shape; reject a value your
-consumer does not understand. `termination` describes why execution stopped
-and is independent from `status`: its current vocabulary is `completed`,
-`timed_out`, `cancelled`, and `resource_exhausted`. For example, a timed-out
-request can still have `status: "partial"` and retain sources that completed
-before the deadline.
+```js
+import { profiles, report } from "rookie-cookies";
 
-`supportedBrowsers()` lists what is registered for the running OS, which is not
-the same as what is installed. `loadReport()` is the report-shaped counterpart
-to `load()` and covers every registered browser rather than `load()`'s
-historical set.
+const listed = await profiles("chrome");
+const viaJob = await report({ browser: "chrome", profile: listed[0]?.profile.profileId });
+```
 
-The two browser-scoped functions reject only on a bad request:
+A profile's cookie stream is its **selected** sources whose `status` is
+`succeeded`, in listed order. A rejected candidate can still be `succeeded`,
+so status-only filtering double-counts.
 
-- `browserProfiles(browserId)` rejects an unknown ID or alias, and also rejects
-  when every detected installation root failed enumeration — an empty list there
-  would be indistinguishable from "not installed", and `browserReport` carries
-  the per-root diagnostics for that case. One failing root among several does
-  not hide the profiles the others yielded.
-- `browserReport(browserId, profileId)` rejects an unknown ID or alias, and a
-  `profileId` this browser did not yield.
+`schemaVersion` versions the DTO. `termination` (`completed`, `timed_out`,
+`cancelled`, `resource_exhausted`) is independent of `status`. Counters are
+ordinary numbers (never `BigInt`); overflow sets `countersSaturated`.
 
-A registered browser that is simply absent is not an error: it resolves to an
-empty profile list, or to a report whose `status` is `no_sources`. Extraction
-failures are likewise not errors — they arrive as a resolved report whose
-`status` and `issues` describe them.
+`supportedBrowsers()` is registration, not detection. `profiles(id)` aliases
+`browserProfiles`. `report({ browser, profile })` is the job-layer name for
+`browserReport`. `loadReport()` is the report-shaped `load()`.
 
-Every identifier and code — `status`, `termination`, `role`, `format`,
-`acquisitionStrategy`, issue `code`/`stage`/`severity` — is an open string, so
-compare against a known value and keep a fallback branch rather than switching
-exhaustively. Every counter is an ordinary JavaScript number, never a `BigInt`;
-a count that would overflow is clamped and sets `countersSaturated`.
+These reject only on a **bad request** (`InvalidArg`): unknown browser, or a
+`profileId` that browser did not yield. `browserProfiles` also rejects when
+every installation root failed enumeration. An absent registered browser
+resolves to `[]` or `status: "no_sources"`. Other failures are
+`GenericFailure`.
+
+`chrome()` stays default-first. `chromeProfiles()` / `chromeProfile()` add
+activity-hint order and a grouped report; lossy `pathLossy` selectors need
+`profileId`.
 
 ## Explicit paths
 
-```typescript
+```js
 import { chromiumCookiesFromPath, cookiesFromPath } from "rookie-cookies";
 
 const firefox = await cookiesFromPath("/path/to/cookies.sqlite", ["example.com"]);
@@ -142,46 +111,105 @@ const chrome = await chromiumCookiesFromPath(
 );
 ```
 
-Chromium options accept `domains` plus at most one of `browserId`,
-`localStatePath`, or `plaintextOnly: true`. Zero selectors selects Automatic.
-Automatic probes platform credentials on Linux and macOS; on Windows an
-explicit Chromium path rejects with `missing_local_state_file` because it does
-not guess a browser installation. Invalid option shapes reject with `TypeError`
-before database I/O; every canonical export always returns a Promise. Process
-shutdown is intentionally unavailable.
+At most one of `browserId`, `localStatePath`, `plaintextOnly: true`. Invalid
+option shapes reject with `TypeError` before I/O. Process shutdown is not
+exposed. Windows Chromium paths without a selector reject
+`missing_local_state_file`.
 
-## Compatibility direct-path functions
+`anyBrowser()`, `chromiumBased*`, and flat `firefoxBased()` are deprecated
+until ≥ 0.7. `firefoxBasedDetailed()` stays for container context.
 
-```typescript
-import { chromiumBasedDetailed, firefoxBasedDetailed } from "rookie-cookies";
+```js
+import { chromiumBasedDetailed } from "rookie-cookies";
 
-const chromiumRecords = await chromiumBasedDetailed(
+const records = await chromiumBasedDetailed(
   "/path/to/Brave/Default/Network/Cookies",
   ["example.com"],
   "brave",
 );
-const firefoxRecords = await firefoxBasedDetailed("/path/to/cookies.sqlite");
+for (const { cookie, context } of records) {
+  console.log(cookie.name, context.topFrameSiteKey);
+}
 ```
 
-Each record contains the unchanged `CookieObject` under `cookie` and a
-`context` object with nullable partition/container fields. On Unix,
-`chromiumBased()` likewise accepts the canonical browser ID as its third
-argument. Omit it only for plaintext-only databases; encrypted rows reject
-instead of silently using Chrome's key identity.
+## Timeouts and cancellation
 
-`anyBrowser()`, `chromiumBased()` and its detailed twin, and flat
-`firefoxBased()` are deprecated in 0.6 for removal no earlier than 0.7. Their
-runtime behavior remains unchanged throughout 0.6.x. `firefoxBasedDetailed()`
-is not deprecated.
+`cookiesFromPath`, `chromiumCookiesFromPath` /
+`chromiumCookiesFromPathDetailed`, every single-browser export, and `read` /
+`fromPath` accept `timeoutMs` and/or a `CancellationHandle`.
 
-## Netscape export
+```js
+import { chrome, CancellationHandle } from "rookie-cookies";
 
-```typescript
+const cancellation = new CancellationHandle();
+const timer = setTimeout(() => cancellation.cancel(), 5000);
+
+try {
+  const cookies = await chrome(undefined, 30000, cancellation);
+  console.log(cookies);
+} catch (error) {
+  if (error.message.includes("operation deadline expired")) {
+    console.log("timed out");
+  } else if (error.message.includes("operation cancelled")) {
+    console.log("cancelled");
+  } else {
+    throw error;
+  }
+} finally {
+  clearTimeout(timer);
+}
+```
+
+## Netscape
+
+```js
 import { chrome, toNetscape } from "rookie-cookies";
 
 const output = toNetscape(await chrome());
 ```
 
-The serializer prevents extra columns or forged records by encoding tabs,
-carriage returns, and line feeds in cookie-controlled fields as `%09`, `%0D`,
-and `%0A`. Every other character is preserved.
+Tabs / CR / LF become `%09` / `%0D` / `%0A`. Same encoding as Rust, CLI, and
+Python.
+
+## 0.5.6 API
+
+In the 0.5.6 line extraction was **synchronous**. There was no `read` /
+`fromPath` job API. Node 18/20 were still supported. Upstream published
+`@rookie-rs/api`.
+
+```js historical
+import { brave, chrome, load } from "rookie-cookies";
+
+// Synchronous in 0.5.6 — returns CookieObject[] directly (do not copy for 0.6)
+const cookies = brave();
+const filtered = chrome(["example.com"]);
+const all = load();
+```
+
+## Migrate 0.5.6 → 0.6.0
+
+| Area | 0.5.6 / early 0.5.x | 0.6.0 |
+| --- | --- | --- |
+| Recommended entry | `chrome()` / `brave()` (sync) | `await read({ browser, profile })` |
+| Async contract | Sync return values | **Every** extraction export is a Promise (since 0.5.8) |
+| Node.js | 18 / 20 accepted | **≥ 22** (tested 22 / 24 / 26) |
+| Session cookies | Not a first-class `profile` | Pass `profile` in `read({ … })` |
+| Path APIs | `firefoxBased`, `chromiumBased`, `anyBrowser` | `cookiesFromPath` / `chromiumCookiesFromPath` (legacy deprecated until ≥ 0.7) |
+| Errors | Flat `Unknown` | Request faults → `InvalidArg`; else `GenericFailure` |
+| Header view | Manual | `snapshot.header(url)` — **no** top-level `header()` |
+| Reports | Not in 0.5.6 | `report({ browser, profile })` / `browserReport(...)` |
+
+1. Bump Node.js to 22+.
+2. Add `await` (or `.then`) to every extraction call.
+3. Prefer `read`; pass `profile` for session cookies.
+4. Move explicit DB paths off `*Based` / `anyBrowser`.
+5. Inspect `.status` / `.code` for `InvalidArg` vs `GenericFailure`.
+6. Do not invent a top-level `header()`.
+
+See [CHANGELOG.md](https://github.com/teng-lin/rookie-cookies/blob/main/CHANGELOG.md).
+
+## More
+
+- [docs/building.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/building.md)
+- [docs/testing.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/testing.md)
+- [teng-lin/rookie-cookies](https://github.com/teng-lin/rookie-cookies)

@@ -96,7 +96,7 @@ jobs:
             fi
           fi
           # Whether derived or explicitly supplied, a prerelease must never
-          # land on `latest` -- this is the one invariant docs/RELEASING.md
+          # land on `latest` -- this is the one invariant docs/releasing.md
           # promises callers.
           if [ "$npm_tag" = "latest" ] && [ "$is_prerelease" = true ]; then
             echo "::error::refusing to publish prerelease $RELEASE_VERSION under npm dist-tag 'latest'; pass tag= explicitly" >&2
@@ -117,12 +117,13 @@ jobs:
         working-directory: ./bindings/node
         run: |
           npm ci --ignore-scripts
+          python3 ../../scripts/sync-node-license.py --node-root .
           npm pack --dry-run --ignore-scripts --json | tee /tmp/npm-pack-root.json
           node -e "
             const packed = require('/tmp/npm-pack-root.json');
             const files = packed[0].files.map((entry) => entry.path);
-            if (!files.includes('MIT-LICENSE.txt')) {
-              throw new Error('MIT-LICENSE.txt is missing from the root npm package: ' + files.join(', '));
+            if (!files.includes('LICENSE.md')) {
+              throw new Error('LICENSE.md is missing from the root npm package: ' + files.join(', '));
             }
           "
 
@@ -375,8 +376,8 @@ jobs:
             "../../release-packages/npm/rookie-cookies-$RELEASE_VERSION.tgz" \
             "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz"
           do
-            tar -tzf "$tarball" | grep -qx "package/MIT-LICENSE.txt" \
-              || { echo "MIT-LICENSE.txt missing from $tarball" >&2; exit 1; }
+            tar -tzf "$tarball" | grep -qx "package/LICENSE.md" \
+              || { echo "LICENSE.md missing from $tarball" >&2; exit 1; }
           done
       - name: Record release and Windows scan checksums
         shell: bash
@@ -385,7 +386,7 @@ jobs:
           # This workflow is the coordinator: it runs from `main`, and
           # `github.sha` is *its own* commit — the tag's source SHA above is
           # a separate value, since publish-npm.yml is dispatched from `main`
-          # rather than from the release tag (see docs/RELEASING.md).
+          # rather than from the release tag (see docs/releasing.md).
           CONTROLLER_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -411,7 +412,7 @@ jobs:
             --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
             --artifacts-root ../../release-packages/npm
       # Release-hardening program R5, advisory-only for now (see
-      # docs/RELEASING.md): resolves each required check to its exact
+      # docs/releasing.md): resolves each required check to its exact
       # producing job/run rather than trusting a check-run name alone.
       # --advisory means this always exits 0 (a ::warning:: annotation on
       # failure, not a job failure) -- this workflow only runs via

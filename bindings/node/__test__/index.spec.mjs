@@ -1227,11 +1227,6 @@ Path=Profiles/work
 test("public JavaScript examples await async extraction APIs", (t) => {
   const documents = [
     ["README.md", new URL("../../../README.md", import.meta.url), true],
-    [
-      "docs/JavaScript.md",
-      new URL("../../../docs/JavaScript.md", import.meta.url),
-      true,
-    ],
     ["bindings/node/README.md", new URL("../README.md", import.meta.url), true],
     [
       "examples/javascript/simple.js",
@@ -1276,6 +1271,10 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "safari",
     "chromiumBased",
     "chromiumBasedDetailed",
+    "read",
+    "fromPath",
+    "profiles",
+    "report",
     ...REPORT_FUNCTIONS,
   ];
   const callPattern = new RegExp(`\\b(?:${asyncApis.join("|")})\\s*\\(`, "g");
@@ -1284,9 +1283,9 @@ test("public JavaScript examples await async extraction APIs", (t) => {
   for (const [name, url, markdown] of documents) {
     const source = readFileSync(url, "utf8");
     const examples = markdown
-      ? [...source.matchAll(/```(?:js|javascript|typescript)\s*\n([\s\S]*?)```/g)].map(
-          (match) => match[1],
-        )
+      ? [...source.matchAll(/```(?:js|javascript|typescript)([^\n]*)\n([\s\S]*?)```/g)]
+          .filter((match) => !/\bhistorical\b/i.test(match[1]))
+          .map((match) => match[2])
       : [source];
 
     for (const example of examples) {

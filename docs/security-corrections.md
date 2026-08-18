@@ -1,8 +1,11 @@
 # Security corrections
 
-Intentional security behavior changes are recorded here even when they differ
-from the compatibility contract in
-[`docs/adr/0001-cookie-extraction-compatibility-and-report-contracts.md`](docs/adr/0001-cookie-extraction-compatibility-and-report-contracts.md).
+Intentional security behavior changes, recorded even when they differ from the
+compatibility contract in
+[ADR 0001](adr/0001-cookie-extraction-compatibility-and-report-contracts.md).
+
+Bundled SQLite pins live in [sqlite-security.md](sqlite-security.md), not here.
+Index: [security.md](security.md).
 
 | Correction | Affected surfaces | Prior behavior | Replacement behavior | Stable code and counters | All-row behavior | Migration | Owner and rationale | Regression |
 |---|---|---|---|---|---|---|---|---|

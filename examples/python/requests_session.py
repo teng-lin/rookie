@@ -1,19 +1,14 @@
-import rookie_cookies
+"""Attach a Chrome profile to a requests.Session."""
+
 import requests
+from rookie_cookies import jar
+
 
 def create_session() -> requests.Session:
-    """
-    Create requests session with cookiejar that contains web browsers cookies
-    """
-    # Load cookies from browser
-    cookies = rookie_cookies.load()
-    # Create Cookiejar from cookies
-    cj = rookie_cookies.to_cookiejar(cookies)
-    # Create session
-    session = requests.session()
-    # Set session cookiejar
-    session.cookies = cj
+    session = requests.Session()
+    session.cookies = jar(browser="chrome", profile="Default")
     return session
 
+
 session = create_session()
-session.get('https://google.com/')
+session.get("https://example.com/", timeout=10)

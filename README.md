@@ -1,106 +1,44 @@
 # rookie-cookies
 
 [![PyPI](https://img.shields.io/pypi/v/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
-[![NPM Version](https://img.shields.io/npm/v/rookie-cookies?logo=npm&color=0076CE)](https://www.npmjs.com/package/rookie-cookies/)
-[![Rust](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
-[![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](MIT-LICENSE.txt)
+[![npm](https://img.shields.io/npm/v/rookie-cookies?logo=npm&color=0076CE)](https://www.npmjs.com/package/rookie-cookies/)
+[![crates.io](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
+[![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](LICENSE.md)
 
+`rookie-cookies` is a fast, cross-platform cookie extraction toolkit — a Rust
+core with native Python and JavaScript bindings and a CLI — that pulls cookies
+from every major browser, including support for the latest Chrome v20 App-Bound
+Encryption (ABE).
 
-`rookie-cookies` is a maintained fork of the original [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) project. It extracts browser cookies through Rust, Python, and Node.js bindings under one shared package name.
-This fork exists because the original repository is archived. Its immediate downstream consumer is [`notebooklm-py`](https://github.com/teng-lin/notebooklm-py), which uses the Python binding for optional browser-cookie authentication.
+This is a maintained fork of
+[`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie), which is
+archived. We still ship that project's public call shapes (`chrome()`,
+`firefox()`, `load()`, and friends) so existing consumers keep working.
 
-## What is maintained here
+That compatibility is a **bridge, not a promise**. New work should use the 0.6
+job API (`read` / Python `jar`). Later releases will break the old surface as we
+add capabilities and clean up the design. Plan on migrating; do not take the
+legacy helpers as frozen forever.
 
-- Python 3.11–3.14 compatibility and automated tests.
-- Rust, Python, Node.js, and CLI test coverage.
-- Browser extraction tests using seeded Chrome and Firefox profiles.
-- Chromium cookie formats including legacy `v10`/`v11` and newer `v20` values.
-- Windows Chrome App-Bound Encryption support when built with the default `appbound` feature.
-- Build and release documentation for downstream users.
+The tree may still publish as `0.6.0-alpha.x`. The snippets below are the
+**0.6.0** recommended surface.
 
-The API remains compatible with the original project wherever possible.
+## What is different from upstream rookie
 
-## Security and privacy
+We keep the old names working while the library grows past a bag of
+per-browser functions:
 
-This project reads local browser cookie databases. Cookies are credentials: treat all output as secret, do not log it, and do not share extracted values.
+- One recommended job (`read` / `jar`) instead of “call `chrome()` and hope”.
+- Profile queries so session cookies are a deliberate choice.
+- Structured reports, explicit-path builders, timeouts, and cancellation.
+- Chromium formats through **legacy DPAPI**, **`v10` / `v11`**, and **App-Bound
+  `v20`** where the host and browser allow it.
+- Shared tests across Rust, Python, Node, and the CLI.
 
-On Windows, Chrome App-Bound Encryption requires an elevated process for the App-Bound key path. The implementation can decrypt the local cookie database, but it does not implement Device Bound Session Credentials (DBSC) or export browser private keys. A decrypted cookie may therefore be insufficient to reproduce a DBSC-protected browser session outside Chrome.
+Those additions are why the old API will eventually go away rather than stay
+the documented default.
 
-Only use this software with browser profiles and accounts you are authorized to access.
-
-## Python
-
-Install the Python binding:
-
-```console
-pip install rookie-cookies
-```
-
-Use it to import a browser session, or to dump Domain-intact records:
-
-```python
-import rookie_cookies as cookies
-
-# Happy path — session import (pass profile= to include session cookies)
-session_jar = cookies.jar(browser="chrome", profile="Default")
-
-# NotebookLM / Playwright storage_state — Domain-intact records
-rows = cookies.read(browser="chrome", profile="Work").as_list()
-```
-
-Named helpers such as `chrome()` remain supported compatibility APIs.
-
-The binding requires CPython 3.11 or newer and is tested on CPython 3.11–3.14.
-Published wheels use the `cp311-abi3` stable ABI tag, so one wheel serves every
-supported CPython version on each platform.
-
-## Rust
-
-```console
-cargo add rookie-cookies anyhow
-```
-
-```rust
-use rookie_cookies::browser;
-
-fn main() -> anyhow::Result<()> {
-    let cookies = browser("chrome", Some(vec!["example.com".to_string()]))?;
-    for cookie in cookies {
-        println!("{} {}", cookie.domain, cookie.name);
-    }
-    Ok(())
-}
-```
-
-## Node.js
-
-The npm packages require Node.js 22 or newer. CI and release artifacts are
-tested on Node.js 22, 24, and 26; Node.js 18 and 20 are no longer supported.
-
-```console
-npm install rookie-cookies
-```
-
-```javascript
-import { chrome } from "rookie-cookies";
-
-const cookies = await chrome(["example.com"]);
-console.log(cookies);
-```
-
-## CLI explicit paths
-
-`--path` classifies Firefox or Chromium databases automatically. To select
-Chromium credentials explicitly, add exactly one of `--browser-id`,
-`--key-path`, or `--plaintext-only`. `--key-path` always means a Windows
-Chromium `Local State` file in 0.6; no process-shutdown option is exposed.
-
-```console
-rookie-cookies --path /path/to/Cookies --browser-id chrome
-rookie-cookies --path /path/to/cookies.sqlite
-```
-
-## Supported browsers
+## Platforms and browsers
 
 | Browser | Linux | macOS | Windows |
 | --- | :---: | :---: | :---: |
@@ -123,50 +61,148 @@ rookie-cookies --path /path/to/cookies.sqlite
 | Yandex | — | ✓ | ✓ |
 | Zen | ✓ | ✓ | ✓ |
 
-Registry-only browsers such as Cốc Cốc, DuckDuckGo, and Yandex are available
-through the generic report/profile APIs and CLI report mode. Browser profile
-discovery is platform-specific. Rust callers should use the typed
-`direct_path::DirectPathRequest` or `direct_path::ChromiumPathRequest` builders
-for explicit database paths. The legacy `*_based`, `any_browser`, and config
-surfaces remain available through 0.6 and are deprecated for removal in 0.7;
-see the language-specific documentation and examples.
+`supported_browsers()` is the live registration list for the running OS (more
+Windows Chromium forks exist in the registry than this table). Registry-only
+browsers (Cốc Cốc, DuckDuckGo, Yandex, Avast, …) show up through report/profile
+APIs and CLI report mode, not always as a named `coccoc()` helper. `*_based` /
+`any_browser` still exist in 0.6 and are deprecated for 0.7.
 
-## Testing
+### Cookie crypto (what `v10` / `v20` mean)
 
-Run the Rust workspace tests:
+Chromium stores a prefix on each encrypted value. The names below are the
+registry **decryption tiers** (`declared_decryption_tiers`), not marketing
+labels.
+
+| Tier | Where | What it is |
+| --- | --- | --- |
+| **legacy DPAPI** | Windows Chromium | Oldest Windows Chromium cookies: current-user DPAPI, no App-Bound wrapping. Still declared for every Windows Chromium browser in the registry. |
+| **`v10`** | Windows, macOS, Linux Chromium | AES-GCM (Windows) or AES-CBC (Unix) values prefixed `v10`. Windows unwraps the AES key from `Local State` with DPAPI. macOS uses Keychain; Linux uses the OS crypt (often paired with `v11`). |
+| **`v11`** | Linux Chromium | Same family as `v10`, prefixed `v11`, typically Secret Service / KWallet. |
+| **App-Bound `v20`** | Windows Chrome-family | Chrome 133+ App-Bound Encryption (`APPB` key in `Local State`, values prefixed `v20`). Needs the default `appbound` feature. Decrypts via COM injection into a spawned browser process, with elevated SYSTEM impersonation as fallback. Hosted canaries: Chrome, Edge, Brave. Also declared for Cốc Cốc and Avast. |
+| **(none)** | Gecko, Safari, IE | Firefox / LibreWolf / Zen / Cachy: plaintext `cookies.sqlite` plus session JSON. Safari: `Cookies.binarycookies` (Full Disk Access). IE: ESE WebCache — functions exist in 0.6 and are deprecated. |
+
+Windows Chromium at a glance:
+
+| Windows browser | legacy DPAPI | `v10` | App-Bound `v20` |
+| --- | :---: | :---: | :---: |
+| Chrome, Edge, Brave | ✓ | ✓ | ✓ |
+| Cốc Cốc, Avast | ✓ | ✓ | ✓ (library; not in the hosted canary matrix) |
+| Arc, Chromium, Opera, Opera GX, Vivaldi, Yandex, DuckDuckGo, Octo, … | ✓ | ✓ | — |
+
+A green **legacy DPAPI `v10`** extraction does **not** mean `v20` works. `v20`
+may need elevation or a live host process; this project does not implement
+Device Bound Session Credentials (DBSC). Coverage details:
+[docs/testing.md](docs/testing.md).
+
+Linux Chromium is `v10` + `v11` (libsecret / KWallet). macOS Chromium is `v10`
+via Keychain. Gecko is the same sqlite/session layout on all three OSes.
+
+## Install
+
+| Language | Requirement | Command |
+| --- | --- | --- |
+| Python | CPython ≥ 3.11 | `pip install rookie-cookies` |
+| Node.js | Node ≥ 22 | `npm install rookie-cookies` |
+| Rust | edition 2021 crate | `cargo add rookie-cookies` |
+| CLI | same repo / release binaries | `rookie-cookies --help` |
+
+## Recommended 0.6 usage
+
+Pass a **profile** when you want session cookies. Omit it to match the old
+first-profile, persistent-only helpers. `read` never URL-filters the snapshot;
+`ReadResult.header(url)` is a view. There is no top-level binding `header()`,
+and no crate-root Rust `get` / `report`.
+
+### Python
+
+```python
+import rookie_cookies as cookies
+
+session_jar = cookies.jar(browser="chrome", profile="Default")
+rows = cookies.read(browser="chrome", profile="Work").as_list()
+```
+
+### Node.js
+
+```javascript
+import { read } from "rookie-cookies";
+
+const snapshot = await read({ browser: "chrome", profile: "Default" });
+console.log(snapshot.cookies, snapshot.header("https://example.com/"));
+```
+
+Extraction is async. Always `await`.
+
+### Rust
+
+```rust
+use rookie_cookies::{read, ReadRequest};
+
+fn main() -> rookie_cookies::Result<()> {
+    let snapshot = read(ReadRequest::browser("chrome").profile("Default"))?;
+    println!("{}", snapshot.header("https://example.com/")?);
+    Ok(())
+}
+```
+
+### CLI
+
+```console
+rookie-cookies --path /path/to/cookies.sqlite
+rookie-cookies --path /path/to/Cookies --browser-id chrome
+```
+
+Chromium credential flags (`--browser-id`, `--key-path`, `--plaintext-only`)
+require `--path` and are mutually exclusive. `--key-path` is a Windows
+`Local State` file.
+
+Coming from 0.5.6 named helpers? Each language guide has a **0.5.6 API**
+section and a **migrate 0.5.6 → 0.6.0** section:
+[python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md).
+
+## Security
+
+Extracted cookies are credentials. Do not log them, commit them, or paste them
+into issues. Use only profiles and accounts you are allowed to access.
+
+On Windows, App-Bound `v20` may need elevated or host-process access.
+This project does not implement Device Bound Session Credentials (DBSC) and
+does not export browser private keys. A decrypted cookie is not always enough
+to replay a protected Chrome session.
+
+Platform quirks (Keychain prompts, Safari Full Disk Access):
+[docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Documentation
+
+| | |
+| --- | --- |
+| Language guides | [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md) |
+| Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) |
+| Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Security | [docs/security.md](docs/security.md) (corrections + SQLite inventory) |
+| Design | [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
+| Examples | [python](examples/python) · [javascript](examples/javascript) · [rust](examples/rust) |
 
 ```console
 cargo test --workspace --all-targets
-cargo test --workspace --doc
+python3 scripts/check-doc-snippets.py
 ```
 
-Run the Python unit tests after building the extension in a virtual environment:
-
-```console
-python -m unittest discover -s tests/python -p 'test_*.py' -v
-```
-
-Real-browser E2E tests are defined in [`.github/workflows/e2e.yml`](.github/workflows/e2e.yml). They seed disposable Chrome and Firefox profiles on Ubuntu, macOS, and Windows and verify Rust, Python, Node.js, and CLI extraction against the same cookie. A separate strict Windows canary verifies default-profile App-Bound `v20` extraction from a live WAL, while the artifact-smoke workflow installs and runs the shipped CLI, wheel, and npm tarballs in clean consumer environments. See [the testing guide](docs/TESTING.md) for the exact matrix and local commands.
-
-## Documentation and examples
-
-- [Python documentation](docs/Python.md)
-- [Rust documentation](docs/Rust.md)
-- [JavaScript documentation](docs/JavaScript.md)
-- [Build instructions](docs/BUILDING.md)
-- [Testing guide](docs/TESTING.md)
-- [Release instructions](docs/RELEASING.md)
-- [Changelog](CHANGELOG.md)
-- [Python examples](examples/python)
-- [Rust examples](examples/rust)
-- [JavaScript examples](examples/javascript)
-
-## Contributing
-
-Please open issues and pull requests in [this maintained fork](https://github.com/teng-lin/rookie-cookies). Include the operating system, browser/version, language binding, and whether the browser was running when the failure occurred. Never include real cookie values or browser databases in an issue.
-
-The project is released under the MIT license. See [MIT-LICENSE.txt](MIT-LICENSE.txt).
+Issues and PRs: [teng-lin/rookie-cookies](https://github.com/teng-lin/rookie-cookies).
+Say which OS, browser, and binding you used. Never attach real cookies or
+database files.
 
 ## Credits
 
-This fork preserves the original project’s history and license. It also builds on ideas from [`browser_cookie3`](https://github.com/borisbabic/browser_cookie3).
+- [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) — original
+  library, history, and MIT license this fork continues.
+- [`moond4rk/HackBrowserData`](https://github.com/moond4rk/HackBrowserData) —
+  research and implementation ideas around multi-browser cookie and credential
+  extraction on Windows, macOS, and Linux.
+
+Also indebted to [`browser_cookie3`](https://github.com/borisbabic/browser_cookie3).
+
+## License
+
+[MIT](LICENSE.md).

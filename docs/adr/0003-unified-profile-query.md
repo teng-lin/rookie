@@ -29,4 +29,4 @@ Callers who passed a non-id string to `browser_report` and depended on a request
 
 ## References
 
-- Design: [unified-extract-api.md](../design/unified-extract-api.md)
+- Follow-up job API: [ADR 0004](0004-read-is-the-recommended-entry.md)

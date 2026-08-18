@@ -196,4 +196,8 @@ Cargo.lock
 
 *.node
 
+# Staged from repo-root LICENSE.md by scripts/sync-node-license.py for npm pack.
+/LICENSE.md
+/npm/*/LICENSE.md
+
 bun.lockb

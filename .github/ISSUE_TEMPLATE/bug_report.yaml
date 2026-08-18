@@ -1,65 +1,130 @@
-name: Bug Report
-description: File a bug report
+name: Bug report
+description: Something extracted wrong, crashed, or failed to build
 title: "[Bug]: "
 labels: ["bug"]
-assignees:
-  - octocat
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to fill out this bug report!
+        Do **not** paste cookie values, `Local State` files, or cookie databases.
+        OS, browser version, binding, and whether the browser was running are enough.
+
+        Guides: [Python](https://github.com/teng-lin/rookie-cookies/blob/main/bindings/python/README.md),
+        [Node](https://github.com/teng-lin/rookie-cookies/blob/main/bindings/node/README.md),
+        [Rust](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md),
+        [troubleshooting](https://github.com/teng-lin/rookie-cookies/blob/main/docs/troubleshooting.md).
   - type: textarea
     id: what-happened
     attributes:
       label: What happened?
-      description: Also tell us, what did you expect to happen?
-      placeholder: Tell us what you see!
-      value: "A bug happened!"
+      description: What you ran, what you expected, what you got (no secrets).
+      placeholder: e.g. read(browser="chrome", profile="Default") returned no cookies while Chrome was logged in.
     validations:
       required: true
   - type: textarea
     id: steps-to-reproduce
     attributes:
       label: Steps to reproduce
-      description: Also tell us, what did you expect to happen?
-      placeholder: Tell us what you see!
-      value: |
-        1. step one...
-        2. step two...
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: dropdown
+    id: binding
+    attributes:
+      label: Language binding
+      multiple: true
+      options:
+        - Python
+        - Node.js
+        - Rust
+        - CLI
+    validations:
+      required: true
+  - type: input
+    id: package-version
+    attributes:
+      label: rookie-cookies version
+      placeholder: e.g. 0.6.0-alpha.3
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
     validations:
       required: true
   - type: dropdown
     id: browsers
     attributes:
-      label: What browsers are you seeing the problem on?
+      label: Browser
       multiple: true
       options:
         - Chrome
-        - Firefox
-        - LibreWolf
-        - Opera
-        - Opera Gx
-        - Edge
-        - Internet
         - Chromium
         - Brave
-        - Vivaldi
+        - Edge
+        - Firefox
+        - LibreWolf
+        - Zen
         - Safari
+        - Arc
+        - Opera
+        - Opera GX
+        - Vivaldi
+        - Cốc Cốc
+        - DuckDuckGo
+        - Yandex
+        - Internet Explorer
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: browser-version
+    attributes:
+      label: Browser version
+      placeholder: e.g. Chrome 133.0.6943.141
+  - type: dropdown
+    id: browser-running
+    attributes:
+      label: Was the browser running during extraction?
+      options:
+        - "Yes"
+        - "No"
+        - Unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: api
+    attributes:
+      label: Which API did you call?
+      multiple: true
+      options:
+        - read / jar
+        - Named helper (chrome, firefox, …)
+        - cookies_from_path / fromPath
+        - report / browser_report
+        - CLI
+        - Other
   - type: textarea
     id: logs
     attributes:
       label: Relevant log output
       description: |
-        Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks.
-        If you use python enable logging by 
+        Redact cookie values and paths that identify a real account.
+        Python:
         ```python
         import logging
         logging.basicConfig(level=logging.DEBUG)
         ```
-        If you use rust try enabling by setting environment variable 
-        ```shell
+        Rust / CLI:
+        ```console
         RUST_LOG=trace
         ```
-        
       render: shell
