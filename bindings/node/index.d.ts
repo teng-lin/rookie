@@ -278,6 +278,39 @@ export declare function browserReport(browserId: string, profileId?: string | un
  * not abort the others; it becomes an issue on the returned report.
  */
 export declare function loadReport(domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
+export interface ReadOptions {
+  browser: string
+  profile?: string
+  includeExpired?: boolean
+  timeoutMs?: number
+}
+export interface ReportOptions {
+  browser: string
+  profile?: string
+  domains?: Array<string>
+  timeoutMs?: number
+}
+export interface FromPathOptions {
+  path: string
+  includeExpired?: boolean
+  timeoutMs?: number
+  browserId?: string
+  keyPath?: string
+  plaintextOnly?: boolean
+}
+export interface ReadWarningObject {
+  code: string
+  count: number
+  message: string
+}
+/** Unfiltered snapshot of one browser profile. Never URL-pre-sliced. */
+export declare function read(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
+/** Alias of `browserProfiles`. No decrypt. */
+export declare function profiles(browserId: string): Promise<Array<ProfileDescriptorObject>>
+/** Bindings name for `extract_report` / `browserReport`. */
+export declare function report(options: ReportOptions): Promise<ExtractionReportObject>
+/** Read cookies from an explicit cookie database path. */
+export declare function fromPath(options: FromPathOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
 export type JsCancellationHandle = CancellationHandle
 /**
  * A cross-thread cancellation token for an in-flight extraction.
@@ -296,6 +329,16 @@ export declare class CancellationHandle {
    */
   cancel(): boolean
   get isCancelled(): boolean
+}
+export type JsReadResult = ReadResult
+export declare class ReadResult {
+  /** Not constructible from JavaScript. Use `read()` or `fromPath()`. */
+  constructor()
+  get cookies(): Array<CookieObject>
+  get warnings(): Array<ReadWarningObject>
+  get browserId(): string
+  get profileId(): string | null
+  header(url: string): string
 }
 /** rookie-cookies cross-platform facade */
 /** Linux-only browsers */

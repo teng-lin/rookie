@@ -4,6 +4,8 @@
 //! host cannot decide whether an assertion passes. Discovery snapshots the
 //! process environment, so every test here holds [`ENV_LOCK`] for its duration.
 
+#![allow(deprecated)]
+
 use rookie_cookies::report::{
   ExtractionReport, IssueCode, IssueSeverityCode, ProfileDescriptor, ReportStatusCode,
   SourceStatusCode,
@@ -158,6 +160,43 @@ fn remove_var(name: &str) {
 }
 
 /// Writes a Chromium profile holding one plaintext cookie.
+fn seed_chromium_encrypted(root: &Path, profile: &str, name: &str, blob: &[u8]) {
+  let database = root.join(profile).join("Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '23');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL,
+        path TEXT NOT NULL,
+        is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL,
+        is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL
+      );",
+    )
+    .expect("create cookies table");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'kept', 'plain', x'', 0, 0)",
+      [],
+    )
+    .expect("insert plaintext cookie");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, ?1, '', ?2, 0, 0)",
+      rusqlite::params![name, blob],
+    )
+    .expect("insert encrypted cookie");
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+}
+
 fn seed_chromium_profile(root: &Path, profile: &str, name: &str, value: &str) {
   let database = root.join(profile).join("Network/Cookies");
   std::fs::create_dir_all(database.parent().expect("profile directory"))
@@ -241,18 +280,104 @@ fn unknown_profile_ids_are_request_errors() {
   let error = rookie_cookies::browser_report("chrome", Some(&"0".repeat(64)), None)
     .expect_err("an unmatched profile id is a request error");
   assert!(
-    error.to_string().contains("unknown chrome profile id"),
+    error.to_string().contains("no chrome profile matches"),
     "unexpected message: {error:#}"
   );
+  assert!(error
+    .downcast_ref::<rookie_cookies::RequestError>()
+    .is_some());
 
-  // A display path is not a selection key, however real the path is.
-  let path = home.chrome_root().join("Default");
-  let error = rookie_cookies::browser_report("chrome", Some(&path.to_string_lossy()), None)
-    .expect_err("display paths are not selection keys");
-  assert!(
-    error.to_string().contains("unknown chrome profile id"),
-    "unexpected message: {error:#}"
+  // Listing stores canonicalized paths (`/private/var/...` on macOS). Query
+  // with the path the listing itself published — that is the Path-eq key.
+  let listed = rookie_cookies::browser_profiles("chrome").expect("listed seeded chrome");
+  let listed_path = listed
+    .iter()
+    .find(|profile| profile.profile.path.ends_with("Default"))
+    .expect("seeded Default profile")
+    .profile
+    .path
+    .clone();
+  let report = rookie_cookies::browser_report("chrome", Some(&listed_path), None)
+    .expect("a non-lossy profile path is a selection key");
+  assert_eq!(report.profiles.len(), 1);
+
+  let cookie_db = listed
+    .iter()
+    .find(|profile| profile.profile.path == listed_path)
+    .expect("Default still listed")
+    .sources
+    .iter()
+    .find(|source| source.role.as_str() == "persistent")
+    .expect("persistent Cookies source")
+    .path
+    .clone();
+  let via_db = rookie_cookies::browser_report("chrome", Some(&cookie_db), None)
+    .expect("a persistent cookie-DB path is a selection key");
+  assert_eq!(via_db.profiles.len(), 1);
+  let _ = home;
+}
+
+#[test]
+fn extract_report_without_profile_matches_browser_report() {
+  let _home = seeded_chrome("extract-report-eq");
+  let via_report = rookie_cookies::browser_report("chrome", None, None).expect("report");
+  let via_extract = rookie_cookies::extract_report(rookie_cookies::Request::browser("chrome"))
+    .expect("extract_report");
+  assert_eq!(via_report.status, via_extract.status);
+  assert_eq!(via_report.profiles.len(), via_extract.profiles.len());
+  assert_eq!(
+    via_report.summary.cookies_emitted,
+    via_extract.summary.cookies_emitted
   );
+}
+
+fn cookie_key(cookie: &rookie_cookies::enums::Cookie) -> (String, String, String, String) {
+  (
+    cookie.domain.clone(),
+    cookie.path.clone(),
+    cookie.name.clone(),
+    cookie.value.clone(),
+  )
+}
+
+#[test]
+fn no_profile_extract_matches_chrome() {
+  let _home = seeded_chrome("extract-eq-chrome");
+  let via_chrome = rookie_cookies::chrome(None).expect("chrome");
+  let via_extract =
+    rookie_cookies::extract(rookie_cookies::Request::browser("chrome")).expect("extract");
+  let mut chrome_keys: Vec<_> = via_chrome.iter().map(cookie_key).collect();
+  let mut extract_keys: Vec<_> = via_extract.iter().map(cookie_key).collect();
+  chrome_keys.sort();
+  extract_keys.sort();
+  assert_eq!(chrome_keys, extract_keys);
+
+  let via_read =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("read");
+  let mut read_keys: Vec<_> = via_read.cookies().iter().map(cookie_key).collect();
+  read_keys.sort();
+  assert_eq!(read_keys, chrome_keys);
+}
+
+#[test]
+fn no_profile_read_reports_decrypt_failed_for_undecryptable_rows() {
+  let home = SyntheticHome::new("read-decrypt");
+  let mut blob = b"v10".to_vec();
+  blob.extend_from_slice(&[0u8; 20]);
+  seed_chromium_encrypted(&home.chrome_root(), "Default", "session", &blob);
+  let result =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("read");
+  let warning = result
+    .warnings()
+    .iter()
+    .find(|warning| warning.code() == "decrypt_failed")
+    .expect("decrypt_failed");
+  assert_eq!(warning.count(), 1);
+  assert_eq!(result.cookies().len(), 1);
+  assert_eq!(result.cookies()[0].name, "kept");
+  let _ = home;
 }
 
 #[test]

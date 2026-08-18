@@ -6,6 +6,8 @@ from . import dto as dto
 from .rookie_cookies import (
     MAX_ISSUE_SAMPLES,
     CancellationHandle,
+    ReadResult,
+    ReadWarning,
     RookieEngineError,
     RookieRequestError,
     any_browser,
@@ -28,10 +30,12 @@ from .rookie_cookies import (
     firefox_based_detailed,
     firefox_profile,
     firefox_profiles,
+    from_path,
     librewolf,
     load,
     load_report,
     opera,
+    read,
     supported_browsers,
     version,
     vivaldi,
@@ -42,6 +46,8 @@ __all__ = [
     "MAX_ISSUE_SAMPLES",
     "CancellationHandle",
     "ChromiumPathOptions",
+    "ReadResult",
+    "ReadWarning",
     "RookieEngineError",
     "RookieRequestError",
     "dto",
@@ -66,10 +72,15 @@ __all__ = [
     "firefox_based_detailed",
     "firefox_profile",
     "firefox_profiles",
+    "from_path",
+    "jar",
     "librewolf",
     "load",
     "load_report",
     "opera",
+    "profiles",
+    "read",
+    "report",
     "supported_browsers",
     "to_cookiejar",
     "to_netscape",
@@ -168,6 +179,46 @@ def create_cookie(
         comment_url=None,
         rest={"HTTPOnly": ""} if http_only else {},
     )
+
+
+def _read_result_as_jar(self: ReadResult) -> http.cookiejar.CookieJar:
+    return to_cookiejar(self.as_list())
+
+
+ReadResult.as_jar = _read_result_as_jar  # type: ignore[method-assign]
+
+
+def jar(
+    *,
+    browser: str,
+    profile: Optional[str] = None,
+    include_expired: bool = False,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> http.cookiejar.CookieJar:
+    """Sugar: ``read(...).as_jar()``. Warnings are discarded; use ``read()`` if you need them."""
+    return read(
+        browser=browser,
+        profile=profile,
+        include_expired=include_expired,
+        timeout=timeout,
+        cancellation=cancellation,
+    ).as_jar()
+
+
+def profiles(browser_id: str) -> ProfileDescriptorList:
+    """Alias of :func:`browser_profiles`."""
+    return browser_profiles(browser_id)
+
+
+def report(
+    browser: str,
+    *,
+    profile: Optional[str] = None,
+    domains: Optional[List[str]] = None,
+) -> ExtractionReport:
+    """Bindings name for :func:`browser_report` / Rust ``extract_report``."""
+    return browser_report(browser, profile, domains)
 
 
 def to_cookiejar(cookies: CookieList) -> http.cookiejar.CookieJar:

@@ -5,7 +5,6 @@
 //! time rather than inline `#[cfg(...)]` match arms.
 
 use crate::common::deadline::BoundaryRuntime;
-use crate::common::enums::Cookie;
 use anyhow::{bail, Result};
 
 #[cfg(target_os = "macos")]
@@ -23,16 +22,16 @@ mod other;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use other as platform;
 
-pub(super) fn remaining_engine_cookies_with_runtime(
+pub(super) fn remaining_engine_snapshot_with_runtime(
   canonical_id: &str,
   engine: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  platform::remaining_engine_cookies_with_runtime(canonical_id, engine, domains, runtime)
+) -> Result<super::LegacySnapshot> {
+  platform::remaining_engine_snapshot_with_runtime(canonical_id, engine, domains, runtime)
 }
 
-fn unsupported_engine(canonical_id: &str, engine: &str) -> Result<Vec<Cookie>> {
+fn unsupported_engine(canonical_id: &str, engine: &str) -> Result<super::LegacySnapshot> {
   bail!("browser {canonical_id:?} uses unsupported engine {engine:?}")
 }
 

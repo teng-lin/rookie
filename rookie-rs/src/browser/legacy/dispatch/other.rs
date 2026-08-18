@@ -1,14 +1,13 @@
 use super::unsupported_engine;
 use crate::common::deadline::BoundaryRuntime;
-use crate::common::enums::Cookie;
 use anyhow::Result;
 
-pub(super) fn remaining_engine_cookies_with_runtime(
+pub(super) fn remaining_engine_snapshot_with_runtime(
   canonical_id: &str,
   engine: &str,
   _domains: Option<Vec<String>>,
   _runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
+) -> Result<super::super::LegacySnapshot> {
   unsupported_engine(canonical_id, engine)
 }
 
@@ -24,7 +23,7 @@ mod tests {
       ("safari", "safari"),
       ("internet_explorer", "internet_explorer"),
     ] {
-      let error = remaining_engine_cookies_with_runtime(canonical_id, engine, None, &runtime)
+      let error = remaining_engine_snapshot_with_runtime(canonical_id, engine, None, &runtime)
         .expect_err("platform-only engine is unavailable");
       assert_eq!(
         error.to_string(),

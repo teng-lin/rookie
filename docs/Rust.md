@@ -9,13 +9,24 @@ cargo add rookie-cookies
 ## Basic Usage
 
 ```rust
-use rookie_cookies;
+use rookie_cookies::{read, ReadRequest};
 
-fn main() {
-    let cookies = rookie_cookies::browser("chrome", None).unwrap();
-    println!("{cookies:?}");
+fn main() -> rookie_cookies::Result<()> {
+    // Pass profile() to include session cookies.
+    let snapshot = read(ReadRequest::browser("chrome").profile("Default"))?;
+    for cookie in snapshot.cookies() {
+        println!("{} {}", cookie.domain, cookie.name);
+    }
+    let header = snapshot.header("https://example.com/")?;
+    let owned = snapshot.into_cookies();
+    let _ = (header, owned);
+    Ok(())
 }
 ```
+
+Store helpers such as `browser("chrome", domains)` and `extract` remain
+supported. `read` is the recommended job: one unfiltered snapshot, then
+`header(url)` as a view. There is no crate-root `get` or `report` function.
 
 ## One operation, any registered browser
 

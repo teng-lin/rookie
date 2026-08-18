@@ -1761,6 +1761,7 @@ fn canonical_direct_engine_source(
 
 /// Private `browser_report` seam. An unknown browser or profile ID is a request
 /// error; a known but absent browser is an `Ok` report with `no_sources`.
+#[cfg(test)]
 pub(crate) fn browser_extraction_report(
   browser_id: &str,
   profile_id: Option<&str>,
@@ -1771,7 +1772,7 @@ pub(crate) fn browser_extraction_report(
   browser_extraction_report_with_runtime(browser_id, profile_id, domains, &runtime)
 }
 
-fn browser_extraction_report_with_runtime(
+pub(crate) fn browser_extraction_report_with_runtime(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
@@ -1950,6 +1951,7 @@ pub(crate) fn chrome_profile_descriptors() -> Result<Vec<ProfileDescriptor>> {
 /// report pipeline as an opaque-ID `browser_report` request. Re-discovery is
 /// deliberate: the report must retain current typed discovery/source outcomes
 /// rather than flattening the selected source into the legacy cookie vector.
+#[allow(dead_code)]
 pub(crate) fn chrome_profile_report(
   profile: &str,
   domains: Option<Vec<String>>,

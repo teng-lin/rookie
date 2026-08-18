@@ -12,7 +12,7 @@ use std::path::PathBuf;
 mod browsers_map;
 use browsers_map::BROWSERS_MAP;
 mod args;
-use args::Args;
+use args::{Args, JobCommand};
 use rookie_cookies::common::format;
 use std::io::Write;
 
@@ -88,6 +88,111 @@ fn print_cookies(args: Args, cookies: Vec<Cookie>) {
     }
     _ => {}
   }
+}
+
+fn emit_warnings(warnings: &[rookie_cookies::ReadWarning]) {
+  for warning in warnings {
+    eprintln!("{warning}");
+  }
+}
+
+fn print_job_cookies(format: &str, cookies: Vec<Cookie>) {
+  match format {
+    "json" => print_line_or_exit(&format::json(cookies)),
+    "netscape" => print_line_or_exit(&format::netscape(cookies)),
+    _ => {}
+  }
+}
+
+fn apply_timeout(
+  mut request: rookie_cookies::ReadRequest,
+  timeout_secs: Option<u64>,
+) -> rookie_cookies::ReadRequest {
+  if let Some(secs) = timeout_secs {
+    request = request.timeout(std::time::Duration::from_secs(secs));
+  }
+  request
+}
+
+fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>> {
+  match command {
+    JobCommand::Read {
+      browser,
+      profile,
+      include_expired,
+      format,
+      timeout_secs,
+    } => {
+      let mut request = apply_timeout(
+        rookie_cookies::ReadRequest::browser(browser).include_expired(include_expired),
+        timeout_secs,
+      );
+      if let Some(profile) = profile {
+        request = request.profile(profile);
+      }
+      let result = rookie_cookies::read(request)?;
+      emit_warnings(result.warnings());
+      print_job_cookies(&format, result.into_cookies());
+    }
+    JobCommand::Profiles { browser } => {
+      let profiles = rookie_cookies::profiles(&browser)?;
+      print_line_or_exit(&serde_json::to_string_pretty(&profiles)?);
+    }
+    JobCommand::Report {
+      browser,
+      profile,
+      domains,
+    } => {
+      let report = rookie_cookies::browser_report(&browser, profile.as_deref(), domains)?;
+      print_line_or_exit(&serde_json::to_string_pretty(&report)?);
+    }
+    JobCommand::FromPath {
+      path,
+      include_expired,
+      format,
+      key_path,
+      browser_id,
+      plaintext_only,
+      timeout_secs,
+    } => {
+      let mut request = rookie_cookies::FromPathRequest::new(path).include_expired(include_expired);
+      if let Some(secs) = timeout_secs {
+        request = request.timeout(std::time::Duration::from_secs(secs));
+      }
+      if plaintext_only {
+        request = request.chromium_credentials(
+          rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly,
+        );
+      } else if let Some(browser_id) = browser_id {
+        request = request.chromium_credentials(
+          rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(browser_id),
+        );
+      } else if let Some(key_path) = key_path {
+        request = request.chromium_credentials(
+          rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+            key_path,
+          )),
+        );
+      }
+      let result = rookie_cookies::from_path(request)?;
+      emit_warnings(result.warnings());
+      print_job_cookies(&format, result.into_cookies());
+    }
+    JobCommand::Header {
+      url,
+      browser,
+      profile,
+    } => {
+      let mut request = rookie_cookies::ReadRequest::browser(browser);
+      if let Some(profile) = profile {
+        request = request.profile(profile);
+      }
+      let result = rookie_cookies::read(request)?;
+      emit_warnings(result.warnings());
+      print_line_or_exit(&result.header(&url)?);
+    }
+  }
+  Ok(())
 }
 
 fn print_version() {
@@ -180,7 +285,30 @@ fn cookies_from_explicit_path(
 /// registered IDs and aliases with one. Every rejection stays a clap usage
 /// error so the exit code and error class survive the move out of clap.
 fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error> {
-  if args.is_generic_mode() && args.format == "netscape" {
+  if args.command.is_some() {
+    let mixed = args.browser.is_some()
+      || args.load
+      || args.path.is_some()
+      || args.list_browsers
+      || args.list_profiles
+      || args.report
+      || args.profile.is_some()
+      || args.domains.is_some()
+      || args.key_path.is_some()
+      || args.browser_id.is_some()
+      || args.plaintext_only;
+    if mixed {
+      return Err(usage_error(
+        command,
+        ErrorKind::ArgumentConflict,
+        "a job subcommand cannot be mixed with top-level --browser / --load / --path / \
+         --list-browsers / --list-profiles / --report / --profile / --domains",
+      ));
+    }
+    return Ok(());
+  }
+
+  if args.is_structured_output_mode() && args.format == "netscape" {
     return Err(usage_error(
       command,
       ErrorKind::ArgumentConflict,
@@ -193,7 +321,7 @@ fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error>
     return Ok(());
   };
 
-  if args.is_generic_mode() {
+  if args.widens_browser_to_registry() {
     let registered = registration_of(browser).map_err(|error| {
       usage_error(
         command,
@@ -272,6 +400,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     error.exit();
   }
 
+  if let Some(command) = args.command.clone() {
+    return run_job_command(command);
+  }
+
   if args.list_browsers {
     let browsers = rookie_cookies::supported_browsers()?;
     print_line_or_exit(&serde_json::to_string_pretty(&browsers)?);
@@ -306,15 +438,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   if args.load {
     cookies = rookie_cookies::load(args.domains)?;
   } else if let Some(browser) = args.browser {
-    let canonical = canonical_legacy_browser(&browser);
-    assert!(
-      BROWSERS_MAP.contains(canonical),
-      "validate_modes rejects browsers outside the legacy map"
-    );
     let cancellation = install_cancel_on_signal();
-    let request = rookie_cookies::Request::browser(canonical)
-      .domains(args.domains)
-      .cancellation(cancellation);
+    let mut request = if args.profile.is_some() {
+      rookie_cookies::Request::browser(&browser)
+    } else {
+      let canonical = canonical_legacy_browser(&browser);
+      assert!(
+        BROWSERS_MAP.contains(canonical),
+        "validate_modes rejects browsers outside the legacy map without --profile"
+      );
+      rookie_cookies::Request::browser(canonical)
+    };
+    if let Some(profile) = args.profile {
+      request = request.profile(profile);
+    }
+    request = request.domains(args.domains).cancellation(cancellation);
     cookies = rookie_cookies::extract(request)?;
   } else if let Some(path) = args.path {
     let cancellation = install_cancel_on_signal();

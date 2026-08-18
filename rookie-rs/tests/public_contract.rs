@@ -21,6 +21,7 @@ use rookie_cookies::report::{
   BrowserDescriptor, ExtractionReport, IssueCode, ProfileDescriptor, ReportStatusCode,
 };
 use rookie_cookies::MozillaProfile;
+use rookie_cookies::RequestError;
 use rookie_cookies::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -193,6 +194,7 @@ fn public_function_signatures_remain_compatible() {
   let _: fn(Vec<rookie_cookies::common::enums::Cookie>) -> String =
     rookie_cookies::common::format::json;
   let _: fn(Vec<rookie_cookies::enums::Cookie>) -> String = format::netscape;
+  let _: fn(&RequestError) -> &'static str = RequestError::code;
 
   #[cfg(target_os = "macos")]
   let _: fn(PathBuf, Option<Vec<String>>) -> Result<Vec<Cookie>> = rookie_cookies::safari_based;
@@ -268,6 +270,22 @@ fn direct_path_error_accessors_are_stable_for_downstream_consumers() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn fault_kind_keeps_chromium_based_unknown_browser_as_engine() {
+  let error = rookie_cookies::chromium_based_with_browser_id(
+    Some("definitely-not-a-registered-browser-id"),
+    std::env::temp_dir().join("rookie-missing-cookies"),
+    None,
+    false,
+  )
+  .expect_err("direct browser_definition path stays unstructured");
+  assert_eq!(
+    rookie_cookies::fault_kind(&error),
+    rookie_cookies::FaultKind::Engine
+  );
+}
+
 #[test]
 fn generic_report_api_signatures_are_the_section_5_8_surface() {
   type BrowserReportFn = fn(&str, Option<&str>, Option<Vec<String>>) -> Result<ExtractionReport>;
@@ -278,7 +296,14 @@ fn generic_report_api_signatures_are_the_section_5_8_surface() {
     rookie_cookies::supported_browsers;
   let _: fn(&str) -> Result<Vec<ProfileDescriptor>> = rookie_cookies::browser_profiles;
   let _: BrowserReportFn = rookie_cookies::browser_report;
+  let _: fn(rookie_cookies::Request) -> Result<ExtractionReport> = rookie_cookies::extract_report;
   let _: fn(Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::load_report;
+  let _: fn(rookie_cookies::ReadRequest) -> Result<rookie_cookies::ReadResult> =
+    rookie_cookies::read;
+  let _: fn(rookie_cookies::FromPathRequest) -> Result<rookie_cookies::ReadResult> =
+    rookie_cookies::from_path;
+  let _: fn(&str) -> Result<Vec<ProfileDescriptor>> = rookie_cookies::profiles;
+  let _: fn(&rookie_cookies::ReadWarning) -> &str = rookie_cookies::ReadWarning::code;
 }
 
 #[test]

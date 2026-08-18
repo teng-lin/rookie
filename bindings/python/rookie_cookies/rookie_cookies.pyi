@@ -349,9 +349,10 @@ def browser_profiles(browser_id: str) -> ProfileDescriptorList:
 
     :param browser_id: A canonical browser ID or alias from supported_browsers
     :return: A list of profile descriptor dictionaries
-    :raises RuntimeError: The browser ID is unknown, or every detected
-        installation root failed enumeration. The message is a diagnostic, not
-        a stable contract; branch on the exception type instead.
+    :raises RookieRequestError: The browser ID is unknown.
+    :raises RookieEngineError: Every detected installation root failed
+        enumeration. Messages are diagnostic, not a stable contract; branch
+        on the exception type instead.
     """
     ...
 
@@ -402,9 +403,9 @@ def browser_report(
         the report to that one profile
     :param domains: Optional list of domains to extract only from them
     :return: An extraction report dictionary
-    :raises RuntimeError: The request itself is bad -- an unknown browser ID,
-        or a profile ID this browser did not yield. The message is a
-        diagnostic, not a stable contract; branch on the exception type
+    :raises RookieRequestError: The request itself is bad -- an unknown
+        browser ID, or a profile ID this browser did not yield. The message
+        is a diagnostic, not a stable contract; branch on the exception type
         instead.
     """
     ...
@@ -416,6 +417,84 @@ def load_report(domains: Optional[List[str]] = None) -> ExtractionReport:
     :param domains: Optional list of domains to extract only from them
     :return: An extraction report dictionary
     """
+    ...
+
+class ReadWarning:
+    """Structured snapshot warning. ``code`` + ``count`` are the machine contract."""
+
+    code: str
+    count: int
+    def __str__(self) -> str: ...
+
+class ReadResult:
+    """Unfiltered snapshot of one profile or one file. Never URL-pre-sliced."""
+
+    warnings: list[ReadWarning]
+    browser_id: str
+    profile_id: Optional[str]
+    def as_list(self) -> CookieList:
+        """Eight-key cookie dicts matching ``chrome()`` / ``load()``."""
+        ...
+    def as_jar(self) -> "http.cookiejar.CookieJar":
+        """Load every acquired record into ``http.cookiejar``. Not send-filtered."""
+        ...
+    def header(self, url: str) -> str:
+        """Cookie request-header view over this snapshot."""
+        ...
+    def __iter__(self): ...
+    def __len__(self) -> int: ...
+    def __bool__(self) -> bool: ...
+
+def read(
+    *,
+    browser: str,
+    profile: Optional[str] = None,
+    include_expired: bool = False,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> ReadResult:
+    """
+    Read an unfiltered snapshot of one browser profile.
+
+    :param browser: Canonical browser ID or registered alias
+    :param profile: Optional profile id, display name, directory, or path
+    :raises TypeError: ``browser`` was omitted
+    :raises RookieRequestError: Unknown browser or profile selector
+    """
+    ...
+
+def from_path(
+    path: str,
+    *,
+    include_expired: bool = False,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> ReadResult:
+    """Read cookies from an explicit cookie database path."""
+    ...
+
+def jar(
+    *,
+    browser: str,
+    profile: Optional[str] = None,
+    include_expired: bool = False,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> "http.cookiejar.CookieJar":
+    """Sugar: ``read(...).as_jar()``. Warnings are discarded."""
+    ...
+
+def profiles(browser_id: str) -> ProfileDescriptorList:
+    """Alias of ``browser_profiles``."""
+    ...
+
+def report(
+    browser: str,
+    *,
+    profile: Optional[str] = None,
+    domains: Optional[List[str]] = None,
+) -> ExtractionReport:
+    """Bindings name for ``browser_report`` / Rust ``extract_report``."""
     ...
 
 # Windows

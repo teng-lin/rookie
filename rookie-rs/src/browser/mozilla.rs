@@ -1843,6 +1843,7 @@ fn is_known_section(sections: &[ProfileSection], candidate: &str) -> bool {
 ///
 /// An ambiguous selector is an error rather than a silent first-match: picking
 /// the wrong profile is the failure this whole resolver exists to prevent.
+#[cfg(test)]
 pub(crate) fn select_profile<'a>(
   profiles: &'a [MozillaProfile],
   selector: &str,
@@ -1877,6 +1878,7 @@ pub(crate) fn select_profile<'a>(
   }
 }
 
+#[cfg(test)]
 fn describe<'a>(profiles: impl Iterator<Item = &'a MozillaProfile>) -> String {
   profiles
     .map(|profile| format!("{} ({REDACTED_PATH})", profile.name))

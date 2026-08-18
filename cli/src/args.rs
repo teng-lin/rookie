@@ -1,4 +1,4 @@
-use clap::{builder::PossibleValuesParser, Parser};
+use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None, disable_version_flag = true)]
@@ -110,15 +110,85 @@ pub struct Args {
   )]
   pub report: bool,
 
-  /// Restrict --report to one profile ID from --list-profiles
-  #[arg(long, requires_all = ["report", "browser"])]
+  /// Select one profile by opaque id, display name, directory name, or
+  /// non-lossy path. Requires --browser. Legal with or without --report.
+  #[arg(long, requires = "browser")]
   pub profile: Option<String>,
+
+  #[command(subcommand)]
+  pub command: Option<JobCommand>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JobCommand {
+  /// Unfiltered snapshot of one browser profile
+  Read {
+    /// Canonical browser ID or registered alias
+    #[arg(short, long)]
+    browser: String,
+    /// Profile id, display name, directory, or path
+    #[arg(short, long)]
+    profile: Option<String>,
+    /// Keep expired cookies
+    #[arg(long)]
+    include_expired: bool,
+    #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
+    format: String,
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+  },
+  /// List discovered profiles (no decrypt)
+  Profiles { browser: String },
+  /// Structured extraction report
+  Report {
+    browser: String,
+    #[arg(short, long)]
+    profile: Option<String>,
+    #[arg(short, long)]
+    domains: Option<Vec<String>>,
+  },
+  /// Read cookies from an explicit cookie database path
+  #[command(name = "from-path")]
+  FromPath {
+    path: String,
+    #[arg(long)]
+    include_expired: bool,
+    #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
+    format: String,
+    #[arg(long)]
+    key_path: Option<String>,
+    #[arg(long)]
+    browser_id: Option<String>,
+    #[arg(long)]
+    plaintext_only: bool,
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+  },
+  /// Cookie request-header view over a snapshot
+  Header {
+    url: String,
+    #[arg(short, long)]
+    browser: String,
+    #[arg(short, long)]
+    profile: Option<String>,
+  },
 }
 
 impl Args {
+  /// Structured JSON DTO modes; Netscape is forbidden here.
+  pub fn is_structured_output_mode(&self) -> bool {
+    self.list_browsers || self.list_profiles || self.report
+  }
+
+  /// True when `--browser` must accept any registered id/alias.
+  pub fn widens_browser_to_registry(&self) -> bool {
+    self.is_structured_output_mode() || self.profile.is_some()
+  }
+
   /// True when a Section 5.8 list/report mode is selected, which is what
   /// widens `--browser` from the legacy map to the registry.
+  #[allow(dead_code)]
   pub fn is_generic_mode(&self) -> bool {
-    self.list_browsers || self.list_profiles || self.report
+    self.widens_browser_to_registry()
   }
 }

@@ -62,6 +62,10 @@ paths = [
   # Later containment: Safari registry adapter (#231).
   "rookie-rs/src/browser/registry/safari.rs",
 
+  # Unified profile resolver: platform-only listing seams (Safari/IE)
+  # and the unix-only lossy-path selector test.
+  "rookie-rs/src/browser/registry/profile_query.rs",
+
   # Later containment: crate-root compatibility dispatch (#233).
   "rookie-rs/src/compatibility_dispatch/mod.rs",
   "rookie-rs/src/compatibility_dispatch/linux.rs",

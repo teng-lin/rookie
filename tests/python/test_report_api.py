@@ -67,9 +67,10 @@ class SupportedBrowsersTest(unittest.TestCase):
 class BrowserProfilesTest(unittest.TestCase):
     def test_unknown_browser_id_raises(self) -> None:
         with _synthetic_home():
-            with self.assertRaises(RuntimeError) as raised:
+            with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
                 rookie_cookies.browser_profiles("not-a-browser")
 
+        self.assertIsInstance(raised.exception, ValueError)
         self.assertIn("unknown browser id", str(raised.exception))
 
     def test_absent_browser_returns_an_empty_list(self) -> None:
@@ -176,18 +177,20 @@ class BrowserProfilesTest(unittest.TestCase):
 class BrowserReportTest(unittest.TestCase):
     def test_unknown_browser_id_raises(self) -> None:
         with _synthetic_home():
-            with self.assertRaises(RuntimeError) as raised:
+            with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
                 rookie_cookies.browser_report("not-a-browser")
 
+        self.assertIsInstance(raised.exception, ValueError)
         self.assertIn("unknown browser id", str(raised.exception))
 
     def test_unknown_profile_id_raises(self) -> None:
         with _synthetic_home() as home:
             _seed_chrome(home)
-            with self.assertRaises(RuntimeError) as raised:
+            with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
                 rookie_cookies.browser_report("chrome", "0" * 64)
 
-        self.assertIn("unknown chrome profile id", str(raised.exception))
+        self.assertIsInstance(raised.exception, ValueError)
+        self.assertIn("no chrome profile matches", str(raised.exception))
 
     def test_absent_browser_reports_no_sources_instead_of_raising(self) -> None:
         with _synthetic_home():
