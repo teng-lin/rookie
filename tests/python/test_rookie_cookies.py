@@ -361,9 +361,13 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         self.assertTrue(cookie.discard)
 
     def test_firefox_context_distinguishes_container_collisions(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        # ignore_cleanup_errors: Windows can keep cookies.sqlite mapped after
+        # rusqlite returns (WinError 32). Python 3.14 no longer swallows that
+        # on TemporaryDirectory exit.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = Path(temp_dir) / "cookies.sqlite"
-            with sqlite3.connect(db_path) as connection:
+            connection = sqlite3.connect(db_path)
+            try:
                 connection.executescript(
                     """
                     CREATE TABLE moz_cookies (
@@ -378,6 +382,9 @@ class RookieCookiesHelpersTest(unittest.TestCase):
                          '^userContextId=1&partitionKey=%28https%2Cpersonal.example%29');
                     """
                 )
+                connection.commit()
+            finally:
+                connection.close()
 
             records = rookie_cookies.firefox_based_detailed(str(db_path))
 
