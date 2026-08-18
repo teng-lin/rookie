@@ -83,10 +83,15 @@ class ControlFailure(Exception):
 
 
 def gh_api(path: str, *, repo: str) -> Any:
+    # encoding="utf-8" is required: on Windows the default locale encoding is
+    # often cp1252, which corrupts check-run names containing "×" (and any
+    # other non-ASCII) in the JSON body and makes required-check matching
+    # fail closed with "no check run found".
     result = subprocess.run(
         ["gh", "api", f"repos/{repo}/{path}", "-H", "Accept: application/vnd.github+json"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         raise ControlFailure(f"GitHub API request failed for {path!r}: {result.stderr.strip()}")
