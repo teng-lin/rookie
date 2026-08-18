@@ -1,0 +1,145 @@
+name: Retry CLI asset
+
+# Manual per-target retry for publish-cli.yml when one matrix leg fails after
+# others have already uploaded. See docs/RELEASING.md "A failed platform leg
+# does not auto-retry". This workflow lives on main so a tag whose own
+# publish-cli.yml copy is broken can still receive the missing asset; the
+# binary itself is always built from the immutable tag commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable release tag (v-prefixed)
+        required: true
+      target:
+        description: Rust target triple to rebuild
+        required: true
+        type: choice
+        options:
+          - x86_64-pc-windows-msvc
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-gnu
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retry-cli-asset-${{ inputs.tag }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    permissions:
+      contents: write
+    environment:
+      name: release
+    runs-on: ${{ inputs.target == 'x86_64-pc-windows-msvc' && 'windows-latest' || (inputs.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-22.04' || 'macos-latest') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag must be v<major>.<minor>.<patch>[-prerelease], got '$RELEASE_TAG'"
+            exit 1
+          fi
+          release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
+          test "$release_sha" = "$(git rev-parse HEAD)"
+          git fetch origin main
+          git merge-base --is-ancestor "$release_sha" origin/main
+          echo "RELEASE_SHA=$release_sha" >>"$GITHUB_ENV"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      - name: Verify live release controls
+        shell: bash
+        run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "$RELEASE_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra_args=()
+          if [ "$TARGET" = "x86_64-pc-windows-msvc" ]; then
+            extra_args+=(--features appbound)
+          fi
+          cargo build "${extra_args[@]}" --target "$TARGET" \
+            --package rookie-cookies-cli --bin rookie-cookies --release --locked
+        env:
+          TARGET: ${{ inputs.target }}
+          ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = "x86_64-pc-windows-msvc" ]; then
+            src="target/$TARGET/release/rookie-cookies.exe"
+            dst="rookie-cookies-cli-$TARGET.exe"
+          else
+            src="target/$TARGET/release/rookie-cookies"
+            dst="rookie-cookies-cli-$TARGET"
+          fi
+          test -f "$src"
+          mv "$src" "$dst"
+          echo "ARTIFACT=$dst" >>"$GITHUB_ENV"
+        env:
+          TARGET: ${{ inputs.target }}
+
+      - name: Re-verify release tag still points at the built commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            --jq '"\(.object.type) \(.object.sha)"')"
+          object_type="${object% *}"
+          object_sha="${object#* }"
+          for _ in 1 2 3 4 5; do
+            if test "$object_type" = commit; then
+              break
+            fi
+            if test "$object_type" != tag; then
+              echo "::error::$RELEASE_TAG resolves to unsupported object type '$object_type'"
+              exit 1
+            fi
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" \
+              --jq '"\(.object.type) \(.object.sha)"')"
+            object_type="${object% *}"
+            object_sha="${object#* }"
+          done
+          if test "$object_type" != commit; then
+            echo "::error::$RELEASE_TAG did not peel to a commit"
+            exit 1
+          fi
+          if test "$object_sha" != "$RELEASE_SHA"; then
+            echo "::error::$RELEASE_TAG now resolves to $object_sha, but this run built $RELEASE_SHA"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+
+      - name: Upload without clobber
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/write-sha256-sidecar.py "$ARTIFACT"
+          gh release upload "$RELEASE_TAG" "$ARTIFACT" "$ARTIFACT.sha256"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}

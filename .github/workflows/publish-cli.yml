@@ -89,7 +89,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
 
+      # shell: bash is required: the default Windows shell is pwsh, where
+      # `$GITHUB_REPOSITORY` is an empty PowerShell variable rather than the
+      # Actions environment variable bash expands. Without this, the Windows
+      # matrix leg fails before it builds (see v0.6.0-alpha.3).
       - name: Verify live release controls
+        shell: bash
         run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "$RELEASE_SHA"
         env:
           GH_TOKEN: ${{ github.token }}
