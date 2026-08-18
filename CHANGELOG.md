@@ -6,6 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-alpha.3] - 2026-08-18
+
+### Added
+
+- Windows Chrome-family browsers (Chrome, Brave, Edge, CocCoc, and Avast) can
+  decrypt App-Bound (v20) cookies via reflective COM injection into a spawned
+  browser process, without administrator privilege. Elevated SYSTEM
+  impersonation remains available as a fallback when injection is unavailable.
+
 ## [0.6.0-alpha.2] - 2026-08-17
 
 ### Added
