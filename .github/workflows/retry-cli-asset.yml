@@ -81,12 +81,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          extra_args=()
+          # Do not expand an empty bash array under `set -u`: macOS runners ship
+          # bash 3.2, where `"${extra_args[@]}"` is an unbound-variable error
+          # when the array is empty (Windows/Linux runners use newer bash).
           if [ "$TARGET" = "x86_64-pc-windows-msvc" ]; then
-            extra_args+=(--features appbound)
+            cargo build --features appbound --target "$TARGET" \
+              --package rookie-cookies-cli --bin rookie-cookies --release --locked
+          else
+            cargo build --target "$TARGET" \
+              --package rookie-cookies-cli --bin rookie-cookies --release --locked
           fi
-          cargo build "${extra_args[@]}" --target "$TARGET" \
-            --package rookie-cookies-cli --bin rookie-cookies --release --locked
         env:
           TARGET: ${{ inputs.target }}
           ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}
