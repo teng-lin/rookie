@@ -117,6 +117,7 @@ jobs:
         working-directory: ./bindings/node
         run: |
           npm ci --ignore-scripts
+          python3 ../../scripts/sync-node-license.py --node-root .
           npm pack --dry-run --ignore-scripts --json | tee /tmp/npm-pack-root.json
           node -e "
             const packed = require('/tmp/npm-pack-root.json');
