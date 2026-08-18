@@ -22,6 +22,80 @@ legacy helpers as frozen forever.
 The tree may still publish as `0.6.0-alpha.x`. The snippets below are the
 **0.6.0** recommended surface.
 
+## What is different from upstream rookie
+
+We keep the old names working while the library grows past a bag of
+per-browser functions:
+
+- One recommended job (`read` / `jar`) instead of “call `chrome()` and hope”.
+- Profile queries so session cookies are a deliberate choice.
+- Structured reports, explicit-path builders, timeouts, and cancellation.
+- Chromium formats through **legacy DPAPI**, **`v10` / `v11`**, and **App-Bound
+  `v20`** where the host and browser allow it.
+- Shared tests across Rust, Python, Node, and the CLI.
+
+Those additions are why the old API will eventually go away rather than stay
+the documented default.
+
+## Platforms and browsers
+
+| Browser | Linux | macOS | Windows |
+| --- | :---: | :---: | :---: |
+| Arc | ✓ | ✓ | ✓ |
+| Brave | ✓ | ✓ | ✓ |
+| Cachy | ✓ | — | — |
+| Chrome | ✓ | ✓ | ✓ |
+| Chromium | ✓ | ✓ | ✓ |
+| Cốc Cốc | — | ✓ | ✓ |
+| DuckDuckGo | — | — | ✓ |
+| Edge | ✓ | ✓ | ✓ |
+| Firefox | ✓ | ✓ | ✓ |
+| Internet Explorer | — | — | ✓ |
+| LibreWolf | ✓ | ✓ | ✓ |
+| Octo Browser | — | — | ✓ |
+| Opera | ✓ | ✓ | ✓ |
+| Opera GX | — | ✓ | ✓ |
+| Safari | — | ✓ | — |
+| Vivaldi | ✓ | ✓ | ✓ |
+| Yandex | — | ✓ | ✓ |
+| Zen | ✓ | ✓ | ✓ |
+
+`supported_browsers()` is the live registration list for the running OS (more
+Windows Chromium forks exist in the registry than this table). Registry-only
+browsers (Cốc Cốc, DuckDuckGo, Yandex, Avast, …) show up through report/profile
+APIs and CLI report mode, not always as a named `coccoc()` helper. `*_based` /
+`any_browser` still exist in 0.6 and are deprecated for 0.7.
+
+### Cookie crypto (what `v10` / `v20` mean)
+
+Chromium stores a prefix on each encrypted value. The names below are the
+registry **decryption tiers** (`declared_decryption_tiers`), not marketing
+labels.
+
+| Tier | Where | What it is |
+| --- | --- | --- |
+| **legacy DPAPI** | Windows Chromium | Oldest Windows Chromium cookies: current-user DPAPI, no App-Bound wrapping. Still declared for every Windows Chromium browser in the registry. |
+| **`v10`** | Windows, macOS, Linux Chromium | AES-GCM (Windows) or AES-CBC (Unix) values prefixed `v10`. Windows unwraps the AES key from `Local State` with DPAPI. macOS uses Keychain; Linux uses the OS crypt (often paired with `v11`). |
+| **`v11`** | Linux Chromium | Same family as `v10`, prefixed `v11`, typically Secret Service / KWallet. |
+| **App-Bound `v20`** | Windows Chrome-family | Chrome 133+ App-Bound Encryption (`APPB` key in `Local State`, values prefixed `v20`). Needs the default `appbound` feature. Decrypts via COM injection into a spawned browser process, with elevated SYSTEM impersonation as fallback. Hosted canaries: Chrome, Edge, Brave. Also declared for Cốc Cốc and Avast. |
+| **(none)** | Gecko, Safari, IE | Firefox / LibreWolf / Zen / Cachy: plaintext `cookies.sqlite` plus session JSON. Safari: `Cookies.binarycookies` (Full Disk Access). IE: ESE WebCache — functions exist in 0.6 and are deprecated. |
+
+Windows Chromium at a glance:
+
+| Windows browser | legacy DPAPI | `v10` | App-Bound `v20` |
+| --- | :---: | :---: | :---: |
+| Chrome, Edge, Brave | ✓ | ✓ | ✓ |
+| Cốc Cốc, Avast | ✓ | ✓ | ✓ (library; not in the hosted canary matrix) |
+| Arc, Chromium, Opera, Opera GX, Vivaldi, Yandex, DuckDuckGo, Octo, … | ✓ | ✓ | — |
+
+A green **legacy DPAPI `v10`** extraction does **not** mean `v20` works. `v20`
+may need elevation or a live host process; this project does not implement
+Device Bound Session Credentials (DBSC). Coverage details:
+[docs/testing.md](docs/testing.md).
+
+Linux Chromium is `v10` + `v11` (libsecret / KWallet). macOS Chromium is `v10`
+via Keychain. Gecko is the same sqlite/session layout on all three OSes.
+
 ## Install
 
 | Language | Requirement | Command |
@@ -85,53 +159,12 @@ Coming from 0.5.6 named helpers? Each language guide has a **0.5.6 API**
 section and a **migrate 0.5.6 → 0.6.0** section:
 [python](docs/python.md) · [javascript](docs/javascript.md) · [rust](docs/rust.md).
 
-## What is different from upstream rookie
-
-We keep the old names working while the library grows past a bag of
-per-browser functions:
-
-- One recommended job (`read` / `jar`) instead of “call `chrome()` and hope”.
-- Profile queries so session cookies are a deliberate choice.
-- Structured reports, explicit-path builders, timeouts, and cancellation.
-- Chromium formats through `v20` / App-Bound where the host allows it.
-- Shared tests across Rust, Python, Node, and the CLI.
-
-Those additions are why the old API will eventually go away rather than stay
-the documented default.
-
-## Platforms and browsers
-
-| Browser | Linux | macOS | Windows |
-| --- | :---: | :---: | :---: |
-| Arc | ✓ | ✓ | ✓ |
-| Brave | ✓ | ✓ | ✓ |
-| Cachy | ✓ | — | — |
-| Chrome | ✓ | ✓ | ✓ |
-| Chromium | ✓ | ✓ | ✓ |
-| Cốc Cốc | — | ✓ | ✓ |
-| DuckDuckGo | — | — | ✓ |
-| Edge | ✓ | ✓ | ✓ |
-| Firefox | ✓ | ✓ | ✓ |
-| Internet Explorer | — | — | ✓ |
-| LibreWolf | ✓ | ✓ | ✓ |
-| Octo Browser | — | — | ✓ |
-| Opera | ✓ | ✓ | ✓ |
-| Opera GX | — | ✓ | ✓ |
-| Safari | — | ✓ | — |
-| Vivaldi | ✓ | ✓ | ✓ |
-| Yandex | — | ✓ | ✓ |
-| Zen | ✓ | ✓ | ✓ |
-
-Registry-only browsers (Cốc Cốc, DuckDuckGo, Yandex, …) show up through
-report/profile APIs and CLI report mode. `*_based` / `any_browser` still exist
-in 0.6 and are deprecated for 0.7.
-
 ## Security
 
 Extracted cookies are credentials. Do not log them, commit them, or paste them
 into issues. Use only profiles and accounts you are allowed to access.
 
-On Windows, App-Bound encryption may need elevated or host-process access.
+On Windows, App-Bound `v20` may need elevated or host-process access.
 This project does not implement Device Bound Session Credentials (DBSC) and
 does not export browser private keys. A decrypted cookie is not always enough
 to replay a protected Chrome session.
