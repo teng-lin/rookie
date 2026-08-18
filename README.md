@@ -5,9 +5,9 @@
 [![crates.io](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
 [![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](LICENSE.md)
 
-Cross-platform libraries and a CLI for reading cookies from browsers on your
-machine. One Rust engine, bindings for **Python**, **Node.js**, and **Rust**,
-and a `rookie-cookies` command-line tool. Linux, macOS, and Windows.
+One Rust engine, on Linux, macOS, and Windows, that turns authorized local
+browser logins—including Chrome, Edge, and Brave App-Bound **v20**—into a
+session you reuse from **Rust**, **Python**, **JavaScript**, or the CLI.
 
 This is a maintained fork of
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie), which is
