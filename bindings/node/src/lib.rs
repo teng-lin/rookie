@@ -13,7 +13,9 @@ use rookie_cookies::report::{
   ExtractionIssue, ExtractionReport, ExtractionStats, ProfileDescriptor, ProfileExtraction,
   ProfileIdentity, ReportStats, SourceExtraction,
 };
-use rookie_cookies::{CancellationHandle, MozillaProfile, Request};
+use rookie_cookies::{
+  CancellationHandle, FromPathRequest, MozillaProfile, ReadRequest, ReadResult, Request,
+};
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -1162,6 +1164,257 @@ impl Task for LoadReportTask {
 #[napi(ts_return_type = "Promise<ExtractionReportObject>")]
 pub fn load_report(domains: Option<Vec<String>>) -> AsyncTask<LoadReportTask> {
   AsyncTask::new(LoadReportTask { domains })
+}
+
+#[napi(object)]
+pub struct ReadOptions {
+  pub browser: String,
+  pub profile: Option<String>,
+  pub include_expired: Option<bool>,
+  pub timeout_ms: Option<u32>,
+}
+
+#[napi(object)]
+pub struct ReportOptions {
+  pub browser: String,
+  pub profile: Option<String>,
+  pub domains: Option<Vec<String>>,
+  pub timeout_ms: Option<u32>,
+}
+
+#[napi(object)]
+pub struct FromPathOptions {
+  pub path: String,
+  pub include_expired: Option<bool>,
+  pub timeout_ms: Option<u32>,
+  pub browser_id: Option<String>,
+  pub key_path: Option<String>,
+  pub plaintext_only: Option<bool>,
+}
+
+#[napi(object)]
+pub struct ReadWarningObject {
+  pub code: String,
+  pub count: u32,
+  pub message: String,
+}
+
+fn clone_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
+  cookies
+    .iter()
+    .map(|cookie| Cookie {
+      domain: cookie.domain.clone(),
+      path: cookie.path.clone(),
+      secure: cookie.secure,
+      expires: cookie.expires,
+      name: cookie.name.clone(),
+      value: cookie.value.clone(),
+      http_only: cookie.http_only,
+      same_site: cookie.same_site,
+    })
+    .collect()
+}
+
+#[napi(js_name = "ReadResult")]
+pub struct JsReadResult {
+  inner: ReadResult,
+}
+
+#[napi]
+impl JsReadResult {
+  #[napi(getter)]
+  pub fn cookies(&self) -> Result<Vec<CookieObject>> {
+    cookies_to_js(clone_cookies(self.inner.cookies()))
+  }
+
+  #[napi(getter)]
+  pub fn warnings(&self) -> Vec<ReadWarningObject> {
+    self
+      .inner
+      .warnings()
+      .iter()
+      .map(|warning| ReadWarningObject {
+        code: warning.code().to_owned(),
+        count: u32::try_from(warning.count()).unwrap_or(u32::MAX),
+        message: warning.to_string(),
+      })
+      .collect()
+  }
+
+  #[napi(getter, js_name = "browserId")]
+  pub fn browser_id(&self) -> String {
+    self.inner.browser_id().to_owned()
+  }
+
+  #[napi(getter, js_name = "profileId")]
+  pub fn profile_id(&self) -> Option<String> {
+    self.inner.profile_id().map(str::to_owned)
+  }
+
+  #[napi]
+  pub fn header(&self, url: String) -> Result<String> {
+    self.inner.header(&url).map_err(classify_fault)
+  }
+}
+
+pub struct ReadTask {
+  options: ReadOptions,
+  cancellation: Option<CancellationHandle>,
+}
+
+impl Task for ReadTask {
+  type Output = ReadResult;
+  type JsValue = JsReadResult;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let options = &self.options;
+    run_worker(|| {
+      let mut request = ReadRequest::browser(&options.browser);
+      if let Some(profile) = options.profile.as_deref() {
+        request = request.profile(profile);
+      }
+      if options.include_expired == Some(true) {
+        request = request.include_expired(true);
+      }
+      if let Some(ms) = options.timeout_ms {
+        request = request.timeout(Duration::from_millis(u64::from(ms)));
+      }
+      if let Some(handle) = self.cancellation.take() {
+        request = request.cancellation(handle);
+      }
+      rookie_cookies::read(request).map_err(classify_fault)
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(JsReadResult { inner: output })
+  }
+}
+
+/// Unfiltered snapshot of one browser profile. Never URL-pre-sliced.
+#[napi(js_name = "read", ts_return_type = "Promise<ReadResult>")]
+pub fn read(
+  options: ReadOptions,
+  cancellation: Option<&JsCancellationHandle>,
+) -> AsyncTask<ReadTask> {
+  AsyncTask::new(ReadTask {
+    options,
+    cancellation: cancellation.map(|handle| handle.0.clone()),
+  })
+}
+
+pub struct ProfilesTask {
+  browser_id: String,
+}
+
+impl Task for ProfilesTask {
+  type Output = Vec<ProfileDescriptor>;
+  type JsValue = Vec<ProfileDescriptorObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    run_worker(|| rookie_cookies::profiles(&self.browser_id).map_err(classify_fault))
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(output.into_iter().map(profile_descriptor_to_js).collect())
+  }
+}
+
+/// Alias of `browserProfiles`. No decrypt.
+#[napi(js_name = "profiles", ts_return_type = "Promise<Array<ProfileDescriptorObject>>")]
+pub fn profiles(browser_id: String) -> AsyncTask<ProfilesTask> {
+  AsyncTask::new(ProfilesTask { browser_id })
+}
+
+pub struct JobReportTask {
+  options: ReportOptions,
+}
+
+impl Task for JobReportTask {
+  type Output = ExtractionReport;
+  type JsValue = ExtractionReportObject;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let options = &self.options;
+    run_worker(|| {
+      let mut request = Request::browser(&options.browser).domains(options.domains.clone());
+      if let Some(profile) = options.profile.as_deref() {
+        request = request.profile(profile);
+      }
+      if let Some(ms) = options.timeout_ms {
+        request = request.timeout(Duration::from_millis(u64::from(ms)));
+      }
+      rookie_cookies::extract_report(request).map_err(classify_fault)
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    report_to_js(output)
+  }
+}
+
+/// Bindings name for `extract_report` / `browserReport`.
+#[napi(js_name = "report", ts_return_type = "Promise<ExtractionReportObject>")]
+pub fn report(options: ReportOptions) -> AsyncTask<JobReportTask> {
+  AsyncTask::new(JobReportTask { options })
+}
+
+pub struct FromPathTask {
+  options: FromPathOptions,
+  cancellation: Option<CancellationHandle>,
+}
+
+impl Task for FromPathTask {
+  type Output = ReadResult;
+  type JsValue = JsReadResult;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    let options = &self.options;
+    run_worker(|| {
+      let mut request = FromPathRequest::new(&options.path);
+      if options.include_expired == Some(true) {
+        request = request.include_expired(true);
+      }
+      if let Some(ms) = options.timeout_ms {
+        request = request.timeout(Duration::from_millis(u64::from(ms)));
+      }
+      if let Some(handle) = self.cancellation.take() {
+        request = request.cancellation(handle);
+      }
+      if options.plaintext_only == Some(true) {
+        request = request.chromium_credentials(
+          rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly,
+        );
+      } else if let Some(browser_id) = options.browser_id.as_deref() {
+        request = request.chromium_credentials(
+          rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(browser_id.to_owned()),
+        );
+      } else if let Some(key_path) = options.key_path.as_deref() {
+        request = request.chromium_credentials(
+          rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+            key_path,
+          )),
+        );
+      }
+      rookie_cookies::from_path(request).map_err(classify_fault)
+    })
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    Ok(JsReadResult { inner: output })
+  }
+}
+
+/// Read cookies from an explicit cookie database path.
+#[napi(js_name = "fromPath", ts_return_type = "Promise<ReadResult>")]
+pub fn from_path(
+  options: FromPathOptions,
+  cancellation: Option<&JsCancellationHandle>,
+) -> AsyncTask<FromPathTask> {
+  AsyncTask::new(FromPathTask {
+    options,
+    cancellation: cancellation.map(|handle| handle.0.clone()),
+  })
 }
 
 // Windows only browsers

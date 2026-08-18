@@ -12,9 +12,16 @@ npm install rookie-cookies
 ## Basic Usage
 
 ```js
-import { brave } from "rookie-cookies";
-const cookies = await brave();
+import { read } from "rookie-cookies";
+
+// Pass profile to include session cookies.
+const snapshot = await read({ browser: "chrome", profile: "Default" });
+const header = snapshot.header("https://example.com/");
+console.log(snapshot.cookies, snapshot.warnings, header);
 ```
+
+Named helpers such as `brave()` remain supported. `read` never URL-filters
+the snapshot. There is no top-level `header()` export.
 
 Browser extraction functions return Promises and must be awaited. When migrating
 from v0.5.7 or earlier, add `await` (or use `.then(...)`) for every extraction

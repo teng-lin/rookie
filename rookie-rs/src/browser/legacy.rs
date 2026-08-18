@@ -262,26 +262,94 @@ pub(crate) fn browser_cookies_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
+  browser_cookies_and_warnings_with_runtime(browser_id, domains, runtime)
+    .map(|(cookies, _warnings)| cookies)
+}
+
+/// One LegacyFirst extract: compatibility cookies plus skip counts from the
+/// same draft. Callers must not run a second `legacy_*_outcome_with_runtime`.
+pub(crate) fn browser_cookies_and_warnings_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
   runtime.check()?;
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
-    "chromium" => project_chromium_outcome_with_runtime(
-      &browser.canonical_id,
-      registry::legacy_chromium_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
-      runtime,
-    ),
-    "gecko" => project_engine_outcome_with_runtime(
-      &browser.canonical_id,
-      registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?,
-      runtime,
-    ),
-    engine => dispatch::remaining_engine_cookies_with_runtime(
+    "chromium" => {
+      let draft = registry::legacy_chromium_outcome_with_runtime(
+        &browser.canonical_id,
+        domains,
+        runtime,
+      )?;
+      let decrypt = chromium_decrypt_skip_count(&draft);
+      let cookies =
+        project_chromium_outcome_with_runtime(&browser.canonical_id, draft, runtime)?;
+      Ok((cookies, skip_warnings(decrypt, 0)))
+    }
+    "gecko" => {
+      let draft =
+        registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
+      cookies_and_skipped_from_engine_draft(&browser.canonical_id, draft, runtime)
+    }
+    engine => dispatch::remaining_engine_snapshot_with_runtime(
       &browser.canonical_id,
       engine,
       domains,
       runtime,
     ),
   }
+}
+
+pub(super) fn cookies_and_skipped_from_engine_draft(
+  canonical_id: &str,
+  draft: EngineExtractionDraft,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
+  let skipped = engine_skipped_row_count(&draft);
+  let cookies = project_engine_outcome_with_runtime(canonical_id, draft, runtime)?;
+  Ok((cookies, skip_warnings(0, skipped)))
+}
+
+fn skip_warnings(decrypt_failed: u64, row_read_failed: u64) -> Vec<(&'static str, u64)> {
+  let mut warnings = Vec::new();
+  if decrypt_failed > 0 {
+    warnings.push(("decrypt_failed", decrypt_failed));
+  }
+  if row_read_failed > 0 {
+    warnings.push(("row_read_failed", row_read_failed));
+  }
+  warnings
+}
+
+fn chromium_decrypt_skip_count(draft: &registry::ChromiumRegistryDraft) -> u64 {
+  use crate::browser::chromium::ChromiumRowIssueCode;
+  let mut count = 0u64;
+  for installation in &draft.installations {
+    for profile in &installation.profiles {
+      for issue in &profile.row_issues {
+        if matches!(
+          issue.code,
+          ChromiumRowIssueCode::Decrypt
+            | ChromiumRowIssueCode::Decode
+            | ChromiumRowIssueCode::ProviderFailed
+            | ChromiumRowIssueCode::ProviderUnavailable
+        ) {
+          count = count.saturating_add(issue.occurrences as u64);
+        }
+      }
+    }
+  }
+  count
+}
+
+fn engine_skipped_row_count(draft: &EngineExtractionDraft) -> u64 {
+  draft
+    .profiles
+    .iter()
+    .flat_map(|profile| profile.sources.iter())
+    .map(|source| source.rows_skipped as u64)
+    .fold(0u64, u64::saturating_add)
 }
 
 /// Compatibility-shaped persistent Gecko profiles from registry discovery.

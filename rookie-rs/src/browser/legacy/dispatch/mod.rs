@@ -23,13 +23,13 @@ mod other;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use other as platform;
 
-pub(super) fn remaining_engine_cookies_with_runtime(
+pub(super) fn remaining_engine_snapshot_with_runtime(
   canonical_id: &str,
   engine: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  platform::remaining_engine_cookies_with_runtime(canonical_id, engine, domains, runtime)
+) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
+  platform::remaining_engine_snapshot_with_runtime(canonical_id, engine, domains, runtime)
 }
 
 fn unsupported_engine(canonical_id: &str, engine: &str) -> Result<Vec<Cookie>> {

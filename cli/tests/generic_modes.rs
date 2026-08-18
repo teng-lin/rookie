@@ -639,11 +639,10 @@ fn list_profiles_requires_a_browser() {
 }
 
 #[test]
-fn profile_requires_both_report_and_browser() {
+fn profile_requires_browser_but_not_report() {
   for args in [
     &["--profile", "any"][..],
     &["--profile", "any", "--report"][..],
-    &["--profile", "any", "--browser", "firefox"][..],
     &[
       "--profile",
       "any",
@@ -654,6 +653,13 @@ fn profile_requires_both_report_and_browser() {
   ] {
     assert_usage_error(&run_rookie(args), &format!("{args:?}"));
   }
+  let mixed = run_rookie(&["--browser", "firefox", "--profile", "any"]);
+  let mixed_stderr = String::from_utf8_lossy(&mixed.stderr);
+  assert!(
+    mixed.status.code() != Some(2) || !mixed_stderr.contains("required arguments"),
+    "flat --browser --profile must not be a clap usage error: {:?}",
+    mixed
+  );
 }
 
 #[test]
@@ -820,4 +826,46 @@ fn version_still_wins_over_the_new_modes() {
     &run_rookie(&["--version", "--list-browsers"]),
     "--version --list-browsers",
   );
+}
+
+#[test]
+fn read_subcommand_requires_browser() {
+  let stderr = assert_usage_error(&run_rookie(&["read"]), "read without -b");
+  assert!(stderr.contains("--browser") || stderr.contains("-b"), "{stderr}");
+}
+
+#[test]
+fn profiles_subcommand_lists_json() {
+  let root = unique_tmpdir("job-profiles");
+  let out = run_isolated(root.path(), &["profiles", "chrome"]);
+  let value = parsed_json(&out);
+  assert!(value.is_array(), "{value}");
+}
+
+#[test]
+fn report_subcommand_matches_flat_report_shape() {
+  let root = unique_tmpdir("job-report");
+  let via_sub = parsed_json(&run_isolated(root.path(), &["report", "chrome"]));
+  let via_flat = parsed_json(&run_isolated(
+    root.path(),
+    &["--report", "--browser", "chrome"],
+  ));
+  assert_eq!(via_sub["status"], via_flat["status"]);
+}
+
+#[test]
+fn subcommand_conflicts_with_top_level_report_flag() {
+  assert_usage_error(
+    &run_rookie(&["report", "chrome", "--report"]),
+    "report chrome --report",
+  );
+}
+
+#[test]
+fn header_subcommand_requires_browser() {
+  let stderr = assert_usage_error(
+    &run_rookie(&["header", "https://example.com/"]),
+    "header without -b",
+  );
+  assert!(stderr.contains("--browser") || stderr.contains("-b"), "{stderr}");
 }

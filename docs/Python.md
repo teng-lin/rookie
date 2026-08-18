@@ -12,9 +12,25 @@ pip3 install -U rookie-cookies
 ## Basic Usage
 
 ```python
-import rookie_cookies
-cookies = rookie_cookies.chrome() # Load cookies from Chrome
+import rookie_cookies as cookies
+
+# Session import. Pass profile= so session cookies are included.
+session.cookies = cookies.jar(browser="chrome", profile="Default")
+
+# Domain-intact records for storage_state / allowlists
+rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```
+
+`read` never URL-filters the snapshot. `jar` loads every acquired record into
+`http.cookiejar`; the stdlib owns send-match. `ReadResult.header(url)` is a
+Cookie request-header *view* over that snapshot.
+
+No-profile `read(browser="chrome")` matches `chrome()` (persistent /
+legacy-eligible cookies). Naming a profile includes session cookies, so
+`read(browser="chrome", profile="Default")` can return more cookies than
+omitting the profile.
+
+Named helpers such as `chrome()` remain supported.
 
 ## Reports
 

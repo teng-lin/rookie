@@ -6,6 +6,31 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Rust `RequestError` classifies unknown browser / empty / unknown / ambiguous /
+  lossy profile selectors, missing browser, and invalid header URLs as request
+  faults. Unknown browser on `resolve_registered_browser` is `FaultKind::Request`.
+- `Request::profile` and `extract_report`. `browser_report`'s middle argument
+  now accepts the same profile query (id, name, directory, non-lossy path, or
+  persistent cookie-DB path). CLI `--profile` requires `--browser` only.
+- Job API: `read` / `ReadResult` (`into_cookies`, `header`) / `ReadWarning`
+  (`code`, `count`) / `from_path` / `profiles`. Python also exports `jar` and
+  `report`. Node exports `read`, `profiles`, `report`, `fromPath`. CLI
+  subcommands `read`, `profiles`, `report`, `from-path`, `header`.
+- ADR 0004: `read` is the recommended entry.
+
+### Changed
+
+- `browser_report` widens non-id profile queries that previously always failed.
+- `firefox_profile` now resolves through `extract(Request::browser("firefox").profile(q))`.
+- Recommended docs entry is `jar(browser=…)` / `read(…).as_list()`.
+
+### Deprecated
+
+- `chrome_profile`, `firefox_profiles`, and the `firefox_profile` selector
+  retarget to `extract` / `extract_report` / `browser_profiles`.
+
 ## [0.6.0-alpha.3] - 2026-08-18
 
 ### Added

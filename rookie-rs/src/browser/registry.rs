@@ -193,8 +193,22 @@ fn resolve_registered_browser_for(
   browser_id: &str,
 ) -> Result<RegisteredBrowser> {
   let registry = embedded_registry()?;
-  let definition = browser_definition(registry, platform, browser_id)?;
-  Ok(registered_browser(definition, platform))
+  let definitions = registry.platforms.get(platform.as_str()).ok_or_else(|| {
+    anyhow!("registry has no definitions for {}", platform.as_str())
+  })?;
+  let definition = definitions.iter().find(|definition| {
+    definition.canonical_id == browser_id
+      || definition.aliases.iter().any(|alias| alias == browser_id)
+  });
+  match definition {
+    Some(definition) => Ok(registered_browser(definition, platform)),
+    None => Err(
+      crate::RequestError::UnknownBrowser {
+        browser_id: browser_id.to_owned(),
+      }
+      .into(),
+    ),
+  }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1105,6 +1119,10 @@ fn engine_roots<'a>(
   roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
   Ok((definition, roots))
 }
+
+mod profile_query;
+#[allow(unused_imports)]
+pub(crate) use profile_query::resolve_profile_query;
 
 mod chromium;
 

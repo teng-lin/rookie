@@ -36,15 +36,19 @@ Install the Python binding:
 pip install rookie-cookies
 ```
 
-Use it to load cookies from a browser:
+Use it to import a browser session, or to dump Domain-intact records:
 
 ```python
-import rookie_cookies
+import rookie_cookies as cookies
 
-cookies = rookie_cookies.chrome(["example.com"])
-for cookie in cookies:
-    print(cookie["domain"], cookie["name"])
+# Happy path — session import (pass profile= to include session cookies)
+session_jar = cookies.jar(browser="chrome", profile="Default")
+
+# NotebookLM / Playwright storage_state — Domain-intact records
+rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```
+
+Named helpers such as `chrome()` remain supported compatibility APIs.
 
 The binding requires CPython 3.11 or newer and is tested on CPython 3.11–3.14.
 Published wheels use the `cp311-abi3` stable ABI tag, so one wheel serves every

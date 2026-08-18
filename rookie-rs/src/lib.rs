@@ -25,6 +25,11 @@ pub use browser::{
 // Private
 mod browser;
 mod compatibility_dispatch;
+mod header_filter;
+mod read;
+mod request_error;
+pub use read::{from_path, profiles, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning};
+pub use request_error::RequestError;
 #[cfg(test)]
 use anyhow::bail;
 pub use anyhow::{self, Result};
@@ -166,16 +171,13 @@ pub enum FaultKind {
 /// fault, for bindings that raise distinct exception types at the FFI
 /// boundary.
 ///
-/// Only errors carrying a structured, downcastable cause can be classified
-/// as [`FaultKind::Request`] today: currently that means
-/// [`direct_path::DirectPathError`]. Every other error -- including the
-/// still-unstructured `bail!` string errors the legacy named-browser and
-/// registry-backed API surface raises for bad input like an unknown browser
-/// ID -- classifies as [`FaultKind::Engine`] until it gains a similarly
-/// structured, downcastable cause. That is a known, honest gap, not a
-/// silent one: giving the legacy API the same structured errors
-/// [`direct_path`] already has is tracked separately rather than attempted
-/// here.
+/// Only errors carrying a structured, downcastable cause classify as
+/// [`FaultKind::Request`]: [`direct_path::DirectPathError`] and
+/// [`RequestError`]. [`RequestError`] is produced for an unknown browser id
+/// on the registered-browser resolve path and for empty / unknown /
+/// ambiguous / lossy profile queries. Unstructured `bail!` on other
+/// surfaces — including `chromium_based_with_browser_id` — still
+/// classifies as [`FaultKind::Engine`].
 ///
 /// This is also coarser than "caller-fixable" in one more way: every
 /// [`direct_path::DirectPathError`] classifies as `Request`, including
@@ -212,6 +214,7 @@ pub fn fault_kind(error: &anyhow::Error) -> FaultKind {
   if error
     .downcast_ref::<direct_path::DirectPathError>()
     .is_some()
+    || error.downcast_ref::<RequestError>().is_some()
   {
     FaultKind::Request
   } else {
@@ -241,6 +244,7 @@ pub fn fault_kind(error: &anyhow::Error) -> FaultKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
   browser_id: String,
+  profile: Option<String>,
   domains: Option<Vec<String>>,
   timeout: Option<std::time::Duration>,
   cancellation: Option<CancellationHandle>,
@@ -252,10 +256,19 @@ impl Request {
   pub fn browser(id: impl Into<String>) -> Self {
     Self {
       browser_id: id.into(),
+      profile: None,
       domains: None,
       timeout: None,
       cancellation: None,
     }
+  }
+
+  /// Selects one profile by opaque `profile_id`, display name, directory
+  /// name, or a non-lossy full path. Resolved at extract time, not here.
+  /// An empty string is [`RequestError::EmptyProfileSelector`].
+  pub fn profile(mut self, query: impl Into<String>) -> Self {
+    self.profile = Some(query.into());
+    self
   }
 
   /// Restricts extraction to the given domains, or clears a prior
@@ -316,7 +329,67 @@ pub fn extract(request: Request) -> Result<Vec<Cookie>> {
       .map(|handle| handle.0)
       .unwrap_or_default(),
   );
-  browser::legacy::browser_cookies_with_runtime(&request.browser_id, request.domains, &runtime)
+  match request.profile {
+    None => {
+      browser::legacy::browser_cookies_with_runtime(&request.browser_id, request.domains, &runtime)
+    }
+    Some(query) => {
+      let profile_id =
+        browser::registry::resolve_profile_query(&request.browser_id, &query, &runtime)?;
+      let report = browser::report_build::browser_extraction_report_with_runtime(
+        &request.browser_id,
+        Some(&profile_id),
+        request.domains,
+        &runtime,
+      )?;
+      flatten_selected_report_cookies(report)
+    }
+  }
+}
+
+/// Labeled extract. No profile → today's [`browser_report`]`(id, None)`
+/// (`AllProfiles`). With a profile query → one-profile report.
+pub fn extract_report(request: Request) -> Result<report::ExtractionReport> {
+  let clock = common::deadline::SystemClock;
+  let runtime = common::deadline::boundary_runtime(
+    &clock,
+    request.timeout,
+    request
+      .cancellation
+      .map(|handle| handle.0)
+      .unwrap_or_default(),
+  );
+  let profile_id = match request.profile.as_deref() {
+    None => None,
+    Some(query) => Some(browser::registry::resolve_profile_query(
+      &request.browser_id,
+      query,
+      &runtime,
+    )?),
+  };
+  browser::report_build::browser_extraction_report_with_runtime(
+    &request.browser_id,
+    profile_id.as_deref(),
+    request.domains,
+    &runtime,
+  )
+}
+
+pub(crate) fn flatten_selected_report_cookies(report: report::ExtractionReport) -> Result<Vec<Cookie>> {
+  let mut cookies = Vec::new();
+  let mut any_selected_success = false;
+  for profile in report.profiles {
+    for source in profile.sources {
+      if source.selected && source.status.as_str() == "succeeded" {
+        any_selected_success = true;
+        cookies.extend(source.cookies);
+      }
+    }
+  }
+  if !any_selected_success {
+    anyhow::bail!("no selected cookie source succeeded");
+  }
+  Ok(cookies)
 }
 
 /// Extracts cookies from one registered browser by canonical ID or alias.
@@ -520,11 +593,16 @@ pub fn chrome_profiles() -> Result<Vec<report::ProfileDescriptor>> {
 /// }
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use extract_report(Request::browser(\"chrome\").profile(q)) \
+          or browser_report(\"chrome\", Some(q), domains)"
+)]
 pub fn chrome_profile(
   profile: &str,
   domains: Option<Vec<String>>,
 ) -> Result<report::ExtractionReport> {
-  browser::report_build::chrome_profile_report(profile, domains)
+  extract_report(Request::browser("chrome").profile(profile).domains(domains))
 }
 
 /// Extracts cookies from one browser as a grouped report.
@@ -564,7 +642,11 @@ pub fn browser_report(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
 ) -> Result<report::ExtractionReport> {
-  browser::report_build::browser_extraction_report(browser_id, profile_id, domains)
+  let mut request = Request::browser(browser_id).domains(domains);
+  if let Some(query) = profile_id {
+    request = request.profile(query);
+  }
+  extract_report(request)
 }
 
 /// Extracts cookies from every registered browser as one grouped report.
@@ -637,6 +719,11 @@ pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// }
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use browser_profiles(\"firefox\") for ProfileDescriptor \
+          (includes session-only profiles this list hides)"
+)]
 pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
   browser::legacy::gecko_profiles("firefox")
 }
@@ -657,19 +744,11 @@ pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser_report(\"firefox\", Some(profile_id), domains) with a profile ID from \
-          browser_profiles(\"firefox\")"
+  note = "use extract(Request::browser(\"firefox\").profile(q)); \
+          list with browser_profiles(\"firefox\")"
 )]
 pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  let clock = common::deadline::SystemClock;
-  let runtime = common::deadline::BoundaryRuntime::standard(&clock);
-  let profiles = browser::legacy::gecko_profiles_with_runtime("firefox", &runtime)?;
-  let selected = browser::mozilla::select_profile(&profiles, profile)?;
-  browser::mozilla::firefox_based_with_runtime(
-    selected.path.join("cookies.sqlite"),
-    domains,
-    &runtime,
-  )
+  extract(Request::browser("firefox").profile(profile).domains(domains))
 }
 
 /// Returns cookies from LibreWolf
@@ -1323,13 +1402,22 @@ mod tests {
   }
 
   #[test]
-  fn fault_kind_falls_back_to_engine_for_an_unstructured_bail_error() {
-    // Known, documented gap (see `fault_kind`'s docs): the legacy
-    // registry-backed API surface still raises plain `bail!` string errors
-    // for bad input, with no downcastable cause to classify on, so this
-    // stays `Engine` until that surface gains a structured error type too.
+  fn fault_kind_classifies_unknown_browser_on_extract_as_request() {
     let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
       .expect_err("an unknown browser id is a request error");
+    assert_eq!(fault_kind(&error), FaultKind::Request);
+    assert!(error.downcast_ref::<RequestError>().is_some());
+  }
+
+  #[test]
+  fn fault_kind_keeps_chromium_based_unknown_browser_as_engine() {
+    let error = chromium_based_with_browser_id(
+      Some("definitely-not-a-registered-browser-id"),
+      std::env::temp_dir().join("rookie-missing-cookies"),
+      None,
+      false,
+    )
+    .expect_err("direct browser_definition path stays unstructured");
     assert_eq!(fault_kind(&error), FaultKind::Engine);
   }
 

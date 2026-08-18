@@ -62,6 +62,11 @@ const EXPECTED_EXPORTS = [
   "chromeProfile",
   "browserReport",
   "loadReport",
+  "ReadResult",
+  "read",
+  "profiles",
+  "report",
+  "fromPath",
 ];
 
 // The generic report APIs, and the object declarations they return. napi-rs
@@ -695,8 +700,10 @@ test("supportedBrowsers describes registered browsers in camelCase", async (t) =
 });
 
 test("unknown browser identifiers reject rather than resolving empty", async (t) => {
-  await t.throwsAsync(rookieCookies.browserProfiles("not_a_browser"));
-  await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
+  const profiles = await t.throwsAsync(rookieCookies.browserProfiles("not_a_browser"));
+  const report = await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
+  t.is(profiles.code, "InvalidArg");
+  t.is(report.code, "InvalidArg");
 });
 
 test.serial("registry-only browsers are reachable through browserReport", async (t) => {
