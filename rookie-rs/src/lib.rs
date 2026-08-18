@@ -1415,6 +1415,7 @@ mod tests {
     assert!(error.downcast_ref::<RequestError>().is_some());
   }
 
+  #[cfg(unix)]
   #[test]
   fn fault_kind_keeps_chromium_based_unknown_browser_as_engine() {
     let error = chromium_based_with_browser_id(

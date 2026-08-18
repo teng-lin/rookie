@@ -63,6 +63,7 @@ jobs:
       - name: Install Playwright (API only — Chrome comes from the runner image)
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        working-directory: tests/e2e
         run: npm install --no-save playwright@1.62.1
 
       - name: Pre-build the e2e test binary (avoid running cargo inside dbus session)
@@ -81,13 +82,16 @@ jobs:
         run: cargo build -p rookie-cookies-cli --release --locked
 
       - name: Build the Node binding
-        # napi-rs cross-compiles to a platform-specific .node alongside
-        # bindings/node/index.js, which our assert_*.mjs scripts import
-        # via a relative path.
+        # napi-rs writes a platform-specific .node next to index.js.
+        # Omit optionalDependencies: those are the already-published
+        # rookie-cookies-<platform>@0.6.0-alpha.3 addons, which do not
+        # export read/ReadResult. Installing them lets index.js load a
+        # stale prebuild instead of the addon this step just compiled.
+        working-directory: bindings/node
         run: |
-          cd bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
         run: |
@@ -162,6 +166,9 @@ jobs:
       - name: Install Playwright + bundled Firefox
         # Playwright bundles a patched Firefox for DevTools/CDP; system Firefox
         # cannot drive Playwright. We only download Firefox, not all browsers.
+        # Install under tests/e2e so seed_*.mjs can resolve `playwright` and
+        # so we do not create a repo-root package.json that shadows bindings/node.
+        working-directory: tests/e2e
         run: |
           npm install --no-save playwright@1.62.1
           npx playwright install firefox
@@ -183,8 +190,9 @@ jobs:
       - name: Build the Node binding
         run: |
           cd bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
 
       - name: Compare report semantics across all four public surfaces
         run: |
@@ -270,6 +278,7 @@ jobs:
           node-version: '22'
 
       - name: Install Playwright + bundled Firefox
+        working-directory: tests/e2e
         run: |
           npm install --no-save playwright@1.62.1
           npx playwright install firefox
@@ -289,8 +298,9 @@ jobs:
       - name: Build the Node binding
         run: |
           cd bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
 
       - name: Seed Firefox profile and run extraction (rust + python + cli + node)
         run: |
@@ -346,6 +356,7 @@ jobs:
       - name: Install Playwright (system Chrome via channel)
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        working-directory: tests/e2e
         run: npm install --no-save playwright@1.62.1
 
       - name: Pre-build the e2e test binary
@@ -363,8 +374,9 @@ jobs:
       - name: Build the Node binding
         run: |
           cd bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
         run: |
@@ -433,6 +445,7 @@ jobs:
           node-version: '22'
 
       - name: Install Playwright + bundled Firefox
+        working-directory: tests/e2e
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -461,8 +474,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           Push-Location bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
           Pop-Location
 
       - name: Seed Firefox profile and run extraction (rust + python + cli + node)
@@ -707,8 +721,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           Push-Location bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
           Pop-Location
 
       - name: Verify v20 and extract a live WAL cookie on all four surfaces
@@ -771,6 +786,7 @@ jobs:
       - name: Install Playwright (system Chrome via channel)
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        working-directory: tests/e2e
         run: npm install --no-save playwright@1.62.1
 
       - name: Record Windows identity/admin status
@@ -805,8 +821,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           Push-Location bindings/node
-          npm install
+          npm ci --omit=optional
           npm run build -- --cargo-flags=--locked
+          node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
           Pop-Location
 
       - name: Exercise deterministic current-user DPAPI on all four surfaces
