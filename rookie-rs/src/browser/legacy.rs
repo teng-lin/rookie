@@ -257,6 +257,8 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   )
 }
 
+pub(super) type LegacySnapshot = (Vec<Cookie>, Vec<(&'static str, u64)>);
+
 pub(crate) fn browser_cookies_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
@@ -272,7 +274,7 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
+) -> Result<LegacySnapshot> {
   runtime.check()?;
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
@@ -301,7 +303,7 @@ pub(super) fn cookies_and_skipped_from_engine_draft(
   canonical_id: &str,
   draft: EngineExtractionDraft,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
+) -> Result<LegacySnapshot> {
   let skipped = engine_skipped_row_count(&draft);
   let cookies = project_engine_outcome_with_runtime(canonical_id, draft, runtime)?;
   Ok((cookies, skip_warnings(0, skipped)))

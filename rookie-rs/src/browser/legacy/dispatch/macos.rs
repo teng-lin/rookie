@@ -1,7 +1,6 @@
 use super::unsupported_engine;
 use crate::browser::registry;
 use crate::common::deadline::BoundaryRuntime;
-use crate::common::enums::Cookie;
 use anyhow::Result;
 
 pub(super) fn remaining_engine_snapshot_with_runtime(
@@ -9,14 +8,14 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   engine: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
+) -> Result<super::super::LegacySnapshot> {
   match engine {
     "safari" => super::super::cookies_and_skipped_from_engine_draft(
       canonical_id,
       registry::legacy_safari_outcome_with_runtime(canonical_id, domains, runtime)?,
       runtime,
     ),
-    _ => unsupported_engine(canonical_id, engine).map(|_| unreachable!()),
+    _ => unsupported_engine(canonical_id, engine),
   }
 }
 

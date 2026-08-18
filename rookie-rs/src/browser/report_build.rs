@@ -1761,6 +1761,7 @@ fn canonical_direct_engine_source(
 
 /// Private `browser_report` seam. An unknown browser or profile ID is a request
 /// error; a known but absent browser is an `Ok` report with `no_sources`.
+#[cfg(test)]
 pub(crate) fn browser_extraction_report(
   browser_id: &str,
   profile_id: Option<&str>,

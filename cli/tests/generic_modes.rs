@@ -705,8 +705,8 @@ fn a_registry_only_browser_without_report_points_at_report() {
   let registry_only: Vec<String> = registered_tokens()
     .into_iter()
     .filter(|token| {
-      !legacy.contains(&token.as_str())
-        && !(legacy.contains(&"opera_gx") && matches!(token.as_str(), "opera gx" | "opera-gx"))
+      !(legacy.contains(&token.as_str())
+        || (legacy.contains(&"opera_gx") && matches!(token.as_str(), "opera gx" | "opera-gx")))
     })
     .collect();
   if registry_only.is_empty() {

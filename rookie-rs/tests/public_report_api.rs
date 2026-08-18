@@ -364,7 +364,7 @@ fn no_profile_extract_matches_chrome() {
 fn no_profile_read_reports_decrypt_failed_for_undecryptable_rows() {
   let home = SyntheticHome::new("read-decrypt");
   let mut blob = b"v10".to_vec();
-  blob.extend(std::iter::repeat(0u8).take(20));
+  blob.extend_from_slice(&[0u8; 20]);
   seed_chromium_encrypted(&home.chrome_root(), "Default", "session", &blob);
   let result =
     rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))

@@ -1,6 +1,5 @@
 use super::unsupported_engine;
 use crate::common::deadline::BoundaryRuntime;
-use crate::common::enums::Cookie;
 use anyhow::Result;
 
 pub(super) fn remaining_engine_snapshot_with_runtime(
@@ -8,8 +7,8 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   engine: &str,
   _domains: Option<Vec<String>>,
   _runtime: &BoundaryRuntime<'_>,
-) -> Result<(Vec<Cookie>, Vec<(&'static str, u64)>)> {
-  unsupported_engine(canonical_id, engine).map(|_| unreachable!())
+) -> Result<super::super::LegacySnapshot> {
+  unsupported_engine(canonical_id, engine)
 }
 
 #[cfg(test)]
