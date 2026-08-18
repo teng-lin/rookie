@@ -182,11 +182,58 @@ def check_tag_rulesets(repo: str) -> list[str]:
     return failures
 
 
+def fetch_all_check_runs(
+    repo: str,
+    commit_sha: str,
+    *,
+    api: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Return every check-run for ``commit_sha``, paging past GitHub's 100-item cap.
+
+    ``commits/{sha}/check-runs`` defaults to ``per_page=30`` and caps at 100.
+    A busy release commit routinely exceeds that (publish retries, cancelled
+    matrix legs, lint/test/e2e/smoke), so a single-page fetch can miss a
+    required check that still exists — the failure mode that blocked
+    ``publish-cli.yml`` for ``v0.6.0-beta.1`` after earlier registry publishes
+    had already passed against a shorter check-run list.
+
+    ``api`` defaults to this module's ``gh_api``. Callers that re-export
+    ``gh_api`` for test patching (``write-ci-proof.py``) should pass their
+    local alias so patches still apply.
+    """
+    request = api if api is not None else gh_api
+    page = 1
+    collected: list[dict[str, Any]] = []
+    total_count: int | None = None
+    while True:
+        response = request(
+            f"commits/{commit_sha}/check-runs?per_page=100&page={page}",
+            repo=repo,
+        )
+        if total_count is None:
+            raw_total = response.get("total_count")
+            total_count = raw_total if isinstance(raw_total, int) else None
+        runs = response.get("check_runs") or []
+        if not isinstance(runs, list):
+            raise ControlFailure(
+                f"commits/{commit_sha}/check-runs page {page}: expected check_runs list, "
+                f"got {type(runs).__name__}"
+            )
+        collected.extend(runs)
+        if not runs:
+            break
+        if total_count is not None and len(collected) >= total_count:
+            break
+        if len(runs) < 100:
+            break
+        page += 1
+    return collected
+
+
 def check_required_checks(repo: str, commit_sha: str) -> list[str]:
     failures: list[str] = []
-    response = gh_api(f"commits/{commit_sha}/check-runs?per_page=100", repo=repo)
     by_name: dict[str, list[dict[str, Any]]] = {}
-    for run in response.get("check_runs", []):
+    for run in fetch_all_check_runs(repo, commit_sha):
         by_name.setdefault(run["name"], []).append(run)
 
     for name in REQUIRED_CHECK_RUNS:

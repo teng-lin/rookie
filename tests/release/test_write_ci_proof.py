@@ -88,7 +88,7 @@ def fake_gh_api_for(
     commit_sha: str,
 ):
     def fake_gh_api(path: str, *, repo: str):
-        if path == f"commits/{commit_sha}/check-runs?per_page=100":
+        if path == f"commits/{commit_sha}/check-runs?per_page=100&page=1":
             return check_runs_response
         if path.startswith("actions/jobs/"):
             return jobs_by_id[int(path.removeprefix("actions/jobs/"))]
