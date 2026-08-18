@@ -1,11 +1,18 @@
-# rookie-cookies Rust Docs
+# rookie-cookies (Rust)
 
-This guide covers the **0.6.0** Rust crate surface (the tree may still publish
-as `0.6.0-alpha.x`). The recommended entry is `read(ReadRequest::…)` per
-[ADR 0004](adr/0004-read-is-the-recommended-entry.md). Later sections document
-the **0.5.6 API** shape and how to **migrate 0.5.6 → 0.6.0**.
+Extract cookies from local browsers on Linux, macOS, and Windows.
 
-## Install (0.6.0)
+This file is the **Rust crate guide** (crates.io landing page and repo
+tutorial). Python and Node live in
+[`bindings/python/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/bindings/python/README.md)
+and
+[`bindings/node/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/bindings/node/README.md).
+The monorepo front door is the root
+[`README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/README.md).
+
+The tree may still publish as `0.6.0-alpha.x`. The recommended 0.6 entry is
+`read(ReadRequest::…)`
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 
 ```console
 cargo add rookie-cookies
@@ -34,20 +41,23 @@ view. There is **no** crate-root `get` or `report` function. Bindings-facing
 `profiles(browser_id)` exists as an alias of `browser_profiles`; structured
 reports use `extract_report` / `browser_report`.
 
-### Profile selection and session cookies
-
 - No-profile `read(ReadRequest::browser("chrome"))` matches the compatibility
   flatten used by `chrome()` / `extract` when `include_expired` is set
   appropriately (persistent / legacy-eligible cookies).
-- Naming a profile includes session cookies, so a profile-aware `read` can
-  return more cookies than omitting `profile()`.
+- Naming a profile includes session cookies.
 - Session import should call `.profile(...)`.
 
-### One operation, any registered browser
+Named helpers (`chrome`, `firefox`, `brave`, …) are `#[deprecated]` since 0.6.0
+in favor of `browser` / `extract` / `read` and remain supported through the
+deprecation window. They are the compatibility bridge from
+[`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) and will break
+in a later major version.
 
-`browser(id, domains)` and the lower-level `extract(Request::browser(id))` remain
-the compatibility / multi-id store verbs. Prefer them when you need a domain
-filter on the frozen flat list; prefer `read` for session import.
+## One operation, any registered browser
+
+`browser(id, domains)` and `extract(Request::browser(id))` remain the
+compatibility / multi-id store verbs. Prefer them when you need a domain filter
+on the frozen flat list; prefer `read` for session import.
 
 ```rust
 fn main() -> rookie_cookies::Result<()> {
@@ -59,11 +69,7 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
-The named per-browser functions (`chrome`, `firefox`, `brave`, …) are
-`#[deprecated]` since 0.6.0 in favor of `browser` / `extract` / `read` and remain
-fully supported through the deprecation window.
-
-### Explicit paths
+## Explicit paths
 
 ```rust
 use std::path::PathBuf;
@@ -86,12 +92,11 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
-Errors from the direct-path API remain `anyhow::Error`; downcast to
-`direct_path::DirectPathError` for stable `kind()`, `code()`, and related
-accessors. The earlier `*_based`, `any_browser`, and config-based direct-path
-APIs remain available through 0.6 and are deprecated for removal in 0.7.
+Errors remain `anyhow::Error`; downcast to `direct_path::DirectPathError` for
+stable `kind()`, `code()`, and related accessors. `*_based`, `any_browser`, and
+config-based direct-path APIs remain through 0.6 and are deprecated for 0.7.
 
-### Timeouts and cancellation
+## Timeouts and cancellation
 
 ```rust
 use std::time::Duration;
@@ -123,7 +128,7 @@ fn main() -> rookie_cookies::Result<()> {
 `.cancellation` builders. Classify request vs engine faults with
 `fault_kind(&error)` (`FaultKind::Request` / `FaultKind::Engine`).
 
-### Reports and profiles
+## Reports and profiles
 
 ```rust
 fn main() -> rookie_cookies::Result<()> {
@@ -145,11 +150,9 @@ worker pool sharing one deadline / cancellation budget.
 
 ## 0.5.6 API
 
-In the 0.5.6 line (and the early maintained-fork docs), the Rust surface was the
-flat named-browser helpers. There was no `read` / `ReadRequest` job API, no
-typed `direct_path` builders, and no `FaultKind` / `stop_reason` helpers.
-
-Typical 0.5.6-style usage:
+In the 0.5.6 line the public surface was the flat named-browser helpers. There
+was no `read` / `ReadRequest` job API, no typed `direct_path` builders, and no
+`FaultKind` / `stop_reason` helpers. Upstream published the `rookie` crate.
 
 ```rust
 fn main() {
@@ -164,44 +167,35 @@ fn main() {
 }
 ```
 
-Install at that era:
-
-```console
-cargo add rookie-cookies
-```
-
-(Upstream 0.5.6 used the `rookie` crate name; the maintained fork publishes
-`rookie-cookies`.)
-
 ## Migrate 0.5.6 → 0.6.0
 
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
 | Recommended entry | `chrome(None)` / `brave(Some(domains))` | `read(ReadRequest::browser(...).profile(...))` |
-| Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(Request::…)` for flat lists; named helpers are deprecated |
-| Session cookies | Not a first-class `profile()` on a job API | `ReadRequest::browser(id).profile(query)` |
-| Path APIs | `*_based`, `any_browser`, config paths | Prefer `direct_path::{cookies_from_path, ChromiumPathRequest, …}`; legacy helpers deprecated until 0.7 |
-| Errors | Flat `anyhow::Error` | Still `anyhow::Error`, plus `fault_kind` / `RequestError` / `stop_reason` / `DirectPathError` downcasts |
+| Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(Request::…)` |
+| Session cookies | Not a first-class `profile()` | `ReadRequest::browser(id).profile(query)` |
+| Path APIs | `*_based`, `any_browser` | `direct_path::{cookies_from_path, ChromiumPathRequest, …}` (legacy deprecated until 0.7) |
+| Errors | Flat `anyhow::Error` | Still `anyhow::Error`, plus `fault_kind` / `RequestError` / `stop_reason` / `DirectPathError` |
 | Header / get | Not a job view | `ReadResult::header(url)` — **no** crate-root `get` or `report` |
-| IE helpers | `internet_explorer` / `internet_explorer_based` | Deprecated for removal (ESE native C library; IE app discontinued) |
+| IE helpers | `internet_explorer` / `internet_explorer_based` | Deprecated (ESE native C library; IE discontinued) |
 
-Concrete migration steps:
+1. Switch session import from `chrome(None)` to
+   `read(ReadRequest::browser("chrome").profile("Default"))`.
+2. Prefer `browser` / `extract` for flat domain-filtered lists.
+3. Move explicit DB paths onto `direct_path` builders.
+4. Classify failures with `fault_kind` / `stop_reason`.
+5. Do not add crate-root `get` / `report`.
 
-1. **Switch session-import call sites** from `chrome(None)` to
-   `read(ReadRequest::browser("chrome").profile("Default"))` (or another
-   discovered profile query).
-2. **Prefer `browser` / `extract`** when you still need the flat domain-filtered
-   compatibility list without the job snapshot.
-3. **Move explicit DB paths** onto `direct_path` builders.
-4. **Classify failures** with `fault_kind` / `stop_reason` instead of string
-   matching alone.
-5. Do **not** add or call crate-root `get` / `report` — use `ReadResult::header`
-   and `extract_report` / `browser_report`.
-
-See [CHANGELOG.md](../CHANGELOG.md) for the full 0.6.0 breaking/compat list.
+See [CHANGELOG.md](https://github.com/teng-lin/rookie-cookies/blob/main/CHANGELOG.md).
 
 ## Logging
 
 ```console
 RUST_LOG=trace cargo run
 ```
+
+## More
+
+- [docs/building.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/building.md)
+- [docs/testing.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/testing.md)
+- [teng-lin/rookie-cookies](https://github.com/teng-lin/rookie-cookies)

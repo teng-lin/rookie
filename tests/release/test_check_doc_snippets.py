@@ -51,8 +51,8 @@ class CheckDocSnippetsTests(unittest.TestCase):
                 "rookie_cookies.not_a_real_export()\n```\n",
                 encoding="utf-8",
             )
-            (root / "docs" / "rust.md").write_text(
-                "# rust.md\n\n## Recommended 0.6.0 usage\n\n"
+            (root / "rookie-rs" / "README.md").write_text(
+                "# rust\n\n## Recommended 0.6.0 usage\n\n"
                 "## 0.5.6 API\n\n## Migrate 0.5.6 → 0.6.0\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
                 encoding="utf-8",
@@ -81,7 +81,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
                 "```js\nimport { chrome } from \"rookie-cookies\";\nawait chrome();\n```\n",
                 encoding="utf-8",
             )
-            (root / "docs" / "rust.md").write_text(
+            (root / "rookie-rs" / "README.md").write_text(
                 "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
                 encoding="utf-8",
@@ -160,7 +160,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "docs").mkdir()
-        (root / "docs" / "rust.md").write_text(
+        (root / "rookie-rs" / "README.md").write_text(
             "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
             "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
             encoding="utf-8",

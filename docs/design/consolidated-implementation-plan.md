@@ -19,4 +19,5 @@ job-layer `read` / `jar` API. The long-form draft specs it pointed at
 
 User-facing guides: [bindings/python/README.md](../../bindings/python/README.md),
 [bindings/node/README.md](../../bindings/node/README.md),
-[rust.md](../rust.md), and the root [README.md](../../README.md).
+[rookie-rs/README.md](../../rookie-rs/README.md), and the root
+[README.md](../../README.md).

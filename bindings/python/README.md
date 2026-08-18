@@ -3,7 +3,7 @@
 Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **Python guide** (PyPI landing page and repo tutorial). Rust
-stays in [`docs/rust.md`](https://github.com/teng-lin/rookie-cookies/blob/main/docs/rust.md).
+stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
 The tree may still publish as `0.6.0-alpha.x`. The recommended 0.6 entry is
 `jar` / `read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 

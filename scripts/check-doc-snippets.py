@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert fenced code samples in user docs only reference shipped public exports.
 
-Parses README.md, docs/rust.md, and the PyPI/npm binding READMEs,
-extracts fenced samples,
+Parses the root README, rookie-rs/README.md, and the PyPI/npm binding
+READMEs, extracts fenced samples,
 and checks that call-site symbols exist in:
 
 * bindings/python/rookie_cookies/__init__.py (__all__) and rookie_cookies.pyi
@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 DOC_FILES = (
     REPO / "README.md",
-    REPO / "docs" / "rust.md",
+    REPO / "rookie-rs" / "README.md",
     REPO / "bindings" / "python" / "README.md",
     REPO / "bindings" / "node" / "README.md",
 )
@@ -369,7 +369,7 @@ def main() -> int:
 
     for doc_path in (
         repo / "README.md",
-        repo / "docs" / "rust.md",
+        repo / "rookie-rs" / "README.md",
         repo / "bindings" / "python" / "README.md",
         repo / "bindings" / "node" / "README.md",
     ):
@@ -443,7 +443,7 @@ def main() -> int:
             repo / "bindings" / "node" / "README.md",
             ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6"),
         ),
-        (repo / "docs" / "rust.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
+        (repo / "rookie-rs" / "README.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
     )
     for path, needles in required_headings:
         text = path.read_text(encoding="utf-8")

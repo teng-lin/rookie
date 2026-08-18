@@ -9,7 +9,8 @@
 Related docs: [building.md](building.md), [testing.md](testing.md),
 [sqlite-security.md](sqlite-security.md), and the user guides under
 [python](../bindings/python/README.md) /
-[javascript](../bindings/node/README.md) / [rust.md](rust.md).
+[javascript](../bindings/node/README.md) /
+[rust](../rookie-rs/README.md).
 The tree may still publish `0.6.0-alpha.x` builds while documenting the **0.6.0**
 API surface.
 

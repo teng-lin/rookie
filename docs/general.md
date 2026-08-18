@@ -3,7 +3,7 @@
 Platform quirks that affect cookie extraction. For the recommended 0.6.0 API,
 see [bindings/python/README.md](../bindings/python/README.md),
 [bindings/node/README.md](../bindings/node/README.md), and
-[rust.md](rust.md).
+[rookie-rs/README.md](../rookie-rs/README.md).
 
 ## Password prompt
 

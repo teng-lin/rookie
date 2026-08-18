@@ -5,7 +5,7 @@ include = [
     "src/**/*",
     "Cargo.toml",
     "../MIT-LICENSE.txt",
-    "../README.md",
+    "README.md",
     "examples/**/*",
 ]
 name = "rookie-cookies"
@@ -16,7 +16,7 @@ license-file = "../MIT-LICENSE.txt"
 homepage = "https://crates.io/crates/rookie-cookies"
 documentation = "https://docs.rs/rookie-cookies/"
 repository = "https://github.com/teng-lin/rookie-cookies"
-readme = "../README.md"
+readme = "README.md"
 keywords = ["windows", "cookies", "rust", "web"]
 
 [lib]
