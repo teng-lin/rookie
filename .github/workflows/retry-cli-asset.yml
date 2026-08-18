@@ -59,9 +59,16 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
 
+      # The binary is built from the tag tree, but release-controls must run
+      # the script from main: a tag cut before the Windows UTF-8 subprocess
+      # fix would otherwise fail matching check-run names containing "×".
       - name: Verify live release controls
         shell: bash
-        run: python3 scripts/check-release-controls.py --repo "$GITHUB_REPOSITORY" --commit-sha "$RELEASE_SHA"
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git show origin/main:scripts/check-release-controls.py >"$RUNNER_TEMP/check-release-controls.py"
+          python3 "$RUNNER_TEMP/check-release-controls.py" --repo "$GITHUB_REPOSITORY" --commit-sha "$RELEASE_SHA"
         env:
           GH_TOKEN: ${{ github.token }}
 

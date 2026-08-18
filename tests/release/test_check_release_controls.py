@@ -187,6 +187,18 @@ class RequiredChecksTests(unittest.TestCase):
         self.assertEqual(failures, [])
 
 
+class GhApiEncodingTests(unittest.TestCase):
+    def test_decodes_gh_api_stdout_as_utf8(self) -> None:
+        # Windows runners default to a legacy locale encoding; without an
+        # explicit UTF-8 decode, check-run names containing "×" will not match.
+        completed = mock.Mock(returncode=0, stdout='{"ok": true, "name": "e2e ubuntu × chrome"}', stderr="")
+        with mock.patch.object(check_release_controls.subprocess, "run", return_value=completed) as run:
+            payload = check_release_controls.gh_api("commits/abc/check-runs", repo="owner/repo")
+        self.assertEqual(payload["name"], "e2e ubuntu × chrome")
+        self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertTrue(run.call_args.kwargs.get("text"))
+
+
 class MainArgumentValidationTests(unittest.TestCase):
     def test_rejects_a_short_commit_sha(self) -> None:
         import subprocess
