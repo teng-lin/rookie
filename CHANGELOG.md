@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-beta.1] - 2026-08-18
+
 ### Added
 
 - Rust `RequestError` classifies unknown browser / empty / unknown / ambiguous /
@@ -22,6 +24,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Documentation rehaul for 0.6: package-owned language guides (`read` / `jar`),
+  Chrome/Edge/Brave App-Bound v20 coverage notes, and migration from 0.5.6.
 - `browser_report` widens non-id profile queries that previously always failed.
 - `firefox_profile` now resolves through `extract(Request::browser("firefox").profile(q))`.
 - Recommended docs entry is `jar(browser=…)` / `read(…).as_list()`.
