@@ -1,18 +1,30 @@
 # Testing rookie-cookies
 
-The test suite separates deterministic contracts, real-browser integration,
-and installed release artifacts. A passing job should identify the exact path
-it exercised; a missing encryption prerequisite must not be reported as crypto
+The suite separates deterministic contracts, real-browser integration, and
+installed release artifacts. A passing job should identify the exact path it
+exercised; a missing encryption prerequisite must not be reported as crypto
 coverage.
 
 ## Deterministic tests
-
-Run the Rust workspace and CLI contract tests with:
 
 ```console
 cargo test --workspace --all-targets
 cargo test --workspace --doc
 python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
+python3 -m unittest discover -s tests/release -p 'test_*.py' -v
+```
+
+After building the Python extension locally, also run:
+
+```console
+python -m unittest discover -s tests/python -p 'test_*.py' -v
+```
+
+Documentation fenced samples are checked against shipped public exports:
+
+```console
+python3 scripts/check-doc-snippets.py
+python3 -m unittest tests.release.test_check_doc_snippets -v
 ```
 
 The lint workflow also enforces the authoritative-discovery boundary: the old
@@ -20,28 +32,23 @@ The lint workflow also enforces the authoritative-discovery boundary: the old
 not add `paths::find_*` calls, and the packaged crate must contain
 `browser_registry.json`.
 
-A separate `cargo run -p xtask -- check-cfg-locations` step enforces the
-platform-cfg containment of issue #218: every `target_os`/`windows`/`unix`
-(etc.) `cfg`/`cfg_attr` attribute under `rookie-rs/src` must be in
-`cfg-location-allowlist.toml`, either as an unlimited capability leaf or as a
-core file whose current cfg count is ratcheted to never increase without a
-deliberate, reviewed edit to that file.
+A separate `cargo run -p xtask -- check-cfg-locations` step enforces platform
+`cfg` containment: every `target_os` / `windows` / `unix` (etc.) `cfg` /
+`cfg_attr` under `rookie-rs/src` must be listed in
+`cfg-location-allowlist.toml`.
 
 The CLI integration suite uses a generated Firefox database and covers JSON and
 Netscape output, logs on stderr, errors, help/version output, profile discovery,
 and paths containing spaces and Unicode. On Windows, the Rust Chrome e2e target
 also generates a `v10` AES-GCM Cookies database and a `Local State` key protected
-at runtime with the current user's DPAPI. This test is deterministic and does
+at runtime with the current user's DPAPI. That test is deterministic and does
 not require Chrome.
 
 Windows additionally compiles and tests the core crate without default features
 so the legacy non-App-Bound branch cannot silently rot.
 
-Node bindings are built once per operating system on the minimum supported
-Node.js 22 runtime. The resulting native module is then tested without
-rebuilding on Node.js 22, 24, and 26 on Ubuntu, macOS, and Windows. This keeps
-the Node-API ABI check separate from the JavaScript runtime compatibility
-matrix.
+Node bindings are built once per OS on the minimum supported Node.js **22**
+runtime, then tested without rebuilding on Node.js 22, 24, and 26.
 
 ## Real-browser tests
 
@@ -58,9 +65,9 @@ ordinary pull-request matrix is:
 | Windows 2025 | Firefox | Rust, Python, Node, CLI |
 
 The Windows App-Bound canary is a separate main-push, scheduled, or explicitly
-dispatched trusted-ref job. It launches the machine-wide Chrome installation directly against the
-real default user-data directory without Playwright, CDP, or a custom profile.
-Before extraction it requires all of the following:
+dispatched trusted-ref job. It launches the machine-wide Chrome installation
+against the real default user-data directory without Playwright, CDP, or a
+custom profile. Before extraction it requires all of the following:
 
 - an elevated runner under the same user that launches Chrome;
 - `Local State.os_crypt.app_bound_encrypted_key` with the `APPB` prefix;
@@ -76,7 +83,7 @@ Before extraction it requires all of the following:
 The canary fails when a prerequisite is absent. It never uploads the disposable
 profile, Cookies database, WAL, or `Local State`.
 
-The cross-platform CLI checker can be run directly:
+Cross-platform CLI checker:
 
 ```console
 python3 tests/e2e/assert_cli_cookie.py path/to/cookies.sqlite
@@ -85,15 +92,12 @@ python3 tests/e2e/assert_cli_cookie.py path/to/Cookies \
 python3 tests/e2e/assert_cli_cookie.py --browser chrome
 ```
 
-The CLI's credential selectors (`--key-path`, `--browser-id`, and
-`--plaintext-only`) require an explicit `--path` and are mutually exclusive.
-`--key-path` means a Windows Chromium `Local State` file on every host; a
-Firefox path plus any credential selector is therefore a typed extraction
-error rather than a silently ignored option.
+CLI credential selectors (`--key-path`, `--browser-id`, and `--plaintext-only`)
+require an explicit `--path` and are mutually exclusive. `--key-path` means a
+Windows Chromium `Local State` file on every host.
 
-Set `ROOKIE_E2E_CLI` to test a binary outside `target/release`. The expected
-cookie can be changed with `ROOKIE_E2E_COOKIE_NAME` and
-`ROOKIE_E2E_COOKIE_VALUE`.
+Set `ROOKIE_E2E_CLI` to test a binary outside `target/release`. Override the
+expected cookie with `ROOKIE_E2E_COOKIE_NAME` and `ROOKIE_E2E_COOKIE_VALUE`.
 
 ## Installed artifact smoke tests
 
@@ -105,20 +109,12 @@ outside the checkout. Each native lane exercises:
 - a wheel installed into a fresh virtual environment with `pip --no-index`;
 - the packed npm root and native-platform tarballs installed offline.
 
-The native npm module is built on Node.js 22, the release-shaped tarballs are
-assembled with Node.js 24, and clean consumers install and load those same
-tarballs on Node.js 22, 24, and 26.
+The native npm module is built on Node.js 22, release-shaped tarballs are
+assembled with Node.js 24, and clean consumers install those same tarballs on
+Node.js 22, 24, and 26.
 
-The existing E2E workflow bootstraps the reusable artifact jobs on pull requests,
-covering Ubuntu x64, Windows x64, and macOS ARM64. The standalone workflow owns
-main-push, scheduled, and manual runs; its scheduled/manual matrix also runs the
-shipped macOS Intel artifacts on a native Intel runner. Provenance records and
-independently verifies the source commit, target, runner, exact package paths,
-byte length, and SHA-256 digest of every consumed artifact. The npm tarballs use
-the same artifact-movement and packaging commands as the publish workflow, and
-Linux uses the same digest-pinned build container. Windows additionally decrypts
-a generated current-user DPAPI fixture through the installed CLI, wheel, and npm
-packages.
+Provenance records and independently verifies the source commit, target, runner,
+exact package paths, byte length, and SHA-256 digest of every consumed artifact.
 
 ## Diagnosing failures
 

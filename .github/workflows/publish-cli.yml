@@ -174,7 +174,7 @@ jobs:
       # publish-npm.yml, this job has no later aggregation stage to collect
       # every leg's artifact before writing one manifest — restructuring the
       # job graph to add one was judged higher-risk than the completeness
-      # gained. See docs/RELEASING.md's "Publish CLI binaries" section.
+      # gained. See docs/releasing.md's "Publish CLI binaries" section.
       - name: Write scan manifest
         shell: bash
         run: |
@@ -212,7 +212,7 @@ jobs:
         shell: bash
 
       # Release-hardening program R5, advisory-only for now (see
-      # docs/RELEASING.md): resolves each required check to its exact
+      # docs/releasing.md): resolves each required check to its exact
       # producing job/run rather than trusting a check-run name alone.
       # --advisory means this always exits 0 (a ::warning:: annotation on
       # failure, not a job failure) -- this workflow only runs via

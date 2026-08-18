@@ -51,19 +51,19 @@ class CheckDocSnippetsTests(unittest.TestCase):
                 "rookie_cookies.not_a_real_export()\n```\n",
                 encoding="utf-8",
             )
-            for name in ("Python.md", "JavaScript.md", "Rust.md"):
+            for name in ("python.md", "javascript.md", "rust.md"):
                 (root / "docs" / name).write_text(
                     f"# {name}\n\n## Recommended 0.6.0 usage\n\n"
                     "## 0.5.6 API\n\n## Migrate 0.5.6 → 0.6.0\n\n"
                     "```python\nimport rookie_cookies\nx = rookie_cookies.chrome()\n```\n"
-                    if name == "Python.md"
+                    if name == "python.md"
                     else (
                         f"# {name}\n\n## Recommended 0.6.0 usage\n\n"
                         "## 0.5.6 API\n\n## Migrate 0.5.6 → 0.6.0\n\n"
                         + (
                             "```js\nimport { chrome } from \"rookie-cookies\";\n"
                             "await chrome();\n```\n"
-                            if name == "JavaScript.md"
+                            if name == "javascript.md"
                             else "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n"
                         )
                     ),
@@ -83,17 +83,17 @@ class CheckDocSnippetsTests(unittest.TestCase):
             root = Path(temp)
             self._seed_minimal_surfaces(root)
             (root / "README.md").write_text("# demo\n", encoding="utf-8")
-            (root / "docs" / "Python.md").write_text(
+            (root / "docs" / "python.md").write_text(
                 "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```python\nfrom rookie_cookies import header\nheader('https://x')\n```\n",
                 encoding="utf-8",
             )
-            (root / "docs" / "JavaScript.md").write_text(
+            (root / "docs" / "javascript.md").write_text(
                 "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```js\nimport { chrome } from \"rookie-cookies\";\nawait chrome();\n```\n",
                 encoding="utf-8",
             )
-            (root / "docs" / "Rust.md").write_text(
+            (root / "docs" / "rust.md").write_text(
                 "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
                 encoding="utf-8",

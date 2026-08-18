@@ -21,7 +21,7 @@ env:
   NODE_OPTIONS: --use-system-ca
   RELEASE_VERSION: ${{ inputs.version }}
   # publish-py.yml is dispatched from the `v$VERSION` tag itself (see
-  # docs/RELEASING.md), so `github.sha` already is the verified release
+  # docs/releasing.md), so `github.sha` already is the verified release
   # commit in every job here — no need to thread it through job outputs the
   # way publish-npm.yml (dispatched from `main`) has to.
   ROOKIE_COOKIES_SOURCE_SHA: ${{ github.sha }}
@@ -245,7 +245,7 @@ jobs:
             --manifest release-scan-manifest.json \
             --artifacts-root "$GITHUB_WORKSPACE"
       # Release-hardening program R5, advisory-only for now (see
-      # docs/RELEASING.md): resolves each required check to its exact
+      # docs/releasing.md): resolves each required check to its exact
       # producing job/run rather than trusting a check-run name alone.
       # --advisory means this always exits 0 (a ::warning:: annotation on
       # failure, not a job failure) -- this workflow only runs via

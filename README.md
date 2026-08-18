@@ -65,7 +65,7 @@ rows = cookies.read(browser="chrome", profile="Work").as_list()
 Named helpers such as `chrome()` remain supported compatibility APIs.
 Published wheels use the `cp311-abi3` stable ABI tag (CPython 3.11–3.14 tested).
 
-Full guide: [Python documentation](docs/Python.md) (includes **0.5.6 API** and
+Full guide: [Python documentation](docs/python.md) (includes **0.5.6 API** and
 **migrate 0.5.6 → 0.6.0**).
 
 ### Node.js (Node ≥ 22)
@@ -86,7 +86,7 @@ console.log(snapshot.header("https://example.com/"));
 Named helpers such as `chrome()` remain supported and also return Promises.
 CI and release artifacts are tested on Node.js 22, 24, and 26.
 
-Full guide: [JavaScript documentation](docs/JavaScript.md) (includes **0.5.6
+Full guide: [JavaScript documentation](docs/javascript.md) (includes **0.5.6
 API** and **migrate 0.5.6 → 0.6.0**).
 
 ### Rust
@@ -113,7 +113,7 @@ fn main() -> rookie_cookies::Result<()> {
 Store helpers such as `browser("chrome", domains)` and `extract` remain
 supported. Prefer `read` for session import jobs.
 
-Full guide: [Rust documentation](docs/Rust.md) (includes **0.5.6 API** and
+Full guide: [Rust documentation](docs/rust.md) (includes **0.5.6 API** and
 **migrate 0.5.6 → 0.6.0**).
 
 ## CLI explicit paths
@@ -191,16 +191,18 @@ Real-browser E2E tests are defined in
 [`.github/workflows/e2e.yml`](.github/workflows/e2e.yml). They seed disposable
 Chrome and Firefox profiles on Ubuntu, macOS, and Windows and verify Rust,
 Python, Node.js, and CLI extraction against the same cookie. See
-[the testing guide](docs/TESTING.md) for the exact matrix and local commands.
+[the testing guide](docs/testing.md) for the exact matrix and local commands.
 
 ## Documentation and examples
 
-- [Python documentation](docs/Python.md)
-- [Rust documentation](docs/Rust.md)
-- [JavaScript documentation](docs/JavaScript.md)
-- [Build instructions](docs/BUILDING.md)
-- [Testing guide](docs/TESTING.md)
-- [Release instructions](docs/RELEASING.md)
+- [Python documentation](docs/python.md)
+- [Rust documentation](docs/rust.md)
+- [JavaScript documentation](docs/javascript.md)
+- [Gotchas / operational notes](docs/general.md)
+- [Build instructions](docs/building.md)
+- [Testing guide](docs/testing.md)
+- [Release instructions](docs/releasing.md)
+- [Bundled SQLite security inventory](docs/sqlite-security.md)
 - [Changelog](CHANGELOG.md)
 - [ADR 0004: `read` is the recommended entry](docs/adr/0004-read-is-the-recommended-entry.md)
 - [Python examples](examples/python)

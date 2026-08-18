@@ -6,6 +6,12 @@
 - PyPI: `rookie-cookies` wheels and source distribution
 - npm: `rookie-cookies` plus four native platform packages
 
+Related docs: [building.md](building.md), [testing.md](testing.md),
+[sqlite-security.md](sqlite-security.md), and the user guides under
+[python.md](python.md) / [javascript.md](javascript.md) / [rust.md](rust.md).
+The tree may still publish `0.6.0-alpha.x` builds while documenting the **0.6.0**
+API surface.
+
 Registry releases are immutable and the npm publication is not atomic. Every
 release workflow therefore runs only by manual dispatch, and every one refuses
 to publish unless it can verify the `v<version>` tag first. The ref you dispatch
@@ -86,7 +92,7 @@ those minimal records from the structurally parsed local manifests, then runs
 `npm ci --dry-run` against both npm lockfiles to prove they are installable.
 
 ```console
-export VERSION=0.5.10
+export VERSION=0.6.0
 python3 scripts/bump-version.py "$VERSION"
 ```
 

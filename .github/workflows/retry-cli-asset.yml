@@ -1,7 +1,7 @@
 name: Retry CLI asset
 
 # Manual per-target retry for publish-cli.yml when one matrix leg fails after
-# others have already uploaded. See docs/RELEASING.md "A failed platform leg
+# others have already uploaded. See docs/releasing.md "A failed platform leg
 # does not auto-retry". This workflow lives on main so a tag whose own
 # publish-cli.yml copy is broken can still receive the missing asset; the
 # binary itself is always built from the immutable tag commit.

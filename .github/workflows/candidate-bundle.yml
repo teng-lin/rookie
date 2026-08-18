@@ -7,7 +7,7 @@ name: Candidate bundle evidence
 # candidate manifest's digest -- so review-time execution and release-time
 # publication can later be shown to trace back to the same tested bytes.
 # This candidate bundle is never published anywhere; its evidence is not
-# consumed by any publish-*.yml workflow yet (see docs/RELEASING.md).
+# consumed by any publish-*.yml workflow yet (see docs/releasing.md).
 
 on:
   pull_request:

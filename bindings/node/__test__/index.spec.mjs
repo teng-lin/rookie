@@ -1228,8 +1228,8 @@ test("public JavaScript examples await async extraction APIs", (t) => {
   const documents = [
     ["README.md", new URL("../../../README.md", import.meta.url), true],
     [
-      "docs/JavaScript.md",
-      new URL("../../../docs/JavaScript.md", import.meta.url),
+      "docs/javascript.md",
+      new URL("../../../docs/javascript.md", import.meta.url),
       true,
     ],
     ["bindings/node/README.md", new URL("../README.md", import.meta.url), true],

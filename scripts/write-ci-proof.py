@@ -44,7 +44,7 @@ be live-validated against a real release before it ships, and a bug here
 must not be able to silently block a real publish. `--advisory` turns any
 failure into a `::warning::` annotation instead of a nonzero exit. Promote
 to hard-blocking (drop `--advisory` at each call site) once it has been
-observed working correctly on a real release -- see docs/RELEASING.md.
+observed working correctly on a real release -- see docs/releasing.md.
 
 Requires the `gh` CLI, authenticated, same as `check-release-controls.py`.
 """
@@ -263,7 +263,7 @@ def parse_args() -> argparse.Namespace:
             "never exit non-zero: print a GitHub Actions ::warning:: annotation on any "
             "failure instead of failing the calling workflow step. For release-hardening "
             "program R5's initial advisory-only rollout into publish-*.yml -- see "
-            "docs/RELEASING.md for the condition to drop this and hard-block instead."
+            "docs/releasing.md for the condition to drop this and hard-block instead."
         ),
     )
     return parser.parse_args()
@@ -293,7 +293,7 @@ def _report_failure(problems: list[str], *, advisory: bool) -> int:
         # be silently dropped).
         print(
             "::warning::CI proof verification failed (advisory-only for now, does not "
-            "block publish -- see docs/RELEASING.md and the log below for details)"
+            "block publish -- see docs/releasing.md and the log below for details)"
         )
         print(summary, file=sys.stderr)
         return 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assert fenced code samples in user docs only reference shipped public exports.
 
-Parses README.md + docs/{Python,JavaScript,Rust}.md, extracts fenced samples,
+Parses README.md + docs/{python,javascript,rust}.md, extracts fenced samples,
 and checks that call-site symbols exist in:
 
 * bindings/python/rookie_cookies/__init__.py (__all__) and rookie_cookies.pyi
@@ -25,9 +25,9 @@ REPO = Path(__file__).resolve().parents[1]
 
 DOC_FILES = (
     REPO / "README.md",
-    REPO / "docs" / "Python.md",
-    REPO / "docs" / "JavaScript.md",
-    REPO / "docs" / "Rust.md",
+    REPO / "docs" / "python.md",
+    REPO / "docs" / "javascript.md",
+    REPO / "docs" / "rust.md",
 )
 
 FENCE_RE = re.compile(
@@ -368,9 +368,9 @@ def main() -> int:
 
     for doc_path in (
         repo / "README.md",
-        repo / "docs" / "Python.md",
-        repo / "docs" / "JavaScript.md",
-        repo / "docs" / "Rust.md",
+        repo / "docs" / "python.md",
+        repo / "docs" / "javascript.md",
+        repo / "docs" / "rust.md",
     ):
         if not doc_path.is_file():
             errors.append(f"missing documentation file: {doc_path}")
@@ -434,9 +434,9 @@ def main() -> int:
 
     # Structural section requirements for language docs.
     required_headings = (
-        (repo / "docs" / "Python.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
-        (repo / "docs" / "JavaScript.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
-        (repo / "docs" / "Rust.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
+        (repo / "docs" / "python.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
+        (repo / "docs" / "javascript.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
+        (repo / "docs" / "rust.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
     )
     for path, needles in required_headings:
         text = path.read_text(encoding="utf-8")
