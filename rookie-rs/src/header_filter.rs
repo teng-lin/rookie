@@ -58,10 +58,7 @@ pub(crate) fn redact_url(raw: &str) -> String {
 }
 
 fn redact_unparseable(raw: &str) -> String {
-  let after_scheme = raw
-    .find("://")
-    .map(|index| index + 3)
-    .unwrap_or(0);
+  let after_scheme = raw.find("://").map(|index| index + 3).unwrap_or(0);
   let scheme = if after_scheme > 0 {
     Some(&raw[..after_scheme - 3])
   } else {
@@ -121,10 +118,7 @@ fn parse_request_url(raw: &str) -> Result<ParsedRequest, RequestError> {
 }
 
 fn is_potentially_trustworthy_host(host: &str) -> bool {
-  host == "localhost"
-    || host.ends_with(".localhost")
-    || host == "127.0.0.1"
-    || host == "::1"
+  host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 fn cookie_path(path: &str) -> &str {
@@ -252,7 +246,12 @@ mod tests {
 
   #[test]
   fn url_table_domain_and_path() {
-    assert!(keeps(".example.com", "/", false, "https://www.example.com/"));
+    assert!(keeps(
+      ".example.com",
+      "/",
+      false,
+      "https://www.example.com/"
+    ));
     assert!(keeps(".example.com", "/", false, "https://example.com/"));
     assert!(!keeps(
       "www.example.com",
@@ -272,7 +271,12 @@ mod tests {
       false,
       "https://www.example.com/"
     ));
-    assert!(!keeps(".example.com", "/admin", false, "https://www.example.com/"));
+    assert!(!keeps(
+      ".example.com",
+      "/admin",
+      false,
+      "https://www.example.com/"
+    ));
     assert!(keeps(
       ".example.com",
       "/admin",
@@ -301,8 +305,16 @@ mod tests {
     assert!(keeps("127.0.0.1", "/", false, "http://127.0.0.1/"));
     assert!(keeps("::1", "/", true, "http://[::1]/"));
     assert!(keeps("::1", "/", false, "http://[::1]/foo"));
-    assert!(!keeps(".example.com", "/", false, "http://example.com.evil.net/"));
-    assert!(keeps("", "/", false, "https://example.com/x") || keeps("example.com", "", false, "https://example.com/x"));
+    assert!(!keeps(
+      ".example.com",
+      "/",
+      false,
+      "http://example.com.evil.net/"
+    ));
+    assert!(
+      keeps("", "/", false, "https://example.com/x")
+        || keeps("example.com", "", false, "https://example.com/x")
+    );
     assert!(keeps("EXAMPLE.COM", "/", false, "https://example.com/"));
     assert!(keeps(".com", "/", false, "https://www.example.com/"));
   }

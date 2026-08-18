@@ -283,7 +283,9 @@ fn unknown_profile_ids_are_request_errors() {
     error.to_string().contains("no chrome profile matches"),
     "unexpected message: {error:#}"
   );
-  assert!(error.downcast_ref::<rookie_cookies::RequestError>().is_some());
+  assert!(error
+    .downcast_ref::<rookie_cookies::RequestError>()
+    .is_some());
 
   // Listing stores canonicalized paths (`/private/var/...` on macOS). Query
   // with the path the listing itself published — that is the Path-eq key.
@@ -342,17 +344,17 @@ fn cookie_key(cookie: &rookie_cookies::enums::Cookie) -> (String, String, String
 fn no_profile_extract_matches_chrome() {
   let _home = seeded_chrome("extract-eq-chrome");
   let via_chrome = rookie_cookies::chrome(None).expect("chrome");
-  let via_extract = rookie_cookies::extract(rookie_cookies::Request::browser("chrome")).expect("extract");
+  let via_extract =
+    rookie_cookies::extract(rookie_cookies::Request::browser("chrome")).expect("extract");
   let mut chrome_keys: Vec<_> = via_chrome.iter().map(cookie_key).collect();
   let mut extract_keys: Vec<_> = via_extract.iter().map(cookie_key).collect();
   chrome_keys.sort();
   extract_keys.sort();
   assert_eq!(chrome_keys, extract_keys);
 
-  let via_read = rookie_cookies::read(
-    rookie_cookies::ReadRequest::browser("chrome").include_expired(true),
-  )
-  .expect("read");
+  let via_read =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("read");
   let mut read_keys: Vec<_> = via_read.cookies().iter().map(cookie_key).collect();
   read_keys.sort();
   assert_eq!(read_keys, chrome_keys);
@@ -364,10 +366,9 @@ fn no_profile_read_reports_decrypt_failed_for_undecryptable_rows() {
   let mut blob = b"v10".to_vec();
   blob.extend(std::iter::repeat(0u8).take(20));
   seed_chromium_encrypted(&home.chrome_root(), "Default", "session", &blob);
-  let result = rookie_cookies::read(
-    rookie_cookies::ReadRequest::browser("chrome").include_expired(true),
-  )
-  .expect("read");
+  let result =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("read");
   let warning = result
     .warnings()
     .iter()

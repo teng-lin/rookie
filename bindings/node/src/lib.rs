@@ -1321,7 +1321,10 @@ impl Task for ProfilesTask {
 }
 
 /// Alias of `browserProfiles`. No decrypt.
-#[napi(js_name = "profiles", ts_return_type = "Promise<Array<ProfileDescriptorObject>>")]
+#[napi(
+  js_name = "profiles",
+  ts_return_type = "Promise<Array<ProfileDescriptorObject>>"
+)]
 pub fn profiles(browser_id: String) -> AsyncTask<ProfilesTask> {
   AsyncTask::new(ProfilesTask { browser_id })
 }

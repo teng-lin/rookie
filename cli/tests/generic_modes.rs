@@ -831,7 +831,10 @@ fn version_still_wins_over_the_new_modes() {
 #[test]
 fn read_subcommand_requires_browser() {
   let stderr = assert_usage_error(&run_rookie(&["read"]), "read without -b");
-  assert!(stderr.contains("--browser") || stderr.contains("-b"), "{stderr}");
+  assert!(
+    stderr.contains("--browser") || stderr.contains("-b"),
+    "{stderr}"
+  );
 }
 
 #[test]
@@ -867,5 +870,8 @@ fn header_subcommand_requires_browser() {
     &run_rookie(&["header", "https://example.com/"]),
     "header without -b",
   );
-  assert!(stderr.contains("--browser") || stderr.contains("-b"), "{stderr}");
+  assert!(
+    stderr.contains("--browser") || stderr.contains("-b"),
+    "{stderr}"
+  );
 }

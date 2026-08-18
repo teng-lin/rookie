@@ -99,9 +99,7 @@ fn list_profile_candidates(
     "chromium" => {
       let listing = chromium_listing_with_runtime(canonical_id, runtime)?;
       if listing.all_detected_roots_failed {
-        anyhow::bail!(
-          "every detected {canonical_id} installation failed profile enumeration"
-        );
+        anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
       Ok(
         listing
@@ -125,9 +123,7 @@ fn list_profile_candidates(
     "gecko" => {
       let draft = gecko_profiles_with_runtime(canonical_id, runtime)?;
       if draft.all_detected_roots_failed() {
-        anyhow::bail!(
-          "every detected {canonical_id} installation failed profile enumeration"
-        );
+        anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
       Ok(draft.profiles.into_iter().map(engine_candidate).collect())
     }
@@ -135,9 +131,7 @@ fn list_profile_candidates(
     "safari" => {
       let draft = super::safari_profiles_with_runtime(canonical_id, runtime)?;
       if draft.all_detected_roots_failed() {
-        anyhow::bail!(
-          "every detected {canonical_id} installation failed profile enumeration"
-        );
+        anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
       Ok(draft.profiles.into_iter().map(engine_candidate).collect())
     }
@@ -145,9 +139,7 @@ fn list_profile_candidates(
     "internet_explorer" => {
       let draft = super::internet_explorer_profiles_with_runtime(canonical_id, runtime)?;
       if draft.all_detected_roots_failed() {
-        anyhow::bail!(
-          "every detected {canonical_id} installation failed profile enumeration"
-        );
+        anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
       Ok(draft.profiles.into_iter().map(engine_candidate).collect())
     }
@@ -231,8 +223,20 @@ mod tests {
 
   #[test]
   fn two_defaults_are_ambiguous() {
-    let a = cand("aa".repeat(32).as_str(), "Stable", "Default", "/s/Default", &[]);
-    let b = cand("bb".repeat(32).as_str(), "Beta", "Default", "/b/Default", &[]);
+    let a = cand(
+      "aa".repeat(32).as_str(),
+      "Stable",
+      "Default",
+      "/s/Default",
+      &[],
+    );
+    let b = cand(
+      "bb".repeat(32).as_str(),
+      "Beta",
+      "Default",
+      "/b/Default",
+      &[],
+    );
     let set = [a.clone(), b.clone()];
     let error = match_profile_query("chrome", "Default", &set).unwrap_err();
     assert!(matches!(error, RequestError::AmbiguousProfile { .. }));
@@ -376,13 +380,7 @@ mod tests {
   #[test]
   fn lossy_path_query_is_lossy_error() {
     use std::os::unix::ffi::OsStringExt;
-    let mut candidate = cand(
-      "aa".repeat(32).as_str(),
-      "Odd",
-      "odd",
-      "/tmp/ok",
-      &[],
-    );
+    let mut candidate = cand("aa".repeat(32).as_str(), "Odd", "odd", "/tmp/ok", &[]);
     candidate.path = PathBuf::from(OsString::from_vec(vec![0xff, b'x']));
     candidate.path_lossy = true;
     let display = candidate.path.to_string_lossy().into_owned();

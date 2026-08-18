@@ -138,9 +138,7 @@ pub enum JobCommand {
     timeout_secs: Option<u64>,
   },
   /// List discovered profiles (no decrypt)
-  Profiles {
-    browser: String,
-  },
+  Profiles { browser: String },
   /// Structured extraction report
   Report {
     browser: String,

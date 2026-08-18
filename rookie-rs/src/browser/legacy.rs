@@ -277,14 +277,10 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
     "chromium" => {
-      let draft = registry::legacy_chromium_outcome_with_runtime(
-        &browser.canonical_id,
-        domains,
-        runtime,
-      )?;
+      let draft =
+        registry::legacy_chromium_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
       let decrypt = chromium_decrypt_skip_count(&draft);
-      let cookies =
-        project_chromium_outcome_with_runtime(&browser.canonical_id, draft, runtime)?;
+      let cookies = project_chromium_outcome_with_runtime(&browser.canonical_id, draft, runtime)?;
       Ok((cookies, skip_warnings(decrypt, 0)))
     }
     "gecko" => {

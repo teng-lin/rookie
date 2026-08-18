@@ -38,11 +38,7 @@ impl ReadWarning {
 
 impl std::fmt::Display for ReadWarning {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(
-      formatter,
-      "skipped {} rows ({})",
-      self.count, self.code
-    )
+    write!(formatter, "skipped {} rows ({})", self.count, self.code)
   }
 }
 
@@ -119,7 +115,11 @@ impl ReadResult {
 
   pub fn header(&self, url: &str) -> Result<String> {
     let filter = GetFilter::for_url(url)?;
-    let mut kept: Vec<&Cookie> = self.cookies.iter().filter(|cookie| filter.keeps(cookie)).collect();
+    let mut kept: Vec<&Cookie> = self
+      .cookies
+      .iter()
+      .filter(|cookie| filter.keeps(cookie))
+      .collect();
     kept.sort_by(|left, right| {
       right
         .path

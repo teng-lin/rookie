@@ -126,7 +126,10 @@ mod tests {
       .code(),
       "unknown_browser"
     );
-    assert_eq!(RequestError::EmptyProfileSelector.code(), "empty_profile_selector");
+    assert_eq!(
+      RequestError::EmptyProfileSelector.code(),
+      "empty_profile_selector"
+    );
     assert_eq!(RequestError::MissingBrowser.code(), "missing_browser");
     assert_eq!(
       RequestError::InvalidUrl {

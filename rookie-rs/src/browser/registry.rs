@@ -193,9 +193,10 @@ fn resolve_registered_browser_for(
   browser_id: &str,
 ) -> Result<RegisteredBrowser> {
   let registry = embedded_registry()?;
-  let definitions = registry.platforms.get(platform.as_str()).ok_or_else(|| {
-    anyhow!("registry has no definitions for {}", platform.as_str())
-  })?;
+  let definitions = registry
+    .platforms
+    .get(platform.as_str())
+    .ok_or_else(|| anyhow!("registry has no definitions for {}", platform.as_str()))?;
   let definition = definitions.iter().find(|definition| {
     definition.canonical_id == browser_id
       || definition.aliases.iter().any(|alias| alias == browser_id)

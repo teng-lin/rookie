@@ -28,12 +28,12 @@ mod compatibility_dispatch;
 mod header_filter;
 mod read;
 mod request_error;
-pub use read::{from_path, profiles, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning};
-pub use request_error::RequestError;
 #[cfg(test)]
 use anyhow::bail;
 pub use anyhow::{self, Result};
 use enums::Cookie;
+pub use read::{from_path, profiles, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning};
+pub use request_error::RequestError;
 #[cfg(target_os = "linux")]
 mod linux;
 use std::fmt;
@@ -375,7 +375,9 @@ pub fn extract_report(request: Request) -> Result<report::ExtractionReport> {
   )
 }
 
-pub(crate) fn flatten_selected_report_cookies(report: report::ExtractionReport) -> Result<Vec<Cookie>> {
+pub(crate) fn flatten_selected_report_cookies(
+  report: report::ExtractionReport,
+) -> Result<Vec<Cookie>> {
   let mut cookies = Vec::new();
   let mut any_selected_success = false;
   for profile in report.profiles {
@@ -748,7 +750,11 @@ pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
           list with browser_profiles(\"firefox\")"
 )]
 pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  extract(Request::browser("firefox").profile(profile).domains(domains))
+  extract(
+    Request::browser("firefox")
+      .profile(profile)
+      .domains(domains),
+  )
 }
 
 /// Returns cookies from LibreWolf

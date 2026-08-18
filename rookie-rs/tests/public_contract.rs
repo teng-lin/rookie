@@ -282,7 +282,8 @@ fn generic_report_api_signatures_are_the_section_5_8_surface() {
   let _: BrowserReportFn = rookie_cookies::browser_report;
   let _: fn(rookie_cookies::Request) -> Result<ExtractionReport> = rookie_cookies::extract_report;
   let _: fn(Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::load_report;
-  let _: fn(rookie_cookies::ReadRequest) -> Result<rookie_cookies::ReadResult> = rookie_cookies::read;
+  let _: fn(rookie_cookies::ReadRequest) -> Result<rookie_cookies::ReadResult> =
+    rookie_cookies::read;
   let _: fn(rookie_cookies::FromPathRequest) -> Result<rookie_cookies::ReadResult> =
     rookie_cookies::from_path;
   let _: fn(&str) -> Result<Vec<ProfileDescriptor>> = rookie_cookies::profiles;
