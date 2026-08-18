@@ -1283,9 +1283,9 @@ test("public JavaScript examples await async extraction APIs", (t) => {
   for (const [name, url, markdown] of documents) {
     const source = readFileSync(url, "utf8");
     const examples = markdown
-      ? [...source.matchAll(/```(?:js|javascript|typescript)\s*\n([\s\S]*?)```/g)].map(
-          (match) => match[1],
-        )
+      ? [...source.matchAll(/```(?:js|javascript|typescript)([^\n]*)\n([\s\S]*?)```/g)]
+          .filter((match) => !/\bhistorical\b/i.test(match[1]))
+          .map((match) => match[2])
       : [source];
 
     for (const example of examples) {

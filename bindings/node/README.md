@@ -177,10 +177,10 @@ In the 0.5.6 line extraction was **synchronous**. There was no `read` /
 `fromPath` job API. Node 18/20 were still supported. Upstream published
 `@rookie-rs/api`.
 
-```js
+```js historical
 import { brave, chrome, load } from "rookie-cookies";
 
-// Synchronous in 0.5.6 — returns CookieObject[] directly
+// Synchronous in 0.5.6 — returns CookieObject[] directly (do not copy for 0.6)
 const cookies = brave();
 const filtered = chrome(["example.com"]);
 const all = load();
