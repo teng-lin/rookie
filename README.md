@@ -157,7 +157,7 @@ require `--path` and are mutually exclusive. `--key-path` is a Windows
 
 Coming from 0.5.6 named helpers? Each language guide has a **0.5.6 API**
 section and a **migrate 0.5.6 → 0.6.0** section:
-[python](docs/python.md) · [javascript](docs/javascript.md) · [rust](docs/rust.md).
+[python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](docs/rust.md).
 
 ## Security
 
@@ -176,7 +176,7 @@ Platform quirks (Keychain prompts, Safari Full Disk Access):
 
 | | |
 | --- | --- |
-| Language guides | [python](docs/python.md) · [javascript](docs/javascript.md) · [rust](docs/rust.md) |
+| Language guides | [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](docs/rust.md) |
 | Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) |
 | Design | [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
 | Examples | [python](examples/python) · [javascript](examples/javascript) · [rust](examples/rust) |

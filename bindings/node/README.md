@@ -2,21 +2,19 @@
 
 Extract cookies from local browsers on Linux, macOS, and Windows.
 
-This file is the **npm landing page**. The canonical JavaScript guide —
-recommended 0.6 `read`, the 0.5.6 sync helpers, and **migrate 0.5.6 → 0.6.0** —
-is
-[`docs/javascript.md`](https://github.com/teng-lin/rookie-cookies/blob/main/docs/javascript.md)
-in the repo. Report object shapes in this file are the binding-specific
-reference that page links to.
+This file is the **JavaScript guide** (npm landing page and repo tutorial).
+Rust stays in [`docs/rust.md`](https://github.com/teng-lin/rookie-cookies/blob/main/docs/rust.md).
+The tree may still publish as `0.6.0-alpha.x`. The recommended 0.6 entry is
+`read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 
-**Node.js ≥ 22** (tested 22, 24, 26). Extraction exports return **Promises** —
-always `await`. `version()` is synchronous.
+**Node.js ≥ 22** (tested 22, 24, 26). Every extraction export returns a
+**Promise** — always `await`. `version()` is synchronous.
 
 ```console
 npm install rookie-cookies
 ```
 
-## Recommended 0.6 entry
+## Recommended 0.6.0 usage
 
 ```js
 import { read } from "rookie-cookies";
@@ -26,14 +24,17 @@ console.log(snapshot.cookies, snapshot.warnings);
 console.log(snapshot.header("https://example.com/"));
 ```
 
-Pass `profile` for session cookies. `read` never URL-filters. There is no
-top-level `header()`. Named helpers (`chrome()`, `brave()`, `load()`) still
-work and also return Promises; they are the compatibility bridge from
-[`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) / `@rookie-rs/api`
-and will break in a later major version.
+Pass `profile` for session cookies. `read` never URL-filters. There is **no**
+top-level `header()` — call `ReadResult.header(url)` on the snapshot.
 
-Coming from 0.5.6 sync `chrome()`? Use the
-[migration section](https://github.com/teng-lin/rookie-cookies/blob/main/docs/javascript.md#migrate-056--060).
+- No-profile `await read({ browser: "chrome" })` matches legacy `chrome()`
+  (persistent / legacy-eligible cookies).
+- Naming `profile` includes session cookies.
+
+Named helpers (`chrome()`, `brave()`, `load()`) still work and also return
+Promises. They are the compatibility bridge from
+[`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) / `@rookie-rs/api`
+and will break in a later major version. Prefer `read` for new code.
 
 ## Reports
 
@@ -67,6 +68,15 @@ if (profiles.length === 0) {
 }
 ```
 
+Job-layer aliases:
+
+```js
+import { profiles, report } from "rookie-cookies";
+
+const listed = await profiles("chrome");
+const viaJob = await report({ browser: "chrome", profile: listed[0]?.profile.profileId });
+```
+
 A profile's cookie stream is its **selected** sources whose `status` is
 `succeeded`, in listed order. A rejected candidate can still be `succeeded`,
 so status-only filtering double-counts.
@@ -81,9 +91,9 @@ ordinary numbers (never `BigInt`); overflow sets `countersSaturated`.
 
 These reject only on a **bad request** (`InvalidArg`): unknown browser, or a
 `profileId` that browser did not yield. `browserProfiles` also rejects when
-every installation root failed enumeration (empty would look like “not
-installed”). An absent registered browser resolves to `[]` or
-`status: "no_sources"`. Other failures are `GenericFailure`.
+every installation root failed enumeration. An absent registered browser
+resolves to `[]` or `status: "no_sources"`. Other failures are
+`GenericFailure`.
 
 `chrome()` stays default-first. `chromeProfiles()` / `chromeProfile()` add
 activity-hint order and a grouped report; lossy `pathLossy` selectors need
@@ -109,6 +119,47 @@ exposed. Windows Chromium paths without a selector reject
 `anyBrowser()`, `chromiumBased*`, and flat `firefoxBased()` are deprecated
 until ≥ 0.7. `firefoxBasedDetailed()` stays for container context.
 
+```js
+import { chromiumBasedDetailed } from "rookie-cookies";
+
+const records = await chromiumBasedDetailed(
+  "/path/to/Brave/Default/Network/Cookies",
+  ["example.com"],
+  "brave",
+);
+for (const { cookie, context } of records) {
+  console.log(cookie.name, context.topFrameSiteKey);
+}
+```
+
+## Timeouts and cancellation
+
+`cookiesFromPath`, `chromiumCookiesFromPath` /
+`chromiumCookiesFromPathDetailed`, every single-browser export, and `read` /
+`fromPath` accept `timeoutMs` and/or a `CancellationHandle`.
+
+```js
+import { chrome, CancellationHandle } from "rookie-cookies";
+
+const cancellation = new CancellationHandle();
+const timer = setTimeout(() => cancellation.cancel(), 5000);
+
+try {
+  const cookies = await chrome(undefined, 30000, cancellation);
+  console.log(cookies);
+} catch (error) {
+  if (error.message.includes("operation deadline expired")) {
+    console.log("timed out");
+  } else if (error.message.includes("operation cancelled")) {
+    console.log("cancelled");
+  } else {
+    throw error;
+  }
+} finally {
+  clearTimeout(timer);
+}
+```
+
 ## Netscape
 
 ```js
@@ -120,9 +171,45 @@ const output = toNetscape(await chrome());
 Tabs / CR / LF become `%09` / `%0D` / `%0A`. Same encoding as Rust, CLI, and
 Python.
 
+## 0.5.6 API
+
+In the 0.5.6 line extraction was **synchronous**. There was no `read` /
+`fromPath` job API. Node 18/20 were still supported. Upstream published
+`@rookie-rs/api`.
+
+```js
+import { brave, chrome, load } from "rookie-cookies";
+
+// Synchronous in 0.5.6 — returns CookieObject[] directly
+const cookies = brave();
+const filtered = chrome(["example.com"]);
+const all = load();
+```
+
+## Migrate 0.5.6 → 0.6.0
+
+| Area | 0.5.6 / early 0.5.x | 0.6.0 |
+| --- | --- | --- |
+| Recommended entry | `chrome()` / `brave()` (sync) | `await read({ browser, profile })` |
+| Async contract | Sync return values | **Every** extraction export is a Promise (since 0.5.8) |
+| Node.js | 18 / 20 accepted | **≥ 22** (tested 22 / 24 / 26) |
+| Session cookies | Not a first-class `profile` | Pass `profile` in `read({ … })` |
+| Path APIs | `firefoxBased`, `chromiumBased`, `anyBrowser` | `cookiesFromPath` / `chromiumCookiesFromPath` (legacy deprecated until ≥ 0.7) |
+| Errors | Flat `Unknown` | Request faults → `InvalidArg`; else `GenericFailure` |
+| Header view | Manual | `snapshot.header(url)` — **no** top-level `header()` |
+| Reports | Not in 0.5.6 | `report({ browser, profile })` / `browserReport(...)` |
+
+1. Bump Node.js to 22+.
+2. Add `await` (or `.then`) to every extraction call.
+3. Prefer `read`; pass `profile` for session cookies.
+4. Move explicit DB paths off `*Based` / `anyBrowser`.
+5. Inspect `.status` / `.code` for `InvalidArg` vs `GenericFailure`.
+6. Do not invent a top-level `header()`.
+
+See [CHANGELOG.md](https://github.com/teng-lin/rookie-cookies/blob/main/CHANGELOG.md).
+
 ## More
 
-- Guide + 0.5.6 migration: [docs/javascript.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/javascript.md)
-- Build / test: [docs/building.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/building.md),
-  [docs/testing.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/testing.md)
-- Source: [teng-lin/rookie-cookies](https://github.com/teng-lin/rookie-cookies)
+- [docs/building.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/building.md)
+- [docs/testing.md](https://github.com/teng-lin/rookie-cookies/blob/main/docs/testing.md)
+- [teng-lin/rookie-cookies](https://github.com/teng-lin/rookie-cookies)

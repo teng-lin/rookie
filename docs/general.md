@@ -1,7 +1,8 @@
 # Gotchas and operational notes
 
 Platform quirks that affect cookie extraction. For the recommended 0.6.0 API,
-see [python.md](python.md), [javascript.md](javascript.md), and
+see [bindings/python/README.md](../bindings/python/README.md),
+[bindings/node/README.md](../bindings/node/README.md), and
 [rust.md](rust.md).
 
 ## Password prompt

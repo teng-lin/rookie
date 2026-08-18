@@ -17,5 +17,6 @@ job-layer `read` / `jar` API. The long-form draft specs it pointed at
 | Unified profile query | [ADR 0003](../adr/0003-unified-profile-query.md) |
 | Recommended entry (`read` / `jar`) | [ADR 0004](../adr/0004-read-is-the-recommended-entry.md) |
 
-User-facing guides: [python.md](../python.md), [javascript.md](../javascript.md),
+User-facing guides: [bindings/python/README.md](../../bindings/python/README.md),
+[bindings/node/README.md](../../bindings/node/README.md),
 [rust.md](../rust.md), and the root [README.md](../../README.md).

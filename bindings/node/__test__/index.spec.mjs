@@ -1227,11 +1227,6 @@ Path=Profiles/work
 test("public JavaScript examples await async extraction APIs", (t) => {
   const documents = [
     ["README.md", new URL("../../../README.md", import.meta.url), true],
-    [
-      "docs/javascript.md",
-      new URL("../../../docs/javascript.md", import.meta.url),
-      true,
-    ],
     ["bindings/node/README.md", new URL("../README.md", import.meta.url), true],
     [
       "examples/javascript/simple.js",

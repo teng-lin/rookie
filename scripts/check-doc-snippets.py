@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert fenced code samples in user docs only reference shipped public exports.
 
-Parses README.md, docs/{python,javascript,rust}.md, and the PyPI/npm
-binding READMEs, extracts fenced samples,
+Parses README.md, docs/rust.md, and the PyPI/npm binding READMEs,
+extracts fenced samples,
 and checks that call-site symbols exist in:
 
 * bindings/python/rookie_cookies/__init__.py (__all__) and rookie_cookies.pyi
@@ -26,8 +26,6 @@ REPO = Path(__file__).resolve().parents[1]
 
 DOC_FILES = (
     REPO / "README.md",
-    REPO / "docs" / "python.md",
-    REPO / "docs" / "javascript.md",
     REPO / "docs" / "rust.md",
     REPO / "bindings" / "python" / "README.md",
     REPO / "bindings" / "node" / "README.md",
@@ -371,8 +369,6 @@ def main() -> int:
 
     for doc_path in (
         repo / "README.md",
-        repo / "docs" / "python.md",
-        repo / "docs" / "javascript.md",
         repo / "docs" / "rust.md",
         repo / "bindings" / "python" / "README.md",
         repo / "bindings" / "node" / "README.md",
@@ -439,8 +435,14 @@ def main() -> int:
 
     # Structural section requirements for language docs.
     required_headings = (
-        (repo / "docs" / "python.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
-        (repo / "docs" / "javascript.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
+        (
+            repo / "bindings" / "python" / "README.md",
+            ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6"),
+        ),
+        (
+            repo / "bindings" / "node" / "README.md",
+            ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6"),
+        ),
         (repo / "docs" / "rust.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
     )
     for path, needles in required_headings:
