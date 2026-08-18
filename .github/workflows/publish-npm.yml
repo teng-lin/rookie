@@ -372,12 +372,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Do not use `tar | grep` under pipefail: grep exits early on a match,
+          # tar gets SIGPIPE ("stdout: write error"), and the pipeline falsely fails.
           for tarball in \
             "../../release-packages/npm/rookie-cookies-$RELEASE_VERSION.tgz" \
             "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz"
           do
-            tar -tzf "$tarball" | grep -qx "package/LICENSE.md" \
-              || { echo "LICENSE.md missing from $tarball" >&2; exit 1; }
+            listing="$(mktemp)"
+            tar -tzf "$tarball" >"$listing"
+            if ! grep -qx "package/LICENSE.md" "$listing"; then
+              echo "LICENSE.md missing from $tarball" >&2
+              echo "tarball contents:" >&2
+              cat "$listing" >&2
+              exit 1
+            fi
+            rm -f "$listing"
           done
       - name: Record release and Windows scan checksums
         shell: bash
