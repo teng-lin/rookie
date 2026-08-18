@@ -172,6 +172,18 @@ class CheckDocSnippetsTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "docs").mkdir()
+        py_readme = root / "bindings" / "python" / "README.md"
+        py_readme.write_text(
+            "## Recommended 0.6\n\n"
+            "```python\nimport rookie_cookies\nx = rookie_cookies.chrome()\n```\n",
+            encoding="utf-8",
+        )
+        node_readme = root / "bindings" / "node" / "README.md"
+        node_readme.write_text(
+            "## Recommended 0.6\n\n"
+            "```js\nimport { chrome } from \"rookie-cookies\";\nawait chrome();\n```\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 # rookie-cookies Python Docs
 
-This guide covers the **0.6.0** Python surface (the tree may still publish as
-`0.6.0-alpha.x`). The recommended entry is `jar` / `read` per
-[ADR 0004](adr/0004-read-is-the-recommended-entry.md). Later sections document
-the **0.5.6 API** shape and how to **migrate 0.5.6 → 0.6.0**.
+This is the **canonical Python guide** in the git repo (tutorial, 0.5.6 API,
+migrate 0.5.6 → 0.6.0). The [PyPI README](../bindings/python/README.md) is the
+registry landing page: short `jar` / `read` plus report-DTO field notes.
+
+This tree may still publish as `0.6.0-alpha.x`. The recommended entry is `jar`
+/ `read` per [ADR 0004](adr/0004-read-is-the-recommended-entry.md).
 
 ## Install (0.6.0)
 
@@ -89,6 +91,8 @@ print(legacy["status"], legacy["summary"]["cookies_emitted"])
 
 `supported_browsers()` lists registration (not detection).
 `browser_profiles(browser_id)` / `profiles(browser_id)` list what is installed.
+Snake_case report keys, `schema_version`, `termination`, and issue sampling:
+[bindings/python/README.md](../bindings/python/README.md#reports).
 
 ### Timeouts and cancellation
 

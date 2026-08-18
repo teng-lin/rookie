@@ -1,9 +1,11 @@
 # rookie-cookies JavaScript Docs
 
-This guide covers the **0.6.0** Node.js surface (the tree may still publish as
-`0.6.0-alpha.x`). The recommended entry is `read` per
-[ADR 0004](adr/0004-read-is-the-recommended-entry.md). Later sections document
-the **0.5.6 API** shape and how to **migrate 0.5.6 → 0.6.0**.
+This is the **canonical JavaScript guide** in the git repo (tutorial, 0.5.6
+API, migrate 0.5.6 → 0.6.0). The [npm README](../bindings/node/README.md) is
+the registry landing page: short `read` plus camelCase report object shapes.
+
+This tree may still publish as `0.6.0-alpha.x`. The recommended entry is `read`
+per [ADR 0004](adr/0004-read-is-the-recommended-entry.md).
 
 ## Install (0.6.0)
 
@@ -72,8 +74,9 @@ const viaCompat = await browserReport("chrome", profilesList[0]?.profile.profile
 ```
 
 Cookies stay attached to the source they came from, alongside that source's
-status, acquisition strategy, counters, and diagnostics. See
-[the Node binding README](../bindings/node/README.md#reports) for object shapes.
+status, acquisition strategy, counters, and diagnostics. CamelCase object
+shapes, `schemaVersion`, and selected-source rules:
+[bindings/node/README.md#reports](../bindings/node/README.md#reports).
 
 ### Timeouts and cancellation
 

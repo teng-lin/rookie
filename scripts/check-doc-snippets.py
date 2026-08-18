@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Assert fenced code samples in user docs only reference shipped public exports.
 
-Parses README.md + docs/{python,javascript,rust}.md, extracts fenced samples,
+Parses README.md, docs/{python,javascript,rust}.md, and the PyPI/npm
+binding READMEs, extracts fenced samples,
 and checks that call-site symbols exist in:
 
 * bindings/python/rookie_cookies/__init__.py (__all__) and rookie_cookies.pyi
@@ -28,6 +29,8 @@ DOC_FILES = (
     REPO / "docs" / "python.md",
     REPO / "docs" / "javascript.md",
     REPO / "docs" / "rust.md",
+    REPO / "bindings" / "python" / "README.md",
+    REPO / "bindings" / "node" / "README.md",
 )
 
 FENCE_RE = re.compile(
@@ -371,6 +374,8 @@ def main() -> int:
         repo / "docs" / "python.md",
         repo / "docs" / "javascript.md",
         repo / "docs" / "rust.md",
+        repo / "bindings" / "python" / "README.md",
+        repo / "bindings" / "node" / "README.md",
     ):
         if not doc_path.is_file():
             errors.append(f"missing documentation file: {doc_path}")
