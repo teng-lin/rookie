@@ -540,13 +540,21 @@ git status --porcelain # must print nothing
 export TARGET=x86_64-unknown-linux-gnu
 cargo build --release --locked --target "$TARGET" \
   --package rookie-cookies-cli --bin rookie-cookies
+# Windows: add --features appbound and the .exe suffix on the asset name.
 mv "target/$TARGET/release/rookie-cookies" "rookie-cookies-cli-$TARGET"
-gh release upload "v$VERSION" "rookie-cookies-cli-$TARGET"
+python3 scripts/write-sha256-sidecar.py "rookie-cookies-cli-$TARGET"
+gh release upload "v$VERSION" \
+  "rookie-cookies-cli-$TARGET" "rookie-cookies-cli-$TARGET.sha256"
 ```
 
 Each platform binary must be built on its own host. Use the workflow's matrix as
 the reference for target names, for the `.exe` suffix on Windows asset names,
-and for the `--features appbound` flag the Windows build adds.
+and for the `--features appbound` flag the Windows build adds. After upload,
+record the Windows scan disposition against that target's
+`release-scan-manifest.json` the same way as in "Publish CLI binaries" — the
+npm native module scan does not cover the CLI executable. Prefer
+`retry-cli-asset.yml` when Actions is available; it writes the sidecar and
+uploads both files.
 
 This workflow only triggers on `workflow_dispatch`, so it cannot be exercised
 by normal pull request CI. Review its YAML carefully and dispatch-test it

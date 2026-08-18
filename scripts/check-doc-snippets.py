@@ -111,7 +111,7 @@ INSTANCE_METHODS = {
 FORBIDDEN_TOP_LEVEL = {
     "python": {"header"},  # only ReadResult.header
     "javascript": {"header"},
-    "rust": {"get", "report"},  # no crate-root get/report (ADR 0004)
+    "rust": {"get"},  # no crate-root get; report is a public module
 }
 
 
@@ -231,11 +231,23 @@ def load_rust_exports(repo: Path) -> set[str]:
 
 def python_symbols_from_snippet(body: str) -> set[str]:
     symbols: set[str] = set()
-    # from rookie_cookies import a, b
+    consumed = set()
     for match in re.finditer(
-        r"from\s+rookie_cookies\s+import\s+\(?([^)\n]+)\)?",
+        r"from\s+rookie_cookies\s+import\s+\((.*?)\)",
+        body,
+        re.DOTALL,
+    ):
+        consumed.add(match.span())
+        for part in match.group(1).split(","):
+            name = part.strip().split(" as ")[0].strip()
+            if name and name != "*":
+                symbols.add(name)
+    for match in re.finditer(
+        r"from\s+rookie_cookies\s+import\s+([^\n(]+)",
         body,
     ):
+        if any(start <= match.start() < end for start, end in consumed):
+            continue
         for part in match.group(1).split(","):
             name = part.strip().split(" as ")[0].strip()
             if name and name != "*":
@@ -353,6 +365,14 @@ def check_forbidden(lang_key: str, symbols: set[str], path: Path, body: str) -> 
                 f"{path}: forbids crate/binding-root `{name}` in {lang_key} samples "
                 f"(ADR 0004)"
             )
+    if lang_key == "rust" and re.search(
+        r"(?:rookie_cookies::report|(?<![\w:])report)\s*\(",
+        body,
+    ):
+        errors.append(
+            f"{path}: forbids crate-root `report(...)` (ADR 0004); "
+            f"`rookie_cookies::report::…` module paths are allowed"
+        )
     return errors
 
 

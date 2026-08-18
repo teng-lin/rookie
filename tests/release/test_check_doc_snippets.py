@@ -95,6 +95,107 @@ class CheckDocSnippetsTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("header", result.stderr)
 
+    def test_multiline_python_import_of_missing_export_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_minimal_surfaces(root)
+            (root / "bindings" / "python" / "README.md").write_text(
+                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "```python\nfrom rookie_cookies import (\n    chrome,\n"
+                "    not_a_real_export,\n)\n```\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not_a_real_export", result.stderr)
+
+    def test_invented_node_export_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_minimal_surfaces(root)
+            (root / "bindings" / "node" / "README.md").write_text(
+                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "```js\nimport { notARealExport } from \"rookie-cookies\";\n"
+                "await notARealExport();\n```\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("notARealExport", result.stderr)
+
+    def test_invented_rust_export_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_minimal_surfaces(root)
+            (root / "rookie-rs" / "README.md").write_text(
+                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "```rust\nfn main() { let _ = rookie_cookies::not_a_real_export(); }\n```\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not_a_real_export", result.stderr)
+
+    def test_rust_report_module_path_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_minimal_surfaces(root)
+            (root / "rookie-rs" / "README.md").write_text(
+                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "```rust\nuse rookie_cookies::report;\n"
+                "fn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
+                encoding="utf-8",
+            )
+            (root / "rookie-rs" / "src" / "lib.rs").write_text(
+                "pub fn chrome() {}\npub fn read() {}\npub struct ReadRequest;\n"
+                "pub mod report;\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout={result.stdout!r}\nstderr={result.stderr!r}",
+            )
+
+    def test_rust_crate_root_report_call_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._seed_minimal_surfaces(root)
+            (root / "rookie-rs" / "README.md").write_text(
+                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "```rust\nfn main() { let _ = rookie_cookies::report(\"chrome\"); }\n```\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--repo", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("report", result.stderr)
+
     def test_python_export_loader_sees_jar_and_read(self) -> None:
         exports = self.checker.load_python_exports(REPOSITORY_ROOT)
         self.assertIn("jar", exports)
@@ -157,6 +258,13 @@ class CheckDocSnippetsTests(unittest.TestCase):
             "pub struct DirectPathRequest;\n"
             "pub struct ChromiumPathRequest;\n"
             "pub enum ChromiumCredentialSource {}\n",
+            encoding="utf-8",
+        )
+        (root / "README.md").write_text(
+            "# demo\n\n"
+            "```python\nimport rookie_cookies\nrookie_cookies.chrome()\n```\n\n"
+            "```js\nimport { chrome } from \"rookie-cookies\";\nawait chrome();\n```\n\n"
+            "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
             encoding="utf-8",
         )
         (root / "docs").mkdir()

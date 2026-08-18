@@ -46,25 +46,31 @@ On Windows Chromium paths, select credentials explicitly with exactly one of
 
 ## Manually import website cookies in a browser
 
-To push extracted cookies back into a browser console on an already-open origin:
+To push extracted cookies back into a browser console on an already-open origin.
+`document.cookie` cannot create **HttpOnly** cookies; skip those or set them
+through a proper client API.
 
 ```python
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import rookie_cookies
 
 
 def create_js_code(cookies):
-    expires = datetime.now(timezone.utc) + timedelta(days=365)
-    expires = expires.strftime("%a, %d %b %Y %H:%M:%S %Z")
     js_code = ""
     for cookie in cookies:
         name = cookie.get("name", "")
         value = cookie.get("value", "")
-        if name and value:
-            assignment = f"{name}={value};expires={expires};"
-            js_code += f"document.cookie = {json.dumps(assignment)};\n"
+        if not name or cookie.get("http_only"):
+            continue
+        parts = [f"{name}={value}", f"path={cookie.get('path') or '/'}"]
+        expires = cookie.get("expires")
+        if expires:
+            stamped = datetime.fromtimestamp(int(expires), tz=timezone.utc)
+            parts.append("expires=" + stamped.strftime("%a, %d %b %Y %H:%M:%S GMT"))
+        assignment = ";".join(parts) + ";"
+        js_code += f"document.cookie = {json.dumps(assignment)};\n"
     js_code += "location.reload()\n"
     return js_code
 

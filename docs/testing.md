@@ -31,7 +31,8 @@ After `maturin develop --release --locked` in `bindings/python`:
 python -m unittest discover -s tests/python -p 'test_*.py' -v
 ```
 
-After `npm ci && npm run build` in `bindings/node`:
+After `npm ci --omit=optional && npm run build` in `bindings/node`
+(omit published platform prebuilds so they cannot shadow the local addon):
 
 ```console
 npm test

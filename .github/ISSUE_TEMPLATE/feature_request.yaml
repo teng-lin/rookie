@@ -9,6 +9,7 @@ body:
         Search existing issues first. New work should fit the 0.6 `read` / `jar`
         job API ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
         Named helpers (`chrome()`, …) are a compatibility bridge and will break later.
+        Do **not** attach real cookie values or browser database files.
   - type: textarea
     id: describe-the-feature
     attributes:

@@ -116,7 +116,8 @@ import threading
 import rookie_cookies
 
 cancellation = rookie_cookies.CancellationHandle()
-threading.Timer(5, cancellation.cancel).start()
+timer = threading.Timer(5, cancellation.cancel)
+timer.start()
 
 try:
     rows = rookie_cookies.read(
@@ -132,6 +133,8 @@ except RuntimeError as error:
         print("cancelled")
     else:
         raise
+finally:
+    timer.cancel()
 ```
 
 ## Netscape
