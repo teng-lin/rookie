@@ -10,7 +10,7 @@
   "main": "rookie_cookies.linux-x64-gnu.node",
   "files": [
     "rookie_cookies.linux-x64-gnu.node",
-    "MIT-LICENSE.txt"
+    "LICENSE.md"
   ],
   "description": "Load cookies from any browser on any platform",
   "license": "MIT",

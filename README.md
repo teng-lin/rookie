@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/rookie-cookies?logo=python)](https://pypi.org/project/rookie-cookies/)
 [![npm](https://img.shields.io/npm/v/rookie-cookies?logo=npm&color=0076CE)](https://www.npmjs.com/package/rookie-cookies/)
 [![crates.io](https://img.shields.io/crates/v/rookie-cookies?logo=rust)](https://crates.io/crates/rookie-cookies/)
-[![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](MIT-LICENSE.txt)
+[![License](https://img.shields.io/github/license/teng-lin/rookie-cookies?logo=license)](LICENSE.md)
 
 Cross-platform libraries and a CLI for reading cookies from browsers on your
 machine. One Rust engine, bindings for **Python**, **Node.js**, and **Rust**,
@@ -204,4 +204,4 @@ Also indebted to [`browser_cookie3`](https://github.com/borisbabic/browser_cooki
 
 ## License
 
-[MIT](MIT-LICENSE.txt).
+[MIT](LICENSE.md).

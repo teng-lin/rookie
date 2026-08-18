@@ -121,8 +121,8 @@ jobs:
           node -e "
             const packed = require('/tmp/npm-pack-root.json');
             const files = packed[0].files.map((entry) => entry.path);
-            if (!files.includes('MIT-LICENSE.txt')) {
-              throw new Error('MIT-LICENSE.txt is missing from the root npm package: ' + files.join(', '));
+            if (!files.includes('LICENSE.md')) {
+              throw new Error('LICENSE.md is missing from the root npm package: ' + files.join(', '));
             }
           "
 
@@ -375,8 +375,8 @@ jobs:
             "../../release-packages/npm/rookie-cookies-$RELEASE_VERSION.tgz" \
             "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz"
           do
-            tar -tzf "$tarball" | grep -qx "package/MIT-LICENSE.txt" \
-              || { echo "MIT-LICENSE.txt missing from $tarball" >&2; exit 1; }
+            tar -tzf "$tarball" | grep -qx "package/LICENSE.md" \
+              || { echo "LICENSE.md missing from $tarball" >&2; exit 1; }
           done
       - name: Record release and Windows scan checksums
         shell: bash
