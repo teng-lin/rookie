@@ -1222,6 +1222,14 @@ pub struct JsReadResult {
 
 #[napi]
 impl JsReadResult {
+  /// Not constructible from JavaScript. Use `read()` or `fromPath()`.
+  #[napi(constructor)]
+  pub fn new() -> Result<Self> {
+    Err(napi::Error::from_reason(
+      "ReadResult cannot be constructed from JavaScript; call read() or fromPath()",
+    ))
+  }
+
   #[napi(getter)]
   pub fn cookies(&self) -> Result<Vec<CookieObject>> {
     cookies_to_js(clone_cookies(self.inner.cookies()))

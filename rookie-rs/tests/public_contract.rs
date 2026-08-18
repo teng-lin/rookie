@@ -270,6 +270,22 @@ fn direct_path_error_accessors_are_stable_for_downstream_consumers() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn fault_kind_keeps_chromium_based_unknown_browser_as_engine() {
+  let error = rookie_cookies::chromium_based_with_browser_id(
+    Some("definitely-not-a-registered-browser-id"),
+    std::env::temp_dir().join("rookie-missing-cookies"),
+    None,
+    false,
+  )
+  .expect_err("direct browser_definition path stays unstructured");
+  assert_eq!(
+    rookie_cookies::fault_kind(&error),
+    rookie_cookies::FaultKind::Engine
+  );
+}
+
 #[test]
 fn generic_report_api_signatures_are_the_section_5_8_surface() {
   type BrowserReportFn = fn(&str, Option<&str>, Option<Vec<String>>) -> Result<ExtractionReport>;

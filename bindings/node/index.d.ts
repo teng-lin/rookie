@@ -331,7 +331,15 @@ export declare class CancellationHandle {
   get isCancelled(): boolean
 }
 export type JsReadResult = ReadResult
-export declare class ReadResult { }
+export declare class ReadResult {
+  /** Not constructible from JavaScript. Use `read()` or `fromPath()`. */
+  constructor()
+  get cookies(): Array<CookieObject>
+  get warnings(): Array<ReadWarningObject>
+  get browserId(): string
+  get profileId(): string | null
+  header(url: string): string
+}
 /** rookie-cookies cross-platform facade */
 /** Linux-only browsers */
 export declare function cachy(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>

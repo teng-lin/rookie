@@ -1417,19 +1417,6 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn fault_kind_keeps_chromium_based_unknown_browser_as_engine() {
-    let error = chromium_based_with_browser_id(
-      Some("definitely-not-a-registered-browser-id"),
-      std::env::temp_dir().join("rookie-missing-cookies"),
-      None,
-      false,
-    )
-    .expect_err("direct browser_definition path stays unstructured");
-    assert_eq!(fault_kind(&error), FaultKind::Engine);
-  }
-
-  #[cfg(unix)]
-  #[test]
   fn explicit_path_rejects_encrypted_rows_without_browser_identity() {
     let directory = crate::utils::TempDir::new().expect("temp directory");
     let db = directory.path().join("Cookies");
