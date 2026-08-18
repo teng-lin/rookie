@@ -1779,7 +1779,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rookie-cookies"
-version = "0.6.0-alpha.3"
+version = "0.6.0-beta.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "rookie-cookies-cli"
-version = "0.6.0-alpha.3"
+version = "0.6.0-beta.1"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "rookie-cookies-node"
-version = "0.6.0-alpha.3"
+version = "0.6.0-beta.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "rookie-cookies-python"
-version = "0.6.0-alpha.3"
+version = "0.6.0-beta.1"
 dependencies = [
  "log",
  "pyo3",
