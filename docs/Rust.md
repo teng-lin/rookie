@@ -1,12 +1,17 @@
 # rookie-cookies Rust Docs
 
-## Install
+This guide covers the **0.6.0** Rust crate surface (the tree may still publish
+as `0.6.0-alpha.x`). The recommended entry is `read(ReadRequest::…)` per
+[ADR 0004](adr/0004-read-is-the-recommended-entry.md). Later sections document
+the **0.5.6 API** shape and how to **migrate 0.5.6 → 0.6.0**.
+
+## Install (0.6.0)
 
 ```console
 cargo add rookie-cookies
 ```
 
-## Basic Usage
+## Recommended 0.6.0 usage
 
 ```rust
 use rookie_cookies::{read, ReadRequest};
@@ -24,24 +29,25 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
-Store helpers such as `browser("chrome", domains)` and `extract` remain
-supported. `read` is the recommended job: one unfiltered snapshot, then
-`header(url)` as a view. There is no crate-root `get` or `report` function.
+`read` is the recommended job: one unfiltered snapshot, then `header(url)` as a
+view. There is **no** crate-root `get` or `report` function. Bindings-facing
+`profiles(browser_id)` exists as an alias of `browser_profiles`; structured
+reports use `extract_report` / `browser_report`.
 
-## One operation, any registered browser
+### Profile selection and session cookies
 
-`browser(id, domains)` and the lower-level `extract(Request::browser(id))` are
-the canonical entry point: unlike a per-browser function, `id` can be any
-canonical ID or alias `supported_browsers()` lists, including registered forks
-and alternate builds with no dedicated function. Both resolve the same first
-installation and first legacy-compatible profile the older named functions
-(`chrome`, `firefox`, `brave`, ...) do — use `browser_report`/`browser_profiles`
-to cover every installation and profile instead.
+- No-profile `read(ReadRequest::browser("chrome"))` matches the compatibility
+  flatten used by `chrome()` / `extract` when `include_expired` is set
+  appropriately (persistent / legacy-eligible cookies).
+- Naming a profile includes session cookies, so a profile-aware `read` can
+  return more cookies than omitting `profile()`.
+- Session import should call `.profile(...)`.
 
-The named per-browser functions (`chrome`, `firefox`, `firefox_profile`,
-`brave`, ...) are `#[deprecated]` since 0.6.0 in favor of `browser`/`extract`
-and remain fully supported through the deprecation window; nothing below stops
-working.
+### One operation, any registered browser
+
+`browser(id, domains)` and the lower-level `extract(Request::browser(id))` remain
+the compatibility / multi-id store verbs. Prefer them when you need a domain
+filter on the frozen flat list; prefer `read` for session import.
 
 ```rust
 fn main() -> rookie_cookies::Result<()> {
@@ -53,11 +59,39 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
-## Timeouts and cancellation
+The named per-browser functions (`chrome`, `firefox`, `brave`, …) are
+`#[deprecated]` since 0.6.0 in favor of `browser` / `extract` / `read` and remain
+fully supported through the deprecation window.
 
-`Request`, `DirectPathRequest`, and `ChromiumPathRequest` each accept an
-optional `.timeout(Duration)` budget and an optional `.cancellation(handle)`
-for cooperative, cross-thread cancellation of an in-flight extraction:
+### Explicit paths
+
+```rust
+use std::path::PathBuf;
+use rookie_cookies::direct_path::{
+    chromium_cookies_from_path_detailed, cookies_from_path, ChromiumCredentialSource,
+    ChromiumPathRequest, DirectPathRequest,
+};
+
+fn main() -> rookie_cookies::Result<()> {
+    let mozilla = cookies_from_path(DirectPathRequest::new(PathBuf::from(
+        "/path/to/cookies.sqlite",
+    )))?;
+    let chromium = chromium_cookies_from_path_detailed(
+        ChromiumPathRequest::new("/path/to/Network/Cookies")
+            .domains(vec!["example.com".to_owned()])
+            .credentials(ChromiumCredentialSource::BrowserId("brave".to_owned())),
+    )?;
+    println!("{} {}", mozilla.len(), chromium.len());
+    Ok(())
+}
+```
+
+Errors from the direct-path API remain `anyhow::Error`; downcast to
+`direct_path::DirectPathError` for stable `kind()`, `code()`, and related
+accessors. The earlier `*_based`, `any_browser`, and config-based direct-path
+APIs remain available through 0.6 and are deprecated for removal in 0.7.
+
+### Timeouts and cancellation
 
 ```rust
 use std::time::Duration;
@@ -66,7 +100,6 @@ fn main() -> rookie_cookies::Result<()> {
     let cancellation = rookie_cookies::CancellationHandle::new();
     let watcher = cancellation.clone();
     std::thread::spawn(move || {
-        // Cancel from another thread, e.g. in response to a user action.
         std::thread::sleep(Duration::from_secs(5));
         watcher.cancel();
     });
@@ -86,140 +119,88 @@ fn main() -> rookie_cookies::Result<()> {
 }
 ```
 
-`CancellationHandle` is `Clone`; every clone shares one underlying signal, so
-cancelling any clone cancels all of them. Cancellation and timeouts are
-checked cooperatively at the same internal boundaries, so they take effect
-mid-extraction rather than only before it starts, but a single long-running
-step between checkpoints is not interrupted mid-step.
+`ReadRequest` and `FromPathRequest` accept the same `.timeout` /
+`.cancellation` builders. Classify request vs engine faults with
+`fault_kind(&error)` (`FaultKind::Request` / `FaultKind::Engine`).
 
-## `load()` and `load_report()` probe browsers concurrently
-
-`load(domains)` and `load_report(domains)` probe every registered browser on
-a small bounded worker pool sharing one deadline/cancellation budget, rather
-than one browser at a time — a slow or hung source no longer starves every
-other source's share of that budget. The result is always grouped by browser
-in the same fixed order each function attempts browsers in (`load`'s own
-browser list and `load_report`'s registry order are tracked separately, but
-each is internally fixed) regardless of which browser's extraction actually
-finished first. Once the shared deadline or cancellation trips, no
-not-yet-started browser is attempted, but a browser already in flight at that
-moment still runs to completion and its results are kept — a per-source
-timeout or cancellation never discards a sibling browser's already-completed
-cookies.
-
-## Firefox profiles
-
-`firefox()` prefers the profile Firefox itself would open, resolved from
-`profiles.ini`. If that profile has no `cookies.sqlite` it falls through to the
-other profiles and finally to the profile root, so it returns cookies rather
-than an error — which means the cookies it returns are not guaranteed to come
-from the profile Firefox currently has open.
-
-To know which profile you are reading, or to reach a secondary one deliberately,
-list them and select by name, directory name, or full path:
+### Reports and profiles
 
 ```rust
-use rookie_cookies;
-
-fn main() {
-    for profile in rookie_cookies::firefox_profiles().unwrap() {
-        println!("{} {} default={}", profile.name, profile.path.display(), profile.is_default);
-    }
-
-    let cookies = rookie_cookies::firefox_profile("work", None).unwrap();
-    println!("{cookies:?}");
-}
-```
-
-## Chrome profiles
-
-`chrome()` remains the legacy default-first selector. The additive
-`chrome_profiles()` listing uses Chrome's advisory `Local State` activity hints:
-the last-used profile appears first, followed by the other active profiles. If
-the hints are missing, stale, or malformed, the order safely falls back to the
-generic default-first registry order.
-
-`chrome_profile()` accepts a profile ID, display name, directory name, or a full
-path when `profile.path_lossy` is false. Lossy display paths require the opaque
-profile ID. It returns a grouped report rather than a flat cookie vector,
-preserving the profile identity, selected source, counters, and typed issues.
-
-```rust
-fn main() {
-    let profiles = rookie_cookies::chrome_profiles().unwrap();
+fn main() -> rookie_cookies::Result<()> {
+    let profiles = rookie_cookies::browser_profiles("chrome")?;
     if let Some(preferred) = profiles.first() {
-        let report = rookie_cookies::chrome_profile(
-            preferred.profile.profile_id.as_str(),
-            Some(vec!["example.com".to_owned()]),
-        )
-        .unwrap();
+        let report = rookie_cookies::browser_report(
+            "chrome",
+            Some(preferred.profile.profile_id.as_str()),
+            None,
+        )?;
         println!("{}", report.status);
     }
+    Ok(())
 }
 ```
 
-## Partition and container context
+`load()` / `load_report()` probe registered browsers concurrently on a bounded
+worker pool sharing one deadline / cancellation budget.
 
-The original `Cookie` type intentionally remains a compatibility projection.
-Use the additive detailed path APIs when cookies that share
-`(domain, path, name)` must remain distinguishable by Chromium CHIPS partition
-or Firefox container:
+## 0.5.6 API
+
+In the 0.5.6 line (and the early maintained-fork docs), the Rust surface was the
+flat named-browser helpers. There was no `read` / `ReadRequest` job API, no
+typed `direct_path` builders, and no `FaultKind` / `stop_reason` helpers.
+
+Typical 0.5.6-style usage:
 
 ```rust
-use std::path::PathBuf;
-
-fn main() -> rookie_cookies::Result<()> {
-    let cookies = rookie_cookies::firefox_based_detailed(
-        PathBuf::from("/path/to/cookies.sqlite"),
-        None,
-    )?;
-    for record in cookies {
-        println!("{} {:?}", record.cookie.name, record.context);
+fn main() {
+    let cookies = rookie_cookies::chrome(None).unwrap();
+    for cookie in cookies {
+        println!("{:?}", cookie);
     }
-    Ok(())
+
+    let domains = vec!["example.com".to_string()];
+    let filtered = rookie_cookies::brave(Some(domains)).unwrap();
+    println!("{}", filtered.len());
 }
 ```
 
-For explicit Chromium databases, use the all-target request API. The source is
-validated as Chromium before options or key providers are touched:
+Install at that era:
 
-```rust
-use rookie_cookies::direct_path::{
-    chromium_cookies_from_path_detailed, ChromiumCredentialSource,
-    ChromiumPathRequest,
-};
-
-fn main() -> rookie_cookies::Result<()> {
-    let cookies = chromium_cookies_from_path_detailed(
-        ChromiumPathRequest::new("/path/to/Network/Cookies")
-            .domains(vec!["example.com".to_owned()])
-            .credentials(ChromiumCredentialSource::BrowserId("brave".to_owned())),
-    )?;
-    println!("{}", cookies.len());
-    Ok(())
-}
+```console
+cargo add rookie-cookies
 ```
 
-`Automatic` preserves the existing ordered browser-identity probe on Linux and
-macOS. Windows requires an explicit `LocalStateFile`. `PlaintextOnly` is strict:
-if any row is encrypted, the complete request fails instead of returning a
-partial list. `AllowProcessShutdown` is an explicit Windows-only choice; the
-default `NonDisruptive` policy never terminates a browser.
+(Upstream 0.5.6 used the `rookie` crate name; the maintained fork publishes
+`rookie-cookies`.)
 
-For a source whose browser family is not known in advance, use
-`cookies_from_path(DirectPathRequest::new(path))`. Mozilla SQLite works on every
-compile target. Chromium works on Linux, macOS, and Windows; Safari binary
-cookies are macOS-only and Internet Explorer WebCache is Windows-only.
+## Migrate 0.5.6 → 0.6.0
 
-The earlier `*_based`, `any_browser`, and config-based direct-path APIs remain
-available through 0.6 for compatibility and are deprecated for removal in 0.7.
-Errors from the new API remain `anyhow::Error`; downcast to
-`direct_path::DirectPathError` for stable `kind()`, `code()`, source, target,
-and reason accessors without losing the underlying I/O, SQLite, or key error.
+| Area | 0.5.6 / early 0.5.x | 0.6.0 |
+| --- | --- | --- |
+| Recommended entry | `chrome(None)` / `brave(Some(domains))` | `read(ReadRequest::browser(...).profile(...))` |
+| Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(Request::…)` for flat lists; named helpers are deprecated |
+| Session cookies | Not a first-class `profile()` on a job API | `ReadRequest::browser(id).profile(query)` |
+| Path APIs | `*_based`, `any_browser`, config paths | Prefer `direct_path::{cookies_from_path, ChromiumPathRequest, …}`; legacy helpers deprecated until 0.7 |
+| Errors | Flat `anyhow::Error` | Still `anyhow::Error`, plus `fault_kind` / `RequestError` / `stop_reason` / `DirectPathError` downcasts |
+| Header / get | Not a job view | `ReadResult::header(url)` — **no** crate-root `get` or `report` |
+| IE helpers | `internet_explorer` / `internet_explorer_based` | Deprecated for removal (ESE native C library; IE app discontinued) |
+
+Concrete migration steps:
+
+1. **Switch session-import call sites** from `chrome(None)` to
+   `read(ReadRequest::browser("chrome").profile("Default"))` (or another
+   discovered profile query).
+2. **Prefer `browser` / `extract`** when you still need the flat domain-filtered
+   compatibility list without the job snapshot.
+3. **Move explicit DB paths** onto `direct_path` builders.
+4. **Classify failures** with `fault_kind` / `stop_reason` instead of string
+   matching alone.
+5. Do **not** add or call crate-root `get` / `report` — use `ReadResult::header`
+   and `extract_report` / `browser_report`.
+
+See [CHANGELOG.md](../CHANGELOG.md) for the full 0.6.0 breaking/compat list.
 
 ## Logging
-
-Logging level can be controlled by changing `RUST_LOG` ENV variable
 
 ```console
 RUST_LOG=trace cargo run

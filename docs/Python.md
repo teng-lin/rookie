@@ -1,85 +1,63 @@
 # rookie-cookies Python Docs
 
-## Install
+This guide covers the **0.6.0** Python surface (the tree may still publish as
+`0.6.0-alpha.x`). The recommended entry is `jar` / `read` per
+[ADR 0004](adr/0004-read-is-the-recommended-entry.md). Later sections document
+the **0.5.6 API** shape and how to **migrate 0.5.6 → 0.6.0**.
 
-CPython 3.11 or newer is required. Wheels use the `cp311-abi3` stable ABI and
-are tested on CPython 3.11–3.14.
+## Install (0.6.0)
+
+CPython **3.11 or newer** is required. Wheels use the `cp311-abi3` stable ABI and
+are tested on CPython 3.11–3.14. CPython 3.8–3.10 and PyPy are not supported in
+0.6.
 
 ```console
 pip3 install -U rookie-cookies
 ```
 
-## Basic Usage
+## Recommended 0.6.0 usage
 
 ```python
+import http.cookiejar
+import requests
 import rookie_cookies as cookies
 
 # Session import. Pass profile= so session cookies are included.
+session = requests.Session()
 session.cookies = cookies.jar(browser="chrome", profile="Default")
 
 # Domain-intact records for storage_state / allowlists
 rows = cookies.read(browser="chrome", profile="Work").as_list()
+
+# Cookie request-header *view* over an unfiltered snapshot
+header = cookies.read(browser="chrome", profile="Default").header(
+    "https://example.com/"
+)
 ```
 
-`read` never URL-filters the snapshot. `jar` loads every acquired record into
-`http.cookiejar`; the stdlib owns send-match. `ReadResult.header(url)` is a
-Cookie request-header *view* over that snapshot.
+`read` never URL-filters the snapshot. `jar` is sugar for `read(...).as_jar()`
+and loads every acquired record into `http.cookiejar`; the stdlib owns
+send-match. There is **no** top-level `header()` export — call
+`ReadResult.header(url)` on a snapshot you already took.
 
-No-profile `read(browser="chrome")` matches `chrome()` (persistent /
-legacy-eligible cookies). Naming a profile includes session cookies, so
-`read(browser="chrome", profile="Default")` can return more cookies than
-omitting the profile.
+### Profile selection and session cookies
 
-Named helpers such as `chrome()` remain supported.
+- No-profile `read(browser="chrome")` matches `chrome()` (persistent /
+  legacy-eligible cookies only).
+- Naming a profile includes session cookies, so
+  `read(browser="chrome", profile="Default")` can return more cookies than
+  omitting the profile.
+- Session import (including NotebookLM-style flows) should pass `profile=`.
 
-## Reports
+Named helpers such as `chrome()`, `firefox()`, and `load()` remain supported
+compatibility APIs. Prefer `read` / `jar` for new code.
 
-`chrome()` and its siblings return a flat cookie list and raise on failure.
-The report API instead covers every installation and profile of a browser and
-keeps failures visible:
-
-```python
-import rookie_cookies
-
-report = rookie_cookies.browser_report("chrome")  # or load_report() for all browsers
-print(report["status"], report["summary"]["cookies_emitted"])
-
-for profile in report["profiles"]:
-    for source in profile["sources"]:
-        if source["selected"] and source["status"] == "succeeded":
-            print(source["source"]["path"], len(source["cookies"]))
-```
-
-`supported_browsers()` lists what this build knows about (registration, not
-detection) and `browser_profiles(browser_id)` lists what is actually installed,
-including the `profile_id` that `browser_report(browser_id, profile_id)` takes.
-
-For Chrome, `chrome_profiles()` lists the preferred active profile first while
-leaving `browser_profiles("chrome")` and the legacy `chrome()` selector
-unchanged. Activity hints are advisory and safely fall back to default-first
-ordering. `chrome_profile(profile, domains=None)` accepts an ID, display name,
-directory name, or a full path when
-`descriptor["profile"]["path_lossy"]` is false; lossy paths require the opaque
-ID. It returns the same provenance-preserving report shape as `browser_report`.
-
-The CLI intentionally keeps the generic frozen grammar: use
-`--list-profiles --browser chrome`, then pass its opaque `profile_id` to
-`--report --browser chrome --profile PROFILE_ID`.
-
-Every DTO is a dictionary with snake_case keys, and every identifier or code is
-an open snake_case string rather than a closed set, so keep a fallback when
-matching one.
-
-## Explicit paths and cookie context
+### Explicit paths
 
 For a path whose browser engine is not known in advance, use
-`cookies_from_path(path, domains=None)`. For Chromium, the canonical options
-dictionary accepts `domains` and at most one optional credential selector:
-`browser_id`, `local_state_path`, or `plaintext_only=True`. Zero selectors
-selects Automatic. Automatic probes platform credentials on Linux and macOS;
-on Windows an explicit Chromium path raises the core
-`missing_local_state_file` error because it does not guess a browser
-installation.
+`cookies_from_path`. For Chromium, use `chromium_cookies_from_path` with at most
+one credential selector (`browser_id`, `local_state_path`, or
+`plaintext_only=True`):
 
 ```python
 import rookie_cookies
@@ -91,16 +69,32 @@ records = rookie_cookies.chromium_cookies_from_path_detailed(
 )
 ```
 
-Unknown options, wrong types, or competing selectors raise `ValueError` before
-the database is touched. Extraction failures raise `RuntimeError` with the Rust
-error chain preserved.
+Request faults on these path APIs raise `RookieRequestError` (a `ValueError`
+subclass). Engine failures raise `RookieEngineError` (a `RuntimeError`
+subclass).
+
+### Reports and profiles
+
+```python
+import rookie_cookies
+
+# Job-layer aliases
+descriptors = rookie_cookies.profiles("chrome")
+report = rookie_cookies.report(browser="chrome", profile="Default")
+
+# Compatibility report surface (same DTO shape)
+legacy = rookie_cookies.browser_report("chrome")
+print(legacy["status"], legacy["summary"]["cookies_emitted"])
+```
+
+`supported_browsers()` lists registration (not detection).
+`browser_profiles(browser_id)` / `profiles(browser_id)` list what is installed.
 
 ### Timeouts and cancellation
 
 `cookies_from_path` accepts optional `timeout` (seconds) and `cancellation`
-keyword arguments; `chromium_cookies_from_path`/`chromium_cookies_from_path_detailed`
-accept the same two keys in their options dictionary. `cancellation` is a
-`CancellationHandle`, shared across threads:
+keyword arguments; Chromium path options accept the same keys. `read` / `jar`
+also accept `timeout` and `cancellation`:
 
 ```python
 import threading
@@ -110,9 +104,12 @@ cancellation = rookie_cookies.CancellationHandle()
 threading.Timer(5, cancellation.cancel).start()
 
 try:
-    cookies = rookie_cookies.cookies_from_path(
-        "/path/to/cookies.sqlite", timeout=30, cancellation=cancellation
-    )
+    rows = rookie_cookies.read(
+        browser="chrome",
+        profile="Default",
+        timeout=30,
+        cancellation=cancellation,
+    ).as_list()
 except RuntimeError as error:
     if "operation deadline expired" in str(error):
         print("timed out")
@@ -122,40 +119,74 @@ except RuntimeError as error:
         raise
 ```
 
-Cancellation and timeouts are checked cooperatively, so they take effect
-mid-extraction rather than only before it starts, but a single long-running
-step is not interrupted mid-step.
+### Deprecated path helpers (still present in 0.6)
 
-The older functions below remain behavior-compatible in 0.6.x, but
 `any_browser()`, the Chromium `*_based` pair, and flat `firefox_based()` are
-deprecated for removal no earlier than 0.7. `firefox_based_detailed()` is not
-deprecated.
+deprecated for removal no earlier than 0.7. Prefer `cookies_from_path` /
+`chromium_cookies_from_path`. `firefox_based_detailed()` remains supported for
+container context.
 
-`firefox_based_detailed()` and `chromium_based_detailed()` return an unchanged
-cookie dictionary under `cookie` plus a separate `context` dictionary. Context
-retains Chromium partition and source fields and Firefox's raw
-`originAttributes` plus parsed container, partition, and private-browsing IDs.
+## 0.5.6 API
+
+In the 0.5.6 line (and the early maintained-fork 0.5.7 docs), the public Python
+surface was the flat named-browser helpers. There was no `read` / `jar` job API,
+no typed `RookieRequestError` / `RookieEngineError` split on path APIs, and no
+canonical `cookies_from_path` / `chromium_cookies_from_path` builders.
+
+Typical 0.5.6-style usage:
 
 ```python
 import rookie_cookies
 
-records = rookie_cookies.chromium_based_detailed(
-    "/path/to/Brave/Default/Network/Cookies",
-    ["example.com"],
-    browser_id="brave",
-)
-for record in records:
-    print(record["cookie"]["name"], record["context"]["top_frame_site_key"])
+# Flat first-profile selection; domain filter optional
+cookies = rookie_cookies.chrome()
+cookies = rookie_cookies.firefox(["example.com"])
+cookies = rookie_cookies.brave(["github.com"])
+
+# Merge every registered browser the loader knows about
+all_cookies = rookie_cookies.load()
+
+# Convert to http.cookiejar for requests / urllib
+jar = rookie_cookies.to_cookiejar(cookies)
+
+# Explicit legacy path helpers (still present, now deprecated in 0.6)
+path_cookies = rookie_cookies.firefox_based("/path/to/cookies.sqlite")
 ```
 
-On Linux and macOS, pass a canonical `browser_id` from
-`supported_browsers()`. It selects the correct Linux keyring crypt name or
-macOS Keychain service/account. The argument may be omitted only for a
-plaintext-only database; encrypted rows raise an explicit error.
+Install at that era required a much older Python floor than 0.6 (`requires-python`
+went as low as 3.7 upstream; the fork’s 0.5.7 line already tested 3.11+, but
+wheels were still `cp38-abi3` until the 0.6 break).
+
+## Migrate 0.5.6 → 0.6.0
+
+| Area | 0.5.6 / early 0.5.x | 0.6.0 |
+| --- | --- | --- |
+| Recommended entry | `chrome()` / `firefox()` / `to_cookiejar(...)` | `jar(browser=..., profile=...)` or `read(...).as_list()` |
+| Session cookies | Not a first-class `profile=` switch on a job API | Pass `profile=` to `read` / `jar` |
+| CPython | 3.8-era / `cp38-abi3` wheels | **≥ 3.11**, `cp311-abi3` wheels |
+| Path APIs | `firefox_based`, `chromium_based`, `any_browser` | Prefer `cookies_from_path` / `chromium_cookies_from_path`; legacy helpers deprecated until ≥ 0.7 |
+| Path request faults | Often a flat `RuntimeError` | `RookieRequestError` (`ValueError` subclass) for bad input on the three path APIs; `except RuntimeError` alone no longer catches those |
+| Header view | Build manually / `to_cookiejar` | `ReadResult.header(url)` — **no** module-level `header()` |
+| Reports | Not in 0.5.6 | `report(...)` / `browser_report(...)`, `profiles(...)` |
+
+Concrete migration steps:
+
+1. **Bump the runtime** to CPython 3.11+.
+2. **Replace session-import call sites** that did
+   `to_cookiejar(chrome())` with `jar(browser="chrome", profile="Default")`
+   (or another discovered profile name / id / path).
+3. **Keep named helpers** (`chrome()`, `load()`, …) only where you truly want
+   the frozen compatibility set (no-profile, persistent / legacy-eligible).
+4. **Move explicit DB paths** from `*_based` / `any_browser` to
+   `cookies_from_path` or `chromium_cookies_from_path`.
+5. **Update exception handlers** around path APIs to catch
+   `RookieRequestError` (and optionally `RookieEngineError`) instead of only
+   `RuntimeError`.
+6. Do **not** invent a top-level `header()` — use `read(...).header(url)`.
+
+See [CHANGELOG.md](../CHANGELOG.md) for the full 0.6.0 breaking/compat list.
 
 ## Logging
-
-Logging level can be controlled by using the `logging` module
 
 ```python
 import logging
@@ -163,7 +194,7 @@ logging.basicConfig()
 logging.getLogger().setLevel(logging.DEBUG)
 ```
 
-To fully disable `rookie_cookies` logging you can set the level to `CRITICAL`
+To fully disable `rookie_cookies` logging set the level to `CRITICAL`:
 
 ```python
 import logging
