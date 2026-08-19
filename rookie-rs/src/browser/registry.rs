@@ -1179,7 +1179,7 @@ pub(crate) use safari::{
 mod internet_explorer;
 
 #[cfg(test)]
-pub(crate) use internet_explorer::InternetExplorerRows;
+pub(crate) use internet_explorer::extracted_internet_explorer_source;
 #[cfg(target_os = "windows")]
 pub(crate) use internet_explorer::{
   internet_explorer_profiles_with_runtime, internet_explorer_report_with_runtime,
@@ -1494,7 +1494,7 @@ pub(crate) mod test_seams {
     query: Q,
   ) -> Result<EngineExtract>
   where
-    Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
+    Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
   {
     internet_explorer_report_with_context(context, browser_id, profile_id, domains, query)
   }
@@ -2682,14 +2682,15 @@ mod tests {
         ))
         .collect::<Vec<_>>()
     );
-    let rows = |_: &Path, _: Option<&[String]>| {
-      Ok(InternetExplorerRows {
-        records: Vec::new(),
-        records_seen: 0,
-        records_skipped: 0,
-        records_rejected: 0,
-        row_error: None,
-      })
+    let rows = |origin: SourceCandidate, _: Option<&[String]>| {
+      Ok(extracted_internet_explorer_source(
+        origin,
+        Vec::new(),
+        0,
+        0,
+        0,
+        None,
+      ))
     };
 
     let all =
@@ -2730,9 +2731,9 @@ mod tests {
       "internet_explorer",
       Some(selected.as_str()),
       None,
-      |path, domains| {
-        read.push(path.to_path_buf());
-        rows(path, domains)
+      |origin, domains| {
+        read.push(origin.path.clone());
+        rows(origin, domains)
       },
     )
     .expect("profile-selected report");
@@ -2866,17 +2867,23 @@ mod tests {
     std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
       .expect("seed WebCache database");
 
-    let outcome =
-      internet_explorer_report_with_context(&context, "internet_explorer", None, None, |_, _| {
-        Ok(InternetExplorerRows {
-          records: Vec::new(),
-          records_seen: 2,
-          records_skipped: 1,
-          records_rejected: 1,
-          row_error: Some("invalid WebCache record".to_owned()),
-        })
-      })
-      .expect("Internet Explorer report");
+    let outcome = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      None,
+      None,
+      |origin, _| {
+        Ok(extracted_internet_explorer_source(
+          origin,
+          Vec::new(),
+          2,
+          1,
+          1,
+          Some("invalid WebCache record".to_owned()),
+        ))
+      },
+    )
+    .expect("Internet Explorer report");
 
     let source = &outcome.profiles[0].sources[0];
     assert_eq!(source.stats.rows_seen, 2);

@@ -220,6 +220,10 @@ pub(crate) fn internet_explorer_outcome_with_runtime(
   })();
   let draft = staged_failure(InternetExplorerFailureStage::Parse, extraction)?;
   let mut source = Source::from_candidate(origin);
+  // Effective acquisition, not the candidate's. Listing freezes IE candidates
+  // as `NotAttempted`; opening the WebCache database is what earns
+  // `EseDatabase`, and only the engine knows the query was attempted.
+  source.acquisition = SourceAcquisition::EseDatabase;
   source.stats = SourceStats {
     rows_seen: draft.stats.records_seen,
     cookies_emitted: draft.records.len(),
