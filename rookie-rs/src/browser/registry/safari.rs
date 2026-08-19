@@ -286,9 +286,19 @@ pub(super) fn safari_report_with_context<F: DiscoveryFs>(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtract> {
-  safari_report_with_query(context, browser_id, profile_id, domains, |path, domains| {
-    query_safari_file(path, domains, crate::browser::safari::safari_based_outcome)
-  })
+  safari_report_with_query(
+    context,
+    browser_id,
+    profile_id,
+    domains,
+    |origin, domains| {
+      query_safari_file(
+        origin,
+        domains,
+        crate::browser::safari::safari_based_outcome,
+      )
+    },
+  )
 }
 
 /// The Safari report with its cookie reader injected, for the same reason the
@@ -304,7 +314,7 @@ pub(super) fn safari_report_with_query<F, Q>(
 ) -> Result<EngineExtract>
 where
   F: DiscoveryFs,
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
@@ -337,7 +347,7 @@ where
     Vec<crate::browser::safari::SafariProfile>,
     Option<crate::browser::safari::SafariProfileDiscoveryIssue>,
   )>,
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   let mut listing =
     discover_safari_with_context_using_runtime(context, browser_id, runtime, discover_profiles)?;
@@ -358,7 +368,7 @@ pub(super) fn populate_safari_sources<Q>(
   query: Q,
 ) -> EngineExtract
 where
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   populate_safari_sources_impl(listing, domains, None, query)
 }
@@ -370,7 +380,7 @@ fn populate_safari_sources_with_runtime<Q>(
   query: Q,
 ) -> EngineExtract
 where
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   populate_safari_sources_impl(listing, domains, Some(runtime), query)
 }
@@ -386,7 +396,7 @@ fn populate_safari_sources_impl<Q>(
   mut query: Q,
 ) -> EngineExtract
 where
-  Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   let EngineListing {
     profiles,
@@ -419,20 +429,11 @@ where
         });
         break 'profiles;
       }
-      let mut source = Source::from_candidate(candidate);
-      match query(&source.origin.path, domains) {
-        Ok(extraction) => {
-          source.stats = SourceStats {
-            rows_seen: extraction.stats.records_seen,
-            cookies_emitted: extraction.records.len(),
-            rows_skipped: extraction.stats.records_skipped,
-            rows_rejected: extraction.stats.records_rejected,
-            provider_failures: 0,
-          };
-          source.acquisition_attempts = extraction.acquisition_attempts;
-          source.records = extraction.records;
-          source.push_row_read_failed(extraction.row_error);
-        }
+      let mut source = Source::from_candidate(candidate.clone());
+      match query(candidate, domains) {
+        // The engine already built the `Source` from this candidate, so there
+        // is nothing to copy across.
+        Ok(extraction) => source = extraction,
         Err(error) => {
           if let Some(stop) = boundary_stop_from_error(&error) {
             extract.boundary_stop.get_or_insert(stop);
@@ -523,14 +524,14 @@ fn retain_safari_runtime_stop(
 }
 
 fn query_safari_file<Q>(
-  path: &Path,
+  origin: SourceCandidate,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<crate::browser::safari::SafariFileDraft>
+) -> Result<Source>
 where
-  Q: FnOnce(PathBuf, Option<Vec<String>>) -> Result<crate::browser::safari::SafariFileDraft>,
+  Q: FnOnce(SourceCandidate, Option<Vec<String>>) -> Result<Source>,
 {
-  query(path.to_path_buf(), domains.map(<[String]>::to_vec))
+  query(origin, domains.map(<[String]>::to_vec))
 }
 
 #[cfg(target_os = "macos")]
@@ -561,9 +562,9 @@ pub(crate) fn safari_report_with_runtime(
     domains.as_deref(),
     runtime,
     crate::browser::safari::discover_safari_profiles_with_runtime,
-    |path, domains| {
-      query_safari_file(path, domains, |path, domains| {
-        crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
+    |origin, domains| {
+      query_safari_file(origin, domains, |origin, domains| {
+        crate::browser::safari::safari_based_outcome_with_runtime(origin, domains, runtime)
       })
     },
   )
@@ -605,12 +606,16 @@ pub(crate) fn legacy_safari_outcome_with_runtime(
   runtime.check()?;
   select_legacy_safari_profile(&mut listing, browser_id)?;
   runtime.check()?;
-  let extract =
-    populate_safari_sources_with_runtime(listing, domains.as_deref(), runtime, |path, domains| {
-      query_safari_file(path, domains, |path, domains| {
-        crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
+  let extract = populate_safari_sources_with_runtime(
+    listing,
+    domains.as_deref(),
+    runtime,
+    |origin, domains| {
+      query_safari_file(origin, domains, |origin, domains| {
+        crate::browser::safari::safari_based_outcome_with_runtime(origin, domains, runtime)
       })
-    });
+    },
+  );
   Ok(retain_safari_runtime_stop(extract, runtime))
 }
 
@@ -682,10 +687,10 @@ mod tests {
     let domains = vec!["example.com".to_owned(), "mozilla.org".to_owned()];
 
     let result = query_safari_file(
-      &path,
+      crate::browser::safari::direct_path_candidate(&path),
       Some(&domains),
-      |forwarded_path, forwarded_domains| {
-        assert_eq!(forwarded_path, path);
+      |forwarded, forwarded_domains| {
+        assert_eq!(forwarded.path, path);
         assert_eq!(forwarded_domains.as_deref(), Some(domains.as_slice()));
         Err(anyhow::anyhow!("injected query"))
       },
@@ -896,18 +901,18 @@ mod tests {
 
   #[test]
   fn source_population_preserves_rows_attempts_and_failure_stage() {
-    let success = populate_safari_sources(discovered_source(), None, |_, _| {
-      Ok(crate::browser::safari::SafariFileDraft {
-        cookies: Vec::new(),
-        records: Vec::new(),
-        stats: crate::browser::safari::SafariExtractionStats {
+    let success = populate_safari_sources(discovered_source(), None, |origin, _| {
+      Ok(crate::browser::safari::safari_source(
+        origin,
+        Vec::new(),
+        crate::browser::safari::SafariExtractionStats {
           records_seen: 7,
           records_skipped: 2,
           records_rejected: 2,
         },
-        row_error: Some("recoverable record".to_owned()),
-        acquisition_attempts: 2,
-      })
+        Some("recoverable record".to_owned()),
+        2,
+      ))
     });
     let success = &success.profiles[0].sources[0];
     assert_eq!(success.stats.rows_seen, 7);
@@ -927,7 +932,7 @@ mod tests {
       });
     let expected_parse_error = format!("{parse_error:#}");
     let mut parse_error = Some(parse_error);
-    let parse = populate_safari_sources(discovered_source(), None, |_, _| {
+    let parse = populate_safari_sources(discovered_source(), None, |_origin, _| {
       Err(parse_error.take().expect("single parse query"))
     });
     let parse = &parse.profiles[0].sources[0];
@@ -949,7 +954,7 @@ mod tests {
     let acquisition_error = anyhow!("Safari source denied").context("acquire Safari cookie file");
     let expected_acquisition_error = format!("{acquisition_error:#}");
     let mut acquisition_error = Some(acquisition_error);
-    let acquisition = populate_safari_sources(discovered_source(), None, |_, _| {
+    let acquisition = populate_safari_sources(discovered_source(), None, |_origin, _| {
       Err(acquisition_error.take().expect("single acquisition query"))
     });
     let acquisition = &acquisition.profiles[0].sources[0];
@@ -993,21 +998,21 @@ mod tests {
         )));
       let calls = Cell::new(0);
 
-      let populated = populate_safari_sources(discovered, None, |_, _| {
+      let populated = populate_safari_sources(discovered, None, |origin, _| {
         let call = calls.get();
         calls.set(call + 1);
         if call == 0 {
-          Ok(crate::browser::safari::SafariFileDraft {
-            cookies: Vec::new(),
-            records: Vec::new(),
-            stats: crate::browser::safari::SafariExtractionStats {
+          Ok(crate::browser::safari::safari_source(
+            origin,
+            Vec::new(),
+            crate::browser::safari::SafariExtractionStats {
               records_seen: 7,
               records_skipped: 2,
               records_rejected: 2,
             },
-            row_error: None,
-            acquisition_attempts: 1,
-          })
+            None,
+            1,
+          ))
         } else {
           Err(
             anyhow::Error::new(stop).context(crate::browser::safari::SafariParseFailure {
@@ -1045,17 +1050,17 @@ mod tests {
     discovered.profiles.push(unattempted);
     let calls = Cell::new(0);
 
-    let populated = populate_safari_sources(discovered, None, |_, _| {
+    let populated = populate_safari_sources(discovered, None, |origin, _| {
       let call = calls.get();
       calls.set(call + 1);
       if call == 0 {
-        Ok(crate::browser::safari::SafariFileDraft {
-          cookies: Vec::new(),
-          records: Vec::new(),
-          stats: crate::browser::safari::SafariExtractionStats::default(),
-          row_error: None,
-          acquisition_attempts: 1,
-        })
+        Ok(crate::browser::safari::safari_source(
+          origin,
+          Vec::new(),
+          crate::browser::safari::SafariExtractionStats::default(),
+          None,
+          1,
+        ))
       } else {
         Err(anyhow::Error::new(BoundaryStop::Cancelled))
       }
@@ -1080,13 +1085,13 @@ mod tests {
       .candidates
       .push(discovered_source_draft(second_path));
     let calls = Cell::new(0);
-    let populated = populate_safari_sources(discovered, None, |_, _| {
+    let populated = populate_safari_sources(discovered, None, |origin, _| {
       let call = calls.get();
       calls.set(call + 1);
       if call == 0 {
-        Ok(crate::browser::safari::SafariFileDraft {
-          cookies: Vec::new(),
-          records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+        Ok(crate::browser::safari::safari_source(
+          origin,
+          vec![crate::browser::cookie_record::CookieRecord::from_cookie(
             crate::common::enums::Cookie {
               domain: ".example.com".to_owned(),
               path: "/".to_owned(),
@@ -1099,14 +1104,14 @@ mod tests {
             },
             crate::browser::cookie_record::SourceRef::pending(0),
           )],
-          stats: crate::browser::safari::SafariExtractionStats {
+          crate::browser::safari::SafariExtractionStats {
             records_seen: 1,
             records_skipped: 0,
             records_rejected: 0,
           },
-          row_error: None,
-          acquisition_attempts: 1,
-        })
+          None,
+          1,
+        ))
       } else {
         Err(anyhow::Error::new(stop))
       }
@@ -1172,11 +1177,11 @@ mod tests {
         "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
       )));
     let calls = Cell::new(0);
-    let outcome = populate_safari_sources_with_runtime(discovered, None, &runtime, |_, _| {
+    let outcome = populate_safari_sources_with_runtime(discovered, None, &runtime, |origin, _| {
       calls.set(calls.get() + 1);
-      let completed = crate::browser::safari::SafariFileDraft {
-        cookies: Vec::new(),
-        records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+      let completed = crate::browser::safari::safari_source(
+        origin,
+        vec![crate::browser::cookie_record::CookieRecord::from_cookie(
           crate::common::enums::Cookie {
             domain: ".example.com".to_owned(),
             path: "/".to_owned(),
@@ -1189,14 +1194,14 @@ mod tests {
           },
           crate::browser::cookie_record::SourceRef::pending(0),
         )],
-        stats: crate::browser::safari::SafariExtractionStats {
+        crate::browser::safari::SafariExtractionStats {
           records_seen: 3,
           records_skipped: 1,
           records_rejected: 1,
         },
-        row_error: Some("one malformed record".to_owned()),
-        acquisition_attempts: 2,
-      };
+        Some("one malformed record".to_owned()),
+        2,
+      );
       match stop {
         BoundaryStop::TimedOut => clock.advance(Duration::from_secs(1)),
         BoundaryStop::Cancelled => assert!(token.cancel()),

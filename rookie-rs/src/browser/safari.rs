@@ -25,6 +25,8 @@ use zeroize::Zeroize;
 use super::cookie_record::{
   Attributes, CookieRecord, CookieValue, Observation, RawValue, SourceRef,
 };
+use super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
+use super::source::{Source, SourceAcquisition, SourceCandidate, SourceStats};
 
 /// `Cookies.binarycookies` is a per-user metadata store and is normally only a
 /// few MiB. Keep a generous ceiling so a corrupt or replaced file cannot make
@@ -61,12 +63,30 @@ pub(crate) fn safari_based_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = safari_based_outcome_with_runtime(db_path.clone(), domains, runtime)?;
+  let source =
+    safari_based_outcome_with_runtime(direct_path_candidate(&db_path), domains, runtime)?;
   super::legacy::project_canonical_outcome_with_runtime(
     "safari",
-    super::report_build::canonical_direct_safari_extraction_with_runtime(&db_path, draft, runtime)?,
+    super::report_build::canonical_direct_safari_extraction_with_runtime(source, runtime)?,
     runtime,
   )
+}
+
+/// The candidate a direct-path Safari read is aimed at.
+///
+/// A caller who names a file has done no discovery, so there is no candidate to
+/// clone. These are the values the direct-path report has always emitted for
+/// such a source, including the frozen `StableFileImage`.
+pub(crate) fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
+  SourceCandidate {
+    path: db_path.to_path_buf(),
+    role: CookieSourceRoleId::persistent(),
+    format: CookieSourceFormatId::known("safari_binarycookies"),
+    precedence: super::registry::PERSISTENT_SOURCE_PRECEDENCE,
+    exists: true,
+    selected: true,
+    acquisition: SourceAcquisition::StableFileImage,
+  }
 }
 
 /// Row accounting for the private cross-engine report. The legacy
@@ -92,17 +112,33 @@ impl std::fmt::Display for SafariParseFailure {
   }
 }
 
-#[derive(Debug)]
-pub(crate) struct SafariFileDraft {
-  #[cfg(test)]
-  pub(crate) cookies: Vec<Cookie>,
-  pub(crate) records: Vec<CookieRecord>,
-  pub(crate) stats: SafariExtractionStats,
-  /// Last row/page parse error when valid records were still recovered.
-  pub(crate) row_error: Option<String>,
-  /// Stable-read attempts actually spent. The reader retries when the file
-  /// changes mid-acquisition, so this is not always one.
-  pub(crate) acquisition_attempts: u32,
+/// Attaches one Safari read to the candidate it came from.
+///
+/// The stats/records/row-error tuple this replaces was a fourth vocabulary for
+/// facts `Source` already names; the adapter copied it field-by-field. Errors
+/// stay on `Result`: an unreadable file is not a source outcome, and folding it
+/// into `Source.failure` would reflow the acquisition message the public
+/// `safari()` API returns.
+pub(crate) fn safari_source(
+  origin: SourceCandidate,
+  records: Vec<CookieRecord>,
+  stats: SafariExtractionStats,
+  row_error: Option<String>,
+  acquisition_attempts: u32,
+) -> Source {
+  let mut source = Source::from_candidate(origin);
+  source.stats = SourceStats {
+    rows_seen: stats.records_seen,
+    cookies_emitted: records.len(),
+    rows_skipped: stats.records_skipped,
+    rows_rejected: stats.records_rejected,
+    provider_failures: 0,
+  };
+  source.records = records;
+  source.acquisition_attempts = acquisition_attempts;
+  // After the stats, never before: the issue is keyed on `rows_skipped`.
+  source.push_row_read_failed(row_error);
+  source
 }
 
 #[cfg(test)]
@@ -165,19 +201,27 @@ impl Decoder<SafariReadOnlySource<'_>, CookieRecord> for SafariBoundaryDecoder {
 }
 
 pub(crate) fn safari_based_outcome(
-  db_path: PathBuf,
+  origin: SourceCandidate,
   domains: Option<Vec<String>>,
-) -> Result<SafariFileDraft> {
+) -> Result<Source> {
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  safari_based_outcome_with_runtime(db_path, domains, &runtime)
+  safari_based_outcome_with_runtime(origin, domains, &runtime)
 }
 
+/// Reads one Safari `Cookies.binarycookies` and returns it as a [`Source`].
+///
+/// The caller hands over the candidate it selected, which becomes
+/// `Source::origin` — path, role, format, and precedence are never rebuilt
+/// here. `Err` still means the read did not produce a source at all, which the
+/// adapter turns into a typed `Source.failure` and the compatibility API
+/// surfaces verbatim.
 pub(crate) fn safari_based_outcome_with_runtime(
-  db_path: PathBuf,
+  origin: SourceCandidate,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<SafariFileDraft> {
+) -> Result<Source> {
+  let db_path = origin.path.clone();
   runtime.check()?;
   let mut file = File::open(&db_path).context(format!(
     "Failed to open {REDACTED_PATH}\n\
@@ -241,24 +285,13 @@ pub(crate) fn safari_based_outcome_with_runtime(
     None => records,
   };
   runtime.check()?;
-  #[cfg(test)]
-  let cookies = records
-    .iter()
-    .cloned()
-    .map(|record| {
-      record
-        .into_cookie()
-        .expect("Safari rows emit plaintext values")
-    })
-    .collect::<Vec<_>>();
-  Ok(SafariFileDraft {
-    #[cfg(test)]
-    cookies,
+  Ok(safari_source(
+    origin,
     records,
     stats,
-    row_error: row_error.map(|error| format!("{error:#}")),
+    row_error.map(|error| format!("{error:#}")),
     acquisition_attempts,
-  })
+  ))
 }
 
 pub(crate) const STABLE_READ_ATTEMPTS: usize = 3;
@@ -1504,12 +1537,14 @@ mod tests {
     let path = directory.path().join("Cookies.binarycookies");
     fs::write(&path, golden_fixture()).expect("write Safari fixture");
 
-    let extraction =
-      safari_based_outcome(path, Some(vec!["not-the-cookie-domain.invalid".to_owned()]))
-        .expect("filter Safari fixture");
-    assert!(extraction.cookies.is_empty());
-    assert_eq!(extraction.stats.records_seen, 0);
-    assert_eq!(extraction.stats.records_skipped, 0);
+    let extraction = safari_based_outcome(
+      direct_path_candidate(&path),
+      Some(vec!["not-the-cookie-domain.invalid".to_owned()]),
+    )
+    .expect("filter Safari fixture");
+    assert!(extraction.cookies().is_empty());
+    assert_eq!(extraction.stats.rows_seen, 0);
+    assert_eq!(extraction.stats.rows_skipped, 0);
   }
 
   #[test]

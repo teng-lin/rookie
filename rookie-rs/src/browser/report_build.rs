@@ -7,7 +7,9 @@
 
 mod dispatch;
 
-use super::cookie_record::{CookieRecord, FinalizationError, LegacyProjectionSemantics};
+#[cfg(test)]
+use super::cookie_record::CookieRecord;
+use super::cookie_record::{FinalizationError, LegacyProjectionSemantics};
 use super::outcome::{
   CompatibilityAbsence, CompatibilityDecision, CompatibilityDisposition, Diagnostic, Failure,
   FailureLedger, FailureScope, Outcome, ResultStatus, SourceOutcome, Termination,
@@ -1659,88 +1661,33 @@ fn direct_engine_extract(
 }
 
 pub(crate) fn canonical_direct_safari_extraction_with_runtime(
-  db_path: &std::path::Path,
-  draft: super::safari::SafariFileDraft,
+  source: Source,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_engine_source(
-    "safari",
-    db_path,
-    "safari_binarycookies",
-    SourceAcquisition::StableFileImage,
-    draft.records,
-    draft.stats.records_seen,
-    draft.stats.records_skipped,
-    draft.stats.records_rejected,
-    draft.acquisition_attempts,
-    draft.row_error,
-    Some(runtime),
-  )
+  canonical_direct_engine_source("safari", source, Some(runtime))
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
-  db_path: &std::path::Path,
-  draft: super::internet_explorer::InternetExplorerDraft,
+  source: Source,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_engine_source(
-    "internet_explorer",
-    db_path,
-    "internet_explorer_ese",
-    SourceAcquisition::EseDatabase,
-    draft.records,
-    draft.stats.records_seen,
-    draft.stats.records_skipped,
-    draft.stats.records_rejected,
-    1,
-    draft.row_error,
-    Some(runtime),
-  )
+  canonical_direct_engine_source("internet_explorer", source, Some(runtime))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Wraps one already-built [`Source`] as a single-profile direct-path extract.
+///
+/// The engine assembled the source, including its `row_read_failed` issue, so
+/// this only supplies the synthetic profile the direct path has no discovery
+/// for. The profile path is read off the source's own origin rather than
+/// threaded alongside it.
 fn canonical_direct_engine_source(
   browser_id: &str,
-  db_path: &std::path::Path,
-  format: &'static str,
-  acquisition: SourceAcquisition,
-  records: Vec<CookieRecord>,
-  rows_seen: usize,
-  rows_skipped: usize,
-  rows_rejected: usize,
-  acquisition_attempts: u32,
-  row_error: Option<String>,
+  source: Source,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
-  let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let cookies_emitted = records.len();
-  let mut source = Source {
-    origin: SourceCandidate {
-      path: db_path.to_path_buf(),
-      role: CookieSourceRoleId::persistent(),
-      format: CookieSourceFormatId::known(format),
-      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-      exists: true,
-      selected: true,
-      acquisition,
-    },
-    selected: true,
-    acquisition,
-    records,
-    stats: SourceStats {
-      rows_seen,
-      cookies_emitted,
-      rows_skipped,
-      rows_rejected,
-      provider_failures: 0,
-    },
-    acquisition_attempts,
-    diagnostics: Vec::new(),
-    failure: None,
-    issues: Vec::new(),
-  };
-  source.push_row_read_failed(row_error);
+  let db_path = source.origin.path.clone();
+  let profile_path = db_path.parent().unwrap_or(&db_path).to_path_buf();
   let extract = direct_engine_extract(profile_path, vec![source], None);
   match runtime {
     Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),

@@ -2282,11 +2282,11 @@ mod tests {
       "safari",
       Some(selected.as_str()),
       Some(&domains),
-      |path, forwarded_domains| {
-        read.push(path.to_path_buf());
+      |origin, forwarded_domains| {
+        read.push(origin.path.clone());
         assert_eq!(forwarded_domains, Some(domains.as_slice()));
         crate::browser::safari::safari_based_outcome(
-          path.to_path_buf(),
+          origin,
           forwarded_domains.map(<[String]>::to_vec),
         )
       },

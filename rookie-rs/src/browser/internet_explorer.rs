@@ -2,6 +2,8 @@ use crate::browser::internet_explorer_model::{
   decode_cookie_record, CookieColumnLayout, InternetExplorerFailure, InternetExplorerFailureStage,
   RawCookieRecord,
 };
+use crate::browser::report_core::{CookieSourceFormatId, CookieSourceRoleId};
+use crate::browser::source::{Source, SourceAcquisition, SourceCandidate, SourceStats};
 use crate::common::enums::Cookie;
 use crate::common::{
   deadline::{BoundaryRuntime, BoundaryStop, SystemClock},
@@ -40,39 +42,69 @@ pub(crate) fn internet_explorer_based_with_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft =
-    internet_explorer_outcome_with_runtime(db_path.clone(), domains, force_kill, runtime)?;
+  let source = internet_explorer_outcome_with_runtime(
+    direct_path_candidate(&db_path),
+    domains,
+    force_kill,
+    runtime,
+  )?;
   crate::browser::legacy::project_canonical_outcome_with_runtime(
     "internet_explorer",
     crate::browser::report_build::canonical_direct_internet_explorer_extraction_with_runtime(
-      &db_path, draft, runtime,
+      source, runtime,
     )?,
     runtime,
   )
 }
 
-/// Record accounting for the private cross-engine report. The legacy
-/// [`internet_explorer_based`] projection deliberately discards it.
+/// Record accounting while the WebCache walk is in progress.
+///
+/// File-private scratch: it is copied onto [`SourceStats`] before the walk
+/// returns, so no caller ever sees this shape.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InternetExplorerDraftStats {
-  pub(crate) records_seen: usize,
-  pub(crate) records_skipped: usize,
-  pub(crate) records_rejected: usize,
+struct InternetExplorerDraftStats {
+  records_seen: usize,
+  records_skipped: usize,
+  records_rejected: usize,
 }
 
 #[derive(Debug)]
-pub(crate) struct InternetExplorerDraft {
-  pub(crate) records: Vec<crate::browser::cookie_record::CookieRecord>,
-  pub(crate) stats: InternetExplorerDraftStats,
-  pub(crate) row_error: Option<String>,
+struct InternetExplorerDraft {
+  records: Vec<crate::browser::cookie_record::CookieRecord>,
+  stats: InternetExplorerDraftStats,
+  row_error: Option<String>,
 }
 
+/// The candidate a direct-path Internet Explorer read is aimed at.
+///
+/// The values the direct-path report has always emitted for such a source. The
+/// `EseDatabase` acquisition is the effective one: unlike Safari, IE's listing
+/// candidates stay `NotAttempted` and the adapter overlays this only once a
+/// WebCache query has been attempted.
+pub(crate) fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
+  SourceCandidate {
+    path: db_path.to_path_buf(),
+    role: CookieSourceRoleId::persistent(),
+    format: CookieSourceFormatId::known("internet_explorer_ese"),
+    precedence: crate::browser::registry::PERSISTENT_SOURCE_PRECEDENCE,
+    exists: true,
+    selected: true,
+    acquisition: SourceAcquisition::EseDatabase,
+  }
+}
+
+/// Reads one WebCache database and returns it as a [`Source`].
+///
+/// `Err` still means no source came back at all; the adapter turns that into a
+/// typed `Source.failure` using the stage tag `staged_failure` attached, which
+/// this function must not flatten.
 pub(crate) fn internet_explorer_outcome_with_runtime(
-  db_path: PathBuf,
+  origin: SourceCandidate,
   domains: Option<Vec<String>>,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<InternetExplorerDraft> {
+) -> Result<Source> {
+  let db_path = origin.path.clone();
   staged_failure(
     InternetExplorerFailureStage::Acquisition,
     runtime.check().map_err(anyhow::Error::from),
@@ -182,7 +214,22 @@ pub(crate) fn internet_explorer_outcome_with_runtime(
       row_error,
     })
   })();
-  staged_failure(InternetExplorerFailureStage::Parse, extraction)
+  let draft = staged_failure(InternetExplorerFailureStage::Parse, extraction)?;
+  let mut source = Source::from_candidate(origin);
+  source.stats = SourceStats {
+    rows_seen: draft.stats.records_seen,
+    cookies_emitted: draft.records.len(),
+    rows_skipped: draft.stats.records_skipped,
+    rows_rejected: draft.stats.records_rejected,
+    provider_failures: 0,
+  };
+  source.records = draft.records;
+  // The WebCache walk opens the database once; there is no stable-read retry
+  // loop to report attempts from.
+  source.acquisition_attempts = 1;
+  // After the stats, never before: the issue is keyed on `rows_skipped`.
+  source.push_row_read_failed(draft.row_error);
+  Ok(source)
 }
 
 fn unsupported_table_skipped_inputs(record_count: usize) -> usize {
