@@ -878,7 +878,19 @@ Their real differences are two: the `Err`-arm failure filling (Safari downcasts 
 #### What §13 licenses (PRs 8–9)
 
 1. One `boundary_stop_from_error` and one `retain_*_runtime_stop` in `registry.rs`. Verbatim dupes; no judgment required.
-2. A shared frame, `populate_engine_sources(listing, |identity, candidates| -> (Vec<Source>, Option<BoundaryStop>))`, absorbing the skeleton identical in all three. Each engine keeps its own per-profile body, so Gecko's probe and first-valid stay where they belong — and become **visible as a body** instead of as a differently-shaped function.
+2. A shared frame, `populate_engine_sources(listing, completion, |identity, candidates| -> (Vec<Source>, Option<BoundaryStop>))`, absorbing the skeleton identical in all three. Each engine keeps its own per-profile body, so Gecko's probe and first-valid stay where they belong — and become **visible as a body** instead of as a differently-shaped function.
+
+   **Measured before implementing, and it changes the shape.** The three post-loop behaviours are not the same thing, so the frame cannot simply absorb "the stop-break and the retain":
+
+   | Engine | On stop |
+   | --- | --- |
+   | Safari (`:483–491`) | truncate by `stop_position`; drop the stopped profile too if it committed nothing |
+   | Gecko (`:530–532`) | `retain_completed_engine_extract` — keep sources with `acquisition_attempts > 0`, then non-empty profiles |
+   | IE (`:250–260`) | nothing after the loop; the retain happens only on the early-return path inside it |
+
+   What is genuinely identical is the envelope: destructuring `EngineListing`, the `with_capacity` construction of `EngineExtract`, the `DiscoveredProfile` destructure, and the `ExtractedProfile { identity, legacy, sources }` push. That is roughly 15–20 lines per engine, not the ~265 the sizing table implies, so **unit 5's line saving is smaller than advertised** — revise the estimate to net −40 or so.
+
+   Its value is not the line saving. Passing completion as an explicit `CompletionPolicy` argument puts three policies that currently disagree *by accident of where they were written* into one signature where the disagreement is legible and reviewable. That is the same move as unit 6, one level up, and it is why unit 5 earns its place even at a smaller diff. **Do not reconcile the three policies** — that is a behaviour change with no golden covering it, and it is out of scope.
 3. One `acquire_each_candidate` for the 1:1 engines, parameterized by the `Err`→`Source` filler. Safari and IE then differ only in that closure, and IE inherits Safari's deadline checks by construction. This composes with PR 1: once `Source::new(identity, selected, acquisition)` replaces `from_candidate`, the placeholder moves naturally into the `Err` arm and the discarded-on-success work disappears.
 
 Not licensed: making Gecko 1:1, or hoisting first-valid into the shared frame.
@@ -1168,7 +1180,7 @@ Each PR: `cargo test --workspace --all-targets --locked` (and `--no-default-feat
 | **2. Dedupe** | PR 6, PR 7, PR 8 | ~58 | none — provable no-ops only |
 | **3. `SourceIdentity`** | PR 1 | ~150 | medium-high; two commits |
 | **4. Compatibility: fix and new home** | PR 3, PR 4 | ~265 moved, ~8 changed | low |
-| **5. Populate frame** | PR 9 | ~265 restructured, net −80 | medium |
+| **5. Populate frame** | PR 9 | ~265 restructured, net ~−40 | medium |
 | **6. Policy becomes data** | PR 10 | ~80 | medium-high — the keystone |
 | **7. Draft split** | PR 12 | ~80 | low |
 
