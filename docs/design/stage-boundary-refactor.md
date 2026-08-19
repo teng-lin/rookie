@@ -34,7 +34,9 @@ Design amendments from review:
 
 Deliberately **not** lifted (would change public behavior or wire bytes): the listing `selected` / `acquisition` / `exists` byte freeze, direct-path synthetic identities (`source_digest` stability), and the public API / DTO / registry / ADR freezes.
 
-**Consistency pass (same day).** Folded in review of Rev 2 against itself and the tree. No new lifts. Fixes: Decision 18 reuses `report_core` id newtypes (the Decision 21 pattern) instead of inventing `registry.rs` twins or claiming wire fields stay `String`; PR 0b is typed against the old `EngineSourceDraft` bag; “done when,” Stage 2 gecko populate, the module table, and the target mermaid describe one end state (post-PR 8/9); leftover “rewrite / cookies-branch delete live in PR 1” sentences retargeted to PR 0b / PR 0c; `check-stage-boundary` lands in PR 1 (the types do not exist in PR 0a); PR 0a includes `internet_explorer_based`.
+**Consistency pass (same day).** Folded in review of Rev 2 against itself and the tree. No new lifts. Fixes: Decision 18 reuses `report_core` id newtypes (the Decision 21 pattern) instead of inventing `registry.rs` twins or claiming wire fields stay `String`; PR 0b is typed against the old `EngineSourceDraft` bag; “done when,” Stage 2 gecko populate, the module table, and the target mermaid describe one end state (post-PR 8/9); leftover “rewrite / cookies-branch delete live in PR 1” sentences retargeted to PR 0b / PR 0c; `check-stage-boundary` lands in PR 1 (the types do not exist in PR 0a); PR 0a includes `internet_explorer_based`. Adds a mermaid class diagram of the post-PR 8/9 types next to Target language — illustration only; no design change.
+
+**Progress.** PR 0a/0b/0c landed as #270 and PR 1 as #271. PR 2 landed the Chromium tower: both towers now build cookie files from the same two types, and the only remaining engine-shaped extract results are Mozilla/Safari/IE (PR 3).
 
 ---
 
@@ -150,6 +152,7 @@ Each hop is a translator. Translators diverge (Chromium row issues vs Gecko `row
 - Do **not** change cookie handling, redaction, ciphertext precedence, deadline/cancellation, `EncryptedValuePolicy`, or unseal.
 - Do **not** flatten all-profile discovery behind named functions; `firefox_profiles()` remains persistent-only `MozillaProfile` (ADR 0002); `read` / `jar` / `from_path` stay as ADR 0004.
 - Do **not** convert parents to `mod.rs`.
+- Do **not** promote decoder scratch to a crate-visible type. `SessionCookieParseDraft`, `ChromiumRowIssue` / `ChromiumRowIssueCode` and the Chromium decoder row types, Safari's page/record decode summary, and the IE ESE table walk are engine-private and are converted at the engine boundary. A name containing `Draft` that never leaves the file that parsed the bytes can keep it.
 - Do **not** "fix" Safari listing `selected: true` or listing `stable_file_image` in **any** PR of this program — the bytes are frozen and golden-pinned. Normalizing them on the wire is a public-behavior change deliberately not taken in Rev 2.
 - Extracting `mod tests` via `#[cfg(test)] #[path]` is a later **workbench** when a production file is unreviewable, not a goal of this program.
 - Relocating the acquire loop into `collect_report` is **not** required for "done when."
@@ -232,6 +235,131 @@ Published      ExtractionReport | Cookie[] | ReadResult
 Public leftovers stay as **projections**: `MozillaProfile` from inventory (ADR 0002 `firefox_profiles()`); eight-field `Cookie` from `Outcome`. `ProfileIdentity` / `ProfileDescriptor` / `SourceExtraction` remain the report DTO.
 
 Internal verbs: resolve, discover, select, lookup, acquire, decode, unseal, finalize, project.
+
+### Target class diagram (end state, post-PR 8/9)
+
+The [target pipeline](#target-pipeline) is the call/data flow. These diagrams are the **types** that make rustc the reviewer. Members shown are the load-bearing ones; full field lists stay in Stage 2 / Stage 5. After PR 9, crate-visible source representations are exactly `SourceCandidate` → `Source` → wire; `report_core::SourceDraft` is a private hop and is omitted.
+
+There is no edge from a listing type to `Source`. `Source` embeds `origin: SourceCandidate` and has no `profile_id`. Chromium does not adopt `EngineProfileIdentity`.
+
+**Gecko / Safari / IE** — listing bag cannot name `Source`; extract bag is not a listing return. `EngineProfileIdentity` and `LegacyRank` are field bundles on both profile types (Decision 19), not a shared `Profile` object and not separate stage types.
+
+```mermaid
+classDiagram
+  direction TB
+
+  class SourceCandidate {
+    PathBuf path
+    CookieSourceRoleId role
+    CookieSourceFormatId format
+    bool selected
+    SourceAcquisition acquisition
+  }
+  note for SourceCandidate "source.rs inventory leaf: no records, cookies, stats, or issues"
+
+  class Source {
+    SourceCandidate origin
+    bool selected
+    SourceAcquisition acquisition
+    Vec~CookieRecord~ records
+    Option~SourceFailure~ failure
+  }
+  note for Source "source.rs post-unseal: no profile_id or cookies field; failed is derived"
+
+  Source *-- SourceCandidate : origin
+
+  class DiscoveredProfile {
+    EngineProfileIdentity identity
+    LegacyRank legacy
+    Vec~SourceCandidate~ candidates
+  }
+  note for DiscoveredProfile "no sources field"
+
+  class ExtractedProfile {
+    EngineProfileIdentity identity
+    LegacyRank legacy
+    Vec~Source~ sources
+  }
+  note for ExtractedProfile "not a listing return"
+
+  class EngineListing {
+    Vec~DiscoveredProfile~ profiles
+    DiscoveryCounters counters
+  }
+
+  class EngineExtract {
+    Vec~ExtractedProfile~ profiles
+    DiscoveryCounters counters
+  }
+
+  EngineListing *-- DiscoveredProfile : profiles
+  DiscoveredProfile *-- SourceCandidate : candidates
+
+  EngineExtract *-- ExtractedProfile : profiles
+  ExtractedProfile *-- Source : sources
+
+  class SourceExtraction {
+    <<frozen wire DTO>>
+  }
+
+  SourceCandidate ..> SourceExtraction : listing projection
+  Source ..> SourceExtraction : source_to_draft then project
+```
+
+**Chromium** — same two leaves after PR 2. Inventory stays cookie-free. Extract keeps identity on `ChromiumProfile` and records on `Source`.
+
+```mermaid
+classDiagram
+  direction TB
+
+  class SourceCandidate {
+    <<shared leaf>>
+  }
+  note for SourceCandidate "Chromium's own CookieSourceCandidate was deleted in PR 2"
+
+  class ChromiumProfile {
+    ProfileId profile_id
+    InstallationId installation_id
+    String display_name
+    Vec~SourceCandidate~ persistent_candidates
+  }
+  note for ChromiumProfile "does not adopt EngineProfileIdentity; no cookies, records, or Vec of Source"
+
+  class ChromiumListing {
+    Vec~ChromiumProfile~ profiles
+  }
+
+  class ChromiumExtractedProfile {
+    ChromiumProfile profile
+    Vec~Source~ sources
+    Option~String~ failure
+  }
+  note for ChromiumExtractedProfile "replaced ChromiumProfileDraft in PR 2; failure means no source could be named"
+
+  class ChromiumRegistryDraft {
+    <<thin extract bag>>
+    Vec~ChromiumExtractedProfile~ profiles
+    DiscoveryCounters counters
+  }
+
+  class Source {
+    SourceCandidate origin
+    Vec~CookieRecord~ records
+  }
+
+  ChromiumListing *-- ChromiumProfile : profiles
+  ChromiumProfile *-- SourceCandidate : persistent_candidates
+  ChromiumRegistryDraft *-- ChromiumExtractedProfile : profiles
+  ChromiumExtractedProfile o-- ChromiumProfile : identity stays
+  ChromiumExtractedProfile *-- Source : sources
+```
+
+An empty `sources` means the opposite thing in the two towers, which is why the mappers stay separate. Chromium lists only databases that exist, so a profile with none is ordinary absence and `ChromiumExtractedProfile.failure` is what says otherwise. The engine listing plants candidates, so an extract profile that ends with no sources lost something and raises `profile_extraction_failed`.
+
+| Tower | Listing (cannot name `Source`) | Extract (cannot be a listing return) |
+| --- | --- | --- |
+| Gecko / Safari / IE | `EngineListing` → `DiscoveredProfile` → `SourceCandidate` | `EngineExtract` → `ExtractedProfile` → `Source` |
+| Chromium | `ChromiumListing` → `ChromiumProfile` → `SourceCandidate` | `ChromiumRegistryDraft` → `ChromiumExtractedProfile` → `Source` |
 
 ### Target pipeline
 
@@ -1158,18 +1286,28 @@ Characterization tests move with the production they pin in the same PR. #218 al
   4. **The row-issue tests re-pin later, not here.** `skipped_rows_without_a_row_error_still_degrade_the_report` and `a_source_that_skipped_nothing_reports_no_row_issue` stay on the old `engine_source_outcome` while Safari/IE still depend on its `rows_skipped → row_read_failed` derivation; re-pinning them to `Source::push_row_read_failed` early would leave the still-live old derivation untested. Re-pin when `engine_source_outcome` is deleted.
 - **Description:** Compiler-enforced boundary. Listing cannot store records. Extract cannot be used as a listing return. Gecko populate stays path/query-based (until PR 8) and emits 1:1 `ExtractedProfile`s (empty `sources` is `profile_extraction_failed`, not absence). Safari/IE populate is a **mechanical retype** of the PR 0b rewrite, not a control-flow change in this PR. Keep `acquisition_attempts` on `Source`. No `cookies` field on `Source`. Chromium tower (`ChromiumProfileDraft` / `ChromiumExtractionDraft`) is **not** migrated. Two-tower window starts.
 
-### PR 2 — Chromium extract emits `Source`; delete `ChromiumProfileDraft`
+### PR 2 — Chromium extract emits `Source`; delete `ChromiumProfileDraft` — **LANDED**
 
-- **Title:** `refactor: emit Source from Chromium extract; delete ChromiumProfileDraft`
+- **Title:** `refactor(chromium): return Source from the engine and delete ChromiumProfileDraft`
 - **Files/components:**
-  - `rookie-rs/src/browser/chromium.rs` (crate-visible acquire returns `Source`; map `ChromiumRowIssue` → `SourceIssue` here or in a helper this file owns; fold `legacy_error` into `SourceIssue`)
-  - `rookie-rs/src/browser/registry/chromium.rs` (`extract_chromium_*` attaches `Source` to inventory identity; **delete `ChromiumProfileDraft`**; thin `ChromiumInstallationDraft` / `ChromiumRegistryDraft` to identity + `Vec<Source>` + counters)
-  - `rookie-rs/src/browser/report_build.rs` (`chromium_profile_outcome` becomes `profile_to_draft(browser_id, installation_id, profile_id, display_name, path, is_default, sources)` using `ChromiumProfile.display_name`; the cookies-if-records-empty branch is already gone from PR 0c)
+  - `rookie-rs/src/browser/chromium.rs` (`query_cookies_engine_outcome_with_runtime` takes a `SourceCandidate` and returns `Source`; `row_issue` moved here as `ChromiumRowIssue` → `SourceIssue`; `legacy_error` folded into a `SourceIssue`)
+  - `rookie-rs/src/browser/registry/chromium.rs` (`CookieSourceCandidate` deleted; **`ChromiumProfileDraft` deleted**, replaced by `ChromiumExtractedProfile` = identity + `Vec<Source>` + a name-nothing failure)
+  - `rookie-rs/src/browser/report_build.rs` (`chromium_profile_outcome` is a copy through `source_to_draft`; `canonical_direct_chromium_extraction*` take a `Source`; the report-side `row_issue` is gone)
   - `rookie-rs/src/browser/legacy.rs` (`chromium_decrypt_skip_count` reads `Source.issues`)
-  - Tests: `legacy_chromium_policy_*`, `merged_column_failures_keep_the_column_in_their_samples`, `provider_failure_retryability_reaches_the_canonical_report_issue`, `an_undecryptable_row_does_not_fail_the_chromium_source`
-- **#218:** `chromium.rs` grandfathered (`max_cfg = 60`). Prefer not to add cfg.
+  - `xtask/src/stage_boundary.rs` (fence for `ChromiumExtractedProfile`)
+- **#218:** no cfg added; `chromium.rs` allowlist entry unchanged.
 - **Dependencies:** PR 1 (`Source` / `SourceIssue` exist)
-- **Description:** Chromium's real operation is already `path+keys→records`. Return `Source` (no `profile_id`). Inventory stays cookie-free. Optional small alias of `CookieSourceCandidate` → `SourceCandidate`. Do **not** collapse `query_*` combinatorics. Do **not** move the Chromium acquire loop into `collect_report`.
+- **Landed as:** two commits — the `CookieSourceCandidate` alias, then the engine boundary. Goldens byte-identical on all three platforms; public API, DTO schema, and `browser_registry.json` unchanged.
+
+**What the alias cost.** The four-step test held: delete the struct, retype `persistent_candidates`, fill role/format/acquisition at the one production construction site, and read them in `chromium_listing_outcome` instead of hardcoding. Nothing spread into Safari/Gecko `exists`, Chromium learned no `StableFileImage`, and `chromium_listing_outcome` stayed separate from `engine_listing_outcome`. The alias turned out to be required rather than optional: `Source` embeds `origin: SourceCandidate`, so an engine cannot return `Source` without producing `SourceCandidate`s to embed.
+
+**Where `legacy_error` went.** Into a `SourceIssue` carrying `SourceIssue::ALL_ROWS_REJECTED`, which `source_to_draft` lifts into `CompatibilityEvidence::AllRowsRejected` rather than pushing as an extraction issue. Section 5.7 still reports a fully-rejected source as succeeded; only the compatibility projection treats it as an error. A `compatibility_evidence` field on `Source` would have put a Chromium-only, legacy-only concern on the leaf every engine shares.
+
+**What `ChromiumProfileFailure` became.** `NoSource` is an empty `Vec<Source>` — absence spelled by having nothing. `Extraction(message)` is `Source.failure`, because the database was named and reached for. `ChromiumExtractedProfile.failure` survives for the remaining case, extraction failing before any source could be named, which is the state the report must not downgrade to `profile_has_no_cookie_source`.
+
+**Two traps found while moving derivations.** `chromium_decrypt_skip_count` matched `ChromiumRowIssueCode` variants and now matches issue codes as strings; the four codes it looks for are built from the same constants `row_issue` emits, with a test asserting the lists agree, because a rename that missed one would silently stop counting those rows. And the adapter's `#[cfg(test)]` `sort_cookies` call was deleted rather than ported to `records`: it existed only because the engine kept a cookie list separate from `records`, and sorting records would have made tests observe an order production never returns. All tests pass without it.
+
+- Do **not** collapse `query_*` combinatorics. Do **not** move the Chromium acquire loop into `collect_report`.
 
 ### PR 3 — Engine bags leave crate-visible APIs (Gecko / Safari / IE)
 
