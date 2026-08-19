@@ -598,7 +598,7 @@ pub(crate) struct EngineExtract {
 }
 ```
 
-`EngineProfileIdentity` + `LegacyRank` are a convenience so listing and extract do not duplicate these fields. Neither is the missing shared `Profile` stage object. **[Rev 2]** The split (Decision 19) keeps ADR 0002 selection-policy inputs out of a type named Identity; behavior of the legacy-first rank is unchanged.
+`EngineProfileIdentity` + `LegacyRank` are a convenience so listing and extract do not duplicate these fields. Neither is the missing shared `Profile` stage object. **[Rev 2]** The split (Decision 19) keeps ADR 0002 selection-policy inputs out of a type named Identity; behavior of the legacy-first rank is unchanged. The same types, as a class diagram: [Target class diagram](#target-class-diagram-end-state-post-pr-89).
 
 Chromium already has the listing/extract split this program is giving Gecko/Safari/IE: `ChromiumProfile` + `CookieSourceCandidate` vs `ChromiumProfileDraft`. Chromium listing stays on `ChromiumListing` / `chromium_listing_outcome` in PR 1. Converging `CookieSourceCandidate` onto `SourceCandidate` is allowed in PR 2 if small; not required for PR 1.
 
@@ -945,7 +945,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(...) -> Result<Source>;
 
 ## Data Model Changes
 
-No on-disk schema, no `browser_registry.json` migration, no report DTO migration.
+No on-disk schema, no `browser_registry.json` migration, no report DTO migration. End-state composition is in [Target class diagram](#target-class-diagram-end-state-post-pr-89).
 
 ### Profile types (the eight-way collision)
 
