@@ -1115,7 +1115,17 @@ where
           let mut source = Source::from_candidate(candidate);
           source.acquisition = database_failure.and_then(|failure| failure.strategy).into();
           source.acquisition_attempts = database_failure.map_or(1, |failure| failure.attempts);
+          // `Acquisition` unconditionally, deliberately. The Chromium report
+          // has always emitted `stage: acquisition` for every database failure
+          // -- the mapper hardcoded it, so `BrowserDatabaseFailure::kind` was
+          // never read here. Mozilla does read it and reports `query` for a
+          // query-stage failure, which makes the two engines disagree about a
+          // frozen wire field. Reconciling them is a deliberate behavior change
+          // with no golden covering it, not something to slip into a refactor.
           source.fail(SourceFailureStage::Acquisition, error.to_string());
+          // The whole error chain, not just the outermost error the failure
+          // carries. This is what the compatibility projection surfaces, and it
+          // is why the evidence is attached to failed sources too.
           source
             .issues
             .push(SourceIssue::all_rows_rejected(format!("{error:#}")));
@@ -3362,6 +3372,30 @@ mod tests {
     let [broken_source] = &broken.sources[..] else {
       panic!("the broken profile still reports the source it tried to read");
     };
+    // The compatibility evidence carries the whole error chain, while the
+    // failure carries only the outermost error. The chain is what the legacy
+    // API surfaces, so dropping the evidence for failed sources would make its
+    // message strictly less informative.
+    let evidence = broken_source
+      .issues
+      .iter()
+      .find(|issue| issue.code == SourceIssue::ALL_ROWS_REJECTED)
+      .expect("a failed source still carries its compatibility evidence");
+    let failure_message = broken_source
+      .failure
+      .as_ref()
+      .map(|failure| failure.message.as_str())
+      .expect("the source records its failure");
+    assert!(
+      evidence.message.starts_with(failure_message),
+      "evidence {:?} must extend the failure {failure_message:?}",
+      evidence.message
+    );
+    assert!(
+      evidence.message.len() > failure_message.len(),
+      "the evidence must add the context the failure alone drops: {:?}",
+      evidence.message
+    );
     assert!(matches!(
       &broken_source.failure,
       Some(failure) if failure.stage == SourceFailureStage::Acquisition
