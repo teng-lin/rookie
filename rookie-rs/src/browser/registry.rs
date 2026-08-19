@@ -2380,11 +2380,12 @@ mod tests {
     std::fs::write(cookie_directory.join(SAFARI_COOKIE_FILE), b"cook\0\0\0\0")
       .expect("seed Safari cookie source");
     let canonical_library = library.canonicalize().expect("canonical Safari root");
-    let (_, warning) = crate::browser::safari::discover_safari_profiles(&canonical_library);
+    let (_, warning) =
+      crate::browser::registry::safari::discover_safari_profiles(&canonical_library);
     let warning = warning.expect("missing profile database degrades to directory fallback");
     assert!(matches!(
       &warning,
-      crate::browser::safari::SafariProfileDiscoveryIssue::Degraded(_)
+      crate::browser::registry::safari::SafariProfileDiscoveryIssue::Degraded(_)
     ));
     let expected_message = warning.message();
 
@@ -2418,11 +2419,12 @@ mod tests {
     std::fs::write(data.join("Safari/Profiles"), b"not a directory")
       .expect("block Safari profile directory enumeration");
     let canonical_library = library.canonicalize().expect("canonical Safari root");
-    let (_, warning) = crate::browser::safari::discover_safari_profiles(&canonical_library);
+    let (_, warning) =
+      crate::browser::registry::safari::discover_safari_profiles(&canonical_library);
     let warning = warning.expect("database and directory fallback both fail");
     assert!(matches!(
       &warning,
-      crate::browser::safari::SafariProfileDiscoveryIssue::EnumerationFailed(_)
+      crate::browser::registry::safari::SafariProfileDiscoveryIssue::EnumerationFailed(_)
     ));
     let expected_message = warning.message();
 

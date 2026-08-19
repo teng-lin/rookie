@@ -112,7 +112,7 @@ paths = [
 
 # Portable parsers/models with some internal native-acquisition gating,
 # never claimed as a completed containment target by name.
-"rookie-rs/src/browser/safari.rs" = { max_cfg = 9, reason = "portable Safari parser; native acquisition gating not yet moved to a leaf" }
+"rookie-rs/src/browser/safari.rs" = { max_cfg = 8, reason = "portable Safari parser; native acquisition gating not yet moved to a leaf. Dropped from 9 in PR 6 (#251 recipe) when Safari inventory (SafariProfile, discover_safari_profiles*, Tabs.db/directory fallback) moved to registry/safari.rs, an existing unlimited leaf, taking one #[cfg(unix)] test with it." }
 "rookie-rs/src/browser/internet_explorer_model.rs" = { max_cfg = 1, reason = "IE data model, predates #227's registry-adapter containment" }
 
 # Small, low-traffic core files with a handful of legitimate but

@@ -10,9 +10,13 @@ use super::{
   DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
   LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
-use anyhow::Result;
+#[cfg(test)]
+use crate::common::deadline::SystemClock;
+use crate::common::{deadline::BoundaryRuntime, diagnostic::REDACTED_PATH, sqlite};
+use anyhow::{Context, Result};
 use std::{
   collections::HashSet,
+  fs,
   path::{Path, PathBuf},
 };
 
@@ -64,7 +68,7 @@ pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
     context,
     browser_id,
     &runtime,
-    crate::browser::safari::discover_safari_profiles_with_runtime,
+    discover_safari_profiles_with_runtime,
   )
 }
 
@@ -79,10 +83,7 @@ where
   Profiles: FnMut(
     &Path,
     &crate::common::deadline::BoundaryRuntime<'_>,
-  ) -> Result<(
-    Vec<crate::browser::safari::SafariProfile>,
-    Option<crate::browser::safari::SafariProfileDiscoveryIssue>,
-  )>,
+  ) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)>,
 {
   runtime.check()?;
   let registry = embedded_registry()?;
@@ -142,12 +143,8 @@ where
       // that failed too means they were never enumerated, which is a loss and
       // must not be reported at warning severity.
       let code = match warning {
-        crate::browser::safari::SafariProfileDiscoveryIssue::Degraded(_) => {
-          "safari_profile_discovery_degraded"
-        }
-        crate::browser::safari::SafariProfileDiscoveryIssue::EnumerationFailed(_) => {
-          "safari_profile_enumeration_failed"
-        }
+        SafariProfileDiscoveryIssue::Degraded(_) => "safari_profile_discovery_degraded",
+        SafariProfileDiscoveryIssue::EnumerationFailed(_) => "safari_profile_enumeration_failed",
       };
       outcome.discovery_issues.push(DiscoveryIssue::new(
         code,
@@ -158,31 +155,29 @@ where
 
     for (legacy_profile_order, profile) in profiles.into_iter().enumerate() {
       runtime.check()?;
-      let selected = match crate::browser::safari::first_existing_cookie_candidate_with_runtime(
-        &profile.cookie_candidates,
-        runtime,
-      ) {
-        Ok(Some(path)) => path.clone(),
-        // A discovered profile with no cookie source is normal absence, not an
-        // extraction failure, so it is not listed as a report profile.
-        Ok(None) => {
-          outcome.discovery_issues.push(DiscoveryIssue::new(
-            "profile_has_no_cookie_source",
-            canonical_root.join(&profile.name),
-            "Safari profile has no cookie source".to_owned(),
-          ));
-          continue;
-        }
-        Err(error) if boundary_stop_from_error(&error).is_some() => return Err(error),
-        Err(error) => {
-          outcome.discovery_issues.push(DiscoveryIssue::new(
-            "profile_source_inspection_failed",
-            canonical_root.join(&profile.name),
-            format!("{error:#}"),
-          ));
-          continue;
-        }
-      };
+      let selected =
+        match first_existing_cookie_candidate_with_runtime(&profile.cookie_candidates, runtime) {
+          Ok(Some(path)) => path.clone(),
+          // A discovered profile with no cookie source is normal absence, not an
+          // extraction failure, so it is not listed as a report profile.
+          Ok(None) => {
+            outcome.discovery_issues.push(DiscoveryIssue::new(
+              "profile_has_no_cookie_source",
+              canonical_root.join(&profile.name),
+              "Safari profile has no cookie source".to_owned(),
+            ));
+            continue;
+          }
+          Err(error) if boundary_stop_from_error(&error).is_some() => return Err(error),
+          Err(error) => {
+            outcome.discovery_issues.push(DiscoveryIssue::new(
+              "profile_source_inspection_failed",
+              canonical_root.join(&profile.name),
+              format!("{error:#}"),
+            ));
+            continue;
+          }
+        };
       let precedence = profile
         .cookie_candidates
         .iter()
@@ -276,7 +271,7 @@ fn discover_safari_with_runtime<F: DiscoveryFs>(
     context,
     browser_id,
     runtime,
-    crate::browser::safari::discover_safari_profiles_with_runtime,
+    discover_safari_profiles_with_runtime,
   )
 }
 
@@ -324,7 +319,7 @@ where
     profile_id,
     domains,
     &runtime,
-    crate::browser::safari::discover_safari_profiles_with_runtime,
+    discover_safari_profiles_with_runtime,
     query,
   )
 }
@@ -343,10 +338,7 @@ where
   Profiles: FnMut(
     &Path,
     &crate::common::deadline::BoundaryRuntime<'_>,
-  ) -> Result<(
-    Vec<crate::browser::safari::SafariProfile>,
-    Option<crate::browser::safari::SafariProfileDiscoveryIssue>,
-  )>,
+  ) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)>,
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   let mut listing =
@@ -561,7 +553,7 @@ pub(crate) fn safari_report_with_runtime(
     profile_id,
     domains.as_deref(),
     runtime,
-    crate::browser::safari::discover_safari_profiles_with_runtime,
+    discover_safari_profiles_with_runtime,
     |origin, domains| {
       query_safari_file(origin, domains, |origin, domains| {
         crate::browser::safari::safari_based_outcome_with_runtime(origin, domains, runtime)
@@ -629,6 +621,297 @@ pub(crate) fn safari_profiles_with_runtime(
   discover_safari_with_runtime(&context, browser_id, runtime)
 }
 
+const SAFARI_TABS_RELATIVE_PATH: &str = "Safari/SafariTabs.db";
+const SAFARI_PROFILE_TYPE: i64 = 1;
+const SAFARI_PROFILE_SUBTYPE: i64 = 2;
+const DEFAULT_PROFILE_SENTINEL: &str = "DefaultProfile";
+
+fn safari_tabs_database_path(library: &Path) -> PathBuf {
+  library
+    .join("Containers/com.apple.Safari/Data/Library")
+    .join(SAFARI_TABS_RELATIVE_PATH)
+}
+
+/// Crate-private profile descriptor used by the later cross-browser report
+/// adapter. It deliberately does not change the legacy `safari()` API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SafariProfile {
+  pub(super) name: String,
+  pub(super) uuid: Option<String>,
+  pub(super) cookie_candidates: Vec<PathBuf>,
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+  let bytes = value.as_bytes();
+  bytes.len() == 36
+    && [8, 13, 18, 23]
+      .into_iter()
+      .all(|index| bytes[index] == b'-')
+    && bytes
+      .iter()
+      .enumerate()
+      .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+}
+
+fn profile_name(title: &str, uuid: &str) -> String {
+  let cleaned = title
+    .trim()
+    .chars()
+    .map(|character| match character {
+      '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'..='\u{1f}' => '_',
+      character => character,
+    })
+    .collect::<String>();
+  if cleaned.is_empty() {
+    format!("profile-{}", uuid[..8].to_ascii_lowercase())
+  } else {
+    cleaned
+  }
+}
+
+fn disambiguate_profile_names(profiles: &mut [SafariProfile]) {
+  let mut used = std::collections::BTreeSet::new();
+  for profile in profiles {
+    let original = profile.name.clone();
+    let mut candidate = original.clone();
+    let mut suffix = 2usize;
+    while used.contains(&candidate) {
+      candidate = format!("{original}-{suffix}");
+      suffix += 1;
+    }
+    used.insert(candidate.clone());
+    profile.name = candidate;
+  }
+}
+
+fn default_profile(library: &Path) -> SafariProfile {
+  SafariProfile {
+    name: "default".to_owned(),
+    uuid: None,
+    cookie_candidates: vec![
+      library.join("Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"),
+      library.join("Cookies/Cookies.binarycookies"),
+    ],
+  }
+}
+
+fn named_profile(library: &Path, uuid: String, title: String) -> SafariProfile {
+  let lower_uuid = uuid.to_ascii_lowercase();
+  SafariProfile {
+    name: profile_name(&title, &uuid),
+    uuid: Some(uuid),
+    cookie_candidates: vec![library.join(format!(
+      "Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore/{lower_uuid}/WebsiteData/Cookies/Cookies.binarycookies"
+    ))],
+  }
+}
+
+/// Returns a successful (including zero-row) profile DB result. The common
+/// SQLite acquisition layer copies a live WAL pair, avoiding the silent
+/// omission of recently-created profiles that immutable reads cause.
+fn named_profiles_from_database(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<(String, String)>> {
+  let database = safari_tabs_database_path(library);
+  sqlite::with_browser_database_with_runtime(
+    database,
+    |connection| {
+      runtime.check()?;
+      let mut statement = connection.prepare(
+        "SELECT external_uuid, title FROM bookmarks \
+       WHERE type = ?1 AND subtype = ?2 AND external_uuid != ?3 \
+       ORDER BY external_uuid COLLATE BINARY, title COLLATE BINARY",
+      )?;
+      runtime.check()?;
+      let mut rows = statement.query(rusqlite::params![
+        SAFARI_PROFILE_TYPE,
+        SAFARI_PROFILE_SUBTYPE,
+        DEFAULT_PROFILE_SENTINEL
+      ])?;
+      runtime.check()?;
+      let mut profiles = Vec::new();
+      loop {
+        runtime.check()?;
+        let row = rows.next()?;
+        runtime.check()?;
+        let Some(row) = row else {
+          break;
+        };
+        let uuid = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+        let title = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+        if is_canonical_uuid(&uuid) {
+          profiles.push((uuid, title));
+        } else if !uuid.is_empty() {
+          log::warn!("Skipping Safari profile row with invalid external UUID {uuid:?}");
+        }
+      }
+      runtime.check()?;
+      Ok(profiles)
+    },
+    runtime,
+  )
+  .map(|outcome| outcome.into_value())
+}
+
+fn named_profiles_from_directory(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<(String, String)>> {
+  let directory = library.join("Containers/com.apple.Safari/Data/Library/Safari/Profiles");
+  runtime.check()?;
+  let entries = fs::read_dir(&directory);
+  runtime.check()?;
+  let mut entries = match entries {
+    Ok(entries) => entries,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    Err(error) => {
+      return Err(error)
+        .with_context(|| format!("Failed to enumerate Safari profile directory {REDACTED_PATH}"))
+    }
+  };
+  let mut profiles = Vec::new();
+  loop {
+    runtime.check()?;
+    let entry = entries.next();
+    runtime.check()?;
+    let Some(entry) = entry else {
+      break;
+    };
+    let entry = entry.with_context(|| {
+      format!("Failed to read an entry in Safari profile directory {REDACTED_PATH}")
+    })?;
+    runtime.check()?;
+    let file_type = entry
+      .file_type()
+      .with_context(|| format!("Failed to inspect Safari profile entry {REDACTED_PATH}"))?
+      .is_dir();
+    runtime.check()?;
+    if file_type {
+      if let Ok(uuid) = entry.file_name().into_string() {
+        if is_canonical_uuid(&uuid) {
+          profiles.push((uuid, String::new()));
+        }
+      }
+    }
+  }
+  runtime.check()?;
+  profiles.sort_by(|left, right| left.0.cmp(&right.0));
+  runtime.check()?;
+  Ok(profiles)
+}
+
+/// Default profile is always first. A readable zero-row database is
+/// authoritative; only absent, unreadable, or schema-incompatible databases
+/// activate the deterministic directory fallback.
+/// How named-profile discovery went when the profile database could not be
+/// used. The distinction is load-bearing: a fallback that enumerated profiles
+/// degraded gracefully, while one that also failed means named profiles were
+/// never enumerated at all and the report must not call that success.
+#[derive(Debug)]
+pub(super) enum SafariProfileDiscoveryIssue {
+  Degraded(String),
+  EnumerationFailed(String),
+}
+
+impl SafariProfileDiscoveryIssue {
+  pub(super) fn message(self) -> String {
+    match self {
+      Self::Degraded(message) | Self::EnumerationFailed(message) => message,
+    }
+  }
+}
+
+fn discover_safari_profiles_with<Database, Directory>(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+  database: Database,
+  directory: Directory,
+) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)>
+where
+  Database: FnOnce(&Path, &BoundaryRuntime<'_>) -> Result<Vec<(String, String)>>,
+  Directory: FnOnce(&Path, &BoundaryRuntime<'_>) -> Result<Vec<(String, String)>>,
+{
+  runtime.check()?;
+  let mut profiles = vec![default_profile(library)];
+  let (named, warning) = match database(library, runtime) {
+    Ok(profiles) => (profiles, None),
+    Err(error) => {
+      // A terminal database result must never be flattened into an ordinary
+      // discovery degradation or reset into a fresh fallback budget.
+      runtime.check()?;
+      match directory(library, runtime) {
+        Ok(profiles) => (profiles, Some(SafariProfileDiscoveryIssue::Degraded(format!(
+          "Safari profile database acquisition/query failed at {REDACTED_PATH}; using directory fallback (Full Disk Access may be required): {error:#}"
+        )))),
+        Err(directory_error) => {
+          runtime.check()?;
+          (Vec::new(), Some(SafariProfileDiscoveryIssue::EnumerationFailed(format!(
+            "Safari profile database acquisition/query failed at {REDACTED_PATH}; directory fallback enumeration also failed: {directory_error:#}; original database error: {error:#}"
+          ))))
+        }
+      }
+    }
+  };
+  runtime.check()?;
+  let mut seen = std::collections::BTreeSet::new();
+  for (uuid, title) in named {
+    runtime.check()?;
+    if seen.insert(uuid.to_ascii_uppercase()) {
+      profiles.push(named_profile(library, uuid, title));
+    }
+  }
+  runtime.check()?;
+  disambiguate_profile_names(&mut profiles);
+  runtime.check()?;
+  Ok((profiles, warning))
+}
+
+fn discover_safari_profiles_with_runtime(
+  library: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)> {
+  discover_safari_profiles_with(
+    library,
+    runtime,
+    named_profiles_from_database,
+    named_profiles_from_directory,
+  )
+}
+
+#[cfg(test)]
+pub(super) fn discover_safari_profiles(
+  library: &Path,
+) -> (Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>) {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  discover_safari_profiles_with_runtime(library, &runtime)
+    .expect("the standard profile-discovery runtime remains active")
+}
+
+/// Crate-private generic adapter. It is intentionally separate from the
+/// legacy API so a broken named profile cannot hide cookies selected by the
+/// historical default-path-first `safari()` function.
+fn first_existing_cookie_candidate_with_runtime<'a>(
+  candidates: &'a [PathBuf],
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Option<&'a PathBuf>> {
+  for path in candidates {
+    runtime.check()?;
+    let metadata = fs::metadata(path);
+    runtime.check()?;
+    match metadata {
+      Ok(_) => return Ok(Some(path)),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+      Err(error) => {
+        return Err(error)
+          .with_context(|| format!("Failed to inspect Safari cookie source {REDACTED_PATH}"))
+      }
+    }
+  }
+  runtime.check()?;
+  Ok(None)
+}
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -825,7 +1108,7 @@ mod tests {
       let cookie_dir = cookie_dir.clone();
       move |_, _| {
         Ok((
-          vec![crate::browser::safari::SafariProfile {
+          vec![SafariProfile {
             name: "Default".to_owned(),
             uuid: None,
             cookie_candidates: vec![cookie_dir.join("Cookies.binarycookies")],
@@ -1279,12 +1562,7 @@ mod tests {
       &context,
       "safari",
       &runtime,
-      |_,
-       _|
-       -> Result<(
-        Vec<crate::browser::safari::SafariProfile>,
-        Option<crate::browser::safari::SafariProfileDiscoveryIssue>,
-      )> {
+      |_, _| -> Result<(Vec<SafariProfile>, Option<SafariProfileDiscoveryIssue>)> {
         profile_calls.set(profile_calls.get() + 1);
         clock.advance(Duration::from_secs(1));
         Err(anyhow!("scripted profile listing failure"))
@@ -1331,7 +1609,7 @@ mod tests {
       |library, _| {
         clock.advance(Duration::from_secs(1));
         Ok((
-          vec![crate::browser::safari::SafariProfile {
+          vec![SafariProfile {
             name: "Default".to_owned(),
             uuid: None,
             cookie_candidates: vec![library.join("Cookies/Cookies.binarycookies")],
@@ -1405,5 +1683,187 @@ mod tests {
         "discovery-only placeholders are not completed work"
       );
     }
+  }
+
+  fn temp_library(tag: &str) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let unique = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system clock")
+      .as_nanos();
+    let library = std::env::temp_dir().join(format!(
+      "rookie-safari-{tag}-{}-{unique}/Library",
+      std::process::id()
+    ));
+    fs::create_dir_all(&library).expect("create library fixture");
+    library
+  }
+
+  fn write_tabs_database(library: &Path, rows: &[(&str, &str)]) {
+    let database = library.join("Containers/com.apple.Safari/Data/Library/Safari/SafariTabs.db");
+    fs::create_dir_all(database.parent().expect("database parent"))
+      .expect("create database parent");
+    let connection = rusqlite::Connection::open(&database).expect("open SafariTabs fixture");
+    connection
+      .execute_batch(
+        "CREATE TABLE bookmarks (external_uuid TEXT, title TEXT, type INTEGER, subtype INTEGER)",
+      )
+      .expect("create bookmarks");
+    for (uuid, title) in rows {
+      connection
+        .execute(
+          "INSERT INTO bookmarks (external_uuid, title, type, subtype) VALUES (?1, ?2, 1, 2)",
+          rusqlite::params![uuid, title],
+        )
+        .expect("insert bookmark profile");
+    }
+  }
+
+  #[test]
+  fn safari_tabs_profiles_are_default_first_lowercase_and_disambiguated() {
+    let library = temp_library("tabs-profiles");
+    let first = "A0B1C2D3-1111-2222-3333-444444444444";
+    let second = "B0B1C2D3-1111-2222-3333-444444444444";
+    let third = "C0B1C2D3-1111-2222-3333-444444444444";
+    let non_profile = "D0B1C2D3-1111-2222-3333-444444444444";
+    write_tabs_database(
+      &library,
+      &[(third, "Work-2"), (second, "Work"), (first, "Work")],
+    );
+    let connection = rusqlite::Connection::open(safari_tabs_database_path(&library))
+      .expect("reopen SafariTabs fixture");
+    connection
+      .execute(
+        "INSERT INTO bookmarks (external_uuid, title, type, subtype) VALUES (?1, ?2, 2, 2)",
+        rusqlite::params![non_profile, "Not a profile"],
+      )
+      .expect("insert non-profile bookmark with matching subtype");
+    drop(connection);
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    assert!(warning.is_none());
+    assert_eq!(
+      profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["default", "Work", "Work-2", "Work-2-2"]
+    );
+    assert_eq!(profiles[1].uuid.as_deref(), Some(first));
+    assert!(profiles[1].cookie_candidates[0].ends_with(format!(
+      "WebsiteDataStore/{}/WebsiteData/Cookies/Cookies.binarycookies",
+      first.to_ascii_lowercase()
+    )));
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn readable_zero_row_profile_database_is_authoritative() {
+    let library = temp_library("zero-row-authority");
+    write_tabs_database(&library, &[]);
+    let uuid = "A0B1C2D3-1111-2222-3333-444444444444";
+    fs::create_dir_all(library.join(format!(
+      "Containers/com.apple.Safari/Data/Library/Safari/Profiles/{uuid}"
+    )))
+    .expect("create fallback profile");
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    assert!(warning.is_none());
+    assert_eq!(
+      profiles.len(),
+      1,
+      "directory fallback must not override a readable zero-row DB"
+    );
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn expiring_profile_database_does_not_reset_the_budget_for_directory_fallback() {
+    use crate::common::deadline::{test_clock::ManualClock, BoundaryStop, Deadline};
+    use std::time::Duration;
+
+    let library = temp_library("profile-runtime-fallback");
+    let clock = ManualClock::default();
+    let deadline = Deadline::after(&clock, Duration::from_secs(1));
+    let runtime = BoundaryRuntime::new(&clock, deadline);
+    let directory_calls = std::cell::Cell::new(0);
+
+    let error = discover_safari_profiles_with(
+      &library,
+      &runtime,
+      |_, _| {
+        clock.advance(Duration::from_secs(1));
+        Err(anyhow!("scripted profile database failure"))
+      },
+      |_, _| {
+        directory_calls.set(directory_calls.get() + 1);
+        Ok(Vec::new())
+      },
+    )
+    .expect_err("the shared deadline expires with the database attempt");
+
+    assert_eq!(
+      error.downcast_ref::<BoundaryStop>(),
+      Some(&BoundaryStop::TimedOut)
+    );
+    assert_eq!(directory_calls.get(), 0, "fallback must not start");
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  #[test]
+  fn missing_profile_database_uses_sorted_directory_fallback_with_warning() {
+    let library = temp_library("directory-fallback");
+    let first = "B0B1C2D3-1111-2222-3333-444444444444";
+    let second = "A0B1C2D3-1111-2222-3333-444444444444";
+    for uuid in [first, second] {
+      fs::create_dir_all(library.join(format!(
+        "Containers/com.apple.Safari/Data/Library/Safari/Profiles/{uuid}"
+      )))
+      .expect("create fallback profile");
+    }
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    // The fallback enumerated profiles, so this is a degradation, not a loss.
+    assert!(matches!(
+      warning,
+      Some(SafariProfileDiscoveryIssue::Degraded(ref message))
+        if message.contains("directory fallback")
+    ));
+    assert_eq!(profiles[0].name, "default");
+    assert_eq!(profiles[1].uuid.as_deref(), Some(second));
+    assert_eq!(profiles[2].uuid.as_deref(), Some(first));
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+  }
+
+  /// When the database *and* the directory fallback both fail, named profiles
+  /// were never enumerated. Reporting that at the same severity as a working
+  /// fallback let the report claim success while profiles were missing.
+  #[cfg(unix)]
+  #[test]
+  fn failing_database_and_directory_fallback_is_an_enumeration_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = temp_library("directory-fallback-denied");
+    let profiles_directory =
+      library.join("Containers/com.apple.Safari/Data/Library/Safari/Profiles");
+    fs::create_dir_all(&profiles_directory).expect("create profile directory");
+    fs::set_permissions(&profiles_directory, fs::Permissions::from_mode(0o000))
+      .expect("deny profile directory");
+
+    let (profiles, warning) = discover_safari_profiles(&library);
+    let failed = matches!(
+      warning,
+      Some(SafariProfileDiscoveryIssue::EnumerationFailed(_))
+    );
+
+    fs::set_permissions(&profiles_directory, fs::Permissions::from_mode(0o700))
+      .expect("restore permissions");
+    fs::remove_dir_all(library.parent().expect("fixture root")).expect("remove fixture");
+
+    assert!(failed, "both paths failed, so enumeration failed");
+    // The default profile still stands; only the named ones were lost.
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].name, "default");
   }
 }
