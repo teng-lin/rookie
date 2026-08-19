@@ -654,14 +654,21 @@ impl Source {
 
 `Source::from_candidate` is deleted. `source_identity(path, role, format, precedence)` becomes `source_identity(&SourceIdentity)`. **`source_digest` keeps its current three typed arguments** and keeps hashing the profile ids (`outcome.rs:377–398`) — it is not part of this change.
 
-**The transformation is mechanical and must stay that way.** At each of the seven production sites, `from_candidate(c)` becomes `Source::new(c.identity(), c.selected, c.acquisition)` and every existing overwrite stays exactly where it is. That is byte-identical by construction. Four sites relied on the seed silently and now say so out loud:
+**The transformation is mechanical and must stay that way.** At each of the seven production sites, `from_candidate(c)` becomes `Source::new(c.identity(), c.selected, c.acquisition)` and every existing overwrite stays exactly where it is. That is byte-identical by construction.
 
-| Site | Relied on the seed for | After |
-| --- | --- | --- |
-| `chromium.rs:440` (`into_source`) | `selected` (sets `acquisition`) | passes `candidate.selected` |
-| `safari.rs:135` (`safari_source`) | both | passes both |
-| `internet_explorer.rs:222` (production IE) | `selected` (overlays `EseDatabase`) | passes `candidate.selected` |
-| `registry/chromium.rs:1103` | `selected` (sets `acquisition`) | passes `candidate.selected` |
+**All seven inherit `selected`; not one of them overwrites it.** Three overwrite `acquisition`. Verified site by site:
+
+| Site | Overwrites | Inherits | Note |
+| --- | --- | --- | --- |
+| `chromium.rs:440` (`into_source`) | `acquisition` | `selected` | |
+| `safari.rs:135` (`safari_source`) | neither | both | |
+| `internet_explorer.rs:222` | `acquisition` (`EseDatabase`) | `selected` | |
+| `registry/chromium.rs:1103` | `acquisition` (from the failure's strategy) | `selected` | failure path |
+| `registry/safari.rs:424` | neither | both | placeholder, **discarded** in the `Ok` arm; the seed reaches the wire only on `Err` |
+| `registry/internet_explorer.rs:224` | neither | both | same placeholder-then-discard shape |
+| `mozilla.rs:1176` | neither | both | unrecognized-session-format guard; the failed source is still reported |
+
+Because no site overwrites `selected`, the mechanical rule is exactly right at all seven and needs no per-site judgment. The placeholder sites deserve one note: `Source::from_candidate(candidate.clone())` is built and then thrown away whenever the query succeeds, so under `Source::new` the construction could move into the `Err` arm and stop allocating on the success path. **Do not do that here** — it is an optimization, not the refactor, and mixing it in forfeits the byte-identical property. Record it as a follow-up.
 
 Deleting `from_candidate` also breaks **five test sites** (`report_build.rs:2504`, `:2577`, `:3030`, `:3217`; `registry/gecko.rs:1893`) and the `#[cfg(test)]` helper `extracted_internet_explorer_source` (`registry/internet_explorer.rs:39`). They convert by the same rule; they are in Commit A's file list, and they are why "seven sites" describes production only.
 
