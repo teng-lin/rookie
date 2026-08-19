@@ -127,6 +127,33 @@ pub(crate) struct SourceIssue {
 }
 
 impl SourceIssue {
+  /// Carries the legacy "every row was rejected" error without giving `Source`
+  /// a sibling field for it.
+  ///
+  /// This is the one issue code that never reaches the wire: the report mapper
+  /// lifts it into `CompatibilityEvidence::AllRowsRejected` instead of pushing
+  /// it as an extraction issue. Section 5.7 does not treat a fully-rejected
+  /// source as failed -- acquisition, parsing, and the query all completed --
+  /// so the evidence exists only for the compatibility projection, which does.
+  ///
+  /// A `compatibility_evidence` field on [`Source`] would put a Chromium-only,
+  /// legacy-only concern on the leaf every engine shares.
+  pub(crate) const ALL_ROWS_REJECTED: &'static str = "all_rows_rejected";
+
+  /// The evidence issue for [`Self::ALL_ROWS_REJECTED`].
+  ///
+  /// A constructor rather than two call sites spelling out the same stage and
+  /// severity: the mapper matches on the code alone, so a disagreement here
+  /// would be invisible until the values were ever read.
+  pub(crate) fn all_rows_rejected(message: impl Into<String>) -> Self {
+    Self::new(
+      Self::ALL_ROWS_REJECTED,
+      ExtractionStageCode::parse(),
+      IssueSeverityCode::error(),
+      message,
+    )
+  }
+
   pub(crate) fn new(
     code: &'static str,
     stage: ExtractionStageCode,
@@ -184,15 +211,8 @@ impl Source {
   ///
   /// Callers fill in what the query returned. `acquisition` starts from the
   /// candidate so an engine that does not overlay one keeps the frozen value.
-  /// The candidate-driven engines (Safari/IE) build their `Source`s this way;
-  /// Gecko's path/query populate builds `Source` directly. Safari compiles only
-  /// on macOS and IE only on Windows, so a Linux build has neither caller -- a
-  /// platform gate, not dead code.
-  ///
-  /// Unconditional allow for the same reason as `SourceAcquisition::EseDatabase`:
-  /// naming the targets here would put a platform `cfg` in a module that is
-  /// deliberately target-agnostic (#218).
-  #[allow(dead_code)]
+  /// The candidate-driven engines (Chromium/Safari/IE) build their `Source`s
+  /// this way; Gecko's path/query populate builds `Source` directly.
   pub(crate) fn from_candidate(origin: SourceCandidate) -> Self {
     let selected = origin.selected;
     let acquisition = origin.acquisition;

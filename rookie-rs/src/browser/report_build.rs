@@ -7,16 +7,15 @@
 
 mod dispatch;
 
-use super::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
 use super::cookie_record::{CookieRecord, FinalizationError, LegacyProjectionSemantics};
 use super::outcome::{
   CompatibilityAbsence, CompatibilityDecision, CompatibilityDisposition, Diagnostic, Failure,
-  FailureLedger, FailureScope, Outcome, ResultStatus, Retryability, SourceOutcome, Termination,
+  FailureLedger, FailureScope, Outcome, ResultStatus, SourceOutcome, Termination,
 };
 use super::registry::{
-  self, ChromiumProfileDraft, ChromiumProfileFailure, ChromiumRegistryDraft, DiscoveredProfile,
-  DiscoveryIssue, EngineExtract, EngineListing, ExtractedProfile, RegisteredBrowser,
-  SourceAcquisition, SOURCE_ROLE_PERSISTENT,
+  self, ChromiumExtractedProfile, ChromiumRegistryDraft, DiscoveredProfile, DiscoveryIssue,
+  EngineExtract, EngineListing, ExtractedProfile, RegisteredBrowser, SourceAcquisition,
+  SOURCE_ROLE_PERSISTENT,
 };
 #[cfg(test)]
 use super::report_core::SourceStatusCode;
@@ -112,65 +111,6 @@ fn source_identity(
 /// A row issue always means rows were skipped, so it degrades the report to
 /// `partial` without demoting the source itself: acquisition and the query
 /// still completed.
-fn row_issue(issue_code: &ChromiumRowIssue) -> ExtractionIssue {
-  let (code, stage) = match issue_code.code {
-    ChromiumRowIssueCode::ColumnRead(_) => ("column_read_failed", ExtractionStageCode::parse()),
-    ChromiumRowIssueCode::Decrypt => ("decrypt_failed", ExtractionStageCode::decrypt()),
-    ChromiumRowIssueCode::Decode => ("decode_failed", ExtractionStageCode::decode()),
-    ChromiumRowIssueCode::ProviderUnavailable => {
-      ("provider_unavailable", ExtractionStageCode::decrypt())
-    }
-    ChromiumRowIssueCode::ProviderFailed => ("provider_failed", ExtractionStageCode::decrypt()),
-  };
-  let message = match issue_code.code {
-    ChromiumRowIssueCode::ColumnRead(column) => {
-      format!(
-        "failed to read the {column} column of {} row(s)",
-        issue_code.occurrences
-      )
-    }
-    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed => {
-      format!(
-        "{} row(s) unavailable because of {code}",
-        issue_code.occurrences
-      )
-    }
-    _ => format!("{} row(s) rejected as {code}", issue_code.occurrences),
-  };
-  // Name-column and value-column failures share one code, so aggregation merges
-  // them and the retained message names only whichever came first. Qualifying
-  // each sample keeps the failing column recoverable from the merged issue.
-  let samples = match issue_code.code {
-    ChromiumRowIssueCode::ColumnRead(column) => issue_code
-      .samples
-      .iter()
-      .map(|sample| format!("{column} column, {sample}"))
-      .collect(),
-    _ => issue_code.samples.clone(),
-  };
-  let mut issue = issue(code, stage, IssueSeverityCode::error(), message)
-    .with_occurrences(u32::try_from(issue_code.occurrences).unwrap_or(u32::MAX))
-    .with_samples(samples);
-  if matches!(
-    issue_code.code,
-    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed
-  ) {
-    issue.cause = "credential_provider".to_owned();
-    issue.provider.clone_from(&issue_code.provider);
-    issue.tier.clone_from(&issue_code.tier);
-    issue.retryability = match issue_code.retryability {
-      Retryability::Retryable => "retryable",
-      Retryability::NotRetryable => "not_retryable",
-      Retryability::Unknown => "unknown",
-    }
-    .to_owned();
-    if let Some(cause) = &issue_code.cause {
-      issue.message = cause.clone();
-    }
-  }
-  issue
-}
-
 fn profile_identity(
   browser_id: &BrowserId,
   installation_id: &str,
@@ -189,22 +129,22 @@ fn profile_identity(
   })
 }
 
+/// Adapts one extracted Chromium profile into a [`ProfileDraft`].
+///
+/// Extract-only, and a copy like [`extracted_profile_outcome`]: everything the
+/// query learned already lives on the [`Source`]s. The one thing this mapper
+/// still decides is what an empty source list means, which is engine-specific
+/// -- Chromium lists only databases that exist, so having none is ordinary
+/// absence rather than the failure it is for the engine listing.
 fn chromium_profile_outcome(
   browser_id: &BrowserId,
   installation_id: &str,
-  extraction: ChromiumProfileDraft,
+  extraction: ChromiumExtractedProfile,
 ) -> Result<ProfileDraft> {
-  let ChromiumProfileDraft {
+  let ChromiumExtractedProfile {
     profile,
-    #[cfg(test)]
-    cookies,
-    records,
-    stats,
-    row_issues,
-    acquisition,
-    acquisition_attempts,
+    sources,
     failure,
-    legacy_error,
   } = extraction;
   let identity = profile_identity(
     browser_id,
@@ -215,22 +155,18 @@ fn chromium_profile_outcome(
   )?;
   let mut outcome = ProfileDraft::new(identity, profile.is_default);
 
-  let Some(candidate) = profile
-    .persistent_candidates
-    .iter()
-    .find(|candidate| candidate.selected)
-  else {
+  if sources.is_empty() {
     // A profile that simply has no cookie database is ordinary absence, but one
     // that reports an extraction failure lost something, so it must not be
     // downgraded to the same `info` signal as an empty profile.
     outcome.issues.push(match failure {
-      Some(ChromiumProfileFailure::Extraction(message)) => issue(
+      Some(message) => issue(
         "profile_extraction_failed",
         ExtractionStageCode::acquisition(),
         IssueSeverityCode::error(),
         message,
       ),
-      _ => issue(
+      None => issue(
         "profile_has_no_cookie_source",
         ExtractionStageCode::discovery(),
         IssueSeverityCode::info(),
@@ -238,52 +174,11 @@ fn chromium_profile_outcome(
       ),
     });
     return Ok(outcome);
-  };
+  }
 
-  let mut source = SourceDraft::new(
-    source_identity(
-      &candidate.path,
-      SOURCE_ROLE_PERSISTENT,
-      "chromium_sqlite",
-      candidate.precedence,
-    ),
-    &candidate.path,
-    true,
-    acquisition_code(acquisition),
-  );
-  source.stats = CounterSet {
-    rows_seen: stats.rows_seen as u64,
-    cookies_emitted: stats.cookies_emitted as u64,
-    rows_skipped: stats.rows_skipped as u64,
-    rows_rejected: stats.rows_rejected as u64,
-    provider_failures: stats.provider_failures as u64,
-    acquisition_attempts: u64::from(acquisition_attempts),
-  }
-  .into_stats();
-  #[cfg(test)]
-  {
-    source.cookies = cookies;
-  }
-  source.records = records;
-  source.compatibility_evidence = legacy_error.map(CompatibilityEvidence::AllRowsRejected);
-  for row in &row_issues {
-    push_aggregated(&mut source.issues, row_issue(row));
-  }
-  // Only a failure to acquire, parse, or query demotes the source. Rejected
-  // rows are already reported above and leave the source succeeded.
-  if let Some(ChromiumProfileFailure::Extraction(message)) = failure {
-    push_aggregated(
-      &mut source.issues,
-      issue(
-        "source_extraction_failed",
-        ExtractionStageCode::acquisition(),
-        IssueSeverityCode::error(),
-        message,
-      ),
-    );
-    source.failed = true;
-  }
-  outcome.sources.push(source);
+  outcome
+    .sources
+    .extend(sources.into_iter().map(source_to_draft));
   Ok(outcome)
 }
 
@@ -349,6 +244,15 @@ fn source_to_draft(source: Source) -> SourceDraft {
     );
   }
   for source_issue in issues {
+    // The one issue code that does not become an extraction issue. Section 5.7
+    // reports a fully-rejected source as succeeded-with-rows-skipped, so the
+    // "every row failed" error exists purely as evidence for the compatibility
+    // projection, which does treat it as a failure.
+    if source_issue.code == SourceIssue::ALL_ROWS_REJECTED {
+      outcome.compatibility_evidence =
+        Some(CompatibilityEvidence::AllRowsRejected(source_issue.message));
+      continue;
+    }
     push_aggregated(
       &mut outcome.issues,
       source_issue_to_extraction(source_issue),
@@ -738,19 +642,22 @@ fn chromium_listing_outcome(
     )?;
     let mut engine = ProfileDraft::new(identity, profile.is_default);
     for candidate in &profile.persistent_candidates {
+      // Chromium listing policy, not a property of `SourceCandidate`: this
+      // engine stats both layouts and lists only what is on disk, while the
+      // engine listing plants `exists: true` candidates that must all survive.
       if !candidate.exists {
         continue;
       }
       engine.sources.push(SourceDraft::new(
         source_identity(
           &candidate.path,
-          SOURCE_ROLE_PERSISTENT,
-          "chromium_sqlite",
+          candidate.role.as_str(),
+          candidate.format.as_str(),
           candidate.precedence,
         ),
         &candidate.path,
         candidate.selected,
-        AcquisitionStrategyCode::not_attempted(),
+        acquisition_code(candidate.acquisition),
       ));
     }
     outcome.profiles.push(engine);
@@ -1558,27 +1465,26 @@ pub(crate) fn canonical_chromium_extraction_with_runtime(
 // Chromium selection, which is Linux/macOS-only; Windows exercises this via
 // `#[cfg(test)]`.
 #[allow(dead_code)]
-pub(crate) fn canonical_direct_chromium_extraction(
-  db_path: &std::path::Path,
-  draft: super::chromium::ChromiumExtractionDraft,
-) -> Result<Outcome> {
-  canonical_direct_chromium_extraction_impl(db_path, draft, None)
+pub(crate) fn canonical_direct_chromium_extraction(source: Source) -> Result<Outcome> {
+  canonical_direct_chromium_extraction_impl(source, None)
 }
 
 pub(crate) fn canonical_direct_chromium_extraction_with_runtime(
-  db_path: &std::path::Path,
-  draft: super::chromium::ChromiumExtractionDraft,
+  source: Source,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_chromium_extraction_impl(db_path, draft, Some(runtime))
+  canonical_direct_chromium_extraction_impl(source, Some(runtime))
 }
 
 fn canonical_direct_chromium_extraction_impl(
-  db_path: &std::path::Path,
-  draft: super::chromium::ChromiumExtractionDraft,
+  source: Source,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
   let browser_id = BrowserId::known("chromium");
+  // The source's own path, not a second one threaded alongside it: the
+  // candidate the engine queried is the only place this is recorded.
+  let db_path = source.origin.path.clone();
+  let db_path = db_path.as_path();
   let profile = ProfileIdentity {
     browser_id: browser_id.clone(),
     installation_id: "0".repeat(64).parse()?,
@@ -1588,38 +1494,7 @@ fn canonical_direct_chromium_extraction_impl(
     path_lossy: db_path.parent().unwrap_or(db_path).to_str().is_none(),
   };
   let mut profile_draft = ProfileDraft::new(profile, true);
-  let mut source = SourceDraft::new(
-    source_identity(
-      db_path,
-      SOURCE_ROLE_PERSISTENT,
-      "chromium_sqlite",
-      registry::PERSISTENT_SOURCE_PRECEDENCE,
-    ),
-    db_path,
-    true,
-    acquisition_code(draft.acquisition_strategy.into()),
-  );
-  source.stats = CounterSet {
-    rows_seen: draft.stats.rows_seen as u64,
-    cookies_emitted: draft.stats.cookies_emitted as u64,
-    rows_skipped: draft.stats.rows_skipped as u64,
-    rows_rejected: draft.stats.rows_rejected as u64,
-    provider_failures: draft.stats.provider_failures as u64,
-    acquisition_attempts: u64::from(draft.acquisition_attempts),
-  }
-  .into_stats();
-  #[cfg(test)]
-  {
-    source.cookies = draft.cookies;
-  }
-  source.records = draft.records;
-  source.compatibility_evidence = draft
-    .legacy_error
-    .map(|error| CompatibilityEvidence::AllRowsRejected(format!("{error:#}")));
-  for row in &draft.issues {
-    push_aggregated(&mut source.issues, row_issue(row));
-  }
-  profile_draft.sources.push(source);
+  profile_draft.sources.push(source_to_draft(source));
   Ok(finalize_outcomes_with_runtime(
     1,
     vec![BrowserDraft {
@@ -2538,43 +2413,38 @@ mod tests {
     assert!(report.issues.is_empty());
   }
 
+  fn chromium_candidate() -> SourceCandidate {
+    SourceCandidate {
+      path: PathBuf::from("/chrome/Default").join("Network/Cookies"),
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known("chromium_sqlite"),
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition: registry::SourceAcquisition::NotAttempted,
+    }
+  }
+
   fn chromium_profile(
-    selected_candidate: bool,
-    failure: Option<ChromiumProfileFailure>,
-  ) -> registry::ChromiumProfileDraft {
+    sources: Vec<Source>,
+    failure: Option<String>,
+  ) -> registry::ChromiumExtractedProfile {
     let path = PathBuf::from("/chrome/Default");
-    registry::ChromiumProfileDraft {
+    registry::ChromiumExtractedProfile {
       profile: registry::ChromiumProfile {
         profile_id: "c".repeat(64).parse().expect("valid profile id"),
         installation_id: "d".repeat(64).parse().expect("valid installation id"),
         directory_name: "Default".to_owned(),
         display_name: "Person 1".to_owned(),
-        path: path.clone(),
+        path,
         is_default: true,
         is_active: true,
         active_order: Some(0),
         is_last_used: true,
-        persistent_candidates: vec![registry::CookieSourceCandidate {
-          path: path.join("Network/Cookies"),
-          precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-          exists: selected_candidate,
-          selected: selected_candidate,
-        }],
+        persistent_candidates: vec![chromium_candidate()],
       },
-      cookies: Vec::new(),
-      records: Vec::new(),
-      stats: crate::browser::chromium::ChromiumExtractionStats {
-        rows_seen: 0,
-        cookies_emitted: 0,
-        rows_skipped: 0,
-        rows_rejected: 0,
-        provider_failures: 0,
-      },
-      row_issues: Vec::new(),
-      acquisition: registry::SourceAcquisition::NotAttempted,
-      acquisition_attempts: 1,
+      sources,
       failure,
-      legacy_error: None,
     }
   }
 
@@ -2587,12 +2457,7 @@ mod tests {
     let engine = chromium_profile_outcome(
       &browser,
       &"d".repeat(64),
-      chromium_profile(
-        false,
-        Some(ChromiumProfileFailure::Extraction(
-          "Local State is unreadable".to_owned(),
-        )),
-      ),
+      chromium_profile(Vec::new(), Some("Local State is unreadable".to_owned())),
     )
     .expect("adapt the profile");
     assert!(engine.sources.is_empty());
@@ -2606,11 +2471,35 @@ mod tests {
     );
   }
 
+  /// The same empty source list without a failure is ordinary absence. The two
+  /// must not collapse: an installed browser with no cookie store would
+  /// otherwise be indistinguishable from one that could not be read.
+  #[test]
+  fn a_chromium_profile_with_no_source_and_no_failure_is_ordinary_absence() {
+    let browser = BrowserId::known("chrome");
+    let engine = chromium_profile_outcome(
+      &browser,
+      &"d".repeat(64),
+      chromium_profile(Vec::new(), None),
+    )
+    .expect("adapt the profile");
+    assert!(engine.sources.is_empty());
+    let issue = engine.issues.first().expect("an issue for the absence");
+    assert_eq!(issue.code.as_str(), "profile_has_no_cookie_source");
+    assert!(!issue.is_error());
+  }
+
   #[test]
   fn chromium_adapter_projects_a_selected_candidate_as_a_succeeding_source() {
     let browser = BrowserId::known("chrome");
-    let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(true, None))
-      .expect("adapt the profile");
+    let mut source = Source::from_candidate(chromium_candidate());
+    source.acquisition_attempts = 1;
+    let engine = chromium_profile_outcome(
+      &browser,
+      &"d".repeat(64),
+      chromium_profile(vec![source], None),
+    )
+    .expect("adapt the profile");
     let report = assemble(1, vec![outcome(vec![engine], false)]);
     assert_eq!(report.status, ReportStatusCode::complete());
     let source = &report.profiles[0].sources[0];
@@ -3090,38 +2979,44 @@ mod tests {
       same_site: crate::common::enums::SAME_SITE_UNSPECIFIED,
     };
 
-    let mut chromium = chromium_profile(true, None);
-    chromium.cookies = vec![cookie("chromium")];
-    chromium.records = vec![fixture_record(cookie("chromium"), 0)];
-    chromium.stats = crate::browser::chromium::ChromiumExtractionStats {
+    // Chromium is built the same way as the other three now: one `Source` the
+    // engine already translated. The adapter has no engine-specific counters
+    // left to reconcile, only the shared ones.
+    let mut chromium_source = Source::from_candidate(chromium_candidate());
+    chromium_source.records = vec![fixture_record(cookie("chromium"), 0)];
+    chromium_source.stats = SourceStats {
       rows_seen: 4,
       cookies_emitted: 1,
       rows_skipped: 3,
       rows_rejected: 1,
       provider_failures: 2,
     };
-    chromium.row_issues = vec![
-      crate::browser::chromium::ChromiumRowIssue {
-        code: crate::browser::chromium::ChromiumRowIssueCode::Decode,
-        provider: None,
-        tier: None,
-        cause: None,
-        retryability: Retryability::Unknown,
-        occurrences: 1,
-        samples: vec!["row 2".to_owned()],
-      },
-      crate::browser::chromium::ChromiumRowIssue {
-        code: crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed,
-        provider: Some("platform_key_provider".to_owned()),
-        tier: Some("v11".to_owned()),
-        cause: Some("keyring unavailable".to_owned()),
-        retryability: Retryability::Retryable,
-        occurrences: 2,
-        samples: vec!["row 3".to_owned(), "row 4".to_owned()],
-      },
-    ];
-    let chromium = chromium_profile_outcome(&BrowserId::known("chrome"), &"d".repeat(64), chromium)
-      .expect("adapt Chromium counters");
+    let mut provider_failed = SourceIssue::new(
+      "provider_failed",
+      ExtractionStageCode::decrypt(),
+      IssueSeverityCode::error(),
+      "keyring unavailable",
+    )
+    .with_occurrences(2);
+    provider_failed.samples = vec!["row 3".to_owned(), "row 4".to_owned()];
+    provider_failed.provider = Some("platform_key_provider".to_owned());
+    provider_failed.tier = Some("v11".to_owned());
+    provider_failed.cause = Some("credential_provider".to_owned());
+    provider_failed.retryability = Some("retryable".to_owned());
+    let mut decode_failed = SourceIssue::new(
+      "decode_failed",
+      ExtractionStageCode::decode(),
+      IssueSeverityCode::error(),
+      "1 row(s) rejected as decode_failed",
+    );
+    decode_failed.samples = vec!["row 2".to_owned()];
+    chromium_source.issues = vec![decode_failed, provider_failed];
+    let chromium = chromium_profile_outcome(
+      &BrowserId::known("chrome"),
+      &"d".repeat(64),
+      chromium_profile(vec![chromium_source], None),
+    )
+    .expect("adapt Chromium counters");
 
     let mut profiles = vec![chromium];
     for (format, name) in [
@@ -3192,49 +3087,99 @@ mod tests {
     }
   }
 
-  /// Name-column and value-column failures share a code, so aggregation merges
-  /// them; the sample must still say which column was lost.
+  /// Engine-authored issues that share a code merge on the way into the report,
+  /// keeping every sample. The engine emits one `SourceIssue` per aggregated
+  /// row issue, so this is where name-column and value-column failures become
+  /// the single `column_read_failed` a consumer sees.
   #[test]
-  fn merged_column_failures_keep_the_column_in_their_samples() {
-    use crate::browser::chromium::{ChromiumRowIssue, ChromiumRowIssueCode};
-
-    let mut issues = Vec::new();
-    for (column, row) in [("name", 1usize), ("value", 7)] {
-      push_aggregated(
-        &mut issues,
-        row_issue(&ChromiumRowIssue {
-          code: ChromiumRowIssueCode::ColumnRead(column),
-          provider: None,
-          tier: None,
-          cause: None,
-          retryability: Retryability::Unknown,
-          occurrences: 1,
-          samples: vec![format!("row {row}")],
-        }),
-      );
-    }
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].occurrences, 2);
+  fn same_code_source_issues_merge_and_keep_every_sample() {
+    let mut source = source_with_issues(vec![
+      column_read_issue("name column, row 1"),
+      column_read_issue("value column, row 7"),
+    ]);
+    source.stats.rows_skipped = 2;
+    let outcome = source_to_draft(source);
+    assert_eq!(outcome.issues.len(), 1);
+    assert_eq!(outcome.issues[0].occurrences, 2);
     assert_eq!(
-      issues[0].samples,
+      outcome.issues[0].samples,
       vec!["name column, row 1", "value column, row 7"]
     );
   }
 
+  /// The engine names the provider, tier, cause, and retryability; the mapper
+  /// only has to carry them. Losing any of them would leave a consumer unable
+  /// to tell a retryable key failure from a permanent one.
   #[test]
-  fn provider_failure_retryability_reaches_the_canonical_report_issue() {
-    let issue = row_issue(&ChromiumRowIssue {
-      code: ChromiumRowIssueCode::ProviderFailed,
-      provider: Some("platform_key_provider".to_owned()),
-      tier: Some("v20".to_owned()),
-      cause: Some("malformed App-Bound Local State".to_owned()),
-      retryability: Retryability::NotRetryable,
-      occurrences: 1,
-      samples: vec!["row 1".to_owned()],
+  fn provider_failure_metadata_reaches_the_canonical_report_issue() {
+    let mut issue = SourceIssue::new(
+      "provider_failed",
+      ExtractionStageCode::decrypt(),
+      IssueSeverityCode::error(),
+      "malformed App-Bound Local State",
+    );
+    issue.provider = Some("platform_key_provider".to_owned());
+    issue.tier = Some("v20".to_owned());
+    issue.cause = Some("credential_provider".to_owned());
+    issue.retryability = Some("not_retryable".to_owned());
+
+    let outcome = source_to_draft(source_with_issues(vec![issue]));
+    let reported = outcome.issues.first().expect("the provider issue");
+    assert_eq!(reported.code.as_str(), "provider_failed");
+    assert_eq!(reported.retryability, "not_retryable");
+    assert_eq!(reported.tier.as_deref(), Some("v20"));
+    assert_eq!(reported.cause, "credential_provider");
+    assert_eq!(reported.message, "malformed App-Bound Local State");
+  }
+
+  /// `all_rows_rejected` is the one code that must not surface as an extraction
+  /// issue: Section 5.7 reports a fully-rejected source as succeeded, and only
+  /// the compatibility projection treats it as an error.
+  #[test]
+  fn the_all_rows_rejected_issue_becomes_evidence_rather_than_an_issue() {
+    let outcome = source_to_draft(source_with_issues(vec![
+      SourceIssue::all_rows_rejected("every row failed"),
+      column_read_issue("name column, row 1"),
+    ]));
+    assert_eq!(
+      outcome
+        .issues
+        .iter()
+        .map(|issue| issue.code.as_str())
+        .collect::<Vec<_>>(),
+      ["column_read_failed"],
+      "the evidence must not reach the report as an issue"
+    );
+    assert!(!outcome.failed, "a fully-rejected source still succeeded");
+    assert!(matches!(
+      outcome.compatibility_evidence,
+      Some(CompatibilityEvidence::AllRowsRejected(message)) if message == "every row failed"
+    ));
+  }
+
+  fn column_read_issue(sample: &str) -> SourceIssue {
+    let mut issue = SourceIssue::new(
+      "column_read_failed",
+      ExtractionStageCode::parse(),
+      IssueSeverityCode::error(),
+      "failed to read the name column of 1 row(s)",
+    );
+    issue.samples = vec![sample.to_owned()];
+    issue
+  }
+
+  fn source_with_issues(issues: Vec<SourceIssue>) -> Source {
+    let mut source = Source::from_candidate(SourceCandidate {
+      path: PathBuf::from("/chrome/Default/Network/Cookies"),
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known("chromium_sqlite"),
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition: registry::SourceAcquisition::NotAttempted,
     });
-    assert_eq!(issue.code.as_str(), "provider_failed");
-    assert_eq!(issue.retryability, "not_retryable");
-    assert_eq!(issue.tier.as_deref(), Some("v20"));
+    source.issues = issues;
+    source
   }
   /// Profile and source issues carry no context from the engines, because the
   /// enclosing profile is implied structurally. Consumers that flatten every
@@ -4085,8 +4030,10 @@ mod engine_chain_tests {
       .expect("chromium report");
     assert!(
       registry_report.installations[0].profiles[0]
-        .legacy_error
-        .is_some(),
+        .sources
+        .iter()
+        .flat_map(|source| source.issues.iter())
+        .any(|issue| issue.code == SourceIssue::ALL_ROWS_REJECTED),
       "the legacy projection must retain its all-row error"
     );
     let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)

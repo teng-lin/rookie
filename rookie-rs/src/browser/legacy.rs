@@ -345,24 +345,15 @@ fn skip_warnings(decrypt_failed: u64, row_read_failed: u64) -> Vec<(&'static str
 }
 
 fn chromium_decrypt_skip_count(draft: &registry::ChromiumRegistryDraft) -> u64 {
-  use crate::browser::chromium::ChromiumRowIssueCode;
-  let mut count = 0u64;
-  for installation in &draft.installations {
-    for profile in &installation.profiles {
-      for issue in &profile.row_issues {
-        if matches!(
-          issue.code,
-          ChromiumRowIssueCode::Decrypt
-            | ChromiumRowIssueCode::Decode
-            | ChromiumRowIssueCode::ProviderFailed
-            | ChromiumRowIssueCode::ProviderUnavailable
-        ) {
-          count = count.saturating_add(issue.occurrences as u64);
-        }
-      }
-    }
-  }
-  count
+  draft
+    .installations
+    .iter()
+    .flat_map(|installation| installation.profiles.iter())
+    .flat_map(|profile| profile.sources.iter())
+    .flat_map(|source| source.issues.iter())
+    .filter(|issue| crate::browser::chromium::CHROMIUM_UNSEAL_ISSUE_CODES.contains(&issue.code))
+    .map(|issue| u64::from(issue.occurrences))
+    .fold(0u64, u64::saturating_add)
 }
 
 fn engine_extract_skipped_row_count(extract: &EngineExtract) -> u64 {

@@ -10,7 +10,7 @@
 #[cfg(test)]
 use super::report_core::sort_cookies;
 use super::report_core::{InstallationId, ProfileId};
-use super::source::{Source, SourceCandidate};
+pub(crate) use super::source::{Source, SourceCandidate, SourceFailureStage, SourceIssue};
 use crate::common::diagnostic::REDACTED_PATH;
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::Lazy;
@@ -825,7 +825,7 @@ pub(crate) const SOURCE_ROLE_SESSION: &str = "session";
 pub(crate) const PERSISTENT_SOURCE_PRECEDENCE: u16 = 10;
 
 // The source-work leaf vocabulary lives in `browser/source.rs`. Re-exported
-// here so Safari/IE/Gecko name the same `SourceAcquisition` / `SourceFailureStage`
+// here so every engine names the same `SourceAcquisition` / `SourceFailureStage`
 // through `registry`, one definition with no divergence.
 pub(crate) use super::source::SourceAcquisition;
 
@@ -1149,13 +1149,11 @@ mod chromium;
 
 #[cfg(unix)]
 pub(crate) use chromium::chromium_key_credentials;
-#[cfg(test)]
-pub(crate) use chromium::CookieSourceCandidate;
 pub(crate) use chromium::{
   chrome_profiles_with_runtime, chromium_listing_with_runtime,
   chromium_registry_report_with_runtime, legacy_chromium_outcome_with_runtime,
-  select_chrome_profile_with_runtime, ChromiumProfile, ChromiumProfileDraft,
-  ChromiumProfileFailure, ChromiumRegistryDraft,
+  select_chrome_profile_with_runtime, ChromiumExtractedProfile, ChromiumProfile,
+  ChromiumRegistryDraft,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use chromium::{

@@ -25,6 +25,8 @@ enum CookieProjection {
   Detailed,
 }
 use super::cookie_record::{CookieRecord, UnavailableCode};
+use super::report_core::{ExtractionStageCode, IssueSeverityCode};
+use super::source::{Source, SourceCandidate, SourceIssue, SourceStats};
 #[cfg(all(test, unix))]
 use super::unseal::decrypt_encrypted_value_with_outcomes;
 #[cfg(test)]
@@ -234,7 +236,7 @@ const MAX_CHROMIUM_ROW_ISSUE_SAMPLES: usize = crate::browser::report_core::MAX_I
 const SQLITE_CONNECTION_LOG: &str = "Creating SQLite connection to <path>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ChromiumRowIssueCode {
+enum ChromiumRowIssueCode {
   ColumnRead(&'static str),
   Decrypt,
   Decode,
@@ -245,7 +247,7 @@ pub(crate) enum ChromiumRowIssueCode {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ChromiumRowIssue {
+struct ChromiumRowIssue {
   pub(crate) code: ChromiumRowIssueCode,
   pub(crate) provider: Option<String>,
   pub(crate) tier: Option<String>,
@@ -256,7 +258,7 @@ pub(crate) struct ChromiumRowIssue {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct ChromiumExtractionStats {
+struct ChromiumExtractionStats {
   pub(crate) rows_seen: usize,
   pub(crate) cookies_emitted: usize,
   pub(crate) rows_skipped: usize,
@@ -310,7 +312,7 @@ impl ChromiumDetailedProbeResult {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct ChromiumExtractionDraft {
+struct ChromiumExtractionDraft {
   #[cfg(test)]
   pub(crate) cookies: Vec<Cookie>,
   #[cfg(test)]
@@ -402,6 +404,53 @@ impl ChromiumExtractionDraft {
     self.record_row_issue_with_cause(code, row_number, provider, tier, Some(cause), retryability);
   }
 
+  /// Converts this engine-private accumulator into the shared [`Source`].
+  ///
+  /// The engine boundary is the only place `ChromiumRowIssue` is translated:
+  /// downstream sees `SourceIssue` like every other engine, so the report
+  /// mapper stays a copy instead of a fifth vocabulary that knows what a
+  /// Chromium cipher tier is.
+  ///
+  /// `origin` is the candidate the query was aimed at, not a rebuilt one --
+  /// path, role, format, and precedence cannot drift from what discovery found
+  /// because they are never copied.
+  ///
+  /// No `row_read_failed` is attached. Chromium describes every skipped row
+  /// through a specific row issue already, so the generic fallback the
+  /// candidate-driven engines need would double-report here.
+  fn into_source(self, origin: SourceCandidate) -> Source {
+    let Self {
+      #[cfg(test)]
+        cookies: _,
+      #[cfg(test)]
+        detailed_cookies: _,
+      records,
+      stats,
+      issues,
+      acquisition_strategy,
+      acquisition_attempts,
+      legacy_error,
+    } = self;
+    let mut source = Source::from_candidate(origin);
+    source.acquisition = acquisition_strategy.into();
+    source.acquisition_attempts = acquisition_attempts;
+    source.records = records;
+    source.stats = SourceStats {
+      rows_seen: stats.rows_seen,
+      cookies_emitted: stats.cookies_emitted,
+      rows_skipped: stats.rows_skipped,
+      rows_rejected: stats.rows_rejected,
+      provider_failures: stats.provider_failures,
+    };
+    source.issues = issues.iter().map(row_issue).collect();
+    if let Some(error) = legacy_error {
+      source
+        .issues
+        .push(SourceIssue::all_rows_rejected(format!("{error:#}")));
+    }
+    source
+  }
+
   pub(super) fn total_row_failure(&self, error: anyhow::Error) -> anyhow::Error {
     let issues = self
       .issues
@@ -423,6 +472,104 @@ impl ChromiumExtractionDraft {
   }
 }
 
+const COLUMN_READ_FAILED: &str = "column_read_failed";
+const DECRYPT_FAILED: &str = "decrypt_failed";
+const DECODE_FAILED: &str = "decode_failed";
+const PROVIDER_FAILED: &str = "provider_failed";
+const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
+
+/// Row-issue codes that mean a row's value could not be recovered, as opposed
+/// to a row that could not be read at all.
+///
+/// The compatibility APIs report these as `decrypt_failed` skips. Built from
+/// the same constants [`row_issue`] emits, so a renamed code cannot silently
+/// stop being counted.
+pub(crate) const CHROMIUM_UNSEAL_ISSUE_CODES: [&str; 4] = [
+  DECRYPT_FAILED,
+  DECODE_FAILED,
+  PROVIDER_FAILED,
+  PROVIDER_UNAVAILABLE,
+];
+
+/// Translates one aggregated Chromium row issue into the shared vocabulary.
+///
+/// Lives here rather than in the report mapper because `ChromiumRowIssue` is
+/// decoder scratch: cipher tiers, credential providers, and column names are
+/// facts only this engine can name.
+fn row_issue(issue: &ChromiumRowIssue) -> SourceIssue {
+  let (code, stage) = match issue.code {
+    ChromiumRowIssueCode::ColumnRead(_) => (COLUMN_READ_FAILED, ExtractionStageCode::parse()),
+    ChromiumRowIssueCode::Decrypt => (DECRYPT_FAILED, ExtractionStageCode::decrypt()),
+    ChromiumRowIssueCode::Decode => (DECODE_FAILED, ExtractionStageCode::decode()),
+    ChromiumRowIssueCode::ProviderUnavailable => {
+      (PROVIDER_UNAVAILABLE, ExtractionStageCode::decrypt())
+    }
+    ChromiumRowIssueCode::ProviderFailed => (PROVIDER_FAILED, ExtractionStageCode::decrypt()),
+  };
+  let provider_issue = matches!(
+    issue.code,
+    ChromiumRowIssueCode::ProviderUnavailable | ChromiumRowIssueCode::ProviderFailed
+  );
+  let message = match issue.code {
+    ChromiumRowIssueCode::ColumnRead(column) => format!(
+      "failed to read the {column} column of {} row(s)",
+      issue.occurrences
+    ),
+    // A provider failure carries the underlying cause, which says more than
+    // the generic count line it replaces.
+    _ if provider_issue => issue
+      .cause
+      .clone()
+      .unwrap_or_else(|| format!("{} row(s) unavailable because of {code}", issue.occurrences)),
+    _ => format!("{} row(s) rejected as {code}", issue.occurrences),
+  };
+  // Name-column and value-column failures share one code, so aggregation merges
+  // them and the retained message names only whichever came first. Qualifying
+  // each sample keeps the failing column recoverable from the merged issue.
+  let samples = match issue.code {
+    ChromiumRowIssueCode::ColumnRead(column) => issue
+      .samples
+      .iter()
+      .map(|sample| format!("{column} column, {sample}"))
+      .collect(),
+    _ => issue.samples.clone(),
+  };
+  let mut outcome = SourceIssue::new(code, stage, IssueSeverityCode::error(), message)
+    .with_occurrences(u32::try_from(issue.occurrences).unwrap_or(u32::MAX));
+  outcome.samples = samples;
+  if provider_issue {
+    outcome.cause = Some("credential_provider".to_owned());
+    outcome.provider.clone_from(&issue.provider);
+    outcome.tier.clone_from(&issue.tier);
+    outcome.retryability = Some(
+      match issue.retryability {
+        Retryability::Retryable => "retryable",
+        Retryability::NotRetryable => "not_retryable",
+        Retryability::Unknown => "unknown",
+      }
+      .to_owned(),
+    );
+  }
+  outcome
+}
+
+/// The candidate a direct-path query is aimed at.
+///
+/// A caller who names a database file has done no discovery, so there is no
+/// candidate to clone; this states the one the path implies. The values match
+/// what the direct-path report has always emitted for such a source.
+fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
+  SourceCandidate {
+    path: db_path.to_path_buf(),
+    role: super::report_core::CookieSourceRoleId::persistent(),
+    format: super::report_core::CookieSourceFormatId::known("chromium_sqlite"),
+    precedence: super::registry::PERSISTENT_SOURCE_PRECEDENCE,
+    exists: true,
+    selected: true,
+    acquisition: super::source::SourceAcquisition::NotAttempted,
+  }
+}
+
 // Only reachable in production through the automatic multi-identity
 // Chromium selection, which is Linux/macOS-only; Windows exercises this via
 // `#[cfg(test)]`.
@@ -430,7 +577,9 @@ impl ChromiumExtractionDraft {
 fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Result<Vec<Cookie>> {
   super::legacy::project_canonical_outcome(
     "chromium",
-    super::report_build::canonical_direct_chromium_extraction(db_path, draft)?,
+    super::report_build::canonical_direct_chromium_extraction(
+      draft.into_source(direct_path_candidate(db_path)),
+    )?,
   )
 }
 
@@ -442,7 +591,8 @@ fn project_legacy_draft_with_runtime(
   super::legacy::project_canonical_outcome_with_runtime(
     "chromium",
     super::report_build::canonical_direct_chromium_extraction_with_runtime(
-      db_path, draft, runtime,
+      draft.into_source(direct_path_candidate(db_path)),
+      runtime,
     )?,
     runtime,
   )
@@ -456,7 +606,9 @@ fn project_detailed_draft(
 ) -> Result<Vec<DetailedCookie>> {
   super::legacy::project_canonical_detailed_outcome(
     "chromium",
-    super::report_build::canonical_direct_chromium_extraction(db_path, draft)?,
+    super::report_build::canonical_direct_chromium_extraction(
+      draft.into_source(direct_path_candidate(db_path)),
+    )?,
   )
 }
 
@@ -468,7 +620,8 @@ fn project_detailed_draft_with_runtime(
   super::legacy::project_canonical_detailed_outcome_with_runtime(
     "chromium",
     super::report_build::canonical_direct_chromium_extraction_with_runtime(
-      db_path, draft, runtime,
+      draft.into_source(direct_path_candidate(db_path)),
+      runtime,
     )?,
     runtime,
   )
@@ -690,7 +843,7 @@ fn query_cookies_probe_with_key_outcomes(
 
 #[allow(unused_variables)]
 #[cfg(test)]
-pub(crate) fn query_cookies_engine_outcome(
+fn query_cookies_engine_outcome(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -706,23 +859,29 @@ pub(crate) fn query_cookies_engine_outcome(
   )
 }
 
+/// Acquires one Chromium cookie database and returns it as a [`Source`].
+///
+/// This is the engine's crate boundary: `ChromiumExtractionDraft`,
+/// `ChromiumRowIssue`, and the decoder's row vocabulary stop here. The caller
+/// hands over the candidate it selected, which becomes `Source::origin`.
 #[allow(unused_variables)]
 pub(crate) fn query_cookies_engine_outcome_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
-  db_path: PathBuf,
+  origin: SourceCandidate,
   domains: Option<Vec<String>>,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumExtractionDraft> {
-  query_cookies_engine_outcome_mode_with_deadline(
+) -> Result<Source> {
+  let draft = query_cookies_engine_outcome_mode_with_deadline(
     outcomes,
-    db_path,
+    origin.path.clone(),
     domains,
     force_kill,
     CookieProjection::Legacy,
     EncryptedValuePolicy::UseKeyOutcomes,
     runtime,
-  )
+  )?;
+  Ok(draft.into_source(origin))
 }
 
 #[allow(unused_variables)]
@@ -3126,6 +3285,104 @@ mod tests {
       (1..=MAX_CHROMIUM_ROW_ISSUE_SAMPLES)
         .map(|row| format!("row {row}"))
         .collect::<Vec<_>>()
+    );
+  }
+
+  /// Name-column and value-column failures share one code, so the report merges
+  /// them. Qualifying each sample here is what keeps the lost column
+  /// recoverable from the merged issue.
+  #[test]
+  fn column_read_issues_name_their_column_in_every_sample() {
+    let issue = row_issue(&ChromiumRowIssue {
+      code: ChromiumRowIssueCode::ColumnRead("value"),
+      provider: None,
+      tier: None,
+      cause: None,
+      retryability: Retryability::Unknown,
+      occurrences: 2,
+      samples: vec!["row 1".to_owned(), "row 7".to_owned()],
+    });
+    assert_eq!(issue.code, "column_read_failed");
+    assert_eq!(issue.message, "failed to read the value column of 2 row(s)");
+    assert_eq!(
+      issue.samples,
+      ["value column, row 1", "value column, row 7"]
+    );
+  }
+
+  /// The engine boundary is the only place that can name a cipher tier or a
+  /// credential provider, so it has to carry them across rather than leave the
+  /// report to re-derive what it cannot see.
+  #[test]
+  fn provider_failures_carry_their_evidence_across_the_engine_boundary() {
+    let issue = row_issue(&ChromiumRowIssue {
+      code: ChromiumRowIssueCode::ProviderFailed,
+      provider: Some("platform_key_provider".to_owned()),
+      tier: Some("v20".to_owned()),
+      cause: Some("malformed App-Bound Local State".to_owned()),
+      retryability: Retryability::NotRetryable,
+      occurrences: 1,
+      samples: vec!["row 1".to_owned()],
+    });
+    assert_eq!(issue.code, "provider_failed");
+    assert_eq!(issue.tier.as_deref(), Some("v20"));
+    assert_eq!(issue.provider.as_deref(), Some("platform_key_provider"));
+    assert_eq!(issue.retryability.as_deref(), Some("not_retryable"));
+    // The underlying cause replaces the generic count line, and the issue's own
+    // `cause` names the class of failure instead.
+    assert_eq!(issue.message, "malformed App-Bound Local State");
+    assert_eq!(issue.cause.as_deref(), Some("credential_provider"));
+  }
+
+  /// A provider failure with no cause still has to say something countable.
+  #[test]
+  fn a_provider_failure_without_a_cause_falls_back_to_the_count_line() {
+    let issue = row_issue(&ChromiumRowIssue {
+      code: ChromiumRowIssueCode::ProviderUnavailable,
+      provider: Some("platform_key_provider".to_owned()),
+      tier: None,
+      cause: None,
+      retryability: Retryability::Unknown,
+      occurrences: 3,
+      samples: Vec::new(),
+    });
+    assert_eq!(
+      issue.message,
+      "3 row(s) unavailable because of provider_unavailable"
+    );
+  }
+
+  /// Every code the compatibility skip count looks for must be one `row_issue`
+  /// actually emits. The count is a plain string match, so a rename that missed
+  /// one list would silently stop reporting those rows as skipped.
+  #[test]
+  fn the_unseal_issue_codes_are_the_ones_the_engine_emits() {
+    let emitted = [
+      ChromiumRowIssueCode::Decrypt,
+      ChromiumRowIssueCode::Decode,
+      ChromiumRowIssueCode::ProviderFailed,
+      ChromiumRowIssueCode::ProviderUnavailable,
+    ]
+    .map(|code| {
+      row_issue(&ChromiumRowIssue {
+        code,
+        provider: None,
+        tier: None,
+        cause: None,
+        retryability: Retryability::Unknown,
+        occurrences: 1,
+        samples: Vec::new(),
+      })
+      .code
+    });
+    let mut emitted = emitted.to_vec();
+    emitted.sort_unstable();
+    let mut counted = CHROMIUM_UNSEAL_ISSUE_CODES.to_vec();
+    counted.sort_unstable();
+    assert_eq!(emitted, counted);
+    assert!(
+      !counted.contains(&"column_read_failed"),
+      "a row that could not be read is not a row whose value could not be recovered"
     );
   }
 
