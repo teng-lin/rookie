@@ -1365,12 +1365,6 @@ pub(crate) struct ChromiumListing {
   pub(crate) all_detected_roots_failed: bool,
 }
 
-fn chromium_listing(browser_id: &str) -> Result<ChromiumListing> {
-  let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  chromium_listing_with_runtime(browser_id, &runtime)
-}
-
 pub(crate) fn chromium_listing_with_runtime(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
