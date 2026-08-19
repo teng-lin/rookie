@@ -8,7 +8,7 @@
 - **Does not revive:** GitHub #260. No `foo.rs` → `foo/mod.rs`. No 600-line prod budget. No CI size lint. Module layout stays `foo.rs` + `foo/child.rs`.
 - **ADRs:** 0001–0004 freeze behavior. ADR 0005 (`docs/adr/0005-stage-boundary-types-and-extraction-vocabulary.md`, workspace, Status: Accepted, 2026-08-19) is type-program law — listing/extract types, the fence, rejected `trait Engine` / `T<Stage>` / file-carve, and Decision 1: `Source` embeds `origin: SourceCandidate`. This program's first PR **amends ADR 0005 in place** with leftover leaks, remaining vocabulary, compatibility homes, and Mozilla origin follow-through. Do not mint ADR 0006. Do not rewrite 0005's locked type-program decisions.
 
-Public freeze (do not lift **in the main program, units 1–7**; the DTO track is the single, explicit exception — Decision 20): `rookie-rs/public-api/*.txt`, report DTO + `schema/report-dto.schema.json`, `browser_registry.json`, ADR 0001–0004 **behavior**, listing `selected` / `acquisition` / `exists` bytes (frozen per engine), direct-path synthetic identities (`"0"*64` / `"1"*64` / `"display_name": "direct"`), `rookie-rs/tests/goldens/<os>/*.json` (re-golden only with explicit commit + reason). Named-API / characterization error text that goldens do not contain (`legacy.rs:601–624`, `report_build.rs:2576–2603`) is also frozen for this program.
+Public freeze (do not lift — the DTO exception contemplated in Rev 9 was suspended in Rev 13, so there is no exception): `rookie-rs/public-api/*.txt`, report DTO + `schema/report-dto.schema.json`, `browser_registry.json`, ADR 0001–0004 **behavior**, listing `selected` / `acquisition` / `exists` bytes (frozen per engine), direct-path synthetic identities (`"0"*64` / `"1"*64` / `"display_name": "direct"`), `rookie-rs/tests/goldens/<os>/*.json` (re-golden only with explicit commit + reason). Named-API / characterization error text that goldens do not contain (`legacy.rs:601–624`, `report_build.rs:2576–2603`) is also frozen for this program.
 
 ---
 
@@ -348,7 +348,7 @@ Goldens under `rookie-rs/tests/goldens/` do not contain the family-fallback stri
 
 Every `collect_report` caller that builds an `ExtractionReport` passes `extract = true`: the `browser_report` / `chrome_profile` / `extract_report` seam at `:1674`, and `load_extraction_report_with_runtime` at `:1742`. The only `extract = false` caller is the descriptor path (`:1805`). **So `status: "succeeded"` beside `acquisition_strategy: "not_attempted"` is never serialised.** The wire was right all along; `CookieSourceDescriptor` is exactly the distinct listing type this document was about to propose inventing.
 
-**Consequences of the correction.** Fixing Leftover 3 needs no schema bump, no re-golden, no `public-api` update, and no DTO track — it is an internal draft split (Decision 21, PR 12) that belongs in the main program. What remains genuinely DTO-shaped is only the direct-path synthetic identity, which *is* published (Decision 20).
+**Consequences of the correction.** Fixing Leftover 3 needs no schema bump, no re-golden, no `public-api` update, and no DTO track — it is an internal draft split (Decision 21, PR 12) that belongs in the main program. Rev 13 found the same to be true of the direct-path synthetic identity, by the same method — no public API exposes it either — so Decision 20 is suspended and nothing in this program is DTO-shaped at all.
 
 **A second correction to this document.** The pipeline description previously said `source_digest` hashes path/role/format/precedence. It also hashes `browser_id`, `installation_id`, and `profile_id` (`outcome.rs:377–398`), which is what makes the identity change a digest change. The hash is domain-separated by a version tag — `b"rookie-cookie-source\0v1"` — so the format anticipated exactly this revision.
 
@@ -481,7 +481,7 @@ The **Pipeline step** column is not Stage.
 - Make `check-stage-boundary` an actual CI gate, so the fence three documents describe as mechanical stops being a habit.
 - Narrow `Source.origin` to a `SourceIdentity` (Decision 17), which absorbs Mozilla's forge and makes effective values required constructor arguments.
 - Collapse the duplicated engine execution frame — three populate skeletons and two verbatim-duplicated helpers — without pretending Mozilla's acquisition policy is the others' (§13).
-- Cost the from-scratch direction and record it, rather than foreclosing it by omission (§14, Decisions 18–20).
+- Cost the from-scratch direction and record it, rather than foreclosing it by omission (§14, Decisions 18–21).
 - Replace `.ends_with` family-fallback selection with equality against the exact `push_row_read_failed(None)` generator. Detection stays counters + codes. Characterization tests stay byte-identical.
 - Move compatibility dispose out of `report_build` so that file owns assembly, not product-string policy.
 - Optionally, as workbench after the ADR 0005 amendment: Chromium bag rename, `#[path]` test extraction, `escape_like_pattern`, cfg(test) dead unsuffixed wrappers.
@@ -491,7 +491,7 @@ The **Pipeline step** column is not Stage.
 - No second type program. No `T<Stage>`. No shared `Installation` / `Profile`. Decision 17's `SourceIdentity` is a narrowing *inside* the accepted program — one struct extracted from an existing one, no new stage, no new generic — not a reopening of it.
 - No `trait Engine`.
 - No `common/fs`. No split of `common/sqlite.rs`.
-- No public API, DTO, golden, registry, or ADR 0001–0004 behavior change **in PRs 0–10 or PR 12**. The DTO revision is accepted (Decision 20) and lives in its own pre-1.0 track, PRs 11a–11b. Only PR 11b may re-golden.
+- No public API, DTO, golden, registry, or ADR 0001–0004 behavior change, in any unit. The DTO revision was accepted in principle and then suspended for want of a demonstrated public payload (Decision 20). **No unit may re-golden.**
 - No rename of historical `populate_*` / `query_cookies_engine_outcome_with_runtime` in this program.
 - No `foo.rs` → `foo/mod.rs`. No 600-line budget. No CI size lint. No revival of #260.
 - No churn of deprecated `lib.rs` named shims.
@@ -905,7 +905,6 @@ This last move is the direct antidote to this codebase's own diagnosis. `source.
 | --- | --- |
 | 14a + 14b | three populate skeletons; two verbatim-duplicated helpers; the `MozillaCandidateOutcome` vs `Result<Source>` split; the Safari/IE placeholder-then-discard; the IE deadline asymmetry; **most of the 91 `_with_runtime` definitions / 28 non-test twins** |
 | 14c | the draft hop; the parallel derivations in `report_build.rs`; `NoSources::{SourceVanished, AbsentUnlessFailed}` — emptiness only needs adjudicating when emptiness is the evidence, and events say what happened |
-| Decision 20 (independently of 14c) | the direct-path parallel universe and its `"0"×64` / `"1"×64` synthetic identities |
 | Decision 21 (internal, no DTO cost) | the last stage-mixed container, `SourceDraft`, and with it the first fence coverage of `report_build` |
 
 #### What it does not change
@@ -990,15 +989,19 @@ Locked. Implementation PRs do not reopen these.
 
     The replacement rule: a characterization test **may** move from an internal seam to a public surface plus goldens, provided the PR demonstrates the new test goes red when the old behavior is deliberately broken. This document already teaches exactly that discipline for moved derivations ("break it deliberately before trusting a green suite" — four unpinned invariants were found that way); Decision 19 applies it to test *placement*. Weakening assertions is still forbidden; so is retargeting in bulk. This converts the safety net from a cage back into a net, and it is the difference between a ten-PR crawl and a three-PR walk.
 
-20. **Spend one versioned DTO revision before 1.0, on the direct-path identity only. Accepted — the maintainer has confirmed the DTO may change.** Rev 9 scoped this as three changes; the Leftover 3 correction removed the largest, because the wire's listing type was already clean. What is left is genuinely published and genuinely wrong:
+20. **SUSPENDED pending evidence — the direct-path identity does not surface publicly either.** The maintainer confirmed the DTO may change, and Rev 9 scoped three changes on that permission. Rev 10 retracted the largest after checking where the shape surfaced. Rev 13 retracts the rest, for the same reason, found the same way — by tracing to a public API instead of reasoning from the code's appearance.
 
-    **20a. Installation and profile ids become optional**, so a direct-path read stops synthesising `"0"×64` / `"1"×64` / `display_name: "direct"`. A caller who names a file did no discovery, and the report currently invents a profile identity to satisfy a required field. This moves `source_digest` for direct-path reads, because the hash covers those ids (`outcome.rs:377–398`); bump its domain tag `v1` → `v2` in the same commit — the tag exists for exactly this.
+    The synthetic identity (`"0"`×64 installation, `"1"`×64 profile, `display_name: "direct"`, `report_build.rs:1610–1650`) is real and is ugly. It is also **internal**:
 
-    **20b. Only then, revisit whether listing `selected` still needs to be per-engine frozen.** With 20a and Decision 21 landed, much of what made those bytes load-bearing is gone. Do not pre-judge it; measure after.
+    - No public API produces an `ExtractionReport` from a path. `Request` has only `browser()` and `profile()` constructors — there is no path variant — so `extract_report`, `browser_report`, `chrome_profile`, and `load_report` all reach the report through discovery.
+    - `finalize_singleton_source` feeds `project_canonical_outcome`, whose output is `Vec<Cookie>` — the frozen eight-field type, no provenance.
+    - `from_path` returns a `ReadResult` whose `profile_id` is explicitly `None` (`read.rs:280`), not the synthetic value.
+    - `DetailedCookie` / `CookieContext` carry browser-native metadata and no identity.
+    - No golden contains the synthetic ids: `grep '0000' rookie-rs/tests/goldens/*/*.json` returns nothing.
 
-    **The golden comes first.** Direct-path reports are pinned by goldens, so PR 11a is smaller than Rev 9 assumed — but the rule stands: capture the current shape, then change it and re-golden with a stated reason. Changing a shape and writing its test afterwards proves nothing.
+    So making the ids optional would change no published byte, and `source_digest`'s `v1` tag would not need bumping. That does not make the scaffolding good — a path read inventing a profile identity is still a wart, and it is exactly the shape Decision 21 is fixing one layer up. It makes it a **refactor, not a DTO revision**, and it is not scheduled here because nothing has been shown to depend on it.
 
-    Not licensed by any main-program PR (units 1–7 below). It is its own pre-1.0 track, parallel-safe because it touches the report layer.
+    **Reopen this with evidence, not with aesthetics.** The test is a public surface that exposes the value: a consumer reading `installation_id` off a direct-path report, or a report API that accepts a path. Neither exists today. The maintainer's permission stands; the need has not been demonstrated.
 
 21. **`SourceDraft` splits into a listing draft and an extract draft (Leftover 3).** The distinct-type answer, chosen by the maintainer for the wire, applies **internally instead** — because the wire already has it. `CookieSourceDescriptor` is the clean listing DTO; the gap is that `report_build`'s single `SourceDraft` carries `failed` and `acquisition_strategy` through a listing path that cannot populate them honestly.
 
@@ -1150,7 +1153,7 @@ Each PR: `cargo test --workspace --all-targets --locked` (and `--no-default-feat
 
 ## PR Plan
 
-**Seven shipping units, plus one parallel track.** The specifications below stayed as originally written — they are the useful part — but they ship grouped. Fifteen review cycles was tidiness, not risk management.
+**Seven shipping units.** The specifications below stayed as originally written — they are the useful part — but they ship grouped. Fifteen review cycles was tidiness, not risk management.
 
 | Unit | Absorbs | Prod lines | Risk |
 | --- | --- | ---: | --- |
@@ -1161,7 +1164,6 @@ Each PR: `cargo test --workspace --all-targets --locked` (and `--no-default-feat
 | **5. Populate frame** | PR 9 | ~265 restructured, net −80 | medium |
 | **6. Policy becomes data** | PR 10 | ~80 | medium-high — the keystone |
 | **7. Draft split** | PR 12 | ~80 | low |
-| *(parallel)* **DTO track** | PR 11a, PR 11b | ~60 + schema | breaking, deliberate |
 
 Total production churn is roughly **1000 lines against ~20k**, and about half of it is code moving rather than code changing. This is not a rewrite.
 
@@ -1308,21 +1310,14 @@ Golden/API impact is **none** unless a spec says otherwise; only PR 11b may re-g
 - **Description:** Decision 21. The listing path stops constructing `failed: false` and `acquisition_code(...)` for sources nobody opened; the descriptor projection reads from a draft that only has what listing knows. First time `check-stage-boundary` reaches `report_build`.
 - **Golden/API impact:** **none.** These fields are discarded before any consumer sees them — that is the whole finding. If a golden moves, the split is wrong; stop and re-read Leftover 3.
 
-### PR 11a — Pin the direct-path report before changing its identity
+### PRs 11a / 11b — SUSPENDED (was: the DTO track)
 
-- **Title:** `test: golden-cover direct-path identity ahead of the DTO revision`
-- **Files:** goldens covering a direct-path read on each OS, if not already distinct; the golden harness.
-- **Dependencies:** none. Parallel with PRs 0–12.
-- **Description:** Decision 20. Capture the synthetic-identity output verbatim, `"0"×64` and all, so PR 11b's re-golden diff shows exactly what the identity change moved and nothing else.
-- **Golden/API impact:** new goldens only.
-
-### PR 11b — DTO revision: installation and profile ids become optional
-
-- **Title:** `feat(dto)!: installation and profile ids are optional for direct-path reads`
-- **Files:** `report_core.rs` (`ProfileIdentity`); `report_build.rs` (the direct-path finalize seam, `direct_engine_extract`); `outcome.rs` (`source_digest` tag `v1` → `v2`); `schema/report-dto.schema.json` (regenerate via `src/bin/generate-dto-schema.rs`); `rookie-rs/public-api/*.txt`; direct-path goldens, re-goldened with a reason.
-- **Dependencies:** **PR 11a** (non-negotiable — Decision 20).
-- **Description:** Decision 20a. A path read has no discovery, so it has no installation or profile to name; the report stops inventing one. Digest tag bumps in the same commit because the ids are hashed.
-- **Golden/API impact:** **breaking, deliberately.** Schema version bump, public-api snapshot update, re-golden with a stated reason. The only PR in this document permitted to do that.
+> Not scheduled. Decision 20's premise failed verification in Rev 13: the
+> synthetic direct-path identity never reaches a public surface, so there is no
+> published byte to fix and no schema, digest tag, or golden to move. If the
+> scaffolding is cleaned up later it is an ordinary refactor, sequenced after
+> unit 7, not a pre-1.0 release-blocking track. Reopen only with a public
+> surface that exposes the value.
 
 ### Will not schedule
 
@@ -1346,7 +1341,6 @@ Wave A (independent, land in any order)
   unit 1  docs + CI          (PR 0, PR 0b)
   unit 2  dedupe             (PR 6, PR 7, PR 8)
   unit 4  compatibility      (PR 3 + PR 4)
-  DTO     PR 11a -> PR 11b   (parallel track, own re-golden)
 
 Wave B
   unit 3  SourceIdentity     (PR 1; commit A mechanical, commit B Mozilla)
@@ -1374,7 +1368,7 @@ PR 1 now precedes PR 2 and PR 5 rather than running beside them: it touches ever
 1. **Chromium extract bag name:** `ChromiumExtract` / `ChromiumExtractedInstallation`. Installation grouping is already visible in the fields. Not `ChromiumRegistryExtract`.
 2. **Home of `compatibility_disposition`:** new sibling `browser/compatibility.rs`. Do not fold into `outcome.rs`.
 3. **Can the dead listing fields on `origin` just be deleted?** No — they are live on `SourceCandidate` and dead only in the `Source.origin` position. Resolved by narrowing the position: `Source.origin: SourceIdentity` (Decision 17), which also makes the effective values required constructor arguments.
-4. **May the DTO change?** Yes — confirmed by the maintainer. Decision 20 is accepted and scheduled as PRs 11a–11b. The freeze on `schema/report-dto.schema.json` and the goldens still binds every other PR in this document.
+4. **May the DTO change?** Yes — confirmed by the maintainer, and then not needed. Every candidate change failed the same test: nothing published depends on it (Decision 20, Rev 13). The permission stands for a future proposal that can show a public surface.
 5. **Distinct listing type, or a `not_attempted` status variant?** Distinct type, chosen by the maintainer. It then turned out the wire already has one — `CookieSourceDescriptor` — so the choice applies to the internal drafts instead (Decision 21, PR 12), at no DTO cost. The answer was right; the layer was wrong.
 
 Compatibility mechanism, ADR 0005-in-place (no 0006), Mozilla signatures, Safari scope, bag name, and dispose home are locked. Generics and `trait Engine` are closed. Decisions 3–6, 8–9, 12, 14–15 are not reopened.
@@ -1433,10 +1427,8 @@ The default resolution when unsure: **a cheaper model behind a strong gate beats
 | 5b. Apply frame to Safari/IE | **Fable** | Mechanical once the signature is fixed | Compiler + goldens |
 | 6. Policy becomes data | **Opus** | The laziness guarantee can break **without moving a golden** — extra I/O, same output | **Independent second session**, also Opus, prompted to disprove laziness |
 | 7. Draft split | **Sonnet** | One file, bounded, and any golden movement proves it wrong | Goldens unchanged, which is the whole test |
-| 11a. Pin direct-path goldens | **Haiku** | Capture output verbatim | None needed |
-| 11b. DTO revision | **Opus** | Breaking change: schema regen, digest tag bump, re-golden rationale | Human sign-off on the golden diff |
 
-Rough shape: Opus on five items, Sonnet on two, Fable on three, Haiku on two. The expensive model is reserved for the three units that can fail silently and the two that produce durable law.
+Rough shape: Opus on three items, Sonnet on two, Fable on three, Haiku on one. The expensive model is reserved for the three units that can fail silently and the two that produce durable law.
 
 ### What no model decides
 
@@ -1474,6 +1466,7 @@ Corrected in Rev 6:
 | The three listing fields could simply be deleted | No — live on `SourceCandidate` (listing wire at `report_build.rs:644`, `:773`; `exists` filters at `:762`, `:1870`; Chromium selection at `registry/chromium.rs:131`, `:139`, `:297`). Dead only in the `Source.origin` position |
 | ADR 0005 Decision 5: no signature carries two adjacent same-typed id strings | False — `source_identity(path, role: &str, format: &str, precedence)` at `report_build.rs:97–102` |
 | `source_digest` hashes path/role/format/precedence | Incomplete — it also hashes `browser_id`, `installation_id`, `profile_id` (`outcome.rs:377–398`), which is what makes Decision 20b a digest change |
+| *(Rev 9)* The direct-path synthetic identity is published | **Wrong, corrected in Rev 13.** No public API builds an `ExtractionReport` from a path (`Request` has no path constructor); `from_path` returns `profile_id: None` (`read.rs:280`); `Cookie` / `CookieContext` carry no identity; no golden contains the ids. Decision 20 suspended |
 | *(Rev 9)* The wire emits `status: "succeeded"` for unopened sources | **Wrong, corrected in Rev 10.** The listing drafts never serialise — `browser_profile_descriptors` (`:1805`) projects them to the clean `ProfileDescriptor` / `CookieSourceDescriptor`, and every public `ExtractionReport` producer passes `extract = true`. The real leftover is the internal `SourceDraft` (Decision 21), fixable with no DTO change |
 | `_with_runtime` unique names: 88 | 86 under the published rule; 91 / 28 reproduce exactly |
 | PR 7: `cfg(test)` `chromium_listing` | Delete it — no callers in production *or* tests |
@@ -1493,6 +1486,8 @@ Rev 4, 2026-08-19. Direct-path session candidates plant like Gecko listing sessi
 Rev 5, 2026-08-19. User resolved Open Questions: extract bag is `ChromiumExtract` / `ChromiumExtractedInstallation`; dispose home is `browser/compatibility.rs`, not `outcome.rs`.
 
 Rev 13, 2026-08-19. Class diagrams added under Background: types today (`Source.origin: SourceCandidate`, mixed `SourceDraft`) versus after this program (`Source.origin: SourceIdentity`, `SourceCandidate` fields still flat, listing draft split). Listing/extract bags unchanged.
+
+Rev 13, 2026-08-19. **Decision 20 suspended.** Executing the plan started with tracing the direct-path synthetic identity to a public surface, and there is none: `Request` has no path constructor, so no public API builds an `ExtractionReport` from a path; `finalize_singleton_source` terminates in `Vec<Cookie>`; `from_path` returns `profile_id: None`; `CookieContext` carries no identity; no golden contains the ids. That is the second time in this document that "the code looks wrong" was mistaken for "the output is wrong" — the first was Rev 9's listing-shape claim, retracted in Rev 10 by the same method. The DTO track (PRs 11a–11b) is unscheduled, the freeze has no exception again, and the remaining cleanup is an ordinary refactor nobody has shown a need for. **The lesson is now a rule for this document: before proposing a change to an output, trace the value to the public API that emits it.**
 
 Rev 12, 2026-08-19. Appendix B added: per-unit model assignment, keyed to what fails if the work is wrong rather than to how many lines change. Opus on the three units that can fail silently plus the two that produce durable law; Fable on the mechanical bulk; Sonnet and Haiku on the bounded remainder. Unit 6 additionally requires a second, independent session to attack the laziness guarantee, because that is the one failure a golden cannot see.
 
