@@ -652,12 +652,12 @@ mod tests {
     session.cookies.push(session_cookie());
     // Finalization takes rows from `records` only; `cookies` is the
     // compatibility projection and never a fallback supply.
-    session.records.push(
-      crate::browser::cookie_record::CookieRecord::from_cookie(
+    session
+      .records
+      .push(crate::browser::cookie_record::CookieRecord::from_cookie(
         session_cookie(),
         crate::browser::cookie_record::SourceRef::pending(0),
-      ),
-    );
+      ));
     let mut outcome = profile_with(Some(persistent_source(
       None,
       Some("every persistent row failed"),

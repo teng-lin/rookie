@@ -226,7 +226,12 @@ fn seed_firefox(home: &SyntheticHome<'_>) {
   let root = home.firefox_root();
   std::fs::create_dir_all(&root).expect("create firefox root");
   seed_firefox_profile(&root, "Profiles/other", "session", "other-value");
-  seed_firefox_profile(&root, "Profiles/abc.default-release", "session", "default-value");
+  seed_firefox_profile(
+    &root,
+    "Profiles/abc.default-release",
+    "session",
+    "default-value",
+  );
   std::fs::write(
     root.join("profiles.ini"),
     "[Profile0]\nName=other\nIsRelative=1\nPath=Profiles/other\nDefault=0\n\n\
@@ -239,9 +244,7 @@ fn seed_firefox(home: &SyntheticHome<'_>) {
 /// not a valid ESE database — see the test for why that is the point.
 #[cfg(target_os = "windows")]
 fn seed_internet_explorer(home: &SyntheticHome<'_>) {
-  let cache = home
-    .home
-    .join("AppData/Roaming/Microsoft/Windows/WebCache");
+  let cache = home.home.join("AppData/Roaming/Microsoft/Windows/WebCache");
   std::fs::create_dir_all(&cache).expect("create WebCache directory");
   std::fs::write(cache.join("WebCacheV01.dat"), b"not-an-ese-database")
     .expect("seed Internet Explorer cookie store");
@@ -254,66 +257,82 @@ fn seed_internet_explorer(home: &SyntheticHome<'_>) {
 fn seed_safari(home: &SyntheticHome<'_>) {
   let cookies = home.safari_cookie_dir();
   std::fs::create_dir_all(&cookies).expect("create Safari cookie directory");
-  std::fs::write(cookies.join("Cookies.binarycookies"), b"cook\x00\x00\x00\x00")
-    .expect("seed Safari cookie file");
+  std::fs::write(
+    cookies.join("Cookies.binarycookies"),
+    b"cook\x00\x00\x00\x00",
+  )
+  .expect("seed Safari cookie file");
 }
 
 // ----------------------------------------------------------- normalization --
 
-/// Replace the synthetic root with a token, then replace every 64-character
-/// lowercase-hex run — the opaque installation/profile ids, which are SHA-256
-/// over path bytes — with its first-appearance rank.
+/// Rewrite the two things that move between runs, and nothing else:
+/// synthetic root prefixes in any string, and the opaque `installation_id` /
+/// `profile_id` values, which are SHA-256 over path bytes.
+///
+/// This walks the parsed document rather than the serialized text, so only
+/// those two *fields* are ranked. A scan for 64-character hex runs over the
+/// raw JSON would also rewrite a cookie value that happened to look like a
+/// digest, and the golden would then be blind to changes in it.
+///
+/// Walking the value also removes the need to handle JSON escaping: paths are
+/// replaced in their unescaped form and re-escaped on serialization, so
+/// Windows backslashes need no special case.
 ///
 /// Ranking rather than blanking keeps a real property under test: an id that
 /// appears in two places must still be the same token in both, so a golden
 /// notices if two profiles start sharing a profile id.
-fn normalize(json: &str, roots: &[String]) -> String {
-  let mut text = json.to_owned();
-  for root in roots {
-    text = text.replace(root.as_str(), "<ROOT>");
-    // Windows serializes `\` as `\\` inside JSON strings.
-    text = text.replace(&root.replace('\\', "\\\\"), "<ROOT>");
-  }
-  rank_opaque_ids(&text)
+fn normalize(document: &serde_json::Value, roots: &[String]) -> String {
+  let mut document = document.clone();
+  let mut seen: Vec<String> = Vec::new();
+  normalize_node(&mut document, None, roots, &mut seen);
+  serde_json::to_string_pretty(&document).expect("render json")
 }
 
-fn rank_opaque_ids(input: &str) -> String {
-  let bytes = input.as_bytes();
-  let mut out = String::with_capacity(input.len());
-  let mut seen: Vec<&str> = Vec::new();
-  let mut index = 0;
-
-  while index < bytes.len() {
-    if bytes[index].is_ascii_hexdigit() {
-      let start = index;
-      while index < bytes.len() && bytes[index].is_ascii_hexdigit() {
-        index += 1;
+fn normalize_node(
+  node: &mut serde_json::Value,
+  key: Option<&str>,
+  roots: &[String],
+  seen: &mut Vec<String>,
+) {
+  match node {
+    serde_json::Value::Object(fields) => {
+      for (name, value) in fields.iter_mut() {
+        normalize_node(value, Some(name.as_str()), roots, seen);
       }
-      let run = &input[start..index];
-      let is_opaque_id = run.len() == 64
-        && run
-          .bytes()
-          .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase());
-      if is_opaque_id {
-        let rank = match seen.iter().position(|candidate| *candidate == run) {
+    }
+    // Array elements inherit the field name so `sources: [...]` entries are
+    // still judged by the key that named them.
+    serde_json::Value::Array(items) => {
+      for item in items.iter_mut() {
+        normalize_node(item, key, roots, seen);
+      }
+    }
+    serde_json::Value::String(text) => {
+      if matches!(key, Some("installation_id") | Some("profile_id")) && is_opaque_id(text) {
+        let rank = match seen.iter().position(|candidate| candidate == text) {
           Some(rank) => rank,
           None => {
-            seen.push(run);
+            seen.push(text.clone());
             seen.len() - 1
           }
         };
-        out.push_str(&format!("<ID:{rank}>"));
+        *text = format!("<ID:{rank}>");
       } else {
-        out.push_str(run);
+        for root in roots {
+          *text = text.replace(root.as_str(), "<ROOT>");
+        }
       }
-    } else {
-      let character = input[index..].chars().next().expect("char boundary");
-      let width = character.len_utf8();
-      out.push_str(&input[index..index + width]);
-      index += width;
     }
+    _ => {}
   }
-  out
+}
+
+fn is_opaque_id(value: &str) -> bool {
+  value.len() == 64
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 // ------------------------------------------------------------- comparison --
@@ -386,8 +405,7 @@ fn capture(browser_id: &str, home: &SyntheticHome<'_>) -> String {
     "listing": serde_json::to_value(&listing).expect("serialize listing"),
     "extract": serde_json::to_value(&extract).expect("serialize extract"),
   });
-  let rendered = serde_json::to_string_pretty(&document).expect("render json");
-  let normalized = normalize(&rendered, &home.root_spellings());
+  let normalized = normalize(&document, &home.root_spellings());
 
   assert!(
     !normalized.contains(&home.home.to_string_lossy().into_owned()),
@@ -434,10 +452,7 @@ fn firefox_reports_match_the_golden() {
 fn internet_explorer_reports_match_the_golden() {
   let home = SyntheticHome::new("internet-explorer");
   seed_internet_explorer(&home);
-  assert_golden(
-    "internet_explorer",
-    &capture("internet_explorer", &home),
-  );
+  assert_golden("internet_explorer", &capture("internet_explorer", &home));
 }
 
 #[cfg(target_os = "macos")]
@@ -446,6 +461,29 @@ fn safari_reports_match_the_golden() {
   let home = SyntheticHome::new("safari");
   seed_safari(&home);
   assert_golden("safari", &capture("safari", &home));
+}
+
+/// A cookie value can look exactly like an opaque id. Normalization must not
+/// rewrite it, or the golden goes blind to changes in that value — the failure
+/// mode a raw 64-hex text scan would have.
+#[test]
+fn a_cookie_value_shaped_like_an_opaque_id_survives_normalization() {
+  let home = SyntheticHome::new("hex-cookie");
+  let digest_shaped = "a".repeat(64);
+  let root = home.chrome_root();
+  seed_chromium_profile(&root, "Default", "session", &digest_shaped);
+
+  let normalized = capture("chrome", &home);
+
+  assert!(
+    normalized.contains(&digest_shaped),
+    "a 64-character hex cookie value was rewritten as an opaque id"
+  );
+  // The real ids in the same document must still be ranked.
+  assert!(
+    normalized.contains("<ID:0>"),
+    "opaque ids stopped being normalized"
+  );
 }
 
 /// The normalization is load-bearing: if it stopped firing, every golden

@@ -346,11 +346,10 @@ fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
     selected,
     acquisition_code(acquisition),
   );
-  let cookies_emitted = if records.is_empty() {
-    cookies.len()
-  } else {
-    records.len()
-  };
+  // Records are the only source of finalized rows, so they are the only honest
+  // basis for this counter. Falling back to `cookies.len()` would report rows
+  // that finalization will not emit.
+  let cookies_emitted = records.len();
   outcome.stats = CounterSet {
     rows_seen: rows_seen as u64,
     cookies_emitted: cookies_emitted as u64,
@@ -2128,7 +2127,9 @@ mod tests {
   fn completed_source(name: &str) -> SourceDraft {
     let mut source = source(false);
     source.cookies.push(completed_cookie(name));
-    source.records.push(fixture_record(completed_cookie(name), 0));
+    source
+      .records
+      .push(fixture_record(completed_cookie(name), 0));
     source.stats.rows_seen = 1;
     source.stats.cookies_emitted = 1;
     source

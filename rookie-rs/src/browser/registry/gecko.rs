@@ -1833,12 +1833,10 @@ mod tests {
             persistent_cookies: vec![retained_cookie()],
             // Production gecko fills `records` and leaves `cookies` empty
             // outside tests; finalization reads `records` only.
-            persistent_records: vec![
-              crate::browser::cookie_record::CookieRecord::from_cookie(
-                retained_cookie(),
-                crate::browser::cookie_record::SourceRef::pending(0),
-              ),
-            ],
+            persistent_records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+              retained_cookie(),
+              crate::browser::cookie_record::SourceRef::pending(0),
+            )],
             persistent_rows_seen: 1,
             persistent_acquisition_strategy: Some(
               DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
