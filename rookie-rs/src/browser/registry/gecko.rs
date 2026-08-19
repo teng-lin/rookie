@@ -1,6 +1,8 @@
 use super::super::mozilla;
 use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
-use super::super::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
+#[cfg(test)]
+use super::super::source::Source;
+use super::super::source::SourceCandidate;
 #[cfg(test)]
 use super::DiscoveryCounters;
 use super::{
@@ -397,7 +399,7 @@ fn gecko_report_with_query<F: DiscoveryFs, Q>(
   query: Q,
 ) -> Result<EngineExtract>
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtract,
 {
   let mut listing = discover_gecko_with_context(context, browser_id)?;
   select_listing_profiles(
@@ -431,7 +433,7 @@ pub(super) fn populate_gecko_sources<Q, E>(
   mut persistent_exists: E,
 ) -> EngineExtract
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
+  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtract,
   E: FnMut(&Path) -> bool,
 {
   let EngineListing {
@@ -452,9 +454,12 @@ where
       legacy,
       candidates: _,
     } = profile;
-    let persistent = identity.path.join("cookies.sqlite");
-    // The Mozilla outcome also owns session fallback. A missing persistent DB
-    // is normal for a session-only profile and is not projected as a source.
+    let persistent = identity.path.join(GECKO_PERSISTENT_SOURCE);
+    // The Mozilla engine also owns session fallback, and it emits a persistent
+    // source whenever the query was attempted -- which it always is, even for a
+    // profile with no cookies.sqlite. The adapter half of the gate lives here:
+    // drop that persistent source unless the profile either discovered a
+    // persistent store or has one on disk now.
     //
     // Discovery's snapshot goes stale in both directions, so existence is
     // rechecked after the query rather than inferred from it: a database that
@@ -462,20 +467,19 @@ where
     // and one deleted since discovery is still projected so its failure is
     // reported instead of vanishing. Inferring from the query alone would
     // silence a database that appeared and was corrupt or locked.
-    let mut extraction = query(&persistent, domains);
-    let stop = extraction.boundary_stop;
-    // Split the session walk off so the persistent source can consume the rest
-    // of the Mozilla outcome without cloning its records.
-    let session_sources = std::mem::take(&mut extraction.session_sources);
-    let mut sources: Vec<Source> = Vec::new();
-    if extraction.persistent_attempted
-      && (identity.persistent_source_discovered || persistent_exists(&persistent))
-    {
-      sources.push(gecko_persistent_source(persistent, extraction));
-    }
-    for session in session_sources {
-      sources.push(gecko_session_source(session));
-    }
+    let outcome = query(&persistent, domains);
+    let stop = outcome.boundary_stop;
+    let mut sources = outcome.sources;
+    // Written as one predicate so the filesystem is probed only for a
+    // persistent source that actually exists to be dropped, and only when
+    // discovery did not already vouch for it. The engine emits at most one, so
+    // this spends at most one `exists` call -- the same as the single
+    // short-circuited call this replaced.
+    sources.retain(|source| {
+      source.origin.role != CookieSourceRoleId::persistent()
+        || identity.persistent_source_discovered
+        || persistent_exists(&persistent)
+    });
     extract.profiles.push(ExtractedProfile {
       identity,
       legacy,
@@ -490,98 +494,6 @@ where
     retain_completed_engine_extract(&mut extract);
   }
   extract
-}
-
-/// Builds the persistent [`Source`] for a queried Gecko profile.
-///
-/// `selected: true` because a profile's authoritative persistent store is
-/// always the selected source. Records are the only supply of finalized rows,
-/// so `cookies_emitted` counts them rather than any cookie list.
-fn gecko_persistent_source(path: PathBuf, extraction: mozilla::MozillaExtractionDraft) -> Source {
-  let acquisition: SourceAcquisition = extraction.persistent_acquisition_strategy.into();
-  let records = extraction.persistent_records;
-  let cookies_emitted = records.len();
-  let mut source = Source {
-    origin: SourceCandidate {
-      path,
-      role: CookieSourceRoleId::persistent(),
-      format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
-      precedence: PERSISTENT_SOURCE_PRECEDENCE,
-      exists: true,
-      selected: true,
-      acquisition,
-    },
-    selected: true,
-    acquisition,
-    records,
-    stats: SourceStats {
-      rows_seen: extraction.persistent_rows_seen,
-      cookies_emitted,
-      rows_skipped: extraction.persistent_rows_skipped,
-      rows_rejected: extraction.persistent_rows_rejected,
-      provider_failures: 0,
-    },
-    acquisition_attempts: extraction.persistent_acquisition_attempts,
-    // `diagnostics` carries acquisition retry notes, which a report renders as a
-    // warning meaning "retried, then succeeded". A rejected row is neither a
-    // retry nor a recovery — rows were lost — so it must not be reported that
-    // way; `push_row_read_failed` raises it as an error-severity row failure.
-    diagnostics: Vec::new(),
-    failure: None,
-    issues: Vec::new(),
-  };
-  if let Some(error) = extraction.persistent_error {
-    let stage = match extraction.persistent_failure_kind {
-      Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
-      _ => SourceFailureStage::Acquisition,
-    };
-    source.fail(stage, error);
-  }
-  source.push_row_read_failed(extraction.persistent_row_error);
-  source
-}
-
-/// Builds a session [`Source`] from one walked Mozilla session candidate.
-///
-/// A session candidate fails by being unreadable as JSON/LZ4, which is a parse
-/// failure, not an acquisition one. Its rejected rows are already counted in
-/// `rows_skipped` and described by `diagnostics`, so it carries no row error.
-fn gecko_session_source(session: mozilla::MozillaSessionDraft) -> Source {
-  let mut source = Source {
-    origin: SourceCandidate {
-      path: session.path,
-      role: CookieSourceRoleId::session(),
-      format: CookieSourceFormatId::known(session.format),
-      precedence: session.precedence,
-      exists: true,
-      selected: session.selected,
-      acquisition: SourceAcquisition::StableFileImage,
-    },
-    selected: session.selected,
-    acquisition: SourceAcquisition::StableFileImage,
-    records: session.records,
-    stats: SourceStats {
-      rows_seen: session.rows_seen,
-      cookies_emitted: 0,
-      rows_skipped: session.rows_skipped,
-      rows_rejected: session.rows_rejected,
-      provider_failures: 0,
-    },
-    acquisition_attempts: session.acquisition_attempts,
-    diagnostics: session.diagnostics,
-    failure: None,
-    issues: Vec::new(),
-  };
-  source.stats.cookies_emitted = source.records.len();
-  // A session candidate never keeps a row error, but rows it rejected still
-  // cost cookies. The issue is keyed on the count, not on the presence of an
-  // error string: raising it only when an engine happened to keep one lets a
-  // report claim `complete` while cookies were dropped.
-  source.push_row_read_failed(None);
-  if let Some(error) = session.error {
-    source.fail(SourceFailureStage::Parse, error);
-  }
-  source
 }
 
 fn gecko_report(
@@ -1797,104 +1709,6 @@ mod tests {
       .all(|issue| !issue.message.contains("additional")));
   }
 
-  #[test]
-  fn a_rejected_row_is_not_projected_as_an_acquisition_retry() {
-    let temp = TempDir::new("gecko-row-error-not-retry");
-    let context = current_context(temp.path().to_path_buf());
-    let root = gecko_test_root(&context);
-    seed_empty_gecko_database(&root.join("Profiles/default"));
-    std::fs::write(
-      root.join("profiles.ini"),
-      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
-    )
-    .expect("write profiles.ini");
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-
-    let report = populate_gecko_sources(
-      discovery,
-      None,
-      |_, _| mozilla::MozillaExtractionDraft {
-        persistent_attempted: true,
-        persistent_acquisition_attempts: 1,
-        persistent_rows_seen: 2,
-        persistent_rows_skipped: 1,
-        persistent_rows_rejected: 1,
-        persistent_row_error: Some("failed to read value from row: invalid utf-8".to_owned()),
-        ..mozilla::MozillaExtractionDraft::default()
-      },
-      |path| path.exists(),
-    );
-
-    let source = &report.profiles[0].sources[0];
-    // A rejected row means cookies were lost. `diagnostics` renders as a
-    // "retried, then succeeded" warning, so routing the row error there would
-    // claim a recovery that never happened; the report layer raises it as an
-    // error-severity row failure instead.
-    assert!(source.diagnostics.is_empty());
-    assert!(source.failure.is_none());
-    assert_eq!(source.stats.rows_skipped, 1);
-    assert_eq!(source.stats.rows_rejected, 1);
-  }
-
-  /// A session candidate never keeps a row error, so an implementation that
-  /// raises `row_read_failed` only when one is present drops this issue
-  /// entirely -- and with it the report's degradation from `complete` to
-  /// `partial`, while cookies were in fact lost. The issue is keyed on the
-  /// skipped count for exactly that reason.
-  #[test]
-  fn a_session_candidate_that_skipped_rows_still_reports_a_row_issue() {
-    let temp = TempDir::new("gecko-session-skipped-rows");
-    let context = current_context(temp.path().to_path_buf());
-    let root = gecko_test_root(&context);
-    seed_empty_gecko_database(&root.join("Profiles/default"));
-    std::fs::write(
-      root.join("profiles.ini"),
-      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
-    )
-    .expect("write profiles.ini");
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-
-    let report = populate_gecko_sources(
-      discovery,
-      None,
-      |path, _| mozilla::MozillaExtractionDraft {
-        persistent_attempted: false,
-        session_sources: vec![mozilla::MozillaSessionDraft {
-          path: path.with_file_name("sessionstore.jsonlz4"),
-          format: "mozilla_session_jsonlz4",
-          precedence: 30,
-          selected: true,
-          cookies: Vec::new(),
-          records: Vec::new(),
-          rows_seen: 3,
-          rows_skipped: 2,
-          rows_rejected: 2,
-          acquisition_attempts: 1,
-          diagnostics: Vec::new(),
-          error: None,
-        }],
-        ..mozilla::MozillaExtractionDraft::default()
-      },
-      |path| path.exists(),
-    );
-
-    let source = &report.profiles[0].sources[0];
-    assert!(
-      source.failure.is_none(),
-      "rejected rows do not fail the source"
-    );
-    let row_issue = source
-      .issues
-      .iter()
-      .find(|issue| issue.code == "row_read_failed")
-      .expect("skipped session rows must degrade the report");
-    assert_eq!(row_issue.occurrences, 2);
-    assert_eq!(
-      row_issue.severity,
-      crate::browser::report_core::IssueSeverityCode::error()
-    );
-  }
-
   fn stopped_gecko_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {
     let retained_cookie = || Cookie {
       domain: ".example.com".to_owned(),
@@ -1946,30 +1760,38 @@ mod tests {
     let populated = populate_gecko_sources(
       discovered,
       None,
-      |_, _| {
+      |persistent, _| {
         let call = calls.get();
         calls.set(call + 1);
         if call == 0 {
-          mozilla::MozillaExtractionDraft {
-            persistent_attempted: true,
-            persistent_cookies: vec![retained_cookie()],
-            // Production gecko fills `records` and leaves `cookies` empty
-            // outside tests; finalization reads `records` only.
-            persistent_records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
-              retained_cookie(),
-              crate::browser::cookie_record::SourceRef::pending(0),
-            )],
-            persistent_rows_seen: 1,
-            persistent_acquisition_strategy: Some(
+          // The engine returns an already-built persistent `Source`. Production
+          // fills `records` and finalization reads records only.
+          let mut source = Source::from_candidate(SourceCandidate {
+            path: persistent.to_path_buf(),
+            role: CookieSourceRoleId::persistent(),
+            format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
+            precedence: PERSISTENT_SOURCE_PRECEDENCE,
+            exists: true,
+            selected: true,
+            acquisition: SourceAcquisition::Database(
               DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
             ),
-            persistent_acquisition_attempts: 1,
-            ..mozilla::MozillaExtractionDraft::default()
+          });
+          source.records = vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+            retained_cookie(),
+            crate::browser::cookie_record::SourceRef::pending(0),
+          )];
+          source.stats.rows_seen = 1;
+          source.stats.cookies_emitted = 1;
+          source.acquisition_attempts = 1;
+          mozilla::MozillaExtract {
+            sources: vec![source],
+            boundary_stop: None,
           }
         } else {
-          mozilla::MozillaExtractionDraft {
+          mozilla::MozillaExtract {
+            sources: Vec::new(),
             boundary_stop: Some(stop),
-            ..mozilla::MozillaExtractionDraft::default()
           }
         }
       },

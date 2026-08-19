@@ -7,7 +7,9 @@
 
 mod dispatch;
 
-use super::cookie_record::{CookieRecord, FinalizationError, LegacyProjectionSemantics};
+#[cfg(test)]
+use super::cookie_record::CookieRecord;
+use super::cookie_record::{FinalizationError, LegacyProjectionSemantics};
 use super::outcome::{
   CompatibilityAbsence, CompatibilityDecision, CompatibilityDisposition, Diagnostic, Failure,
   FailureLedger, FailureScope, Outcome, ResultStatus, SourceOutcome, Termination,
@@ -29,9 +31,9 @@ use super::report_core::{
   ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator, TerminationCode,
   MAX_ISSUE_SAMPLES,
 };
-use super::source::{
-  Source, SourceCandidate, SourceFailureStage as SourceFailureStageNew, SourceIssue, SourceStats,
-};
+use super::source::{Source, SourceFailureStage as SourceFailureStageNew, SourceIssue};
+#[cfg(test)]
+use super::source::{SourceCandidate, SourceStats};
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
@@ -1513,101 +1515,26 @@ fn canonical_direct_chromium_extraction_impl(
 
 pub(crate) fn canonical_direct_mozilla_extraction_with_runtime(
   db_path: &std::path::Path,
-  draft: super::mozilla::MozillaExtractionDraft,
+  extract: super::mozilla::MozillaExtract,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_mozilla_extraction_impl(db_path, draft, Some(runtime))
+  canonical_direct_mozilla_extraction_impl(db_path, extract, Some(runtime))
 }
 
 fn canonical_direct_mozilla_extraction_impl(
   db_path: &std::path::Path,
-  draft: super::mozilla::MozillaExtractionDraft,
+  extract: super::mozilla::MozillaExtract,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
+  // The engine already assembled every source, including its `row_read_failed`
+  // issues. The direct path gates the persistent source on `persistent_attempted`
+  // alone -- there is no discovery to consult -- which is exactly the engine's
+  // emit condition, so the engine's `Vec<Source>` is consumed as-is.
   let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let mut sources = Vec::new();
-  if draft.persistent_attempted {
-    let records = draft.persistent_records;
-    let cookies_emitted = records.len();
-    let acquisition: SourceAcquisition = draft.persistent_acquisition_strategy.into();
-    let mut source = Source {
-      origin: SourceCandidate {
-        path: db_path.to_path_buf(),
-        role: CookieSourceRoleId::persistent(),
-        format: CookieSourceFormatId::known(super::mozilla::PERSISTENT_FORMAT_ID),
-        precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-        exists: true,
-        selected: true,
-        acquisition,
-      },
-      selected: true,
-      acquisition,
-      records,
-      stats: SourceStats {
-        rows_seen: draft.persistent_rows_seen,
-        cookies_emitted,
-        rows_skipped: draft.persistent_rows_skipped,
-        rows_rejected: draft.persistent_rows_rejected,
-        provider_failures: 0,
-      },
-      acquisition_attempts: draft.persistent_acquisition_attempts,
-      diagnostics: Vec::new(),
-      failure: None,
-      issues: Vec::new(),
-    };
-    if let Some(error) = draft.persistent_error {
-      let stage = match draft.persistent_failure_kind {
-        Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => {
-          SourceFailureStageNew::Query
-        }
-        _ => SourceFailureStageNew::Acquisition,
-      };
-      source.fail(stage, error);
-    }
-    source.push_row_read_failed(draft.persistent_row_error);
-    sources.push(source);
-  }
-  sources.extend(draft.session_sources.into_iter().map(|session| {
-    let records = session.records;
-    let cookies_emitted = records.len();
-    let mut source = Source {
-      origin: SourceCandidate {
-        path: session.path,
-        role: CookieSourceRoleId::session(),
-        format: CookieSourceFormatId::known(session.format),
-        precedence: session.precedence,
-        exists: true,
-        selected: session.selected,
-        acquisition: SourceAcquisition::StableFileImage,
-      },
-      selected: session.selected,
-      acquisition: SourceAcquisition::StableFileImage,
-      records,
-      stats: SourceStats {
-        rows_seen: session.rows_seen,
-        cookies_emitted,
-        rows_skipped: session.rows_skipped,
-        rows_rejected: session.rows_rejected,
-        provider_failures: 0,
-      },
-      acquisition_attempts: session.acquisition_attempts,
-      diagnostics: session.diagnostics,
-      failure: None,
-      issues: Vec::new(),
-    };
-    // Same rule as the registry adapter: a session candidate keeps no row
-    // error, but rows it rejected still cost cookies, so the issue is keyed on
-    // the skipped count rather than on an error string being present.
-    source.push_row_read_failed(None);
-    if let Some(error) = session.error {
-      source.fail(SourceFailureStageNew::Parse, error);
-    }
-    source
-  }));
-  let extract = direct_engine_extract(profile_path, sources, draft.boundary_stop);
+  let engine_extract = direct_engine_extract(profile_path, extract.sources, extract.boundary_stop);
   match runtime {
-    Some(runtime) => canonical_engine_extract_with_runtime("firefox", extract, runtime),
-    None => canonical_engine_extract("firefox", extract),
+    Some(runtime) => canonical_engine_extract_with_runtime("firefox", engine_extract, runtime),
+    None => canonical_engine_extract("firefox", engine_extract),
   }
 }
 
@@ -1659,88 +1586,33 @@ fn direct_engine_extract(
 }
 
 pub(crate) fn canonical_direct_safari_extraction_with_runtime(
-  db_path: &std::path::Path,
-  draft: super::safari::SafariFileDraft,
+  source: Source,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_engine_source(
-    "safari",
-    db_path,
-    "safari_binarycookies",
-    SourceAcquisition::StableFileImage,
-    draft.records,
-    draft.stats.records_seen,
-    draft.stats.records_skipped,
-    draft.stats.records_rejected,
-    draft.acquisition_attempts,
-    draft.row_error,
-    Some(runtime),
-  )
+  canonical_direct_engine_source("safari", source, Some(runtime))
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
-  db_path: &std::path::Path,
-  draft: super::internet_explorer::InternetExplorerDraft,
+  source: Source,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_engine_source(
-    "internet_explorer",
-    db_path,
-    "internet_explorer_ese",
-    SourceAcquisition::EseDatabase,
-    draft.records,
-    draft.stats.records_seen,
-    draft.stats.records_skipped,
-    draft.stats.records_rejected,
-    1,
-    draft.row_error,
-    Some(runtime),
-  )
+  canonical_direct_engine_source("internet_explorer", source, Some(runtime))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Wraps one already-built [`Source`] as a single-profile direct-path extract.
+///
+/// The engine assembled the source, including its `row_read_failed` issue, so
+/// this only supplies the synthetic profile the direct path has no discovery
+/// for. The profile path is read off the source's own origin rather than
+/// threaded alongside it.
 fn canonical_direct_engine_source(
   browser_id: &str,
-  db_path: &std::path::Path,
-  format: &'static str,
-  acquisition: SourceAcquisition,
-  records: Vec<CookieRecord>,
-  rows_seen: usize,
-  rows_skipped: usize,
-  rows_rejected: usize,
-  acquisition_attempts: u32,
-  row_error: Option<String>,
+  source: Source,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
-  let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let cookies_emitted = records.len();
-  let mut source = Source {
-    origin: SourceCandidate {
-      path: db_path.to_path_buf(),
-      role: CookieSourceRoleId::persistent(),
-      format: CookieSourceFormatId::known(format),
-      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-      exists: true,
-      selected: true,
-      acquisition,
-    },
-    selected: true,
-    acquisition,
-    records,
-    stats: SourceStats {
-      rows_seen,
-      cookies_emitted,
-      rows_skipped,
-      rows_rejected,
-      provider_failures: 0,
-    },
-    acquisition_attempts,
-    diagnostics: Vec::new(),
-    failure: None,
-    issues: Vec::new(),
-  };
-  source.push_row_read_failed(row_error);
+  let db_path = source.origin.path.clone();
+  let profile_path = db_path.parent().unwrap_or(&db_path).to_path_buf();
   let extract = direct_engine_extract(profile_path, vec![source], None);
   match runtime {
     Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),
@@ -3624,7 +3496,7 @@ mod engine_chain_tests {
 
   #[test]
   fn a_real_internet_explorer_profile_reaches_the_frozen_report() {
-    use crate::browser::registry::{InternetExplorerRows, PlatformId};
+    use crate::browser::registry::{extracted_internet_explorer_source, PlatformId};
 
     let temp = TempDir::new("ie");
     let context = test_seams::context(PlatformId::Windows, temp.path().to_path_buf());
@@ -3634,10 +3506,15 @@ mod engine_chain_tests {
 
     // The ESE reader is injected, so this exercises the adapter chain without
     // needing a real ESE database on a non-Windows host.
-    let engine =
-      test_seams::internet_explorer_report(&context, "internet_explorer", None, None, |_, _| {
-        Ok(InternetExplorerRows {
-          records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+    let engine = test_seams::internet_explorer_report(
+      &context,
+      "internet_explorer",
+      None,
+      None,
+      |origin, _| {
+        Ok(extracted_internet_explorer_source(
+          origin,
+          vec![crate::browser::cookie_record::CookieRecord::from_cookie(
             crate::common::enums::Cookie {
               domain: ".example.com".to_owned(),
               path: "/".to_owned(),
@@ -3650,13 +3527,14 @@ mod engine_chain_tests {
             },
             crate::browser::cookie_record::SourceRef::pending(0),
           )],
-          records_seen: 1,
-          records_skipped: 0,
-          records_rejected: 0,
-          row_error: None,
-        })
-      })
-      .expect("internet explorer report");
+          1,
+          0,
+          0,
+          None,
+        ))
+      },
+    )
+    .expect("internet explorer report");
 
     let browser = BrowserId::known("internet_explorer");
     let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
@@ -3941,7 +3819,7 @@ mod engine_chain_tests {
 
   #[test]
   fn a_profile_selected_internet_explorer_report_says_what_the_post_filtered_report_said() {
-    use crate::browser::registry::{InternetExplorerRows, PlatformId};
+    use crate::browser::registry::{extracted_internet_explorer_source, PlatformId};
 
     let temp = TempDir::new("ie-profile-contract");
     let context = test_seams::context(PlatformId::Windows, temp.path().to_path_buf());
@@ -3953,26 +3831,28 @@ mod engine_chain_tests {
     }
     // Each root answers with its own cookie, so a report built from the wrong
     // profile could not pass by coincidence.
-    let rows = |path: &std::path::Path, _: Option<&[String]>| {
-      Ok(InternetExplorerRows {
-        records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+    let rows = |origin: crate::browser::registry::SourceCandidate, _: Option<&[String]>| {
+      let name = format!("{}", origin.path.display());
+      Ok(extracted_internet_explorer_source(
+        origin,
+        vec![crate::browser::cookie_record::CookieRecord::from_cookie(
           crate::common::enums::Cookie {
             domain: ".example.com".to_owned(),
             path: "/".to_owned(),
             secure: false,
             expires: None,
-            name: format!("{}", path.display()),
+            name,
             value: "value".to_owned(),
             http_only: false,
             same_site: 0,
           },
           crate::browser::cookie_record::SourceRef::pending(0),
         )],
-        records_seen: 1,
-        records_skipped: 0,
-        records_rejected: 0,
-        row_error: None,
-      })
+        1,
+        0,
+        0,
+        None,
+      ))
     };
 
     let browser = BrowserId::known("internet_explorer");
