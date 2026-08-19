@@ -112,7 +112,7 @@ paths = [
 
 # Portable parsers/models with some internal native-acquisition gating,
 # never claimed as a completed containment target by name.
-"rookie-rs/src/browser/safari.rs" = { max_cfg = 10, reason = "portable Safari parser; native acquisition gating not yet moved to a leaf; +1 for macOS-only real Cookies.binarycookies test" }
+"rookie-rs/src/browser/safari.rs" = { max_cfg = 9, reason = "portable Safari parser; native acquisition gating not yet moved to a leaf; +1 for the macOS-only real Cookies.binarycookies test (#274), -1 when Safari inventory moved to registry/safari.rs (PR 6, #251 recipe) and took a #[cfg(unix)] test with it" }
 "rookie-rs/src/browser/internet_explorer_model.rs" = { max_cfg = 1, reason = "IE data model, predates #227's registry-adapter containment" }
 
 # Small, low-traffic core files with a handful of legitimate but
