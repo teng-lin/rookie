@@ -9,6 +9,7 @@ is a patched build and cannot drive LibreWolf/Zen).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -192,7 +193,9 @@ def main() -> int:
             'eval "$(printf "\\n" | gnome-keyring-daemon --unlock || true)"; '
             'eval "$(gnome-keyring-daemon --start --components=secrets || true)"; '
             "export XDG_CURRENT_DESKTOP=GNOME ROOKIE_E2E_DBUS=1; "
-            f'exec {sys.executable} {Path(__file__).resolve()}'
+            "exec "
+            f"{shlex.quote(sys.executable)} "
+            f"{shlex.quote(str(Path(__file__).resolve()))}"
         )
         os.execvp("dbus-run-session", ["dbus-run-session", "--", "bash", "-lc", inner])
     return run()

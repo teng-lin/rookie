@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: e2e-claimed-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   coverage:
     name: claimed-browser matrix is complete
@@ -173,7 +177,7 @@ jobs:
             browser: chromium
             channel: chromium
             keychain_service: Chrome Safe Storage
-            keychain_account: Chromium
+            keychain_account: Chrome
           - os: macos
             runner: macos-15
             browser: edge
@@ -194,6 +198,7 @@ jobs:
             channel: chrome
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/${{ matrix.browser }}
+      ROOKIE_E2E_BROWSER_ID: ${{ matrix.browser }}
       ROOKIE_E2E_KEYCHAIN_SERVICE: ${{ matrix.keychain_service }}
       ROOKIE_E2E_KEYCHAIN_ACCOUNT: ${{ matrix.keychain_account }}
     steps:

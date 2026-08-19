@@ -46,15 +46,22 @@ run_inner() {
   fi
 
   test -f "$user_data/Default/Network/Cookies" || test -f "$user_data/Default/Cookies"
-  cargo test --test e2e_chrome --locked -- --ignored --nocapture
+  browser_id="${ROOKIE_E2E_BROWSER_ID:-chrome}"
+  # e2e_chrome.rs hardcodes Chrome Keychain / libsecret names.
+  if [[ "$browser_id" == "chrome" ]]; then
+    cargo test --test e2e_chrome --locked -- --ignored --nocapture
+  fi
   .venv/bin/python tests/e2e/assert_chrome_cookie.py
   node tests/e2e/assert_chrome_cookie.mjs
   cookies_db="$user_data/Default/Network/Cookies"
   [[ -f "$cookies_db" ]] || cookies_db="$user_data/Default/Cookies"
-  .venv/bin/python tests/e2e/assert_cli_cookie.py "$cookies_db"
+  .venv/bin/python tests/e2e/assert_cli_cookie.py "$cookies_db" --browser-id "$browser_id"
 }
 
 export channel user_data
+export ROOKIE_E2E_BROWSER_ID="${ROOKIE_E2E_BROWSER_ID:-}"
+export ROOKIE_E2E_KEYCHAIN_SERVICE="${ROOKIE_E2E_KEYCHAIN_SERVICE:-}"
+export ROOKIE_E2E_KEYCHAIN_ACCOUNT="${ROOKIE_E2E_KEYCHAIN_ACCOUNT:-}"
 if [[ "$(uname -s)" == "Linux" ]]; then
   dbus-run-session -- bash -euo pipefail -c '
     eval "$(printf "\n" | gnome-keyring-daemon --unlock || true)"

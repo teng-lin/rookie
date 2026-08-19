@@ -62,6 +62,14 @@ class RealContractTests(unittest.TestCase):
             ),
         )
 
+    def test_wheel_linux_matrix_includes_native_arm64_runner(self) -> None:
+        contract = platform_contract.load_contract()
+        matrix = platform_contract.wheel_linux_matrix(contract)
+        by_target = {entry["target"]: entry["runner"] for entry in matrix["include"]}
+        self.assertEqual(set(by_target), {"x86_64", "aarch64"})
+        self.assertEqual(by_target["aarch64"], "ubuntu-24.04-arm")
+        self.assertTrue(all(entry.get("target") and entry.get("runner") for entry in matrix["include"]))
+
 
 class MatchCellForArtifactTests(unittest.TestCase):
     """Filenames are taken verbatim from the real `write-release-scan-manifest.py`

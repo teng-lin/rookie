@@ -12,11 +12,14 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import urllib.request
 from pathlib import Path
+
+socket.setdefaulttimeout(120)
 
 
 def this_os() -> str:
@@ -185,8 +188,12 @@ HOSTS: dict[str, dict] = {
         },
         "macos": {
             "kind": "brew",
-            "cask": "zen-browser",
-            "exe": ["/Applications/Zen Browser.app/Contents/MacOS/zen"],
+            "cask": "zen",
+            "exe": [
+                "/Applications/Zen.app/Contents/MacOS/zen",
+                "/Applications/Zen Browser.app/Contents/MacOS/zen",
+                "/opt/homebrew/bin/zen",
+            ],
         },
         "windows": {
             "kind": "winget",
@@ -258,68 +265,52 @@ def install_brave_apt() -> None:
     run(["sudo", "apt-get", "install", "-y", "brave-browser"])
 
 
-def install_opera_apt() -> None:
+def _install_apt_repo(*, key_url: str, keyring: str, source_line: str, package: str) -> None:
     run(["sudo", "apt-get", "install", "-y", "curl", "gnupg"])
-    key = Path("/usr/share/keyrings/opera-browser.gpg")
-    with urllib.request.urlopen("https://deb.opera.com/archive.key") as response:
+    with urllib.request.urlopen(key_url, timeout=60) as response:
         payload = response.read()
     subprocess.run(
-        ["sudo", "gpg", "--batch", "--yes", "--dearmor", "-o", str(key)],
+        ["sudo", "gpg", "--batch", "--yes", "--dearmor", "-o", keyring],
         input=payload,
         check=True,
     )
-    line = (
-        "deb [arch=amd64 signed-by=/usr/share/keyrings/opera-browser.gpg] "
-        "https://deb.opera.com/opera-stable/ stable non-free\n"
-    )
     subprocess.run(
-        ["sudo", "tee", "/etc/apt/sources.list.d/opera-stable.list"],
-        input=line.encode(),
+        ["sudo", "tee", f"/etc/apt/sources.list.d/{package}.list"],
+        input=(source_line + "\n").encode(),
         check=True,
-    )
-    run(
-        [
-            "sudo",
-            "debconf-set-selections",
-        ],
-        input=b"opera-stable opera-stable/add-deb-source boolean false\n",
     )
     env = os.environ.copy()
     env["DEBIAN_FRONTEND"] = "noninteractive"
     run(["sudo", "apt-get", "update"])
-    run(["sudo", "apt-get", "install", "-y", "opera-stable"], env=env)
+    run(["sudo", "apt-get", "install", "-y", package], env=env)
+
+
+def install_opera_apt() -> None:
+    run(
+        ["sudo", "debconf-set-selections"],
+        input=b"opera-stable opera-stable/add-deb-source boolean false\n",
+    )
+    _install_apt_repo(
+        key_url="https://deb.opera.com/archive.key",
+        keyring="/usr/share/keyrings/opera-browser.gpg",
+        source_line=(
+            "deb [arch=amd64 signed-by=/usr/share/keyrings/opera-browser.gpg] "
+            "https://deb.opera.com/opera-stable/ stable non-free"
+        ),
+        package="opera-stable",
+    )
 
 
 def install_vivaldi_apt() -> None:
-    run(["sudo", "apt-get", "install", "-y", "curl", "gnupg"])
-    with urllib.request.urlopen(
-        "https://repo.vivaldi.com/archive/linux_signing_key.pub"
-    ) as response:
-        payload = response.read()
-    subprocess.run(
-        [
-            "sudo",
-            "gpg",
-            "--batch",
-            "--yes",
-            "--dearmor",
-            "-o",
-            "/usr/share/keyrings/vivaldi.gpg",
-        ],
-        input=payload,
-        check=True,
+    _install_apt_repo(
+        key_url="https://repo.vivaldi.com/archive/linux_signing_key.pub",
+        keyring="/usr/share/keyrings/vivaldi.gpg",
+        source_line=(
+            "deb [arch=amd64 signed-by=/usr/share/keyrings/vivaldi.gpg] "
+            "https://repo.vivaldi.com/archive/deb/ stable main"
+        ),
+        package="vivaldi-stable",
     )
-    line = (
-        "deb [arch=amd64 signed-by=/usr/share/keyrings/vivaldi.gpg] "
-        "https://repo.vivaldi.com/archive/deb/ stable main\n"
-    )
-    subprocess.run(
-        ["sudo", "tee", "/etc/apt/sources.list.d/vivaldi.list"],
-        input=line.encode(),
-        check=True,
-    )
-    run(["sudo", "apt-get", "update"])
-    run(["sudo", "apt-get", "install", "-y", "vivaldi-stable"])
 
 
 def install_librewolf_extrepo() -> None:
@@ -351,24 +342,29 @@ def install_brew(cask: str) -> None:
     env = os.environ.copy()
     env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
     env["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
-    run(["brew", "install", "--cask", cask], env=env)
+    env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
+    print("+ brew install --cask", cask, flush=True)
+    # Homebrew can exit 1 after a successful cask install because of tap-trust
+    # warnings on GitHub-hosted macOS images.
+    subprocess.run(["brew", "install", "--cask", cask], env=env, check=False)
 
 
 def install_winget(package_id: str) -> None:
-    run(
-        [
-            "winget",
-            "install",
-            "-e",
-            "--id",
-            package_id,
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--disable-interactivity",
-            "--source",
-            "winget",
-        ]
-    )
+    cmd = [
+        "winget",
+        "install",
+        "-e",
+        "--id",
+        package_id,
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]
+    print("+", " ".join(cmd), flush=True)
+    completed = subprocess.run(cmd, check=False)
+    # 0 = installed; -1978335189 = already installed.
+    if completed.returncode not in (0, -1978335189):
+        print(f"winget exited {completed.returncode}; will use the binary if it exists")
 
 
 def install_spec(spec: dict) -> None:

@@ -70,7 +70,10 @@ def run(platform: str) -> int:
     if not rows:
         raise SystemExit(f"no coverage rows for platform {platform!r}")
 
-    supported = set(rookie_cookies.supported_browsers())
+    supported = {
+        item if isinstance(item, str) else item["id"]
+        for item in rookie_cookies.supported_browsers()
+    }
     missing = sorted(
         row["browser"] for row in rows if row["browser"] not in supported
     )
@@ -97,14 +100,12 @@ def run(platform: str) -> int:
                     rookie_cookies.chromium_cookies_from_path(
                         missing_db, {"browser_id": row["browser"]}
                     )
-                except rookie_cookies.RookieRequestError as error:
-                    raise SystemExit(
-                        f"browser_id {row['browser']!r} rejected as a request: {error}"
-                    ) from error
                 except Exception as error:
-                    if "unknown browser id" in str(error):
+                    message = str(error)
+                    if "unknown browser id" in message or "not Chromium" in message:
                         raise SystemExit(
-                            f"browser_id {row['browser']!r} is unknown: {error}"
+                            f"browser_id {row['browser']!r} is not a valid Chromium "
+                            f"identity: {message}"
                         ) from error
 
         if sys.platform == "win32":

@@ -1,4 +1,4 @@
-"""Every registry browser×OS pair must appear in the claimed-browser matrix."""
+"""Every registry browser/OS pair must appear in the claimed-browser matrix."""
 
 from __future__ import annotations
 

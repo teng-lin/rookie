@@ -170,7 +170,7 @@
         "keyring"
       ],
       "accepted_risk": null,
-      "notes": "Built natively on ubuntu-24.04-arm. No QEMU and no x86_64 napi-rs Docker image.",
+      "notes": "Built natively on ubuntu-24.04-arm. No QEMU and no x86_64 napi-rs Docker image. artifact-smoke.yml linux-arm64 consume exercises the linux-arm64-gnu addon.",
       "npm_platform": "linux-arm64-gnu",
       "target_triple": "aarch64-unknown-linux-gnu",
       "runner": "ubuntu-24.04-arm"
@@ -285,7 +285,7 @@
         "keyring"
       ],
       "accepted_risk": null,
-      "notes": "Built and uploaded from ubuntu-24.04-arm. publish-cli.yml still does not run the release binary before attach.",
+      "notes": "Built on ubuntu-24.04-arm. artifact-smoke.yml linux-arm64 consume runs the arm64 CLI (a separately built but same-triple binary); publish-cli.yml still does not execute the GitHub-release asset before attach.",
       "target_triple": "aarch64-unknown-linux-gnu",
       "runner": "ubuntu-24.04-arm"
     },
@@ -359,7 +359,7 @@
         "keyring"
       ],
       "accepted_risk": null,
-      "notes": "Built on ubuntu-24.04-arm, the matching native architecture. No QEMU.",
+      "notes": "Built on ubuntu-24.04-arm, the matching native architecture. No QEMU. artifact-smoke.yml linux-arm64 consume exercises the aarch64 wheel.",
       "runner": "ubuntu-24.04-arm"
     },
     {

@@ -33,7 +33,11 @@ try {
     if (-not (Test-Path $cookiesDb)) { throw "missing Cookies database" }
     $localState = Join-Path $userData "Local State"
 
-    cargo test --test e2e_chrome --locked -- --ignored --nocapture
+    $browserId = $env:ROOKIE_E2E_BROWSER_ID
+    if (-not $browserId) { $browserId = "chrome" }
+    if ($browserId -eq "chrome") {
+        cargo test --test e2e_chrome --locked -- --ignored --nocapture
+    }
     & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
     node tests/e2e/assert_chrome_cookie.mjs
     & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `

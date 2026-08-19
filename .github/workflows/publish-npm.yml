@@ -403,6 +403,7 @@ jobs:
           native_binaries=(
             npm/darwin-arm64/rookie_cookies.darwin-arm64.node
             npm/darwin-x64/rookie_cookies.darwin-x64.node
+            npm/linux-arm64-gnu/rookie_cookies.linux-arm64-gnu.node
             npm/linux-x64-gnu/rookie_cookies.linux-x64-gnu.node
             npm/win32-x64-msvc/rookie_cookies.win32-x64-msvc.node
           )
@@ -422,7 +423,8 @@ jobs:
           # tar gets SIGPIPE ("stdout: write error"), and the pipeline falsely fails.
           for tarball in \
             "../../release-packages/npm/rookie-cookies-$RELEASE_VERSION.tgz" \
-            "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz"
+            "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz" \
+            "../../release-packages/npm/rookie-cookies-linux-arm64-gnu-$RELEASE_VERSION.tgz"
           do
             listing="$(mktemp)"
             tar -tzf "$tarball" >"$listing"
@@ -539,7 +541,7 @@ jobs:
           NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
         run: |
           set -euo pipefail
-          test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 5
+          test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 6
           echo "Verified publish inputs (target npm dist-tag: $NPM_TAG)"
           for tarball in release-packages/*.tgz; do
             npm publish "./$tarball" --dry-run --access public --ignore-scripts --tag "$NPM_TAG"
