@@ -17,8 +17,12 @@ use super::chromium_decoder::{
   ChromiumBoundaryDecoder, ChromiumDecodeEvent, ChromiumDecodeIssueCode, ChromiumDecodeSummary,
   ChromiumReadOnlySource, EncryptedValuePolicy, MissingBrowserKeyIdentity,
 };
-/// Selects only the public compatibility shape after the unified decoder has
-/// completed. It is deliberately never visible to the decoder itself.
+/// Names the public compatibility shape a test expects after the unified
+/// decoder has completed. It is deliberately never visible to the decoder
+/// itself, and never steers acquisition: production code picks a projection by
+/// calling `project_legacy_draft`/`project_detailed_draft`, so this label
+/// survives only as test scaffolding.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CookieProjection {
   Legacy,
@@ -110,13 +114,14 @@ pub(crate) fn chromium_based_plaintext_only_with_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Legacy,
-    EncryptedValuePolicy::RejectMissingIdentity,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::RejectMissingIdentity,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   project_legacy_draft_with_runtime(&db_path, draft, runtime)
@@ -140,13 +145,14 @@ pub(crate) fn chromium_based_detailed_plaintext_only_with_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Detailed,
-    EncryptedValuePolicy::RejectMissingIdentity,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::RejectMissingIdentity,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
@@ -697,13 +703,14 @@ pub(crate) fn query_cookies_with_key_outcomes_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     &outcomes,
     db_path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Legacy,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   project_legacy_draft_with_runtime(&db_path, draft, runtime)
@@ -717,13 +724,14 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     &outcomes,
     db_path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Detailed,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
@@ -736,12 +744,14 @@ pub(crate) fn query_cookies_with_key_outcomes_without_platform_recovery(
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = query_cookies_from_database_with_runtime(
+  let draft = acquire_chromium_source(
     outcomes,
     db_path.clone(),
     domains,
-    CookieProjection::Legacy,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::DirectRead,
+    },
     runtime,
   )?;
   project_legacy_draft_with_runtime(&db_path, draft, runtime)
@@ -754,12 +764,14 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = query_cookies_from_database_with_runtime(
+  let draft = acquire_chromium_source(
     outcomes,
     db_path.clone(),
     domains,
-    CookieProjection::Detailed,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::DirectRead,
+    },
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
@@ -771,12 +783,14 @@ pub(crate) fn query_cookies_plaintext_without_platform_recovery(
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = query_cookies_from_database_with_runtime(
+  let draft = acquire_chromium_source(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
     domains,
-    CookieProjection::Legacy,
-    EncryptedValuePolicy::RejectMissingIdentity,
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::RejectMissingIdentity,
+      acquisition: ChromiumAcquisition::DirectRead,
+    },
     runtime,
   )?;
   project_legacy_draft_with_runtime(&db_path, draft, runtime)
@@ -788,12 +802,14 @@ pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = query_cookies_from_database_with_runtime(
+  let draft = acquire_chromium_source(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
     domains,
-    CookieProjection::Detailed,
-    EncryptedValuePolicy::RejectMissingIdentity,
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::RejectMissingIdentity,
+      acquisition: ChromiumAcquisition::DirectRead,
+    },
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
@@ -807,13 +823,14 @@ pub(crate) fn chromium_based_detailed_probe_with_key_outcomes(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumDetailedProbeResult> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     &outcomes,
     db_path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Detailed,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   let rows_skipped = draft.stats.rows_skipped;
@@ -832,13 +849,14 @@ fn query_cookies_probe_with_key_outcomes(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProbeResult> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     &outcomes,
     db_path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Legacy,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   let rows_skipped = draft.stats.rows_skipped;
@@ -849,7 +867,106 @@ fn query_cookies_probe_with_key_outcomes(
   })
 }
 
-#[allow(unused_variables)]
+/// The database-acquisition strategy for a single Chromium read.
+///
+/// Once projection is applied by the caller, this is the only axis on which the
+/// former `query_*` wrappers diverged: whether the read is wrapped in the
+/// Windows force-kill lock recovery, and if so whether a process holding the
+/// database open may be terminated.
+///
+/// `DirectRead` is only ever constructed by the Windows-gated
+/// `*_without_platform_recovery` callers, so it is never constructed on other
+/// targets; the whole engine boundary is compiled on every platform, hence the
+/// allow rather than a `cfg`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+enum ChromiumAcquisition {
+  /// Read the database directly, with no force-kill lock recovery and without
+  /// re-checking the runtime deadline. This is the historical
+  /// `*_without_platform_recovery` path, whose callers have already checked the
+  /// deadline.
+  DirectRead,
+  /// Wrap the read in Windows force-kill lock recovery; `force_kill` controls
+  /// whether a process holding the database open may be terminated. On non-
+  /// Windows targets there is no recovery to perform, so this checks the
+  /// deadline and reads directly, and `force_kill` is inert.
+  WithForceKillRecovery { force_kill: bool },
+}
+
+/// Every flag that distinguishes one Chromium acquire from another, collapsed
+/// into one value so callers state a policy tuple instead of picking a bespoke
+/// `query_*` wrapper.
+///
+/// Projection is deliberately absent: the draft carries every projection's data
+/// and the caller selects one with `project_*`, so it never influenced the
+/// acquire itself.
+#[derive(Clone, Copy, Debug)]
+struct ChromiumAcquireOptions {
+  /// How an encrypted row is treated when no browser key identity is present.
+  encrypted_value_policy: EncryptedValuePolicy,
+  /// Whether the read is wrapped in platform force-kill lock recovery.
+  acquisition: ChromiumAcquisition,
+}
+
+/// Acquires one Chromium cookie database into a [`ChromiumExtractionDraft`].
+///
+/// The single point where the acquisition strategy and encrypted-value policy
+/// are resolved. `ChromiumExtractionDraft`, `ChromiumRowIssue`, and the
+/// decoder's row vocabulary stop here — callers project the draft or turn it
+/// into a [`Source`].
+fn acquire_chromium_source(
+  outcomes: &ChromiumKeyOutcomes,
+  db_path: PathBuf,
+  domains: Option<&[String]>,
+  options: ChromiumAcquireOptions,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<ChromiumExtractionDraft> {
+  let ChromiumAcquireOptions {
+    encrypted_value_policy,
+    acquisition,
+  } = options;
+  match acquisition {
+    ChromiumAcquisition::DirectRead => query_cookies_from_database_with_runtime(
+      outcomes,
+      db_path,
+      domains,
+      encrypted_value_policy,
+      runtime,
+    ),
+    ChromiumAcquisition::WithForceKillRecovery { force_kill } => {
+      runtime.check()?;
+      #[cfg(target_os = "windows")]
+      {
+        chromium_database_acquisition::with_force_kill_recovery(
+          &db_path,
+          force_kill,
+          runtime,
+          |path, runtime| {
+            query_cookies_from_database_with_runtime(
+              outcomes,
+              path.to_path_buf(),
+              domains,
+              encrypted_value_policy,
+              runtime,
+            )
+          },
+        )
+      }
+      #[cfg(not(target_os = "windows"))]
+      {
+        let _ = force_kill;
+        query_cookies_from_database_with_runtime(
+          outcomes,
+          db_path,
+          domains,
+          encrypted_value_policy,
+          runtime,
+        )
+      }
+    }
+  }
+}
+
 #[cfg(test)]
 fn query_cookies_engine_outcome(
   outcomes: &ChromiumKeyOutcomes,
@@ -872,7 +989,6 @@ fn query_cookies_engine_outcome(
 /// This is the engine's crate boundary: `ChromiumExtractionDraft`,
 /// `ChromiumRowIssue`, and the decoder's row vocabulary stop here. The caller
 /// hands over the candidate it selected, which becomes `Source::origin`.
-#[allow(unused_variables)]
 pub(crate) fn query_cookies_engine_outcome_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   origin: SourceCandidate,
@@ -880,79 +996,39 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Source> {
-  let draft = query_cookies_engine_outcome_mode_with_deadline(
+  let draft = acquire_chromium_source(
     outcomes,
     origin.path.clone(),
-    domains,
-    force_kill,
-    CookieProjection::Legacy,
-    EncryptedValuePolicy::UseKeyOutcomes,
+    domains.as_deref(),
+    ChromiumAcquireOptions {
+      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
     runtime,
   )?;
   Ok(draft.into_source(origin))
 }
 
-#[allow(unused_variables)]
 #[cfg(test)]
 fn query_cookies_engine_outcome_mode(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-  projection: CookieProjection,
+  _projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
 ) -> Result<ChromiumExtractionDraft> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  query_cookies_engine_outcome_mode_with_deadline(
-    outcomes,
-    db_path,
-    domains,
-    force_kill,
-    projection,
-    encrypted_value_policy,
-    &runtime,
-  )
-}
-
-#[allow(unused_variables)]
-fn query_cookies_engine_outcome_mode_with_deadline(
-  outcomes: &ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  force_kill: bool,
-  projection: CookieProjection,
-  encrypted_value_policy: EncryptedValuePolicy,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumExtractionDraft> {
-  runtime.check()?;
-  #[cfg(target_os = "windows")]
-  {
-    chromium_database_acquisition::with_force_kill_recovery(
-      &db_path,
-      force_kill,
-      runtime,
-      |path, runtime| {
-        query_cookies_from_database_with_runtime(
-          outcomes,
-          path.to_path_buf(),
-          domains.as_deref(),
-          projection,
-          encrypted_value_policy,
-          runtime,
-        )
-      },
-    )
-  }
-
-  #[cfg(not(target_os = "windows"))]
-  query_cookies_from_database_with_runtime(
+  acquire_chromium_source(
     outcomes,
     db_path,
     domains.as_deref(),
-    projection,
-    encrypted_value_policy,
-    runtime,
+    ChromiumAcquireOptions {
+      encrypted_value_policy,
+      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
+    },
+    &runtime,
   )
 }
 
@@ -960,7 +1036,6 @@ fn query_cookies_from_database_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<&[String]>,
-  _projection: CookieProjection,
   encrypted_value_policy: EncryptedValuePolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumExtractionDraft> {
