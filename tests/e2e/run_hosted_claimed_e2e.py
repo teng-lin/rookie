@@ -139,17 +139,40 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         f"--user-data-dir={user_data}",
         url,
     ]
-    if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
-        cmd = ["xvfb-run", "-a", *cmd]
+    if sys.platform.startswith("linux"):
+        cmd.insert(-1, "--password-store=gnome-libsecret")
+        if shutil.which("xvfb-run"):
+            cmd = ["xvfb-run", "-a", *cmd]
     print("+", " ".join(cmd), flush=True)
+    proc = subprocess.Popen(cmd, cwd=str(ROOT))
+    saw_db = False
     try:
-        subprocess.run(cmd, check=False, cwd=str(ROOT), timeout=90)
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        find_chromium_db(user_data)
-    except SystemExit as error:
-        raise SystemExit(f"native chromium seed did not write a Cookies db: {error}") from error
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                find_chromium_db(user_data)
+                saw_db = True
+                time.sleep(2)
+                break
+            except SystemExit:
+                time.sleep(0.5)
+        if not saw_db:
+            status = proc.poll()
+            if status is not None:
+                raise SystemExit(
+                    f"native chromium seed exited {status} before writing a Cookies db"
+                )
+            raise SystemExit("native chromium seed timed out before writing a Cookies db")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    find_chromium_db(user_data)
 
 
 def seed_chromium(channel: str, user_data: Path, url: str, exe: str) -> None:

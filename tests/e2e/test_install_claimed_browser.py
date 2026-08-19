@@ -61,7 +61,7 @@ class InstallCatalogTests(unittest.TestCase):
             app_macos = root / "Opera GX.app" / "Contents" / "MacOS"
             app_macos.mkdir(parents=True)
             binary = app_macos / "Opera"
-            binary.write_bytes(b"")
+            binary.write_bytes(b"fake-browser\n")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             found = INSTALL.find_exe(
                 [str(app_macos / "Opera GX"), str(root / "*.app" / "Contents" / "MacOS" / "Opera")]
@@ -74,11 +74,26 @@ class InstallCatalogTests(unittest.TestCase):
             nested = root / "Packages" / "DuckDuckGo.DesktopBrowser_1" / "Local"
             nested.mkdir(parents=True)
             exe = nested / "DuckDuckGo.exe"
-            exe.write_bytes(b"")
+            exe.write_bytes(b"fake-browser\n")
             found = INSTALL.find_exe(
                 [str(root / "Packages" / "DuckDuckGo*" / "**" / "DuckDuckGo.exe")]
             )
             self.assertEqual(Path(found).resolve(), exe.resolve())
+
+    def test_is_launchable_rejects_empty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "Arc.exe"
+            empty.write_bytes(b"")
+            self.assertFalse(INSTALL.is_launchable(empty))
+            real = Path(tmp) / "brave.exe"
+            real.write_bytes(b"fake-browser\n")
+            self.assertTrue(INSTALL.is_launchable(real))
+
+    def test_catalog_skips_windowsapps_aliases(self) -> None:
+        for browser in ("arc", "duckduckgo", "brave"):
+            windows = INSTALL.HOSTS[browser].get("windows", {})
+            for path in windows.get("exe", []):
+                self.assertNotIn("WindowsApps", path, browser)
 
 
 if __name__ == "__main__":

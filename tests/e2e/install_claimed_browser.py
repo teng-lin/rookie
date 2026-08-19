@@ -169,7 +169,6 @@ HOSTS: dict[str, dict] = {
             "exe": [
                 r"%LocalAppData%\Programs\Arc\Arc.exe",
                 r"%LocalAppData%\Arc\Application\Arc.exe",
-                r"%LocalAppData%\Microsoft\WindowsApps\Arc.exe",
                 r"%LocalAppData%\Packages\TheBrowserCompany.Arc_*\**\Arc.exe",
             ],
         },
@@ -227,7 +226,6 @@ HOSTS: dict[str, dict] = {
             "exe": [
                 r"%LocalAppData%\DuckDuckGo\DuckDuckGo.exe",
                 r"%ProgramFiles%\DuckDuckGo\DuckDuckGo.exe",
-                r"%LocalAppData%\Microsoft\WindowsApps\DuckDuckGo.exe",
                 r"%LocalAppData%\Packages\DuckDuckGo*\**\DuckDuckGo.exe",
             ],
         },
@@ -253,6 +251,22 @@ def expand_candidates(candidates: list[str]) -> list[str]:
     return paths
 
 
+def is_launchable(path: Path) -> bool:
+    """Reject missing, empty, and Windows App Execution Alias stubs."""
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        winapps = Path(expand(r"%LocalAppData%\Microsoft\WindowsApps")).resolve()
+        return winapps not in path.resolve().parents and path.resolve() != winapps
+    except OSError:
+        return True
+
+
 def macos_bundle_executable(path: Path) -> str | None:
     for parent in [path, *path.parents]:
         if parent.suffix != ".app":
@@ -261,16 +275,12 @@ def macos_bundle_executable(path: Path) -> str | None:
         if not macos.is_dir():
             continue
         for child in sorted(macos.iterdir()):
-            if child.is_file() and os.access(child, os.X_OK):
+            if os.access(child, os.X_OK) and is_launchable(child):
                 return str(child.resolve())
     return None
 
 
 def windows_search(names: list[str]) -> str | None:
-    direct_roots = [
-        Path(expand(r"%LocalAppData%\Microsoft\WindowsApps")),
-        Path(expand(r"%LocalAppData%\Microsoft\WinGet\Links")),
-    ]
     walk_roots = [
         Path(expand(r"%LocalAppData%\Microsoft\WinGet\Packages")),
         Path(expand(r"%LocalAppData%\Programs")),
@@ -279,18 +289,10 @@ def windows_search(names: list[str]) -> str | None:
         Path(expand(r"%LocalAppData%\DuckDuckGo")),
         Path(expand(r"%LocalAppData%\Arc")),
     ]
-    for name in names:
-        stem = name[:-4] if name.lower().endswith(".exe") else name
-        which = shutil.which(name) or shutil.which(stem)
-        if which and Path(which).is_file():
-            return which
-    for root in direct_roots:
-        if not root.is_dir():
-            continue
-        for name in names:
-            direct = root / name
-            if direct.is_file():
-                return str(direct.resolve())
+    link_roots = [
+        Path(expand(r"%LocalAppData%\Microsoft\WinGet\Links")),
+    ]
+    wanted = {name.lower() for name in names}
     for root in walk_roots:
         if not root.is_dir():
             continue
@@ -302,10 +304,25 @@ def windows_search(names: list[str]) -> str | None:
                     dirnames.clear()
                     continue
                 for filename in filenames:
-                    if filename.lower() in {name.lower() for name in names}:
-                        return str((Path(dirpath) / filename).resolve())
+                    if filename.lower() not in wanted:
+                        continue
+                    hit = Path(dirpath) / filename
+                    if is_launchable(hit):
+                        return str(hit.resolve())
         except OSError:
             continue
+    for root in link_roots:
+        if not root.is_dir():
+            continue
+        for name in names:
+            direct = root / name
+            if is_launchable(direct):
+                return str(direct.resolve())
+    for name in names:
+        stem = name[:-4] if name.lower().endswith(".exe") else name
+        which = shutil.which(name) or shutil.which(stem)
+        if which and is_launchable(Path(which)):
+            return which
     return None
 
 
@@ -320,9 +337,9 @@ def find_exe(candidates: list[str]) -> str | None:
             if os.sep not in path and "/" not in path
             else None
         )
-        if which and Path(which).is_file():
+        if which and is_launchable(Path(which)):
             return which
-        if candidate.is_file():
+        if is_launchable(candidate):
             return str(candidate.resolve())
         bundled = macos_bundle_executable(candidate)
         if bundled:
