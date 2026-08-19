@@ -592,7 +592,8 @@ fn parse_cookie<T: ByteOrder>(bs: &[u8]) -> Result<CookieRecord> {
   let url = slice_to(bs, url_off, name_off).and_then(c_str)?;
   let name = slice_to(bs, name_off, path_off).and_then(c_str)?;
   let path = slice_to(bs, path_off, value_off).and_then(c_str)?;
-  let value = slice_to(bs, value_off, bs.len()).and_then(c_str)?;
+  let value_slice = slice(bs, value_off, bs.len().saturating_sub(value_off))?;
+  let value = c_str_value(value_slice)?;
 
   let is_secure = (flags & 0x01) == 0x01;
   let is_http_only = (flags & 0x04) == 0x04;
@@ -799,6 +800,22 @@ fn c_str(bs: &[u8]) -> Result<String> {
     .and_then(|elements| {
       String::from_utf8(elements.to_vec()).map_err(|err| anyhow!(err.to_string()))
     })
+}
+
+fn c_str_value(bs: &[u8]) -> Result<String> {
+  let nul_pos = bs
+    .iter()
+    .position(|&b| b == 0x00)
+    .ok_or_else(|| anyhow!("c string non null terminator"))?;
+  let elements = &bs[..nul_pos];
+  let trailing = &bs[nul_pos + 1..];
+  if !trailing.is_empty()
+    && !trailing.starts_with(b"bplist00")
+    && !trailing.iter().all(|&b| b == 0x00)
+  {
+    bail!("c string contains embedded NUL");
+  }
+  String::from_utf8(elements.to_vec()).map_err(|err| anyhow!(err.to_string()))
 }
 
 const SAFARI_TABS_RELATIVE_PATH: &str = "Safari/SafariTabs.db";
@@ -1625,6 +1642,55 @@ mod tests {
   }
 
   #[test]
+  fn cookie_record_with_trailing_bplist_metadata_is_parsed_successfully() {
+    let mut record = build_cookie_record(&FixtureCookie {
+      domain: ".example.test",
+      name: "session",
+      path: "/account",
+      value: "secret-value",
+      flags: 0x01 | 0x04,
+      expires: 750_000_000.0,
+    });
+    // Append bplist metadata as modern Safari does
+    let bplist_payload = b"bplist00\xd1\x01\x02ZAccessTime#A\xc8\x19\xc3\x8d\xa4\xc3\xa0\x08\x0b\x16\x00\x00\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x1f";
+    record.extend_from_slice(bplist_payload);
+    let record_len = u32::try_from(record.len()).expect("record length");
+    LittleEndian::write_u32(&mut record[0x00..0x04], record_len);
+
+    let (cookies, _records, stats, row_error) =
+      parse_content(&build_file(&[build_page(&[record])])).expect("parse cookie with bplist");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].value, "secret-value");
+    assert_eq!(stats.records_seen, 1);
+    assert_eq!(stats.records_skipped, 0);
+    assert!(row_error.is_none());
+  }
+
+  #[test]
+  fn cookie_record_with_trailing_null_padding_is_parsed_successfully() {
+    let mut record = build_cookie_record(&FixtureCookie {
+      domain: ".example.test",
+      name: "session",
+      path: "/account",
+      value: "secret-value",
+      flags: 0x01 | 0x04,
+      expires: 750_000_000.0,
+    });
+    // Append 8 null padding bytes
+    record.extend_from_slice(&[0; 8]);
+    let record_len = u32::try_from(record.len()).expect("record length");
+    LittleEndian::write_u32(&mut record[0x00..0x04], record_len);
+
+    let (cookies, _records, stats, row_error) =
+      parse_content(&build_file(&[build_page(&[record])])).expect("parse cookie with null padding");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].value, "secret-value");
+    assert_eq!(stats.records_seen, 1);
+    assert_eq!(stats.records_skipped, 0);
+    assert!(row_error.is_none());
+  }
+
+  #[test]
   fn malformed_page_does_not_discard_cookie_from_another_page() {
     let bad_records = [
       build_cookie_record(&FixtureCookie {
@@ -2110,5 +2176,22 @@ mod tests {
     // The default profile still stands; only the named ones were lost.
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].name, "default");
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn parses_real_safari_cookies_if_present() {
+    if let Some(home) = std::env::var_os("HOME") {
+      let path = PathBuf::from(home)
+        .join("Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies");
+      if path.exists() {
+        if let Ok(data) = std::fs::read(&path) {
+          let (_cookies, _records, stats, row_error) =
+            parse_content(&data).expect("parse real safari cookies");
+          assert_eq!(stats.records_skipped, 0);
+          assert!(row_error.is_none());
+        }
+      }
+    }
   }
 }
