@@ -7,6 +7,7 @@ use super::super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, 
 use super::super::chromium_platform_keys::{
   ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession, MacosKeychainCredentials,
 };
+use super::super::report_core::{InstallationId, ProfileId};
 use super::{
   browser_definition, embedded_registry, installation_id, is_informational_discovery_issue,
   normalized_path_bytes, profile_id, BrowserDefinition, BrowserEngine, DiscoveryContext,
@@ -129,8 +130,8 @@ pub(crate) struct CookieSourceCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChromiumProfile {
-  pub(crate) profile_id: String,
-  pub(crate) installation_id: String,
+  pub(crate) profile_id: ProfileId,
+  pub(crate) installation_id: InstallationId,
   pub(crate) directory_name: String,
   pub(crate) display_name: String,
   pub(crate) path: PathBuf,
@@ -218,7 +219,7 @@ fn add_legacy_flat_chromium_profiles<F: DiscoveryFs>(
         &installation.installation_id,
         ProfileLocator::Relative(Path::new(".")),
       ),
-      installation_id: installation.installation_id.clone(),
+      installation_id: InstallationId::known(&installation.installation_id),
       directory_name: ".".to_owned(),
       display_name: installation.channel.clone(),
       path: installation.path.clone(),
@@ -577,7 +578,7 @@ fn discover_installation_profiles<F: DiscoveryFs>(
     }
     installation.profiles.push(ChromiumProfile {
       profile_id,
-      installation_id: installation.installation_id.clone(),
+      installation_id: InstallationId::known(&installation.installation_id),
       directory_name: directory_name.clone(),
       display_name,
       path: canonical_path,
@@ -722,7 +723,9 @@ fn discover_browser_with_context_and_selection<F: DiscoveryFs>(
         &installation_key,
       );
       let mut installation = BrowserInstallation {
-        installation_id: id,
+        // `BrowserInstallation` keeps the opaque id as a `String`; the public
+        // `ChromiumProfile` re-wraps it as the report_core newtype (Decision 18).
+        installation_id: id.as_str().to_owned(),
         browser_id: definition.canonical_id.clone(),
         root_id: root.root_id.clone(),
         channel: root.channel.clone(),
@@ -930,7 +933,7 @@ where
       .installations
       .iter()
       .flat_map(|installation| &installation.profiles)
-      .any(|profile| profile.profile_id == profile_id);
+      .any(|profile| profile.profile_id.as_str() == profile_id);
     if !found {
       bail!("unknown {browser_id} profile id {profile_id:?}")
     }
@@ -986,10 +989,10 @@ where
       .iter()
       .filter(|profile| match selection {
         ProfileSelection::AllProfiles => true,
-        ProfileSelection::ProfileId(profile_id) => profile.profile_id == profile_id,
+        ProfileSelection::ProfileId(profile_id) => profile.profile_id.as_str() == profile_id,
         ProfileSelection::LegacyFirstProfile => legacy_profile_id
-          .as_deref()
-          .is_some_and(|profile_id| profile.profile_id == profile_id),
+          .as_ref()
+          .is_some_and(|expected| &profile.profile_id == expected),
       })
       .cloned()
       .collect::<Vec<_>>();
@@ -1363,7 +1366,7 @@ fn select_chromium_profile<'a>(
 
   if let Some(profile) = profiles
     .iter()
-    .find(|profile| profile.profile_id == selector)
+    .find(|profile| profile.profile_id.as_str() == selector)
   {
     return Ok(profile);
   }
@@ -3127,10 +3130,10 @@ mod tests {
     assert_eq!(profiles[1].display_name, "Work");
     assert!(profiles
       .iter()
-      .all(|profile| profile.profile_id.len() == 64));
+      .all(|profile| profile.profile_id.as_str().len() == 64));
     assert!(profiles
       .iter()
-      .all(|profile| profile.installation_id.len() == 64));
+      .all(|profile| profile.installation_id.as_str().len() == 64));
     assert_eq!(profiles[0].persistent_candidates[0].precedence, 10);
     assert!(profiles[0].persistent_candidates[0].selected);
 
@@ -3245,9 +3248,9 @@ mod tests {
     let error = select_chromium_profile(&profiles, &lossy_path)
       .expect_err("a lossy display path cannot round-trip");
     assert!(error.to_string().contains("lossy display value"));
-    assert!(error.to_string().contains(&profile_id));
+    assert!(error.to_string().contains(profile_id.as_str()));
     assert_eq!(
-      select_chromium_profile(&profiles, &profile_id)
+      select_chromium_profile(&profiles, profile_id.as_str())
         .expect("opaque ID remains lossless")
         .profile_id,
       profile_id
@@ -3428,7 +3431,7 @@ mod tests {
     let report = extract_chromium_with_provider(
       &context,
       "chrome",
-      Some(&profile_id),
+      Some(profile_id.as_str()),
       Some(vec!["example.com".to_owned()]),
       &provider,
     )

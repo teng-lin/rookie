@@ -10,7 +10,7 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<super::super::LegacySnapshot> {
   match engine {
-    "internet_explorer" => super::super::cookies_and_skipped_from_engine_draft(
+    "internet_explorer" => super::super::cookies_and_skipped_from_engine_extract(
       canonical_id,
       registry::legacy_internet_explorer_outcome_with_runtime(canonical_id, domains, runtime)?,
       runtime,

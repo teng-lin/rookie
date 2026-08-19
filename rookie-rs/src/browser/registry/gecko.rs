@@ -1,19 +1,23 @@
 use super::super::mozilla;
+use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
+use super::super::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
+#[cfg(test)]
+use super::DiscoveryCounters;
 use super::{
   browser_definition, canonical_installation_root, embedded_registry, installation_id,
   installation_root_is_directory, normalized_path_bytes, profile_id, push_bounded_discovery_issue,
-  retain_completed_engine_work, select_engine_profiles, sort_engine_profiles, BrowserEngine,
-  DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, EngineExtractionDraft,
-  EngineProfileDraft, EngineSourceDraft, InstallationRoot, ProfileLocator, ProfileSelection,
-  SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT,
-  SOURCE_ROLE_SESSION,
+  retain_completed_engine_extract, select_listing_profiles, sort_discovered_profiles,
+  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
+  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
+  InstallationRoot, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
+  PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
-use super::{
-  sort_cookies, test_seams, DatabaseAcquisitionStrategy, PlatformId, MAX_DISCOVERY_ISSUE_SAMPLES,
-};
+use super::{sort_cookies, test_seams, PlatformId, MAX_DISCOVERY_ISSUE_SAMPLES};
 #[cfg(test)]
 use crate::common::enums::Cookie;
+#[cfg(test)]
+use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{bail, Result};
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -31,27 +35,21 @@ fn gecko_profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path:
 
 fn source_candidate(
   path: PathBuf,
-  role: &'static str,
-  format: &'static str,
+  role: CookieSourceRoleId,
+  format: CookieSourceFormatId,
   precedence: u16,
-) -> EngineSourceDraft {
-  EngineSourceDraft {
+) -> SourceCandidate {
+  SourceCandidate {
     path,
     role,
     format,
     precedence,
+    // A candidate exists only because discovery found it, so listing freezes
+    // `exists: true`; it is nothing yet read, so `selected` is false and
+    // acquisition is `NotAttempted`.
+    exists: true,
     selected: false,
-    cookies: Vec::new(),
-    records: Vec::new(),
-    rows_seen: 0,
-    rows_skipped: 0,
-    rows_rejected: 0,
     acquisition: SourceAcquisition::NotAttempted,
-    acquisition_attempts: 0,
-    diagnostics: Vec::new(),
-    error: None,
-    error_stage: SourceFailureStage::Acquisition,
-    row_error: None,
   }
 }
 
@@ -60,33 +58,33 @@ fn source_candidate(
 pub(super) fn gecko_profiles_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionDraft> {
-  let mut outcome = discover_gecko_with_context(context, browser_id)?;
-  for profile in &mut outcome.profiles {
-    if profile.persistent_source_discovered {
-      profile.sources.push(source_candidate(
-        profile.path.join(GECKO_PERSISTENT_SOURCE),
-        SOURCE_ROLE_PERSISTENT,
-        "mozilla_sqlite",
+) -> Result<EngineListing> {
+  let mut listing = discover_gecko_with_context(context, browser_id)?;
+  for profile in &mut listing.profiles {
+    if profile.identity.persistent_source_discovered {
+      profile.candidates.push(source_candidate(
+        profile.identity.path.join(GECKO_PERSISTENT_SOURCE),
+        CookieSourceRoleId::persistent(),
+        CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
         PERSISTENT_SOURCE_PRECEDENCE,
       ));
     }
     for (index, (relative, format)) in mozilla::SESSION_CANDIDATES.into_iter().enumerate() {
-      let path = profile.path.join(relative);
+      let path = profile.identity.path.join(relative);
       if context.fs.exists(&path) {
-        profile.sources.push(source_candidate(
+        profile.candidates.push(source_candidate(
           path,
-          SOURCE_ROLE_SESSION,
-          format.format_id(),
+          CookieSourceRoleId::session(),
+          CookieSourceFormatId::known(format.format_id()),
           mozilla::session_candidate_precedence(index),
         ));
       }
     }
   }
-  Ok(outcome)
+  Ok(listing)
 }
 
-fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+fn gecko_profiles(browser_id: &str) -> Result<EngineListing> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   gecko_profiles_with_runtime(browser_id, &runtime)
@@ -95,7 +93,7 @@ fn gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
 pub(crate) fn gecko_profiles_with_runtime(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineListing> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
@@ -144,7 +142,7 @@ fn markerless_gecko_profiles<F: DiscoveryFs>(
 pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineListing> {
   let registry = embedded_registry()?;
   let definition = browser_definition(registry, context.platform, browser_id)?;
   if definition.engine != BrowserEngine::Gecko {
@@ -154,7 +152,7 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
   roots.sort_by_key(|root| (root.priority, root.root_id.as_str()));
   let mut seen_installations = HashSet::new();
   let mut seen_profiles: HashMap<Vec<u8>, usize> = HashMap::new();
-  let mut outcome = EngineExtractionDraft::default();
+  let mut outcome = EngineListing::default();
 
   for root in roots {
     if root.discovery != DiscoveryStrategy::MozillaProfilesIni {
@@ -172,7 +170,7 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
     else {
       continue;
     };
-    let installation_id = installation_id(
+    let installation_id_value = installation_id(
       &definition.canonical_id,
       &root.root_id,
       &root.channel,
@@ -294,7 +292,7 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
       ));
     }
     if enumerated {
-      outcome.installations_enumerated += 1;
+      outcome.counters.installations_enumerated += 1;
     }
 
     for (legacy_profile_order, (declared_profile, legacy_eligible)) in
@@ -315,14 +313,14 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
       let profile_key = normalized_path_bytes(&profile_path);
       if let Some(&existing_index) = seen_profiles.get(&profile_key) {
         let existing = &mut outcome.profiles[existing_index];
-        existing.is_default |= declared_profile.is_default;
-        if legacy_eligible && !existing.legacy_eligible {
-          existing.legacy_eligible = true;
-          existing.legacy_installation_priority = root.priority;
-          existing.legacy_installation_path = canonical_root.clone();
-          existing.legacy_profile_order = legacy_profile_order;
-          existing.legacy_is_default = declared_profile.is_default;
-          existing.legacy_name.clone_from(&declared_profile.name);
+        existing.identity.is_default |= declared_profile.is_default;
+        if legacy_eligible && !existing.legacy.eligible {
+          existing.legacy.eligible = true;
+          existing.legacy.installation_priority = root.priority;
+          existing.legacy.installation_path = canonical_root.clone();
+          existing.legacy.profile_order = legacy_profile_order;
+          existing.legacy.is_default = declared_profile.is_default;
+          existing.legacy.name.clone_from(&declared_profile.name);
         }
         push_bounded_discovery_issue(
           &mut outcome.discovery_issues,
@@ -337,29 +335,34 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
         .map(ProfileLocator::Relative)
         .unwrap_or(ProfileLocator::Absolute(&profile_path));
       let legacy_is_default = declared_profile.is_default;
+      let profile_id_value = profile_id(installation_id_value.as_str(), locator);
+      let persistent_source_discovered = context.fs.exists(&profile_path.join("cookies.sqlite"));
       seen_profiles.insert(profile_key, outcome.profiles.len());
-      outcome.profiles.push(EngineProfileDraft {
-        profile_id: profile_id(&installation_id, locator),
-        installation_id: installation_id.clone(),
-        installation_priority: root.priority,
-        legacy_installation_priority: root.priority,
-        legacy_profile_order,
-        legacy_is_default,
-        legacy_eligible,
-        installation_path: canonical_root.clone(),
-        legacy_installation_path: canonical_root.clone(),
-        legacy_name: declared_profile.name.clone(),
-        name: declared_profile.name,
-        persistent_source_discovered: context.fs.exists(&profile_path.join("cookies.sqlite")),
-        path: profile_path,
-        is_default: declared_profile.is_default,
+      outcome.profiles.push(DiscoveredProfile {
+        identity: EngineProfileIdentity {
+          profile_id: profile_id_value,
+          installation_id: installation_id_value.clone(),
+          installation_priority: root.priority,
+          installation_path: canonical_root.clone(),
+          name: declared_profile.name.clone(),
+          path: profile_path,
+          is_default: declared_profile.is_default,
+          persistent_source_discovered,
+        },
+        legacy: LegacyRank {
+          installation_priority: root.priority,
+          profile_order: legacy_profile_order,
+          is_default: legacy_is_default,
+          eligible: legacy_eligible,
+          installation_path: canonical_root.clone(),
+          name: declared_profile.name,
+        },
         // Gecko populate is path-driven and does not iterate candidates.
         candidates: Vec::new(),
-        sources: Vec::new(),
       });
     }
   }
-  sort_engine_profiles(&mut outcome.profiles);
+  sort_discovered_profiles(&mut outcome.profiles);
   Ok(outcome)
 }
 
@@ -371,7 +374,7 @@ pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<&[String]>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   gecko_report_with_query(
     context,
     browser_id,
@@ -392,49 +395,64 @@ fn gecko_report_with_query<F: DiscoveryFs, Q>(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<EngineExtractionDraft>
+) -> Result<EngineExtract>
 where
   Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
 {
-  let mut outcome = discover_gecko_with_context(context, browser_id)?;
-  select_engine_profiles(
-    &mut outcome,
+  let mut listing = discover_gecko_with_context(context, browser_id)?;
+  select_listing_profiles(
+    &mut listing,
     browser_id,
     ProfileSelection::from_profile_id(profile_id),
   )?;
-  Ok(populate_gecko_sources(outcome, domains, query, |path| {
+  Ok(populate_gecko_sources(listing, domains, query, |path| {
     context.fs.exists(path)
   }))
 }
 
+/// Turns a post-select [`EngineListing`] into an [`EngineExtract`] by querying
+/// each profile's cookie store.
+///
+/// It is deliberately **path/query-based**, not candidate-driven: discovery
+/// leaves `DiscoveredProfile.candidates` empty for Gecko, so iterating them the
+/// way Safari/IE populate does would query nothing and emit an empty report.
+/// The persistent path is derived from the profile directory and the session
+/// walk lives inside the Mozilla query; both push a [`Source`] onto the profile
+/// only after that query returns.
+///
+/// The output is 1:1 with the post-select listing: a profile whose query
+/// produced nothing still appears with `sources: vec![]`, so the report layer
+/// can tell a source that vanished before extraction (`profile_extraction_failed`)
+/// from a browser that was never installed.
 pub(super) fn populate_gecko_sources<Q, E>(
-  outcome: EngineExtractionDraft,
-  domains: Option<&[String]>,
-  query: Q,
-  persistent_exists: E,
-) -> EngineExtractionDraft
-where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
-  E: FnMut(&Path) -> bool,
-{
-  populate_gecko_sources_with_order(outcome, domains, query, persistent_exists, true)
-}
-
-fn populate_gecko_sources_with_order<Q, E>(
-  mut outcome: EngineExtractionDraft,
+  listing: EngineListing,
   domains: Option<&[String]>,
   mut query: Q,
   mut persistent_exists: E,
-  sort_output: bool,
-) -> EngineExtractionDraft
+) -> EngineExtract
 where
   Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtractionDraft,
   E: FnMut(&Path) -> bool,
 {
-  #[cfg(not(test))]
-  let _ = sort_output;
-  for profile in &mut outcome.profiles {
-    let persistent = profile.path.join("cookies.sqlite");
+  let EngineListing {
+    profiles,
+    discovery_issues,
+    counters,
+    boundary_stop,
+  } = listing;
+  let mut extract = EngineExtract {
+    profiles: Vec::with_capacity(profiles.len()),
+    discovery_issues,
+    counters,
+    boundary_stop,
+  };
+  for profile in profiles {
+    let DiscoveredProfile {
+      identity,
+      legacy,
+      candidates: _,
+    } = profile;
+    let persistent = identity.path.join("cookies.sqlite");
     // The Mozilla outcome also owns session fallback. A missing persistent DB
     // is normal for a session-only profile and is not projected as a source.
     //
@@ -444,113 +462,133 @@ where
     // and one deleted since discovery is still projected so its failure is
     // reported instead of vanishing. Inferring from the query alone would
     // silence a database that appeared and was corrupt or locked.
-    let extraction = query(&persistent, domains);
-    let boundary_stop = extraction.boundary_stop;
+    let mut extraction = query(&persistent, domains);
+    let stop = extraction.boundary_stop;
+    // Split the session walk off so the persistent source can consume the rest
+    // of the Mozilla outcome without cloning its records.
+    let session_sources = std::mem::take(&mut extraction.session_sources);
+    let mut sources: Vec<Source> = Vec::new();
     if extraction.persistent_attempted
-      && (profile.persistent_source_discovered || persistent_exists(&persistent))
+      && (identity.persistent_source_discovered || persistent_exists(&persistent))
     {
-      #[cfg(test)]
-      let mut persistent_cookies = extraction.persistent_cookies;
-      #[cfg(test)]
-      if sort_output {
-        sort_cookies(&mut persistent_cookies);
-      }
-      profile.sources.push(EngineSourceDraft {
-        path: persistent,
-        role: SOURCE_ROLE_PERSISTENT,
-        format: mozilla::PERSISTENT_FORMAT_ID,
-        precedence: PERSISTENT_SOURCE_PRECEDENCE,
-        selected: true,
-        rows_seen: extraction.persistent_rows_seen,
-        rows_skipped: extraction.persistent_rows_skipped,
-        rows_rejected: extraction.persistent_rows_rejected,
-        cookies: {
-          #[cfg(test)]
-          {
-            persistent_cookies
-          }
-          #[cfg(not(test))]
-          {
-            Vec::new()
-          }
-        },
-        records: extraction.persistent_records,
-        acquisition: extraction.persistent_acquisition_strategy.into(),
-        acquisition_attempts: extraction.persistent_acquisition_attempts,
-        // `diagnostics` carries acquisition retry notes, which a report renders
-        // as a warning meaning "retried, then succeeded". A rejected row is
-        // neither a retry nor a recovery — rows were lost — so it must not be
-        // reported that way. The row error stays on the Mozilla outcome for the
-        // report layer to raise as an error-severity row failure instead.
-        diagnostics: Vec::new(),
-        error: extraction.persistent_error,
-        error_stage: match extraction.persistent_failure_kind {
-          Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => {
-            SourceFailureStage::Query
-          }
-          _ => SourceFailureStage::Acquisition,
-        },
-        row_error: extraction.persistent_row_error,
-      });
+      sources.push(gecko_persistent_source(persistent, extraction));
     }
-    profile
-      .sources
-      .extend(extraction.session_sources.into_iter().map(|source| {
-        #[cfg(test)]
-        let mut source = source;
-        #[cfg(test)]
-        if sort_output {
-          sort_cookies(&mut source.cookies);
-        }
-        EngineSourceDraft {
-          path: source.path,
-          role: SOURCE_ROLE_SESSION,
-          format: source.format,
-          precedence: source.precedence,
-          selected: source.selected,
-          rows_seen: source.rows_seen,
-          rows_skipped: source.rows_skipped,
-          rows_rejected: source.rows_rejected,
-          cookies: {
-            #[cfg(test)]
-            {
-              source.cookies
-            }
-            #[cfg(not(test))]
-            {
-              Vec::new()
-            }
-          },
-          records: source.records,
-          acquisition: SourceAcquisition::StableFileImage,
-          acquisition_attempts: source.acquisition_attempts,
-          diagnostics: source.diagnostics,
-          // A session candidate's `error` means the candidate itself could not
-          // be parsed, which is a real source failure. Rows it rejected are
-          // already counted in `rows_skipped` and described by `diagnostics`.
-          error: source.error,
-          // A session candidate fails by being unreadable as JSON/LZ4, which is
-          // a parse failure, not an acquisition one.
-          error_stage: SourceFailureStage::Parse,
-          row_error: None,
-        }
-      }));
-    if boundary_stop.is_some() {
-      outcome.boundary_stop = boundary_stop;
+    for session in session_sources {
+      sources.push(gecko_session_source(session));
+    }
+    extract.profiles.push(ExtractedProfile {
+      identity,
+      legacy,
+      sources,
+    });
+    if stop.is_some() {
+      extract.boundary_stop = stop;
       break;
     }
   }
-  if outcome.boundary_stop.is_some() {
-    retain_completed_engine_work(&mut outcome);
+  if extract.boundary_stop.is_some() {
+    retain_completed_engine_extract(&mut extract);
   }
-  outcome
+  extract
+}
+
+/// Builds the persistent [`Source`] for a queried Gecko profile.
+///
+/// `selected: true` because a profile's authoritative persistent store is
+/// always the selected source. Records are the only supply of finalized rows,
+/// so `cookies_emitted` counts them rather than any cookie list.
+fn gecko_persistent_source(path: PathBuf, extraction: mozilla::MozillaExtractionDraft) -> Source {
+  let acquisition: SourceAcquisition = extraction.persistent_acquisition_strategy.into();
+  let records = extraction.persistent_records;
+  let cookies_emitted = records.len();
+  let mut source = Source {
+    origin: SourceCandidate {
+      path,
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
+      precedence: PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition,
+    },
+    selected: true,
+    acquisition,
+    records,
+    stats: SourceStats {
+      rows_seen: extraction.persistent_rows_seen,
+      cookies_emitted,
+      rows_skipped: extraction.persistent_rows_skipped,
+      rows_rejected: extraction.persistent_rows_rejected,
+      provider_failures: 0,
+    },
+    acquisition_attempts: extraction.persistent_acquisition_attempts,
+    // `diagnostics` carries acquisition retry notes, which a report renders as a
+    // warning meaning "retried, then succeeded". A rejected row is neither a
+    // retry nor a recovery — rows were lost — so it must not be reported that
+    // way; `push_row_read_failed` raises it as an error-severity row failure.
+    diagnostics: Vec::new(),
+    failure: None,
+    issues: Vec::new(),
+  };
+  if let Some(error) = extraction.persistent_error {
+    let stage = match extraction.persistent_failure_kind {
+      Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
+      _ => SourceFailureStage::Acquisition,
+    };
+    source.fail(stage, error);
+  }
+  source.push_row_read_failed(extraction.persistent_row_error);
+  source
+}
+
+/// Builds a session [`Source`] from one walked Mozilla session candidate.
+///
+/// A session candidate fails by being unreadable as JSON/LZ4, which is a parse
+/// failure, not an acquisition one. Its rejected rows are already counted in
+/// `rows_skipped` and described by `diagnostics`, so it carries no row error.
+fn gecko_session_source(session: mozilla::MozillaSessionDraft) -> Source {
+  let mut source = Source {
+    origin: SourceCandidate {
+      path: session.path,
+      role: CookieSourceRoleId::session(),
+      format: CookieSourceFormatId::known(session.format),
+      precedence: session.precedence,
+      exists: true,
+      selected: session.selected,
+      acquisition: SourceAcquisition::StableFileImage,
+    },
+    selected: session.selected,
+    acquisition: SourceAcquisition::StableFileImage,
+    records: session.records,
+    stats: SourceStats {
+      rows_seen: session.rows_seen,
+      cookies_emitted: 0,
+      rows_skipped: session.rows_skipped,
+      rows_rejected: session.rows_rejected,
+      provider_failures: 0,
+    },
+    acquisition_attempts: session.acquisition_attempts,
+    diagnostics: session.diagnostics,
+    failure: None,
+    issues: Vec::new(),
+  };
+  source.stats.cookies_emitted = source.records.len();
+  // A session candidate never keeps a row error, but rows it rejected still
+  // cost cookies. The issue is keyed on the count, not on the presence of an
+  // error string: raising it only when an engine happened to keep one lets a
+  // report claim `complete` while cookies were dropped.
+  source.push_row_read_failed(None);
+  if let Some(error) = session.error {
+    source.fail(SourceFailureStage::Parse, error);
+  }
+  source
 }
 
 fn gecko_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   gecko_report_with_runtime(browser_id, profile_id, domains, &runtime)
@@ -561,66 +599,66 @@ pub(crate) fn gecko_report_with_runtime(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let outcome = gecko_report_with_query(
+  let extract = gecko_report_with_query(
     &context,
     browser_id,
     profile_id,
     domains.as_deref(),
     |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
   )?;
-  Ok(retain_gecko_runtime_stop(outcome, runtime))
+  Ok(retain_gecko_runtime_stop(extract, runtime))
 }
 
 fn retain_gecko_runtime_stop(
-  mut outcome: EngineExtractionDraft,
+  mut extract: EngineExtract,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> EngineExtractionDraft {
+) -> EngineExtract {
   if let Err(stop) = runtime.check() {
-    outcome.boundary_stop.get_or_insert(stop);
+    extract.boundary_stop.get_or_insert(stop);
   }
-  if outcome.boundary_stop.is_some() {
-    retain_completed_engine_work(&mut outcome);
+  if extract.boundary_stop.is_some() {
+    retain_completed_engine_extract(&mut extract);
   }
-  outcome
+  extract
 }
 
-fn sort_legacy_gecko_profiles(outcome: &mut EngineExtractionDraft) {
+fn sort_legacy_gecko_profiles(listing: &mut EngineListing) {
   // Generic Gecko reports remain display-name sorted. The compatibility
   // selector instead uses the default profile when it has cookies.sqlite,
   // then falls back in profiles.ini declaration order within each root.
-  outcome
+  listing
     .profiles
-    .retain(|profile| profile.legacy_eligible && profile.persistent_source_discovered);
-  outcome.profiles.sort_by(|left, right| {
+    .retain(|profile| profile.legacy.eligible && profile.identity.persistent_source_discovered);
+  listing.profiles.sort_by(|left, right| {
     left
-      .legacy_installation_priority
-      .cmp(&right.legacy_installation_priority)
+      .legacy
+      .installation_priority
+      .cmp(&right.legacy.installation_priority)
       .then_with(|| {
-        normalized_path_bytes(&left.legacy_installation_path)
-          .cmp(&normalized_path_bytes(&right.legacy_installation_path))
+        normalized_path_bytes(&left.legacy.installation_path)
+          .cmp(&normalized_path_bytes(&right.legacy.installation_path))
       })
-      .then_with(|| (!left.legacy_is_default).cmp(&(!right.legacy_is_default)))
-      .then_with(|| left.legacy_profile_order.cmp(&right.legacy_profile_order))
-      .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
+      .then_with(|| (!left.legacy.is_default).cmp(&(!right.legacy.is_default)))
+      .then_with(|| left.legacy.profile_order.cmp(&right.legacy.profile_order))
+      .then_with(|| {
+        normalized_path_bytes(&left.identity.path).cmp(&normalized_path_bytes(&right.identity.path))
+      })
   });
 }
 
-fn select_legacy_gecko_profile(outcome: &mut EngineExtractionDraft) {
-  sort_legacy_gecko_profiles(outcome);
-  outcome.profiles.truncate(1);
+fn select_legacy_gecko_profile(listing: &mut EngineListing) {
+  sort_legacy_gecko_profiles(listing);
+  listing.profiles.truncate(1);
 }
 
 /// Extracts the first persistent Gecko profile through the authoritative
 /// discovery engine. Session-only profiles remain available to reports but do
 /// not silently change the historical named-API contract.
-fn legacy_gecko_outcome(
-  browser_id: &str,
-  domains: Option<Vec<String>>,
-) -> Result<EngineExtractionDraft> {
+fn legacy_gecko_outcome(browser_id: &str, domains: Option<Vec<String>>) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   legacy_gecko_outcome_with_runtime(browser_id, domains, &runtime)
@@ -630,25 +668,24 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut outcome = discover_gecko_with_context(&context, browser_id)?;
-  select_legacy_gecko_profile(&mut outcome);
-  let outcome = populate_gecko_sources_with_order(
-    outcome,
+  let mut listing = discover_gecko_with_context(&context, browser_id)?;
+  select_legacy_gecko_profile(&mut listing);
+  let extract = populate_gecko_sources(
+    listing,
     domains.as_deref(),
     |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
     |path| context.fs.exists(path),
-    false,
   );
-  Ok(retain_gecko_runtime_stop(outcome, runtime))
+  Ok(retain_gecko_runtime_stop(extract, runtime))
 }
 
 /// Lists persistent Gecko profiles in the same deterministic registry order
 /// used by the compatibility selector.
-fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
+fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineListing> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   legacy_gecko_profiles_with_runtime(browser_id, &runtime)
@@ -657,15 +694,15 @@ fn legacy_gecko_profiles(browser_id: &str) -> Result<EngineExtractionDraft> {
 pub(crate) fn legacy_gecko_profiles_with_runtime(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineListing> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut outcome = discover_gecko_with_context(&context, browser_id)?;
+  let mut listing = discover_gecko_with_context(&context, browser_id)?;
   runtime.check()?;
-  sort_legacy_gecko_profiles(&mut outcome);
+  sort_legacy_gecko_profiles(&mut listing);
   runtime.check()?;
-  Ok(outcome)
+  Ok(listing)
 }
 
 #[cfg(test)]
@@ -697,11 +734,11 @@ mod tests {
       report
         .profiles
         .iter()
-        .map(|profile| profile.name.as_str())
+        .map(|profile| profile.identity.name.as_str())
         .collect::<Vec<_>>(),
       ["Zulu", "Alpha", "beta"]
     );
-    assert!(report.profiles[0].is_default);
+    assert!(report.profiles[0].identity.is_default);
   }
 
   #[test]
@@ -738,7 +775,10 @@ mod tests {
       report
         .profiles
         .iter()
-        .map(|profile| (profile.installation_priority, profile.name.as_str()))
+        .map(|profile| (
+          profile.identity.installation_priority,
+          profile.identity.name.as_str()
+        ))
         .collect::<Vec<_>>(),
       expected
     );
@@ -759,9 +799,9 @@ mod tests {
 
     let flat = discover_gecko_with_context(&context, "firefox").expect("discover flat fallback");
     assert_eq!(flat.profiles.len(), 1);
-    assert_eq!(flat.profiles[0].path, root.canonicalize().unwrap());
+    assert_eq!(flat.profiles[0].identity.path, root.canonicalize().unwrap());
     assert!(
-      !flat.profiles[0].is_default,
+      !flat.profiles[0].identity.is_default,
       "a stale declaration cannot transfer its default flag"
     );
     assert!(flat
@@ -778,14 +818,14 @@ mod tests {
       markerless
         .profiles
         .iter()
-        .map(|profile| profile.name.as_str())
+        .map(|profile| profile.identity.name.as_str())
         .collect::<Vec<_>>(),
       ["Restored One", "Restored Two"]
     );
     assert!(markerless
       .profiles
       .iter()
-      .all(|profile| !profile.is_default));
+      .all(|profile| !profile.identity.is_default));
   }
 
   #[test]
@@ -799,8 +839,11 @@ mod tests {
     let generic = discover_gecko_with_context(&context, "firefox")
       .expect("generic discovery retains markerless recovery");
     assert_eq!(generic.profiles.len(), 1);
-    assert_eq!(generic.profiles[0].path, markerless.canonicalize().unwrap());
-    assert!(!generic.profiles[0].legacy_eligible);
+    assert_eq!(
+      generic.profiles[0].identity.path,
+      markerless.canonicalize().unwrap()
+    );
+    assert!(!generic.profiles[0].legacy.eligible);
 
     let mut legacy = discover_gecko_with_context(&context, "firefox")
       .expect("legacy discovery completes as ordinary absence");
@@ -843,7 +886,7 @@ mod tests {
 
     let report = discover_gecko_with_context(&context, "firefox").expect("discover flat fallback");
     assert_eq!(report.profiles.len(), 1);
-    assert!(!report.profiles[0].is_default);
+    assert!(!report.profiles[0].identity.is_default);
     assert!(report
       .discovery_issues
       .iter()
@@ -868,17 +911,18 @@ mod tests {
 
     let report = discover_gecko_with_context(&context, "firefox").expect("discover profiles");
     assert_eq!(report.profiles.len(), 2);
-    assert!(report
-      .profiles
-      .iter()
-      .any(|profile| profile.path == root.canonicalize().unwrap()
-        && profile.persistent_source_discovered
-        && !profile.is_default));
+    assert!(report.profiles.iter().any(|profile| profile.identity.path
+      == root.canonicalize().unwrap()
+      && profile.identity.persistent_source_discovered
+      && !profile.identity.is_default));
 
     let mut legacy = report;
     sort_legacy_gecko_profiles(&mut legacy);
     assert_eq!(legacy.profiles.len(), 1);
-    assert_eq!(legacy.profiles[0].path, root.canonicalize().unwrap());
+    assert_eq!(
+      legacy.profiles[0].identity.path,
+      root.canonicalize().unwrap()
+    );
   }
 
   #[test]
@@ -947,16 +991,19 @@ mod tests {
     let shared_profile = report
       .profiles
       .iter()
-      .find(|profile| profile.path == shared.canonicalize().unwrap())
+      .find(|profile| profile.identity.path == shared.canonicalize().unwrap())
       .expect("deduplicated shared profile");
-    assert!(shared_profile.is_default, "later default flag is merged");
+    assert!(
+      shared_profile.identity.is_default,
+      "later default flag is merged"
+    );
     assert!(report
       .discovery_issues
       .iter()
       .any(|issue| issue.code == "duplicate_profile"));
 
     sort_legacy_gecko_profiles(&mut report);
-    assert_eq!(report.profiles[0].name, "Original default");
+    assert_eq!(report.profiles[0].identity.name, "Original default");
   }
 
   #[test]
@@ -996,16 +1043,16 @@ mod tests {
     assert_eq!(report.profiles.len(), 1);
     let profile = &report.profiles[0];
     assert_eq!(
-      profile.installation_priority, snap_priority,
+      profile.identity.installation_priority, snap_priority,
       "generic ownership remains with the first markerless admission"
     );
-    assert!(profile.legacy_eligible);
-    assert_eq!(profile.legacy_installation_priority, native_priority);
-    assert_eq!(profile.legacy_profile_order, 0);
-    assert!(profile.legacy_is_default);
-    assert_eq!(profile.legacy_name, "Declared");
+    assert!(profile.legacy.eligible);
+    assert_eq!(profile.legacy.installation_priority, native_priority);
+    assert_eq!(profile.legacy.profile_order, 0);
+    assert!(profile.legacy.is_default);
+    assert_eq!(profile.legacy.name, "Declared");
     assert_eq!(
-      profile.legacy_installation_path,
+      profile.legacy.installation_path,
       native.canonicalize().expect("canonical native root")
     );
   }
@@ -1059,7 +1106,7 @@ mod tests {
 
     let report = discover_gecko_with_context(&context, "firefox").expect("partial discovery");
     assert_eq!(report.profiles.len(), 1);
-    assert_eq!(report.profiles[0].name, "Restored Direct");
+    assert_eq!(report.profiles[0].identity.name, "Restored Direct");
     assert!(report.discovery_issues.iter().any(|issue| {
       issue.code == "optional_profiles_enumeration_failed" && issue.path == profiles_container
     }));
@@ -1132,7 +1179,7 @@ mod tests {
 
     let report = discover_gecko_with_context(&context, "firefox").expect("discover Firefox");
     assert_eq!(report.profiles.len(), 1);
-    assert_eq!(report.installations_discovered, 1);
+    assert_eq!(report.counters.installations_discovered, 1);
     // The aliased root is one clear signal, not a second installation whose
     // every profile then looks like a duplicate.
     assert_eq!(
@@ -1164,7 +1211,7 @@ mod tests {
     )
     .expect("write profiles.ini");
     let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-    assert!(!discovery.profiles[0].persistent_source_discovered);
+    assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut created = false;
     let report = populate_gecko_sources(
@@ -1182,11 +1229,11 @@ mod tests {
     let persistent = report.profiles[0]
       .sources
       .iter()
-      .find(|source| source.role == SOURCE_ROLE_PERSISTENT)
+      .find(|source| source.origin.role == CookieSourceRoleId::persistent())
       .expect("persistent source created between discovery and query");
-    assert_eq!(persistent.format, "mozilla_sqlite");
+    assert_eq!(persistent.origin.format.as_str(), "mozilla_sqlite");
     assert!(persistent.selected);
-    assert!(persistent.error.is_none());
+    assert!(persistent.failure.is_none());
   }
 
   #[test]
@@ -1203,7 +1250,7 @@ mod tests {
     )
     .expect("write profiles.ini");
     let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-    assert!(!discovery.profiles[0].persistent_source_discovered);
+    assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     // Appears between discovery and query, but unreadable. Inferring existence
     // from query success alone would drop this failure entirely.
@@ -1223,10 +1270,10 @@ mod tests {
     let persistent = report.profiles[0]
       .sources
       .iter()
-      .find(|source| source.role == SOURCE_ROLE_PERSISTENT)
+      .find(|source| source.origin.role == CookieSourceRoleId::persistent())
       .expect("corrupt persistent source is still reported");
     assert!(persistent.selected);
-    assert!(persistent.error.is_some());
+    assert!(persistent.failure.is_some());
   }
 
   #[test]
@@ -1253,7 +1300,7 @@ mod tests {
     assert!(!report.profiles[0]
       .sources
       .iter()
-      .any(|source| source.role == SOURCE_ROLE_PERSISTENT));
+      .any(|source| source.origin.role == CookieSourceRoleId::persistent()));
   }
 
   #[test]
@@ -1269,7 +1316,7 @@ mod tests {
     )
     .expect("write profiles.ini");
     let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-    assert!(discovery.profiles[0].persistent_source_discovered);
+    assert!(discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut removed = false;
     let report = populate_gecko_sources(
@@ -1286,12 +1333,12 @@ mod tests {
     );
     assert_eq!(report.profiles[0].sources.len(), 1);
     let source = &report.profiles[0].sources[0];
-    assert_eq!(source.format, "mozilla_sqlite");
+    assert_eq!(source.origin.format.as_str(), "mozilla_sqlite");
     assert!(source.selected);
     assert!(source
-      .error
-      .as_deref()
-      .is_some_and(|error| error.contains("Can't resolve database path")));
+      .failure
+      .as_ref()
+      .is_some_and(|failure| failure.message.contains("Can't resolve database path")));
   }
 
   /// The admission gate (`gecko_profile_has_source`) guarantees a session-only
@@ -1325,7 +1372,7 @@ mod tests {
       1,
       "profile admitted as session-only"
     );
-    assert!(!discovery.profiles[0].persistent_source_discovered);
+    assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let report = populate_gecko_sources(
       discovery,
@@ -1373,10 +1420,10 @@ mod tests {
     let report = discover_gecko_with_context(&context, "firefox").expect("discover Gecko");
     assert_eq!(report.profiles.len(), 1);
     assert_eq!(
-      report.profiles[0].path,
+      report.profiles[0].identity.path,
       profile.canonicalize().expect("canonical profile")
     );
-    assert!(report.profiles[0].is_default);
+    assert!(report.profiles[0].identity.is_default);
   }
 
   #[test]
@@ -1429,25 +1476,32 @@ mod tests {
     assert_eq!(report.profiles.len(), 1);
     let sources = &report.profiles[0].sources;
     assert_eq!(sources.len(), 3);
-    assert_eq!(sources[0].format, "mozilla_sqlite");
-    assert_eq!(sources[0].rows_seen, 2);
+    assert_eq!(sources[0].origin.format.as_str(), "mozilla_sqlite");
+    assert_eq!(sources[0].stats.rows_seen, 2);
     assert_eq!(
       sources[0].acquisition,
       SourceAcquisition::Database(DatabaseAcquisitionStrategy::LiveReadOnly)
     );
     assert_eq!(sources[0].acquisition_attempts, 1);
-    assert_eq!(sources[0].cookies[0].name, "persistent-a");
-    assert_eq!(sources[0].cookies[1].name, "persistent-z");
-    assert_eq!(sources[1].format, "firefox_session_jsonlz4");
+    // `Source` has no cookies field; records are projected on demand, in query
+    // order, so sort them for a deterministic name assertion (the wire report
+    // imposes its own order downstream).
+    let mut persistent_cookies = sources[0].cookies();
+    sort_cookies(&mut persistent_cookies);
+    assert_eq!(persistent_cookies[0].name, "persistent-a");
+    assert_eq!(persistent_cookies[1].name, "persistent-z");
+    assert_eq!(sources[1].origin.format.as_str(), "firefox_session_jsonlz4");
     assert!(!sources[1].selected);
-    assert!(sources[1].error.is_some());
-    assert_eq!(sources[2].format, "firefox_session_json");
+    assert!(sources[1].failure.is_some());
+    assert_eq!(sources[2].origin.format.as_str(), "firefox_session_json");
     assert!(sources[2].selected);
-    assert_eq!(sources[2].rows_seen, 3);
-    assert_eq!(sources[2].rows_skipped, 1);
+    assert_eq!(sources[2].stats.rows_seen, 3);
+    assert_eq!(sources[2].stats.rows_skipped, 1);
     assert_eq!(sources[2].diagnostics.len(), 1);
-    assert_eq!(sources[2].cookies[0].name, "session-a");
-    assert_eq!(sources[2].cookies[1].name, "session-z");
+    let mut session_cookies = sources[2].cookies();
+    sort_cookies(&mut session_cookies);
+    assert_eq!(session_cookies[0].name, "session-a");
+    assert_eq!(session_cookies[1].name, "session-z");
   }
 
   /// A profile-selected report must not read the profiles it was not asked
@@ -1474,14 +1528,14 @@ mod tests {
     assert_eq!(all.profiles.len(), 2);
     // Deliberately not the first profile: reading only the first one would
     // otherwise pass for the wrong reason.
-    let selected = all.profiles[1].profile_id.clone();
-    let selected_source = all.profiles[1].path.join(GECKO_PERSISTENT_SOURCE);
+    let selected = all.profiles[1].identity.profile_id.clone();
+    let selected_source = all.profiles[1].identity.path.join(GECKO_PERSISTENT_SOURCE);
 
     let mut read = Vec::new();
     let one = gecko_report_with_query(
       &context,
       "firefox",
-      Some(&selected),
+      Some(selected.as_str()),
       None,
       |path, domains| {
         read.push(path.to_path_buf());
@@ -1492,10 +1546,13 @@ mod tests {
 
     assert_eq!(read, vec![selected_source]);
     assert_eq!(one.profiles.len(), 1);
-    assert_eq!(one.profiles[0].profile_id, selected);
+    assert_eq!(one.profiles[0].identity.profile_id, selected);
     // Discovery still ran across every installation, so the counters a
     // profile-selected report publishes are unchanged.
-    assert_eq!(one.installations_discovered, all.installations_discovered);
+    assert_eq!(
+      one.counters.installations_discovered,
+      all.counters.installations_discovered
+    );
 
     let unknown = gecko_report_with_context(&context, "firefox", Some("not-a-profile"), None)
       .expect_err("an unknown profile id is a request error");
@@ -1517,18 +1574,21 @@ mod tests {
     .expect("write profiles.ini");
 
     let mut outcome = discover_gecko_with_context(&context, "firefox").expect("discover");
-    select_engine_profiles(
+    select_listing_profiles(
       &mut outcome,
       "firefox",
       ProfileSelection::LegacyFirstProfile,
     )
     .expect("select first");
     assert_eq!(outcome.profiles.len(), 1);
-    assert_eq!(outcome.profiles[0].name, "default");
-    let selected_source = outcome.profiles[0].path.join(GECKO_PERSISTENT_SOURCE);
+    assert_eq!(outcome.profiles[0].identity.name, "default");
+    let selected_source = outcome.profiles[0]
+      .identity
+      .path
+      .join(GECKO_PERSISTENT_SOURCE);
 
     let mut read = Vec::new();
-    let outcome = populate_gecko_sources_with_order(
+    let outcome = populate_gecko_sources(
       outcome,
       None,
       |path, domains| {
@@ -1536,7 +1596,6 @@ mod tests {
         mozilla::query_cookies_engine_outcome(path, domains)
       },
       |path| context.fs.exists(path),
-      false,
     );
     assert_eq!(read, [selected_source]);
     assert_eq!(outcome.profiles.len(), 1);
@@ -1564,7 +1623,7 @@ mod tests {
       outcome
         .profiles
         .iter()
-        .map(|profile| profile.name.as_str())
+        .map(|profile| profile.identity.name.as_str())
         .collect::<Vec<_>>(),
       ["Alpha", "Zulu"],
       "generic report ordering remains display-name based"
@@ -1576,7 +1635,7 @@ mod tests {
       listing
         .profiles
         .iter()
-        .map(|profile| profile.name.as_str())
+        .map(|profile| profile.identity.name.as_str())
         .collect::<Vec<_>>(),
       ["Zulu", "Alpha"],
       "legacy listing follows profiles.ini declaration order"
@@ -1584,8 +1643,9 @@ mod tests {
 
     select_legacy_gecko_profile(&mut outcome);
     assert_eq!(outcome.profiles.len(), 1);
-    assert_eq!(outcome.profiles[0].name, "Zulu");
+    assert_eq!(outcome.profiles[0].identity.name, "Zulu");
     assert!(outcome.profiles[0]
+      .identity
       .path
       .ends_with("Profiles/first-declared"));
   }
@@ -1654,7 +1714,7 @@ mod tests {
     .expect("write profiles.ini");
 
     let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-    assert!(!discovery.profiles[0].persistent_source_discovered);
+    assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut created = false;
     let report = populate_gecko_sources(
@@ -1673,10 +1733,10 @@ mod tests {
     let persistent = report.profiles[0]
       .sources
       .iter()
-      .find(|source| source.format == mozilla::PERSISTENT_FORMAT_ID)
+      .find(|source| source.origin.format.as_str() == mozilla::PERSISTENT_FORMAT_ID)
       .expect("persistent source created before the query must be projected");
     assert!(persistent.selected);
-    assert!(persistent.error.is_none());
+    assert!(persistent.failure.is_none());
   }
 
   #[test]
@@ -1771,14 +1831,71 @@ mod tests {
     // claim a recovery that never happened; the report layer raises it as an
     // error-severity row failure instead.
     assert!(source.diagnostics.is_empty());
-    assert!(source.error.is_none());
-    assert_eq!(source.rows_skipped, 1);
-    assert_eq!(source.rows_rejected, 1);
+    assert!(source.failure.is_none());
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.rows_rejected, 1);
   }
 
-  fn stopped_gecko_adapter_outcome(
-    stop: crate::common::deadline::BoundaryStop,
-  ) -> EngineExtractionDraft {
+  /// A session candidate never keeps a row error, so an implementation that
+  /// raises `row_read_failed` only when one is present drops this issue
+  /// entirely -- and with it the report's degradation from `complete` to
+  /// `partial`, while cookies were in fact lost. The issue is keyed on the
+  /// skipped count for exactly that reason.
+  #[test]
+  fn a_session_candidate_that_skipped_rows_still_reports_a_row_issue() {
+    let temp = TempDir::new("gecko-session-skipped-rows");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    seed_empty_gecko_database(&root.join("Profiles/default"));
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |path, _| mozilla::MozillaExtractionDraft {
+        persistent_attempted: false,
+        session_sources: vec![mozilla::MozillaSessionDraft {
+          path: path.with_file_name("sessionstore.jsonlz4"),
+          format: "mozilla_session_jsonlz4",
+          precedence: 30,
+          selected: true,
+          cookies: Vec::new(),
+          records: Vec::new(),
+          rows_seen: 3,
+          rows_skipped: 2,
+          rows_rejected: 2,
+          acquisition_attempts: 1,
+          diagnostics: Vec::new(),
+          error: None,
+        }],
+        ..mozilla::MozillaExtractionDraft::default()
+      },
+      |path| path.exists(),
+    );
+
+    let source = &report.profiles[0].sources[0];
+    assert!(
+      source.failure.is_none(),
+      "rejected rows do not fail the source"
+    );
+    let row_issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code == "row_read_failed")
+      .expect("skipped session rows must degrade the report");
+    assert_eq!(row_issue.occurrences, 2);
+    assert_eq!(
+      row_issue.severity,
+      crate::browser::report_core::IssueSeverityCode::error()
+    );
+  }
+
+  fn stopped_gecko_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {
     let retained_cookie = || Cookie {
       domain: ".example.com".to_owned(),
       path: "/".to_owned(),
@@ -1792,32 +1909,37 @@ mod tests {
     let profiles = (0..3)
       .map(|index| {
         let path = PathBuf::from(format!("/profiles/gecko-{index}"));
-        EngineProfileDraft {
-          profile_id: format!("{index:064x}"),
-          installation_id: "0".repeat(64),
-          installation_priority: 10,
-          legacy_installation_priority: 10,
-          legacy_profile_order: index,
-          legacy_is_default: index == 0,
-          legacy_eligible: true,
-          installation_path: PathBuf::from("/profiles"),
-          legacy_installation_path: PathBuf::from("/profiles"),
-          name: format!("profile-{index}"),
-          legacy_name: format!("profile-{index}"),
-          path,
-          is_default: index == 0,
-          persistent_source_discovered: true,
+        DiscoveredProfile {
+          identity: EngineProfileIdentity {
+            profile_id: format!("{index:064x}").parse().expect("valid profile id"),
+            installation_id: "0".repeat(64).parse().expect("valid installation id"),
+            installation_priority: 10,
+            installation_path: PathBuf::from("/profiles"),
+            name: format!("profile-{index}"),
+            path,
+            is_default: index == 0,
+            persistent_source_discovered: true,
+          },
+          legacy: LegacyRank {
+            installation_priority: 10,
+            profile_order: index,
+            is_default: index == 0,
+            eligible: true,
+            installation_path: PathBuf::from("/profiles"),
+            name: format!("profile-{index}"),
+          },
           candidates: Vec::new(),
-          sources: Vec::new(),
         }
       })
       .collect();
-    let discovered = EngineExtractionDraft {
+    let discovered = EngineListing {
       profiles,
       discovery_issues: Vec::new(),
-      installations_discovered: 1,
-      installations_detected: 1,
-      installations_enumerated: 1,
+      counters: DiscoveryCounters {
+        installations_discovered: 1,
+        installations_detected: 1,
+        installations_enumerated: 1,
+      },
       boundary_stop: None,
     };
     let calls = std::cell::Cell::new(0);
@@ -1871,7 +1993,7 @@ mod tests {
       assert_eq!(populated.profiles.len(), 1);
       assert_eq!(populated.profiles[0].sources.len(), 1);
 
-      let report = crate::browser::report_build::project_engine_report(
+      let report = crate::browser::report_build::project_engine_extract(
         "firefox",
         stopped_gecko_adapter_outcome(stop),
       )
@@ -1884,7 +2006,7 @@ mod tests {
         .expect("serialize report")
         .contains("profile_extraction_failed"));
 
-      let cookies = crate::browser::legacy::project_engine_outcome(
+      let cookies = crate::browser::legacy::project_engine_extract_outcome(
         "firefox",
         stopped_gecko_adapter_outcome(stop),
       )
@@ -1911,10 +2033,10 @@ mod tests {
     // promote the flat root to default instead.
     let report = discover_gecko_with_context(&context, "firefox").expect("discover BOM profiles");
     assert_eq!(report.profiles.len(), 1);
-    assert_eq!(report.profiles[0].name, "work");
-    assert!(report.profiles[0].is_default);
+    assert_eq!(report.profiles[0].identity.name, "work");
+    assert!(report.profiles[0].identity.is_default);
     assert_eq!(
-      report.profiles[0].path,
+      report.profiles[0].identity.path,
       root
         .join("Profiles/work")
         .canonicalize()
@@ -1952,7 +2074,7 @@ mod tests {
     // through the seam rather than straight off the real filesystem.
     let report = discover_gecko_with_context(&context, "firefox").expect("discover injected");
     assert_eq!(report.profiles.len(), 1);
-    assert_eq!(report.profiles[0].name, "injected");
+    assert_eq!(report.profiles[0].identity.name, "injected");
   }
 
   #[test]
@@ -1970,9 +2092,9 @@ mod tests {
       .file_name()
       .map(|name| name.to_string_lossy().into_owned())
       .expect("root directory name");
-    assert_eq!(report.profiles[0].name, expected);
-    assert!(!report.profiles[0].name.is_empty());
-    assert!(report.profiles[0].is_default);
+    assert_eq!(report.profiles[0].identity.name, expected);
+    assert!(!report.profiles[0].identity.name.is_empty());
+    assert!(report.profiles[0].identity.is_default);
   }
 
   #[test]
@@ -1996,15 +2118,15 @@ mod tests {
     assert_eq!(report.profiles.len(), 1);
     let profile = &report.profiles[0];
     let canonical_external = external.canonicalize().expect("canonical external profile");
-    assert_eq!(profile.path, canonical_external);
-    assert!(profile.is_default);
-    assert!(profile.persistent_source_discovered);
+    assert_eq!(profile.identity.path, canonical_external);
+    assert!(profile.identity.is_default);
+    assert!(profile.identity.persistent_source_discovered);
     // A profile outside the installation root must be identified by an absolute
     // locator; a relative one would not round-trip.
     assert_eq!(
-      profile.profile_id,
+      profile.identity.profile_id,
       profile_id(
-        &profile.installation_id,
+        profile.identity.installation_id.as_str(),
         ProfileLocator::Absolute(&canonical_external)
       )
     );
@@ -2031,11 +2153,11 @@ mod tests {
     assert_eq!(report.profiles.len(), 1);
     let profile = &report.profiles[0];
     let canonical_escaped = escaped.canonicalize().expect("canonical escaped profile");
-    assert_eq!(profile.path, canonical_escaped);
+    assert_eq!(profile.identity.path, canonical_escaped);
     assert_eq!(
-      profile.profile_id,
+      profile.identity.profile_id,
       profile_id(
-        &profile.installation_id,
+        profile.identity.installation_id.as_str(),
         ProfileLocator::Absolute(&canonical_escaped)
       )
     );
@@ -2067,13 +2189,16 @@ mod tests {
     // source: absence is normal, not an error.
     assert!(sources
       .iter()
-      .all(|source| source.format != mozilla::PERSISTENT_FORMAT_ID));
+      .all(|source| source.origin.format.as_str() != mozilla::PERSISTENT_FORMAT_ID));
     assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].format, mozilla::SESSION_JSON_FORMAT_ID);
+    assert_eq!(
+      sources[0].origin.format.as_str(),
+      mozilla::SESSION_JSON_FORMAT_ID
+    );
     assert!(sources[0].selected);
-    assert!(sources[0].error.is_none());
-    assert_eq!(sources[0].cookies.len(), 1);
-    assert_eq!(sources[0].cookies[0].name, "session-only");
+    assert!(sources[0].failure.is_none());
+    assert_eq!(sources[0].cookies().len(), 1);
+    assert_eq!(sources[0].cookies()[0].name, "session-only");
   }
 
   #[test]
@@ -2087,9 +2212,9 @@ mod tests {
 
     let discovery =
       discover_gecko_with_context(&context, "firefox").expect("non-directory means absent");
-    assert_eq!(discovery.installations_detected, 0);
-    assert_eq!(discovery.installations_discovered, 0);
-    assert_eq!(discovery.installations_enumerated, 0);
+    assert_eq!(discovery.counters.installations_detected, 0);
+    assert_eq!(discovery.counters.installations_discovered, 0);
+    assert_eq!(discovery.counters.installations_enumerated, 0);
     assert!(discovery.discovery_issues.is_empty());
     assert!(!discovery.all_detected_roots_failed());
   }
@@ -2111,9 +2236,9 @@ mod tests {
 
     let discovery =
       discover_gecko_with_context(&context, "firefox").expect("retain the valid Gecko root");
-    assert_eq!(discovery.installations_detected, 2);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert_eq!(discovery.profiles.len(), 1);
     assert!(!discovery.all_detected_roots_failed());
     assert!(discovery

@@ -1,10 +1,14 @@
+use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
+use super::super::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
+#[cfg(test)]
+use super::DiscoveryCounters;
 use super::{
   canonical_installation_root, embedded_registry, engine_roots, installation_id,
-  installation_root_is_directory, normalized_path_bytes, profile_id, select_engine_profiles,
-  sort_engine_profiles, BrowserEngine, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtractionDraft, EngineProfileDraft, EngineSourceDraft, ProfileLocator,
-  ProfileSelection, SourceAcquisition, SourceFailureStage, PERSISTENT_SOURCE_PRECEDENCE,
-  SOURCE_ROLE_PERSISTENT,
+  installation_root_is_directory, normalized_path_bytes, profile_id,
+  retain_completed_engine_extract, select_listing_profiles, sort_discovered_profiles,
+  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
+  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
+  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 use anyhow::Result;
 use std::{
@@ -53,7 +57,7 @@ fn has_safari_installation_marker<F: DiscoveryFs>(
 pub(super) fn discover_safari_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineListing> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   discover_safari_with_context_using_runtime(
@@ -69,7 +73,7 @@ fn discover_safari_with_context_using_runtime<F, Profiles>(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   mut discover_profiles: Profiles,
-) -> Result<EngineExtractionDraft>
+) -> Result<EngineListing>
 where
   F: DiscoveryFs,
   Profiles: FnMut(
@@ -92,7 +96,7 @@ where
   runtime.check()?;
   let mut seen_installations = HashSet::new();
   let mut seen_profiles = HashSet::new();
-  let mut outcome = EngineExtractionDraft::default();
+  let mut outcome = EngineListing::default();
 
   for root in roots {
     runtime.check()?;
@@ -117,7 +121,7 @@ where
     let Some(canonical_root) = canonical_root else {
       continue;
     };
-    let installation_id = installation_id(
+    let installation_id_value = installation_id(
       &definition.canonical_id,
       &root.root_id,
       &root.channel,
@@ -126,7 +130,7 @@ where
 
     // Safari profile discovery degrades to the default profile instead of
     // failing, so a canonicalized root is always enumerated.
-    outcome.installations_enumerated += 1;
+    outcome.counters.installations_enumerated += 1;
     runtime.check()?;
     let profiles = discover_profiles(&canonical_root, runtime);
     // A stop reached during a provider call wins over either its ordinary
@@ -217,57 +221,57 @@ where
         .map(ProfileLocator::Relative)
         .unwrap_or(ProfileLocator::Absolute(&profile_path));
       let source_path = profile_path.join(SAFARI_COOKIE_FILE);
-      let source = EngineSourceDraft {
-        path: source_path,
-        role: SOURCE_ROLE_PERSISTENT,
-        format: "safari_binarycookies",
-        precedence,
-        selected: true,
-        cookies: Vec::new(),
-        records: Vec::new(),
-        rows_seen: 0,
-        rows_skipped: 0,
-        rows_rejected: 0,
-        acquisition: SourceAcquisition::StableFileImage,
-        // Replaced with the real count once acquisition runs; discovery-only
-        // listings never attempt a read.
-        acquisition_attempts: 0,
-        diagnostics: Vec::new(),
-        error: None,
-        error_stage: SourceFailureStage::Acquisition,
-        row_error: None,
-      };
-      outcome.profiles.push(EngineProfileDraft {
-        profile_id: profile_id(&installation_id, locator),
-        installation_id: installation_id.clone(),
-        installation_priority: root.priority,
-        legacy_installation_priority: root.priority,
-        legacy_profile_order,
-        legacy_is_default: profile.uuid.is_none(),
-        legacy_eligible: true,
-        installation_path: canonical_root.clone(),
-        legacy_installation_path: canonical_root.clone(),
-        legacy_name: profile.name.clone(),
-        name: profile.name,
-        path: profile_path,
-        is_default: profile.uuid.is_none(),
-        persistent_source_discovered: true,
-        candidates: vec![source],
-        sources: Vec::new(),
+      let candidate = safari_source_candidate(source_path, precedence);
+      let profile_id_value = profile_id(installation_id_value.as_str(), locator);
+      let is_default = profile.uuid.is_none();
+      outcome.profiles.push(DiscoveredProfile {
+        identity: EngineProfileIdentity {
+          profile_id: profile_id_value,
+          installation_id: installation_id_value.clone(),
+          installation_priority: root.priority,
+          installation_path: canonical_root.clone(),
+          name: profile.name.clone(),
+          path: profile_path,
+          is_default,
+          persistent_source_discovered: true,
+        },
+        legacy: LegacyRank {
+          installation_priority: root.priority,
+          profile_order: legacy_profile_order,
+          is_default,
+          eligible: true,
+          installation_path: canonical_root.clone(),
+          name: profile.name,
+        },
+        candidates: vec![candidate],
       });
     }
   }
   runtime.check()?;
-  sort_engine_profiles(&mut outcome.profiles);
+  sort_discovered_profiles(&mut outcome.profiles);
   runtime.check()?;
   Ok(outcome)
+}
+
+/// The frozen Safari listing candidate: `selected: true`, `StableFileImage`,
+/// `exists: true` (discovery found it), and not yet attempted.
+fn safari_source_candidate(path: PathBuf, precedence: u16) -> SourceCandidate {
+  SourceCandidate {
+    path,
+    role: CookieSourceRoleId::persistent(),
+    format: CookieSourceFormatId::known("safari_binarycookies"),
+    precedence,
+    exists: true,
+    selected: true,
+    acquisition: SourceAcquisition::StableFileImage,
+  }
 }
 
 fn discover_safari_with_runtime<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineListing> {
   discover_safari_with_context_using_runtime(
     context,
     browser_id,
@@ -281,7 +285,7 @@ pub(super) fn safari_report_with_context<F: DiscoveryFs>(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<&[String]>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   safari_report_with_query(context, browser_id, profile_id, domains, |path, domains| {
     query_safari_file(path, domains, crate::browser::safari::safari_based_outcome)
   })
@@ -297,7 +301,7 @@ pub(super) fn safari_report_with_query<F, Q>(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
   query: Q,
-) -> Result<EngineExtractionDraft>
+) -> Result<EngineExtract>
 where
   F: DiscoveryFs,
   Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
@@ -323,7 +327,7 @@ fn safari_report_with_context_using_runtime<F, Profiles, Q>(
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   discover_profiles: Profiles,
   query: Q,
-) -> Result<EngineExtractionDraft>
+) -> Result<EngineExtract>
 where
   F: DiscoveryFs,
   Profiles: FnMut(
@@ -335,116 +339,164 @@ where
   )>,
   Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
-  let mut outcome =
+  let mut listing =
     discover_safari_with_context_using_runtime(context, browser_id, runtime, discover_profiles)?;
   runtime.check()?;
-  select_engine_profiles(
-    &mut outcome,
+  select_listing_profiles(
+    &mut listing,
     browser_id,
     ProfileSelection::from_profile_id(profile_id),
   )?;
   runtime.check()?;
-  let outcome = populate_safari_sources_with_runtime(outcome, domains, runtime, query);
-  Ok(retain_safari_runtime_stop(outcome, runtime))
+  let extract = populate_safari_sources_with_runtime(listing, domains, runtime, query);
+  Ok(retain_safari_runtime_stop(extract, runtime))
 }
 
 pub(super) fn populate_safari_sources<Q>(
-  outcome: EngineExtractionDraft,
+  listing: EngineListing,
   domains: Option<&[String]>,
   query: Q,
-) -> EngineExtractionDraft
+) -> EngineExtract
 where
   Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
-  populate_safari_sources_impl(outcome, domains, None, query)
+  populate_safari_sources_impl(listing, domains, None, query)
 }
 
 fn populate_safari_sources_with_runtime<Q>(
-  outcome: EngineExtractionDraft,
+  listing: EngineListing,
   domains: Option<&[String]>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   query: Q,
-) -> EngineExtractionDraft
+) -> EngineExtract
 where
   Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
-  populate_safari_sources_impl(outcome, domains, Some(runtime), query)
+  populate_safari_sources_impl(listing, domains, Some(runtime), query)
 }
 
+/// Candidate-driven populate (unlike Gecko's path/query walk): discovery plants
+/// exactly the Safari candidates, and each is acquired in turn. Safari inherits
+/// the candidate's frozen `selected: true` + `StableFileImage` through
+/// [`Source::from_candidate`]; only records/attempts/failure are overlaid.
 fn populate_safari_sources_impl<Q>(
-  mut outcome: EngineExtractionDraft,
+  listing: EngineListing,
   domains: Option<&[String]>,
   runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
   mut query: Q,
-) -> EngineExtractionDraft
+) -> EngineExtract
 where
   Q: FnMut(&Path, Option<&[String]>) -> Result<crate::browser::safari::SafariFileDraft>,
 {
+  let EngineListing {
+    profiles,
+    discovery_issues,
+    counters,
+    boundary_stop,
+  } = listing;
+  let mut extract = EngineExtract {
+    profiles: Vec::with_capacity(profiles.len()),
+    discovery_issues,
+    counters,
+    boundary_stop,
+  };
   let mut stop_position = None;
-  'profiles: for profile_index in 0..outcome.profiles.len() {
-    // Take the candidates: anything not committed below is work that never
-    // happened, and must not survive as a zero-attempt placeholder.
-    let candidates = std::mem::take(&mut outcome.profiles[profile_index].candidates);
-    for mut source in candidates {
+  'profiles: for (profile_index, profile) in profiles.into_iter().enumerate() {
+    let DiscoveredProfile {
+      identity,
+      legacy,
+      candidates,
+    } = profile;
+    let mut sources = Vec::new();
+    for candidate in candidates {
       if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        outcome.boundary_stop.get_or_insert(stop);
+        extract.boundary_stop.get_or_insert(stop);
         stop_position = Some(profile_index);
+        extract.profiles.push(ExtractedProfile {
+          identity,
+          legacy,
+          sources,
+        });
         break 'profiles;
       }
-      let result = query(&source.path, domains);
-      match result {
+      let mut source = Source::from_candidate(candidate);
+      match query(&source.origin.path, domains) {
         Ok(extraction) => {
-          source.rows_seen = extraction.stats.records_seen;
-          source.rows_skipped = extraction.stats.records_skipped;
-          source.rows_rejected = extraction.stats.records_rejected;
+          source.stats = SourceStats {
+            rows_seen: extraction.stats.records_seen,
+            cookies_emitted: extraction.records.len(),
+            rows_skipped: extraction.stats.records_skipped,
+            rows_rejected: extraction.stats.records_rejected,
+            provider_failures: 0,
+          };
           source.acquisition_attempts = extraction.acquisition_attempts;
-          source.row_error = extraction.row_error;
           source.records = extraction.records;
+          source.push_row_read_failed(extraction.row_error);
         }
         Err(error) => {
           if let Some(stop) = boundary_stop_from_error(&error) {
-            outcome.boundary_stop.get_or_insert(stop);
+            extract.boundary_stop.get_or_insert(stop);
             stop_position = Some(profile_index);
+            extract.profiles.push(ExtractedProfile {
+              identity,
+              legacy,
+              sources,
+            });
             break 'profiles;
           }
           // Exhausting the retries is itself the failure, so report the
           // attempts spent rather than the placeholder.
           source.acquisition_attempts = crate::browser::safari::STABLE_READ_ATTEMPTS as u32;
-          source.error_stage =
-            match error.downcast_ref::<crate::browser::safari::SafariParseFailure>() {
-              Some(failure) => {
-                source.rows_seen = failure.stats.records_seen;
-                source.rows_skipped = failure.stats.records_skipped;
-                source.rows_rejected = failure.stats.records_rejected;
-                source.row_error = Some(format!("{error:#}"));
-                SourceFailureStage::Parse
-              }
-              None => SourceFailureStage::Acquisition,
-            };
-          source.error = Some(format!("{error:#}"));
+          let message = format!("{error:#}");
+          match error.downcast_ref::<crate::browser::safari::SafariParseFailure>() {
+            Some(failure) => {
+              source.stats = SourceStats {
+                rows_seen: failure.stats.records_seen,
+                cookies_emitted: 0,
+                rows_skipped: failure.stats.records_skipped,
+                rows_rejected: failure.stats.records_rejected,
+                provider_failures: 0,
+              };
+              source.push_row_read_failed(Some(message.clone()));
+              source.fail(SourceFailureStage::Parse, message);
+            }
+            None => {
+              source.fail(SourceFailureStage::Acquisition, message);
+            }
+          }
         }
       }
       // The query result above is an atomic source outcome. Commit it before
       // sampling the shared stop state so a stop that races with the return
       // cannot discard records and counters that already completed.
-      outcome.profiles[profile_index].sources.push(source);
+      sources.push(source);
       if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        outcome.boundary_stop.get_or_insert(stop);
+        extract.boundary_stop.get_or_insert(stop);
         stop_position = Some(profile_index);
+        extract.profiles.push(ExtractedProfile {
+          identity,
+          legacy,
+          sources,
+        });
         break 'profiles;
       }
     }
+    extract.profiles.push(ExtractedProfile {
+      identity,
+      legacy,
+      sources,
+    });
   }
   if let Some(profile_index) = stop_position {
     // Sources hold exactly the queries that completed, so there is nothing to
     // truncate within a profile any more. Profiles after the stop never ran,
     // and the stopped profile itself is dropped if it committed nothing.
-    outcome.profiles.truncate(profile_index + 1);
-    if outcome.profiles[profile_index].sources.is_empty() {
-      outcome.profiles.truncate(profile_index);
+    extract.profiles.truncate(profile_index + 1);
+    if extract.profiles[profile_index].sources.is_empty() {
+      extract.profiles.truncate(profile_index);
     }
   }
-  outcome
+  extract
 }
 
 fn boundary_stop_from_error(
@@ -458,16 +510,16 @@ fn boundary_stop_from_error(
 }
 
 fn retain_safari_runtime_stop(
-  mut outcome: EngineExtractionDraft,
+  mut extract: EngineExtract,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> EngineExtractionDraft {
+) -> EngineExtract {
   if let Err(stop) = runtime.check() {
-    outcome.boundary_stop.get_or_insert(stop);
+    extract.boundary_stop.get_or_insert(stop);
   }
-  if outcome.boundary_stop.is_some() {
-    super::retain_completed_engine_work(&mut outcome);
+  if extract.boundary_stop.is_some() {
+    retain_completed_engine_extract(&mut extract);
   }
-  outcome
+  extract
 }
 
 fn query_safari_file<Q>(
@@ -486,7 +538,7 @@ pub(crate) fn safari_report(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   safari_report_with_runtime(browser_id, profile_id, domains, &runtime)
@@ -498,7 +550,7 @@ pub(crate) fn safari_report_with_runtime(
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
@@ -518,21 +570,23 @@ pub(crate) fn safari_report_with_runtime(
 }
 
 pub(super) fn select_legacy_safari_profile(
-  outcome: &mut EngineExtractionDraft,
+  listing: &mut EngineListing,
   browser_id: &str,
 ) -> Result<()> {
   // The historical named wrapper probed only Safari's two default cookie
   // locations. Named profiles remain report-capable, but must never become a
   // fallback when both default locations are absent.
-  outcome.profiles.retain(|profile| profile.is_default);
-  select_engine_profiles(outcome, browser_id, ProfileSelection::LegacyFirstProfile)
+  listing
+    .profiles
+    .retain(|profile| profile.identity.is_default);
+  select_listing_profiles(listing, browser_id, ProfileSelection::LegacyFirstProfile)
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn legacy_safari_outcome(
   browser_id: &str,
   domains: Option<Vec<String>>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   legacy_safari_outcome_with_runtime(browser_id, domains, &runtime)
@@ -543,39 +597,31 @@ pub(crate) fn legacy_safari_outcome_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineExtract> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut outcome = discover_safari_with_runtime(&context, browser_id, runtime)?;
+  let mut listing = discover_safari_with_runtime(&context, browser_id, runtime)?;
   runtime.check()?;
-  select_legacy_safari_profile(&mut outcome, browser_id)?;
+  select_legacy_safari_profile(&mut listing, browser_id)?;
   runtime.check()?;
-  let outcome =
-    populate_safari_sources_with_runtime(outcome, domains.as_deref(), runtime, |path, domains| {
+  let extract =
+    populate_safari_sources_with_runtime(listing, domains.as_deref(), runtime, |path, domains| {
       query_safari_file(path, domains, |path, domains| {
         crate::browser::safari::safari_based_outcome_with_runtime(path, domains, runtime)
       })
     });
-  Ok(retain_safari_runtime_stop(outcome, runtime))
+  Ok(retain_safari_runtime_stop(extract, runtime))
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn safari_profiles_with_runtime(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<EngineExtractionDraft> {
+) -> Result<EngineListing> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
-  let mut listing = discover_safari_with_runtime(&context, browser_id, runtime)?;
-  // Listing reports what discovery found, and its consumer still reads
-  // `sources`. Nothing was queried, so these stay the frozen placeholders --
-  // `selected: true`, `StableFileImage`, zero attempts. PR 1 replaces this
-  // hand-off with a listing type that cannot hold a queried source.
-  for profile in &mut listing.profiles {
-    profile.sources = std::mem::take(&mut profile.candidates);
-  }
-  Ok(listing)
+  discover_safari_with_runtime(&context, browser_id, runtime)
 }
 
 #[cfg(test)]
@@ -588,55 +634,43 @@ mod tests {
     "1111111111111111111111111111111111111111111111111111111111111111";
   const TEST_PROFILE_ID: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
-  fn discovered_source_draft(path: PathBuf) -> EngineSourceDraft {
-    EngineSourceDraft {
-      path,
-      role: SOURCE_ROLE_PERSISTENT,
-      format: "safari_binarycookies",
-      precedence: PERSISTENT_SOURCE_PRECEDENCE,
-      selected: true,
-      cookies: Vec::new(),
-      records: Vec::new(),
-      rows_seen: 0,
-      rows_skipped: 0,
-      rows_rejected: 0,
-      acquisition: SourceAcquisition::StableFileImage,
-      acquisition_attempts: 0,
-      diagnostics: Vec::new(),
-      error: None,
-      error_stage: SourceFailureStage::Acquisition,
-      row_error: None,
-    }
+  fn discovered_source_draft(path: PathBuf) -> SourceCandidate {
+    safari_source_candidate(path, PERSISTENT_SOURCE_PRECEDENCE)
   }
 
-  fn discovered_source() -> EngineExtractionDraft {
+  fn discovered_source() -> EngineListing {
     let installation_path = PathBuf::from("/Users/rookie/Library");
     let profile_path = installation_path.join("Cookies");
-    EngineExtractionDraft {
-      installations_detected: 1,
-      installations_discovered: 1,
-      installations_enumerated: 1,
+    EngineListing {
+      counters: DiscoveryCounters {
+        installations_detected: 1,
+        installations_discovered: 1,
+        installations_enumerated: 1,
+      },
       boundary_stop: None,
-      profiles: vec![EngineProfileDraft {
-        profile_id: TEST_PROFILE_ID.to_owned(),
-        installation_id: TEST_INSTALLATION_ID.to_owned(),
-        installation_priority: 10,
-        legacy_installation_priority: 10,
-        legacy_profile_order: 0,
-        legacy_is_default: true,
-        legacy_eligible: true,
-        installation_path: installation_path.clone(),
-        legacy_installation_path: installation_path,
-        legacy_name: "Default".to_owned(),
-        name: "Default".to_owned(),
-        path: profile_path.clone(),
-        is_default: true,
-        persistent_source_discovered: true,
+      profiles: vec![DiscoveredProfile {
+        identity: EngineProfileIdentity {
+          profile_id: TEST_PROFILE_ID.parse().expect("valid profile id"),
+          installation_id: TEST_INSTALLATION_ID.parse().expect("valid installation id"),
+          installation_priority: 10,
+          installation_path: installation_path.clone(),
+          name: "Default".to_owned(),
+          path: profile_path.clone(),
+          is_default: true,
+          persistent_source_discovered: true,
+        },
+        legacy: LegacyRank {
+          installation_priority: 10,
+          profile_order: 0,
+          is_default: true,
+          eligible: true,
+          installation_path,
+          name: "Default".to_owned(),
+        },
         // Discovery output: the candidate exists, nothing has been queried.
         candidates: vec![discovered_source_draft(
           profile_path.join(SAFARI_COOKIE_FILE),
         )],
-        sources: Vec::new(),
       }],
       discovery_issues: Vec::new(),
     }
@@ -841,15 +875,23 @@ mod tests {
     // projection legitimately drops it as expired; `rows_seen` proves the real
     // binarycookies parser actually read and processed the fixture rather than
     // the query silently failing, which is what this test exists to catch.
-    assert!(report_source.error.is_none(), "{:?}", report_source.error);
-    assert_eq!(report_source.rows_seen, 1);
+    assert!(
+      report_source.failure.is_none(),
+      "{:?}",
+      report_source.failure
+    );
+    assert_eq!(report_source.stats.rows_seen, 1);
 
     let legacy = legacy_safari_outcome("safari", None)
       .expect("legacy_safari_outcome should discover the synthetic legacy home");
     assert_eq!(legacy.profiles.len(), 1);
     let legacy_source = &legacy.profiles[0].sources[0];
-    assert!(legacy_source.error.is_none(), "{:?}", legacy_source.error);
-    assert_eq!(legacy_source.rows_seen, 1);
+    assert!(
+      legacy_source.failure.is_none(),
+      "{:?}",
+      legacy_source.failure
+    );
+    assert_eq!(legacy_source.stats.rows_seen, 1);
   }
 
   #[test]
@@ -868,12 +910,12 @@ mod tests {
       })
     });
     let success = &success.profiles[0].sources[0];
-    assert_eq!(success.rows_seen, 7);
-    assert_eq!(success.rows_skipped, 2);
-    assert_eq!(success.rows_rejected, 2);
-    assert_eq!(success.row_error.as_deref(), Some("recoverable record"));
+    assert_eq!(success.stats.rows_seen, 7);
+    assert_eq!(success.stats.rows_skipped, 2);
+    assert_eq!(success.stats.rows_rejected, 2);
+    assert_eq!(row_read_failed_message(success), Some("recoverable record"));
     assert_eq!(success.acquisition_attempts, 2);
-    assert!(success.error.is_none());
+    assert!(success.failure.is_none());
 
     let parse_error =
       anyhow!("invalid Safari record").context(crate::browser::safari::SafariParseFailure {
@@ -889,17 +931,18 @@ mod tests {
       Err(parse_error.take().expect("single parse query"))
     });
     let parse = &parse.profiles[0].sources[0];
-    assert_eq!(parse.error_stage, SourceFailureStage::Parse);
-    assert_eq!(parse.rows_seen, 5);
-    assert_eq!(parse.rows_skipped, 3);
-    assert_eq!(parse.rows_rejected, 3);
+    let parse_failure = parse.failure.as_ref().expect("parse failure recorded");
+    assert_eq!(parse_failure.stage, SourceFailureStage::Parse);
+    assert_eq!(parse.stats.rows_seen, 5);
+    assert_eq!(parse.stats.rows_skipped, 3);
+    assert_eq!(parse.stats.rows_rejected, 3);
     assert_eq!(
       parse.acquisition_attempts,
       crate::browser::safari::STABLE_READ_ATTEMPTS as u32
     );
-    assert_eq!(parse.error.as_deref(), Some(expected_parse_error.as_str()));
+    assert_eq!(parse_failure.message, expected_parse_error);
     assert_eq!(
-      parse.row_error.as_deref(),
+      row_read_failed_message(parse),
       Some(expected_parse_error.as_str())
     );
 
@@ -910,19 +953,27 @@ mod tests {
       Err(acquisition_error.take().expect("single acquisition query"))
     });
     let acquisition = &acquisition.profiles[0].sources[0];
-    assert_eq!(acquisition.error_stage, SourceFailureStage::Acquisition);
-    assert_eq!(acquisition.rows_seen, 0);
-    assert_eq!(acquisition.rows_skipped, 0);
-    assert_eq!(acquisition.rows_rejected, 0);
-    assert!(acquisition.row_error.is_none());
+    let acquisition_failure = acquisition.failure.as_ref().expect("acquisition failure");
+    assert_eq!(acquisition_failure.stage, SourceFailureStage::Acquisition);
+    assert_eq!(acquisition.stats.rows_seen, 0);
+    assert_eq!(acquisition.stats.rows_skipped, 0);
+    assert_eq!(acquisition.stats.rows_rejected, 0);
+    assert_eq!(row_read_failed_message(acquisition), None);
     assert_eq!(
       acquisition.acquisition_attempts,
       crate::browser::safari::STABLE_READ_ATTEMPTS as u32
     );
-    assert_eq!(
-      acquisition.error.as_deref(),
-      Some(expected_acquisition_error.as_str())
-    );
+    assert_eq!(acquisition_failure.message, expected_acquisition_error);
+  }
+
+  /// The `row_read_failed` issue message an adapter attached through
+  /// [`Source::push_row_read_failed`], if any.
+  fn row_read_failed_message(source: &Source) -> Option<&str> {
+    source
+      .issues
+      .iter()
+      .find(|issue| issue.code == "row_read_failed")
+      .map(|issue| issue.message.as_str())
   }
 
   #[test]
@@ -968,9 +1019,9 @@ mod tests {
 
       assert_eq!(calls.get(), 2);
       assert_eq!(populated.boundary_stop, Some(stop));
-      assert_eq!(populated.profiles[0].sources[0].rows_seen, 7);
-      assert_eq!(populated.profiles[0].sources[0].rows_rejected, 2);
-      assert!(populated.profiles[0].sources[0].error.is_none());
+      assert_eq!(populated.profiles[0].sources[0].stats.rows_seen, 7);
+      assert_eq!(populated.profiles[0].sources[0].stats.rows_rejected, 2);
+      assert!(populated.profiles[0].sources[0].failure.is_none());
       assert_eq!(
         populated.profiles[0].sources.len(),
         1,
@@ -985,11 +1036,11 @@ mod tests {
 
     let mut discovered = discovered_source();
     let mut interrupted = discovered_source().profiles.remove(0);
-    interrupted.profile_id = "interrupted-profile".to_owned();
-    interrupted.name = "Interrupted".to_owned();
+    interrupted.identity.profile_id = "a".repeat(64).parse().expect("valid profile id");
+    interrupted.identity.name = "Interrupted".to_owned();
     let mut unattempted = discovered_source().profiles.remove(0);
-    unattempted.profile_id = "unattempted-profile".to_owned();
-    unattempted.name = "Unattempted".to_owned();
+    unattempted.identity.profile_id = "b".repeat(64).parse().expect("valid profile id");
+    unattempted.identity.name = "Unattempted".to_owned();
     discovered.profiles.push(interrupted);
     discovered.profiles.push(unattempted);
     let calls = Cell::new(0);
@@ -1013,11 +1064,14 @@ mod tests {
     assert_eq!(calls.get(), 2);
     assert_eq!(populated.boundary_stop, Some(BoundaryStop::Cancelled));
     assert_eq!(populated.profiles.len(), 1);
-    assert_eq!(populated.profiles[0].profile_id, TEST_PROFILE_ID);
+    assert_eq!(
+      populated.profiles[0].identity.profile_id.as_str(),
+      TEST_PROFILE_ID
+    );
     assert_eq!(populated.profiles[0].sources.len(), 1);
   }
 
-  fn stopped_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtractionDraft {
+  fn stopped_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {
     let mut discovered = discovered_source();
     let second_path = PathBuf::from(
       "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
@@ -1075,7 +1129,7 @@ mod tests {
       assert_eq!(populated.profiles.len(), 1);
       assert_eq!(populated.profiles[0].sources.len(), 1);
 
-      let report = crate::browser::report_build::project_engine_report(
+      let report = crate::browser::report_build::project_engine_extract(
         "safari",
         stopped_adapter_outcome(stop),
       )
@@ -1088,17 +1142,17 @@ mod tests {
         .expect("serialize report")
         .contains("profile_extraction_failed"));
 
-      let cookies =
-        crate::browser::legacy::project_engine_outcome("safari", stopped_adapter_outcome(stop))
-          .expect("legacy projection retains completed Safari work");
+      let cookies = crate::browser::legacy::project_engine_extract_outcome(
+        "safari",
+        stopped_adapter_outcome(stop),
+      )
+      .expect("legacy projection retains completed Safari work");
       assert_eq!(cookies.len(), 1);
       assert_eq!(cookies[0].name, "retained");
     }
   }
 
-  fn stopped_after_success_outcome(
-    stop: crate::common::deadline::BoundaryStop,
-  ) -> EngineExtractionDraft {
+  fn stopped_after_success_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {
     use crate::common::deadline::{
       test_clock::ManualClock, BoundaryStop, CancellationToken, Deadline,
     };
@@ -1165,7 +1219,7 @@ mod tests {
       (BoundaryStop::Cancelled, "cancelled"),
       (BoundaryStop::ResourceExhausted, "resource_exhausted"),
     ] {
-      let report = crate::browser::report_build::project_engine_report(
+      let report = crate::browser::report_build::project_engine_extract(
         "safari",
         stopped_after_success_outcome(stop),
       )
@@ -1184,7 +1238,7 @@ mod tests {
       assert_eq!(report.summary.rows_rejected, 1);
       assert_eq!(report.summary.cookies_emitted, 1);
 
-      let cookies = crate::browser::legacy::project_engine_outcome(
+      let cookies = crate::browser::legacy::project_engine_extract_outcome(
         "safari",
         stopped_after_success_outcome(stop),
       )
@@ -1322,7 +1376,23 @@ mod tests {
       };
       let runtime = BoundaryRuntime::with_stop(&clock, deadline, token);
 
-      let retained = retain_safari_runtime_stop(discovered_source(), &runtime);
+      // A discovery-only extract: profiles with no committed source.
+      let listing = discovered_source();
+      let discovery_only = EngineExtract {
+        profiles: listing
+          .profiles
+          .into_iter()
+          .map(|profile| ExtractedProfile {
+            identity: profile.identity,
+            legacy: profile.legacy,
+            sources: Vec::new(),
+          })
+          .collect(),
+        discovery_issues: listing.discovery_issues,
+        counters: listing.counters,
+        boundary_stop: listing.boundary_stop,
+      };
+      let retained = retain_safari_runtime_stop(discovery_only, &runtime);
 
       assert_eq!(retained.boundary_stop, Some(stop));
       assert!(

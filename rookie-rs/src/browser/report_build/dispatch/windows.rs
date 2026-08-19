@@ -16,12 +16,14 @@ pub(super) fn remaining_engine_report(
   if engine != "internet_explorer" {
     return Ok(undetected(browser_id));
   }
-  let engine = if extract {
-    registry::internet_explorer_report_with_runtime(canonical_id, profile_id, domains, runtime)?
+  if extract {
+    let engine =
+      registry::internet_explorer_report_with_runtime(canonical_id, profile_id, domains, runtime)?;
+    super::super::engine_extract_outcome(browser_id, engine)
   } else {
-    registry::internet_explorer_profiles_with_runtime(canonical_id, runtime)?
-  };
-  super::super::engine_browser_outcome(browser_id, engine)
+    let listing = registry::internet_explorer_profiles_with_runtime(canonical_id, runtime)?;
+    super::super::engine_listing_outcome(browser_id, listing)
+  }
 }
 
 #[cfg(test)]

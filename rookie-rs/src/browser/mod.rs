@@ -14,6 +14,7 @@ pub(crate) mod outcome;
 pub(crate) mod registry;
 pub(crate) mod report_build;
 pub(crate) mod report_core;
+pub(crate) mod source;
 pub(crate) mod unseal;
 
 #[cfg(target_os = "windows")]

@@ -2,9 +2,10 @@
 //!
 //! Listing drafts only — no key providers.
 
+use super::super::report_core::CookieSourceRoleId;
 use super::{
   chromium_listing_with_runtime, gecko_profiles_with_runtime, resolve_registered_browser,
-  EngineProfileDraft, SOURCE_ROLE_PERSISTENT,
+  DiscoveredProfile,
 };
 use crate::common::deadline::BoundaryRuntime;
 use crate::RequestError;
@@ -113,7 +114,7 @@ fn list_profile_candidates(
               .into_iter()
               .map(|candidate| candidate.path)
               .collect(),
-            profile_id: profile.profile_id,
+            profile_id: profile.profile_id.as_str().to_owned(),
             display_name: profile.display_name,
             path: profile.path,
           })
@@ -121,50 +122,72 @@ fn list_profile_candidates(
       )
     }
     "gecko" => {
-      let draft = gecko_profiles_with_runtime(canonical_id, runtime)?;
-      if draft.all_detected_roots_failed() {
+      let listing = gecko_profiles_with_runtime(canonical_id, runtime)?;
+      if listing.all_detected_roots_failed() {
         anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
-      Ok(draft.profiles.into_iter().map(engine_candidate).collect())
+      Ok(
+        listing
+          .profiles
+          .into_iter()
+          .map(discovered_candidate)
+          .collect(),
+      )
     }
     #[cfg(target_os = "macos")]
     "safari" => {
-      let draft = super::safari_profiles_with_runtime(canonical_id, runtime)?;
-      if draft.all_detected_roots_failed() {
+      let listing = super::safari_profiles_with_runtime(canonical_id, runtime)?;
+      if listing.all_detected_roots_failed() {
         anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
-      Ok(draft.profiles.into_iter().map(engine_candidate).collect())
+      Ok(
+        listing
+          .profiles
+          .into_iter()
+          .map(discovered_candidate)
+          .collect(),
+      )
     }
     #[cfg(target_os = "windows")]
     "internet_explorer" => {
-      let draft = super::internet_explorer_profiles_with_runtime(canonical_id, runtime)?;
-      if draft.all_detected_roots_failed() {
+      let listing = super::internet_explorer_profiles_with_runtime(canonical_id, runtime)?;
+      if listing.all_detected_roots_failed() {
         anyhow::bail!("every detected {canonical_id} installation failed profile enumeration");
       }
-      Ok(draft.profiles.into_iter().map(engine_candidate).collect())
+      Ok(
+        listing
+          .profiles
+          .into_iter()
+          .map(discovered_candidate)
+          .collect(),
+      )
     }
     _ => Ok(Vec::new()),
   }
 }
 
-fn engine_candidate(profile: EngineProfileDraft) -> ProfileMatchCandidate {
+/// Maps a listing profile onto an ADR 0003 match candidate. The persistent
+/// source path key (ADR 0004) comes from the listing candidates.
+fn discovered_candidate(profile: DiscoveredProfile) -> ProfileMatchCandidate {
   let directory_name = profile
+    .identity
     .path
     .file_name()
     .map(OsString::from)
     .unwrap_or_default();
+  let persistent = CookieSourceRoleId::persistent();
   ProfileMatchCandidate {
-    profile_id: profile.profile_id,
-    display_name: profile.name,
+    profile_id: profile.identity.profile_id.as_str().to_owned(),
+    display_name: profile.identity.name,
     directory_name,
-    path_lossy: profile.path.to_str().is_none(),
+    path_lossy: profile.identity.path.to_str().is_none(),
     persistent_source_paths: profile
-      .sources
+      .candidates
       .into_iter()
-      .filter(|source| source.role == SOURCE_ROLE_PERSISTENT)
-      .map(|source| source.path)
+      .filter(|candidate| candidate.role == persistent)
+      .map(|candidate| candidate.path)
       .collect(),
-    path: profile.path,
+    path: profile.identity.path,
   }
 }
 
