@@ -1,6 +1,4 @@
-use super::super::chromium::{
-  query_cookies_engine_outcome_with_runtime, ChromiumExtractionStats, ChromiumRowIssue,
-};
+use super::super::chromium::query_cookies_engine_outcome_with_runtime;
 #[cfg(all(test, target_os = "macos"))]
 use super::super::chromium_crypto::ChromiumKeyOutcome;
 use super::super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, KeyProvider};
@@ -14,11 +12,12 @@ use super::{
   browser_definition, embedded_registry, installation_id, is_informational_discovery_issue,
   normalized_path_bytes, profile_id, BrowserDefinition, BrowserEngine, DiscoveryContext,
   DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, InstallationRoot, PlatformId, ProfileLocator,
-  ProfileSelection, SourceAcquisition, SourceCandidate, MAX_DISCOVERY_ISSUE_SAMPLES,
+  ProfileSelection, Source, SourceAcquisition, SourceCandidate, SourceFailureStage, SourceIssue,
+  MAX_DISCOVERY_ISSUE_SAMPLES,
 };
 #[cfg(test)]
 use super::{
-  capability_descriptor, registered_browsers_for, sort_cookies, GlobExpansion, GlobExpansionIssue,
+  capability_descriptor, registered_browsers_for, GlobExpansion, GlobExpansionIssue,
   RealDiscoveryFs,
 };
 use crate::common::diagnostic::REDACTED_PATH;
@@ -789,44 +788,49 @@ fn discover_browser_with_context_and_selection<F: DiscoveryFs>(
   Ok(discovery)
 }
 
+/// One profile after extraction: its identity, plus what reading its cookie
+/// databases produced.
+///
+/// Extract-only. The listing counterpart is [`ChromiumProfile`], whose
+/// `persistent_candidates` cannot hold records; a `Source` here cannot be
+/// returned from listing. Sources are the profile's whole extraction result --
+/// stats, row issues, and any failure live on them, not beside them.
 #[derive(Debug)]
-pub(crate) struct ChromiumProfileDraft {
+pub(crate) struct ChromiumExtractedProfile {
   pub(crate) profile: ChromiumProfile,
-  #[cfg(test)]
-  pub(crate) cookies: Vec<Cookie>,
-  pub(crate) records: Vec<super::super::cookie_record::CookieRecord>,
-  pub(crate) stats: ChromiumExtractionStats,
-  pub(crate) row_issues: Vec<ChromiumRowIssue>,
-  pub(crate) acquisition: SourceAcquisition,
-  pub(crate) acquisition_attempts: u32,
-  pub(crate) failure: Option<ChromiumProfileFailure>,
-  /// Exact error used by the historical flat Chromium projection when every
-  /// relevant row failed. Grouped reports retain those failures as row issues
-  /// instead, so they deliberately ignore this compatibility-only field.
-  pub(crate) legacy_error: Option<String>,
+  pub(crate) sources: Vec<Source>,
+  /// Extraction failed before any source could be named.
+  ///
+  /// Empty `sources` on its own means the profile declares no cookie database,
+  /// which is ordinary absence; this says the profile lost something instead,
+  /// so the report must not downgrade it to the same `info` signal. A failure
+  /// that happened *while reading* a named source lives on that
+  /// [`Source::failure`] rather than here.
+  ///
+  /// This is the opposite convention from the engine listing, where an empty
+  /// `sources` is itself the failure. The two engines discover differently:
+  /// Chromium lists only databases that exist, so having none is normal.
+  pub(crate) failure: Option<String>,
 }
 
-/// Why a profile yielded no cookies, typed so the report can tell ordinary
-/// absence from a real failure.
-///
-/// These were once one `Option<String>` whose "no source" case was a message
-/// sentinel, which made an installed browser with no cookie store
-/// indistinguishable from one that could not be read.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ChromiumProfileFailure {
-  /// The profile declares no cookie database. Ordinary absence, not an error.
-  NoSource,
-  /// Acquisition, schema validation, or the query did not complete. Rejected
-  /// rows are not this: they are counted in `rows_skipped` and described by
-  /// `row_issues` while the source itself still succeeds.
-  Extraction(String),
+impl ChromiumExtractedProfile {
+  /// Compatibility cookies projected from every source's records.
+  ///
+  /// The mirror of [`Source::cookies`] for tests that assert on a profile's
+  /// whole yield. Chromium selects one source per profile today, so this is a
+  /// flatten over one element; writing it as a flatten keeps it correct if
+  /// session candidates ever arrive.
+  #[cfg(test)]
+  pub(crate) fn cookies(&self) -> Vec<Cookie> {
+    self.sources.iter().flat_map(Source::cookies).collect()
+  }
 }
 
 #[derive(Debug)]
 pub(crate) struct ChromiumInstallationDraft {
   pub(crate) installation_id: String,
   pub(crate) channel: String,
-  pub(crate) profiles: Vec<ChromiumProfileDraft>,
+  pub(crate) profiles: Vec<ChromiumExtractedProfile>,
 }
 
 #[derive(Debug, Default)]
@@ -1056,55 +1060,44 @@ where
         report.boundary_stop = Some(stop);
         break;
       }
-      let Some(source) = profile.selected_source().map(Path::to_path_buf) else {
-        profile_extractions.push(ChromiumProfileDraft {
+      let Some(candidate) = profile
+        .persistent_candidates
+        .iter()
+        .find(|candidate| candidate.selected)
+        .cloned()
+      else {
+        // No selected database is ordinary absence, so the profile carries no
+        // failure and no source. The report reads the empty list as such.
+        profile_extractions.push(ChromiumExtractedProfile {
           profile,
-          #[cfg(test)]
-          cookies: Vec::new(),
-          records: Vec::new(),
-          stats: ChromiumExtractionStats::default(),
-          row_issues: Vec::new(),
-          acquisition: SourceAcquisition::NotAttempted,
-          acquisition_attempts: 0,
-          failure: Some(ChromiumProfileFailure::NoSource),
-          legacy_error: None,
+          sources: Vec::new(),
+          failure: None,
         });
         continue;
       };
       match query_cookies_engine_outcome_with_runtime(
         &key_outcomes,
-        source,
+        candidate.clone(),
         domains.clone(),
         false,
         runtime,
       ) {
-        Ok(outcome) => {
-          #[cfg(test)]
-          let mut outcome = outcome;
-          #[cfg(test)]
-          if selection != ProfileSelection::LegacyFirstProfile {
-            sort_cookies(&mut outcome.cookies);
-          }
-          let legacy_error = outcome
-            .legacy_error
-            .as_ref()
-            .map(|error| format!("{error:#}"));
-          profile_extractions.push(ChromiumProfileDraft {
+        Ok(source) => {
+          // The adapter used to re-sort the engine's separate cookie list here.
+          // There is no separate list any more -- cookies are projected from
+          // `records` -- so a sort would only make tests observe an order
+          // production never returns.
+          //
+          // A source where every row was rejected is not a failed source:
+          // acquisition, parsing, and the query all completed. Section 5.7
+          // reports it as succeeded-with-rows-skipped, and the row issues the
+          // engine attached already carry the detail. Only the compatibility
+          // projection treats it as an error, through the evidence issue the
+          // engine attached for it.
+          profile_extractions.push(ChromiumExtractedProfile {
             profile,
-            #[cfg(test)]
-            cookies: outcome.cookies,
-            records: outcome.records,
-            stats: outcome.stats,
-            row_issues: outcome.issues,
-            acquisition: outcome.acquisition_strategy.into(),
-            acquisition_attempts: outcome.acquisition_attempts,
-            // `legacy_error` reports that no row decoded, which the legacy API
-            // treats as a failure. Section 5.7 does not: acquisition, parsing,
-            // and the query all completed, so the source succeeded with every
-            // row skipped. `row_issues` and `rows_skipped` already carry that
-            // detail, so nothing is lost by not restating it as a failure.
+            sources: vec![source],
             failure: None,
-            legacy_error,
           });
         }
         Err(error) => {
@@ -1115,18 +1108,21 @@ where
             report.boundary_stop = Some(*stop);
             break;
           }
-          let failure = error.downcast_ref::<crate::common::sqlite::BrowserDatabaseFailure>();
-          profile_extractions.push(ChromiumProfileDraft {
+          let database_failure =
+            error.downcast_ref::<crate::common::sqlite::BrowserDatabaseFailure>();
+          // The source was named and reached for, so the failure belongs to it
+          // rather than to the profile.
+          let mut source = Source::from_candidate(candidate);
+          source.acquisition = database_failure.and_then(|failure| failure.strategy).into();
+          source.acquisition_attempts = database_failure.map_or(1, |failure| failure.attempts);
+          source.fail(SourceFailureStage::Acquisition, error.to_string());
+          source
+            .issues
+            .push(SourceIssue::all_rows_rejected(format!("{error:#}")));
+          profile_extractions.push(ChromiumExtractedProfile {
             profile,
-            #[cfg(test)]
-            cookies: Vec::new(),
-            records: Vec::new(),
-            stats: ChromiumExtractionStats::default(),
-            row_issues: Vec::new(),
-            acquisition: failure.and_then(|failure| failure.strategy).into(),
-            acquisition_attempts: failure.map_or(1, |failure| failure.attempts),
-            failure: Some(ChromiumProfileFailure::Extraction(error.to_string())),
-            legacy_error: Some(format!("{error:#}")),
+            sources: vec![source],
+            failure: None,
           });
         }
       }
@@ -2153,17 +2149,17 @@ mod tests {
         .flat_map(|installation| &installation.profiles)
         .collect::<Vec<_>>();
       assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
+      let [source] = &profiles[0].sources[..] else {
+        panic!("{browser_id} extracts its one selected source");
+      };
+      assert!(source.failure.is_none(), "{browser_id} extraction succeeds");
       assert_eq!(
-        profiles[0].failure, None,
-        "{browser_id} extraction succeeds"
-      );
-      assert_eq!(
-        profiles[0]
-          .cookies
+        source
+          .cookies()
           .iter()
-          .map(|cookie| (cookie.name.as_str(), cookie.value.as_str()))
+          .map(|cookie| (cookie.name.clone(), cookie.value.clone()))
           .collect::<Vec<_>>(),
-        [(browser_id, "plaintext-value")]
+        [(browser_id.to_owned(), "plaintext-value".to_owned())]
       );
     }
 
@@ -2360,14 +2356,16 @@ mod tests {
         .flat_map(|installation| &installation.profiles)
         .collect::<Vec<_>>();
       assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
-      let extraction = profiles[0];
+      let [source] = &profiles[0].sources[..] else {
+        panic!("{browser_id} extracts its one selected source");
+      };
       assert!(
-        extraction.cookies.is_empty(),
+        source.cookies().is_empty(),
         "{browser_id} must not report undecryptable rows as cookies"
       );
       assert_eq!(
-        extraction.stats,
-        ChromiumExtractionStats {
+        source.stats,
+        crate::browser::source::SourceStats {
           rows_seen: 1,
           cookies_emitted: 0,
           rows_skipped: 1,
@@ -2376,22 +2374,32 @@ mod tests {
         },
         "{browser_id} must count the row unavailable through the failed provider"
       );
-      assert_eq!(
-        extraction.failure, None,
+      assert!(
+        source.failure.is_none(),
         "an unavailable row does not make the successfully queried source fail"
       );
+      // Every row was rejected, so the source also carries the compatibility
+      // evidence issue. That one never reaches the report; the row issue does.
+      let row_issues = source
+        .issues
+        .iter()
+        .filter(|issue| issue.code != SourceIssue::ALL_ROWS_REJECTED)
+        .collect::<Vec<_>>();
       assert_eq!(
-        extraction.row_issues.len(),
+        row_issues.len(),
         1,
         "{browser_id} must surface the unavailable row instead of silently returning empty output"
       );
-      let issue = &extraction.row_issues[0];
-      assert_eq!(
-        issue.code,
-        crate::browser::chromium::ChromiumRowIssueCode::ProviderFailed
+      assert_eq!(row_issues[0].code, "provider_failed");
+      assert_eq!(row_issues[0].occurrences, 1);
+      assert_eq!(row_issues[0].samples, vec!["row 1".to_owned()]);
+      assert!(
+        source
+          .issues
+          .iter()
+          .any(|issue| issue.code == SourceIssue::ALL_ROWS_REJECTED),
+        "{browser_id} rejected every row, which the compatibility projection reports as an error"
       );
-      assert_eq!(issue.occurrences, 1);
-      assert_eq!(issue.samples, vec!["row 1".to_owned()]);
     }
   }
 
@@ -2786,7 +2794,7 @@ mod tests {
         .flat_map(|installation| &installation.profiles)
         .next()
         .expect("HOME profile is selected");
-      assert_eq!(selected.cookies[0].name, "home-cookie");
+      assert_eq!(selected.cookies()[0].name, "home-cookie");
       assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
     }
   }
@@ -3343,14 +3351,20 @@ mod tests {
       .iter()
       .find(|profile| profile.profile.directory_name == "Profile 2")
       .expect("Profile 2 extraction");
-    assert_eq!(default.cookies[0].name, "shared");
-    assert_eq!(default.cookies[0].value, "default-value");
-    assert_eq!(good.cookies[0].name, "shared");
-    assert_eq!(good.cookies[0].value, "profile-value");
-    assert!(broken.cookies.is_empty());
+    assert_eq!(default.cookies()[0].name, "shared");
+    assert_eq!(default.cookies()[0].value, "default-value");
+    assert_eq!(good.cookies()[0].name, "shared");
+    assert_eq!(good.cookies()[0].value, "profile-value");
+    assert!(broken.cookies().is_empty());
+    // The database was named and reached for, so the failure belongs to the
+    // source rather than to the profile.
+    assert!(broken.failure.is_none());
+    let [broken_source] = &broken.sources[..] else {
+      panic!("the broken profile still reports the source it tried to read");
+    };
     assert!(matches!(
-      broken.failure,
-      Some(ChromiumProfileFailure::Extraction(_))
+      &broken_source.failure,
+      Some(failure) if failure.stage == SourceFailureStage::Acquisition
     ));
   }
 
@@ -3403,13 +3417,17 @@ mod tests {
       extract_chromium_with_provider(&context, "chrome", None, None, &CountingProvider::default())
         .expect("partial report");
     let extraction = &report.installations[0].profiles[0];
-    assert_eq!(extraction.cookies.len(), 1);
-    assert_eq!(extraction.cookies[0].name, "readable");
-    assert_eq!(extraction.stats.rows_seen, 2);
-    assert_eq!(extraction.stats.cookies_emitted, 1);
-    assert_eq!(extraction.stats.rows_skipped, 1);
-    assert_eq!(extraction.row_issues.len(), 1);
-    assert_eq!(extraction.row_issues[0].occurrences, 1);
+    assert_eq!(extraction.cookies().len(), 1);
+    assert_eq!(extraction.cookies()[0].name, "readable");
+    let [source] = &extraction.sources[..] else {
+      panic!("the profile extracts its one selected source");
+    };
+    assert_eq!(source.stats.rows_seen, 2);
+    assert_eq!(source.stats.cookies_emitted, 1);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.issues.len(), 1);
+    assert_eq!(source.issues[0].occurrences, 1);
+    assert!(source.failure.is_none());
     assert!(extraction.failure.is_none());
   }
 
@@ -3445,7 +3463,7 @@ mod tests {
       profile_id
     );
     assert_eq!(
-      report.installations[0].profiles[0].cookies[0].name,
+      report.installations[0].profiles[0].cookies()[0].name,
       "selected"
     );
     assert_eq!(
@@ -3504,7 +3522,7 @@ mod tests {
     assert_eq!(profiles[0].profile.directory_name, "Default");
     assert_eq!(
       profiles[0]
-        .cookies
+        .cookies()
         .iter()
         .map(|cookie| cookie.name.as_str())
         .collect::<Vec<_>>(),
@@ -3542,8 +3560,8 @@ mod tests {
       extraction.profile.path,
       beta.join("Default").canonicalize().unwrap()
     );
-    assert_eq!(extraction.cookies.len(), 1);
-    assert_eq!(extraction.cookies[0].name, "beta-network");
+    assert_eq!(extraction.cookies().len(), 1);
+    assert_eq!(extraction.cookies()[0].name, "beta-network");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
@@ -3576,7 +3594,7 @@ mod tests {
       extraction.profile.path,
       stable.join("Default").canonicalize().unwrap()
     );
-    assert_eq!(extraction.cookies[0].name, "stable-default");
+    assert_eq!(extraction.cookies()[0].name, "stable-default");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
@@ -3609,7 +3627,7 @@ mod tests {
       extraction.profile.path,
       native.join("Default").canonicalize().unwrap()
     );
-    assert_eq!(extraction.cookies[0].name, "native-legacy");
+    assert_eq!(extraction.cookies()[0].name, "native-legacy");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
@@ -3660,7 +3678,7 @@ mod tests {
       .expect("selected profile");
 
     assert_eq!(extraction.profile.directory_name, "Profile 1");
-    assert_eq!(extraction.cookies[0].name, "first-directory");
+    assert_eq!(extraction.cookies()[0].name, "first-directory");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
@@ -3708,7 +3726,7 @@ mod tests {
         .next()
         .expect("flat profile");
       assert_eq!(selected.profile.directory_name, ".");
-      assert_eq!(selected.cookies[0].name, "flat");
+      assert_eq!(selected.cookies()[0].name, "flat");
       assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
     }
 
@@ -3732,7 +3750,7 @@ mod tests {
       .flat_map(|installation| &installation.profiles)
       .next()
       .expect("stable flat profile");
-    assert_eq!(selected.cookies[0].name, "stable-cookies");
+    assert_eq!(selected.cookies()[0].name, "stable-cookies");
 
     let temp = TempDir::new("legacy-linux-opera-default-before-flat");
     let context = context_for(PlatformId::Linux, temp.path().join("home"), []);
@@ -3755,7 +3773,7 @@ mod tests {
       .next()
       .expect("Default profile");
     assert_eq!(selected.profile.directory_name, "Default");
-    assert_eq!(selected.cookies[0].name, "default");
+    assert_eq!(selected.cookies()[0].name, "default");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
@@ -3793,7 +3811,7 @@ mod tests {
         .flat_map(|installation| &installation.profiles)
         .next()
         .expect("selected profile");
-      assert_eq!(selected.cookies[0].name, earlier_root);
+      assert_eq!(selected.cookies()[0].name, earlier_root);
       assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
     }
   }
@@ -3841,7 +3859,7 @@ mod tests {
     let generic_provider = CountingProvider::default();
     let generic = extract_chromium_with_provider(&context, "chrome", None, None, &generic_provider)
       .expect("generic reports tolerate missing Local State for plaintext rows");
-    assert_eq!(generic.installations[0].profiles[0].cookies.len(), 1);
+    assert_eq!(generic.installations[0].profiles[0].cookies().len(), 1);
     assert_eq!(
       generic_provider
         .calls
@@ -3906,7 +3924,7 @@ mod tests {
     )
     .expect("valid Local State allows legacy plaintext extraction");
     assert_eq!(
-      valid.installations[0].profiles[0].cookies[0].name,
+      valid.installations[0].profiles[0].cookies()[0].name,
       "plaintext"
     );
     assert_eq!(
@@ -3982,7 +4000,7 @@ mod tests {
       .flat_map(|installation| &installation.profiles)
       .next()
       .expect("flat Opera profile");
-    assert_eq!(selected.cookies[0].name, "opera");
+    assert_eq!(selected.cookies()[0].name, "opera");
     assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
@@ -4018,7 +4036,7 @@ mod tests {
         .flat_map(|installation| &installation.profiles)
         .next()
         .expect("native Default remains eligible");
-      assert_eq!(selected.cookies[0].name, "native-default");
+      assert_eq!(selected.cookies()[0].name, "native-default");
       assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
     }
   }
@@ -4730,13 +4748,16 @@ mod tests {
       assert_eq!(report.installations.len(), 1, "{browser_id} installations");
       let profiles = &report.installations[0].profiles;
       assert_eq!(profiles.len(), 1, "{browser_id} profiles");
-      assert_eq!(profiles[0].cookies.len(), 1);
-      assert_eq!(profiles[0].cookies[0].name, browser_id);
-      assert_eq!(profiles[0].cookies[0].value, "plaintext-value");
+      assert_eq!(profiles[0].cookies().len(), 1);
+      assert_eq!(profiles[0].cookies()[0].name, browser_id);
+      assert_eq!(profiles[0].cookies()[0].value, "plaintext-value");
       assert!(profiles[0].failure.is_none());
-      assert_eq!(profiles[0].stats.rows_seen, 1);
-      assert_eq!(profiles[0].stats.cookies_emitted, 1);
-      assert_eq!(profiles[0].stats.rows_skipped, 0);
+      let [source] = &profiles[0].sources[..] else {
+        panic!("{browser_id} extracts its one selected source");
+      };
+      assert_eq!(source.stats.rows_seen, 1);
+      assert_eq!(source.stats.cookies_emitted, 1);
+      assert_eq!(source.stats.rows_skipped, 0);
       assert_eq!(
         provider
           .calls

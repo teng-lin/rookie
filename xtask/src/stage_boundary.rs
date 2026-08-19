@@ -71,6 +71,25 @@ const FENCES: &[Fence] = &[
     reason: "Chromium inventory stays cookie-free; extraction results live on \
              the extract bag",
   },
+  Fence {
+    type_name: "ChromiumExtractedProfile",
+    path: "rookie-rs/src/browser/registry/chromium.rs",
+    // `records`, `stats`, and `row_issues` were all fields on the deleted
+    // `ChromiumProfileDraft`, beside the profile rather than on the source they
+    // described. They belong to a `Source` now, so the profile has nowhere to
+    // restate them and no way to disagree with it.
+    forbidden_fields: &[
+      "cookies",
+      "records",
+      "stats",
+      "row_issues",
+      "issues",
+      "legacy_error",
+      "acquisition",
+    ],
+    reason: "a Chromium extract profile owns sources, not their contents; \
+             everything a query learned lives on the `Source` it produced",
+  },
 ];
 
 #[derive(Debug)]
