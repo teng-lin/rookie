@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -21,15 +22,56 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def wait_for_server(url: str = "http://127.0.0.1:8765/", timeout: float = 15) -> None:
+def pick_cookie_port() -> int:
+    raw = os.environ.get("ROOKIE_E2E_COOKIE_PORT")
+    if raw:
+        return int(raw)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_for_server(
+    port: int,
+    proc: subprocess.Popen[bytes] | subprocess.Popen[str],
+    log_path: Path,
+    timeout: float = 45,
+) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc.poll() is not None:
+            logs = log_path.read_text(encoding="utf-8", errors="replace")
+            raise SystemExit(
+                f"cookie server exited {proc.returncode} before binding "
+                f"127.0.0.1:{port}\n{logs}"
+            )
         try:
-            with socket.create_connection(("127.0.0.1", 8765), timeout=0.5):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                 return
         except OSError:
             time.sleep(0.25)
-    raise SystemExit(f"cookie server did not become ready at {url}")
+    logs = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    raise SystemExit(
+        f"cookie server did not become ready at http://127.0.0.1:{port}/\n{logs}"
+    )
+
+
+def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path]:
+    port = pick_cookie_port()
+    env = os.environ.copy()
+    env["ROOKIE_E2E_COOKIE_PORT"] = str(port)
+    log_path = Path(tempfile.gettempdir()) / f"rookie-cookie-server-{port}.log"
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(ROOT / "tests/e2e/cookie_server.py")],
+            cwd=str(ROOT),
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    wait_for_server(port, proc, log_path)
+    return proc, port, log_path
 
 
 def venv_python() -> Path:
@@ -42,44 +84,88 @@ def venv_python() -> Path:
     raise SystemExit("expected a .venv from the workflow's maturin develop step")
 
 
+def keychain_accounts(service: str) -> list[str]:
+    raw = os.environ.get("ROOKIE_E2E_KEYCHAIN_ACCOUNT", "Chrome")
+    accounts = [part.strip() for part in raw.split(",") if part.strip()]
+    if service == "Chrome Safe Storage":
+        for extra in ("Chrome", "Chromium"):
+            if extra not in accounts:
+                accounts.append(extra)
+    return accounts
+
+
 def plant_keychain() -> None:
     service = os.environ.get("ROOKIE_E2E_KEYCHAIN_SERVICE")
     if not service or sys.platform != "darwin":
         return
-    account = os.environ.get("ROOKIE_E2E_KEYCHAIN_ACCOUNT", "Chrome")
-    subprocess.run(
-        [
-            "/usr/bin/security",
-            "delete-generic-password",
-            "-a",
-            account,
-            "-s",
-            service,
-        ],
-        check=False,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "/usr/bin/security",
-            "add-generic-password",
-            "-U",
-            "-a",
-            account,
-            "-s",
-            service,
-            "-w",
-            "mock_password",
-        ],
-        check=True,
-    )
+    for account in keychain_accounts(service):
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "delete-generic-password",
+                "-a",
+                account,
+                "-s",
+                service,
+            ],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                service,
+                "-w",
+                "mock_password",
+            ],
+            check=True,
+        )
 
 
-def seed_chromium(channel: str, user_data: Path, url: str) -> None:
+def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
+    cmd = [
+        exe,
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--disable-default-apps",
+        f"--user-data-dir={user_data}",
+        url,
+    ]
+    if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
+        cmd = ["xvfb-run", "-a", *cmd]
+    print("+", " ".join(cmd), flush=True)
+    try:
+        subprocess.run(cmd, check=False, cwd=str(ROOT), timeout=90)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        find_chromium_db(user_data)
+    except SystemExit as error:
+        raise SystemExit(f"native chromium seed did not write a Cookies db: {error}") from error
+
+
+def seed_chromium(channel: str, user_data: Path, url: str, exe: str) -> None:
     cmd = ["node", str(ROOT / "tests/e2e/seed_chromium_cookie.mjs"), channel, str(user_data), url]
     if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
         cmd = ["xvfb-run", "-a", *cmd]
-    subprocess.run(cmd, check=True, cwd=str(ROOT))
+    try:
+        subprocess.run(cmd, check=True, cwd=str(ROOT))
+        return
+    except subprocess.CalledProcessError as error:
+        print(
+            f"playwright seed failed ({error.returncode}); "
+            "retrying with a native --headless launch",
+            flush=True,
+        )
+    seed_chromium_native(exe, user_data, url)
 
 
 def seed_gecko(exe: str, profile: Path, url: str) -> None:
@@ -161,20 +247,16 @@ def run() -> int:
     )
     user_data.mkdir(parents=True, exist_ok=True)
 
-    plant_keychain()
-    server = subprocess.Popen(
-        [sys.executable, str(ROOT / "tests/e2e/cookie_server.py")],
-        cwd=str(ROOT),
-    )
+    server, port, _log_path = start_cookie_server()
     try:
-        wait_for_server()
-        url = "http://127.0.0.1:8765/set"
+        plant_keychain()
+        url = f"http://127.0.0.1:{port}/set"
         if engine == "gecko":
             seed_gecko(exe, user_data, url)
             assert_gecko(user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
-            seed_chromium("chromium", user_data, url)
+            seed_chromium("chromium", user_data, url, exe)
             assert_chromium(user_data, browser)
     finally:
         server.terminate()

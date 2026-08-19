@@ -9,6 +9,7 @@ fixture lane.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -54,6 +56,7 @@ HOSTS: dict[str, dict] = {
             "kind": "winget",
             "id": "Brave.Brave",
             "exe": [
+                r"%LocalAppData%\BraveSoftware\Brave-Browser\Application\brave.exe",
                 r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe",
                 r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe",
             ],
@@ -88,7 +91,10 @@ HOSTS: dict[str, dict] = {
         "macos": {
             "kind": "brew",
             "cask": "opera-gx",
-            "exe": ["/Applications/Opera GX.app/Contents/MacOS/Opera GX"],
+            "exe": [
+                "/Applications/Opera GX.app/Contents/MacOS/Opera GX",
+                "/Applications/Opera GX.app/Contents/MacOS/Opera",
+            ],
         },
         "windows": {
             "kind": "winget",
@@ -105,7 +111,13 @@ HOSTS: dict[str, dict] = {
         "keychain_account": "Vivaldi",
         "linux": {
             "kind": "vivaldi_apt",
-            "exe": ["vivaldi", "vivaldi-stable", "/usr/bin/vivaldi"],
+            "exe": [
+                "/opt/vivaldi/vivaldi",
+                "/usr/bin/vivaldi-stable",
+                "vivaldi-stable",
+                "vivaldi",
+                "/usr/bin/vivaldi",
+            ],
         },
         "macos": {
             "kind": "brew",
@@ -157,6 +169,8 @@ HOSTS: dict[str, dict] = {
             "exe": [
                 r"%LocalAppData%\Programs\Arc\Arc.exe",
                 r"%LocalAppData%\Arc\Application\Arc.exe",
+                r"%LocalAppData%\Microsoft\WindowsApps\Arc.exe",
+                r"%LocalAppData%\Packages\TheBrowserCompany.Arc_*\**\Arc.exe",
             ],
         },
     },
@@ -213,6 +227,8 @@ HOSTS: dict[str, dict] = {
             "exe": [
                 r"%LocalAppData%\DuckDuckGo\DuckDuckGo.exe",
                 r"%ProgramFiles%\DuckDuckGo\DuckDuckGo.exe",
+                r"%LocalAppData%\Microsoft\WindowsApps\DuckDuckGo.exe",
+                r"%LocalAppData%\Packages\DuckDuckGo*\**\DuckDuckGo.exe",
             ],
         },
     },
@@ -225,15 +241,106 @@ RUNNERS = {
 }
 
 
-def find_exe(candidates: list[str]) -> str | None:
+def expand_candidates(candidates: list[str]) -> list[str]:
+    paths: list[str] = []
     for raw in candidates:
         path = expand(raw)
-        which = shutil.which(path) if os.sep not in path and "/" not in path else None
+        if any(char in path for char in "*?["):
+            # glob.glob('**') is reliable with forward slashes on Windows.
+            paths.extend(sorted(glob.glob(path.replace("\\", "/"), recursive=True)))
+        else:
+            paths.append(path)
+    return paths
+
+
+def macos_bundle_executable(path: Path) -> str | None:
+    for parent in [path, *path.parents]:
+        if parent.suffix != ".app":
+            continue
+        macos = parent / "Contents" / "MacOS"
+        if not macos.is_dir():
+            continue
+        for child in sorted(macos.iterdir()):
+            if child.is_file() and os.access(child, os.X_OK):
+                return str(child.resolve())
+    return None
+
+
+def windows_search(names: list[str]) -> str | None:
+    direct_roots = [
+        Path(expand(r"%LocalAppData%\Microsoft\WindowsApps")),
+        Path(expand(r"%LocalAppData%\Microsoft\WinGet\Links")),
+    ]
+    walk_roots = [
+        Path(expand(r"%LocalAppData%\Microsoft\WinGet\Packages")),
+        Path(expand(r"%LocalAppData%\Programs")),
+        Path(expand(r"%LocalAppData%\Packages")),
+        Path(expand(r"%LocalAppData%\BraveSoftware")),
+        Path(expand(r"%LocalAppData%\DuckDuckGo")),
+        Path(expand(r"%LocalAppData%\Arc")),
+    ]
+    for name in names:
+        stem = name[:-4] if name.lower().endswith(".exe") else name
+        which = shutil.which(name) or shutil.which(stem)
         if which and Path(which).is_file():
             return which
-        if Path(path).is_file():
-            return str(Path(path).resolve())
+    for root in direct_roots:
+        if not root.is_dir():
+            continue
+        for name in names:
+            direct = root / name
+            if direct.is_file():
+                return str(direct.resolve())
+    for root in walk_roots:
+        if not root.is_dir():
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                rel = Path(dirpath).relative_to(root)
+                depth = 0 if str(rel) == "." else len(rel.parts)
+                if depth >= 6:
+                    dirnames.clear()
+                    continue
+                for filename in filenames:
+                    if filename.lower() in {name.lower() for name in names}:
+                        return str((Path(dirpath) / filename).resolve())
+        except OSError:
+            continue
     return None
+
+
+def find_exe(candidates: list[str]) -> str | None:
+    names: list[str] = []
+    for path in expand_candidates(candidates):
+        candidate = Path(path)
+        if candidate.name and candidate.name not in names:
+            names.append(candidate.name)
+        which = (
+            shutil.which(path)
+            if os.sep not in path and "/" not in path
+            else None
+        )
+        if which and Path(which).is_file():
+            return which
+        if candidate.is_file():
+            return str(candidate.resolve())
+        bundled = macos_bundle_executable(candidate)
+        if bundled:
+            return bundled
+    if os.name == "nt":
+        return windows_search(names)
+    return None
+
+
+def wait_for_exe(candidates: list[str], timeout: float = 90) -> str | None:
+    deadline = time.time() + timeout
+    while True:
+        exe = find_exe(candidates)
+        if exe:
+            return exe
+        if time.time() >= deadline:
+            return None
+        time.sleep(2)
 
 
 def run(cmd: list[str], **kwargs) -> None:
@@ -343,6 +450,7 @@ def install_brew(cask: str) -> None:
     env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
     env["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
     env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
+    env["HOMEBREW_NO_REQUIRE_TAP_TRUST"] = "1"
     print("+ brew install --cask", cask, flush=True)
     # Homebrew can exit 1 after a successful cask install because of tap-trust
     # warnings on GitHub-hosted macOS images.
@@ -426,7 +534,9 @@ def install_browser(browser: str, platform: str) -> str:
     exe = find_exe(spec["exe"])
     if exe is None:
         install_spec(spec)
-        exe = find_exe(spec["exe"])
+        # Silent installers (especially winget per-user) often return before
+        # the executable is visible on disk.
+        exe = wait_for_exe(spec["exe"])
     if exe is None:
         raise SystemExit(f"installed {browser} on {platform} but could not find the executable")
     env = {

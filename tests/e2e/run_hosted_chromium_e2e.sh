@@ -21,10 +21,22 @@ run_inner() {
 
   if [[ -n "${ROOKIE_E2E_KEYCHAIN_SERVICE:-}" ]]; then
     account="${ROOKIE_E2E_KEYCHAIN_ACCOUNT:-Chrome}"
-    /usr/bin/security delete-generic-password \
-      -a "$account" -s "$ROOKIE_E2E_KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
-    /usr/bin/security add-generic-password -U \
-      -a "$account" -s "$ROOKIE_E2E_KEYCHAIN_SERVICE" -w mock_password
+    accounts=("$account")
+    # Playwright Chromium's registry identity is Chrome Safe Storage / Chromium.
+    if [[ "$ROOKIE_E2E_KEYCHAIN_SERVICE" == "Chrome Safe Storage" ]]; then
+      accounts+=("Chrome" "Chromium")
+    fi
+    seen=""
+    for account in "${accounts[@]}"; do
+      case " $seen " in
+        *" $account "*) continue ;;
+      esac
+      seen+=" $account"
+      /usr/bin/security delete-generic-password \
+        -a "$account" -s "$ROOKIE_E2E_KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
+      /usr/bin/security add-generic-password -U \
+        -a "$account" -s "$ROOKIE_E2E_KEYCHAIN_SERVICE" -w mock_password
+    done
   fi
 
   ready=0

@@ -177,7 +177,7 @@ jobs:
             browser: chromium
             channel: chromium
             keychain_service: Chrome Safe Storage
-            keychain_account: Chrome
+            keychain_account: Chromium
           - os: macos
             runner: macos-15
             browser: edge

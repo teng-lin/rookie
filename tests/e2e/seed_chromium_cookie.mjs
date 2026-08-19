@@ -40,6 +40,9 @@ const launchOptions = {
     "--disable-default-apps",
     "--disable-background-networking",
     "--disable-component-update",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
     ...linuxArgs,
   ],
 };
