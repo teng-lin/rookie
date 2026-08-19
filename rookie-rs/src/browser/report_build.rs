@@ -738,19 +738,22 @@ fn chromium_listing_outcome(
     )?;
     let mut engine = ProfileDraft::new(identity, profile.is_default);
     for candidate in &profile.persistent_candidates {
+      // Chromium listing policy, not a property of `SourceCandidate`: this
+      // engine stats both layouts and lists only what is on disk, while the
+      // engine listing plants `exists: true` candidates that must all survive.
       if !candidate.exists {
         continue;
       }
       engine.sources.push(SourceDraft::new(
         source_identity(
           &candidate.path,
-          SOURCE_ROLE_PERSISTENT,
-          "chromium_sqlite",
+          candidate.role.as_str(),
+          candidate.format.as_str(),
           candidate.precedence,
         ),
         &candidate.path,
         candidate.selected,
-        AcquisitionStrategyCode::not_attempted(),
+        acquisition_code(candidate.acquisition),
       ));
     }
     outcome.profiles.push(engine);
@@ -2554,11 +2557,14 @@ mod tests {
         is_active: true,
         active_order: Some(0),
         is_last_used: true,
-        persistent_candidates: vec![registry::CookieSourceCandidate {
+        persistent_candidates: vec![SourceCandidate {
           path: path.join("Network/Cookies"),
+          role: CookieSourceRoleId::persistent(),
+          format: CookieSourceFormatId::known("chromium_sqlite"),
           precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
           exists: selected_candidate,
           selected: selected_candidate,
+          acquisition: registry::SourceAcquisition::NotAttempted,
         }],
       },
       cookies: Vec::new(),

@@ -7,12 +7,14 @@ use super::super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, 
 use super::super::chromium_platform_keys::{
   ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession, MacosKeychainCredentials,
 };
-use super::super::report_core::{InstallationId, ProfileId};
+use super::super::report_core::{
+  CookieSourceFormatId, CookieSourceRoleId, InstallationId, ProfileId,
+};
 use super::{
   browser_definition, embedded_registry, installation_id, is_informational_discovery_issue,
   normalized_path_bytes, profile_id, BrowserDefinition, BrowserEngine, DiscoveryContext,
   DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, InstallationRoot, PlatformId, ProfileLocator,
-  ProfileSelection, SourceAcquisition, MAX_DISCOVERY_ISSUE_SAMPLES,
+  ProfileSelection, SourceAcquisition, SourceCandidate, MAX_DISCOVERY_ISSUE_SAMPLES,
 };
 #[cfg(test)]
 use super::{
@@ -121,14 +123,6 @@ pub(super) fn validate_key_credentials(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CookieSourceCandidate {
-  pub(crate) path: PathBuf,
-  pub(crate) precedence: u16,
-  pub(crate) exists: bool,
-  pub(crate) selected: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChromiumProfile {
   pub(crate) profile_id: ProfileId,
   pub(crate) installation_id: InstallationId,
@@ -139,7 +133,7 @@ pub(crate) struct ChromiumProfile {
   pub(crate) is_active: bool,
   pub(crate) active_order: Option<u32>,
   pub(crate) is_last_used: bool,
-  pub(crate) persistent_candidates: Vec<CookieSourceCandidate>,
+  pub(crate) persistent_candidates: Vec<SourceCandidate>,
 }
 
 impl ChromiumProfile {
@@ -306,20 +300,10 @@ fn parse_local_state(contents: &str) -> Result<LocalStateMetadata> {
 fn persistent_candidates<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   profile_path: &Path,
-) -> Vec<CookieSourceCandidate> {
+) -> Vec<SourceCandidate> {
   let mut candidates = vec![
-    CookieSourceCandidate {
-      path: profile_path.join("Network/Cookies"),
-      precedence: 10,
-      exists: false,
-      selected: false,
-    },
-    CookieSourceCandidate {
-      path: profile_path.join("Cookies"),
-      precedence: 20,
-      exists: false,
-      selected: false,
-    },
+    persistent_candidate(profile_path.join("Network/Cookies"), 10),
+    persistent_candidate(profile_path.join("Cookies"), 20),
   ];
   let mut selected = false;
   for candidate in &mut candidates {
@@ -328,6 +312,24 @@ fn persistent_candidates<F: DiscoveryFs>(
     selected |= candidate.selected;
   }
   candidates
+}
+
+/// A Chromium persistent cookie database that discovery has not stat'd yet.
+///
+/// `exists` and `selected` are decided by the caller once the filesystem has
+/// been read. `acquisition` is listing metadata and stays `NotAttempted` for
+/// this engine: Chromium never freezes a strategy at listing time, and the
+/// value a query actually used lands on `Source::acquisition`.
+fn persistent_candidate(path: PathBuf, precedence: u16) -> SourceCandidate {
+  SourceCandidate {
+    path,
+    role: CookieSourceRoleId::persistent(),
+    format: CookieSourceFormatId::known("chromium_sqlite"),
+    precedence,
+    exists: false,
+    selected: false,
+    acquisition: SourceAcquisition::NotAttempted,
+  }
 }
 
 fn profile_has_source<F: DiscoveryFs>(context: &DiscoveryContext<F>, path: &Path) -> bool {

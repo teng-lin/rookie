@@ -1149,8 +1149,6 @@ mod chromium;
 
 #[cfg(unix)]
 pub(crate) use chromium::chromium_key_credentials;
-#[cfg(test)]
-pub(crate) use chromium::CookieSourceCandidate;
 pub(crate) use chromium::{
   chrome_profiles_with_runtime, chromium_listing_with_runtime,
   chromium_registry_report_with_runtime, legacy_chromium_outcome_with_runtime,
