@@ -1462,13 +1462,18 @@ pub(crate) mod test_seams {
   where
     R: FnMut(&Path),
   {
-    let discovery = discover_gecko_with_context(context, browser_id)?;
+    let discovery = gecko_profiles_with_context(context, browser_id)?;
     Ok(populate_gecko_sources(
       discovery,
       domains,
-      |persistent, domains| {
-        on_before_query(persistent);
-        mozilla::query_cookies_engine_outcome(persistent, domains)
+      |candidate, domains| {
+        // The persistent probe is always the first candidate a profile
+        // acquires, so gating on it fires the hook once per profile, before
+        // any of that profile's reads.
+        if candidate.role == crate::browser::report_core::CookieSourceRoleId::persistent() {
+          on_before_query(&candidate.path);
+        }
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| context.fs.exists(path),
     ))

@@ -55,8 +55,10 @@ fn source_candidate(
   }
 }
 
-/// Discovery-only Gecko listing seam: existing cookie-bearing candidates
-/// without acquiring or querying any of them.
+/// The Gecko listing seam: existing cookie-bearing candidates without
+/// acquiring or querying any of them. Both the listing report and the
+/// candidate-driven extraction consume this, so a candidate can never be
+/// listed and missed by extraction (or vice versa).
 pub(super) fn gecko_profiles_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
@@ -359,7 +361,8 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
           installation_path: canonical_root.clone(),
           name: declared_profile.name,
         },
-        // Gecko populate is path-driven and does not iterate candidates.
+        // Candidates are planted by `gecko_profiles_with_context`, the seam
+        // both the listing report and the candidate-driven populate consume.
         candidates: Vec::new(),
       });
     }
@@ -382,13 +385,13 @@ pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
     browser_id,
     profile_id,
     domains,
-    mozilla::query_cookies_engine_outcome,
+    mozilla::acquire_candidate_source,
   )
 }
 
-/// The Gecko report with its cookie query injected, so a test can observe which
-/// profiles were actually read rather than only which ones survived into the
-/// report. Production takes the same path through
+/// The Gecko report with its per-candidate acquisition injected, so a test can
+/// observe which sources were actually read rather than only which ones
+/// survived into the report. Production takes the same path through
 /// [`gecko_report_with_context`], so the profile selection below is the one
 /// that ships.
 fn gecko_report_with_query<F: DiscoveryFs, Q>(
@@ -399,9 +402,9 @@ fn gecko_report_with_query<F: DiscoveryFs, Q>(
   query: Q,
 ) -> Result<EngineExtract>
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtract,
+  Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
 {
-  let mut listing = discover_gecko_with_context(context, browser_id)?;
+  let mut listing = gecko_profiles_with_context(context, browser_id)?;
   select_listing_profiles(
     &mut listing,
     browser_id,
@@ -412,17 +415,33 @@ where
   }))
 }
 
-/// Turns a post-select [`EngineListing`] into an [`EngineExtract`] by querying
-/// each profile's cookie store.
+/// The persistent probe for a profile whose listing planted no persistent
+/// candidate. The engine attempts the persistent query for every profile --
+/// the database may have appeared since discovery -- so the probe cannot be
+/// read from the listing alone. `exists` records what discovery knew.
+fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandidate {
+  SourceCandidate {
+    path: identity.path.join(GECKO_PERSISTENT_SOURCE),
+    role: CookieSourceRoleId::persistent(),
+    format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
+    precedence: PERSISTENT_SOURCE_PRECEDENCE,
+    exists: identity.persistent_source_discovered,
+    selected: false,
+    acquisition: SourceAcquisition::NotAttempted,
+  }
+}
+
+/// Turns a post-select [`EngineListing`] into an [`EngineExtract`] by acquiring
+/// each profile's candidates, the way the Safari/IE populates do.
 ///
-/// It is deliberately **path/query-based**, not candidate-driven: discovery
-/// leaves `DiscoveredProfile.candidates` empty for Gecko, so iterating them the
-/// way Safari/IE populate does would query nothing and emit an empty report.
-/// The persistent path is derived from the profile directory and the session
-/// walk lives inside the Mozilla query; both push a [`Source`] onto the profile
-/// only after that query returns.
+/// The persistent candidate is always queried -- planted or not -- because the
+/// database may have appeared since discovery; the adapter half of the gate
+/// below decides whether the resulting source survives. The session candidates
+/// are the ones listing planted (in `SESSION_CANDIDATES` declaration order),
+/// and [`mozilla::select_session_sources`] applies the first-valid rule over
+/// them: after the first success no later candidate is acquired.
 ///
-/// The output is 1:1 with the post-select listing: a profile whose query
+/// The output is 1:1 with the post-select listing: a profile whose candidates
 /// produced nothing still appears with `sources: vec![]`, so the report layer
 /// can tell a source that vanished before extraction (`profile_extraction_failed`)
 /// from a browser that was never installed.
@@ -433,7 +452,7 @@ pub(super) fn populate_gecko_sources<Q, E>(
   mut persistent_exists: E,
 ) -> EngineExtract
 where
-  Q: FnMut(&Path, Option<&[String]>) -> mozilla::MozillaExtract,
+  Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
   E: FnMut(&Path) -> bool,
 {
   let EngineListing {
@@ -452,34 +471,52 @@ where
     let DiscoveredProfile {
       identity,
       legacy,
-      candidates: _,
+      candidates,
     } = profile;
     let persistent = identity.path.join(GECKO_PERSISTENT_SOURCE);
-    // The Mozilla engine also owns session fallback, and it emits a persistent
-    // source whenever the query was attempted -- which it always is, even for a
-    // profile with no cookies.sqlite. The adapter half of the gate lives here:
-    // drop that persistent source unless the profile either discovered a
-    // persistent store or has one on disk now.
+    let persistent_candidate = candidates
+      .iter()
+      .find(|candidate| candidate.role == CookieSourceRoleId::persistent())
+      .cloned()
+      .unwrap_or_else(|| persistent_probe_candidate(&identity));
+    let mut sources = Vec::new();
+    let mut stop = None;
+    // The Mozilla engine emits a persistent source whenever the query was
+    // attempted -- which it always is, even for a profile with no
+    // cookies.sqlite. The adapter half of the gate lives here: drop that
+    // persistent source unless the profile either discovered a persistent
+    // store or has one on disk now.
     //
     // Discovery's snapshot goes stale in both directions, so existence is
     // rechecked after the query rather than inferred from it: a database that
     // appeared since discovery is projected even when reading it then failed,
     // and one deleted since discovery is still projected so its failure is
     // reported instead of vanishing. Inferring from the query alone would
-    // silence a database that appeared and was corrupt or locked.
-    let outcome = query(&persistent, domains);
-    let stop = outcome.boundary_stop;
-    let mut sources = outcome.sources;
-    // Written as one predicate so the filesystem is probed only for a
-    // persistent source that actually exists to be dropped, and only when
-    // discovery did not already vouch for it. The engine emits at most one, so
-    // this spends at most one `exists` call -- the same as the single
-    // short-circuited call this replaced.
-    sources.retain(|source| {
-      source.origin.role != CookieSourceRoleId::persistent()
-        || identity.persistent_source_discovered
-        || persistent_exists(&persistent)
-    });
+    // silence a database that appeared and was corrupt or locked. The `exists`
+    // probe is spent only when discovery did not already vouch for the store.
+    match query(&persistent_candidate, domains) {
+      mozilla::MozillaCandidateOutcome::Source(source) => {
+        if identity.persistent_source_discovered || persistent_exists(&persistent) {
+          sources.push(source);
+        }
+      }
+      // The engine never reports the persistent probe as missing -- an absent
+      // database is a failed attempt -- so there is nothing to record.
+      mozilla::MozillaCandidateOutcome::Missing => {}
+      mozilla::MozillaCandidateOutcome::Stop(boundary) => stop = Some(boundary),
+    }
+    if stop.is_none() {
+      // First-valid selection lives in the engine and is shared with the
+      // direct-path walk; laziness of this iterator is what guarantees the
+      // candidates after the first success are never acquired.
+      stop = mozilla::select_session_sources(
+        candidates
+          .iter()
+          .filter(|candidate| candidate.role == CookieSourceRoleId::session())
+          .map(|candidate| query(candidate, domains)),
+        &mut sources,
+      );
+    }
     extract.profiles.push(ExtractedProfile {
       identity,
       legacy,
@@ -520,7 +557,9 @@ pub(crate) fn gecko_report_with_runtime(
     browser_id,
     profile_id,
     domains.as_deref(),
-    |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
+    |candidate, domains| {
+      mozilla::acquire_candidate_source_with_runtime(candidate, domains, runtime)
+    },
   )?;
   Ok(retain_gecko_runtime_stop(extract, runtime))
 }
@@ -584,12 +623,14 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let mut listing = discover_gecko_with_context(&context, browser_id)?;
+  let mut listing = gecko_profiles_with_context(&context, browser_id)?;
   select_legacy_gecko_profile(&mut listing);
   let extract = populate_gecko_sources(
     listing,
     domains.as_deref(),
-    |path, domains| mozilla::query_cookies_engine_outcome_with_runtime(path, domains, runtime),
+    |candidate, domains| {
+      mozilla::acquire_candidate_source_with_runtime(candidate, domains, runtime)
+    },
     |path| context.fs.exists(path),
   );
   Ok(retain_gecko_runtime_stop(extract, runtime))
@@ -1122,19 +1163,19 @@ mod tests {
       "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
     )
     .expect("write profiles.ini");
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
     assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut created = false;
     let report = populate_gecko_sources(
       discovery,
       None,
-      |persistent, domains| {
+      |candidate, domains| {
         if !created {
           created = true;
-          seed_empty_gecko_database(persistent.parent().expect("profile directory"));
+          seed_empty_gecko_database(candidate.path.parent().expect("profile directory"));
         }
-        mozilla::query_cookies_engine_outcome(persistent, domains)
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| path.exists(),
     );
@@ -1161,7 +1202,7 @@ mod tests {
       "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
     )
     .expect("write profiles.ini");
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
     assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     // Appears between discovery and query, but unreadable. Inferring existence
@@ -1170,12 +1211,12 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
-      |persistent, domains| {
+      |candidate, domains| {
         if !created {
           created = true;
-          std::fs::write(persistent, b"not a sqlite database").expect("seed corrupt database");
+          std::fs::write(&candidate.path, b"not a sqlite database").expect("seed corrupt database");
         }
-        mozilla::query_cookies_engine_outcome(persistent, domains)
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| path.exists(),
     );
@@ -1202,13 +1243,11 @@ mod tests {
     )
     .expect("write profiles.ini");
 
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
-    let report = populate_gecko_sources(
-      discovery,
-      None,
-      mozilla::query_cookies_engine_outcome,
-      |path| path.exists(),
-    );
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
+    let report =
+      populate_gecko_sources(discovery, None, mozilla::acquire_candidate_source, |path| {
+        path.exists()
+      });
     assert!(!report.profiles[0]
       .sources
       .iter()
@@ -1227,19 +1266,19 @@ mod tests {
       "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
     )
     .expect("write profiles.ini");
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
     assert!(discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut removed = false;
     let report = populate_gecko_sources(
       discovery,
       None,
-      |persistent, domains| {
+      |candidate, domains| {
         if !removed {
           removed = true;
-          std::fs::remove_file(persistent).expect("remove discovered source");
+          std::fs::remove_file(&candidate.path).expect("remove discovered source");
         }
-        mozilla::query_cookies_engine_outcome(persistent, domains)
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| path.exists(),
     );
@@ -1278,28 +1317,113 @@ mod tests {
     )
     .expect("write profiles.ini");
 
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
     assert_eq!(
       discovery.profiles.len(),
       1,
       "profile admitted as session-only"
     );
     assert!(!discovery.profiles[0].identity.persistent_source_discovered);
+    let planted_session = session_file
+      .canonicalize()
+      .expect("canonical session candidate path");
+    assert!(
+      discovery.profiles[0]
+        .candidates
+        .iter()
+        .any(|candidate| candidate.path == planted_session),
+      "the vanishing candidate was planted at discovery time"
+    );
 
     let report = populate_gecko_sources(
       discovery,
       None,
-      |persistent, domains| {
+      |candidate, domains| {
         // The persistent DB never existed; the race is on the session file,
         // which we remove right before the engine would read it.
         let _ = std::fs::remove_file(&session_file);
-        mozilla::query_cookies_engine_outcome(persistent, domains)
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| path.exists(),
     );
 
     assert_eq!(report.profiles.len(), 1);
     assert!(report.profiles[0].sources.is_empty());
+  }
+
+  /// The candidate-driven populate must inherit first-valid selection: once a
+  /// session candidate is read successfully, the later planted candidates must
+  /// never be acquired. This counts the acquisitions rather than the emitted
+  /// sources -- a populate that eagerly collected its candidates, or a `select`
+  /// that kept pulling, would read every one while still emitting exactly one
+  /// selected source and passing every content assertion.
+  #[test]
+  fn populate_stops_acquiring_session_candidates_after_the_first_valid_one() {
+    let temp = TempDir::new("gecko-populate-first-valid");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    seed_empty_gecko_database(&profile);
+    // Two live session candidates: the first in declared order must win, and
+    // the second must never be touched.
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create session dir");
+    for relative in [
+      "sessionstore-backups/recovery.jsonlz4",
+      "sessionstore-backups/recovery.baklz4",
+    ] {
+      std::fs::write(
+        profile.join(relative),
+        b"invalid but present session candidate",
+      )
+      .expect("write session candidate");
+    }
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
+    let session_candidates = discovery.profiles[0]
+      .candidates
+      .iter()
+      .filter(|candidate| candidate.role == CookieSourceRoleId::session())
+      .count();
+    assert_eq!(session_candidates, 2, "both live candidates were planted");
+
+    let mut session_reads = 0;
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |candidate, domains| {
+        if candidate.role == CookieSourceRoleId::session() {
+          session_reads += 1;
+          // Force the first candidate to *succeed* so selection stops: an empty
+          // window state is a valid, selected session source.
+          std::fs::write(&candidate.path, {
+            let mut encoded = b"mozLz40\0".to_vec();
+            encoded.extend(lz4_flex::block::compress_prepend_size(
+              br#"{"windows":[{"tabs":[]}],"cookies":[]}"#,
+            ));
+            encoded
+          })
+          .expect("make the probed candidate a valid empty session store");
+        }
+        mozilla::acquire_candidate_source(candidate, domains)
+      },
+      |path| path.exists(),
+    );
+
+    assert_eq!(
+      session_reads, 1,
+      "the second session candidate must never be acquired"
+    );
+    let selected_sessions = report.profiles[0]
+      .sources
+      .iter()
+      .filter(|source| source.origin.role == CookieSourceRoleId::session() && source.selected)
+      .count();
+    assert_eq!(selected_sessions, 1);
   }
 
   #[test]
@@ -1449,9 +1573,9 @@ mod tests {
       "firefox",
       Some(selected.as_str()),
       None,
-      |path, domains| {
-        read.push(path.to_path_buf());
-        mozilla::query_cookies_engine_outcome(path, domains)
+      |candidate, domains| {
+        read.push(candidate.path.clone());
+        mozilla::acquire_candidate_source(candidate, domains)
       },
     )
     .expect("profile-selected report");
@@ -1485,7 +1609,7 @@ mod tests {
     )
     .expect("write profiles.ini");
 
-    let mut outcome = discover_gecko_with_context(&context, "firefox").expect("discover");
+    let mut outcome = gecko_profiles_with_context(&context, "firefox").expect("discover");
     select_listing_profiles(
       &mut outcome,
       "firefox",
@@ -1503,9 +1627,9 @@ mod tests {
     let outcome = populate_gecko_sources(
       outcome,
       None,
-      |path, domains| {
-        read.push(path.to_path_buf());
-        mozilla::query_cookies_engine_outcome(path, domains)
+      |candidate, domains| {
+        read.push(candidate.path.clone());
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| context.fs.exists(path),
     );
@@ -1625,19 +1749,19 @@ mod tests {
     )
     .expect("write profiles.ini");
 
-    let discovery = discover_gecko_with_context(&context, "firefox").expect("discover profile");
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
     assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut created = false;
     let report = populate_gecko_sources(
       discovery,
       None,
-      |persistent, domains| {
+      |candidate, domains| {
         if !created {
           created = true;
-          seed_empty_gecko_database(persistent.parent().expect("profile directory"));
+          seed_empty_gecko_database(candidate.path.parent().expect("profile directory"));
         }
-        mozilla::query_cookies_engine_outcome(persistent, domains)
+        mozilla::acquire_candidate_source(candidate, domains)
       },
       |path| path.exists(),
     );
@@ -1760,14 +1884,14 @@ mod tests {
     let populated = populate_gecko_sources(
       discovered,
       None,
-      |persistent, _| {
+      |candidate, _| {
         let call = calls.get();
         calls.set(call + 1);
         if call == 0 {
           // The engine returns an already-built persistent `Source`. Production
           // fills `records` and finalization reads records only.
           let mut source = Source::from_candidate(SourceCandidate {
-            path: persistent.to_path_buf(),
+            path: candidate.path.clone(),
             role: CookieSourceRoleId::persistent(),
             format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
             precedence: PERSISTENT_SOURCE_PRECEDENCE,
@@ -1784,15 +1908,9 @@ mod tests {
           source.stats.rows_seen = 1;
           source.stats.cookies_emitted = 1;
           source.acquisition_attempts = 1;
-          mozilla::MozillaExtract {
-            sources: vec![source],
-            boundary_stop: None,
-          }
+          mozilla::MozillaCandidateOutcome::Source(source)
         } else {
-          mozilla::MozillaExtract {
-            sources: Vec::new(),
-            boundary_stop: Some(stop),
-          }
+          mozilla::MozillaCandidateOutcome::Stop(stop)
         }
       },
       |_| true,
