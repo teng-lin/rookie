@@ -24,18 +24,18 @@ use super::report_core::SourceStatusCode;
 use super::report_core::{
   compare_source_identity, display_path, issue, push_aggregated, sort_cookies,
   sort_source_descriptors, source_status, AcquisitionStrategyCode, BrowserCapabilitiesDescriptor,
-  BrowserDescriptor, BrowserId, CipherTierId, CompatibilityEvidence, CookieSourceDescriptor,
-  CookieSourceFormatId, CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineId,
-  ExtractionIssue, ExtractionReport, ExtractionStageCode, InstallationId, IssueSeverityCode,
-  ProfileDescriptor, ProfileDraft, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats,
-  ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator, TerminationCode,
-  MAX_ISSUE_SAMPLES,
+  BrowserDescriptor, BrowserId, CipherTierId, CookieSourceDescriptor, CookieSourceFormatId,
+  CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineId, ExtractionIssue,
+  ExtractionReport, ExtractionStageCode, ExtractionStats, InstallationId, IssueSeverityCode,
+  ProfileDescriptor, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, ReportStatusCode,
+  SourceExtraction, StatsAccumulator, TerminationCode, MAX_ISSUE_SAMPLES,
 };
 use super::source::{Source, SourceFailureStage as SourceFailureStageNew, SourceIssue};
 #[cfg(test)]
 use super::source::{SourceCandidate, SourceStats};
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
+use crate::common::enums::Cookie;
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
@@ -138,6 +138,111 @@ fn profile_identity(
 /// still decides is what an empty source list means, which is engine-specific
 /// -- Chromium lists only databases that exist, so having none is ordinary
 /// absence rather than the failure it is for the engine listing.
+/// Engine adaptation layer from Section 5.7, private to this module.
+///
+/// These were `pub(crate)` in `report_core` so the engine adapters could build
+/// them. No adapter does any more: every engine returns a `Source`, and the two
+/// copy helpers below are the only things that construct a draft. Keeping the
+/// types here makes that structural -- `report_core` holds the frozen wire
+/// contract, and the draft is a private hop on the way to it, so the
+/// crate-visible source representations are exactly `SourceCandidate`,
+/// `Source`, and the wire DTO.
+#[non_exhaustive]
+#[derive(Debug)]
+struct SourceDraft {
+  source: CookieSourceIdentity,
+  /// Original platform path representation used only for provenance hashing.
+  /// The public `source.path` remains the explicitly marked lossy display form.
+  source_path_bytes: Vec<u8>,
+  selected: bool,
+  acquisition_strategy: AcquisitionStrategyCode,
+  cookies: Vec<Cookie>,
+  /// Canonical records retain source-native metadata which the compatibility
+  /// `Cookie` projection intentionally omits.
+  records: Vec<super::cookie_record::CookieRecord>,
+  /// Typed evidence consumed exactly once by canonical finalization. It never
+  /// reaches either projector as a second policy input.
+  compatibility_evidence: Option<CompatibilityEvidence>,
+  stats: ExtractionStats,
+  issues: Vec<ExtractionIssue>,
+  /// Acquisition, parsing, or the filtered query did not complete. Skipped rows
+  /// alone never set this: a source with rejected rows still succeeded.
+  failed: bool,
+}
+
+#[non_exhaustive]
+#[derive(Debug)]
+struct ProfileDraft {
+  profile: ProfileIdentity,
+  is_default: bool,
+  sources: Vec<SourceDraft>,
+  issues: Vec<ExtractionIssue>,
+}
+
+impl SourceDraft {
+  fn new(
+    source: CookieSourceIdentity,
+    source_path: &std::path::Path,
+    selected: bool,
+    acquisition_strategy: AcquisitionStrategyCode,
+  ) -> Self {
+    Self {
+      source_path_bytes: raw_path_bytes(source_path),
+      source,
+      selected,
+      acquisition_strategy,
+      cookies: Vec::new(),
+      records: Vec::new(),
+      compatibility_evidence: None,
+      stats: ExtractionStats::default(),
+      issues: Vec::new(),
+      failed: false,
+    }
+  }
+}
+
+#[derive(Debug)]
+enum CompatibilityEvidence {
+  AllRowsRejected(String),
+}
+
+fn raw_path_bytes(path: &std::path::Path) -> Vec<u8> {
+  #[cfg(unix)]
+  {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::ffi::OsStrExt;
+    path
+      .as_os_str()
+      .encode_wide()
+      .flat_map(u16::to_le_bytes)
+      .collect()
+  }
+  #[cfg(not(any(unix, windows)))]
+  {
+    path.to_string_lossy().as_bytes().to_vec()
+  }
+}
+
+impl ProfileDraft {
+  fn new(profile: ProfileIdentity, is_default: bool) -> Self {
+    Self {
+      profile,
+      is_default,
+      sources: Vec::new(),
+      issues: Vec::new(),
+    }
+  }
+}
+/// Section 5.5 source ordering: role first, then declared precedence. The sort
+/// is stable, so equal keys keep their engine-declared candidate order.
+#[cfg(test)]
+fn sort_source_outcomes(sources: &mut [SourceDraft]) {
+  sources.sort_by(|left, right| compare_source_identity(&left.source, &right.source));
+}
 /// What a profile with no sources means. The two towers disagree, because they
 /// discover differently, and that disagreement is the only thing the shared
 /// profile mapper cannot derive for itself.
@@ -1862,8 +1967,73 @@ fn profile_descriptors_from_outcome(
 
 #[cfg(test)]
 mod tests {
+
+  #[test]
+  fn source_outcomes_sort_persistent_before_session_then_by_precedence() {
+    let mut sources = vec![
+      ordering_source(CookieSourceRoleId::known("future_z"), 1),
+      ordering_source(CookieSourceRoleId::session(), 20),
+      ordering_source(CookieSourceRoleId::persistent(), 20),
+      ordering_source(CookieSourceRoleId::known("future_a"), 2),
+      ordering_source(CookieSourceRoleId::session(), 10),
+      ordering_source(CookieSourceRoleId::known("future_a"), 1),
+      ordering_source(CookieSourceRoleId::persistent(), 10),
+      ordering_source(CookieSourceRoleId::known("future_a"), 1),
+    ];
+    sort_source_outcomes(&mut sources);
+    let order = sources
+      .iter()
+      .map(|source| (source.source.role.to_string(), source.source.precedence))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      order,
+      vec![
+        ("persistent".to_owned(), 10),
+        ("persistent".to_owned(), 20),
+        ("session".to_owned(), 10),
+        ("session".to_owned(), 20),
+        ("future_a".to_owned(), 1),
+        ("future_a".to_owned(), 1),
+        ("future_a".to_owned(), 2),
+        ("future_z".to_owned(), 1),
+      ]
+    );
+
+    let mut descriptors = sources
+      .iter()
+      .rev()
+      .map(|source| CookieSourceDescriptor {
+        role: source.source.role.clone(),
+        format: source.source.format.clone(),
+        path: source.source.path.clone(),
+        path_lossy: source.source.path_lossy,
+        precedence: source.source.precedence,
+      })
+      .collect::<Vec<_>>();
+    sort_source_descriptors(&mut descriptors);
+    let descriptor_order = descriptors
+      .iter()
+      .map(|source| (source.role.to_string(), source.precedence))
+      .collect::<Vec<_>>();
+    assert_eq!(descriptor_order, order);
+  }
+
+  fn ordering_source(role: CookieSourceRoleId, precedence: u16) -> SourceDraft {
+    SourceDraft::new(
+      CookieSourceIdentity {
+        role,
+        format: CookieSourceFormatId::known("chromium_sqlite"),
+        path: "/tmp/source".to_owned(),
+        path_lossy: false,
+        precedence,
+      },
+      std::path::Path::new("/tmp/source"),
+      true,
+      AcquisitionStrategyCode::live_read_only(),
+    )
+  }
   use super::*;
-  use crate::browser::report_core::{ReportStatusCode, SourceDraft};
+  use crate::browser::report_core::ReportStatusCode;
   use std::path::PathBuf;
 
   fn identity() -> ProfileIdentity {

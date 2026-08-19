@@ -475,100 +475,6 @@ pub struct ExtractionReport {
   pub issues: Vec<ExtractionIssue>,
 }
 
-/// Engine adaptation layer from Section 5.7. Each engine converts one attempted
-/// source and its enclosing profile into these shapes before the shared report
-/// builder normalizes ordering, statuses, and aggregate counters.
-#[non_exhaustive]
-#[derive(Debug)]
-pub(crate) struct SourceDraft {
-  pub(crate) source: CookieSourceIdentity,
-  /// Original platform path representation used only for provenance hashing.
-  /// The public `source.path` remains the explicitly marked lossy display form.
-  pub(crate) source_path_bytes: Vec<u8>,
-  pub(crate) selected: bool,
-  pub(crate) acquisition_strategy: AcquisitionStrategyCode,
-  pub(crate) cookies: Vec<Cookie>,
-  /// Canonical records retain source-native metadata which the compatibility
-  /// `Cookie` projection intentionally omits.
-  pub(crate) records: Vec<super::cookie_record::CookieRecord>,
-  /// Typed evidence consumed exactly once by canonical finalization. It never
-  /// reaches either projector as a second policy input.
-  pub(crate) compatibility_evidence: Option<CompatibilityEvidence>,
-  pub(crate) stats: ExtractionStats,
-  pub(crate) issues: Vec<ExtractionIssue>,
-  /// Acquisition, parsing, or the filtered query did not complete. Skipped rows
-  /// alone never set this: a source with rejected rows still succeeded.
-  pub(crate) failed: bool,
-}
-
-#[non_exhaustive]
-#[derive(Debug)]
-pub(crate) struct ProfileDraft {
-  pub(crate) profile: ProfileIdentity,
-  pub(crate) is_default: bool,
-  pub(crate) sources: Vec<SourceDraft>,
-  pub(crate) issues: Vec<ExtractionIssue>,
-}
-
-impl SourceDraft {
-  pub(crate) fn new(
-    source: CookieSourceIdentity,
-    source_path: &std::path::Path,
-    selected: bool,
-    acquisition_strategy: AcquisitionStrategyCode,
-  ) -> Self {
-    Self {
-      source_path_bytes: raw_path_bytes(source_path),
-      source,
-      selected,
-      acquisition_strategy,
-      cookies: Vec::new(),
-      records: Vec::new(),
-      compatibility_evidence: None,
-      stats: ExtractionStats::default(),
-      issues: Vec::new(),
-      failed: false,
-    }
-  }
-}
-
-#[derive(Debug)]
-pub(crate) enum CompatibilityEvidence {
-  AllRowsRejected(String),
-}
-
-fn raw_path_bytes(path: &std::path::Path) -> Vec<u8> {
-  #[cfg(unix)]
-  {
-    use std::os::unix::ffi::OsStrExt;
-    path.as_os_str().as_bytes().to_vec()
-  }
-  #[cfg(windows)]
-  {
-    use std::os::windows::ffi::OsStrExt;
-    path
-      .as_os_str()
-      .encode_wide()
-      .flat_map(u16::to_le_bytes)
-      .collect()
-  }
-  #[cfg(not(any(unix, windows)))]
-  {
-    path.to_string_lossy().as_bytes().to_vec()
-  }
-}
-
-impl ProfileDraft {
-  pub(crate) fn new(profile: ProfileIdentity, is_default: bool) -> Self {
-    Self {
-      profile,
-      is_default,
-      sources: Vec::new(),
-      issues: Vec::new(),
-    }
-  }
-}
-
 /// Wider-than-wire counters. Every public counter is `u32` so Node/TypeScript
 /// can represent it exactly; counting happens in `u64` and saturates once.
 #[derive(Clone, Copy, Debug, Default)]
@@ -751,13 +657,6 @@ pub(crate) fn sort_cookies(cookies: &mut [Cookie]) {
       .then_with(|| left.same_site.cmp(&right.same_site))
       .then_with(|| left.value.cmp(&right.value))
   });
-}
-
-/// Section 5.5 source ordering: role first, then declared precedence. The sort
-/// is stable, so equal keys keep their engine-declared candidate order.
-#[cfg(test)]
-pub(crate) fn sort_source_outcomes(sources: &mut [SourceDraft]) {
-  sources.sort_by(|left, right| compare_source_identity(&left.source, &right.source));
 }
 
 pub(crate) fn sort_source_descriptors(sources: &mut [CookieSourceDescriptor]) {
@@ -1044,71 +943,6 @@ mod tests {
     assert_eq!(issues[1].message, "escalated");
   }
 
-  #[test]
-  fn source_outcomes_sort_persistent_before_session_then_by_precedence() {
-    let mut sources = vec![
-      source(CookieSourceRoleId::known("future_z"), 1),
-      source(CookieSourceRoleId::session(), 20),
-      source(CookieSourceRoleId::persistent(), 20),
-      source(CookieSourceRoleId::known("future_a"), 2),
-      source(CookieSourceRoleId::session(), 10),
-      source(CookieSourceRoleId::known("future_a"), 1),
-      source(CookieSourceRoleId::persistent(), 10),
-      source(CookieSourceRoleId::known("future_a"), 1),
-    ];
-    sort_source_outcomes(&mut sources);
-    let order = sources
-      .iter()
-      .map(|source| (source.source.role.to_string(), source.source.precedence))
-      .collect::<Vec<_>>();
-    assert_eq!(
-      order,
-      vec![
-        ("persistent".to_owned(), 10),
-        ("persistent".to_owned(), 20),
-        ("session".to_owned(), 10),
-        ("session".to_owned(), 20),
-        ("future_a".to_owned(), 1),
-        ("future_a".to_owned(), 1),
-        ("future_a".to_owned(), 2),
-        ("future_z".to_owned(), 1),
-      ]
-    );
-
-    let mut descriptors = sources
-      .iter()
-      .rev()
-      .map(|source| CookieSourceDescriptor {
-        role: source.source.role.clone(),
-        format: source.source.format.clone(),
-        path: source.source.path.clone(),
-        path_lossy: source.source.path_lossy,
-        precedence: source.source.precedence,
-      })
-      .collect::<Vec<_>>();
-    sort_source_descriptors(&mut descriptors);
-    let descriptor_order = descriptors
-      .iter()
-      .map(|source| (source.role.to_string(), source.precedence))
-      .collect::<Vec<_>>();
-    assert_eq!(descriptor_order, order);
-  }
-
-  fn source(role: CookieSourceRoleId, precedence: u16) -> SourceDraft {
-    SourceDraft::new(
-      CookieSourceIdentity {
-        role,
-        format: CookieSourceFormatId::known("chromium_sqlite"),
-        path: "/tmp/source".to_owned(),
-        path_lossy: false,
-        precedence,
-      },
-      std::path::Path::new("/tmp/source"),
-      true,
-      AcquisitionStrategyCode::live_read_only(),
-    )
-  }
-
   fn cookie(domain: &str, path: &str, name: &str, value: &str) -> Cookie {
     Cookie {
       domain: domain.to_owned(),
@@ -1126,7 +960,13 @@ mod tests {
   fn public_report_debug_redacts_nested_cookie_values_without_changing_wire_output() {
     const SENTINEL: &str = "nested-report-cookie-value-sentinel";
     let source = SourceExtraction {
-      source: source(CookieSourceRoleId::persistent(), 10).source,
+      source: CookieSourceIdentity {
+        role: CookieSourceRoleId::persistent(),
+        format: CookieSourceFormatId::known("chromium_sqlite"),
+        path: "/tmp/source".to_owned(),
+        path_lossy: false,
+        precedence: 10,
+      },
       status: SourceStatusCode::succeeded(),
       selected: true,
       acquisition_strategy: AcquisitionStrategyCode::live_read_only(),
