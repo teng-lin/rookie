@@ -1,0 +1,179 @@
+{
+  "listing": [
+    {
+      "profile": {
+        "browser_id": "chrome",
+        "installation_id": "<ID:0>",
+        "profile_id": "<ID:1>",
+        "display_name": "Default",
+        "path": "<ROOT>/Library/Application Support/Google/Chrome/Default",
+        "path_lossy": false
+      },
+      "is_default": true,
+      "sources": [
+        {
+          "role": "persistent",
+          "format": "chromium_sqlite",
+          "path": "<ROOT>/Library/Application Support/Google/Chrome/Default/Network/Cookies",
+          "path_lossy": false,
+          "precedence": 10
+        }
+      ]
+    },
+    {
+      "profile": {
+        "browser_id": "chrome",
+        "installation_id": "<ID:0>",
+        "profile_id": "<ID:2>",
+        "display_name": "Profile 1",
+        "path": "<ROOT>/Library/Application Support/Google/Chrome/Profile 1",
+        "path_lossy": false
+      },
+      "is_default": false,
+      "sources": [
+        {
+          "role": "persistent",
+          "format": "chromium_sqlite",
+          "path": "<ROOT>/Library/Application Support/Google/Chrome/Profile 1/Network/Cookies",
+          "path_lossy": false,
+          "precedence": 10
+        }
+      ]
+    }
+  ],
+  "extract": {
+    "schema_version": 1,
+    "status": "complete",
+    "termination": "completed",
+    "summary": {
+      "registered_browsers": 1,
+      "browsers_detected": 1,
+      "browsers_not_detected": 0,
+      "installations_discovered": 1,
+      "profiles_discovered": 2,
+      "sources_succeeded": 2,
+      "sources_failed": 0,
+      "rows_seen": 2,
+      "cookies_emitted": 2,
+      "rows_skipped": 0,
+      "rows_rejected": 0,
+      "provider_failures": 0,
+      "counters_saturated": false
+    },
+    "profiles": [
+      {
+        "profile": {
+          "browser_id": "chrome",
+          "installation_id": "<ID:0>",
+          "profile_id": "<ID:1>",
+          "display_name": "Default",
+          "path": "<ROOT>/Library/Application Support/Google/Chrome/Default",
+          "path_lossy": false
+        },
+        "sources": [
+          {
+            "source": {
+              "role": "persistent",
+              "format": "chromium_sqlite",
+              "path": "<ROOT>/Library/Application Support/Google/Chrome/Default/Network/Cookies",
+              "path_lossy": false,
+              "precedence": 10
+            },
+            "status": "succeeded",
+            "selected": true,
+            "acquisition_strategy": "live_read_only",
+            "cookies": [
+              {
+                "domain": ".example.test",
+                "path": "/",
+                "secure": false,
+                "expires": null,
+                "name": "session",
+                "value": "default-value",
+                "http_only": false,
+                "same_site": 0
+              }
+            ],
+            "stats": {
+              "rows_seen": 1,
+              "cookies_emitted": 1,
+              "rows_skipped": 0,
+              "rows_rejected": 0,
+              "provider_failures": 0,
+              "acquisition_attempts": 1,
+              "counters_saturated": false
+            },
+            "issues": []
+          }
+        ],
+        "stats": {
+          "rows_seen": 1,
+          "cookies_emitted": 1,
+          "rows_skipped": 0,
+          "rows_rejected": 0,
+          "provider_failures": 0,
+          "acquisition_attempts": 1,
+          "counters_saturated": false
+        },
+        "issues": []
+      },
+      {
+        "profile": {
+          "browser_id": "chrome",
+          "installation_id": "<ID:0>",
+          "profile_id": "<ID:2>",
+          "display_name": "Profile 1",
+          "path": "<ROOT>/Library/Application Support/Google/Chrome/Profile 1",
+          "path_lossy": false
+        },
+        "sources": [
+          {
+            "source": {
+              "role": "persistent",
+              "format": "chromium_sqlite",
+              "path": "<ROOT>/Library/Application Support/Google/Chrome/Profile 1/Network/Cookies",
+              "path_lossy": false,
+              "precedence": 10
+            },
+            "status": "succeeded",
+            "selected": true,
+            "acquisition_strategy": "live_read_only",
+            "cookies": [
+              {
+                "domain": ".example.test",
+                "path": "/",
+                "secure": false,
+                "expires": null,
+                "name": "session",
+                "value": "profile-value",
+                "http_only": false,
+                "same_site": 0
+              }
+            ],
+            "stats": {
+              "rows_seen": 1,
+              "cookies_emitted": 1,
+              "rows_skipped": 0,
+              "rows_rejected": 0,
+              "provider_failures": 0,
+              "acquisition_attempts": 1,
+              "counters_saturated": false
+            },
+            "issues": []
+          }
+        ],
+        "stats": {
+          "rows_seen": 1,
+          "cookies_emitted": 1,
+          "rows_skipped": 0,
+          "rows_rejected": 0,
+          "provider_failures": 0,
+          "acquisition_attempts": 1,
+          "counters_saturated": false
+        },
+        "issues": []
+      }
+    ],
+    "issues": []
+  }
+}
