@@ -67,8 +67,12 @@ pub(crate) fn firefox_based_with_runtime(
   let outcome = query_cookies_engine_outcome_with_runtime(&db_path, domains.as_deref(), runtime);
   super::legacy::project_canonical_outcome_with_runtime(
     "firefox",
-    super::report_build::canonical_direct_mozilla_extraction_with_runtime(
-      &db_path, outcome, runtime,
+    super::report_build::finalize_singleton_source(
+      "firefox",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      outcome.sources,
+      outcome.boundary_stop,
+      Some(runtime),
     )?,
     runtime,
   )
@@ -97,8 +101,12 @@ pub(crate) fn firefox_based_detailed_with_runtime(
   let outcome = query_cookies_engine_outcome_with_runtime(&db_path, domains.as_deref(), runtime);
   super::legacy::project_canonical_detailed_outcome_with_runtime(
     "firefox",
-    super::report_build::canonical_direct_mozilla_extraction_with_runtime(
-      &db_path, outcome, runtime,
+    super::report_build::finalize_singleton_source(
+      "firefox",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      outcome.sources,
+      outcome.boundary_stop,
+      Some(runtime),
     )?,
     runtime,
   )

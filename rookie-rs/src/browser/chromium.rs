@@ -553,6 +553,24 @@ fn row_issue(issue: &ChromiumRowIssue) -> SourceIssue {
   outcome
 }
 
+/// Finalizes one direct-path Chromium read as a single-profile outcome.
+///
+/// The profile is the database's parent directory; the synthetic identity is
+/// supplied by `finalize_singleton_source`.
+fn direct_chromium_outcome(
+  db_path: &Path,
+  draft: ChromiumExtractionDraft,
+  runtime: Option<&BoundaryRuntime<'_>>,
+) -> Result<super::outcome::Outcome> {
+  super::report_build::finalize_singleton_source(
+    "chromium",
+    db_path.parent().unwrap_or(db_path).to_path_buf(),
+    vec![draft.into_source(direct_path_candidate(db_path))],
+    None,
+    runtime,
+  )
+}
+
 /// The candidate a direct-path query is aimed at.
 ///
 /// A caller who names a database file has done no discovery, so there is no
@@ -577,9 +595,7 @@ fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
 fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Result<Vec<Cookie>> {
   super::legacy::project_canonical_outcome(
     "chromium",
-    super::report_build::canonical_direct_chromium_extraction(
-      draft.into_source(direct_path_candidate(db_path)),
-    )?,
+    direct_chromium_outcome(db_path, draft, None)?,
   )
 }
 
@@ -590,10 +606,7 @@ fn project_legacy_draft_with_runtime(
 ) -> Result<Vec<Cookie>> {
   super::legacy::project_canonical_outcome_with_runtime(
     "chromium",
-    super::report_build::canonical_direct_chromium_extraction_with_runtime(
-      draft.into_source(direct_path_candidate(db_path)),
-      runtime,
-    )?,
+    direct_chromium_outcome(db_path, draft, Some(runtime))?,
     runtime,
   )
 }
@@ -606,9 +619,7 @@ fn project_detailed_draft(
 ) -> Result<Vec<DetailedCookie>> {
   super::legacy::project_canonical_detailed_outcome(
     "chromium",
-    super::report_build::canonical_direct_chromium_extraction(
-      draft.into_source(direct_path_candidate(db_path)),
-    )?,
+    direct_chromium_outcome(db_path, draft, None)?,
   )
 }
 
@@ -619,10 +630,7 @@ fn project_detailed_draft_with_runtime(
 ) -> Result<Vec<DetailedCookie>> {
   super::legacy::project_canonical_detailed_outcome_with_runtime(
     "chromium",
-    super::report_build::canonical_direct_chromium_extraction_with_runtime(
-      draft.into_source(direct_path_candidate(db_path)),
-      runtime,
-    )?,
+    direct_chromium_outcome(db_path, draft, Some(runtime))?,
     runtime,
   )
 }

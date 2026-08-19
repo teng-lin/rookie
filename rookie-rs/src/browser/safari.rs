@@ -67,7 +67,13 @@ pub(crate) fn safari_based_with_runtime(
     safari_based_outcome_with_runtime(direct_path_candidate(&db_path), domains, runtime)?;
   super::legacy::project_canonical_outcome_with_runtime(
     "safari",
-    super::report_build::canonical_direct_safari_extraction_with_runtime(source, runtime)?,
+    super::report_build::finalize_singleton_source(
+      "safari",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      vec![source],
+      None,
+      Some(runtime),
+    )?,
     runtime,
   )
 }

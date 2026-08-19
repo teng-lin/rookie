@@ -385,6 +385,10 @@ fn engine_compatibility_family(browser_id: &BrowserId) -> CompatibilityFamily {
   match browser_id.as_str() {
     "safari" => CompatibilityFamily::Safari,
     "internet_explorer" => CompatibilityFamily::InternetExplorer,
+    // Only the direct path reaches this arm: registry Chromium browsers are
+    // adapted by `chromium_browser_outcome`, which names the family itself.
+    // Without it a direct-path Chromium read would be dispositioned as Gecko.
+    "chromium" => CompatibilityFamily::Chromium,
     _ => CompatibilityFamily::Gecko,
   }
 }
@@ -1463,78 +1467,31 @@ pub(crate) fn canonical_chromium_extraction_with_runtime(
   ))
 }
 
-// Only reachable in production through the automatic multi-identity
-// Chromium selection, which is Linux/macOS-only; Windows exercises this via
-// `#[cfg(test)]`.
-#[allow(dead_code)]
-pub(crate) fn canonical_direct_chromium_extraction(source: Source) -> Result<Outcome> {
-  canonical_direct_chromium_extraction_impl(source, None)
-}
-
-pub(crate) fn canonical_direct_chromium_extraction_with_runtime(
-  source: Source,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_chromium_extraction_impl(source, Some(runtime))
-}
-
-fn canonical_direct_chromium_extraction_impl(
-  source: Source,
+/// Finalizes one direct-path read: the caller named a file, so there is exactly
+/// one profile and no discovery to consult.
+///
+/// This replaces the four `canonical_direct_*` helpers, which had converged on
+/// the same body once every engine started returning `Source`. Chromium's kept
+/// a hand-built `ProfileIdentity` / `BrowserDraft` beside the shared one; both
+/// produce the same report, because `profile_identity` applies the same
+/// `display_path` and the synthetic counters make `all_detected_roots_failed()`
+/// false either way.
+///
+/// `profile_path` is a parameter rather than derived from `sources`: a Gecko
+/// profile whose persistent store was never attempted leads with a session
+/// source, and `sessionstore-backups/recovery.baklz4` does not have the profile
+/// directory as its parent.
+pub(crate) fn finalize_singleton_source(
+  browser_id: &str,
+  profile_path: std::path::PathBuf,
+  sources: Vec<Source>,
+  boundary_stop: Option<BoundaryStop>,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
-  let browser_id = BrowserId::known("chromium");
-  // The source's own path, not a second one threaded alongside it: the
-  // candidate the engine queried is the only place this is recorded.
-  let db_path = source.origin.path.clone();
-  let db_path = db_path.as_path();
-  let profile = ProfileIdentity {
-    browser_id: browser_id.clone(),
-    installation_id: "0".repeat(64).parse()?,
-    profile_id: "1".repeat(64).parse()?,
-    display_name: "direct".to_owned(),
-    path: display_path(db_path.parent().unwrap_or(db_path)).0,
-    path_lossy: db_path.parent().unwrap_or(db_path).to_str().is_none(),
-  };
-  let mut profile_draft = ProfileDraft::new(profile, true);
-  profile_draft.sources.push(source_to_draft(source));
-  Ok(finalize_outcomes_with_runtime(
-    1,
-    vec![BrowserDraft {
-      browser_id,
-      compatibility_family: CompatibilityFamily::Chromium,
-      detected: true,
-      installations_discovered: 1,
-      discovery_failed: false,
-      profiles: vec![profile_draft],
-      issues: Vec::new(),
-      termination: Termination::Completed,
-    }],
-    runtime,
-  ))
-}
-
-pub(crate) fn canonical_direct_mozilla_extraction_with_runtime(
-  db_path: &std::path::Path,
-  extract: super::mozilla::MozillaExtract,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_mozilla_extraction_impl(db_path, extract, Some(runtime))
-}
-
-fn canonical_direct_mozilla_extraction_impl(
-  db_path: &std::path::Path,
-  extract: super::mozilla::MozillaExtract,
-  runtime: Option<&BoundaryRuntime<'_>>,
-) -> Result<Outcome> {
-  // The engine already assembled every source, including its `row_read_failed`
-  // issues. The direct path gates the persistent source on `persistent_attempted`
-  // alone -- there is no discovery to consult -- which is exactly the engine's
-  // emit condition, so the engine's `Vec<Source>` is consumed as-is.
-  let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let engine_extract = direct_engine_extract(profile_path, extract.sources, extract.boundary_stop);
+  let extract = direct_engine_extract(profile_path, sources, boundary_stop);
   match runtime {
-    Some(runtime) => canonical_engine_extract_with_runtime("firefox", engine_extract, runtime),
-    None => canonical_engine_extract("firefox", engine_extract),
+    Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),
+    None => canonical_engine_extract(browser_id, extract),
   }
 }
 
@@ -1582,41 +1539,6 @@ fn direct_engine_extract(
       installations_enumerated: 1,
     },
     boundary_stop,
-  }
-}
-
-pub(crate) fn canonical_direct_safari_extraction_with_runtime(
-  source: Source,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_engine_source("safari", source, Some(runtime))
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
-  source: Source,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_engine_source("internet_explorer", source, Some(runtime))
-}
-
-/// Wraps one already-built [`Source`] as a single-profile direct-path extract.
-///
-/// The engine assembled the source, including its `row_read_failed` issue, so
-/// this only supplies the synthetic profile the direct path has no discovery
-/// for. The profile path is read off the source's own origin rather than
-/// threaded alongside it.
-fn canonical_direct_engine_source(
-  browser_id: &str,
-  source: Source,
-  runtime: Option<&BoundaryRuntime<'_>>,
-) -> Result<Outcome> {
-  let db_path = source.origin.path.clone();
-  let profile_path = db_path.parent().unwrap_or(&db_path).to_path_buf();
-  let extract = direct_engine_extract(profile_path, vec![source], None);
-  match runtime {
-    Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),
-    None => canonical_engine_extract(browser_id, extract),
   }
 }
 
@@ -2428,6 +2350,42 @@ mod tests {
     );
     // A failed candidate beside a succeeding one is exactly the `partial` case.
     assert_eq!(report.status, ReportStatusCode::partial());
+  }
+
+  /// `finalize_singleton_source` picks the compatibility family from the
+  /// browser id, so a direct-path Chromium read must not be dispositioned by
+  /// Gecko's session-fallback arm. The two arms agree on every other outcome a
+  /// single persistent source can produce, which is why this asserts the one
+  /// place they differ: the all-rows-rejected fallback names the engine.
+  #[test]
+  fn a_direct_path_chromium_read_is_dispositioned_as_chromium() {
+    let mut source = Source::from_candidate(SourceCandidate {
+      path: PathBuf::from("/chrome/Default/Cookies"),
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known("chromium_sqlite"),
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition: registry::SourceAcquisition::NotAttempted,
+    });
+    source.stats.rows_seen = 2;
+    source.stats.rows_skipped = 2;
+    source.push_row_read_failed(None);
+
+    let outcome = finalize_singleton_source(
+      "chromium",
+      PathBuf::from("/chrome/Default"),
+      vec![source],
+      None,
+      None,
+    )
+    .expect("finalize the direct-path source");
+    let error = crate::browser::legacy::project_canonical_outcome("chromium", outcome)
+      .expect_err("every row was rejected, so the compatibility projection fails");
+    assert!(
+      format!("{error:#}").contains("all Chromium cookie rows failed to decode"),
+      "expected the Chromium fallback, got: {error:#}"
+    );
   }
 
   fn engine_source(
