@@ -6,6 +6,7 @@
 - **Crate:** `rookie-rs` (workspace root `/Users/blackmyth/src/rookie-cookies`, crate path `rookie-rs/`)
 - **Release context:** 0.6.0-beta.1 just shipped. This is an internal structure-and-domain-language refactor, not a product feature.
 - **Does not revive:** GitHub #260 ("Modularize oversized browser, registry, and report modules"), closed `NOT_PLANNED`. Its design doc was dropped from PR #262. This document is not that epic.
+- **Durable decisions live in [ADR 0005](../adr/0005-stage-boundary-types-and-extraction-vocabulary.md).** The stage-boundary invariant, the fence, the internal vocabulary, module ownership, and the rejected alternatives were extracted there because they outlive this program. This document remains the program record: motivation in full, the PR plan, progress, and the trade-off analysis behind each decision. Where the two disagree about a rule, the ADR wins; where the ADR is silent about *how* a PR gets there, this document is the reference.
 
 ---
 
@@ -1160,6 +1161,7 @@ None that block implementation. Sequencing is locked: goldens in PR 0a; Safari/I
 
 ## References
 
+- ADR 0005: `docs/adr/0005-stage-boundary-types-and-extraction-vocabulary.md` (the durable decisions from this document)
 - ADR 0001: `docs/adr/0001-cookie-extraction-compatibility-and-report-contracts.md`
 - ADR 0002: `docs/adr/0002-authoritative-browser-registry.md`
 - ADR 0003: `docs/adr/0003-unified-profile-query.md`

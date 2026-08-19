@@ -181,6 +181,9 @@ jobs:
       - name: Check platform cfg locations
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: cargo run -p xtask --locked -- check-cfg-locations
+      - name: Check stage boundary
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: cargo run -p xtask --locked -- check-stage-boundary
       - name: Install pinned cargo-public-api
         if: ${{ !cancelled() }}
         run: cargo install cargo-public-api --version 0.52.0 --locked
