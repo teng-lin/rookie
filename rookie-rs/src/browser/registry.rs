@@ -1156,8 +1156,7 @@ pub(crate) use chromium::chromium_key_credentials;
 pub(crate) use chromium::{
   chrome_profiles_with_runtime, chromium_listing_with_runtime,
   chromium_registry_report_with_runtime, legacy_chromium_outcome_with_runtime,
-  select_chrome_profile_with_runtime, ChromiumExtractedProfile, ChromiumProfile,
-  ChromiumRegistryDraft,
+  ChromiumExtractedProfile, ChromiumProfile, ChromiumRegistryDraft,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use chromium::{

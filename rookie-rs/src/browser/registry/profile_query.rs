@@ -106,18 +106,7 @@ fn list_profile_candidates(
         listing
           .profiles
           .into_iter()
-          .map(|profile| ProfileMatchCandidate {
-            path_lossy: profile.path.to_str().is_none(),
-            directory_name: OsString::from(profile.directory_name),
-            persistent_source_paths: profile
-              .persistent_candidates
-              .into_iter()
-              .map(|candidate| candidate.path)
-              .collect(),
-            profile_id: profile.profile_id.as_str().to_owned(),
-            display_name: profile.display_name,
-            path: profile.path,
-          })
+          .map(chromium_match_candidate)
           .collect(),
       )
     }
@@ -163,6 +152,26 @@ fn list_profile_candidates(
       )
     }
     _ => Ok(Vec::new()),
+  }
+}
+
+/// Maps a Chromium listing profile onto an ADR 0003 match candidate. The
+/// persistent source path key (ADR 0004) comes from the profile's persistent
+/// candidates. Shared with `registry/chromium.rs` so Chrome profile selection
+/// (`chrome_profile_report`) goes through the same [`match_profile_query`]
+/// resolver as every other engine instead of a duplicate matcher.
+pub(crate) fn chromium_match_candidate(profile: super::ChromiumProfile) -> ProfileMatchCandidate {
+  ProfileMatchCandidate {
+    path_lossy: profile.path.to_str().is_none(),
+    directory_name: OsString::from(profile.directory_name),
+    persistent_source_paths: profile
+      .persistent_candidates
+      .into_iter()
+      .map(|candidate| candidate.path)
+      .collect(),
+    profile_id: profile.profile_id.as_str().to_owned(),
+    display_name: profile.display_name,
+    path: profile.path,
   }
 }
 
