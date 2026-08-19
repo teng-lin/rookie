@@ -1,0 +1,298 @@
+{
+  "schema_version": 1,
+  "lanes": {
+    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox/Edge/Chromium in e2e.yml or e2e-release.yml. Extra products are installed on the runner only when a silent installer yields a launchable browser we can seed (Brave, Opera, Opera GX, LibreWolf, Zen).",
+    "release_fixture": "Engine fixture extracted with this browser_id in e2e-release.yml (tag, release, workflow_dispatch).",
+    "manual": "Operator-owned host (Safari FDA, IE ESE). Not GitHub-hosted."
+  },
+  "coverage": [
+    {
+      "platform": "linux",
+      "browser": "arc",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "linux",
+      "browser": "brave",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "cachy",
+      "engine": "gecko",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "linux",
+      "browser": "chrome",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "chromium",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "edge",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "firefox",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "librewolf",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "opera",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "linux",
+      "browser": "vivaldi",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "linux",
+      "browser": "zen",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "arc",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "macos",
+      "browser": "brave",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "chrome",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "chromium",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "coccoc",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "macos",
+      "browser": "edge",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "firefox",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "librewolf",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "opera",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "opera_gx",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "macos",
+      "browser": "safari",
+      "engine": "safari",
+      "lane": "manual"
+    },
+    {
+      "platform": "macos",
+      "browser": "vivaldi",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "macos",
+      "browser": "yandex",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "macos",
+      "browser": "zen",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "arc",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "avast",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "brave",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "browser_from_vought",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "chrome",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "chromium",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "coccoc",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "dc_browser",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "duckduckgo",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "edge",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "firefox",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "internet_explorer",
+      "engine": "internet_explorer",
+      "lane": "manual"
+    },
+    {
+      "platform": "windows",
+      "browser": "librewolf",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "octo_browser",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "opera",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "opera_gx",
+      "engine": "chromium",
+      "lane": "nightly_hosted"
+    },
+    {
+      "platform": "windows",
+      "browser": "qq_browser",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "sogou",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "speed_360",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "speed_360x",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "vivaldi",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "yandex",
+      "engine": "chromium",
+      "lane": "release_fixture"
+    },
+    {
+      "platform": "windows",
+      "browser": "zen",
+      "engine": "gecko",
+      "lane": "nightly_hosted"
+    }
+  ]
+}

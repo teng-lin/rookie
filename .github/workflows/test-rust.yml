@@ -5,7 +5,18 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Full Node/Python version matrix, FreeBSD, and packaging wheels.
+    - cron: '17 5 * * *'
   workflow_dispatch:
+    inputs:
+      suite:
+        description: PR-sized suite, or the full nightly language matrix
+        type: choice
+        options:
+          - pr
+          - nightly
+        default: nightly
 
 permissions:
   contents: read
@@ -16,62 +27,138 @@ env:
   NODE_OPTIONS: --use-system-ca
 
 jobs:
-  release-metadata:
-    name: release metadata consistency
+  decide:
+    name: decide suite
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      nightly: ${{ steps.decide.outputs.nightly }}
+      node_build_matrix: ${{ steps.decide.outputs.node_build_matrix }}
+      node_test_matrix: ${{ steps.decide.outputs.node_test_matrix }}
+      python_matrix: ${{ steps.decide.outputs.python_matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          # check-release.py's SemVer-floor check (scripts/check-release.py's
-          # latest_published_version) reads `git tag --list 'v*'` and treats
-          # "no tags found" as "nothing published yet" rather than an error —
-          # so a shallow checkout wouldn't fail loudly here, it would just
-          # silently never exercise the downgrade check this job exists to
-          # cover. fetch-depth: 0 matches what every publish-*.yml workflow
-          # already does for the same reason.
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - name: Validate platform contract
-        run: python scripts/platform_contract.py --validate
-      - name: Check native execution coverage
-        run: python scripts/run-consumer-harness.py --check-native-coverage
-      - name: Check release metadata
-        run: python scripts/check-release.py
-      - name: Test release tooling
-        run: python -m unittest discover -s tests/release -p 'test_*.py' -v
-      - name: Test E2E Python helpers
-        run: python -m unittest discover -s tests/e2e -p 'test_*.py' -v
+      - id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SUITE: ${{ inputs.suite || '' }}
+        run: |
+          set -euo pipefail
+          nightly=false
+          case "$EVENT_NAME" in
+            schedule) nightly=true ;;
+            workflow_dispatch)
+              if [ "$SUITE" = "nightly" ]; then nightly=true; fi
+              ;;
+          esac
+          echo "nightly=$nightly" >> "$GITHUB_OUTPUT"
+          if [ "$nightly" = true ]; then
+            # Build on 22 (the published toolchain) so the 3×3 tests still
+            # prove that addon loads on 24 and 26.
+            echo 'node_build_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"macos-latest","node":"22"},{"os":"windows-latest","node":"22"}]' >> "$GITHUB_OUTPUT"
+            echo 'node_test_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"ubuntu-latest","node":"24"},{"os":"ubuntu-latest","node":"26"},{"os":"macos-latest","node":"22"},{"os":"macos-latest","node":"24"},{"os":"macos-latest","node":"26"},{"os":"windows-latest","node":"22"},{"os":"windows-latest","node":"24"},{"os":"windows-latest","node":"26"}]' >> "$GITHUB_OUTPUT"
+            echo 'python_matrix=[{"os":"ubuntu-latest","python":"3.11"},{"os":"ubuntu-latest","python":"3.12"},{"os":"ubuntu-latest","python":"3.13"},{"os":"ubuntu-latest","python":"3.14"},{"os":"macos-latest","python":"3.11"},{"os":"macos-latest","python":"3.12"},{"os":"macos-latest","python":"3.13"},{"os":"macos-latest","python":"3.14"},{"os":"windows-latest","python":"3.11"},{"os":"windows-latest","python":"3.12"},{"os":"windows-latest","python":"3.13"},{"os":"windows-latest","python":"3.14"}]' >> "$GITHUB_OUTPUT"
+          else
+            # One Node and one CPython per OS, staggered so a PR still
+            # compiles and tests every supported runtime without the 3×N product.
+            echo 'node_build_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"macos-latest","node":"24"},{"os":"windows-latest","node":"26"}]' >> "$GITHUB_OUTPUT"
+            echo 'node_test_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"macos-latest","node":"24"},{"os":"windows-latest","node":"26"}]' >> "$GITHUB_OUTPUT"
+            echo 'python_matrix=[{"os":"ubuntu-latest","python":"3.12"},{"os":"macos-latest","python":"3.13"},{"os":"windows-latest","python":"3.14"}]' >> "$GITHUB_OUTPUT"
+          fi
 
-  lint-and-test:
-    # Clippy and the test suite share a checkout, toolchain and cache, so they
-    # run as one job per OS rather than two. Both still report from a single
-    # run: every step after Clippy carries `!cancelled()`, so a lint failure
-    # never hides a test failure the way plain sequential steps would.
-    name: lint and test (${{ matrix.os }})
+  check:
+    # One job per OS: rustfmt/package/metadata/audit on Ubuntu only;
+    # Clippy, cargo test, and public-API snapshots on all three.
+    # Steps after the first gate use `!cancelled()` so one failure cannot
+    # hide the next.
+    name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # check-release.py's SemVer-floor check reads `git tag --list 'v*'`.
+          # A shallow checkout would silently skip the downgrade check.
+          fetch-depth: 0
           persist-credentials: false
       - name: Install Linux packages
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
+          sudo apt-get install --no-install-recommends -y \
+            libdbus-1-dev dbus at-spi2-core libssl-dev pkg-config
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      # Install nightly first so the subsequent stable install remains the
+      # default for fmt/clippy/test. check-public-api.py selects nightly
+      # with `cargo +nightly-2025-11-23`.
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: nightly-2025-11-23
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: .
+
+      - name: Run cargo fmt
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --manifest-path Cargo.toml --all -- --check
+      - name: Verify cargo package
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: |
+          cargo package --manifest-path Cargo.toml -p rookie-cookies --locked --list > package_files.txt
+          cat package_files.txt
+          grep -q "^examples/simple.rs$" package_files.txt
+          grep -q "^examples/from_path.rs$" package_files.txt
+          grep -q "^examples/detailed_from_path.rs$" package_files.txt
+          grep -q "^browser_registry.json$" package_files.txt
+      - name: Enforce authoritative browser discovery
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: |
+          test ! -e rookie-rs/config.json
+          test ! -e rookie-rs/src/common/paths.rs
+          if rg -n 'common::paths|paths::find_[a-z_]+_paths' rookie-rs/src; then
+            echo 'legacy browser discovery call site found' >&2
+            exit 1
+          fi
+      - name: Validate platform contract
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python scripts/platform_contract.py --validate
+      - name: Check native execution coverage
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python scripts/run-consumer-harness.py --check-native-coverage
+      - name: Check release metadata
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python scripts/check-release.py
+      - name: Test release tooling
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python -m unittest discover -s tests/release -p 'test_*.py' -v
+      - name: Test E2E Python helpers
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python -m unittest discover -s tests/e2e -p 'test_*.py' -v
+      - name: Install cargo-audit
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Run cargo audit against exceptions
+        # Blocking: every RustSec advisory against Cargo.lock must have a
+        # matching, unexpired entry in security/audit-exceptions.toml.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python scripts/check-audit-exceptions.py
+
       - name: Run Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test workspace
         if: ${{ !cancelled() }}
@@ -84,101 +171,27 @@ jobs:
         run: cargo test --workspace --doc --locked
       - name: Check packaged Rust consumer resolution
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
-        run: python3 scripts/check-packaged-rust-consumer.py
+        run: python scripts/check-packaged-rust-consumer.py
       - name: Check DTO schema and generated DTOs are current
-        # schema/report-dto.schema.json and bindings/python/rookie_cookies/dto.py
-        # are both committed, generated files (see schema/README.md) -- if
-        # report_core.rs changes without regenerating them, this diff catches
-        # the stale pair instead of letting CI stay green, mirroring the
-        # napi-rs loader drift check in the node-test job below.
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: |
           cargo run --manifest-path rookie-rs/Cargo.toml --bin generate-dto-schema --features dto-schema -- schema/report-dto.schema.json
-          python3 scripts/generate-python-dto.py
+          python scripts/generate-python-dto.py
           git diff --exit-code schema/report-dto.schema.json bindings/python/rookie_cookies/dto.py
       - name: Check platform cfg locations
-        # See issue #218: within rookie-rs/src (this program's actual scope
-        # -- bindings/CLI aren't covered), cfg-location-allowlist.toml is
-        # the only place a target_os/windows/unix cfg is allowed to appear
-        # outside a capability leaf. This is the final rollout item.
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: cargo run -p xtask --locked -- check-cfg-locations
-
-  cargo-audit:
-    name: cargo audit (blocking)
-    runs-on: ubuntu-latest
-    # Blocking: every RustSec advisory `cargo audit` reports against the
-    # committed Cargo.lock must have a matching, unexpired entry in
-    # security/audit-exceptions.toml (owner + rationale + ISO-8601 expiry) or
-    # this job fails. There is no continue-on-error escape hatch — an
-    # advisory that needs more time to fix gets a time-bounded exception
-    # entry, not a silenced job.
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Run cargo audit against exceptions
-        run: python3 scripts/check-audit-exceptions.py
-
-  public-api:
-    name: public API (${{ matrix.platform }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            enforce: true
-          - os: macos-latest
-            platform: macos
-            enforce: true
-          - os: windows-latest
-            platform: windows
-            enforce: true
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Install Linux cargo-public-api dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libssl-dev pkg-config
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      # cargo-public-api 0.52.0 --locked consumes rustdoc format 57 despite
-      # advertising an older format-55 minimum; this is the tested compatible nightly.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: nightly-2025-11-23
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Install pinned cargo-public-api
+        if: ${{ !cancelled() }}
         run: cargo install cargo-public-api --version 0.52.0 --locked
       - name: Enforce committed public API snapshots
-        if: matrix.enforce
+        if: ${{ !cancelled() }}
         run: python scripts/check-public-api.py --platform ${{ matrix.platform }}
-      - name: Bootstrap native public API snapshots
-        if: ${{ !matrix.enforce }}
-        run: python scripts/check-public-api.py --platform ${{ matrix.platform }} --bootstrap --output-dir target/public-api
-      - name: Upload native snapshot candidates
-        if: ${{ !matrix.enforce }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: public-api-${{ matrix.platform }}
-          path: target/public-api/${{ matrix.platform }}-*.txt
-          if-no-files-found: error
 
   freebsd-native:
     name: native FreeBSD direct-path API
+    needs: decide
+    if: needs.decide.outputs.nightly == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -258,12 +271,13 @@ jobs:
             cargo run --manifest-path tests/direct_path_consumer/Cargo.toml
 
   node-build:
-    name: node build (${{ matrix.os }}, Node.js 22)
+    name: node build (${{ matrix.os }}, Node.js ${{ matrix.node }})
+    needs: decide
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include: ${{ fromJson(needs.decide.outputs.node_build_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -277,7 +291,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: bindings/node/package-lock.json
       - name: Install node deps
@@ -295,7 +309,7 @@ jobs:
         # of letting CI stay green.
         working-directory: bindings/node
         run: git diff --exit-code index.js index.d.ts
-      - name: Upload Node.js 22 native binding
+      - name: Upload native binding
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: node-test-binding-${{ matrix.os }}-${{ github.sha }}
@@ -305,13 +319,14 @@ jobs:
 
   node-test:
     name: node test (${{ matrix.os }}, Node.js ${{ matrix.node }})
-    needs: node-build
+    needs:
+      - decide
+      - node-build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        node: ['22', '24', '26']
+        include: ${{ fromJson(needs.decide.outputs.node_test_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -329,7 +344,7 @@ jobs:
       - name: Install node deps
         working-directory: bindings/node
         run: npm ci
-      - name: Download Node.js 22 native binding
+      - name: Download native binding
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: node-test-binding-${{ matrix.os }}-${{ github.sha }}
@@ -347,7 +362,54 @@ jobs:
         working-directory: examples/javascript
         run: npm test
 
+  python-tests:
+    # abi3-py311 wheel: one build per (OS, interpreter) cell, then the
+    # tests/python suite. Pull requests stagger versions across OSes;
+    # nightly is the full 3 × {3.11–3.14} product.
+    name: Python build and tests (${{ matrix.os }}, ${{ matrix.python }})
+    needs: decide
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.decide.outputs.python_matrix) }}
+    steps:
+      - name: Install Linux packages
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build the abi3 wheel and run the suite
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet maturin==1.14.1
+          python -m maturin build --release --locked --out dist --manifest-path bindings/python/Cargo.toml
+          wheel=$(ls dist/*.whl)
+          echo "Testing $wheel on $(python --version)"
+          python -m venv .venv
+          if [ -x .venv/bin/python ]; then
+            py=.venv/bin/python
+          else
+            py=.venv/Scripts/python
+          fi
+          "$py" -m pip install --quiet "$wheel"
+          "$py" -m unittest discover -s tests/python -p 'test_*.py' -v
+
   linux:
+    name: manylinux Python wheel
+    needs: decide
+    if: needs.decide.outputs.nightly == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -373,52 +435,10 @@ jobs:
           manylinux: auto
           working-directory: bindings/python
 
-  python-tests:
-    # The binding is built with pyo3's `abi3-py311`, so one wheel is importable
-    # by every supported interpreter. Building it once and installing it into
-    # each version's virtualenv still exercises all four, without paying for
-    # four identical release builds of the same artifact.
-    name: Python module tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: |
-            3.11
-            3.12
-            3.13
-            3.14
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Build the abi3 wheel once
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
-        run: |
-          python3.12 -m venv .build-venv
-          .build-venv/bin/pip install --quiet maturin
-          cd bindings/python
-          ../../.build-venv/bin/maturin build --release --locked --out ../../dist
-      - name: Run the suite under every supported interpreter
-        run: |
-          set -euo pipefail
-          wheel=$(ls dist/*.whl)
-          echo "Testing $wheel"
-          for version in 3.11 3.12 3.13 3.14; do
-            echo "::group::Python $version"
-            "python$version" -m venv ".venv-$version"
-            ".venv-$version/bin/pip" install --quiet "$wheel"
-            ".venv-$version/bin/python" -m unittest discover -s tests/python -p 'test_*.py' -v
-            echo "::endgroup::"
-          done
-
   windows:
+    name: Windows Python wheel
+    needs: decide
+    if: needs.decide.outputs.nightly == 'true'
     runs-on: windows-latest
     strategy:
       matrix:
@@ -440,6 +460,9 @@ jobs:
           sccache: 'true'
 
   macos:
+    name: macOS Intel Python wheel
+    needs: decide
+    if: needs.decide.outputs.nightly == 'true'
     runs-on: macos-latest
     strategy:
       matrix:
@@ -460,6 +483,9 @@ jobs:
           sccache: 'true'
 
   sdist:
+    name: Python sdist
+    needs: decide
+    if: needs.decide.outputs.nightly == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -6,6 +6,32 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Native linux-arm64 artifacts: PyPI manylinux aarch64 wheel, npm
+  `rookie-cookies-linux-arm64-gnu`, and a CLI
+  `aarch64-unknown-linux-gnu` binary, all built on `ubuntu-24.04-arm`.
+
+### Removed
+
+- PyPI wheels for linux i686, armv7, s390x, and ppc64le. Those arches have
+  no desktop browser cookie store this project can honestly support.
+
+### Changed
+
+- CI is split into PR, nightly, and release lanes. Pull requests run one
+  `check` job per OS (fmt, package, metadata, cargo-audit, rust lint+test,
+  public API), and stagger Node build+test (22/24/26)
+  plus Python build+tests (3.12/3.13/3.14)
+  across Ubuntu/macOS/Windows. The full Node and Python version product,
+  FreeBSD, packaging wheels/sdist, Chrome/Firefox e2e, and artifact smoke
+  move to nightly / `main`. Extra hosted browsers (Edge, Chromium, Windows
+  Brave, Opera, Opera GX, LibreWolf, Zen)
+  are installed on the runner when a silent installer exists. Claimed-browser
+  fixtures remain for products we cannot install. Extra hosted browsers run on
+  nightly and again on release. Claimed-browser fixtures run on
+  `v*` tags, GitHub Releases, or `workflow_dispatch`.
+
 ## [0.6.0-beta.1] - 2026-08-18
 
 ### Added

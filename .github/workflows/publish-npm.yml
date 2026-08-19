@@ -180,6 +180,11 @@ jobs:
             .cargo-cache
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+      - name: Install Linux packages
+        if: runner.os == 'Linux' && !matrix.settings.docker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus
       - name: Install dependencies
         run: npm ci
 
@@ -273,6 +278,46 @@ jobs:
         shell: bash
       - name: Test bindings
         run: npm test
+  test-linux-arm64-gnu-binding:
+    name: Test bindings on Linux-arm64-gnu - node@${{ matrix.node }}
+    needs:
+      - preflight
+      - build
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "22"
+          - "24"
+          - "26"
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
+      - name: Setup node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: ./bindings/node/package-lock.json
+      - name: Install Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus
+      - name: Install dependencies
+        run: npm ci
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bindings-aarch64-unknown-linux-gnu
+          path: .
+      - name: List packages
+        run: ls -R .
+        shell: bash
+      - name: Test bindings
+        run: npm test
   test-linux-x64-gnu-binding:
     name: Test bindings on Linux-x64-gnu - node@${{ matrix.node }}
     needs:
@@ -325,6 +370,7 @@ jobs:
       - build
       - test-macOS-windows-binding
       - test-linux-x64-gnu-binding
+      - test-linux-arm64-gnu-binding
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -357,6 +403,7 @@ jobs:
           native_binaries=(
             npm/darwin-arm64/rookie_cookies.darwin-arm64.node
             npm/darwin-x64/rookie_cookies.darwin-x64.node
+            npm/linux-arm64-gnu/rookie_cookies.linux-arm64-gnu.node
             npm/linux-x64-gnu/rookie_cookies.linux-x64-gnu.node
             npm/win32-x64-msvc/rookie_cookies.win32-x64-msvc.node
           )
@@ -376,7 +423,8 @@ jobs:
           # tar gets SIGPIPE ("stdout: write error"), and the pipeline falsely fails.
           for tarball in \
             "../../release-packages/npm/rookie-cookies-$RELEASE_VERSION.tgz" \
-            "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz"
+            "../../release-packages/npm/rookie-cookies-linux-x64-gnu-$RELEASE_VERSION.tgz" \
+            "../../release-packages/npm/rookie-cookies-linux-arm64-gnu-$RELEASE_VERSION.tgz"
           do
             listing="$(mktemp)"
             tar -tzf "$tarball" >"$listing"
@@ -493,7 +541,7 @@ jobs:
           NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
         run: |
           set -euo pipefail
-          test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 5
+          test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 6
           echo "Verified publish inputs (target npm dist-tag: $NPM_TAG)"
           for tarball in release-packages/*.tgz; do
             npm publish "./$tarball" --dry-run --access public --ignore-scripts --tag "$NPM_TAG"

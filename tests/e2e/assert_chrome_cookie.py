@@ -62,10 +62,11 @@ def main() -> int:
         automatic = rookie_cookies.chromium_cookies_from_path(
             str(db_path), {"domains": [domain]}
         )
+        browser_id = os.environ.get("ROOKIE_E2E_BROWSER_ID", "chrome")
         canonical = rookie_cookies.chromium_cookies_from_path(
-            str(db_path), {"domains": [domain], "browser_id": "chrome"}
+            str(db_path), {"domains": [domain], "browser_id": browser_id}
         )
-        legacy = rookie_cookies.chromium_based(str(db_path), [domain], "chrome")
+        legacy = rookie_cookies.chromium_based(str(db_path), [domain], browser_id)
         results = [
             ("chromium_cookies_from_path(Automatic)", automatic),
             ("chromium_cookies_from_path(BrowserId)", canonical),

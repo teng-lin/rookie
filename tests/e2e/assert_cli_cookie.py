@@ -40,6 +40,7 @@ def assert_cli_cookie(
     expected_name: Optional[str] = None,
     expected_value: Optional[str] = None,
     browser: Optional[str] = None,
+    browser_id: Optional[str] = None,
 ) -> int:
     """Run the CLI and return the number of cookies in its JSON response."""
     expected_name = expected_name or os.environ.get(
@@ -65,6 +66,8 @@ def assert_cli_cookie(
     command.extend(("--domains", domain, "--format", "json"))
     if key_path is not None:
         command.extend(("--key-path", str(key_path)))
+    if browser_id is not None:
+        command.extend(("--browser-id", browser_id))
 
     environment = os.environ.copy()
     environment["RUST_LOG"] = "error"
@@ -123,6 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--browser", help="discover the named browser instead of using an explicit path"
     )
     parser.add_argument(
+        "--browser-id",
+        help="Chromium credential identity for --path (unix Keychain / libsecret)",
+    )
+    parser.add_argument(
         "--key-path",
         type=Path,
         help="Chromium Local State/key file (required for Chromium on Windows)",
@@ -157,6 +164,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_name=expected_name,
             expected_value=expected_value,
             browser=args.browser,
+            browser_id=args.browser_id,
         )
     except HarnessError as error:
         print(f"error: {error}", file=sys.stderr)

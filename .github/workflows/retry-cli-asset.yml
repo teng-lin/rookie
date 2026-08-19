@@ -21,6 +21,7 @@ on:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
           - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
 
 permissions:
   contents: read
@@ -35,7 +36,7 @@ jobs:
       contents: write
     environment:
       name: release
-    runs-on: ${{ inputs.target == 'x86_64-pc-windows-msvc' && 'windows-latest' || (inputs.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-22.04' || 'macos-latest') }}
+    runs-on: ${{ inputs.target == 'x86_64-pc-windows-msvc' && 'windows-latest' || (inputs.target == 'aarch64-unknown-linux-gnu' && 'ubuntu-24.04-arm' || (inputs.target == 'x86_64-unknown-linux-gnu' && 'ubuntu-22.04' || 'macos-latest')) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

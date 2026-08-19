@@ -5,7 +5,9 @@
 // Usage:
 //   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url>
 //
-// channel: "chrome" | "msedge" | "chrome-beta" | etc. (Playwright channel name)
+// channel: "chrome" | "msedge" | "chromium" | "chrome-beta" | etc.
+//   "chromium" uses Playwright's bundled Chromium (no channel).
+//   ROOKIE_E2E_BROWSER_PATH overrides the executable when set (Brave, …).
 // user-data-dir: persistent profile path; matches rookie-cookies' default lookup
 // url: e.g. "http://127.0.0.1:8765/set"
 //
@@ -31,16 +33,29 @@ const channel = channelArg === "edge" ? "msedge" : channelArg;
 const linuxArgs =
   process.platform === "linux" ? ["--password-store=gnome-libsecret"] : [];
 
-const context = await chromium.launchPersistentContext(userDataDir, {
-  channel,
+const launchOptions = {
   headless: false,
   args: [
     "--no-first-run",
     "--disable-default-apps",
     "--disable-background-networking",
     "--disable-component-update",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
     ...linuxArgs,
   ],
+};
+if (process.env.ROOKIE_E2E_BROWSER_PATH) {
+  launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
+} else if (channel && channel !== "chromium") {
+  launchOptions.channel = channel;
+}
+
+const timeout = Number(process.env.ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS || 30000);
+const context = await chromium.launchPersistentContext(userDataDir, {
+  ...launchOptions,
+  timeout,
 });
 
 try {

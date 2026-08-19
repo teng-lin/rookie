@@ -66,10 +66,17 @@ if (process.platform === "win32") {
       "chromiumCookiesFromPath(BrowserId)",
       await rookieCookies.chromiumCookiesFromPath(dbPath, {
         domains: [domain],
-        browserId: "chrome",
+        browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
       }),
     ],
-    ["chromiumBased", await rookieCookies.chromiumBased(dbPath, [domain], "chrome")],
+    [
+      "chromiumBased",
+      await rookieCookies.chromiumBased(
+        dbPath,
+        [domain],
+        process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
+      ),
+    ],
   ];
 }
 

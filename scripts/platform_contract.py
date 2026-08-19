@@ -100,12 +100,26 @@ def wheel_targets(contract: dict[str, Any], os_name: str) -> list[str]:
     )
 
 
+def wheel_linux_matrix(contract: dict[str, Any]) -> dict[str, Any]:
+    """`{"include": [...]}` so linux aarch64 can run on ubuntu-24.04-arm."""
+    include = []
+    for cpu in wheel_targets(contract, "linux"):
+        matches = [
+            cell
+            for cell in cells(contract, artifact_id="wheel")
+            if cell["os"] == "linux" and cell["cpu"] == cpu and cell["build"]
+        ]
+        runner = matches[0].get("runner") if matches else None
+        include.append({"target": cpu, "runner": runner or "ubuntu-latest"})
+    return {"include": include}
+
+
 def npm_native_packages(contract: dict[str, Any]) -> tuple[str, ...]:
     """Native npm package names, in the same order the old hardcoded tuple used.
 
-    Sorting `npm_platform` alphabetically happens to reproduce that exact
-    order (darwin-arm64, darwin-x64, linux-x64-gnu, win32-x64-msvc) without
-    needing a separate explicit ordering field.
+    Sorting `npm_platform` alphabetically happens to reproduce a stable
+    order (darwin-arm64, darwin-x64, linux-arm64-gnu, linux-x64-gnu,
+    win32-x64-msvc) without needing a separate explicit ordering field.
     """
     platforms = sorted(cell["npm_platform"] for cell in cells(contract, artifact_id="npm-native"))
     return tuple(f"rookie-cookies-{platform}" for platform in platforms)
@@ -316,8 +330,8 @@ def contract_digest(path: Path = DEFAULT_CONTRACT_PATH) -> str:
 
 def _cell_identity(cell: dict[str, Any]) -> tuple[Any, ...]:
     # The same compound key validate() uses to detect duplicate cells
-    # (artifact_id alone is not unique -- the real contract has 9 `wheel`
-    # cells, 4 `npm-native` cells, and 4 `cli` cells, one per platform/libc
+    # (artifact_id alone is not unique -- the real contract has several `wheel`
+    # cells, several `npm-native` cells, and several `cli` cells, one per platform/libc
     # combination). Keying only on artifact_id would silently collapse all
     # of a real artifact_id's cells down to whichever one happens to be
     # last in list order, hiding a changed or newly-added cell whenever a
@@ -415,6 +429,8 @@ def emit_matrix(contract: dict[str, Any], name: str) -> Any:
         return cli_matrix(contract)
     if name == "npm-native":
         return npm_native_matrix(contract)
+    if name == "wheel-linux":
+        return wheel_linux_matrix(contract)
     if name.startswith("wheel-"):
         return {"target": wheel_targets(contract, name.removeprefix("wheel-"))}
     raise ContractError(f"unknown matrix name {name!r}, expected one of {_EMITTABLE_MATRICES}")

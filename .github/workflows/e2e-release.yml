@@ -1,0 +1,266 @@
+name: E2E claimed browsers
+
+# Not a pull-request job. Chrome/Firefox stay in e2e.yml.
+# Nightly + dispatch run the extra hosted browsers (Edge, Chromium, Windows
+# Brave). Tags / GitHub Releases / dispatch also run the fixture matrix.
+on:
+  schedule:
+    - cron: '27 5 * * *'
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-claimed-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  coverage:
+    name: claimed-browser matrix is complete
+    if: github.event_name != 'pull_request' || github.event.label.name == 'e2e-release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Check every registry cell has a lane
+        run: python -m unittest discover -s tests/e2e -p 'test_browser_coverage.py' -v
+
+  hosted-matrix:
+    name: claimed-browser install matrix
+    needs: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - id: matrix
+        run: python tests/e2e/install_claimed_browser.py --print-matrix
+
+  hosted-claimed:
+    name: e2e install × ${{ matrix.os }} × ${{ matrix.browser }}
+    needs:
+      - coverage
+      - hosted-matrix
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.hosted-matrix.outputs.include) }}
+    env:
+      ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install Linux desktop / keyring packages
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            xvfb dbus dbus-x11 gnome-keyring libsecret-tools at-spi2-core curl gnupg
+      - name: Install Playwright (Chromium-family seed)
+        if: matrix.engine == 'chromium'
+        working-directory: tests/e2e
+        run: npm install --no-save playwright@1.62.1
+      - name: Install the claimed browser
+        run: python tests/e2e/install_claimed_browser.py --browser ${{ matrix.browser }} --platform ${{ matrix.platform }}
+      - name: Pre-build CLI, Python, and Node
+        shell: bash
+        run: |
+          cargo build -p rookie-cookies-cli --release --locked
+          python3 -m venv .venv || python -m venv .venv
+          if [ -x .venv/bin/python ]; then py=.venv/bin/python; else py=.venv/Scripts/python; fi
+          "$py" -m pip install --upgrade --quiet pip maturin==1.14.1
+          "$py" -m maturin develop --release --locked --manifest-path bindings/python/Cargo.toml
+          (cd bindings/node && npm ci --omit=optional && npm run build -- --cargo-flags=--locked)
+      - name: Seed installed browser and extract
+        shell: bash
+        run: |
+          if [ -x .venv/bin/python ]; then py=.venv/bin/python; else py=.venv/Scripts/python; fi
+          "$py" tests/e2e/run_hosted_claimed_e2e.py
+
+  fixtures:
+    name: claimed-browser fixtures (${{ matrix.os }})
+    needs: coverage
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux packages
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev dbus at-spi2-core
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build and install Python binding
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -x .venv/bin/python ]; then
+            py=.venv/bin/python
+          else
+            py=.venv/Scripts/python
+          fi
+          "$py" -m pip install --quiet maturin==1.14.1
+          "$py" -m maturin develop --release --locked --manifest-path bindings/python/Cargo.toml
+      - name: Extract fixtures for every claimed browser_id
+        shell: bash
+        run: |
+          if [ -x .venv/bin/python ]; then
+            py=.venv/bin/python
+          else
+            py=.venv/Scripts/python
+          fi
+          "$py" tests/e2e/run_claimed_browser_fixtures.py
+
+  hosted:
+    name: e2e release × ${{ matrix.os }} × ${{ matrix.browser }}
+    needs: coverage
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu
+            runner: ubuntu-24.04
+            browser: chromium
+            channel: chromium
+          - os: ubuntu
+            runner: ubuntu-24.04
+            browser: edge
+            channel: msedge
+          - os: macos
+            runner: macos-15
+            browser: chromium
+            channel: chromium
+            keychain_service: Chrome Safe Storage
+            keychain_account: Chromium
+          - os: macos
+            runner: macos-15
+            browser: edge
+            channel: msedge
+            keychain_service: Microsoft Edge Safe Storage
+            keychain_account: Microsoft Edge
+          - os: windows
+            runner: windows-2025
+            browser: chromium
+            channel: chromium
+          - os: windows
+            runner: windows-2025
+            browser: edge
+            channel: msedge
+          - os: windows
+            runner: windows-2025
+            browser: brave
+            channel: chrome
+    env:
+      ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/${{ matrix.browser }}
+      ROOKIE_E2E_BROWSER_ID: ${{ matrix.browser }}
+      ROOKIE_E2E_KEYCHAIN_SERVICE: ${{ matrix.keychain_service }}
+      ROOKIE_E2E_KEYCHAIN_ACCOUNT: ${{ matrix.keychain_account }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install Linux desktop / keyring packages
+        if: matrix.os == 'ubuntu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            xvfb dbus dbus-x11 gnome-keyring libsecret-tools at-spi2-core
+      - name: Install Playwright
+        working-directory: tests/e2e
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: ${{ matrix.channel == 'chromium' && '0' || '1' }}
+        run: |
+          npm install --no-save playwright@1.62.1
+          if [ "${{ matrix.channel }}" = "chromium" ]; then
+            npx playwright install chromium
+          fi
+        shell: bash
+      - name: Install machine-wide Brave
+        if: matrix.browser == 'brave'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @(
+            "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
+            "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe"
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            winget install -e --id Brave.Brave --scope machine `
+              --accept-package-agreements --accept-source-agreements `
+              --disable-interactivity --source winget
+            $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $exe) { throw "Brave was not installed" }
+          "ROOKIE_E2E_BROWSER_PATH=$exe" | Out-File $env:GITHUB_ENV -Append
+      - name: Pre-build e2e binary, CLI, Python, and Node
+        shell: bash
+        run: |
+          cargo test --test e2e_chrome --no-run --locked
+          cargo build -p rookie-cookies-cli --release --locked
+          python3 -m venv .venv || python -m venv .venv
+          if [ -x .venv/bin/python ]; then py=.venv/bin/python; else py=.venv/Scripts/python; fi
+          "$py" -m pip install --upgrade --quiet pip maturin==1.14.1
+          "$py" -m maturin develop --release --locked --manifest-path bindings/python/Cargo.toml
+          (cd bindings/node && npm ci --omit=optional && npm run build -- --cargo-flags=--locked)
+      - name: Seed and extract (Unix)
+        if: matrix.os != 'windows'
+        run: bash tests/e2e/run_hosted_chromium_e2e.sh ${{ matrix.channel }}
+      - name: Seed and extract (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: tests/e2e/run_hosted_chromium_e2e.ps1 ${{ matrix.channel }}

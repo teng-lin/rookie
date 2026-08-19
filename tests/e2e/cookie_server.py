@@ -48,9 +48,15 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+def listen_port() -> int:
+    return int(os.environ.get("ROOKIE_E2E_COOKIE_PORT", "8765"))
+
+
 if __name__ == "__main__":
     # Threaded: a single-threaded server is wedged permanently by one idle
     # preconnected socket, which silently drops every later request.
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
+    port = listen_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
+    print(f"cookie server listening on 127.0.0.1:{port}", flush=True)
     server.serve_forever()

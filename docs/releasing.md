@@ -12,7 +12,7 @@ One version across three ecosystems:
 - crates.io: `rookie-cookies` (`publish-crate.yml`, crate README is
   `rookie-rs/README.md`)
 - PyPI: `rookie-cookies` wheels and sdist (`publish-py.yml`)
-- npm: `rookie-cookies` plus four native platform packages (`publish-npm.yml`)
+- npm: `rookie-cookies` plus five native platform packages (`publish-npm.yml`)
 
 CLI GitHub-release assets: `publish-cli.yml`. Retry one missing CLI target
 from `main` with `retry-cli-asset.yml`.
@@ -72,7 +72,7 @@ issue, pull request, or workflow log:
    `rookie-cookies`, owner `teng-lin`, repository `rookie-cookies`, workflow
    `publish-py.yml`, and environment `release`. No PyPI token is needed by the
    workflow.
-3. Configure npm trusted publishing for `rookie-cookies` and all four native
+3. Configure npm trusted publishing for `rookie-cookies` and all five native
    platform packages. For each package, use owner `teng-lin`, repository
    `rookie-cookies`, workflow `publish-npm.yml`, environment `release`, and
    allow the `npm publish` operation. The workflow uses OIDC and does not need
@@ -88,7 +88,7 @@ or repository files.
 Author the release-note prose under the single `## [Unreleased]` heading in
 `CHANGELOG.md`, then set the target version once and run the deterministic bump
 command. It updates the workspace version and internal dependency requirement,
-synchronizes all five npm manifests and exact optional-dependency pins,
+synchronizes all six npm manifests and exact optional-dependency pins,
 promotes the authored changelog prose to a dated release section, and asks
 Cargo and npm to regenerate their lockfiles. It never generates release-note
 prose or replaces unrelated dependency versions that happen to match the old
@@ -140,7 +140,7 @@ cargo publish --dry-run -p rookie-cookies --features appbound
 Use `--ignore-scripts` for the npm preview. The release workflow builds and
 tests every native binary. Native builds run on Node.js 22; macOS, Windows, and
 Linux Docker tests load them on Node.js 22, 24, and 26; and packaging plus
-trusted publishing run on Node.js 24. The workflow creates all five immutable
+trusted publishing run on Node.js 24. The workflow creates all six immutable
 tarballs without running publish lifecycle scripts and saves them as a workflow
 artifact before any registry write.
 
@@ -182,11 +182,12 @@ gh workflow run publish-npm.yml --ref main -f version="$VERSION" -f tag="alpha"
 pip and cargo skip pre-release versions by default, so PyPI and crates.io
 need no equivalent tag handling.
 
-The npm workflow builds and tests four native targets, verifies every expected
+The npm workflow builds and tests five native targets, verifies every expected
 binary, and publishes these prepared native tarballs before the root package:
 
 - `rookie-cookies-darwin-arm64`
 - `rookie-cookies-darwin-x64`
+- `rookie-cookies-linux-arm64-gnu`
 - `rookie-cookies-linux-x64-gnu`
 - `rookie-cookies-win32-x64-msvc`
 
@@ -200,7 +201,7 @@ additional files in its `npm-release-<version>` workflow artifact before the
 - `scan/rookie_cookies.win32-x64-msvc.node`, copied byte-for-byte from the
   Windows package assembled by the workflow;
 - `scan/release-scan-manifest.json`, recording the release version, immutable
-  tag commit, byte length, and SHA-256 for that native module and all five npm
+  tag commit, byte length, and SHA-256 for that native module and all six npm
   tarballs.
 
 There is no reviewer gate between the package job and `publish` — do not
@@ -367,6 +368,7 @@ python -c "import rookie_cookies; print(rookie_cookies.version())"
 npm view "rookie-cookies@$VERSION" version
 npm view "rookie-cookies-darwin-arm64@$VERSION" version
 npm view "rookie-cookies-darwin-x64@$VERSION" version
+npm view "rookie-cookies-linux-arm64-gnu@$VERSION" version
 npm view "rookie-cookies-linux-x64-gnu@$VERSION" version
 npm view "rookie-cookies-win32-x64-msvc@$VERSION" version
 ```
@@ -377,7 +379,7 @@ Create the GitHub release only after all three registry checks pass.
 
 After the GitHub release exists, dispatch `publish-cli.yml` from the matching
 tag to build and attach the `rookie-cookies` CLI binary for macOS (arm64 and
-x86_64), Linux x86_64, and Windows x86_64. A later failed matrix leg is
+x86_64), Linux (x86_64 and aarch64), and Windows x86_64. A later failed matrix leg is
 retried with `retry-cli-asset.yml`, not by re-dispatching the whole workflow
 (see "A failed platform leg does not auto-retry").
 
@@ -386,7 +388,7 @@ also uploads a `cli-scan-manifest-<target>` workflow artifact containing a
 `release-scan-manifest.json` scoped to that leg's one binary (source SHA,
 controller SHA, platform-contract digest, byte length, SHA-256) — the same
 manifest shape `publish-npm.yml` produces, applied per CLI target instead of
-once for all five npm packages. Verify the Windows executable against its
+once for all six npm packages. Verify the Windows executable against its
 sidecar before its separate ESET scan, then record the disposition the same
 way as the npm scan, against the Windows leg's own manifest:
 
@@ -506,8 +508,8 @@ gh workflow run retry-cli-asset.yml --ref main \
 ```
 
 Valid `target` values: `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`,
-`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`. Windows still adds
-`--features appbound`.
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu`. Windows still adds `--features appbound`.
 
 If that workflow is unavailable (or you must attach to a pre-hardened tag
 without using Actions), build and upload that one target by hand — see
@@ -574,14 +576,14 @@ after its first successful run.
 Never blindly rerun a failed publish job. First check the registry because an
 upload can succeed before the workflow reports a timeout.
 
-For npm, inspect all five package names at the requested version. If the native
+For npm, inspect all six package names at the requested version. If the native
 packages exist but the root package does not, download the failed run's
 `npm-release-<version>` artifact and publish its unchanged root tarball with
 lifecycle scripts disabled. Do not rebuild or attempt to overwrite any package
 version; npm, PyPI, and crates.io versions are immutable.
 
 For PyPI, `publish-py.yml` no longer passes `skip-existing: true` to
-`pypa/gh-action-pypi-publish`: a partial failure (say, 6 of 9 files uploaded
+`pypa/gh-action-pypi-publish`: a partial failure (say, 3 of 6 files uploaded
 before a timeout) means re-dispatching the whole workflow now hits PyPI's hard
 "File already exists" rejection on every already-uploaded file, rather than
 those being silently treated as already-there. Check `pypi.org/project/

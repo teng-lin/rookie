@@ -52,11 +52,11 @@ REQUIRED_TAG_RULESETS = {
 # workflow checks the identical set. Confirmed against a real commit's
 # check-runs API response, not guessed from workflow YAML — reusable
 # workflows (`workflow_call`) render as "<caller job name> / <callee job
-# name>", not the caller name alone, and `e2e.yml`'s `artifact-pr-*` jobs are
-# explicitly PR-only (`if: github.event_name == 'pull_request'`); the
-# per-commit-on-main signal is `artifact-smoke.yml`'s push-triggered jobs
-# instead — same reusable `_artifact-smoke.yml`, different caller, always
-# runs on push to main regardless of which paths changed.
+# name>", not the caller name alone. Artifact smoke is not a pull-request
+# job; the per-commit-on-main signal is `artifact-smoke.yml`'s push-triggered
+# jobs — same reusable `_artifact-smoke.yml`, always runs on push to main
+# regardless of which paths changed. Chrome/Firefox e2e is likewise
+# main/nightly/manual (`e2e.yml`), not pull_request.
 _ARTIFACT_SMOKE_SUB_JOBS = (
     "Build release packages",
     "Install and exercise downloaded packages (Node.js 22)",
@@ -74,7 +74,7 @@ REQUIRED_CHECK_RUNS = (
     "e2e windows × chrome (App-Bound v20 canary)",
     "e2e windows × chrome (legacy DPAPI)",
     *(f"{platform} / {sub_job}" for platform in _ARTIFACT_SMOKE_PLATFORMS for sub_job in _ARTIFACT_SMOKE_SUB_JOBS),
-    "cargo audit (blocking)",
+    "check (ubuntu-latest)",
 )
 
 
