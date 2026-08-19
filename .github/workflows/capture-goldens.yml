@@ -1,0 +1,91 @@
+name: Capture report goldens
+
+# Report goldens (`rookie-rs/tests/goldens/<os>/`) are captured per target OS,
+# because root-relative browser paths differ per platform. This workflow
+# regenerates them on a real runner for each OS and uploads the result, so a
+# platform can be captured without owning a machine of that platform.
+#
+# Usage:
+#   1. Widen the `#[cfg(...)]` gates in rookie-rs/tests/report_goldens.rs so the
+#      golden tests compile on the platform you want to capture.
+#   2. Push that state to a `goldens/**` branch. This workflow runs there and
+#      nowhere else, so it never fires on a normal PR.
+#   3. Download the artifacts, read the diff, and commit the goldens together
+#      with the widened gates.
+#
+# The macOS leg is captured too, deliberately: its output must match the
+# already-committed macOS goldens byte for byte. If it does not, capture is
+# environment-sensitive and none of the other legs can be trusted either.
+
+on:
+  push:
+    branches:
+      - 'goldens/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_OPTIONS: --use-system-ca
+
+jobs:
+  capture:
+    name: capture (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux packages
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libdbus-1-dev dbus at-spi2-core libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: .
+
+      - name: Regenerate goldens
+        env:
+          UPDATE_GOLDENS: '1'
+        run: cargo test -p rookie-cookies --test report_goldens --locked
+
+      # Printed as well as uploaded: a capture that silently produced an empty
+      # or degenerate report is worth catching by eye before it is committed as
+      # the freeze.
+      - name: Show captured goldens
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(rookie-rs/tests/goldens/*/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No goldens were produced. Are the cfg gates widened for this platform?"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            echo "===== $file ($(wc -l < "$file") lines) ====="
+            cat "$file"
+          done
+
+      - name: Verify the captured goldens now pass
+        run: cargo test -p rookie-cookies --test report_goldens --locked
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: goldens-${{ matrix.platform }}
+          path: rookie-rs/tests/goldens/
+          if-no-files-found: error
