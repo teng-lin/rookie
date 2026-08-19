@@ -112,7 +112,6 @@ impl SyntheticHome<'_> {
     return self.home.join(".config/google-chrome");
   }
 
-  #[cfg(target_os = "macos")]
   fn firefox_root(&self) -> PathBuf {
     #[cfg(target_os = "macos")]
     return self.home.join("Library/Application Support/Firefox");
@@ -199,7 +198,6 @@ fn seed_chrome(home: &SyntheticHome<'_>) {
   seed_chromium_profile(&root, "Profile 1", "session", "profile-value");
 }
 
-#[cfg(target_os = "macos")]
 fn seed_firefox_profile(root: &Path, relative: &str, name: &str, value: &str) {
   let profile = root.join(relative);
   std::fs::create_dir_all(&profile).expect("create profile directory");
@@ -224,7 +222,6 @@ fn seed_firefox_profile(root: &Path, relative: &str, name: &str, value: &str) {
 
 /// Default-second in declaration order so the golden pins the default-first
 /// listing sort rather than incidental ini order.
-#[cfg(target_os = "macos")]
 fn seed_firefox(home: &SyntheticHome<'_>) {
   let root = home.firefox_root();
   std::fs::create_dir_all(&root).expect("create firefox root");
@@ -236,6 +233,18 @@ fn seed_firefox(home: &SyntheticHome<'_>) {
      [Profile1]\nName=default\nIsRelative=1\nPath=Profiles/abc.default-release\nDefault=1\n",
   )
   .expect("write profiles.ini");
+}
+
+/// Internet Explorer's WebCache root, reached through `APPDATA`. The file is
+/// not a valid ESE database — see the test for why that is the point.
+#[cfg(target_os = "windows")]
+fn seed_internet_explorer(home: &SyntheticHome<'_>) {
+  let cache = home
+    .home
+    .join("AppData/Roaming/Microsoft/Windows/WebCache");
+  std::fs::create_dir_all(&cache).expect("create WebCache directory");
+  std::fs::write(cache.join("WebCacheV01.dat"), b"not-an-ese-database")
+    .expect("seed Internet Explorer cookie store");
 }
 
 /// A valid, empty BinaryCookies file: the `cook` magic plus a zero page count.
@@ -309,9 +318,6 @@ fn rank_opaque_ids(input: &str) -> String {
 
 // ------------------------------------------------------------- comparison --
 
-// Golden comparison is compiled only for captured platforms; see the gates on
-// the tests below.
-#[cfg(target_os = "macos")]
 fn golden_path(name: &str) -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("tests/goldens")
@@ -319,12 +325,10 @@ fn golden_path(name: &str) -> PathBuf {
     .join(format!("{name}.json"))
 }
 
-#[cfg(target_os = "macos")]
 fn updating() -> bool {
   std::env::var_os("UPDATE_GOLDENS").is_some_and(|value| !value.is_empty())
 }
 
-#[cfg(target_os = "macos")]
 fn assert_golden(name: &str, actual: &str) {
   let path = golden_path(name);
   if updating() {
@@ -394,20 +398,15 @@ fn capture(browser_id: &str, home: &SyntheticHome<'_>) -> String {
 
 // ------------------------------------------------------------------ tests --
 
-// Goldens are captured per target OS, and only macOS has been captured so far.
-// The gates below say exactly that: on an uncaptured platform there is no
-// golden to enforce, so the test does not exist rather than passing vacuously.
-//
-// To capture another platform, on a host of that platform:
+// Each test is gated to the platforms its browser actually exists on, and a
+// golden is committed for every one of them. Regenerate on a host of that
+// platform with:
 //
 //   UPDATE_GOLDENS=1 cargo test -p rookie-cookies --test report_goldens
 //
-// then commit `rookie-rs/tests/goldens/<os>/` and widen these gates to include
-// it. `normalization_survives_a_different_synthetic_root` runs everywhere and
-// already proves the harness itself is portable, so capturing is the only work
-// involved.
+// or, without owning such a host, push to a `goldens/**` branch and take the
+// artifacts from the "Capture report goldens" workflow.
 
-#[cfg(target_os = "macos")]
 #[test]
 fn chrome_reports_match_the_golden() {
   let home = SyntheticHome::new("chrome");
@@ -415,12 +414,30 @@ fn chrome_reports_match_the_golden() {
   assert_golden("chrome", &capture("chrome", &home));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn firefox_reports_match_the_golden() {
   let home = SyntheticHome::new("firefox");
   seed_firefox(&home);
   assert_golden("firefox", &capture("firefox", &home));
+}
+
+/// Internet Explorer's cookie store is a real ESE database, which is far too
+/// involved to synthesize here. The seed is deliberately not a valid one, so
+/// this golden pins the *attempted and failed* path: discovery finds the
+/// candidate, populate queries it, the `EseDatabase` acquisition is overlaid,
+/// and the parse failure is reported.
+///
+/// That is precisely the shape the push-after-query populate rewrite touches,
+/// and IE is the one engine with no other report-level coverage.
+#[cfg(target_os = "windows")]
+#[test]
+fn internet_explorer_reports_match_the_golden() {
+  let home = SyntheticHome::new("internet-explorer");
+  seed_internet_explorer(&home);
+  assert_golden(
+    "internet_explorer",
+    &capture("internet_explorer", &home),
+  );
 }
 
 #[cfg(target_os = "macos")]
