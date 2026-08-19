@@ -14,9 +14,9 @@ use super::outcome::{
   FailureLedger, FailureScope, Outcome, ResultStatus, Retryability, SourceOutcome, Termination,
 };
 use super::registry::{
-  self, ChromiumProfileDraft, ChromiumProfileFailure, ChromiumRegistryDraft, DiscoveryIssue,
-  EngineProfileDraft, EngineSourceDraft, RegisteredBrowser, SourceAcquisition, SourceFailureStage,
-  SOURCE_ROLE_PERSISTENT,
+  self, ChromiumProfileDraft, ChromiumProfileFailure, ChromiumRegistryDraft, DiscoveredProfile,
+  DiscoveryIssue, EngineExtract, EngineListing, ExtractedProfile, RegisteredBrowser,
+  SourceAcquisition, SOURCE_ROLE_PERSISTENT,
 };
 #[cfg(test)]
 use super::report_core::SourceStatusCode;
@@ -29,6 +29,9 @@ use super::report_core::{
   ProfileDescriptor, ProfileDraft, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats,
   ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator, TerminationCode,
   MAX_ISSUE_SAMPLES,
+};
+use super::source::{
+  Source, SourceCandidate, SourceFailureStage as SourceFailureStageNew, SourceIssue, SourceStats,
 };
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
@@ -206,7 +209,7 @@ fn chromium_profile_outcome(
   let identity = profile_identity(
     browser_id,
     installation_id,
-    &profile.profile_id,
+    profile.profile_id.as_str(),
     &profile.display_name,
     &profile.path,
   )?;
@@ -284,82 +287,55 @@ fn chromium_profile_outcome(
   Ok(outcome)
 }
 
-fn engine_profile_outcome(
-  browser_id: &BrowserId,
-  profile: EngineProfileDraft,
-) -> Result<ProfileDraft> {
-  let identity = profile_identity(
-    browser_id,
-    &profile.installation_id,
-    &profile.profile_id,
-    &profile.name,
-    &profile.path,
-  )?;
-  let mut outcome = ProfileDraft::new(identity, profile.is_default);
-  for source in profile.sources {
-    outcome.sources.push(engine_source_outcome(source));
-  }
-  if outcome.sources.is_empty() {
-    // Discovery only admits a profile here when it found either a persistent
-    // database or a session candidate (`gecko_profile_has_source`), so a
-    // profile that reaches this adapter with zero sources means whatever
-    // justified its admission - a Gecko session candidate, since a
-    // discovered persistent source always projects into `sources` - is gone
-    // by the time of extraction. That is a real failure, not the "nothing
-    // was ever there" case `no_sources` means. Discovery-only profiles on a
-    // stopped draft are pruned before this adapter and never reach this branch.
-    push_aggregated(
-      &mut outcome.issues,
-      issue(
-        "profile_extraction_failed",
-        ExtractionStageCode::acquisition(),
-        IssueSeverityCode::error(),
-        "a cookie source present at discovery could not be found by the time of extraction",
-      ),
-    );
-  }
-  Ok(outcome)
-}
-
-fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
-  let EngineSourceDraft {
-    path,
-    role,
-    format,
-    precedence,
+/// Adapts one already-queried [`Source`] into the shared [`SourceDraft`].
+///
+/// A pure copy: stats, records, diagnostics, pre-built issues, and the failure
+/// are transferred as-is. It does not re-derive `row_read_failed` from
+/// `rows_skipped` (the engine already attached it through
+/// [`Source::push_row_read_failed`]) and does not recompute `cookies_emitted`
+/// from a cookie list.
+fn source_to_draft(source: Source) -> SourceDraft {
+  // Records are the only supply of finalized rows; `cookies` stays the
+  // compatibility projection and the secrets walk. Production leaves it empty,
+  // matching the pre-split adapter; characterization tests project it from
+  // records so they can assert on cookie contents.
+  #[cfg(test)]
+  let cookies = source.cookies();
+  let Source {
+    origin,
     selected,
-    cookies,
-    records,
-    rows_seen,
-    rows_skipped,
-    rows_rejected,
     acquisition,
+    records,
+    stats,
     acquisition_attempts,
     diagnostics,
-    error,
-    error_stage,
-    row_error,
+    failure,
+    issues,
   } = source;
   let mut outcome = SourceDraft::new(
-    source_identity(&path, role, format, precedence),
-    &path,
+    source_identity(
+      &origin.path,
+      origin.role.as_str(),
+      origin.format.as_str(),
+      origin.precedence,
+    ),
+    &origin.path,
     selected,
     acquisition_code(acquisition),
   );
-  // Records are the only source of finalized rows, so they are the only honest
-  // basis for this counter. Falling back to `cookies.len()` would report rows
-  // that finalization will not emit.
-  let cookies_emitted = records.len();
   outcome.stats = CounterSet {
-    rows_seen: rows_seen as u64,
-    cookies_emitted: cookies_emitted as u64,
-    rows_skipped: rows_skipped as u64,
-    rows_rejected: rows_rejected as u64,
-    provider_failures: 0,
+    rows_seen: stats.rows_seen as u64,
+    cookies_emitted: stats.cookies_emitted as u64,
+    rows_skipped: stats.rows_skipped as u64,
+    rows_rejected: stats.rows_rejected as u64,
+    provider_failures: stats.provider_failures as u64,
     acquisition_attempts: u64::from(acquisition_attempts),
   }
   .into_stats();
-  outcome.cookies = cookies;
+  #[cfg(test)]
+  {
+    outcome.cookies = cookies;
+  }
   outcome.records = records;
   for diagnostic in diagnostics {
     push_aggregated(
@@ -372,44 +348,108 @@ fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
       ),
     );
   }
-  // A rejected row costs cookies, so it is an error-severity issue that makes
-  // the report `partial` -- but acquisition, parsing, and the query completed,
-  // so the source itself still succeeded. This mirrors how the Chromium adapter
-  // treats its row issues.
-  //
-  // Keyed on the count, not on whether an engine happened to keep the error:
-  // Safari and Internet Explorer report skipped rows without one, and deriving
-  // the issue from the error alone let a report claim `complete` while cookies
-  // had been dropped.
-  if rows_skipped > 0 {
+  for source_issue in issues {
     push_aggregated(
       &mut outcome.issues,
-      issue(
-        "row_read_failed",
-        ExtractionStageCode::parse(),
-        IssueSeverityCode::error(),
-        row_error.unwrap_or_else(|| format!("{rows_skipped} row(s) could not be read")),
-      )
-      .with_occurrences(u32::try_from(rows_skipped).unwrap_or(u32::MAX)),
+      source_issue_to_extraction(source_issue),
     );
   }
-  if let Some(error) = error {
+  if let Some(failure) = failure {
     push_aggregated(
       &mut outcome.issues,
       issue(
         "source_extraction_failed",
-        match error_stage {
-          SourceFailureStage::Acquisition => ExtractionStageCode::acquisition(),
-          SourceFailureStage::Parse => ExtractionStageCode::parse(),
-          SourceFailureStage::Query => ExtractionStageCode::query(),
+        match failure.stage {
+          SourceFailureStageNew::Acquisition => ExtractionStageCode::acquisition(),
+          SourceFailureStageNew::Parse => ExtractionStageCode::parse(),
+          SourceFailureStageNew::Query => ExtractionStageCode::query(),
         },
         IssueSeverityCode::error(),
-        error,
+        failure.message,
       ),
     );
     outcome.failed = true;
   }
   outcome
+}
+
+/// Copies a crate-private [`SourceIssue`] into the report's [`ExtractionIssue`].
+///
+/// The issue was fully formed at the engine boundary, so the report mapper only
+/// transfers it and never re-reasons about counters. Optional provider/tier/
+/// cause/retryability evidence is carried through when present (Chromium's row
+/// issues rely on it); the other engines leave it unset, matching `issue`'s
+/// defaults.
+fn source_issue_to_extraction(source_issue: SourceIssue) -> ExtractionIssue {
+  let SourceIssue {
+    code,
+    stage,
+    severity,
+    message,
+    occurrences,
+    samples,
+    provider,
+    tier,
+    cause,
+    retryability,
+  } = source_issue;
+  let mut outcome = issue(code, stage, severity, message).with_occurrences(occurrences);
+  if !samples.is_empty() {
+    outcome = outcome.with_samples(samples);
+  }
+  if provider.is_some() {
+    outcome.provider = provider;
+  }
+  if tier.is_some() {
+    outcome.tier = tier;
+  }
+  if let Some(cause) = cause {
+    outcome.cause = cause;
+  }
+  if let Some(retryability) = retryability {
+    outcome.retryability = retryability;
+  }
+  outcome
+}
+
+/// Adapts one extracted profile into a [`ProfileDraft`].
+///
+/// Extract-only: a profile whose sources are all gone after a source present at
+/// discovery vanished raises `profile_extraction_failed`. Listing never reaches
+/// this path, so empty candidates there stay ordinary listing emptiness.
+fn extracted_profile_outcome(
+  browser_id: &BrowserId,
+  profile: ExtractedProfile,
+) -> Result<ProfileDraft> {
+  let identity = profile_identity(
+    browser_id,
+    profile.identity.installation_id.as_str(),
+    profile.identity.profile_id.as_str(),
+    &profile.identity.name,
+    &profile.identity.path,
+  )?;
+  let mut outcome = ProfileDraft::new(identity, profile.identity.is_default);
+  for source in profile.sources {
+    outcome.sources.push(source_to_draft(source));
+  }
+  if outcome.sources.is_empty() {
+    // Discovery only admits a profile when it found either a persistent
+    // database or a session candidate, so a profile that reaches extraction
+    // with zero sources means whatever justified its admission is gone by the
+    // time of extraction. That is a real failure, not the "nothing was ever
+    // there" case `no_sources` means. Discovery-only profiles on a stopped
+    // extract are pruned before this adapter and never reach this branch.
+    push_aggregated(
+      &mut outcome.issues,
+      issue(
+        "profile_extraction_failed",
+        ExtractionStageCode::acquisition(),
+        IssueSeverityCode::error(),
+        "a cookie source present at discovery could not be found by the time of extraction",
+      ),
+    );
+  }
+  Ok(outcome)
 }
 
 /// One registered browser's contribution to a report.
@@ -493,33 +533,99 @@ fn chromium_browser_outcome(
   Ok(outcome)
 }
 
-fn engine_browser_outcome(
+/// Adapts an [`EngineExtract`] bag (Gecko/Safari/IE) into a browser draft.
+///
+/// After a stop, drop discovery-only work before mapping, so an interrupted run
+/// never fabricates a successful zero-row source.
+fn engine_extract_outcome(
   browser_id: &BrowserId,
-  mut engine: registry::EngineExtractionDraft,
+  mut extract: EngineExtract,
 ) -> Result<BrowserDraft> {
-  if engine.boundary_stop.is_some() {
-    registry::retain_completed_engine_work(&mut engine);
+  if extract.boundary_stop.is_some() {
+    registry::retain_completed_engine_extract(&mut extract);
   }
-  let termination = engine
+  let termination = extract
     .boundary_stop
     .map_or(Termination::Completed, termination_from_stop);
   let mut outcome = BrowserDraft {
     browser_id: browser_id.clone(),
     compatibility_family: engine_compatibility_family(browser_id),
-    detected: engine.installations_discovered > 0 || engine.installations_detected > 0,
-    installations_discovered: engine.installations_discovered,
-    discovery_failed: engine.all_detected_roots_failed(),
+    detected: extract.counters.installations_discovered > 0
+      || extract.counters.installations_detected > 0,
+    installations_discovered: extract.counters.installations_discovered,
+    discovery_failed: extract.all_detected_roots_failed(),
     profiles: Vec::new(),
     issues: Vec::new(),
     termination,
   };
-  for discovery in &engine.discovery_issues {
+  for discovery in &extract.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
   }
-  for profile in engine.profiles {
+  for profile in extract.profiles {
     outcome
       .profiles
-      .push(engine_profile_outcome(browser_id, profile)?);
+      .push(extracted_profile_outcome(browser_id, profile)?);
+  }
+  Ok(outcome)
+}
+
+/// Adapts a Gecko listing into a browser draft (`browser_profiles`).
+///
+/// Every discovered candidate becomes a `not_attempted` source descriptor with
+/// its frozen `selected`/`acquisition`; there is no `exists` filter (Gecko
+/// candidates are all `exists: true`). Empty candidates are ordinary listing
+/// emptiness, never `profile_extraction_failed` — that error is extract-only.
+fn engine_listing_outcome(browser_id: &BrowserId, listing: EngineListing) -> Result<BrowserDraft> {
+  let mut outcome = BrowserDraft {
+    browser_id: browser_id.clone(),
+    compatibility_family: engine_compatibility_family(browser_id),
+    detected: listing.counters.installations_discovered > 0
+      || listing.counters.installations_detected > 0,
+    installations_discovered: listing.counters.installations_discovered,
+    discovery_failed: listing.all_detected_roots_failed(),
+    profiles: Vec::new(),
+    issues: Vec::new(),
+    // Listing never acquires, so a request stop during discovery is the only
+    // termination it can carry.
+    termination: listing
+      .boundary_stop
+      .map_or(Termination::Completed, termination_from_stop),
+  };
+  for discovery in &listing.discovery_issues {
+    push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
+  }
+  for profile in listing.profiles {
+    outcome
+      .profiles
+      .push(discovered_profile_outcome(browser_id, profile)?);
+  }
+  Ok(outcome)
+}
+
+fn discovered_profile_outcome(
+  browser_id: &BrowserId,
+  profile: DiscoveredProfile,
+) -> Result<ProfileDraft> {
+  let identity = profile_identity(
+    browser_id,
+    profile.identity.installation_id.as_str(),
+    profile.identity.profile_id.as_str(),
+    &profile.identity.name,
+    &profile.identity.path,
+  )?;
+  let mut outcome = ProfileDraft::new(identity, profile.identity.is_default);
+  for candidate in profile.candidates {
+    outcome.sources.push(SourceDraft::new(
+      source_identity(
+        &candidate.path,
+        candidate.role.as_str(),
+        candidate.format.as_str(),
+        candidate.precedence,
+      ),
+      &candidate.path,
+      candidate.selected,
+      acquisition_code(candidate.acquisition),
+    ));
   }
   Ok(outcome)
 }
@@ -582,12 +688,14 @@ fn collect_report(
       chromium_browser_outcome(&browser_id, report)
     }
     "gecko" => {
-      let engine = if extract {
-        registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?
+      if extract {
+        let engine =
+          registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?;
+        engine_extract_outcome(&browser_id, engine)
       } else {
-        registry::gecko_profiles_with_runtime(&browser.canonical_id, runtime)?
-      };
-      engine_browser_outcome(&browser_id, engine)
+        let listing = registry::gecko_profiles_with_runtime(&browser.canonical_id, runtime)?;
+        engine_listing_outcome(&browser_id, listing)
+      }
     }
     engine => dispatch::remaining_engine_report(
       &browser_id,
@@ -623,8 +731,8 @@ fn chromium_listing_outcome(
   for profile in listing.profiles {
     let identity = profile_identity(
       browser_id,
-      &profile.installation_id,
-      &profile.profile_id,
+      profile.installation_id.as_str(),
+      profile.profile_id.as_str(),
       &profile.display_name,
       &profile.path,
     )?;
@@ -1383,36 +1491,39 @@ fn assemble_with_runtime(
   project_canonical_report_with_runtime(outcome, Some(runtime))
 }
 
-pub(crate) fn canonical_engine_extraction(
+/// Finalizes a single-browser [`EngineExtract`] (Gecko/Safari/IE report path and
+/// direct-path).
+pub(crate) fn canonical_engine_extract(
   browser_id: &str,
-  engine: registry::EngineExtractionDraft,
+  extract: EngineExtract,
 ) -> Result<Outcome> {
   let browser_id: BrowserId = browser_id.parse()?;
   Ok(finalize_outcomes(
     1,
-    vec![engine_browser_outcome(&browser_id, engine)?],
+    vec![engine_extract_outcome(&browser_id, extract)?],
   ))
 }
 
 #[cfg(test)]
-pub(crate) fn project_engine_report(
+pub(crate) fn project_engine_extract(
   browser_id: &str,
-  engine: registry::EngineExtractionDraft,
+  extract: EngineExtract,
 ) -> Result<ExtractionReport> {
-  Ok(project_canonical_report(canonical_engine_extraction(
-    browser_id, engine,
+  Ok(project_canonical_report(canonical_engine_extract(
+    browser_id, extract,
   )?))
 }
 
-pub(crate) fn canonical_engine_extraction_with_runtime(
+/// [`canonical_engine_extraction_with_runtime`] over the Gecko extract bag.
+pub(crate) fn canonical_engine_extract_with_runtime(
   browser_id: &str,
-  engine: registry::EngineExtractionDraft,
+  extract: EngineExtract,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
   let browser_id: BrowserId = browser_id.parse()?;
   Ok(finalize_outcomes_with_runtime(
     1,
-    vec![engine_browser_outcome(&browser_id, engine)?],
+    vec![engine_extract_outcome(&browser_id, extract)?],
     Some(runtime),
   ))
 }
@@ -1538,102 +1649,136 @@ fn canonical_direct_mozilla_extraction_impl(
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
   let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  #[cfg(test)]
-  let persistent_cookies = draft.persistent_cookies;
   let mut sources = Vec::new();
   if draft.persistent_attempted {
-    sources.push(registry::EngineSourceDraft {
-      path: db_path.to_path_buf(),
-      role: registry::SOURCE_ROLE_PERSISTENT,
-      format: super::mozilla::PERSISTENT_FORMAT_ID,
-      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-      selected: true,
-      cookies: {
-        #[cfg(test)]
-        {
-          persistent_cookies
-        }
-        #[cfg(not(test))]
-        {
-          Vec::new()
-        }
+    let records = draft.persistent_records;
+    let cookies_emitted = records.len();
+    let acquisition: SourceAcquisition = draft.persistent_acquisition_strategy.into();
+    let mut source = Source {
+      origin: SourceCandidate {
+        path: db_path.to_path_buf(),
+        role: CookieSourceRoleId::persistent(),
+        format: CookieSourceFormatId::known(super::mozilla::PERSISTENT_FORMAT_ID),
+        precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+        exists: true,
+        selected: true,
+        acquisition,
       },
-      records: draft.persistent_records,
-      rows_seen: draft.persistent_rows_seen,
-      rows_skipped: draft.persistent_rows_skipped,
-      rows_rejected: draft.persistent_rows_rejected,
-      acquisition: draft.persistent_acquisition_strategy.into(),
+      selected: true,
+      acquisition,
+      records,
+      stats: SourceStats {
+        rows_seen: draft.persistent_rows_seen,
+        cookies_emitted,
+        rows_skipped: draft.persistent_rows_skipped,
+        rows_rejected: draft.persistent_rows_rejected,
+        provider_failures: 0,
+      },
       acquisition_attempts: draft.persistent_acquisition_attempts,
       diagnostics: Vec::new(),
-      error: draft.persistent_error,
-      error_stage: match draft.persistent_failure_kind {
-        Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
-        _ => SourceFailureStage::Acquisition,
-      },
-      row_error: draft.persistent_row_error,
-    });
+      failure: None,
+      issues: Vec::new(),
+    };
+    if let Some(error) = draft.persistent_error {
+      let stage = match draft.persistent_failure_kind {
+        Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => {
+          SourceFailureStageNew::Query
+        }
+        _ => SourceFailureStageNew::Acquisition,
+      };
+      source.fail(stage, error);
+    }
+    source.push_row_read_failed(draft.persistent_row_error);
+    sources.push(source);
   }
-  sources.extend(
-    draft
-      .session_sources
-      .into_iter()
-      .map(|source| registry::EngineSourceDraft {
-        path: source.path,
-        role: registry::SOURCE_ROLE_SESSION,
-        format: source.format,
-        precedence: source.precedence,
-        selected: source.selected,
-        cookies: {
-          #[cfg(test)]
-          {
-            source.cookies
-          }
-          #[cfg(not(test))]
-          {
-            Vec::new()
-          }
-        },
-        records: source.records,
-        rows_seen: source.rows_seen,
-        rows_skipped: source.rows_skipped,
-        rows_rejected: source.rows_rejected,
+  sources.extend(draft.session_sources.into_iter().map(|session| {
+    let records = session.records;
+    let cookies_emitted = records.len();
+    let mut source = Source {
+      origin: SourceCandidate {
+        path: session.path,
+        role: CookieSourceRoleId::session(),
+        format: CookieSourceFormatId::known(session.format),
+        precedence: session.precedence,
+        exists: true,
+        selected: session.selected,
         acquisition: SourceAcquisition::StableFileImage,
-        acquisition_attempts: source.acquisition_attempts,
-        diagnostics: source.diagnostics,
-        error: source.error,
-        error_stage: SourceFailureStage::Parse,
-        row_error: None,
-      }),
-  );
-  let engine = registry::EngineExtractionDraft {
-    profiles: vec![registry::EngineProfileDraft {
-      profile_id: "1".repeat(64),
-      installation_id: "0".repeat(64),
-      installation_priority: 0,
-      legacy_installation_priority: 0,
-      legacy_profile_order: 0,
-      legacy_is_default: true,
-      legacy_eligible: true,
-      installation_path: profile_path.clone(),
-      legacy_installation_path: profile_path.clone(),
-      name: "direct".to_owned(),
-      legacy_name: "direct".to_owned(),
-      path: profile_path,
-      is_default: true,
-      persistent_source_discovered: true,
-      // Direct path: the caller named the file, so it is already acquired.
-      candidates: Vec::new(),
+      },
+      selected: session.selected,
+      acquisition: SourceAcquisition::StableFileImage,
+      records,
+      stats: SourceStats {
+        rows_seen: session.rows_seen,
+        cookies_emitted,
+        rows_skipped: session.rows_skipped,
+        rows_rejected: session.rows_rejected,
+        provider_failures: 0,
+      },
+      acquisition_attempts: session.acquisition_attempts,
+      diagnostics: session.diagnostics,
+      failure: None,
+      issues: Vec::new(),
+    };
+    // Same rule as the registry adapter: a session candidate keeps no row
+    // error, but rows it rejected still cost cookies, so the issue is keyed on
+    // the skipped count rather than on an error string being present.
+    source.push_row_read_failed(None);
+    if let Some(error) = session.error {
+      source.fail(SourceFailureStageNew::Parse, error);
+    }
+    source
+  }));
+  let extract = direct_engine_extract(profile_path, sources, draft.boundary_stop);
+  match runtime {
+    Some(runtime) => canonical_engine_extract_with_runtime("firefox", extract, runtime),
+    None => canonical_engine_extract("firefox", extract),
+  }
+}
+
+/// The synthetic single-profile [`EngineExtract`] every direct-path helper
+/// wraps its already-acquired [`Source`]s in. The frozen synthetic identity
+/// (`"0"*64` installation, `"1"*64` profile, display name `direct`) is Decision
+/// 10 and must not change.
+fn direct_engine_extract(
+  profile_path: std::path::PathBuf,
+  sources: Vec<Source>,
+  boundary_stop: Option<BoundaryStop>,
+) -> EngineExtract {
+  EngineExtract {
+    profiles: vec![ExtractedProfile {
+      identity: registry::EngineProfileIdentity {
+        profile_id: "1"
+          .repeat(64)
+          .parse()
+          .expect("synthetic profile id is valid"),
+        installation_id: "0"
+          .repeat(64)
+          .parse()
+          .expect("synthetic installation id is valid"),
+        installation_priority: 0,
+        installation_path: profile_path.clone(),
+        name: "direct".to_owned(),
+        path: profile_path.clone(),
+        is_default: true,
+        persistent_source_discovered: true,
+      },
+      legacy: registry::LegacyRank {
+        installation_priority: 0,
+        profile_order: 0,
+        is_default: true,
+        eligible: true,
+        installation_path: profile_path,
+        name: "direct".to_owned(),
+      },
       sources,
     }],
     discovery_issues: Vec::new(),
-    installations_discovered: 1,
-    installations_detected: 1,
-    installations_enumerated: 1,
-    boundary_stop: draft.boundary_stop,
-  };
-  match runtime {
-    Some(runtime) => canonical_engine_extraction_with_runtime("firefox", engine, runtime),
-    None => canonical_engine_extraction("firefox", engine),
+    counters: registry::DiscoveryCounters {
+      installations_discovered: 1,
+      installations_detected: 1,
+      installations_enumerated: 1,
+    },
+    boundary_stop,
   }
 }
 
@@ -1647,16 +1792,6 @@ pub(crate) fn canonical_direct_safari_extraction_with_runtime(
     db_path,
     "safari_binarycookies",
     SourceAcquisition::StableFileImage,
-    {
-      #[cfg(test)]
-      {
-        draft.cookies
-      }
-      #[cfg(not(test))]
-      {
-        Vec::new()
-      }
-    },
     draft.records,
     draft.stats.records_seen,
     draft.stats.records_skipped,
@@ -1678,7 +1813,6 @@ pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
     db_path,
     "internet_explorer_ese",
     SourceAcquisition::EseDatabase,
-    Vec::new(),
     draft.records,
     draft.stats.records_seen,
     draft.stats.records_skipped,
@@ -1695,7 +1829,6 @@ fn canonical_direct_engine_source(
   db_path: &std::path::Path,
   format: &'static str,
   acquisition: SourceAcquisition,
-  cookies: Vec<crate::common::enums::Cookie>,
   records: Vec<CookieRecord>,
   rows_seen: usize,
   rows_skipped: usize,
@@ -1705,52 +1838,37 @@ fn canonical_direct_engine_source(
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
   let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let engine = registry::EngineExtractionDraft {
-    profiles: vec![registry::EngineProfileDraft {
-      profile_id: "1".repeat(64),
-      installation_id: "0".repeat(64),
-      installation_priority: 0,
-      legacy_installation_priority: 0,
-      legacy_profile_order: 0,
-      legacy_is_default: true,
-      legacy_eligible: true,
-      installation_path: profile_path.clone(),
-      legacy_installation_path: profile_path.clone(),
-      name: "direct".to_owned(),
-      legacy_name: "direct".to_owned(),
-      path: profile_path,
-      is_default: true,
-      persistent_source_discovered: true,
-      // Direct path: the caller named the file, so it is already acquired.
-      candidates: Vec::new(),
-      sources: vec![registry::EngineSourceDraft {
-        path: db_path.to_path_buf(),
-        role: registry::SOURCE_ROLE_PERSISTENT,
-        format,
-        precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-        selected: true,
-        cookies,
-        records,
-        rows_seen,
-        rows_skipped,
-        rows_rejected,
-        acquisition,
-        acquisition_attempts,
-        diagnostics: Vec::new(),
-        error: None,
-        error_stage: SourceFailureStage::Parse,
-        row_error,
-      }],
-    }],
-    discovery_issues: Vec::new(),
-    installations_discovered: 1,
-    installations_detected: 1,
-    installations_enumerated: 1,
-    boundary_stop: None,
+  let cookies_emitted = records.len();
+  let mut source = Source {
+    origin: SourceCandidate {
+      path: db_path.to_path_buf(),
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known(format),
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition,
+    },
+    selected: true,
+    acquisition,
+    records,
+    stats: SourceStats {
+      rows_seen,
+      cookies_emitted,
+      rows_skipped,
+      rows_rejected,
+      provider_failures: 0,
+    },
+    acquisition_attempts,
+    diagnostics: Vec::new(),
+    failure: None,
+    issues: Vec::new(),
   };
+  source.push_row_read_failed(row_error);
+  let extract = direct_engine_extract(profile_path, vec![source], None);
   match runtime {
-    Some(runtime) => canonical_engine_extraction_with_runtime(browser_id, engine, runtime),
-    None => canonical_engine_extraction(browser_id, engine),
+    Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),
+    None => canonical_engine_extract(browser_id, extract),
   }
 }
 
@@ -1954,7 +2072,12 @@ pub(crate) fn chrome_profile_report(
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
   let profile = registry::select_chrome_profile_with_runtime(profile, &runtime)?;
-  browser_extraction_report_with_runtime("chrome", Some(&profile.profile_id), domains, &runtime)
+  browser_extraction_report_with_runtime(
+    "chrome",
+    Some(profile.profile_id.as_str()),
+    domains,
+    &runtime,
+  )
 }
 
 fn chromium_profile_descriptor(
@@ -1963,8 +2086,8 @@ fn chromium_profile_descriptor(
 ) -> Result<ProfileDescriptor> {
   let identity = profile_identity(
     browser_id,
-    &profile.installation_id,
-    &profile.profile_id,
+    profile.installation_id.as_str(),
+    profile.profile_id.as_str(),
     &profile.display_name,
     &profile.path,
   )?;
@@ -2421,8 +2544,8 @@ mod tests {
     let path = PathBuf::from("/chrome/Default");
     registry::ChromiumProfileDraft {
       profile: registry::ChromiumProfile {
-        profile_id: "c".repeat(64),
-        installation_id: "d".repeat(64),
+        profile_id: "c".repeat(64).parse().expect("valid profile id"),
+        installation_id: "d".repeat(64).parse().expect("valid installation id"),
         directory_name: "Default".to_owned(),
         display_name: "Person 1".to_owned(),
         path: path.clone(),
@@ -2500,23 +2623,13 @@ mod tests {
   /// rejected session candidate keeps `selected = false` per Section 5.7.
   #[test]
   fn engine_adapter_orders_sources_and_preserves_session_selection() {
-    let profile = registry::EngineProfileDraft {
-      profile_id: "c".repeat(64),
-      installation_id: "d".repeat(64),
-      installation_priority: 0,
-      legacy_installation_priority: 0,
-      legacy_profile_order: 0,
-      legacy_is_default: true,
-      legacy_eligible: true,
-      installation_path: PathBuf::from("/firefox"),
-      legacy_installation_path: PathBuf::from("/firefox"),
-      name: "default".to_owned(),
-      legacy_name: "default".to_owned(),
-      path: PathBuf::from("/firefox/Profiles/default"),
-      is_default: true,
-      persistent_source_discovered: true,
-      candidates: Vec::new(),
-      sources: vec![
+    let profile = extracted_profile(
+      "c",
+      "d",
+      "default",
+      "/firefox",
+      "/firefox/Profiles/default",
+      vec![
         engine_source(
           "sessionstore.jsonlz4",
           "session",
@@ -2527,9 +2640,9 @@ mod tests {
         engine_source("cookies.sqlite", "persistent", 10, true, None),
         engine_source("recovery.baklz4", "session", 30, true, None),
       ],
-    };
+    );
     let engine =
-      engine_profile_outcome(&BrowserId::known("firefox"), profile).expect("adapt the profile");
+      extracted_profile_outcome(&BrowserId::known("firefox"), profile).expect("adapt the profile");
     let report = assemble(1, vec![outcome(vec![engine], false)]);
     let ordered = report.profiles[0]
       .sources
@@ -2561,24 +2674,67 @@ mod tests {
     precedence: u16,
     selected: bool,
     error: Option<&str>,
-  ) -> registry::EngineSourceDraft {
-    registry::EngineSourceDraft {
-      path: PathBuf::from("/firefox/Profiles/default").join(name),
-      role,
-      format: "mozilla_sqlite",
-      precedence,
+  ) -> Source {
+    let mut source = Source {
+      origin: SourceCandidate {
+        path: PathBuf::from("/firefox/Profiles/default").join(name),
+        role: CookieSourceRoleId::known(role),
+        format: CookieSourceFormatId::known("mozilla_sqlite"),
+        precedence,
+        exists: true,
+        selected,
+        acquisition: registry::SourceAcquisition::StableFileImage,
+      },
       selected,
-      cookies: Vec::new(),
-      records: Vec::new(),
-      rows_seen: 0,
-      rows_skipped: 0,
-      rows_rejected: 0,
       acquisition: registry::SourceAcquisition::StableFileImage,
+      records: Vec::new(),
+      stats: SourceStats::default(),
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
-      error: error.map(str::to_owned),
-      error_stage: SourceFailureStage::Acquisition,
-      row_error: None,
+      failure: None,
+      issues: Vec::new(),
+    };
+    if let Some(error) = error {
+      source.fail(SourceFailureStageNew::Acquisition, error);
+    }
+    source
+  }
+
+  /// Builds an [`ExtractedProfile`] fixture from repeated-char ids.
+  fn extracted_profile(
+    profile_id_char: &str,
+    installation_id_char: &str,
+    name: &str,
+    installation_path: &str,
+    path: &str,
+    sources: Vec<Source>,
+  ) -> ExtractedProfile {
+    ExtractedProfile {
+      identity: registry::EngineProfileIdentity {
+        profile_id: profile_id_char
+          .repeat(64)
+          .parse()
+          .expect("valid profile id"),
+        installation_id: installation_id_char
+          .repeat(64)
+          .parse()
+          .expect("valid installation id"),
+        installation_priority: 0,
+        installation_path: PathBuf::from(installation_path),
+        name: name.to_owned(),
+        path: PathBuf::from(path),
+        is_default: true,
+        persistent_source_discovered: true,
+      },
+      legacy: registry::LegacyRank {
+        installation_priority: 0,
+        profile_order: 0,
+        is_default: true,
+        eligible: true,
+        installation_path: PathBuf::from(installation_path),
+        name: name.to_owned(),
+      },
+      sources,
     }
   }
 
@@ -2869,10 +3025,12 @@ mod tests {
   fn skipped_rows_without_a_row_error_still_degrade_the_report() {
     let mut profile = ProfileDraft::new(identity(), true);
     let mut source = engine_source("Cookies.binarycookies", "persistent", 10, true, None);
-    source.rows_seen = 3;
-    source.rows_skipped = 2;
-    source.row_error = None;
-    profile.sources.push(engine_source_outcome(source));
+    source.stats.rows_seen = 3;
+    source.stats.rows_skipped = 2;
+    // The adapter attaches the row issue from the skip count alone; no row
+    // error string is available. `source_to_draft` only copies it.
+    source.push_row_read_failed(None);
+    profile.sources.push(source_to_draft(source));
 
     let report = assemble(1, vec![outcome(vec![profile], false)]);
     let source = &report.profiles[0].sources[0];
@@ -2971,14 +3129,14 @@ mod tests {
       ("internet_explorer_ese", "internet-explorer"),
     ] {
       let mut source = engine_source(name, SOURCE_ROLE_PERSISTENT, 10, true, None);
-      source.format = format;
-      source.cookies = vec![cookie(name)];
+      source.origin.format = CookieSourceFormatId::known(format);
       source.records = vec![fixture_record(cookie(name), 0)];
-      source.rows_seen = 3;
-      source.rows_skipped = 2;
-      source.row_error = Some(format!("{name} rejected two records"));
+      source.stats.rows_seen = 3;
+      source.stats.rows_skipped = 2;
+      source.stats.cookies_emitted = source.records.len();
+      source.push_row_read_failed(Some(format!("{name} rejected two records")));
       let mut profile = ProfileDraft::new(identity(), true);
-      profile.sources.push(engine_source_outcome(source));
+      profile.sources.push(source_to_draft(source));
       profiles.push(profile);
     }
 
@@ -2999,7 +3157,7 @@ mod tests {
   #[test]
   fn a_source_that_skipped_nothing_reports_no_row_issue() {
     let mut profile = ProfileDraft::new(identity(), true);
-    profile.sources.push(engine_source_outcome(engine_source(
+    profile.sources.push(source_to_draft(engine_source(
       "cookies.sqlite",
       "persistent",
       10,
@@ -3017,13 +3175,13 @@ mod tests {
   #[test]
   fn a_source_failure_reports_the_stage_it_actually_failed_at() {
     for (stage, expected) in [
-      (SourceFailureStage::Acquisition, "acquisition"),
-      (SourceFailureStage::Parse, "parse"),
-      (SourceFailureStage::Query, "query"),
+      (SourceFailureStageNew::Acquisition, "acquisition"),
+      (SourceFailureStageNew::Parse, "parse"),
+      (SourceFailureStageNew::Query, "query"),
     ] {
-      let mut source = engine_source("cookies.sqlite", "persistent", 10, true, Some("boom"));
-      source.error_stage = stage;
-      let outcome = engine_source_outcome(source);
+      let mut source = engine_source("cookies.sqlite", "persistent", 10, true, None);
+      source.fail(stage, "boom");
+      let outcome = source_to_draft(source);
       let issue = outcome
         .issues
         .iter()
@@ -3090,15 +3248,9 @@ mod tests {
       IssueSeverityCode::error(),
       "profile level",
     ));
-    let mut source = engine_source(
-      "cookies.sqlite",
-      "persistent",
-      10,
-      true,
-      Some("source level"),
-    );
-    source.error_stage = SourceFailureStage::Parse;
-    profile.sources.push(engine_source_outcome(source));
+    let mut source = engine_source("cookies.sqlite", "persistent", 10, true, None);
+    source.fail(SourceFailureStageNew::Parse, "source level");
+    profile.sources.push(source_to_draft(source));
 
     let report = assemble(1, vec![outcome(vec![profile], false)]);
     let expected = &report.profiles[0].profile;
@@ -3191,7 +3343,7 @@ mod engine_chain_tests {
 
     let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
     let browser = BrowserId::known("firefox");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.status, ReportStatusCode::complete());
@@ -3244,7 +3396,7 @@ mod engine_chain_tests {
     let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
     assert!(engine.profiles.is_empty());
     let browser = BrowserId::known("firefox");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.status, ReportStatusCode::no_sources());
@@ -3267,19 +3419,30 @@ mod engine_chain_tests {
       let temp = TempDir::new(&format!("{name}-metadata-denied-report"));
       let context = test_seams::context(platform, temp.path().to_path_buf());
       let root = test_seams::primary_root_path(&context, browser_id);
-      let engine =
+      let browser = BrowserId::known(browser_id);
+
+      // All three non-Chromium engines share the listing tower now, so a
+      // metadata-denied root produces one browser draft the same way.
+      let listing =
         test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root.clone())
           .expect("discovery retains the metadata failure");
-      assert_eq!(engine.installations_detected, 1, "{name}");
-      assert_eq!(engine.installations_discovered, 0, "{name}");
-      assert_eq!(engine.installations_enumerated, 0, "{name}");
-      assert!(engine.all_detected_roots_failed(), "{name}");
+      let counters = listing.counters;
+      let all_failed = listing.all_detected_roots_failed();
+      let report_outcome =
+        engine_listing_outcome(&browser, listing).expect("adapt engine discovery");
+      let repeat = test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root)
+        .expect("repeat deterministic discovery for listing");
+      let listing_outcome =
+        engine_listing_outcome(&browser, repeat).expect("adapt listing discovery");
 
-      let browser = BrowserId::known(browser_id);
-      let outcome = engine_browser_outcome(&browser, engine).expect("adapt engine discovery");
-      assert!(outcome.detected, "{name}");
-      assert!(outcome.discovery_failed, "{name}");
-      let report = assemble(1, vec![outcome]);
+      assert_eq!(counters.installations_detected, 1, "{name}");
+      assert_eq!(counters.installations_discovered, 0, "{name}");
+      assert_eq!(counters.installations_enumerated, 0, "{name}");
+      assert!(all_failed, "{name}");
+
+      assert!(report_outcome.detected, "{name}");
+      assert!(report_outcome.discovery_failed, "{name}");
+      let report = assemble(1, vec![report_outcome]);
       assert_eq!(report.status, ReportStatusCode::failed(), "{name}");
       assert_eq!(report.summary.browsers_detected, 1, "{name}");
       let issue = report
@@ -3297,10 +3460,7 @@ mod engine_chain_tests {
         "{name}"
       );
 
-      let engine = test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root)
-        .expect("repeat deterministic discovery for listing");
-      let outcome = engine_browser_outcome(&browser, engine).expect("adapt listing discovery");
-      let error = profile_descriptors_from_outcome(browser_id, outcome)
+      let error = profile_descriptors_from_outcome(browser_id, listing_outcome)
         .expect_err("an unreadable root must not become an empty profile list");
       assert!(
         error
@@ -3346,7 +3506,7 @@ mod engine_chain_tests {
     );
 
     let browser = BrowserId::known("firefox");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.status, ReportStatusCode::failed());
@@ -3383,7 +3543,7 @@ mod engine_chain_tests {
 
     let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let browser = BrowserId::known("safari");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.summary.installations_discovered, 1);
@@ -3419,7 +3579,7 @@ mod engine_chain_tests {
 
     let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let outcome =
-      engine_browser_outcome(&BrowserId::known("safari"), engine).expect("adapt the Safari report");
+      engine_extract_outcome(&BrowserId::known("safari"), engine).expect("adapt the Safari report");
     assemble(1, vec![outcome])
   }
 
@@ -3483,7 +3643,7 @@ mod engine_chain_tests {
 
     let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let browser = BrowserId::known("safari");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.summary.browsers_detected, 0);
@@ -3509,7 +3669,7 @@ mod engine_chain_tests {
 
     let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
     let browser = BrowserId::known("safari");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.summary.installations_discovered, 1);
@@ -3553,7 +3713,7 @@ mod engine_chain_tests {
       .expect("internet explorer report");
 
     let browser = BrowserId::known("internet_explorer");
-    let outcome = engine_browser_outcome(&browser, engine).expect("adapt the engine outcome");
+    let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
     assert_eq!(report.status, ReportStatusCode::complete());
@@ -3633,7 +3793,7 @@ mod engine_chain_tests {
     drop(connection);
 
     let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
-    let outcome = engine_browser_outcome(&BrowserId::known("firefox"), engine)
+    let outcome = engine_extract_outcome(&BrowserId::known("firefox"), engine)
       .expect("adapt the engine outcome");
     let report = assemble(1, vec![outcome]);
 
@@ -3696,9 +3856,14 @@ mod engine_chain_tests {
     assert_eq!(all.installations_discovered, 2);
     let selected_profile = all.installations[0].profiles[0].profile.profile_id.clone();
 
-    let one =
-      test_seams::chromium_report(&context, "chrome", Some(&selected_profile), None, no_keys())
-        .expect("profile-selected chromium report");
+    let one = test_seams::chromium_report(
+      &context,
+      "chrome",
+      Some(selected_profile.as_str()),
+      None,
+      no_keys(),
+    )
+    .expect("profile-selected chromium report");
     assert_eq!(one.installations.len(), 1);
     assert_eq!(one.installations_discovered, 2);
 
@@ -3715,25 +3880,22 @@ mod engine_chain_tests {
   /// the old build produced -- extract every profile, then drop the unwanted
   /// ones -- and requires them to be identical field for field, issues and
   /// counters included.
-  fn post_filtered_report(
+  fn post_filtered_extract_report(
     browser: &BrowserId,
-    engine: registry::EngineExtractionDraft,
+    extract: EngineExtract,
     profile_id: &str,
   ) -> ExtractionReport {
-    let mut outcome = engine_browser_outcome(browser, engine).expect("adapt the engine outcome");
+    let mut outcome = engine_extract_outcome(browser, extract).expect("adapt the engine outcome");
     outcome
       .profiles
       .retain(|profile| profile.profile.profile_id.as_str() == profile_id);
     assemble(1, vec![outcome])
   }
 
-  fn selected_report(
-    browser: &BrowserId,
-    engine: registry::EngineExtractionDraft,
-  ) -> ExtractionReport {
+  fn selected_extract_report(browser: &BrowserId, extract: EngineExtract) -> ExtractionReport {
     assemble(
       1,
-      vec![engine_browser_outcome(browser, engine).expect("adapt the engine outcome")],
+      vec![engine_extract_outcome(browser, extract).expect("adapt the engine outcome")],
     )
   }
 
@@ -3779,12 +3941,12 @@ mod engine_chain_tests {
     let browser = BrowserId::known("firefox");
     let full = test_seams::gecko_report(&context, "firefox", None, None).expect("full report");
     assert_eq!(full.profiles.len(), 2);
-    let selected = full.profiles[1].profile_id.clone();
-    let expected = post_filtered_report(&browser, full, &selected);
+    let selected = full.profiles[1].identity.profile_id.as_str().to_owned();
+    let expected = post_filtered_extract_report(&browser, full, &selected);
 
     let engine = test_seams::gecko_report(&context, "firefox", Some(&selected), None)
       .expect("profile-selected report");
-    let actual = selected_report(&browser, engine);
+    let actual = selected_extract_report(&browser, engine);
 
     assert_eq!(actual.status, ReportStatusCode::partial());
     assert_eq!(actual.summary.cookies_emitted, 1);
@@ -3820,12 +3982,15 @@ mod engine_chain_tests {
     let browser = BrowserId::known("safari");
     let full = test_seams::safari_report(&context, "safari", None, None).expect("full report");
     assert_eq!(full.profiles.len(), 2);
-    let selected = full.profiles[1].profile_id.clone();
-    let expected = post_filtered_report(&browser, full, &selected);
+    let selected = full.profiles[1].identity.profile_id.as_str().to_owned();
+    let expected = post_filtered_extract_report(&browser, full, &selected);
 
     let engine = test_seams::safari_report(&context, "safari", Some(&selected), None)
       .expect("profile-selected report");
-    assert_eq!(wire(&selected_report(&browser, engine)), wire(&expected));
+    assert_eq!(
+      wire(&selected_extract_report(&browser, engine)),
+      wire(&expected)
+    );
   }
 
   #[test]
@@ -3869,8 +4034,8 @@ mod engine_chain_tests {
       test_seams::internet_explorer_report(&context, "internet_explorer", None, None, rows)
         .expect("full report");
     assert_eq!(full.profiles.len(), 2);
-    let selected = full.profiles[1].profile_id.clone();
-    let expected = post_filtered_report(&browser, full, &selected);
+    let selected = full.profiles[1].identity.profile_id.as_str().to_owned();
+    let expected = post_filtered_extract_report(&browser, full, &selected);
 
     let engine = test_seams::internet_explorer_report(
       &context,
@@ -3880,7 +4045,7 @@ mod engine_chain_tests {
       rows,
     )
     .expect("profile-selected report");
-    let actual = selected_report(&browser, engine);
+    let actual = selected_extract_report(&browser, engine);
 
     assert_eq!(actual.summary.cookies_emitted, 1);
     assert_eq!(wire(&actual), wire(&expected));

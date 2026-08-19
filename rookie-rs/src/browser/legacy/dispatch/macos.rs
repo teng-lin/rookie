@@ -10,7 +10,7 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<super::super::LegacySnapshot> {
   match engine {
-    "safari" => super::super::cookies_and_skipped_from_engine_draft(
+    "safari" => super::super::cookies_and_skipped_from_engine_extract(
       canonical_id,
       registry::legacy_safari_outcome_with_runtime(canonical_id, domains, runtime)?,
       runtime,

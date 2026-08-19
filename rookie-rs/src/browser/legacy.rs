@@ -8,9 +8,7 @@ mod dispatch;
 use super::cookie_record::{FinalizedCookieRecord, LegacyProjectionSemantics};
 use super::mozilla::MozillaProfile;
 use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome, Termination};
-#[cfg(test)]
-use super::registry::EngineSourceDraft;
-use super::registry::{self, EngineExtractionDraft};
+use super::registry::{self, EngineExtract, EngineListing};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::enums::{Cookie, DetailedCookie};
 use anyhow::{bail, Result};
@@ -45,17 +43,36 @@ pub(crate) fn is_browser_not_installed(error: &anyhow::Error) -> bool {
     .any(|cause| cause.downcast_ref::<BrowserNotInstalled>().is_some())
 }
 
-fn discovery_failure(outcome: &EngineExtractionDraft, browser_id: &str) -> Option<String> {
-  if outcome.all_detected_roots_failed() {
+/// Renders the browser-absent-vs-discovery-failed message for the Gecko
+/// listing.
+///
+/// The Safari/IE towers reach the same policy through
+/// `project_engine_outcome`; only Gecko's `firefox_profiles` needs it directly,
+/// and Gecko has moved onto the listing/extract split.
+fn listing_discovery_failure(listing: &EngineListing, browser_id: &str) -> Option<String> {
+  discovery_failure_parts(
+    listing.all_detected_roots_failed(),
+    listing.profiles.is_empty(),
+    &listing.discovery_issues,
+    browser_id,
+  )
+}
+
+fn discovery_failure_parts(
+  all_detected_roots_failed: bool,
+  profiles_empty: bool,
+  discovery_issues: &[registry::DiscoveryIssue],
+  browser_id: &str,
+) -> Option<String> {
+  if all_detected_roots_failed {
     return Some(format!(
       "every detected {browser_id} installation failed profile enumeration"
     ));
   }
-  if !outcome.profiles.is_empty() {
+  if !profiles_empty {
     return None;
   }
-  let failures = outcome
-    .discovery_issues
+  let failures = discovery_issues
     .iter()
     .filter(|issue| !registry::is_informational_discovery_issue(issue.code))
     .map(|issue| crate::common::diagnostic::sanitize(&issue.message))
@@ -70,24 +87,24 @@ fn discovery_failure(outcome: &EngineExtractionDraft, browser_id: &str) -> Optio
 }
 
 #[cfg(test)]
-pub(crate) fn project_engine_outcome(
+pub(crate) fn project_engine_extract_outcome(
   browser_id: &str,
-  outcome: EngineExtractionDraft,
+  extract: EngineExtract,
 ) -> Result<Vec<Cookie>> {
   project_canonical_outcome(
     browser_id,
-    super::report_build::canonical_engine_extraction(browser_id, outcome)?,
+    super::report_build::canonical_engine_extract(browser_id, extract)?,
   )
 }
 
-fn project_engine_outcome_with_runtime(
+fn project_engine_extract_with_runtime(
   browser_id: &str,
-  outcome: EngineExtractionDraft,
+  extract: EngineExtract,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   project_canonical_outcome_with_runtime(
     browser_id,
-    super::report_build::canonical_engine_extraction_with_runtime(browser_id, outcome, runtime)?,
+    super::report_build::canonical_engine_extract_with_runtime(browser_id, extract, runtime)?,
     runtime,
   )
 }
@@ -286,9 +303,11 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
       Ok((cookies, skip_warnings(decrypt, 0)))
     }
     "gecko" => {
-      let draft =
+      let extract =
         registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
-      cookies_and_skipped_from_engine_draft(&browser.canonical_id, draft, runtime)
+      let skipped = engine_extract_skipped_row_count(&extract);
+      let cookies = project_engine_extract_with_runtime(&browser.canonical_id, extract, runtime)?;
+      Ok((cookies, skip_warnings(0, skipped)))
     }
     engine => dispatch::remaining_engine_snapshot_with_runtime(
       &browser.canonical_id,
@@ -299,13 +318,13 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
   }
 }
 
-pub(super) fn cookies_and_skipped_from_engine_draft(
+pub(super) fn cookies_and_skipped_from_engine_extract(
   canonical_id: &str,
-  draft: EngineExtractionDraft,
+  extract: EngineExtract,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<LegacySnapshot> {
-  let skipped = engine_skipped_row_count(&draft);
-  let cookies = project_engine_outcome_with_runtime(canonical_id, draft, runtime)?;
+  let skipped = engine_extract_skipped_row_count(&extract);
+  let cookies = project_engine_extract_with_runtime(canonical_id, extract, runtime)?;
   Ok((cookies, skip_warnings(0, skipped)))
 }
 
@@ -341,12 +360,12 @@ fn chromium_decrypt_skip_count(draft: &registry::ChromiumRegistryDraft) -> u64 {
   count
 }
 
-fn engine_skipped_row_count(draft: &EngineExtractionDraft) -> u64 {
-  draft
+fn engine_extract_skipped_row_count(extract: &EngineExtract) -> u64 {
+  extract
     .profiles
     .iter()
     .flat_map(|profile| profile.sources.iter())
-    .map(|source| source.rows_skipped as u64)
+    .map(|source| source.stats.rows_skipped as u64)
     .fold(0u64, u64::saturating_add)
 }
 
@@ -361,17 +380,17 @@ pub(crate) fn gecko_profiles_with_runtime(
   browser_id: &str,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<MozillaProfile>> {
-  let outcome = registry::legacy_gecko_profiles_with_runtime(browser_id, runtime)?;
-  if let Some(error) = discovery_failure(&outcome, browser_id) {
+  let listing = registry::legacy_gecko_profiles_with_runtime(browser_id, runtime)?;
+  if let Some(error) = listing_discovery_failure(&listing, browser_id) {
     bail!(error)
   }
-  let profiles = outcome
+  let profiles = listing
     .profiles
     .into_iter()
     .map(|profile| MozillaProfile {
-      name: profile.legacy_name,
-      path: profile.path,
-      is_default: profile.is_default,
+      name: profile.legacy.name,
+      path: profile.identity.path,
+      is_default: profile.identity.is_default,
     })
     .collect::<Vec<_>>();
   if profiles.is_empty() {
@@ -385,82 +404,110 @@ pub(crate) fn gecko_profiles_with_runtime(
 mod tests {
   use super::*;
   use crate::browser::registry::{
-    test_seams, EngineProfileDraft, PlatformId, SourceAcquisition, SourceFailureStage,
-    PERSISTENT_SOURCE_PRECEDENCE, SOURCE_ROLE_PERSISTENT, SOURCE_ROLE_SESSION,
+    test_seams, DiscoveryCounters, EngineProfileIdentity, ExtractedProfile, LegacyRank, PlatformId,
+    SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
   };
+  use crate::browser::report_core::{CookieSourceFormatId, CookieSourceRoleId};
+  use crate::browser::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
   use std::path::PathBuf;
 
-  fn profile_with(source: Option<EngineSourceDraft>) -> EngineExtractionDraft {
-    EngineExtractionDraft {
-      profiles: vec![EngineProfileDraft {
-        profile_id: "a".repeat(64),
-        installation_id: "b".repeat(64),
-        installation_priority: 10,
-        legacy_installation_priority: 10,
-        legacy_profile_order: 0,
-        legacy_is_default: true,
-        legacy_eligible: true,
-        installation_path: PathBuf::from("/browser"),
-        legacy_installation_path: PathBuf::from("/browser"),
-        name: "default".to_owned(),
-        legacy_name: "default".to_owned(),
-        path: PathBuf::from("/browser/default"),
-        is_default: true,
-        persistent_source_discovered: true,
+  fn profile_with(source: Option<Source>) -> EngineExtract {
+    EngineExtract {
+      profiles: vec![ExtractedProfile {
+        identity: EngineProfileIdentity {
+          profile_id: "a".repeat(64).parse().expect("valid profile id"),
+          installation_id: "b".repeat(64).parse().expect("valid installation id"),
+          installation_priority: 10,
+          installation_path: PathBuf::from("/browser"),
+          name: "default".to_owned(),
+          path: PathBuf::from("/browser/default"),
+          is_default: true,
+          persistent_source_discovered: true,
+        },
+        legacy: LegacyRank {
+          installation_priority: 10,
+          profile_order: 0,
+          is_default: true,
+          eligible: true,
+          installation_path: PathBuf::from("/browser"),
+          name: "default".to_owned(),
+        },
         // Post-populate fixture: these sources have already been queried.
-        candidates: Vec::new(),
         sources: source.into_iter().collect(),
       }],
-      installations_detected: 1,
-      installations_discovered: 1,
-      installations_enumerated: 1,
-      ..EngineExtractionDraft::default()
+      counters: DiscoveryCounters {
+        installations_detected: 1,
+        installations_discovered: 1,
+        installations_enumerated: 1,
+      },
+      discovery_issues: Vec::new(),
+      boundary_stop: None,
     }
   }
 
-  fn persistent_source(error: Option<&str>, row_error: Option<&str>) -> EngineSourceDraft {
-    EngineSourceDraft {
-      path: PathBuf::from("/browser/default/cookies.sqlite"),
-      role: SOURCE_ROLE_PERSISTENT,
-      format: "mozilla_sqlite",
-      precedence: PERSISTENT_SOURCE_PRECEDENCE,
-      selected: true,
-      cookies: Vec::new(),
+  fn source_from(
+    path: &str,
+    role: CookieSourceRoleId,
+    format: &str,
+    precedence: u16,
+    selected: bool,
+    acquisition: SourceAcquisition,
+  ) -> Source {
+    Source {
+      origin: SourceCandidate {
+        path: PathBuf::from(path),
+        role,
+        format: CookieSourceFormatId::known(format),
+        precedence,
+        exists: true,
+        selected,
+        acquisition,
+      },
+      selected,
+      acquisition,
       records: Vec::new(),
-      rows_seen: usize::from(row_error.is_some()),
-      rows_skipped: usize::from(row_error.is_some()),
-      rows_rejected: usize::from(row_error.is_some()),
-      acquisition: SourceAcquisition::NotAttempted,
+      stats: SourceStats::default(),
       acquisition_attempts: 1,
       diagnostics: Vec::new(),
-      error: error.map(str::to_owned),
-      error_stage: SourceFailureStage::Acquisition,
-      row_error: row_error.map(str::to_owned),
+      failure: None,
+      issues: Vec::new(),
     }
   }
 
-  fn failed_session_source(path: &str, error: &str) -> EngineSourceDraft {
-    EngineSourceDraft {
-      path: PathBuf::from(path),
-      role: SOURCE_ROLE_SESSION,
-      format: "firefox_session_jsonlz4",
-      precedence: 20,
-      selected: false,
-      cookies: Vec::new(),
-      records: Vec::new(),
-      rows_seen: 0,
-      rows_skipped: 0,
-      rows_rejected: 0,
-      acquisition: SourceAcquisition::StableFileImage,
-      acquisition_attempts: 1,
-      diagnostics: Vec::new(),
-      error: Some(error.to_owned()),
-      error_stage: SourceFailureStage::Parse,
-      row_error: None,
+  fn persistent_source(error: Option<&str>, row_error: Option<&str>) -> Source {
+    let mut source = source_from(
+      "/browser/default/cookies.sqlite",
+      CookieSourceRoleId::persistent(),
+      "mozilla_sqlite",
+      PERSISTENT_SOURCE_PRECEDENCE,
+      true,
+      SourceAcquisition::NotAttempted,
+    );
+    let rows = usize::from(row_error.is_some());
+    source.stats.rows_seen = rows;
+    source.stats.rows_skipped = rows;
+    source.stats.rows_rejected = rows;
+    if let Some(error) = error {
+      source.fail(SourceFailureStage::Acquisition, error);
     }
+    source.push_row_read_failed(row_error.map(str::to_owned));
+    source
   }
 
-  fn actual_safari_outcome(fixture: &[u8]) -> EngineExtractionDraft {
+  fn failed_session_source(path: &str, error: &str) -> Source {
+    let mut source = source_from(
+      path,
+      CookieSourceRoleId::session(),
+      "firefox_session_jsonlz4",
+      20,
+      false,
+      SourceAcquisition::StableFileImage,
+    );
+    source.fail(SourceFailureStage::Parse, error);
+    source
+  }
+
+  fn actual_safari_outcome(fixture: &[u8]) -> EngineExtract {
     let directory = crate::utils::TempDir::new().expect("temporary Safari fixture directory");
     let context = test_seams::context(PlatformId::Macos, directory.path().to_path_buf());
     let library = test_seams::primary_root_path(&context, "safari");
@@ -471,25 +518,28 @@ mod tests {
     test_seams::safari_report(&context, "safari", None, None).expect("extract Safari fixture")
   }
 
-  fn empty_outcome_with_issue(code: &'static str) -> EngineExtractionDraft {
-    EngineExtractionDraft {
+  fn empty_outcome_with_issue(code: &'static str) -> EngineExtract {
+    EngineExtract {
       discovery_issues: vec![registry::DiscoveryIssue {
         code,
         path: PathBuf::from("/browser/discovery"),
         message: "injected discovery failure".to_owned(),
         occurrences: 1,
       }],
-      installations_detected: 1,
-      installations_discovered: 1,
-      installations_enumerated: 1,
-      ..EngineExtractionDraft::default()
+      counters: DiscoveryCounters {
+        installations_detected: 1,
+        installations_discovered: 1,
+        installations_enumerated: 1,
+      },
+      profiles: Vec::new(),
+      boundary_stop: None,
     }
   }
 
   #[test]
   fn ordinary_absence_stays_typed_for_load() {
     let error =
-      project_engine_outcome("firefox", EngineExtractionDraft::default()).expect_err("absence");
+      project_engine_extract_outcome("firefox", EngineExtract::default()).expect_err("absence");
     assert!(is_browser_not_installed(&error));
   }
 
@@ -499,7 +549,7 @@ mod tests {
       "mozilla_profiles_ini_invalid",
       "safari_profile_enumeration_failed",
     ] {
-      let error = project_engine_outcome("browser", empty_outcome_with_issue(code))
+      let error = project_engine_extract_outcome("browser", empty_outcome_with_issue(code))
         .expect_err("discovery failures must surface");
       assert!(!is_browser_not_installed(&error), "{code}");
       assert!(error.to_string().contains("injected discovery failure"));
@@ -511,7 +561,8 @@ mod tests {
     let mut outcome = empty_outcome_with_issue("profile_enumeration_failed");
     outcome.discovery_issues[0].message =
       "failed /private/secret/profile and C:\\Users\\Secret\\Profile".to_owned();
-    let error = project_engine_outcome("browser", outcome).expect_err("profile discovery failed");
+    let error =
+      project_engine_extract_outcome("browser", outcome).expect_err("profile discovery failed");
     let diagnostic = error.to_string();
     assert!(!diagnostic.contains("/private/secret"));
     assert!(!diagnostic.contains(r"C:\Users\Secret"));
@@ -532,7 +583,7 @@ mod tests {
       "duplicate_installation",
       "duplicate_profile",
     ] {
-      let error = project_engine_outcome("browser", empty_outcome_with_issue(code))
+      let error = project_engine_extract_outcome("browser", empty_outcome_with_issue(code))
         .expect_err("empty discovery remains absence");
       assert!(is_browser_not_installed(&error), "{code}");
     }
@@ -544,7 +595,7 @@ mod tests {
       persistent_source(Some("database is corrupt"), None),
       persistent_source(None, Some("every row failed")),
     ] {
-      let error = project_engine_outcome("firefox", profile_with(Some(source)))
+      let error = project_engine_extract_outcome("firefox", profile_with(Some(source)))
         .expect_err("real extraction failure");
       assert!(!is_browser_not_installed(&error));
     }
@@ -552,7 +603,7 @@ mod tests {
 
   #[test]
   fn internet_explorer_all_row_failure_remains_an_error() {
-    let error = project_engine_outcome(
+    let error = project_engine_extract_outcome(
       "internet_explorer",
       profile_with(Some(persistent_source(
         None,
@@ -565,9 +616,12 @@ mod tests {
     assert!(!is_browser_not_installed(&error));
 
     let mut source = persistent_source(None, None);
-    source.rows_seen = 1;
-    source.rows_skipped = 1;
-    let error = project_engine_outcome("internet_explorer", profile_with(Some(source)))
+    source.stats.rows_seen = 1;
+    source.stats.rows_skipped = 1;
+    // The adapter attaches the row issue from the skip count with no detailed
+    // message; the projection must still treat it as a decode failure.
+    source.push_row_read_failed(None);
+    let error = project_engine_extract_outcome("internet_explorer", profile_with(Some(source)))
       .expect_err("skipped WebCache rows need an error even without a detailed row message");
     assert!(error
       .to_string()
@@ -579,10 +633,10 @@ mod tests {
     let outcome = actual_safari_outcome(&crate::browser::safari::embedded_nul_test_fixture(
       "name", false,
     ));
-    assert_eq!(outcome.profiles[0].sources[0].rows_seen, 1);
-    assert_eq!(outcome.profiles[0].sources[0].rows_skipped, 1);
+    assert_eq!(outcome.profiles[0].sources[0].stats.rows_seen, 1);
+    assert_eq!(outcome.profiles[0].sources[0].stats.rows_skipped, 1);
 
-    let error = project_engine_outcome("safari", outcome)
+    let error = project_engine_extract_outcome("safari", outcome)
       .expect_err("legacy Safari must preserve the existing all-malformed error");
     assert!(error.to_string().contains("c string contains embedded NUL"));
     assert!(!is_browser_not_installed(&error));
@@ -593,11 +647,11 @@ mod tests {
     let outcome = actual_safari_outcome(&crate::browser::safari::embedded_nul_test_fixture(
       "path", true,
     ));
-    assert_eq!(outcome.profiles[0].sources[0].rows_seen, 2);
-    assert_eq!(outcome.profiles[0].sources[0].rows_skipped, 1);
+    assert_eq!(outcome.profiles[0].sources[0].stats.rows_seen, 2);
+    assert_eq!(outcome.profiles[0].sources[0].stats.rows_skipped, 1);
 
-    let cookies =
-      project_engine_outcome("safari", outcome).expect("legacy Safari keeps the valid record");
+    let cookies = project_engine_extract_outcome("safari", outcome)
+      .expect("legacy Safari keeps the valid record");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].domain, ".good.test");
     assert_eq!(cookies[0].name, "good");
@@ -613,7 +667,7 @@ mod tests {
       failed_session_source("/browser/default/sessionstore.js", "invalid JSON"),
     ]);
 
-    let error = project_engine_outcome("firefox", outcome)
+    let error = project_engine_extract_outcome("firefox", outcome)
       .expect_err("all existing session candidates failed");
     let message = error.to_string();
     assert!(message.contains("all existing Firefox session store candidates failed"));
@@ -623,13 +677,13 @@ mod tests {
 
     let mut selected_empty = failed_session_source("/browser/default/sessionstore.js", "unused");
     selected_empty.selected = true;
-    selected_empty.error = None;
+    selected_empty.failure = None;
     let mut recovered = profile_with(Some(persistent_source(None, None)));
     recovered.profiles[0].sources.extend([
       failed_session_source("/browser/default/recovery.jsonlz4", "invalid mozLz4"),
       selected_empty,
     ]);
-    assert!(project_engine_outcome("firefox", recovered)
+    assert!(project_engine_extract_outcome("firefox", recovered)
       .expect("an authoritative empty session source is still a success")
       .is_empty());
   }
@@ -638,7 +692,7 @@ mod tests {
   fn valid_gecko_session_cookie_rescues_persistent_all_row_failure() {
     let mut session = failed_session_source("/browser/default/sessionstore.js", "unused");
     session.selected = true;
-    session.error = None;
+    session.failure = None;
     let session_cookie = || Cookie {
       domain: ".example.com".to_owned(),
       path: "/".to_owned(),
@@ -649,9 +703,8 @@ mod tests {
       http_only: false,
       same_site: -1,
     };
-    session.cookies.push(session_cookie());
-    // Finalization takes rows from `records` only; `cookies` is the
-    // compatibility projection and never a fallback supply.
+    // Finalization takes rows from `records` only; `Source` has no cookies
+    // field, so a session cookie is supplied purely as a record.
     session
       .records
       .push(crate::browser::cookie_record::CookieRecord::from_cookie(
@@ -664,20 +717,20 @@ mod tests {
     )));
     outcome.profiles[0].sources.push(session);
 
-    let cookies = project_engine_outcome("firefox", outcome)
+    let cookies = project_engine_extract_outcome("firefox", outcome)
       .expect("a valid session source is the historical fallback");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "session");
 
     let mut selected_empty = failed_session_source("/browser/default/sessionstore.js", "unused");
     selected_empty.selected = true;
-    selected_empty.error = None;
+    selected_empty.failure = None;
     let mut empty = profile_with(Some(persistent_source(
       None,
       Some("every persistent row failed"),
     )));
     empty.profiles[0].sources.push(selected_empty);
-    assert!(project_engine_outcome("firefox", empty)
+    assert!(project_engine_extract_outcome("firefox", empty)
       .expect("an authoritative empty session source rescues persistent failure")
       .is_empty());
 
@@ -691,7 +744,7 @@ mod tests {
         "/browser/default/sessionstore.js",
         "invalid JSON",
       ));
-    let error = project_engine_outcome("firefox", all_sessions_failed)
+    let error = project_engine_extract_outcome("firefox", all_sessions_failed)
       .expect_err("the historical total-session failure takes precedence");
     assert!(error
       .to_string()

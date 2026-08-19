@@ -9,9 +9,9 @@
 
 #[cfg(test)]
 use super::report_core::sort_cookies;
+use super::report_core::{InstallationId, ProfileId};
+use super::source::{Source, SourceCandidate};
 use crate::common::diagnostic::REDACTED_PATH;
-use crate::common::enums::Cookie;
-use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -753,14 +753,17 @@ fn digest_fields<'a>(fields: impl IntoIterator<Item = &'a [u8]>) -> String {
   format!("{:x}", hasher.finalize())
 }
 
-fn installation_id(browser_id: &str, root_id: &str, channel: &str, path: &[u8]) -> String {
-  digest_fields([
+// [Rev 2] Decision 18: these produce the already-public `report_core` id
+// newtypes rather than bare `String`, so a transposed installation/profile id is
+// a compile error. The hex is unchanged: `known` wraps the same digest.
+fn installation_id(browser_id: &str, root_id: &str, channel: &str, path: &[u8]) -> InstallationId {
+  InstallationId::known(&digest_fields([
     INSTALLATION_ID_DOMAIN.as_bytes(),
     browser_id.as_bytes(),
     root_id.as_bytes(),
     channel.as_bytes(),
     path,
-  ])
+  ]))
 }
 
 enum ProfileLocator<'a> {
@@ -768,18 +771,18 @@ enum ProfileLocator<'a> {
   Absolute(&'a Path),
 }
 
-fn profile_id(installation_id: &str, locator: ProfileLocator<'_>) -> String {
+fn profile_id(installation_id: &str, locator: ProfileLocator<'_>) -> ProfileId {
   let (kind, path) = match locator {
     ProfileLocator::Relative(path) => (b"relative".as_slice(), path),
     ProfileLocator::Absolute(path) => (b"absolute".as_slice(), path),
   };
   let normalized = normalized_path_bytes(path);
-  digest_fields([
+  ProfileId::known(&digest_fields([
     PROFILE_ID_DOMAIN.as_bytes(),
     installation_id.as_bytes(),
     kind,
     &normalized,
-  ])
+  ]))
 }
 
 #[cfg(unix)]
@@ -821,106 +824,75 @@ pub(crate) const SOURCE_ROLE_SESSION: &str = "session";
 /// persistent source always carries the first declared precedence.
 pub(crate) const PERSISTENT_SOURCE_PRECEDENCE: u16 = 10;
 
-/// Source-level outcome shared by the non-Chromium adapters. It is deliberately
-/// crate-private: 4E owns the final cross-engine DTO freeze.
-#[derive(Debug)]
-pub(crate) struct EngineSourceDraft {
-  pub(crate) path: PathBuf,
-  pub(crate) role: &'static str,
-  pub(crate) format: &'static str,
-  pub(crate) precedence: u16,
-  pub(crate) selected: bool,
-  pub(crate) cookies: Vec<Cookie>,
-  pub(crate) records: Vec<super::cookie_record::CookieRecord>,
-  pub(crate) rows_seen: usize,
-  pub(crate) rows_skipped: usize,
-  pub(crate) rows_rejected: usize,
-  pub(crate) acquisition: SourceAcquisition,
-  pub(crate) acquisition_attempts: u32,
-  pub(crate) diagnostics: Vec<String>,
-  /// The source could not be acquired, parsed, or queried, so it failed.
-  pub(crate) error: Option<String>,
-  /// Where `error` happened. The report's `stage` is a frozen field, so
-  /// flattening a parse or query failure into `acquisition` would misdescribe
-  /// it and rob consumers of the signal they need to choose a remedy.
-  pub(crate) error_stage: SourceFailureStage,
-  /// A row was seen and rejected. Reported as a row issue against a source
-  /// that still succeeded, never as a source failure.
-  pub(crate) row_error: Option<String>,
-}
+// The source-work leaf vocabulary lives in `browser/source.rs`. Re-exported
+// here so Safari/IE/Gecko name the same `SourceAcquisition` / `SourceFailureStage`
+// through `registry`, one definition with no divergence.
+pub(crate) use super::source::SourceAcquisition;
 
-/// The stage at which a source failed, mapped onto the frozen report vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SourceFailureStage {
-  #[default]
-  Acquisition,
-  Parse,
-  Query,
-}
-
-/// How a source was made readable. Non-SQLite engines never acquire through the
-/// browser-database layer, so their strategies are separate variants rather
-/// than an absent [`DatabaseAcquisitionStrategy`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceAcquisition {
-  Database(DatabaseAcquisitionStrategy),
-  StableFileImage,
-  EseDatabase,
-  NotAttempted,
-}
-
-impl From<Option<DatabaseAcquisitionStrategy>> for SourceAcquisition {
-  fn from(strategy: Option<DatabaseAcquisitionStrategy>) -> Self {
-    strategy.map_or(Self::NotAttempted, Self::Database)
-  }
-}
-
-#[derive(Debug)]
-pub(crate) struct EngineProfileDraft {
-  pub(crate) profile_id: String,
-  pub(crate) installation_id: String,
+/// Identity fields shared by the Gecko/Safari/IE listing and extract profile
+/// types.
+///
+/// A field bundle, not a stage object and not a public `Profile`. Chromium
+/// does not adopt it: `ChromiumProfile` keeps its own directory_name /
+/// display_name / is_active / is_last_used.
+#[derive(Debug, Clone)]
+pub(crate) struct EngineProfileIdentity {
+  pub(crate) profile_id: ProfileId,
+  pub(crate) installation_id: InstallationId,
   pub(crate) installation_priority: u16,
-  /// Installation rank at the first compatibility-eligible admission. This
-  /// can differ from generic ownership when a markerless recovery profile is
-  /// later encountered as an explicit declaration through another root.
-  pub(crate) legacy_installation_priority: u16,
-  /// Discovery order within one installation, retained for compatibility
-  /// selectors even though generic reports use display-name ordering.
-  pub(crate) legacy_profile_order: usize,
-  /// Defaultness at the first compatibility-eligible admission. Duplicate
-  /// registry roots may later promote `is_default` for generic reporting, but
-  /// must not reorder the frozen legacy selector.
-  pub(crate) legacy_is_default: bool,
-  /// Whether the deleted named-browser path resolver could have admitted this
-  /// profile. Markerless recovery is intentionally generic-report-only.
-  pub(crate) legacy_eligible: bool,
   pub(crate) installation_path: PathBuf,
-  pub(crate) legacy_installation_path: PathBuf,
+  /// Becomes `ProfileIdentity.display_name`.
   pub(crate) name: String,
-  pub(crate) legacy_name: String,
   pub(crate) path: PathBuf,
   pub(crate) is_default: bool,
   pub(crate) persistent_source_discovered: bool,
-  /// Cookie sources discovery found on disk, before any of them is read.
-  ///
-  /// Safari and Internet Explorer fill this at discovery and their populate
-  /// steps consume it, pushing onto `sources` only once a query has returned.
-  /// Gecko discovery leaves it empty: its populate is path-driven and does not
-  /// iterate candidates.
-  ///
-  /// Scaffolding. This field exists so the push-after-query rewrite can be
-  /// reviewed on its own; the listing/extract type split replaces it with
-  /// `DiscoveredProfile`/`ExtractedProfile`, which the compiler can police.
-  pub(crate) candidates: Vec<EngineSourceDraft>,
-  /// Sources that have actually been queried. A value here means acquisition
-  /// was attempted and its outcome committed, never a discovery placeholder.
-  pub(crate) sources: Vec<EngineSourceDraft>,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct EngineExtractionDraft {
-  pub(crate) profiles: Vec<EngineProfileDraft>,
-  pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+/// ADR 0002 `LegacyFirstProfile` ranking inputs.
+///
+/// Selection policy, deliberately kept out of a type named `Identity`: these
+/// decide which profile the compatibility wrappers pick, and the report never
+/// reads them.
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyRank {
+  /// Installation rank at the first compatibility-eligible admission. This can
+  /// differ from generic ownership when a markerless recovery profile is later
+  /// encountered as an explicit declaration through another root.
+  pub(crate) installation_priority: u16,
+  /// Discovery order within one installation, retained for compatibility
+  /// selectors even though generic reports use display-name ordering.
+  pub(crate) profile_order: usize,
+  /// Defaultness at the first compatibility-eligible admission. Duplicate
+  /// registry roots may later promote `is_default` for generic reporting, but
+  /// must not reorder the frozen legacy selector.
+  pub(crate) is_default: bool,
+  /// Whether the deleted named-browser path resolver could have admitted this
+  /// profile. Markerless recovery is intentionally generic-report-only.
+  pub(crate) eligible: bool,
+  pub(crate) installation_path: PathBuf,
+  pub(crate) name: String,
+}
+
+/// Listing return profile. rustc: there is no field here to put a [`Source`] in.
+#[derive(Debug)]
+pub(crate) struct DiscoveredProfile {
+  pub(crate) identity: EngineProfileIdentity,
+  pub(crate) legacy: LegacyRank,
+  pub(crate) candidates: Vec<SourceCandidate>,
+}
+
+/// Extract return profile. Never returned by a listing function.
+#[derive(Debug)]
+pub(crate) struct ExtractedProfile {
+  pub(crate) identity: EngineProfileIdentity,
+  pub(crate) legacy: LegacyRank,
+  pub(crate) sources: Vec<Source>,
+}
+
+/// Shared discover counters, embedded by both bags so listing and extract
+/// cannot diverge on `all_detected_roots_failed`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DiscoveryCounters {
   /// Distinct installations that were resolved and owned by this browser.
   /// Duplicates and roots that failed to canonicalize are excluded, matching
   /// what the Chromium adapter reports.
@@ -930,13 +902,9 @@ pub(crate) struct EngineExtractionDraft {
   pub(crate) installations_detected: usize,
   /// Roots whose profile enumeration completed, even when it found nothing.
   pub(crate) installations_enumerated: usize,
-  /// Typed request stop observed while populating sources. Keeping it outside
-  /// source diagnostics prevents timeouts/cancellation from becoming fake
-  /// source failures.
-  pub(crate) boundary_stop: Option<crate::common::deadline::BoundaryStop>,
 }
 
-impl EngineExtractionDraft {
+impl DiscoveryCounters {
   /// Section 5.7: when every applicable detected root fails enumeration the
   /// result is `failed`/`Err`, never an empty list indistinguishable from a
   /// browser that is simply not installed.
@@ -945,61 +913,38 @@ impl EngineExtractionDraft {
   }
 }
 
-/// Drops discovery-only source slots after a typed request stop. A source is
-/// committed atomically by its adapter only after at least one acquisition
-/// attempt completes; leaving a zero-attempt slot behind would fabricate a
-/// successful zero-row source during canonicalization. Profiles that then own
-/// no completed sources are likewise discovery placeholders, not extraction
-/// failures.
-pub(crate) fn retain_completed_engine_work(outcome: &mut EngineExtractionDraft) {
-  for profile in &mut outcome.profiles {
-    profile
-      .sources
-      .retain(|source| source.acquisition_attempts > 0);
-  }
-  outcome
-    .profiles
-    .retain(|profile| !profile.sources.is_empty());
+/// What discovery found. Cannot carry extraction results.
+#[derive(Debug, Default)]
+pub(crate) struct EngineListing {
+  pub(crate) profiles: Vec<DiscoveredProfile>,
+  pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+  pub(crate) counters: DiscoveryCounters,
+  /// Typed request stop observed while populating sources. Keeping it outside
+  /// source diagnostics prevents timeouts/cancellation from becoming fake
+  /// source failures.
+  pub(crate) boundary_stop: Option<crate::common::deadline::BoundaryStop>,
 }
 
-/// Narrows a discovered engine outcome to the one requested profile, before any
-/// source is acquired. This mirrors what the Chromium seam does with its own
-/// `profile_id` filter, and it is the whole point of pushing the selection down
-/// here: filtering the profiles out of a finished report still reads, decrypts,
-/// and materializes cookies the caller never asked for.
-///
-/// Only the profile list is narrowed. Discovery has already completed, so the
-/// counters and discovery issues stay exactly what an unselected run reports --
-/// selecting a profile must not make the other installations look absent.
-fn select_engine_profiles(
-  outcome: &mut EngineExtractionDraft,
-  browser_id: &str,
-  selection: ProfileSelection<'_>,
-) -> Result<()> {
-  match selection {
-    ProfileSelection::AllProfiles => {}
-    ProfileSelection::ProfileId(profile_id) => {
-      if !outcome
-        .profiles
-        .iter()
-        .any(|profile| profile.profile_id == profile_id)
-      {
-        bail!("unknown {browser_id} profile id {profile_id:?}")
-      }
-      outcome
-        .profiles
-        .retain(|profile| profile.profile_id == profile_id);
-    }
-    ProfileSelection::LegacyFirstProfile => {
-      // Compatibility selectors require a persistent source; session-only
-      // profiles remain report-capable but are not candidates for those APIs.
-      outcome
-        .profiles
-        .retain(|profile| profile.legacy_eligible && profile.persistent_source_discovered);
-      outcome.profiles.truncate(1);
-    }
+impl EngineListing {
+  pub(crate) fn all_detected_roots_failed(&self) -> bool {
+    self.counters.all_detected_roots_failed()
   }
-  Ok(())
+}
+
+/// Thin adapter extract bag. Survives past "done when": the acquire loop stays
+/// in the adapters, and this is what they hand back.
+#[derive(Debug, Default)]
+pub(crate) struct EngineExtract {
+  pub(crate) profiles: Vec<ExtractedProfile>,
+  pub(crate) discovery_issues: Vec<DiscoveryIssue>,
+  pub(crate) counters: DiscoveryCounters,
+  pub(crate) boundary_stop: Option<crate::common::deadline::BoundaryStop>,
+}
+
+impl EngineExtract {
+  pub(crate) fn all_detected_roots_failed(&self) -> bool {
+    self.counters.all_detected_roots_failed()
+  }
 }
 
 const MAX_DISCOVERY_ISSUE_SAMPLES: usize = 32;
@@ -1035,9 +980,9 @@ fn canonical_installation_root<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   root_path: PathBuf,
   seen_installations: &mut HashSet<Vec<u8>>,
-  outcome: &mut EngineExtractionDraft,
+  outcome: &mut EngineListing,
 ) -> Option<PathBuf> {
-  outcome.installations_detected += 1;
+  outcome.counters.installations_detected += 1;
   let canonical_root = match context.fs.canonicalize(&root_path) {
     Ok(path) => path,
     Err(error) => {
@@ -1058,7 +1003,7 @@ fn canonical_installation_root<F: DiscoveryFs>(
     );
     return None;
   }
-  outcome.installations_discovered += 1;
+  outcome.counters.installations_discovered += 1;
   Some(canonical_root)
 }
 
@@ -1074,7 +1019,7 @@ fn canonical_installation_root<F: DiscoveryFs>(
 fn installation_root_is_directory<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   root_path: &Path,
-  outcome: &mut EngineExtractionDraft,
+  outcome: &mut EngineListing,
 ) -> bool {
   match context.fs.metadata(root_path) {
     Ok(metadata) => metadata.is_dir(),
@@ -1087,7 +1032,7 @@ fn installation_root_is_directory<F: DiscoveryFs>(
       false
     }
     Err(error) => {
-      outcome.installations_detected += 1;
+      outcome.counters.installations_detected += 1;
       outcome.discovery_issues.push(DiscoveryIssue::new(
         "installation_metadata_failed",
         root_path.to_path_buf(),
@@ -1098,23 +1043,85 @@ fn installation_root_is_directory<F: DiscoveryFs>(
   }
 }
 
-/// Section 5.5 ordering: installations by registry priority then normalized
-/// path, then profiles default-first, by locale-independent lowercase name, raw
-/// name, and finally normalized path.
-fn sort_engine_profiles(profiles: &mut [EngineProfileDraft]) {
+/// Section 5.5 ordering over the listing profile shape: installations by
+/// registry priority then normalized path, then profiles default-first, by
+/// locale-independent lowercase name, raw name, and finally normalized path.
+fn sort_discovered_profiles(profiles: &mut [DiscoveredProfile]) {
   profiles.sort_by(|left, right| {
     left
+      .identity
       .installation_priority
-      .cmp(&right.installation_priority)
+      .cmp(&right.identity.installation_priority)
       .then_with(|| {
-        normalized_path_bytes(&left.installation_path)
-          .cmp(&normalized_path_bytes(&right.installation_path))
+        normalized_path_bytes(&left.identity.installation_path)
+          .cmp(&normalized_path_bytes(&right.identity.installation_path))
       })
-      .then_with(|| (!left.is_default).cmp(&(!right.is_default)))
-      .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-      .then_with(|| left.name.cmp(&right.name))
-      .then_with(|| normalized_path_bytes(&left.path).cmp(&normalized_path_bytes(&right.path)))
+      .then_with(|| (!left.identity.is_default).cmp(&(!right.identity.is_default)))
+      .then_with(|| {
+        left
+          .identity
+          .name
+          .to_lowercase()
+          .cmp(&right.identity.name.to_lowercase())
+      })
+      .then_with(|| left.identity.name.cmp(&right.identity.name))
+      .then_with(|| {
+        normalized_path_bytes(&left.identity.path).cmp(&normalized_path_bytes(&right.identity.path))
+      })
   });
+}
+
+/// Narrows the listing to the requested profile, before any source is acquired.
+/// Discovery has
+/// already completed, so only the profile list is narrowed: the counters and
+/// discovery issues stay exactly what an unselected run reports.
+fn select_listing_profiles(
+  listing: &mut EngineListing,
+  browser_id: &str,
+  selection: ProfileSelection<'_>,
+) -> Result<()> {
+  match selection {
+    ProfileSelection::AllProfiles => {}
+    ProfileSelection::ProfileId(profile_id) => {
+      if !listing
+        .profiles
+        .iter()
+        .any(|profile| profile.identity.profile_id.as_str() == profile_id)
+      {
+        bail!("unknown {browser_id} profile id {profile_id:?}")
+      }
+      listing
+        .profiles
+        .retain(|profile| profile.identity.profile_id.as_str() == profile_id);
+    }
+    ProfileSelection::LegacyFirstProfile => {
+      // Compatibility selectors require a persistent source; session-only
+      // profiles remain report-capable but are not candidates for those APIs.
+      listing
+        .profiles
+        .retain(|profile| profile.legacy.eligible && profile.identity.persistent_source_discovered);
+      listing.profiles.truncate(1);
+    }
+  }
+  Ok(())
+}
+
+/// Drops discovery-only source slots from the extract bag after a typed request
+/// stop. Drops discovery-only
+/// source slots after a typed request stop: a `Source` is committed atomically
+/// only once at least one acquisition attempt completes, so leaving a
+/// zero-attempt slot would fabricate a successful zero-row source. Profiles that
+/// then own no committed source are likewise discovery placeholders, not
+/// extraction failures.
+pub(crate) fn retain_completed_engine_extract(extract: &mut EngineExtract) {
+  for profile in &mut extract.profiles {
+    profile
+      .sources
+      .retain(|source| source.acquisition_attempts > 0);
+  }
+  extract
+    .profiles
+    .retain(|profile| !profile.sources.is_empty());
 }
 
 /// Resolves the installation roots an engine adapter should walk, in the fixed
@@ -1276,7 +1283,7 @@ pub(crate) mod test_seams {
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
     denied: PathBuf,
-  ) -> Result<EngineExtractionDraft> {
+  ) -> Result<EngineListing> {
     let denied_context = DiscoveryContext {
       platform: context.platform,
       home: context.home.clone(),
@@ -1435,7 +1442,7 @@ pub(crate) mod test_seams {
     browser_id: &str,
     profile_id: Option<&str>,
     domains: Option<&[String]>,
-  ) -> Result<EngineExtractionDraft> {
+  ) -> Result<EngineExtract> {
     gecko_report_with_context(context, browser_id, profile_id, domains)
   }
 
@@ -1449,7 +1456,7 @@ pub(crate) mod test_seams {
     browser_id: &str,
     domains: Option<&[String]>,
     mut on_before_query: R,
-  ) -> Result<EngineExtractionDraft>
+  ) -> Result<EngineExtract>
   where
     R: FnMut(&Path),
   {
@@ -1468,7 +1475,7 @@ pub(crate) mod test_seams {
   pub(crate) fn gecko_profiles(
     context: &DiscoveryContext<RealDiscoveryFs>,
     browser_id: &str,
-  ) -> Result<EngineExtractionDraft> {
+  ) -> Result<EngineListing> {
     gecko_profiles_with_context(context, browser_id)
   }
 
@@ -1477,7 +1484,7 @@ pub(crate) mod test_seams {
     browser_id: &str,
     profile_id: Option<&str>,
     domains: Option<&[String]>,
-  ) -> Result<EngineExtractionDraft> {
+  ) -> Result<EngineExtract> {
     safari_report_with_context(context, browser_id, profile_id, domains)
   }
 
@@ -1487,7 +1494,7 @@ pub(crate) mod test_seams {
     profile_id: Option<&str>,
     domains: Option<&[String]>,
     query: Q,
-  ) -> Result<EngineExtractionDraft>
+  ) -> Result<EngineExtract>
   where
     Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
   {
@@ -1722,6 +1729,7 @@ pub(crate) mod test_seams {
 
 #[cfg(test)]
 mod tests {
+  use super::super::source::SourceFailureStage;
   use super::chromium::discover_browser_with_context;
   use super::gecko::discover_gecko_with_context;
   use super::internet_explorer::{
@@ -1817,7 +1825,7 @@ mod tests {
     assert!(!chrome.all_detected_roots_failed());
 
     let safari = discover_safari_with_context(&context, "safari").expect("discover Safari");
-    assert_eq!(safari.installations_detected, 0);
+    assert_eq!(safari.counters.installations_detected, 0);
     assert!(safari.discovery_issues.is_empty());
     assert!(!safari.all_detected_roots_failed());
   }
@@ -2236,7 +2244,7 @@ mod tests {
       .parent()
       .expect("default Safari source parent");
     let expected_default_profile_id = profile_id(
-      &expected_installation_id,
+      expected_installation_id.as_str(),
       ProfileLocator::Relative(
         default_profile_path
           .strip_prefix(&canonical_library)
@@ -2244,28 +2252,37 @@ mod tests {
       ),
     );
 
-    assert_eq!(all.installations_detected, 1);
-    assert_eq!(all.installations_discovered, 1);
-    assert_eq!(all.installations_enumerated, 1);
+    assert_eq!(all.counters.installations_detected, 1);
+    assert_eq!(all.counters.installations_discovered, 1);
+    assert_eq!(all.counters.installations_enumerated, 1);
     assert_eq!(all.profiles.len(), 2);
-    assert_eq!(all.profiles[0].installation_id, expected_installation_id);
-    assert_eq!(all.profiles[0].profile_id, expected_default_profile_id);
-    assert_eq!(all.profiles[0].installation_path, canonical_library);
-    assert_eq!(all.profiles[0].sources[0].path, default_source);
+    assert_eq!(
+      all.profiles[0].identity.installation_id,
+      expected_installation_id
+    );
+    assert_eq!(
+      all.profiles[0].identity.profile_id,
+      expected_default_profile_id
+    );
+    assert_eq!(
+      all.profiles[0].identity.installation_path,
+      canonical_library
+    );
+    assert_eq!(all.profiles[0].sources[0].origin.path, default_source);
     assert_eq!(
       all.profiles[0].sources[0].acquisition,
       SourceAcquisition::StableFileImage
     );
     assert_eq!(all.profiles[0].sources[0].acquisition_attempts, 1);
-    let selected = all.profiles[1].profile_id.clone();
-    assert_eq!(all.profiles[1].sources[0].path, named_source);
+    let selected = all.profiles[1].identity.profile_id.clone();
+    assert_eq!(all.profiles[1].sources[0].origin.path, named_source);
 
     let domains = vec!["example.com".to_owned(), "mozilla.org".to_owned()];
     let mut read = Vec::new();
     let one = safari_report_with_query(
       &context,
       "safari",
-      Some(&selected),
+      Some(selected.as_str()),
       Some(&domains),
       |path, forwarded_domains| {
         read.push(path.to_path_buf());
@@ -2280,8 +2297,11 @@ mod tests {
 
     assert_eq!(read, vec![named_source]);
     assert_eq!(one.profiles.len(), 1);
-    assert_eq!(one.profiles[0].profile_id, selected);
-    assert_eq!(one.installations_discovered, all.installations_discovered);
+    assert_eq!(one.profiles[0].identity.profile_id, selected);
+    assert_eq!(
+      one.counters.installations_discovered,
+      all.counters.installations_discovered
+    );
 
     let mut unknown_queries = 0;
     let unknown = safari_report_with_query(
@@ -2322,7 +2342,7 @@ mod tests {
 
     let mut outcome = discover_safari_with_context(&context, "safari").expect("discover Safari");
     assert_eq!(outcome.profiles.len(), 1);
-    assert!(!outcome.profiles[0].is_default);
+    assert!(!outcome.profiles[0].identity.is_default);
 
     select_legacy_safari_profile(&mut outcome, "safari").expect("select legacy Safari profile");
     assert!(outcome.profiles.is_empty());
@@ -2345,9 +2365,9 @@ mod tests {
     let discovery = discover_safari_with_context(&context, "safari")
       .expect("a bare Library is not a Safari installation");
 
-    assert_eq!(discovery.installations_detected, 0);
-    assert_eq!(discovery.installations_discovered, 0);
-    assert_eq!(discovery.installations_enumerated, 0);
+    assert_eq!(discovery.counters.installations_detected, 0);
+    assert_eq!(discovery.counters.installations_discovered, 0);
+    assert_eq!(discovery.counters.installations_enumerated, 0);
     assert!(discovery.profiles.is_empty());
     assert!(discovery.discovery_issues.is_empty());
   }
@@ -2373,9 +2393,9 @@ mod tests {
     let discovery = discover_safari_with_context(&context, "safari")
       .expect("degraded Safari profile discovery remains reportable");
 
-    assert_eq!(discovery.installations_detected, 1);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 1);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert_eq!(discovery.profiles.len(), 1);
     assert_eq!(discovery.discovery_issues.len(), 1);
     let issue = &discovery.discovery_issues[0];
@@ -2411,9 +2431,9 @@ mod tests {
     let discovery = discover_safari_with_context(&context, "safari")
       .expect("failed named-profile enumeration retains the default profile");
 
-    assert_eq!(discovery.installations_detected, 1);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 1);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert_eq!(discovery.profiles.len(), 1);
     assert_eq!(discovery.discovery_issues.len(), 1);
     let issue = &discovery.discovery_issues[0];
@@ -2477,9 +2497,9 @@ mod tests {
     let discovery = discover_safari_with_context(&context, "safari")
       .expect("marker denial keeps Safari detected");
 
-    assert_eq!(discovery.installations_detected, 1);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 1);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert!(discovery.profiles.is_empty());
     assert!(discovery
       .discovery_issues
@@ -2532,8 +2552,8 @@ mod tests {
       .expect("deduplicate canonical Safari profiles");
 
     assert_eq!(discovery.profiles.len(), 1);
-    assert!(discovery.profiles[0].is_default);
-    assert_eq!(discovery.profiles[0].path, shared);
+    assert!(discovery.profiles[0].identity.is_default);
+    assert_eq!(discovery.profiles[0].identity.path, shared);
     let duplicate = discovery
       .discovery_issues
       .iter()
@@ -2580,18 +2600,23 @@ mod tests {
       .collect::<Vec<_>>();
     let expected_profile_ids = expected_installation_ids
       .iter()
-      .map(|installation_id| profile_id(installation_id, ProfileLocator::Relative(Path::new(""))))
+      .map(|installation_id| {
+        profile_id(
+          installation_id.as_str(),
+          ProfileLocator::Relative(Path::new("")),
+        )
+      })
       .collect::<Vec<_>>();
     let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("discover both WebCache roots");
-    assert_eq!(discovery.installations_detected, 2);
-    assert_eq!(discovery.installations_discovered, 2);
-    assert_eq!(discovery.installations_enumerated, 2);
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 2);
+    assert_eq!(discovery.counters.installations_enumerated, 2);
     assert_eq!(
       discovery
         .profiles
         .iter()
-        .map(|profile| profile.installation_priority)
+        .map(|profile| profile.identity.installation_priority)
         .collect::<Vec<_>>(),
       [10, 20]
     );
@@ -2599,7 +2624,7 @@ mod tests {
       discovery
         .profiles
         .iter()
-        .map(|profile| profile.installation_path.clone())
+        .map(|profile| profile.identity.installation_path.clone())
         .collect::<Vec<_>>(),
       canonical_roots
     );
@@ -2607,7 +2632,7 @@ mod tests {
       discovery
         .profiles
         .iter()
-        .map(|profile| profile.installation_id.clone())
+        .map(|profile| profile.identity.installation_id.clone())
         .collect::<Vec<_>>(),
       expected_installation_ids
     );
@@ -2615,27 +2640,29 @@ mod tests {
       discovery
         .profiles
         .iter()
-        .map(|profile| profile.profile_id.clone())
+        .map(|profile| profile.identity.profile_id.clone())
         .collect::<Vec<_>>(),
       expected_profile_ids
     );
     for profile in &discovery.profiles {
-      for id in [&profile.installation_id, &profile.profile_id] {
+      for id in [
+        profile.identity.installation_id.as_str(),
+        profile.identity.profile_id.as_str(),
+      ] {
         assert_eq!(id.len(), 64);
         assert!(id
           .bytes()
           .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
       }
       // Discovery output: a candidate that has not been queried. The frozen
-      // placeholder shape (`NotAttempted`, zero attempts) is unchanged; it just
-      // no longer sits in `sources`, which now means "queried".
+      // placeholder shape (`NotAttempted`, not selected until extract) is
+      // unchanged; a `SourceCandidate` is a listing leaf with no attempt count.
       assert_eq!(profile.candidates.len(), 1);
-      assert!(profile.sources.is_empty());
       assert_eq!(
         profile.candidates[0].acquisition,
         SourceAcquisition::NotAttempted
       );
-      assert_eq!(profile.candidates[0].acquisition_attempts, 0);
+      assert!(profile.candidates[0].exists);
     }
     let rediscovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("rediscover both WebCache roots");
@@ -2643,12 +2670,18 @@ mod tests {
       rediscovery
         .profiles
         .iter()
-        .map(|profile| (&profile.installation_id, &profile.profile_id))
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
         .collect::<Vec<_>>(),
       discovery
         .profiles
         .iter()
-        .map(|profile| (&profile.installation_id, &profile.profile_id))
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
         .collect::<Vec<_>>()
     );
     let rows = |_: &Path, _: Option<&[String]>| {
@@ -2665,33 +2698,39 @@ mod tests {
       internet_explorer_report_with_context(&context, "internet_explorer", None, None, rows)
         .expect("full report");
     assert_eq!(all.profiles.len(), 2);
-    assert_eq!(all.installations_detected, 2);
-    assert_eq!(all.installations_discovered, 2);
-    assert_eq!(all.installations_enumerated, 2);
+    assert_eq!(all.counters.installations_detected, 2);
+    assert_eq!(all.counters.installations_discovered, 2);
+    assert_eq!(all.counters.installations_enumerated, 2);
     assert_eq!(
       all
         .profiles
         .iter()
-        .map(|profile| (&profile.installation_id, &profile.profile_id))
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
         .collect::<Vec<_>>(),
       discovery
         .profiles
         .iter()
-        .map(|profile| (&profile.installation_id, &profile.profile_id))
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
         .collect::<Vec<_>>()
     );
     assert!(all.profiles.iter().all(|profile| {
       profile.sources[0].acquisition == SourceAcquisition::EseDatabase
         && profile.sources[0].acquisition_attempts == 1
     }));
-    let selected = all.profiles[1].profile_id.clone();
-    let selected_source = all.profiles[1].sources[0].path.clone();
+    let selected = all.profiles[1].identity.profile_id.clone();
+    let selected_source = all.profiles[1].sources[0].origin.path.clone();
 
     let mut read = Vec::new();
     let one = internet_explorer_report_with_context(
       &context,
       "internet_explorer",
-      Some(&selected),
+      Some(selected.as_str()),
       None,
       |path, domains| {
         read.push(path.to_path_buf());
@@ -2702,8 +2741,11 @@ mod tests {
 
     assert_eq!(read, vec![selected_source]);
     assert_eq!(one.profiles.len(), 1);
-    assert_eq!(one.profiles[0].profile_id, selected);
-    assert_eq!(one.installations_discovered, all.installations_discovered);
+    assert_eq!(one.profiles[0].identity.profile_id, selected);
+    assert_eq!(
+      one.counters.installations_discovered,
+      all.counters.installations_discovered
+    );
 
     let unknown = internet_explorer_report_with_context(
       &context,
@@ -2737,9 +2779,9 @@ mod tests {
     let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("missing WebCache is profile absence");
 
-    assert_eq!(discovery.installations_detected, 1);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 1);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert!(discovery.profiles.is_empty());
     assert!(!discovery.all_detected_roots_failed());
     assert_eq!(discovery.discovery_issues.len(), 1);
@@ -2788,12 +2830,12 @@ mod tests {
     let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("deduplicate canonical WebCache roots");
 
-    assert_eq!(discovery.installations_detected, 2);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert_eq!(discovery.profiles.len(), 1);
-    assert_eq!(discovery.profiles[0].installation_priority, 10);
-    assert_eq!(discovery.profiles[0].installation_path, shared);
+    assert_eq!(discovery.profiles[0].identity.installation_priority, 10);
+    assert_eq!(discovery.profiles[0].identity.installation_path, shared);
     let duplicate = discovery
       .discovery_issues
       .iter()
@@ -2839,10 +2881,15 @@ mod tests {
       .expect("Internet Explorer report");
 
     let source = &outcome.profiles[0].sources[0];
-    assert_eq!(source.rows_seen, 2);
-    assert_eq!(source.rows_skipped, 1);
-    assert_eq!(source.rows_rejected, 1);
-    assert_eq!(source.row_error.as_deref(), Some("invalid WebCache record"));
+    assert_eq!(source.stats.rows_seen, 2);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.rows_rejected, 1);
+    let row_issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code == "row_read_failed")
+      .expect("skipped rows are reported");
+    assert_eq!(row_issue.message, "invalid WebCache record");
   }
 
   #[test]
@@ -2869,11 +2916,9 @@ mod tests {
       .expect("query failures remain report data");
 
     let source = &outcome.profiles[0].sources[0];
-    assert_eq!(source.error_stage, SourceFailureStage::Parse);
-    assert_eq!(
-      source.error.as_deref(),
-      Some("injected WebCache query failure")
-    );
+    let failure = source.failure.as_ref().expect("query failure recorded");
+    assert_eq!(failure.stage, SourceFailureStage::Parse);
+    assert_eq!(failure.message, "injected WebCache query failure");
   }
 
   #[test]
@@ -2898,14 +2943,14 @@ mod tests {
     let gecko_context = context_for(PlatformId::Linux, temp.path().join("linux-home"), []);
     let gecko =
       discover_gecko_with_context(&gecko_context, "firefox").expect("missing Gecko roots");
-    assert_eq!(gecko.installations_detected, 0);
+    assert_eq!(gecko.counters.installations_detected, 0);
     assert!(gecko.discovery_issues.is_empty());
     assert!(!gecko.all_detected_roots_failed());
 
     let safari_context = context_for(PlatformId::Macos, temp.path().join("macos-home"), []);
     let safari =
       discover_safari_with_context(&safari_context, "safari").expect("missing Safari root");
-    assert_eq!(safari.installations_detected, 0);
+    assert_eq!(safari.counters.installations_detected, 0);
     assert!(safari.discovery_issues.is_empty());
     assert!(!safari.all_detected_roots_failed());
 
@@ -2920,7 +2965,7 @@ mod tests {
     );
     let ie = discover_internet_explorer_with_context(&ie_context, "internet_explorer")
       .expect("missing IE roots");
-    assert_eq!(ie.installations_detected, 0);
+    assert_eq!(ie.counters.installations_detected, 0);
     assert!(ie.discovery_issues.is_empty());
     assert!(!ie.all_detected_roots_failed());
   }
@@ -2952,9 +2997,9 @@ mod tests {
 
     let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("retain the valid IE root");
-    assert_eq!(discovery.installations_detected, 2);
-    assert_eq!(discovery.installations_discovered, 1);
-    assert_eq!(discovery.installations_enumerated, 1);
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
     assert_eq!(discovery.profiles.len(), 1);
     assert!(!discovery.all_detected_roots_failed());
     assert!(discovery

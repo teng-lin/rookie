@@ -3,6 +3,7 @@
 
 mod allowlist;
 mod cfg_scan;
+mod stage_boundary;
 
 use allowlist::{Allowlist, Verdict};
 use cfg_scan::CfgHit;
@@ -192,9 +193,76 @@ fn cmd_check_cfg_locations() -> Result<bool, String> {
   Ok(report.ok)
 }
 
+/// Fails if a listing type has regrown a field that lets it carry the next
+/// stage's data, or if a fenced type has vanished.
+///
+/// The second half matters as much as the first: renaming or deleting
+/// `SourceCandidate` would otherwise disable its fence silently, leaving a
+/// green check that no longer checks anything.
+fn cmd_check_stage_boundary() -> Result<bool, String> {
+  let root = repo_root();
+  let scan_dir = root.join(SCAN_ROOT);
+  let mut files = Vec::new();
+  for entry in walkdir::WalkDir::new(&scan_dir) {
+    let entry = entry.map_err(|error| format!("failed to walk {}: {error}", scan_dir.display()))?;
+    if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "rs") {
+      files.push(entry.into_path());
+    }
+  }
+  files.sort();
+  if files.is_empty() {
+    return Err(format!(
+      "scanned zero .rs files under {SCAN_ROOT} -- the scan root or repo_root() is wrong"
+    ));
+  }
+
+  let mut violations = Vec::new();
+  let mut defined = std::collections::BTreeSet::new();
+  for file in &files {
+    let relative = file
+      .strip_prefix(&root)
+      .unwrap_or(file)
+      .to_string_lossy()
+      .replace('\\', "/");
+    let source = std::fs::read_to_string(file)
+      .map_err(|error| format!("failed to read {relative}: {error}"))?;
+    let (found, types) = stage_boundary::scan_file(&relative, &source)?;
+    violations.extend(found);
+    defined.extend(types);
+  }
+
+  let missing: Vec<_> = stage_boundary::fenced_type_names()
+    .into_iter()
+    .filter(|name| !defined.contains(*name))
+    .collect();
+  if !missing.is_empty() {
+    return Err(format!(
+      "fenced type(s) not found under {SCAN_ROOT}: {}. If a type was renamed, \
+       update the fence in xtask/src/stage_boundary.rs in the same change -- a \
+       fence pointing at a type that no longer exists silently checks nothing.",
+      missing.join(", ")
+    ));
+  }
+
+  for violation in &violations {
+    eprintln!("{violation}");
+  }
+  Ok(violations.is_empty())
+}
+
+const STAGE_BOUNDARY_OK: &str = "Listing and extract types still refuse the next stage's data.";
+
 fn main() {
   let mut args = std::env::args().skip(1);
   match args.next().as_deref() {
+    Some("check-stage-boundary") => match cmd_check_stage_boundary() {
+      Ok(true) => println!("{STAGE_BOUNDARY_OK}"),
+      Ok(false) => std::process::exit(1),
+      Err(error) => {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+      }
+    },
     Some("check-cfg-locations") => match cmd_check_cfg_locations() {
       Ok(true) => println!("Every platform cfg location is accounted for in {ALLOWLIST_FILE}."),
       Ok(false) => std::process::exit(1),
@@ -211,11 +279,17 @@ fn main() {
     }
     Some(other) => {
       eprintln!("error: unknown xtask subcommand {other:?}");
-      eprintln!("usage: cargo run -p xtask -- <check-cfg-locations|list-cfg-locations>");
+      eprintln!(
+        "usage: cargo run -p xtask -- \
+         <check-cfg-locations|list-cfg-locations|check-stage-boundary>"
+      );
       std::process::exit(2);
     }
     None => {
-      eprintln!("usage: cargo run -p xtask -- <check-cfg-locations|list-cfg-locations>");
+      eprintln!(
+        "usage: cargo run -p xtask -- \
+         <check-cfg-locations|list-cfg-locations|check-stage-boundary>"
+      );
       std::process::exit(2);
     }
   }
