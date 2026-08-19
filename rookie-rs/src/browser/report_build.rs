@@ -1622,6 +1622,8 @@ fn canonical_direct_mozilla_extraction_impl(
       path: profile_path,
       is_default: true,
       persistent_source_discovered: true,
+      // Direct path: the caller named the file, so it is already acquired.
+      candidates: Vec::new(),
       sources,
     }],
     discovery_issues: Vec::new(),
@@ -1720,6 +1722,8 @@ fn canonical_direct_engine_source(
       path: profile_path,
       is_default: true,
       persistent_source_discovered: true,
+      // Direct path: the caller named the file, so it is already acquired.
+      candidates: Vec::new(),
       sources: vec![registry::EngineSourceDraft {
         path: db_path.to_path_buf(),
         role: registry::SOURCE_ROLE_PERSISTENT,
@@ -2510,6 +2514,7 @@ mod tests {
       path: PathBuf::from("/firefox/Profiles/default"),
       is_default: true,
       persistent_source_discovered: true,
+      candidates: Vec::new(),
       sources: vec![
         engine_source(
           "sessionstore.jsonlz4",

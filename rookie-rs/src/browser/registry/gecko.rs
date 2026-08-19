@@ -353,6 +353,8 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
         persistent_source_discovered: context.fs.exists(&profile_path.join("cookies.sqlite")),
         path: profile_path,
         is_default: declared_profile.is_default,
+        // Gecko populate is path-driven and does not iterate candidates.
+        candidates: Vec::new(),
         sources: Vec::new(),
       });
     }
@@ -1805,6 +1807,7 @@ mod tests {
           path,
           is_default: index == 0,
           persistent_source_discovered: true,
+          candidates: Vec::new(),
           sources: Vec::new(),
         }
       })

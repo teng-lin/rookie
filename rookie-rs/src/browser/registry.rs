@@ -901,6 +901,19 @@ pub(crate) struct EngineProfileDraft {
   pub(crate) path: PathBuf,
   pub(crate) is_default: bool,
   pub(crate) persistent_source_discovered: bool,
+  /// Cookie sources discovery found on disk, before any of them is read.
+  ///
+  /// Safari and Internet Explorer fill this at discovery and their populate
+  /// steps consume it, pushing onto `sources` only once a query has returned.
+  /// Gecko discovery leaves it empty: its populate is path-driven and does not
+  /// iterate candidates.
+  ///
+  /// Scaffolding. This field exists so the push-after-query rewrite can be
+  /// reviewed on its own; the listing/extract type split replaces it with
+  /// `DiscoveredProfile`/`ExtractedProfile`, which the compiler can police.
+  pub(crate) candidates: Vec<EngineSourceDraft>,
+  /// Sources that have actually been queried. A value here means acquisition
+  /// was attempted and its outcome committed, never a discovery placeholder.
   pub(crate) sources: Vec<EngineSourceDraft>,
 }
 
@@ -2428,21 +2441,22 @@ mod tests {
     let both = discover_safari_with_context(&context, "safari")
       .expect("discover modern Safari default source");
     assert_eq!(both.profiles.len(), 1);
+    // Discovery reports candidates; nothing is a `source` until it is queried.
     assert_eq!(
-      both.profiles[0].sources[0].path,
+      both.profiles[0].candidates[0].path,
       modern.canonicalize().expect("canonical modern source")
     );
-    assert_eq!(both.profiles[0].sources[0].precedence, 10);
+    assert_eq!(both.profiles[0].candidates[0].precedence, 10);
 
     std::fs::remove_file(&modern).expect("remove modern Safari source");
     let legacy_only = discover_safari_with_context(&context, "safari")
       .expect("fall back to pre-sandbox Safari source");
     assert_eq!(legacy_only.profiles.len(), 1);
     assert_eq!(
-      legacy_only.profiles[0].sources[0].path,
+      legacy_only.profiles[0].candidates[0].path,
       legacy.canonicalize().expect("canonical legacy source")
     );
-    assert_eq!(legacy_only.profiles[0].sources[0].precedence, 20);
+    assert_eq!(legacy_only.profiles[0].candidates[0].precedence, 20);
   }
 
   #[test]
@@ -2612,12 +2626,16 @@ mod tests {
           .bytes()
           .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
       }
-      assert_eq!(profile.sources.len(), 1);
+      // Discovery output: a candidate that has not been queried. The frozen
+      // placeholder shape (`NotAttempted`, zero attempts) is unchanged; it just
+      // no longer sits in `sources`, which now means "queried".
+      assert_eq!(profile.candidates.len(), 1);
+      assert!(profile.sources.is_empty());
       assert_eq!(
-        profile.sources[0].acquisition,
+        profile.candidates[0].acquisition,
         SourceAcquisition::NotAttempted
       );
-      assert_eq!(profile.sources[0].acquisition_attempts, 0);
+      assert_eq!(profile.candidates[0].acquisition_attempts, 0);
     }
     let rediscovery = discover_internet_explorer_with_context(&context, "internet_explorer")
       .expect("rediscover both WebCache roots");

@@ -407,6 +407,8 @@ mod tests {
         path: PathBuf::from("/browser/default"),
         is_default: true,
         persistent_source_discovered: true,
+        // Post-populate fixture: these sources have already been queried.
+        candidates: Vec::new(),
         sources: source.into_iter().collect(),
       }],
       installations_detected: 1,
