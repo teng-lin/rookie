@@ -112,6 +112,7 @@ impl SyntheticHome<'_> {
     return self.home.join(".config/google-chrome");
   }
 
+  #[cfg(target_os = "macos")]
   fn firefox_root(&self) -> PathBuf {
     #[cfg(target_os = "macos")]
     return self.home.join("Library/Application Support/Firefox");
@@ -198,6 +199,7 @@ fn seed_chrome(home: &SyntheticHome<'_>) {
   seed_chromium_profile(&root, "Profile 1", "session", "profile-value");
 }
 
+#[cfg(target_os = "macos")]
 fn seed_firefox_profile(root: &Path, relative: &str, name: &str, value: &str) {
   let profile = root.join(relative);
   std::fs::create_dir_all(&profile).expect("create profile directory");
@@ -222,6 +224,7 @@ fn seed_firefox_profile(root: &Path, relative: &str, name: &str, value: &str) {
 
 /// Default-second in declaration order so the golden pins the default-first
 /// listing sort rather than incidental ini order.
+#[cfg(target_os = "macos")]
 fn seed_firefox(home: &SyntheticHome<'_>) {
   let root = home.firefox_root();
   std::fs::create_dir_all(&root).expect("create firefox root");
@@ -306,6 +309,9 @@ fn rank_opaque_ids(input: &str) -> String {
 
 // ------------------------------------------------------------- comparison --
 
+// Golden comparison is compiled only for captured platforms; see the gates on
+// the tests below.
+#[cfg(target_os = "macos")]
 fn golden_path(name: &str) -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("tests/goldens")
@@ -313,10 +319,12 @@ fn golden_path(name: &str) -> PathBuf {
     .join(format!("{name}.json"))
 }
 
+#[cfg(target_os = "macos")]
 fn updating() -> bool {
   std::env::var_os("UPDATE_GOLDENS").is_some_and(|value| !value.is_empty())
 }
 
+#[cfg(target_os = "macos")]
 fn assert_golden(name: &str, actual: &str) {
   let path = golden_path(name);
   if updating() {
@@ -386,6 +394,20 @@ fn capture(browser_id: &str, home: &SyntheticHome<'_>) -> String {
 
 // ------------------------------------------------------------------ tests --
 
+// Goldens are captured per target OS, and only macOS has been captured so far.
+// The gates below say exactly that: on an uncaptured platform there is no
+// golden to enforce, so the test does not exist rather than passing vacuously.
+//
+// To capture another platform, on a host of that platform:
+//
+//   UPDATE_GOLDENS=1 cargo test -p rookie-cookies --test report_goldens
+//
+// then commit `rookie-rs/tests/goldens/<os>/` and widen these gates to include
+// it. `normalization_survives_a_different_synthetic_root` runs everywhere and
+// already proves the harness itself is portable, so capturing is the only work
+// involved.
+
+#[cfg(target_os = "macos")]
 #[test]
 fn chrome_reports_match_the_golden() {
   let home = SyntheticHome::new("chrome");
@@ -393,6 +415,7 @@ fn chrome_reports_match_the_golden() {
   assert_golden("chrome", &capture("chrome", &home));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn firefox_reports_match_the_golden() {
   let home = SyntheticHome::new("firefox");
