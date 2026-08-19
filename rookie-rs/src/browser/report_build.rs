@@ -138,50 +138,20 @@ fn profile_identity(
 /// still decides is what an empty source list means, which is engine-specific
 /// -- Chromium lists only databases that exist, so having none is ordinary
 /// absence rather than the failure it is for the engine listing.
-fn chromium_profile_outcome(
-  browser_id: &BrowserId,
-  installation_id: &str,
-  extraction: ChromiumExtractedProfile,
-) -> Result<ProfileDraft> {
-  let ChromiumExtractedProfile {
-    profile,
-    sources,
-    failure,
-  } = extraction;
-  let identity = profile_identity(
-    browser_id,
-    installation_id,
-    profile.profile_id.as_str(),
-    &profile.display_name,
-    &profile.path,
-  )?;
-  let mut outcome = ProfileDraft::new(identity, profile.is_default);
-
-  if sources.is_empty() {
-    // A profile that simply has no cookie database is ordinary absence, but one
-    // that reports an extraction failure lost something, so it must not be
-    // downgraded to the same `info` signal as an empty profile.
-    outcome.issues.push(match failure {
-      Some(message) => issue(
-        "profile_extraction_failed",
-        ExtractionStageCode::acquisition(),
-        IssueSeverityCode::error(),
-        message,
-      ),
-      None => issue(
-        "profile_has_no_cookie_source",
-        ExtractionStageCode::discovery(),
-        IssueSeverityCode::info(),
-        "profile has no selected persistent source",
-      ),
-    });
-    return Ok(outcome);
-  }
-
-  outcome
-    .sources
-    .extend(sources.into_iter().map(source_to_draft));
-  Ok(outcome)
+/// What a profile with no sources means. The two towers disagree, because they
+/// discover differently, and that disagreement is the only thing the shared
+/// profile mapper cannot derive for itself.
+enum NoSources {
+  /// Listing admits a profile only when it found a persistent database or a
+  /// session candidate, so an extract with none means whatever justified that
+  /// admission is gone. Always a failure -- never the "nothing was ever there"
+  /// case `no_sources` means. Discovery-only profiles on a stopped extract are
+  /// pruned before the mapper and never reach this.
+  SourceVanished,
+  /// Chromium lists only databases that exist, so a profile with none is
+  /// ordinary absence. A profile that failed before it could name one lost
+  /// something, and must not be downgraded to the same `info` signal.
+  AbsentUnlessFailed(Option<String>),
 }
 
 /// Adapts one already-queried [`Source`] into the shared [`SourceDraft`].
@@ -323,39 +293,49 @@ fn source_issue_to_extraction(source_issue: SourceIssue) -> ExtractionIssue {
 /// Extract-only: a profile whose sources are all gone after a source present at
 /// discovery vanished raises `profile_extraction_failed`. Listing never reaches
 /// this path, so empty candidates there stay ordinary listing emptiness.
-fn extracted_profile_outcome(
-  browser_id: &BrowserId,
-  profile: ExtractedProfile,
-) -> Result<ProfileDraft> {
-  let identity = profile_identity(
-    browser_id,
-    profile.identity.installation_id.as_str(),
-    profile.identity.profile_id.as_str(),
-    &profile.identity.name,
-    &profile.identity.path,
-  )?;
-  let mut outcome = ProfileDraft::new(identity, profile.identity.is_default);
-  for source in profile.sources {
-    outcome.sources.push(source_to_draft(source));
+/// Adapts one extracted profile into a [`ProfileDraft`]. The only profile
+/// mapper: both towers reach the report through it.
+///
+/// A copy, like [`source_to_draft`]. It takes an already-built
+/// [`ProfileIdentity`] rather than either engine's profile bag, which is what
+/// lets one function serve both -- `EngineProfileIdentity.name` and
+/// `ChromiumProfile.display_name` are both just `display_name` by the time they
+/// arrive.
+fn profile_to_draft(
+  identity: ProfileIdentity,
+  is_default: bool,
+  sources: Vec<Source>,
+  no_sources: NoSources,
+) -> ProfileDraft {
+  let mut outcome = ProfileDraft::new(identity, is_default);
+  outcome
+    .sources
+    .extend(sources.into_iter().map(source_to_draft));
+  if !outcome.sources.is_empty() {
+    return outcome;
   }
-  if outcome.sources.is_empty() {
-    // Discovery only admits a profile when it found either a persistent
-    // database or a session candidate, so a profile that reaches extraction
-    // with zero sources means whatever justified its admission is gone by the
-    // time of extraction. That is a real failure, not the "nothing was ever
-    // there" case `no_sources` means. Discovery-only profiles on a stopped
-    // extract are pruned before this adapter and never reach this branch.
-    push_aggregated(
-      &mut outcome.issues,
-      issue(
-        "profile_extraction_failed",
-        ExtractionStageCode::acquisition(),
-        IssueSeverityCode::error(),
-        "a cookie source present at discovery could not be found by the time of extraction",
-      ),
-    );
-  }
-  Ok(outcome)
+  let empty = match no_sources {
+    NoSources::SourceVanished => issue(
+      "profile_extraction_failed",
+      ExtractionStageCode::acquisition(),
+      IssueSeverityCode::error(),
+      "a cookie source present at discovery could not be found by the time of extraction",
+    ),
+    NoSources::AbsentUnlessFailed(Some(message)) => issue(
+      "profile_extraction_failed",
+      ExtractionStageCode::acquisition(),
+      IssueSeverityCode::error(),
+      message,
+    ),
+    NoSources::AbsentUnlessFailed(None) => issue(
+      "profile_has_no_cookie_source",
+      ExtractionStageCode::discovery(),
+      IssueSeverityCode::info(),
+      "profile has no selected persistent source",
+    ),
+  };
+  push_aggregated(&mut outcome.issues, empty);
+  outcome
 }
 
 /// One registered browser's contribution to a report.
@@ -432,12 +412,25 @@ fn chromium_browser_outcome(
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
   }
   for installation in report.installations {
-    for profile in installation.profiles {
-      outcome.profiles.push(chromium_profile_outcome(
+    for extracted in installation.profiles {
+      let ChromiumExtractedProfile {
+        profile,
+        sources,
+        failure,
+      } = extracted;
+      let identity = profile_identity(
         browser_id,
         &installation.installation_id,
-        profile,
-      )?);
+        profile.profile_id.as_str(),
+        &profile.display_name,
+        &profile.path,
+      )?;
+      outcome.profiles.push(profile_to_draft(
+        identity,
+        profile.is_default,
+        sources,
+        NoSources::AbsentUnlessFailed(failure),
+      ));
     }
   }
   Ok(outcome)
@@ -472,9 +465,19 @@ fn engine_extract_outcome(
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
   }
   for profile in extract.profiles {
-    outcome
-      .profiles
-      .push(extracted_profile_outcome(browser_id, profile)?);
+    let identity = profile_identity(
+      browser_id,
+      profile.identity.installation_id.as_str(),
+      profile.identity.profile_id.as_str(),
+      &profile.identity.name,
+      &profile.identity.path,
+    )?;
+    outcome.profiles.push(profile_to_draft(
+      identity,
+      profile.identity.is_default,
+      profile.sources,
+      NoSources::SourceVanished,
+    ));
   }
   Ok(outcome)
 }
@@ -2217,6 +2220,53 @@ mod tests {
       selected: true,
       acquisition: registry::SourceAcquisition::NotAttempted,
     }
+  }
+
+  /// The Chromium half of what `chromium_browser_outcome` now does inline.
+  /// Kept so the adapter tests still drive the real mapper.
+  fn chromium_profile_outcome(
+    browser_id: &BrowserId,
+    installation_id: &str,
+    extraction: registry::ChromiumExtractedProfile,
+  ) -> Result<ProfileDraft> {
+    let registry::ChromiumExtractedProfile {
+      profile,
+      sources,
+      failure,
+    } = extraction;
+    let identity = profile_identity(
+      browser_id,
+      installation_id,
+      profile.profile_id.as_str(),
+      &profile.display_name,
+      &profile.path,
+    )?;
+    Ok(profile_to_draft(
+      identity,
+      profile.is_default,
+      sources,
+      NoSources::AbsentUnlessFailed(failure),
+    ))
+  }
+
+  /// The engine half of what `engine_extract_outcome` now does inline.
+  fn extracted_profile_outcome(
+    browser_id: &BrowserId,
+    profile: ExtractedProfile,
+  ) -> Result<ProfileDraft> {
+    let identity = profile_identity(
+      browser_id,
+      profile.identity.installation_id.as_str(),
+      profile.identity.profile_id.as_str(),
+      &profile.identity.name,
+      &profile.identity.path,
+    )?;
+    Ok(profile_to_draft(
+      identity,
+      profile.identity.is_default,
+      profile.sources,
+      NoSources::SourceVanished,
+    ))
   }
 
   fn chromium_profile(
