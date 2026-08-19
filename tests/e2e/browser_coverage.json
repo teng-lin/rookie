@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "lanes": {
-    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox/Edge/Chromium in e2e.yml or e2e-release.yml. Brave, Opera, Vivaldi, LibreWolf, Zen, Arc, Yandex, Opera GX, DuckDuckGo installed on the runner when a silent installer exists.",
+    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox/Edge/Chromium in e2e.yml or e2e-release.yml. Extra products are installed on the runner only when a silent installer yields a launchable browser we can seed (Brave, Opera, Opera GX, Vivaldi, LibreWolf, Zen, Windows Yandex).",
     "release_fixture": "Engine fixture extracted with this browser_id in e2e-release.yml (tag, release, workflow_dispatch).",
     "manual": "Operator-owned host (Safari FDA, IE ESE). Not GitHub-hosted."
   },
@@ -76,7 +76,7 @@
       "platform": "macos",
       "browser": "arc",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "release_fixture"
     },
     {
       "platform": "macos",
@@ -148,7 +148,7 @@
       "platform": "macos",
       "browser": "yandex",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "release_fixture"
     },
     {
       "platform": "macos",
@@ -160,7 +160,7 @@
       "platform": "windows",
       "browser": "arc",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "release_fixture"
     },
     {
       "platform": "windows",
@@ -208,7 +208,7 @@
       "platform": "windows",
       "browser": "duckduckgo",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "release_fixture"
     },
     {
       "platform": "windows",

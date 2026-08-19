@@ -12,6 +12,7 @@ import os
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -127,7 +128,35 @@ def plant_keychain() -> None:
         )
 
 
+def stage_chromium_user_data(user_data: Path) -> None:
+    user_data.mkdir(parents=True, exist_ok=True)
+    # Vivaldi SIGSEGVs on GitHub runners if these first-run files are missing.
+    for name in ("search_engines.json", "search_engines_prompt.json"):
+        path = user_data / name
+        if not path.exists():
+            path.write_text("{}\n", encoding="utf-8")
+
+
+def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
+    try:
+        db = find_chromium_db(user_data)
+    except SystemExit:
+        return False
+    try:
+        connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            row = connection.execute(
+                "select 1 from cookies where name = ? limit 1", (name,)
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
 def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
+    screenshot = Path(tempfile.gettempdir()) / "rookie-claimed-seed.png"
     cmd = [
         exe,
         "--headless=new",
@@ -137,6 +166,9 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         "--no-first-run",
         "--disable-default-apps",
         f"--user-data-dir={user_data}",
+        f"--screenshot={screenshot}",
+        "--virtual-time-budget=8000",
+        "--dump-dom",
         url,
     ]
     if sys.platform.startswith("linux"):
@@ -145,26 +177,24 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
             cmd = ["xvfb-run", "-a", *cmd]
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
-    saw_db = False
+    saw_cookie = False
     try:
         deadline = time.time() + 90
         while time.time() < deadline:
+            if cookies_db_has_name(user_data):
+                saw_cookie = True
+                time.sleep(1)
+                break
             if proc.poll() is not None:
                 break
-            try:
-                find_chromium_db(user_data)
-                saw_db = True
-                time.sleep(2)
-                break
-            except SystemExit:
-                time.sleep(0.5)
-        if not saw_db:
+            time.sleep(0.5)
+        if not saw_cookie:
             status = proc.poll()
             if status is not None:
                 raise SystemExit(
-                    f"native chromium seed exited {status} before writing a Cookies db"
+                    f"native chromium seed exited {status} without writing rookie_ci"
                 )
-            raise SystemExit("native chromium seed timed out before writing a Cookies db")
+            raise SystemExit("native chromium seed timed out without writing rookie_ci")
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -172,7 +202,8 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-    find_chromium_db(user_data)
+    if not cookies_db_has_name(user_data):
+        raise SystemExit("native chromium seed did not persist rookie_ci")
 
 
 def seed_chromium(channel: str, user_data: Path, url: str, exe: str) -> None:
@@ -279,6 +310,7 @@ def run() -> int:
             assert_gecko(user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
+            stage_chromium_user_data(user_data)
             seed_chromium("chromium", user_data, url, exe)
             assert_chromium(user_data, browser)
     finally:

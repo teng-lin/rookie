@@ -135,41 +135,15 @@ HOSTS: dict[str, dict] = {
     },
     "yandex": {
         "engine": "chromium",
-        "keychain_service": "Yandex Safe Storage",
-        "keychain_account": "Yandex",
-        "macos": {
-            "kind": "brew",
-            "cask": "yandex",
-            "exe": [
-                "/Applications/Yandex.app/Contents/MacOS/Yandex",
-                "/Applications/Yandex Browser.app/Contents/MacOS/Yandex",
-            ],
-        },
+        # macOS Yandex has no registry keychain identity (plaintext-only
+        # claim). Playwright still encrypts with mock_password, so a hosted
+        # seed cannot be extracted honestly.
         "windows": {
             "kind": "winget",
             "id": "Yandex.Browser",
             "exe": [
                 r"%LocalAppData%\Yandex\YandexBrowser\Application\browser.exe",
                 r"%ProgramFiles%\Yandex\YandexBrowser\Application\browser.exe",
-            ],
-        },
-    },
-    "arc": {
-        "engine": "chromium",
-        "keychain_service": "Arc Safe Storage",
-        "keychain_account": "Arc",
-        "macos": {
-            "kind": "brew",
-            "cask": "arc",
-            "exe": ["/Applications/Arc.app/Contents/MacOS/Arc"],
-        },
-        "windows": {
-            "kind": "winget",
-            "id": "TheBrowserCompany.Arc",
-            "exe": [
-                r"%LocalAppData%\Programs\Arc\Arc.exe",
-                r"%LocalAppData%\Arc\Application\Arc.exe",
-                r"%LocalAppData%\Packages\TheBrowserCompany.Arc_*\**\Arc.exe",
             ],
         },
     },
@@ -215,18 +189,6 @@ HOSTS: dict[str, dict] = {
                 r"%ProgramFiles%\Zen Browser\zen.exe",
                 r"%LocalAppData%\Zen Browser\zen.exe",
                 r"%LocalAppData%\Programs\Zen Browser\zen.exe",
-            ],
-        },
-    },
-    "duckduckgo": {
-        "engine": "chromium",
-        "windows": {
-            "kind": "winget",
-            "id": "DuckDuckGo.DesktopBrowser",
-            "exe": [
-                r"%LocalAppData%\DuckDuckGo\DuckDuckGo.exe",
-                r"%ProgramFiles%\DuckDuckGo\DuckDuckGo.exe",
-                r"%LocalAppData%\Packages\DuckDuckGo*\**\DuckDuckGo.exe",
             ],
         },
     },

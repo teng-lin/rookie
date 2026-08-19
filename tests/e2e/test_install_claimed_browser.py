@@ -90,10 +90,16 @@ class InstallCatalogTests(unittest.TestCase):
             self.assertTrue(INSTALL.is_launchable(real))
 
     def test_catalog_skips_windowsapps_aliases(self) -> None:
-        for browser in ("arc", "duckduckgo", "brave"):
-            windows = INSTALL.HOSTS[browser].get("windows", {})
-            for path in windows.get("exe", []):
+        for browser, meta in INSTALL.HOSTS.items():
+            for path in meta.get("windows", {}).get("exe", []):
                 self.assertNotIn("WindowsApps", path, browser)
+
+    def test_untestable_products_are_not_in_the_install_catalog(self) -> None:
+        catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
+        self.assertNotIn(("macos", "arc"), catalog)
+        self.assertNotIn(("windows", "arc"), catalog)
+        self.assertNotIn(("windows", "duckduckgo"), catalog)
+        self.assertNotIn(("macos", "yandex"), catalog)
 
 
 if __name__ == "__main__":

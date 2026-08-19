@@ -52,7 +52,11 @@ if (process.env.ROOKIE_E2E_BROWSER_PATH) {
   launchOptions.channel = channel;
 }
 
-const context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+const timeout = Number(process.env.ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS || 30000);
+const context = await chromium.launchPersistentContext(userDataDir, {
+  ...launchOptions,
+  timeout,
+});
 
 try {
   const page = await context.newPage();

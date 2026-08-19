@@ -44,3 +44,23 @@ class ClaimedE2eHelperTests(unittest.TestCase):
     def test_pick_cookie_port_honors_env(self) -> None:
         with mock.patch.dict(CLAIMED.os.environ, {"ROOKIE_E2E_COOKIE_PORT": "9333"}):
             self.assertEqual(CLAIMED.pick_cookie_port(), 9333)
+
+    def test_cookies_db_has_name_reads_sqlite(self) -> None:
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "Default" / "Cookies"
+            db.parent.mkdir(parents=True)
+            connection = sqlite3.connect(db)
+            connection.execute(
+                "create table cookies (name text, host_key text, value text)"
+            )
+            connection.execute(
+                "insert into cookies values ('rookie_ci', '127.0.0.1', 'bar')"
+            )
+            connection.commit()
+            connection.close()
+            self.assertTrue(CLAIMED.cookies_db_has_name(Path(tmp)))
+            self.assertFalse(CLAIMED.cookies_db_has_name(Path(tmp), "missing"))
