@@ -1128,6 +1128,36 @@ pub(crate) fn retain_completed_engine_extract(extract: &mut EngineExtract) {
     .retain(|profile| !profile.sources.is_empty());
 }
 
+// Only reachable through the safari/internet_explorer engine adapters, whose
+// modules are compiled on macOS/Windows and in tests; other targets see this
+// as dead. registry.rs's cfg ceiling (#218) keeps the gate out of this file.
+#[allow(dead_code)]
+fn boundary_stop_from_error(
+  error: &anyhow::Error,
+) -> Option<crate::common::deadline::BoundaryStop> {
+  error.chain().find_map(|cause| {
+    cause
+      .downcast_ref::<crate::common::deadline::BoundaryStop>()
+      .copied()
+  })
+}
+
+// See `boundary_stop_from_error`: only reachable through the safari and
+// internet_explorer engine adapters.
+#[allow(dead_code)]
+fn retain_engine_runtime_stop(
+  mut extract: EngineExtract,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> EngineExtract {
+  if let Err(stop) = runtime.check() {
+    extract.boundary_stop.get_or_insert(stop);
+  }
+  if extract.boundary_stop.is_some() {
+    retain_completed_engine_extract(&mut extract);
+  }
+  extract
+}
+
 /// Resolves the installation roots an engine adapter should walk, in the fixed
 /// registry order of priority then root ID.
 fn engine_roots<'a>(

@@ -3,9 +3,9 @@ use super::super::source::{Source, SourceCandidate, SourceFailureStage, SourceSt
 #[cfg(test)]
 use super::DiscoveryCounters;
 use super::{
-  canonical_installation_root, embedded_registry, engine_roots, installation_id,
-  installation_root_is_directory, normalized_path_bytes, profile_id,
-  retain_completed_engine_extract, select_listing_profiles, sort_discovered_profiles,
+  boundary_stop_from_error, canonical_installation_root, embedded_registry, engine_roots,
+  installation_id, installation_root_is_directory, normalized_path_bytes, profile_id,
+  retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles,
   BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
   DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
   LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
@@ -351,7 +351,7 @@ where
   )?;
   runtime.check()?;
   let extract = populate_safari_sources_with_runtime(listing, domains, runtime, query);
-  Ok(retain_safari_runtime_stop(extract, runtime))
+  Ok(retain_engine_runtime_stop(extract, runtime))
 }
 
 pub(super) fn populate_safari_sources<Q>(
@@ -492,29 +492,6 @@ where
   extract
 }
 
-fn boundary_stop_from_error(
-  error: &anyhow::Error,
-) -> Option<crate::common::deadline::BoundaryStop> {
-  error.chain().find_map(|cause| {
-    cause
-      .downcast_ref::<crate::common::deadline::BoundaryStop>()
-      .copied()
-  })
-}
-
-fn retain_safari_runtime_stop(
-  mut extract: EngineExtract,
-  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> EngineExtract {
-  if let Err(stop) = runtime.check() {
-    extract.boundary_stop.get_or_insert(stop);
-  }
-  if extract.boundary_stop.is_some() {
-    retain_completed_engine_extract(&mut extract);
-  }
-  extract
-}
-
 fn query_safari_file<Q>(
   origin: SourceCandidate,
   domains: Option<&[String]>,
@@ -608,7 +585,7 @@ pub(crate) fn legacy_safari_outcome_with_runtime(
       })
     },
   );
-  Ok(retain_safari_runtime_stop(extract, runtime))
+  Ok(retain_engine_runtime_stop(extract, runtime))
 }
 
 #[cfg(target_os = "macos")]
@@ -1675,7 +1652,7 @@ mod tests {
         counters: listing.counters,
         boundary_stop: listing.boundary_stop,
       };
-      let retained = retain_safari_runtime_stop(discovery_only, &runtime);
+      let retained = retain_engine_runtime_stop(discovery_only, &runtime);
 
       assert_eq!(retained.boundary_stop, Some(stop));
       assert!(
