@@ -31,6 +31,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixtures remain for products we cannot install. Extra hosted browsers run on
   nightly and again on release. Claimed-browser fixtures run on
   `v*` tags, GitHub Releases, or `workflow_dispatch`.
+- `docs/testing.md` lists every registry browser against hosted CI, release
+  fixtures, or manual (Safari / Internet Explorer).
+
+### Fixed
+
+- Artifact smoke on Ubuntu ARM64: maturin-action's manylinux container left
+  `RUSTC_WRAPPER=sccache` in the host job environment, so the native Node
+  binding build failed looking for a host `sccache`.
 
 ## [0.6.0-beta.1] - 2026-08-18
 

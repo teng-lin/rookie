@@ -93,7 +93,14 @@ jobs:
       - name: Build native Node binding on the runner
         if: runner.os != 'Linux' || runner.arch == 'ARM64'
         working-directory: bindings/node
-        run: npm run build -- --target ${{ inputs.rust-target }} --cargo-flags=--locked
+        shell: bash
+        run: |
+          # maturin-action with manylinux installs sccache inside Docker and
+          # still exports RUSTC_WRAPPER=sccache into the host job env.
+          if ! command -v sccache >/dev/null 2>&1; then
+            unset RUSTC_WRAPPER SCCACHE_GHA_ENABLED
+          fi
+          npm run build -- --target "${{ inputs.rust-target }}" --cargo-flags=--locked
       - name: Build native Node binding in the pinned release container
         if: runner.os == 'Linux' && runner.arch == 'X64'
         env:

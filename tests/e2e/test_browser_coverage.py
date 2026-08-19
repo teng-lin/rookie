@@ -10,6 +10,21 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 COVERAGE_PATH = Path(__file__).with_name("browser_coverage.json")
 REGISTRY_PATH = REPOSITORY_ROOT / "rookie-rs" / "browser_registry.json"
+TESTING_MD_PATH = REPOSITORY_ROOT / "docs" / "testing.md"
+
+# docs/testing.md uses the shorter product names readers already know.
+DOC_BROWSER_TITLES = {
+    "chrome": "Chrome",
+    "coccoc": "Cốc Cốc",
+    "edge": "Edge",
+}
+DOC_LANE_CELLS = {
+    "hosted": "nightly_hosted",
+    "fixture": "release_fixture",
+    "manual": "manual",
+    "**manual**": "manual",
+    "—": None,
+}
 
 KNOWN_LANES = frozenset({"nightly_hosted", "release_fixture", "manual"})
 NIGHTLY_HOSTED = frozenset(
@@ -47,6 +62,38 @@ MANUAL = frozenset({("macos", "safari"), ("windows", "internet_explorer")})
 
 def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _doc_title(canonical_id: str, display_name: str) -> str:
+    return DOC_BROWSER_TITLES.get(canonical_id, display_name)
+
+
+def _parse_testing_md_matrix(text: str) -> dict[str, dict[str, str | None]]:
+    """Parse the Browser / Linux / macOS / Windows table in docs/testing.md."""
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith("| Browser | Linux | macOS | Windows |"):
+            start = index
+            break
+    if start is None:
+        raise AssertionError("docs/testing.md is missing the browser coverage matrix")
+
+    rows: dict[str, dict[str, str | None]] = {}
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 4:
+            raise AssertionError(f"unexpected matrix row: {line!r}")
+        title, *platforms = cells
+        parsed: dict[str, str | None] = {}
+        for platform, cell in zip(("linux", "macos", "windows"), platforms, strict=True):
+            if cell not in DOC_LANE_CELLS:
+                raise AssertionError(f"unknown lane cell {cell!r} for {title}")
+            parsed[platform] = DOC_LANE_CELLS[cell]
+        rows[title] = parsed
+    return rows
 
 
 def _expected_lane(platform: str, browser: str) -> str:
@@ -94,6 +141,23 @@ class BrowserCoverageTests(unittest.TestCase):
             if row["lane"] == "nightly_hosted"
         }
         self.assertEqual(hosted, NIGHTLY_HOSTED)
+
+    def test_testing_md_matrix_matches_coverage(self) -> None:
+        titles: dict[str, str] = {}
+        for browsers in self.registry["platforms"].values():
+            for browser in browsers:
+                titles[browser["canonical_id"]] = _doc_title(
+                    browser["canonical_id"], browser["display_name"]
+                )
+
+        expected: dict[str, dict[str, str | None]] = {
+            title: {"linux": None, "macos": None, "windows": None} for title in titles.values()
+        }
+        for row in self.coverage_doc["coverage"]:
+            expected[titles[row["browser"]]][row["platform"]] = row["lane"]
+
+        actual = _parse_testing_md_matrix(TESTING_MD_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":
