@@ -1314,89 +1314,6 @@ fn prefer_active_profiles(profiles: &mut [ChromiumProfile]) {
   });
 }
 
-/// Selects one Chrome profile by opaque ID, display name, directory name, or
-/// full path when that path is valid UTF-8.
-///
-/// Names can repeat across channels and installations, so an ambiguous match
-/// is rejected instead of silently trusting an advisory activity hint. The
-/// opaque profile ID is always lossless; callers must use it when a descriptor
-/// marks its display path as lossy.
-fn select_chrome_profile(profile: &str) -> Result<ChromiumProfile> {
-  let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  select_chrome_profile_with_runtime(profile, &runtime)
-}
-
-pub(crate) fn select_chrome_profile_with_runtime(
-  profile: &str,
-  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<ChromiumProfile> {
-  let profiles = chrome_profiles_with_runtime(runtime)?;
-  runtime.check()?;
-  select_chromium_profile(&profiles, profile).cloned()
-}
-
-fn select_chromium_profile<'a>(
-  profiles: &'a [ChromiumProfile],
-  selector: &str,
-) -> Result<&'a ChromiumProfile> {
-  if selector.is_empty() {
-    bail!("Chrome profile selector must not be empty")
-  }
-
-  if let Some(profile) = profiles
-    .iter()
-    .find(|profile| profile.profile_id.as_str() == selector)
-  {
-    return Ok(profile);
-  }
-
-  let lossy_paths = profiles
-    .iter()
-    .filter(|profile| profile.path.to_str().is_none() && profile.path.to_string_lossy() == selector)
-    .collect::<Vec<_>>();
-  if !lossy_paths.is_empty() {
-    bail!(
-      "Chrome profile path {selector:?} is a lossy display value and cannot be used as a selector; select by profile ID: [{}]",
-      describe_chromium_profiles(lossy_paths.into_iter())
-    )
-  }
-
-  let wanted = Path::new(selector);
-  let matches = profiles
-    .iter()
-    .filter(|profile| {
-      profile.display_name == selector
-        || profile.directory_name == selector
-        || profile.path == wanted
-    })
-    .collect::<Vec<_>>();
-  match matches.as_slice() {
-    [profile] => Ok(profile),
-    [] => bail!(
-      "no Chrome profile matches {selector:?}; available profiles: [{}]",
-      describe_chromium_profiles(profiles.iter())
-    ),
-    _ => bail!(
-      "{} Chrome profiles match {selector:?}; select one by profile ID or a non-lossy full path: [{}]",
-      matches.len(),
-      describe_chromium_profiles(matches.iter().copied())
-    ),
-  }
-}
-
-fn describe_chromium_profiles<'a>(profiles: impl Iterator<Item = &'a ChromiumProfile>) -> String {
-  profiles
-    .map(|profile| {
-      format!(
-        "{} ({}, {})",
-        profile.display_name, REDACTED_PATH, profile.profile_id
-      )
-    })
-    .collect::<Vec<_>>()
-    .join(", ")
-}
-
 fn lost_chromium_profile_error(browser_id: &str, issues: &[DiscoveryIssue]) -> Option<String> {
   let lost_profiles = issues
     .iter()
@@ -1547,12 +1464,14 @@ fn chrome_profile(profile_id: &str, domains: Option<Vec<String>>) -> Result<Chro
 
 #[cfg(test)]
 mod tests {
+  use super::super::profile_query::{chromium_match_candidate, match_profile_query};
   use super::super::test_seams::{
     browser_root, channel_root, context_for, current_context, seed_cookie, with_test_fs,
     write_local_state, TempDir, TestDiscoveryFs,
   };
   use super::*;
   use crate::browser::chromium_crypto::{ChromiumKeyOutcomes, KeyProvider};
+  use crate::RequestError;
   use rusqlite::params;
   use std::cell::RefCell;
 
@@ -3138,6 +3057,57 @@ mod tests {
   }
 
   #[test]
+  fn last_used_outranks_active_order_even_when_absent_from_the_active_list() {
+    // `last_active_profiles` only backfills the last-used profile when it is
+    // itself empty (see `parse_local_state`), so a non-empty active list can
+    // name a last-used profile that isn't in it at all: `active_order` is
+    // then `None` while `is_last_used` is `true`. The doc contract on
+    // `chrome_profiles` says the last-used profile is listed first
+    // regardless, so it must still outrank profiles with a real
+    // `active_order`, not just the ones with no hint at all.
+    let temp = TempDir::new("last-used-outranks-active-order");
+    let context = current_context(temp.path().to_path_buf());
+    let root = channel_root(&context, "stable");
+    seed_cookie(&root.join("Default"), true, "default", "one");
+    seed_cookie(&root.join("Profile 1"), false, "one-alt", "two");
+    seed_cookie(&root.join("Profile 2"), false, "two-alt", "three");
+    write_local_state(
+      &root,
+      serde_json::json!({
+        "profile": {
+          "last_used": "Default",
+          "last_active_profiles": ["Profile 1", "Profile 2"],
+        }
+      }),
+    );
+
+    let discovery = discover_browser_with_context(&context, "chrome").expect("discover Chrome");
+    let profiles = discovery.profiles();
+    let default_profile = profiles
+      .iter()
+      .find(|profile| profile.directory_name == "Default")
+      .expect("Default profile discovered");
+    assert!(default_profile.is_last_used);
+    assert_eq!(
+      default_profile.active_order, None,
+      "Default is last-used but absent from last_active_profiles"
+    );
+    let profile_one = profiles
+      .iter()
+      .find(|profile| profile.directory_name == "Profile 1")
+      .expect("Profile 1 discovered");
+    assert_eq!(profile_one.active_order, Some(0));
+
+    let mut preferred = profiles.clone();
+    prefer_active_profiles(&mut preferred);
+    assert_eq!(
+      profile_directory_names(&preferred),
+      ["Default", "Profile 1", "Profile 2"],
+      "the last-used profile must sort first even though it carries no active_order"
+    );
+  }
+
+  #[test]
   fn missing_stale_and_malformed_activity_hints_fall_back_to_default_first() {
     for (tag, local_state) in [
       ("missing", None),
@@ -3173,6 +3143,9 @@ mod tests {
 
   #[test]
   fn chrome_profile_selection_requires_an_unambiguous_name_directory_or_path() {
+    // Chrome profile selection is no longer its own matcher: real discovered
+    // Chromium profiles are converted to `ProfileMatchCandidate`s and resolved
+    // by the same `match_profile_query` every other engine uses (PR C).
     let temp = TempDir::new("profile-selection");
     let context = current_context(temp.path().to_path_buf());
     let stable = channel_root(&context, "stable");
@@ -3197,27 +3170,43 @@ mod tests {
     let mut profiles = discovery.profiles();
     prefer_active_profiles(&mut profiles);
     assert_eq!(profiles[0].display_name, "Work");
+    let work_id = profiles[0].profile_id.as_str().to_owned();
+    let second_id = profiles[1].profile_id.as_str().to_owned();
+    let second_path = profiles[1].path.clone();
+    let personal_id = profiles
+      .iter()
+      .find(|profile| profile.display_name == "Personal")
+      .expect("Personal profile discovered")
+      .profile_id
+      .as_str()
+      .to_owned();
+    let candidates: Vec<_> = profiles.into_iter().map(chromium_match_candidate).collect();
+
     assert_eq!(
-      select_chromium_profile(&profiles, "Personal")
-        .expect("unique display name")
-        .display_name,
-      "Personal"
+      match_profile_query("chrome", "Personal", &candidates).expect("unique display name"),
+      personal_id
     );
     assert_eq!(
-      select_chromium_profile(&profiles, profiles[0].profile_id.as_str())
-        .expect("profile ID")
-        .profile_id,
-      profiles[0].profile_id
+      match_profile_query("chrome", &work_id, &candidates).expect("profile ID"),
+      work_id
     );
     assert_eq!(
-      select_chromium_profile(&profiles, profiles[1].path.to_string_lossy().as_ref())
-        .expect("full path")
-        .profile_id,
-      profiles[1].profile_id
+      match_profile_query(
+        "chrome",
+        second_path.to_string_lossy().as_ref(),
+        &candidates
+      )
+      .expect("full path"),
+      second_id
     );
-    let ambiguous = select_chromium_profile(&profiles, "Default").expect_err("two directories");
-    assert!(ambiguous.to_string().contains("2 Chrome profiles match"));
-    assert!(select_chromium_profile(&profiles, "").is_err());
+    let ambiguous =
+      match_profile_query("chrome", "Default", &candidates).expect_err("two directories");
+    assert!(matches!(ambiguous, RequestError::AmbiguousProfile { .. }));
+    assert_eq!(ambiguous.profile_ids().len(), 2);
+    assert!(matches!(
+      match_profile_query("chrome", "", &candidates),
+      Err(RequestError::EmptyProfileSelector)
+    ));
   }
 
   #[cfg(unix)]
@@ -3232,18 +3221,16 @@ mod tests {
     seed_cookie(&root.join("Default"), true, "default", "one");
     let discovery = discover_browser_with_context(&context, "chrome").expect("discover Chrome");
     let mut profiles = discovery.profiles();
-    let profile_id = profiles[0].profile_id.clone();
+    let profile_id = profiles[0].profile_id.as_str().to_owned();
     profiles[0].path = PathBuf::from(OsString::from_vec(b"/profile/invalid-\xff".to_vec()));
     let lossy_path = profiles[0].path.to_string_lossy().into_owned();
+    let candidates: Vec<_> = profiles.into_iter().map(chromium_match_candidate).collect();
 
-    let error = select_chromium_profile(&profiles, &lossy_path)
+    let error = match_profile_query("chrome", &lossy_path, &candidates)
       .expect_err("a lossy display path cannot round-trip");
-    assert!(error.to_string().contains("lossy display value"));
-    assert!(error.to_string().contains(profile_id.as_str()));
+    assert!(matches!(error, RequestError::LossyProfilePath { .. }));
     assert_eq!(
-      select_chromium_profile(&profiles, profile_id.as_str())
-        .expect("opaque ID remains lossless")
-        .profile_id,
+      match_profile_query("chrome", &profile_id, &candidates).expect("opaque ID remains lossless"),
       profile_id
     );
   }

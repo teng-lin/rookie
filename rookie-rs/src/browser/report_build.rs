@@ -1849,13 +1849,8 @@ pub(crate) fn chrome_profile_report(
 ) -> Result<ExtractionReport> {
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  let profile = registry::select_chrome_profile_with_runtime(profile, &runtime)?;
-  browser_extraction_report_with_runtime(
-    "chrome",
-    Some(profile.profile_id.as_str()),
-    domains,
-    &runtime,
-  )
+  let profile_id = registry::resolve_profile_query("chrome", profile, &runtime)?;
+  browser_extraction_report_with_runtime("chrome", Some(profile_id.as_str()), domains, &runtime)
 }
 
 fn chromium_profile_descriptor(
