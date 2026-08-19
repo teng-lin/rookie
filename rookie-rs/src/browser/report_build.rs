@@ -31,9 +31,9 @@ use super::report_core::{
   ReportStatusCode, SourceDraft, SourceExtraction, StatsAccumulator, TerminationCode,
   MAX_ISSUE_SAMPLES,
 };
-use super::source::{
-  Source, SourceCandidate, SourceFailureStage as SourceFailureStageNew, SourceIssue, SourceStats,
-};
+use super::source::{Source, SourceFailureStage as SourceFailureStageNew, SourceIssue};
+#[cfg(test)]
+use super::source::{SourceCandidate, SourceStats};
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
@@ -1515,101 +1515,26 @@ fn canonical_direct_chromium_extraction_impl(
 
 pub(crate) fn canonical_direct_mozilla_extraction_with_runtime(
   db_path: &std::path::Path,
-  draft: super::mozilla::MozillaExtractionDraft,
+  extract: super::mozilla::MozillaExtract,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Outcome> {
-  canonical_direct_mozilla_extraction_impl(db_path, draft, Some(runtime))
+  canonical_direct_mozilla_extraction_impl(db_path, extract, Some(runtime))
 }
 
 fn canonical_direct_mozilla_extraction_impl(
   db_path: &std::path::Path,
-  draft: super::mozilla::MozillaExtractionDraft,
+  extract: super::mozilla::MozillaExtract,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
+  // The engine already assembled every source, including its `row_read_failed`
+  // issues. The direct path gates the persistent source on `persistent_attempted`
+  // alone -- there is no discovery to consult -- which is exactly the engine's
+  // emit condition, so the engine's `Vec<Source>` is consumed as-is.
   let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let mut sources = Vec::new();
-  if draft.persistent_attempted {
-    let records = draft.persistent_records;
-    let cookies_emitted = records.len();
-    let acquisition: SourceAcquisition = draft.persistent_acquisition_strategy.into();
-    let mut source = Source {
-      origin: SourceCandidate {
-        path: db_path.to_path_buf(),
-        role: CookieSourceRoleId::persistent(),
-        format: CookieSourceFormatId::known(super::mozilla::PERSISTENT_FORMAT_ID),
-        precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
-        exists: true,
-        selected: true,
-        acquisition,
-      },
-      selected: true,
-      acquisition,
-      records,
-      stats: SourceStats {
-        rows_seen: draft.persistent_rows_seen,
-        cookies_emitted,
-        rows_skipped: draft.persistent_rows_skipped,
-        rows_rejected: draft.persistent_rows_rejected,
-        provider_failures: 0,
-      },
-      acquisition_attempts: draft.persistent_acquisition_attempts,
-      diagnostics: Vec::new(),
-      failure: None,
-      issues: Vec::new(),
-    };
-    if let Some(error) = draft.persistent_error {
-      let stage = match draft.persistent_failure_kind {
-        Some(crate::common::sqlite::BrowserDatabaseFailureKind::Query) => {
-          SourceFailureStageNew::Query
-        }
-        _ => SourceFailureStageNew::Acquisition,
-      };
-      source.fail(stage, error);
-    }
-    source.push_row_read_failed(draft.persistent_row_error);
-    sources.push(source);
-  }
-  sources.extend(draft.session_sources.into_iter().map(|session| {
-    let records = session.records;
-    let cookies_emitted = records.len();
-    let mut source = Source {
-      origin: SourceCandidate {
-        path: session.path,
-        role: CookieSourceRoleId::session(),
-        format: CookieSourceFormatId::known(session.format),
-        precedence: session.precedence,
-        exists: true,
-        selected: session.selected,
-        acquisition: SourceAcquisition::StableFileImage,
-      },
-      selected: session.selected,
-      acquisition: SourceAcquisition::StableFileImage,
-      records,
-      stats: SourceStats {
-        rows_seen: session.rows_seen,
-        cookies_emitted,
-        rows_skipped: session.rows_skipped,
-        rows_rejected: session.rows_rejected,
-        provider_failures: 0,
-      },
-      acquisition_attempts: session.acquisition_attempts,
-      diagnostics: session.diagnostics,
-      failure: None,
-      issues: Vec::new(),
-    };
-    // Same rule as the registry adapter: a session candidate keeps no row
-    // error, but rows it rejected still cost cookies, so the issue is keyed on
-    // the skipped count rather than on an error string being present.
-    source.push_row_read_failed(None);
-    if let Some(error) = session.error {
-      source.fail(SourceFailureStageNew::Parse, error);
-    }
-    source
-  }));
-  let extract = direct_engine_extract(profile_path, sources, draft.boundary_stop);
+  let engine_extract = direct_engine_extract(profile_path, extract.sources, extract.boundary_stop);
   match runtime {
-    Some(runtime) => canonical_engine_extract_with_runtime("firefox", extract, runtime),
-    None => canonical_engine_extract("firefox", extract),
+    Some(runtime) => canonical_engine_extract_with_runtime("firefox", engine_extract, runtime),
+    None => canonical_engine_extract("firefox", engine_extract),
   }
 }
 

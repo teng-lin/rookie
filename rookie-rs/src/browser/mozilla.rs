@@ -23,6 +23,9 @@ use zeroize::Zeroize;
 use super::cookie_record::{
   Attributes, CookieRecord, CookieValue, Observation, RawValue, SourceRef,
 };
+use super::registry::PERSISTENT_SOURCE_PRECEDENCE;
+use super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
+use super::source::{Source, SourceAcquisition, SourceCandidate, SourceFailureStage, SourceStats};
 
 // Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
 // expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
@@ -697,61 +700,206 @@ struct SessionCandidateFailure {
   transient_errors: Vec<String>,
 }
 
-/// Crate-private source outcome for the generic registry adapter.  The legacy
-/// API deliberately continues to project this to a flat `Vec<Cookie>`.
+/// File-private scratch for one walked session candidate. It names the same
+/// facts [`Source`] does, and [`session_source`] converts it at the engine
+/// boundary; nothing outside this module sees it.
 #[derive(Debug)]
-pub(crate) struct MozillaSessionDraft {
-  pub(crate) path: PathBuf,
-  pub(crate) format: &'static str,
+struct MozillaSessionDraft {
+  path: PathBuf,
+  format: &'static str,
   /// Declared candidate precedence from [`session_candidates`], retained so a
   /// report orders attempted candidates by declaration rather than by which
   /// ones happened to exist.
-  pub(crate) precedence: u16,
-  pub(crate) selected: bool,
+  precedence: u16,
+  selected: bool,
   #[cfg(test)]
-  pub(crate) cookies: Vec<Cookie>,
-  pub(crate) records: Vec<CookieRecord>,
-  pub(crate) rows_seen: usize,
-  pub(crate) rows_skipped: usize,
-  pub(crate) rows_rejected: usize,
-  pub(crate) acquisition_attempts: u32,
-  pub(crate) diagnostics: Vec<String>,
-  pub(crate) error: Option<String>,
+  cookies: Vec<Cookie>,
+  records: Vec<CookieRecord>,
+  rows_seen: usize,
+  rows_skipped: usize,
+  rows_rejected: usize,
+  acquisition_attempts: u32,
+  diagnostics: Vec<String>,
+  error: Option<String>,
 }
 
+/// File-private scratch the walk accumulates a profile's persistent and session
+/// results into. It is converted to a [`MozillaExtract`] (a `Vec<Source>`) at
+/// the engine boundary by [`extract_from_draft`]; nothing outside this module
+/// sees it.
 #[derive(Debug, Default)]
-pub(crate) struct MozillaExtractionDraft {
+struct MozillaExtractionDraft {
   #[cfg(test)]
-  pub(crate) persistent_cookies: Vec<Cookie>,
+  persistent_cookies: Vec<Cookie>,
   #[cfg(test)]
-  pub(crate) persistent_detailed_cookies: Vec<DetailedCookie>,
-  pub(crate) persistent_records: Vec<CookieRecord>,
-  pub(crate) persistent_rows_seen: usize,
-  pub(crate) persistent_rows_skipped: usize,
-  pub(crate) persistent_rows_rejected: usize,
-  pub(crate) persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
-  pub(crate) persistent_acquisition_attempts: u32,
+  persistent_detailed_cookies: Vec<DetailedCookie>,
+  persistent_records: Vec<CookieRecord>,
+  persistent_rows_seen: usize,
+  persistent_rows_skipped: usize,
+  persistent_rows_rejected: usize,
+  persistent_acquisition_strategy: Option<sqlite::DatabaseAcquisitionStrategy>,
+  persistent_acquisition_attempts: u32,
   /// Whether the persistent source reached an atomic success or ordinary
   /// failure. A boundary stop before that point must not turn discovery's
   /// source placeholder into a successful zero-row outcome.
-  pub(crate) persistent_attempted: bool,
+  persistent_attempted: bool,
   /// Acquisition, schema validation, or the query did not complete, so the
   /// source failed outright. A source that produced rows is never reported
   /// through this field, so a caller can tell total failure from partial
   /// success.
-  pub(crate) persistent_error: Option<String>,
+  persistent_error: Option<String>,
   /// Which of those it was, taken from the SQLite layer's typed failure rather
   /// than assumed.
-  pub(crate) persistent_failure_kind: Option<sqlite::BrowserDatabaseFailureKind>,
+  persistent_failure_kind: Option<sqlite::BrowserDatabaseFailureKind>,
   /// A row was seen and rejected while the source itself stayed readable.
   /// Section 5.7 counts this in `rows_skipped` and reports it as a row issue
   /// against a source that still succeeded, which is why it is deliberately
   /// separate from `persistent_error`.
-  pub(crate) persistent_row_error: Option<String>,
-  pub(crate) session_sources: Vec<MozillaSessionDraft>,
+  persistent_row_error: Option<String>,
+  session_sources: Vec<MozillaSessionDraft>,
   /// Operation termination is retained as a typed boundary result. It is not
   /// represented as a fabricated session source or flattened diagnostic.
+  boundary_stop: Option<BoundaryStop>,
+}
+
+/// The crate-visible result of extracting one Mozilla profile: the sources the
+/// walk produced and any boundary stop it observed.
+///
+/// Sources are in walk order: the persistent source first, then each session
+/// candidate.
+///
+/// The persistent source is present iff the query was attempted, which is all
+/// this engine can know. It is *not* the same as "the profile has a persistent
+/// store": a session-only profile with no `cookies.sqlite` still attempts the
+/// query and so still gets a failed persistent source here. Whether that
+/// survives into a report is the adapter's half of the decision --
+/// [`super::registry::gecko::populate_gecko_sources`] drops it for a profile
+/// that neither discovered a persistent store nor still has one on disk, which
+/// is knowledge only the listing and the filesystem have. The direct path keeps
+/// every source, because it has no discovery and "attempted" is its whole gate.
+pub(crate) struct MozillaExtract {
+  pub(crate) sources: Vec<Source>,
   pub(crate) boundary_stop: Option<BoundaryStop>,
+}
+
+/// Builds the persistent [`Source`] for a queried Gecko profile.
+///
+/// `selected: true` because a profile's authoritative persistent store is
+/// always the selected source. Records are the only supply of finalized rows,
+/// so `cookies_emitted` counts them rather than any cookie list.
+fn persistent_source(path: PathBuf, extraction: MozillaExtractionDraft) -> Source {
+  let acquisition: SourceAcquisition = extraction.persistent_acquisition_strategy.into();
+  let records = extraction.persistent_records;
+  let cookies_emitted = records.len();
+  let mut source = Source {
+    origin: SourceCandidate {
+      path,
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known(PERSISTENT_FORMAT_ID),
+      precedence: PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition,
+    },
+    selected: true,
+    acquisition,
+    records,
+    stats: SourceStats {
+      rows_seen: extraction.persistent_rows_seen,
+      cookies_emitted,
+      rows_skipped: extraction.persistent_rows_skipped,
+      rows_rejected: extraction.persistent_rows_rejected,
+      provider_failures: 0,
+    },
+    acquisition_attempts: extraction.persistent_acquisition_attempts,
+    // `diagnostics` carries acquisition retry notes, which a report renders as a
+    // warning meaning "retried, then succeeded". A rejected row is neither a
+    // retry nor a recovery — rows were lost — so it must not be reported that
+    // way; `push_row_read_failed` raises it as an error-severity row failure.
+    diagnostics: Vec::new(),
+    failure: None,
+    issues: Vec::new(),
+  };
+  if let Some(error) = extraction.persistent_error {
+    // The stage is taken from the SQLite layer's typed failure kind rather than
+    // assumed: `stage` is a frozen report field consumers read to choose a
+    // remedy, and a query that failed after the database opened is not an
+    // acquisition failure.
+    let stage = match extraction.persistent_failure_kind {
+      Some(sqlite::BrowserDatabaseFailureKind::Query) => SourceFailureStage::Query,
+      _ => SourceFailureStage::Acquisition,
+    };
+    source.fail(stage, error);
+  }
+  source.push_row_read_failed(extraction.persistent_row_error);
+  source
+}
+
+/// Builds a session [`Source`] from one walked Mozilla session candidate.
+///
+/// A session candidate fails by being unreadable as JSON/LZ4, which is a parse
+/// failure, not an acquisition one. Its rejected rows are already counted in
+/// `rows_skipped` and described by `diagnostics`, so it carries no row error.
+fn session_source(session: MozillaSessionDraft) -> Source {
+  let mut source = Source {
+    origin: SourceCandidate {
+      path: session.path,
+      role: CookieSourceRoleId::session(),
+      format: CookieSourceFormatId::known(session.format),
+      precedence: session.precedence,
+      exists: true,
+      selected: session.selected,
+      acquisition: SourceAcquisition::StableFileImage,
+    },
+    selected: session.selected,
+    acquisition: SourceAcquisition::StableFileImage,
+    records: session.records,
+    stats: SourceStats {
+      rows_seen: session.rows_seen,
+      cookies_emitted: 0,
+      rows_skipped: session.rows_skipped,
+      rows_rejected: session.rows_rejected,
+      provider_failures: 0,
+    },
+    acquisition_attempts: session.acquisition_attempts,
+    diagnostics: session.diagnostics,
+    failure: None,
+    issues: Vec::new(),
+  };
+  source.stats.cookies_emitted = source.records.len();
+  // A session candidate never keeps a row error, but rows it rejected still
+  // cost cookies. The issue is keyed on the count, not on the presence of an
+  // error string: raising it only when an engine happened to keep one lets a
+  // report claim `complete` while cookies were dropped. (invariants (b), (c))
+  source.push_row_read_failed(None);
+  if let Some(error) = session.error {
+    source.fail(SourceFailureStage::Parse, error);
+  }
+  source
+}
+
+/// Converts the walk's file-private scratch into the crate-visible
+/// [`MozillaExtract`] at the engine boundary.
+///
+/// Emits the persistent source iff the query was attempted, then the session
+/// sources in walk order. Both facts are load-bearing: the adapter completes
+/// the first (see [`MozillaExtract`]), and the report orders sources by role
+/// and precedence, so producing them out of walk order would reshuffle equal
+/// keys under a stable sort.
+fn extract_from_draft(db_path: &Path, mut draft: MozillaExtractionDraft) -> MozillaExtract {
+  let boundary_stop = draft.boundary_stop.take();
+  let session_sources = std::mem::take(&mut draft.session_sources);
+  let mut sources = Vec::new();
+  if draft.persistent_attempted {
+    sources.push(persistent_source(db_path.to_path_buf(), draft));
+  }
+  for session in session_sources {
+    sources.push(session_source(session));
+  }
+  MozillaExtract {
+    sources,
+    boundary_stop,
+  }
 }
 
 /// Extract a Mozilla profile with the same authoritative session ordering as
@@ -760,13 +908,27 @@ pub(crate) struct MozillaExtractionDraft {
 pub(crate) fn query_cookies_engine_outcome(
   db_path: &Path,
   domains: Option<&[String]>,
-) -> MozillaExtractionDraft {
+) -> MozillaExtract {
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
   query_cookies_engine_outcome_with_runtime(db_path, domains, &runtime)
 }
 
 pub(crate) fn query_cookies_engine_outcome_with_runtime(
+  db_path: &Path,
+  domains: Option<&[String]>,
+  runtime: &BoundaryRuntime<'_>,
+) -> MozillaExtract {
+  extract_from_draft(
+    db_path,
+    engine_draft_with_runtime(db_path, domains, runtime),
+  )
+}
+
+/// The walk's file-private draft, before the [`MozillaExtract`] boundary
+/// conversion. Kept separate so the walk's characterization tests can still
+/// assert on the pre-conversion scratch.
+fn engine_draft_with_runtime(
   db_path: &Path,
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
@@ -779,6 +941,13 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
       parse_session_path_with_runtime(path, format, domains, runtime)
     },
   )
+}
+
+#[cfg(test)]
+fn engine_draft(db_path: &Path, domains: Option<&[String]>) -> MozillaExtractionDraft {
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+  engine_draft_with_runtime(db_path, domains, &runtime)
 }
 
 fn query_cookies_engine_outcome_with_session_probe<P>(
@@ -3015,6 +3184,105 @@ mod tests {
   }
 
   #[test]
+  fn a_rejected_persistent_row_is_not_projected_as_an_acquisition_retry() {
+    let source = persistent_source(
+      PathBuf::from("cookies.sqlite"),
+      MozillaExtractionDraft {
+        persistent_attempted: true,
+        persistent_acquisition_attempts: 1,
+        persistent_rows_seen: 2,
+        persistent_rows_skipped: 1,
+        persistent_rows_rejected: 1,
+        persistent_row_error: Some("failed to read value from row: invalid utf-8".to_owned()),
+        ..MozillaExtractionDraft::default()
+      },
+    );
+    // A rejected row means cookies were lost. `diagnostics` renders as a
+    // "retried, then succeeded" warning, so routing the row error there would
+    // claim a recovery that never happened; it is raised as an error-severity
+    // row failure instead, and the source itself is not failed.
+    assert!(source.diagnostics.is_empty());
+    assert!(source.failure.is_none());
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.rows_rejected, 1);
+    assert!(source
+      .issues
+      .iter()
+      .any(|issue| issue.code == "row_read_failed"));
+  }
+
+  /// The report's `stage` is what a consumer reads to choose a remedy, so a
+  /// query that failed after the database opened must not be described as an
+  /// acquisition failure. The stage comes from the SQLite layer's typed kind;
+  /// flattening it to `Acquisition` used to pass the whole suite.
+  #[test]
+  fn a_persistent_failure_reports_the_stage_the_sqlite_layer_named() {
+    let staged = |kind: Option<sqlite::BrowserDatabaseFailureKind>| {
+      persistent_source(
+        PathBuf::from("cookies.sqlite"),
+        MozillaExtractionDraft {
+          persistent_attempted: true,
+          persistent_error: Some("boom".to_owned()),
+          persistent_failure_kind: kind,
+          ..MozillaExtractionDraft::default()
+        },
+      )
+      .failure
+      .expect("the source records its failure")
+      .stage
+    };
+
+    assert_eq!(
+      staged(Some(sqlite::BrowserDatabaseFailureKind::Query)),
+      SourceFailureStage::Query
+    );
+    assert_eq!(
+      staged(Some(sqlite::BrowserDatabaseFailureKind::Acquisition)),
+      SourceFailureStage::Acquisition
+    );
+    // Untyped failures stay acquisition-stage: that is the conservative end of
+    // the pipeline, not a claim that acquisition is what broke.
+    assert_eq!(staged(None), SourceFailureStage::Acquisition);
+  }
+
+  /// A session candidate never keeps a row error, so an implementation that
+  /// raises `row_read_failed` only when one is present drops this issue
+  /// entirely -- and with it the report's degradation from `complete` to
+  /// `partial`, while cookies were in fact lost. The issue is keyed on the
+  /// skipped count for exactly that reason.
+  #[test]
+  fn a_session_candidate_that_skipped_rows_still_reports_a_row_issue() {
+    let source = session_source(MozillaSessionDraft {
+      path: PathBuf::from("sessionstore.jsonlz4"),
+      format: "mozilla_session_jsonlz4",
+      precedence: 30,
+      selected: true,
+      cookies: Vec::new(),
+      records: Vec::new(),
+      rows_seen: 3,
+      rows_skipped: 2,
+      rows_rejected: 2,
+      acquisition_attempts: 1,
+      diagnostics: Vec::new(),
+      error: None,
+    });
+    assert!(
+      source.failure.is_none(),
+      "rejected rows do not fail the source"
+    );
+    let row_issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code == "row_read_failed")
+      .expect("skipped session rows must degrade the report");
+    assert_eq!(row_issue.occurrences, 2);
+    assert_eq!(
+      row_issue.severity,
+      crate::browser::report_core::IssueSeverityCode::error()
+    );
+  }
+
+  #[test]
   fn engine_outcome_counts_each_malformed_persistent_row() {
     let dir = unique_tmpdir("ff-engine-row-counts");
     let db = dir.join("cookies.sqlite");
@@ -3032,7 +3300,7 @@ mod tests {
       .expect("insert malformed cookie");
     drop(conn);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert_eq!(outcome.persistent_rows_seen, 2);
     assert_eq!(outcome.persistent_rows_skipped, 1);
     assert_eq!(outcome.persistent_rows_rejected, 1);
@@ -3069,7 +3337,7 @@ mod tests {
       .expect("seed malformed metadata rows");
     drop(connection);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert_eq!(outcome.persistent_rows_seen, 7);
     assert_eq!(outcome.persistent_rows_skipped, 1);
     assert_eq!(outcome.persistent_rows_rejected, 1);
@@ -3120,7 +3388,7 @@ mod tests {
       .expect("seed malformed host");
     drop(connection);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert_eq!(outcome.persistent_rows_seen, 1);
     assert_eq!(outcome.persistent_rows_skipped, 1);
     assert!(outcome.persistent_cookies.is_empty());
@@ -3140,7 +3408,7 @@ mod tests {
     std::fs::create_dir_all(&dir).expect("create profile dir");
     std::fs::write(&db, b"not a sqlite database").expect("write unreadable db");
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert!(outcome.persistent_error.is_some());
     assert!(outcome.persistent_row_error.is_none());
     assert!(outcome.persistent_cookies.is_empty());
@@ -3155,7 +3423,7 @@ mod tests {
     let session = dir.join("sessionstore-backups/recovery.jsonlz4");
     write_session_jsonlz4(&session, serde_json::json!([session_cookie("recovered")]));
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert!(outcome.persistent_error.is_some());
     assert!(outcome
       .session_sources
@@ -3241,7 +3509,7 @@ mod tests {
     let selected = dir.join("sessionstore-backups/recovery.baklz4");
     write_session_jsonlz4(&selected, serde_json::json!([session_cookie("recovered")]));
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert_eq!(outcome.session_sources.len(), 2);
     assert_eq!(outcome.session_sources[0].path, invalid);
     assert_eq!(outcome.session_sources[0].format, "firefox_session_jsonlz4");
@@ -3266,7 +3534,7 @@ mod tests {
       std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
     }
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert_eq!(outcome.session_sources.len(), SESSION_CANDIDATES.len());
     assert!(outcome
       .session_sources
@@ -3356,7 +3624,7 @@ mod tests {
       ]),
     );
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     let source = &outcome.session_sources[0];
     assert!(source.selected);
     assert_eq!(source.rows_seen, 4);
@@ -3393,7 +3661,7 @@ mod tests {
       serde_json::Value::Array(malformed),
     );
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     let source = &outcome.session_sources[0];
     assert!(source.selected);
     assert_eq!(source.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
@@ -3416,7 +3684,7 @@ mod tests {
     )
     .expect("write legacy session store");
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     let source = &outcome.session_sources[0];
     assert_eq!(source.format, "firefox_session_json");
     assert_eq!(source.rows_seen, 2);
@@ -3441,7 +3709,7 @@ mod tests {
     )
     .expect("write legacy session store");
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     let source = &outcome.session_sources[0];
     assert_eq!(source.format, SESSION_JSON_FORMAT_ID);
     assert_eq!(source.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
@@ -3462,7 +3730,7 @@ mod tests {
     )
     .expect("write invalid session candidate");
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     let source = &outcome.session_sources[0];
     assert!(!source.selected);
     assert!(source.error.is_some());
@@ -3515,7 +3783,7 @@ mod tests {
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(&db, &[]);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert!(outcome.session_sources.is_empty());
   }
 
@@ -3551,7 +3819,7 @@ mod tests {
     let db = dir.join("cookies.sqlite");
     seed_moz_cookies(&db, &[]);
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert!(outcome.persistent_error.is_none());
     assert!(outcome.session_sources.is_empty());
   }
@@ -3894,7 +4162,7 @@ mod tests {
       .expect("checkpointed");
     assert_eq!(checkpointed.expires, Some(1_700_000_000));
 
-    let outcome = query_cookies_engine_outcome(&db, None);
+    let outcome = engine_draft(&db, None);
     assert_eq!(
       outcome.persistent_acquisition_strategy,
       Some(sqlite::DatabaseAcquisitionStrategy::VerifiedWalSnapshot)
