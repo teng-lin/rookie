@@ -5,7 +5,7 @@ use super::{
 };
 use crate::browser::chromium_crypto::ChromiumKeyOutcomes;
 use crate::browser::chromium_platform_keys::{
-  ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession,
+  ChromiumKeyIdentity, ChromiumKeyRequest, HostKeySession,
 };
 use crate::common::deadline::BoundaryRuntime;
 use crate::enums::{Cookie, DetailedCookie};
@@ -429,7 +429,7 @@ fn local_state_outcomes(
       InvalidDirectPathOptionsReason::MissingLocalStateFile,
     ));
   }
-  let credentials = ChromiumKeyCredentials::default();
+  let credentials = ChromiumKeyIdentity::default();
   let mut session = HostKeySession::new();
   Ok(session.retrieve(
     ChromiumKeyRequest::for_local_state_file(&credentials, path),

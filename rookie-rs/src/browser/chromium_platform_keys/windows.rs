@@ -424,7 +424,7 @@ mod tests {
 
   #[test]
   fn parsed_local_state_wins_without_a_session_read() {
-    let credentials = super::super::ChromiumKeyCredentials::default();
+    let credentials = super::super::ChromiumKeyIdentity::default();
     let local_state = serde_json::json!({});
     let reader = CountingLocalStateReader {
       calls: Cell::new(0),
@@ -446,7 +446,7 @@ mod tests {
 
   #[test]
   fn local_state_path_is_read_once_and_failures_keep_independent_tier_outcomes() {
-    let credentials = super::super::ChromiumKeyCredentials::default();
+    let credentials = super::super::ChromiumKeyIdentity::default();
     let path = std::path::Path::new("Local State");
 
     let success_reader = CountingLocalStateReader {
@@ -788,7 +788,7 @@ mod tests {
       stop,
     };
     let backend = AdvancingWindowsBackend::new();
-    let credentials = super::super::ChromiumKeyCredentials::default();
+    let credentials = super::super::ChromiumKeyIdentity::default();
 
     let outcomes = host_key_outcomes_with_runtime(
       ChromiumKeyRequest::for_installation(
@@ -819,7 +819,7 @@ mod tests {
       elapsed: std::time::Duration::from_secs(1),
     };
     let backend = AdvancingWindowsBackend::new();
-    let credentials = super::super::ChromiumKeyCredentials::default();
+    let credentials = super::super::ChromiumKeyIdentity::default();
 
     let outcomes = host_key_outcomes_with_runtime(
       ChromiumKeyRequest::for_installation(
