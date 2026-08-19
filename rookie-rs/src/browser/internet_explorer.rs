@@ -50,8 +50,12 @@ pub(crate) fn internet_explorer_based_with_runtime(
   )?;
   crate::browser::legacy::project_canonical_outcome_with_runtime(
     "internet_explorer",
-    crate::browser::report_build::canonical_direct_internet_explorer_extraction_with_runtime(
-      source, runtime,
+    crate::browser::report_build::finalize_singleton_source(
+      "internet_explorer",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      vec![source],
+      None,
+      Some(runtime),
     )?,
     runtime,
   )

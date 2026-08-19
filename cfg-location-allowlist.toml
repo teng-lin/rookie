@@ -119,7 +119,6 @@ paths = [
 # unreviewed-for-containment branches.
 "rookie-rs/src/browser/mod.rs" = { max_cfg = 3, reason = "crate browser-module root; +1 for Windows App-Bound host-identity module gate (same pattern as chromium_database_acquisition)" }
 "rookie-rs/src/browser/outcome.rs" = { max_cfg = 1, reason = "not a rollout target" }
-"rookie-rs/src/browser/report_build.rs" = { max_cfg = 1, reason = "not a rollout target" }
 "rookie-rs/src/browser/report_core.rs" = { max_cfg = 3, reason = "not a rollout target" }
 "rookie-rs/src/common/date.rs" = { max_cfg = 1, reason = "not a rollout target" }
 "rookie-rs/src/common/deadline.rs" = { max_cfg = 3, reason = "not a rollout target" }
