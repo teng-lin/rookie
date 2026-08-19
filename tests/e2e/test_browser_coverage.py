@@ -21,7 +21,6 @@ NIGHTLY_HOSTED = frozenset(
         ("linux", "firefox"),
         ("linux", "librewolf"),
         ("linux", "opera"),
-        ("linux", "vivaldi"),
         ("linux", "zen"),
         ("macos", "brave"),
         ("macos", "chrome"),
@@ -31,7 +30,6 @@ NIGHTLY_HOSTED = frozenset(
         ("macos", "librewolf"),
         ("macos", "opera"),
         ("macos", "opera_gx"),
-        ("macos", "vivaldi"),
         ("macos", "zen"),
         ("windows", "brave"),
         ("windows", "chrome"),
@@ -41,8 +39,6 @@ NIGHTLY_HOSTED = frozenset(
         ("windows", "librewolf"),
         ("windows", "opera"),
         ("windows", "opera_gx"),
-        ("windows", "vivaldi"),
-        ("windows", "yandex"),
         ("windows", "zen"),
     }
 )

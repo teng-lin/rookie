@@ -130,7 +130,7 @@ def plant_keychain() -> None:
 
 def stage_chromium_user_data(user_data: Path) -> None:
     user_data.mkdir(parents=True, exist_ok=True)
-    # Vivaldi SIGSEGVs on GitHub runners if these first-run files are missing.
+    # Some Chromium forks read these first-run files before writing cookies.
     for name in ("search_engines.json", "search_engines_prompt.json"):
         path = user_data / name
         if not path.exists():

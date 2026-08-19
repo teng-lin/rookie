@@ -26,7 +26,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across Ubuntu/macOS/Windows. The full Node and Python version product,
   FreeBSD, packaging wheels/sdist, Chrome/Firefox e2e, and artifact smoke
   move to nightly / `main`. Extra hosted browsers (Edge, Chromium, Windows
-  Brave, Opera, Opera GX, Vivaldi, LibreWolf, Zen, Windows Yandex)
+  Brave, Opera, Opera GX, LibreWolf, Zen)
   are installed on the runner when a silent installer exists. Claimed-browser
   fixtures remain for products we cannot install. Extra hosted browsers run on
   nightly and again on release. Claimed-browser fixtures run on

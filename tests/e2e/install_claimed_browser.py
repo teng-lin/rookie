@@ -105,48 +105,6 @@ HOSTS: dict[str, dict] = {
             ],
         },
     },
-    "vivaldi": {
-        "engine": "chromium",
-        "keychain_service": "Vivaldi Safe Storage",
-        "keychain_account": "Vivaldi",
-        "linux": {
-            "kind": "vivaldi_apt",
-            "exe": [
-                "/opt/vivaldi/vivaldi",
-                "/usr/bin/vivaldi-stable",
-                "vivaldi-stable",
-                "vivaldi",
-                "/usr/bin/vivaldi",
-            ],
-        },
-        "macos": {
-            "kind": "brew",
-            "cask": "vivaldi",
-            "exe": ["/Applications/Vivaldi.app/Contents/MacOS/Vivaldi"],
-        },
-        "windows": {
-            "kind": "winget",
-            "id": "Vivaldi.Vivaldi",
-            "exe": [
-                r"%LocalAppData%\Vivaldi\Application\vivaldi.exe",
-                r"%ProgramFiles%\Vivaldi\Application\vivaldi.exe",
-            ],
-        },
-    },
-    "yandex": {
-        "engine": "chromium",
-        # macOS Yandex has no registry keychain identity (plaintext-only
-        # claim). Playwright still encrypts with mock_password, so a hosted
-        # seed cannot be extracted honestly.
-        "windows": {
-            "kind": "winget",
-            "id": "Yandex.Browser",
-            "exe": [
-                r"%LocalAppData%\Yandex\YandexBrowser\Application\browser.exe",
-                r"%ProgramFiles%\Yandex\YandexBrowser\Application\browser.exe",
-            ],
-        },
-    },
     "librewolf": {
         "engine": "gecko",
         "linux": {
@@ -387,18 +345,6 @@ def install_opera_apt() -> None:
     )
 
 
-def install_vivaldi_apt() -> None:
-    _install_apt_repo(
-        key_url="https://repo.vivaldi.com/archive/linux_signing_key.pub",
-        keyring="/usr/share/keyrings/vivaldi.gpg",
-        source_line=(
-            "deb [arch=amd64 signed-by=/usr/share/keyrings/vivaldi.gpg] "
-            "https://repo.vivaldi.com/archive/deb/ stable main"
-        ),
-        package="vivaldi-stable",
-    )
-
-
 def install_librewolf_extrepo() -> None:
     run(["sudo", "apt-get", "update"])
     run(["sudo", "apt-get", "install", "-y", "extrepo"])
@@ -460,8 +406,6 @@ def install_spec(spec: dict) -> None:
         install_brave_apt()
     elif kind == "opera_apt":
         install_opera_apt()
-    elif kind == "vivaldi_apt":
-        install_vivaldi_apt()
     elif kind == "librewolf_extrepo":
         install_librewolf_extrepo()
     elif kind == "zen_tarball":

@@ -100,6 +100,10 @@ class InstallCatalogTests(unittest.TestCase):
         self.assertNotIn(("windows", "arc"), catalog)
         self.assertNotIn(("windows", "duckduckgo"), catalog)
         self.assertNotIn(("macos", "yandex"), catalog)
+        self.assertNotIn(("linux", "vivaldi"), catalog)
+        self.assertNotIn(("macos", "vivaldi"), catalog)
+        self.assertNotIn(("windows", "vivaldi"), catalog)
+        self.assertNotIn(("windows", "yandex"), catalog)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ CI has three lanes. A pull request is not the full product.
 | Lane | Trigger | What runs |
 | --- | --- | --- |
 | **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
-| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist, Chrome/Firefox/Edge/Chromium e2e, plus installed Brave/Opera/Opera GX/Vivaldi/LibreWolf/Zen/Windows Yandex when the installer yields a launchable browser we can seed. Artifact smoke. |
+| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist, Chrome/Firefox/Edge/Chromium e2e, plus installed Brave/Opera/Opera GX/LibreWolf/Zen when the installer yields a launchable browser we can seed. Artifact smoke. |
 | **Release** | `v*` tag, GitHub Release, or `workflow_dispatch` on `e2e-release.yml` | Nightly hosted browsers again, plus engine fixtures for every other claimed id. App-Bound Chrome+Edge+Brave. macOS Intel artifact smoke (schedule/manual). Safari and Internet Explorer stay **manual** (FDA / ESE). |
 
 ## Local commands
