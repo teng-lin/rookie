@@ -3496,7 +3496,7 @@ mod engine_chain_tests {
 
   #[test]
   fn a_real_internet_explorer_profile_reaches_the_frozen_report() {
-    use crate::browser::registry::{InternetExplorerRows, PlatformId};
+    use crate::browser::registry::{extracted_internet_explorer_source, PlatformId};
 
     let temp = TempDir::new("ie");
     let context = test_seams::context(PlatformId::Windows, temp.path().to_path_buf());
@@ -3506,10 +3506,15 @@ mod engine_chain_tests {
 
     // The ESE reader is injected, so this exercises the adapter chain without
     // needing a real ESE database on a non-Windows host.
-    let engine =
-      test_seams::internet_explorer_report(&context, "internet_explorer", None, None, |_, _| {
-        Ok(InternetExplorerRows {
-          records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+    let engine = test_seams::internet_explorer_report(
+      &context,
+      "internet_explorer",
+      None,
+      None,
+      |origin, _| {
+        Ok(extracted_internet_explorer_source(
+          origin,
+          vec![crate::browser::cookie_record::CookieRecord::from_cookie(
             crate::common::enums::Cookie {
               domain: ".example.com".to_owned(),
               path: "/".to_owned(),
@@ -3522,13 +3527,14 @@ mod engine_chain_tests {
             },
             crate::browser::cookie_record::SourceRef::pending(0),
           )],
-          records_seen: 1,
-          records_skipped: 0,
-          records_rejected: 0,
-          row_error: None,
-        })
-      })
-      .expect("internet explorer report");
+          1,
+          0,
+          0,
+          None,
+        ))
+      },
+    )
+    .expect("internet explorer report");
 
     let browser = BrowserId::known("internet_explorer");
     let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
@@ -3813,7 +3819,7 @@ mod engine_chain_tests {
 
   #[test]
   fn a_profile_selected_internet_explorer_report_says_what_the_post_filtered_report_said() {
-    use crate::browser::registry::{InternetExplorerRows, PlatformId};
+    use crate::browser::registry::{extracted_internet_explorer_source, PlatformId};
 
     let temp = TempDir::new("ie-profile-contract");
     let context = test_seams::context(PlatformId::Windows, temp.path().to_path_buf());
@@ -3825,26 +3831,28 @@ mod engine_chain_tests {
     }
     // Each root answers with its own cookie, so a report built from the wrong
     // profile could not pass by coincidence.
-    let rows = |path: &std::path::Path, _: Option<&[String]>| {
-      Ok(InternetExplorerRows {
-        records: vec![crate::browser::cookie_record::CookieRecord::from_cookie(
+    let rows = |origin: crate::browser::registry::SourceCandidate, _: Option<&[String]>| {
+      let name = format!("{}", origin.path.display());
+      Ok(extracted_internet_explorer_source(
+        origin,
+        vec![crate::browser::cookie_record::CookieRecord::from_cookie(
           crate::common::enums::Cookie {
             domain: ".example.com".to_owned(),
             path: "/".to_owned(),
             secure: false,
             expires: None,
-            name: format!("{}", path.display()),
+            name,
             value: "value".to_owned(),
             http_only: false,
             same_site: 0,
           },
           crate::browser::cookie_record::SourceRef::pending(0),
         )],
-        records_seen: 1,
-        records_skipped: 0,
-        records_rejected: 0,
-        row_error: None,
-      })
+        1,
+        0,
+        0,
+        None,
+      ))
     };
 
     let browser = BrowserId::known("internet_explorer");
