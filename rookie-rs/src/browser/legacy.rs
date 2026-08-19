@@ -318,6 +318,11 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
   }
 }
 
+// Reached only through the platform legacy dispatch: Safari on macOS and
+// Internet Explorer on Windows. A Linux build compiles neither, so it has no
+// caller there -- a platform gate, not dead code. Kept target-agnostic rather
+// than `cfg`-gated so this module stays free of platform cfg (#218).
+#[allow(dead_code)]
 pub(super) fn cookies_and_skipped_from_engine_extract(
   canonical_id: &str,
   extract: EngineExtract,
