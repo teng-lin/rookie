@@ -120,7 +120,8 @@ pub(super) fn discover_internet_explorer_with_context<F: DiscoveryFs>(
       path: canonical_root,
       is_default: true,
       persistent_source_discovered: true,
-      sources: vec![source],
+      candidates: vec![source],
+      sources: Vec::new(),
     });
   }
   sort_engine_profiles(&mut outcome.profiles);
@@ -166,8 +167,11 @@ pub(super) fn populate_internet_explorer_sources<Q>(
 where
   Q: FnMut(&Path, Option<&[String]>) -> Result<InternetExplorerRows>,
 {
-  for profile in &mut outcome.profiles {
-    for source in &mut profile.sources {
+  for profile_index in 0..outcome.profiles.len() {
+    // Take the candidates: anything not committed below never ran, and must
+    // not survive as a zero-attempt placeholder.
+    let candidates = std::mem::take(&mut outcome.profiles[profile_index].candidates);
+    for mut source in candidates {
       match query(&source.path, domains) {
         Ok(rows) => {
           source.acquisition = SourceAcquisition::EseDatabase;
@@ -181,6 +185,8 @@ where
         Err(error) => {
           if let Some(stop) = boundary_stop_from_error(&error) {
             outcome.boundary_stop.get_or_insert(stop);
+            // `source` is dropped uncommitted: the query did not return, so
+            // there is no outcome to report for it.
             super::retain_completed_engine_work(&mut outcome);
             return outcome;
           }
@@ -190,6 +196,7 @@ where
           source.error = Some(format!("{error:#}"));
         }
       }
+      outcome.profiles[profile_index].sources.push(source);
     }
   }
   outcome
@@ -246,7 +253,14 @@ pub(crate) fn internet_explorer_profiles_with_runtime(
 ) -> Result<EngineExtractionDraft> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
-  discover_internet_explorer_with_runtime(&context, browser_id, runtime)
+  let mut listing = discover_internet_explorer_with_runtime(&context, browser_id, runtime)?;
+  // See the Safari listing hand-off: nothing was queried, so these stay the
+  // frozen discovery placeholders (`NotAttempted`, zero attempts) that the
+  // listing consumer reads from `sources`.
+  for profile in &mut listing.profiles {
+    profile.sources = std::mem::take(&mut profile.candidates);
+  }
+  Ok(listing)
 }
 
 #[cfg(target_os = "windows")]
@@ -383,7 +397,9 @@ mod tests {
         path: installation_path.clone(),
         is_default: true,
         persistent_source_discovered: true,
-        sources: vec![
+        // Discovery output: both candidates exist, neither has been queried.
+        sources: Vec::new(),
+        candidates: vec![
           discovered_source_draft(installation_path.join(INTERNET_EXPLORER_COOKIE_FILE)),
           discovered_source_draft(
             installation_path

@@ -252,7 +252,8 @@ where
         path: profile_path,
         is_default: profile.uuid.is_none(),
         persistent_source_discovered: true,
-        sources: vec![source],
+        candidates: vec![source],
+        sources: Vec::new(),
       });
     }
   }
@@ -381,17 +382,16 @@ where
 {
   let mut stop_position = None;
   'profiles: for profile_index in 0..outcome.profiles.len() {
-    for source_index in 0..outcome.profiles[profile_index].sources.len() {
+    // Take the candidates: anything not committed below is work that never
+    // happened, and must not survive as a zero-attempt placeholder.
+    let candidates = std::mem::take(&mut outcome.profiles[profile_index].candidates);
+    for mut source in candidates {
       if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
         outcome.boundary_stop.get_or_insert(stop);
-        stop_position = Some((profile_index, source_index));
+        stop_position = Some(profile_index);
         break 'profiles;
       }
-      let result = query(
-        &outcome.profiles[profile_index].sources[source_index].path,
-        domains,
-      );
-      let source = &mut outcome.profiles[profile_index].sources[source_index];
+      let result = query(&source.path, domains);
       match result {
         Ok(extraction) => {
           source.rows_seen = extraction.stats.records_seen;
@@ -404,7 +404,7 @@ where
         Err(error) => {
           if let Some(stop) = boundary_stop_from_error(&error) {
             outcome.boundary_stop.get_or_insert(stop);
-            stop_position = Some((profile_index, source_index));
+            stop_position = Some(profile_index);
             break 'profiles;
           }
           // Exhausting the retries is itself the failure, so report the
@@ -426,20 +426,20 @@ where
       }
       // The query result above is an atomic source outcome. Commit it before
       // sampling the shared stop state so a stop that races with the return
-      // cannot discard records and counters that already completed. Only
-      // zero-attempt placeholders after this source are pruned.
+      // cannot discard records and counters that already completed.
+      outcome.profiles[profile_index].sources.push(source);
       if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
         outcome.boundary_stop.get_or_insert(stop);
-        stop_position = Some((profile_index, source_index + 1));
+        stop_position = Some(profile_index);
         break 'profiles;
       }
     }
   }
-  if let Some((profile_index, source_index)) = stop_position {
+  if let Some(profile_index) = stop_position {
+    // Sources hold exactly the queries that completed, so there is nothing to
+    // truncate within a profile any more. Profiles after the stop never ran,
+    // and the stopped profile itself is dropped if it committed nothing.
     outcome.profiles.truncate(profile_index + 1);
-    outcome.profiles[profile_index]
-      .sources
-      .truncate(source_index);
     if outcome.profiles[profile_index].sources.is_empty() {
       outcome.profiles.truncate(profile_index);
     }
@@ -567,7 +567,15 @@ pub(crate) fn safari_profiles_with_runtime(
 ) -> Result<EngineExtractionDraft> {
   runtime.check()?;
   let context = DiscoveryContext::system()?;
-  discover_safari_with_runtime(&context, browser_id, runtime)
+  let mut listing = discover_safari_with_runtime(&context, browser_id, runtime)?;
+  // Listing reports what discovery found, and its consumer still reads
+  // `sources`. Nothing was queried, so these stay the frozen placeholders --
+  // `selected: true`, `StableFileImage`, zero attempts. PR 1 replaces this
+  // hand-off with a listing type that cannot hold a queried source.
+  for profile in &mut listing.profiles {
+    profile.sources = std::mem::take(&mut profile.candidates);
+  }
+  Ok(listing)
 }
 
 #[cfg(test)]
@@ -624,9 +632,11 @@ mod tests {
         path: profile_path.clone(),
         is_default: true,
         persistent_source_discovered: true,
-        sources: vec![discovered_source_draft(
+        // Discovery output: the candidate exists, nothing has been queried.
+        candidates: vec![discovered_source_draft(
           profile_path.join(SAFARI_COOKIE_FILE),
         )],
+        sources: Vec::new(),
       }],
       discovery_issues: Vec::new(),
     }
@@ -926,7 +936,7 @@ mod tests {
     ] {
       let mut discovered = discovered_source();
       discovered.profiles[0]
-        .sources
+        .candidates
         .push(discovered_source_draft(PathBuf::from(
           "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
         )));
@@ -1013,7 +1023,7 @@ mod tests {
       "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
     );
     discovered.profiles[0]
-      .sources
+      .candidates
       .push(discovered_source_draft(second_path));
     let calls = Cell::new(0);
     let populated = populate_safari_sources(discovered, None, |_, _| {
@@ -1103,7 +1113,7 @@ mod tests {
     );
     let mut discovered = discovered_source();
     discovered.profiles[0]
-      .sources
+      .candidates
       .push(discovered_source_draft(PathBuf::from(
         "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
       )));

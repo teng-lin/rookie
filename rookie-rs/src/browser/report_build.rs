@@ -346,11 +346,10 @@ fn engine_source_outcome(source: EngineSourceDraft) -> SourceDraft {
     selected,
     acquisition_code(acquisition),
   );
-  let cookies_emitted = if records.is_empty() {
-    cookies.len()
-  } else {
-    records.len()
-  };
+  // Records are the only source of finalized rows, so they are the only honest
+  // basis for this counter. Falling back to `cookies.len()` would report rows
+  // that finalization will not emit.
+  let cookies_emitted = records.len();
   outcome.stats = CounterSet {
     rows_seen: rows_seen as u64,
     cookies_emitted: cookies_emitted as u64,
@@ -715,19 +714,11 @@ fn canonicalize_profile(
       );
     }
     drop(secrets);
-    let draft_records = if source.records.is_empty() {
-      source
-        .cookies
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, cookie)| {
-          CookieRecord::from_cookie(cookie, super::outcome::source_ref(source_digest, ordinal))
-        })
-        .collect()
-    } else {
-      source.records
-    };
-    for record in draft_records {
+    // `records` is the only source of finalized rows. `cookies` remains the
+    // compatibility projection and the secrets walk above; it is never a
+    // fallback supply of records, so an adapter that emits cookies without
+    // records now reports zero rows instead of silently reconstructing them.
+    for record in source.records {
       match record.finalize() {
         Ok(record) => canonical.records.push(record),
         Err(error) => {
@@ -1630,6 +1621,8 @@ fn canonical_direct_mozilla_extraction_impl(
       path: profile_path,
       is_default: true,
       persistent_source_discovered: true,
+      // Direct path: the caller named the file, so it is already acquired.
+      candidates: Vec::new(),
       sources,
     }],
     discovery_issues: Vec::new(),
@@ -1728,6 +1721,8 @@ fn canonical_direct_engine_source(
       path: profile_path,
       is_default: true,
       persistent_source_discovered: true,
+      // Direct path: the caller named the file, so it is already acquired.
+      candidates: Vec::new(),
       sources: vec![registry::EngineSourceDraft {
         path: db_path.to_path_buf(),
         role: registry::SOURCE_ROLE_PERSISTENT,
@@ -2103,9 +2098,21 @@ mod tests {
     source
   }
 
-  fn completed_source(name: &str) -> SourceDraft {
-    let mut source = source(false);
-    source.cookies.push(crate::common::enums::Cookie {
+  /// The canonical record for a fixture cookie.
+  ///
+  /// `canonicalize_profile` does not synthesize records from `cookies`, so a
+  /// fixture that sets only `cookies` finalizes to zero rows. `Outcome::finalize`
+  /// re-stamps provenance through `assign_provenance`, so a pending `SourceRef`
+  /// is all a fixture needs here.
+  fn fixture_record(cookie: crate::common::enums::Cookie, ordinal: usize) -> CookieRecord {
+    CookieRecord::from_cookie(
+      cookie,
+      crate::browser::cookie_record::SourceRef::pending(ordinal),
+    )
+  }
+
+  fn completed_cookie(name: &str) -> crate::common::enums::Cookie {
+    crate::common::enums::Cookie {
       domain: ".example.test".to_owned(),
       path: "/".to_owned(),
       secure: false,
@@ -2114,7 +2121,15 @@ mod tests {
       value: format!("secret-{name}"),
       http_only: true,
       same_site: 1,
-    });
+    }
+  }
+
+  fn completed_source(name: &str) -> SourceDraft {
+    let mut source = source(false);
+    source.cookies.push(completed_cookie(name));
+    source
+      .records
+      .push(fixture_record(completed_cookie(name), 0));
     source.stats.rows_seen = 1;
     source.stats.cookies_emitted = 1;
     source
@@ -2373,7 +2388,7 @@ mod tests {
         true,
         AcquisitionStrategyCode::live_read_only(),
       );
-      source.cookies.push(crate::common::enums::Cookie {
+      let partial_cookie = || crate::common::enums::Cookie {
         domain: ".example.test".to_owned(),
         path: "/".to_owned(),
         secure: false,
@@ -2382,7 +2397,9 @@ mod tests {
         value: format!("secret-{name}"),
         http_only: false,
         same_site: -1,
-      });
+      };
+      source.cookies.push(partial_cookie());
+      source.records.push(fixture_record(partial_cookie(), 0));
       source.stats.rows_seen = 1;
       source.stats.cookies_emitted = 1;
       profile.sources.push(source);
@@ -2498,6 +2515,7 @@ mod tests {
       path: PathBuf::from("/firefox/Profiles/default"),
       is_default: true,
       persistent_source_discovered: true,
+      candidates: Vec::new(),
       sources: vec![
         engine_source(
           "sessionstore.jsonlz4",
@@ -2915,6 +2933,7 @@ mod tests {
 
     let mut chromium = chromium_profile(true, None);
     chromium.cookies = vec![cookie("chromium")];
+    chromium.records = vec![fixture_record(cookie("chromium"), 0)];
     chromium.stats = crate::browser::chromium::ChromiumExtractionStats {
       rows_seen: 4,
       cookies_emitted: 1,
@@ -2954,6 +2973,7 @@ mod tests {
       let mut source = engine_source(name, SOURCE_ROLE_PERSISTENT, 10, true, None);
       source.format = format;
       source.cookies = vec![cookie(name)];
+      source.records = vec![fixture_record(cookie(name), 0)];
       source.rows_seen = 3;
       source.rows_skipped = 2;
       source.row_error = Some(format!("{name} rejected two records"));
