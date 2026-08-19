@@ -1514,7 +1514,8 @@ pub(crate) fn project_engine_extract(
   )?))
 }
 
-/// [`canonical_engine_extraction_with_runtime`] over the Gecko extract bag.
+/// [`canonical_engine_extract`] with a deadline, over any engine's extract bag
+/// -- Gecko, Safari, and Internet Explorer all route through it.
 pub(crate) fn canonical_engine_extract_with_runtime(
   browser_id: &str,
   extract: EngineExtract,

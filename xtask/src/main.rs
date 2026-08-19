@@ -231,15 +231,17 @@ fn cmd_check_stage_boundary() -> Result<bool, String> {
     defined.extend(types);
   }
 
-  let missing: Vec<_> = stage_boundary::fenced_type_names()
+  let missing: Vec<String> = stage_boundary::fenced_types()
     .into_iter()
-    .filter(|name| !defined.contains(*name))
+    .filter(|(path, name)| !defined.contains(&((*path).to_owned(), (*name).to_owned())))
+    .map(|(path, name)| format!("{name} (expected in {path})"))
     .collect();
   if !missing.is_empty() {
     return Err(format!(
-      "fenced type(s) not found under {SCAN_ROOT}: {}. If a type was renamed, \
-       update the fence in xtask/src/stage_boundary.rs in the same change -- a \
-       fence pointing at a type that no longer exists silently checks nothing.",
+      "fenced type(s) not found under {SCAN_ROOT}: {}. If a type was renamed or \
+       moved, update the fence in xtask/src/stage_boundary.rs in the same change \
+       -- a fence pointing at a type that no longer exists silently checks \
+       nothing.",
       missing.join(", ")
     ));
   }
