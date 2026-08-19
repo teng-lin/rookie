@@ -1,6 +1,6 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::create_pbkdf2_key;
-use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
+use super::{ChromiumKeyIdentity, ChromiumKeyRequest};
 #[cfg(test)]
 use crate::common::deadline::Deadline;
 use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
@@ -109,7 +109,7 @@ impl KeyProvider<()> for MacosPlatformKeyProvider<'_> {
   type Keys = ChromiumKeyOutcomes;
 
   fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
-    let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
+    let credentials = ChromiumKeyIdentity::from_legacy_browser(self.config);
     let mut session = HostKeySession::new();
     session.retrieve(ChromiumKeyRequest::direct(&credentials), runtime)
   }
@@ -160,8 +160,8 @@ mod tests {
     }
   }
 
-  fn macos_credentials() -> ChromiumKeyCredentials {
-    ChromiumKeyCredentials {
+  fn macos_credentials() -> ChromiumKeyIdentity {
+    ChromiumKeyIdentity {
       linux_crypt_name: None,
       macos_keychain: Some(MacosKeychainCredentials {
         service: "Chrome Safe Storage".to_string(),
@@ -170,7 +170,7 @@ mod tests {
     }
   }
 
-  fn request(credentials: &ChromiumKeyCredentials) -> ChromiumKeyRequest<'_> {
+  fn request(credentials: &ChromiumKeyIdentity) -> ChromiumKeyRequest<'_> {
     ChromiumKeyRequest::direct(credentials)
   }
 
@@ -274,7 +274,7 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(SecretString::new("must not be read".to_string())),
     };
-    let credentials = ChromiumKeyCredentials::default();
+    let credentials = ChromiumKeyIdentity::default();
     let (clock, deadline) = deadline();
     let runtime = BoundaryRuntime::new(&clock, deadline);
     let outcomes = retrieve_macos_key_outcomes(request(&credentials), &backend, &runtime);
@@ -291,7 +291,7 @@ mod tests {
       calls: Cell::new(0),
       result: Ok(SecretString::new("must not be read".to_string())),
     };
-    let credentials = ChromiumKeyCredentials::default();
+    let credentials = ChromiumKeyIdentity::default();
 
     let (clock, deadline) = deadline();
     let runtime = BoundaryRuntime::new(&clock, deadline);
@@ -338,7 +338,7 @@ mod tests {
         osx_key_service: service.map(str::to_owned),
         osx_key_user: account.map(str::to_owned),
       };
-      let credentials = ChromiumKeyCredentials::from_legacy_browser(&config);
+      let credentials = ChromiumKeyIdentity::from_legacy_browser(&config);
       let backend = FakeMacosBackend {
         calls: Cell::new(0),
         result: Ok(SecretString::new("must not be read".to_string())),

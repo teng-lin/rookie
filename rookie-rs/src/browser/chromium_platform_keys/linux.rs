@@ -1,7 +1,7 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::create_pbkdf2_key;
 use super::shared::outcome_from_result;
-use super::{ChromiumKeyCredentials, ChromiumKeyRequest};
+use super::{ChromiumKeyIdentity, ChromiumKeyRequest};
 use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
 #[cfg(test)]
 use crate::common::deadline::{Clock, Deadline};
@@ -83,7 +83,7 @@ impl LinuxKeyOutcomeCache {
 
   fn outcomes_for(
     &mut self,
-    credentials: &ChromiumKeyCredentials,
+    credentials: &ChromiumKeyIdentity,
     runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes {
     self.outcomes_for_with_backend(credentials, &SystemLinuxKeyringBackend, runtime)
@@ -91,7 +91,7 @@ impl LinuxKeyOutcomeCache {
 
   fn outcomes_for_with_backend<B>(
     &mut self,
-    credentials: &ChromiumKeyCredentials,
+    credentials: &ChromiumKeyIdentity,
     backend: &B,
     runtime: &BoundaryRuntime<'_>,
   ) -> ChromiumKeyOutcomes
@@ -173,7 +173,7 @@ impl KeyProvider<()> for LinuxPlatformKeyProvider<'_> {
   type Keys = ChromiumKeyOutcomes;
 
   fn keys(&self, _context: &(), runtime: &BoundaryRuntime<'_>) -> ChromiumKeyOutcomes {
-    let credentials = ChromiumKeyCredentials::from_legacy_browser(self.config);
+    let credentials = ChromiumKeyIdentity::from_legacy_browser(self.config);
     let mut session = HostKeySession::new();
     session.retrieve(ChromiumKeyRequest::direct(&credentials), runtime)
   }
@@ -224,17 +224,14 @@ mod tests {
     }
   }
 
-  fn linux_credentials(crypt_name: Option<&str>) -> ChromiumKeyCredentials {
-    ChromiumKeyCredentials {
+  fn linux_credentials(crypt_name: Option<&str>) -> ChromiumKeyIdentity {
+    ChromiumKeyIdentity {
       linux_crypt_name: crypt_name.map(str::to_string),
       macos_keychain: None,
     }
   }
 
-  fn outcomes_with_backend<B>(
-    credentials: &ChromiumKeyCredentials,
-    backend: &B,
-  ) -> ChromiumKeyOutcomes
+  fn outcomes_with_backend<B>(credentials: &ChromiumKeyIdentity, backend: &B) -> ChromiumKeyOutcomes
   where
     B: LinuxKeyringBackend,
   {
@@ -251,7 +248,7 @@ mod tests {
 
   fn cached_outcomes_with_backend<B>(
     cache: &mut LinuxKeyOutcomeCache,
-    credentials: &ChromiumKeyCredentials,
+    credentials: &ChromiumKeyIdentity,
     backend: &B,
   ) -> ChromiumKeyOutcomes
   where

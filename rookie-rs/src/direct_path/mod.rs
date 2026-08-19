@@ -496,7 +496,7 @@ fn automatic_identities(
 ) -> Result<
   Vec<(
     &'static str,
-    crate::browser::chromium_platform_keys::ChromiumKeyCredentials,
+    crate::browser::chromium_platform_keys::ChromiumKeyIdentity,
   )>,
 > {
   ids
@@ -566,7 +566,7 @@ fn automatic_chromium_detailed(
 fn automatic_chromium_with<Session, Candidate, Output, NewSession, Probe, Score, Finish>(
   identities: &[(
     &'static str,
-    crate::browser::chromium_platform_keys::ChromiumKeyCredentials,
+    crate::browser::chromium_platform_keys::ChromiumKeyIdentity,
   )],
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -581,7 +581,7 @@ where
   Probe: FnMut(
     &mut Session,
     &'static str,
-    &crate::browser::chromium_platform_keys::ChromiumKeyCredentials,
+    &crate::browser::chromium_platform_keys::ChromiumKeyIdentity,
     PathBuf,
     Option<Vec<String>>,
   ) -> Result<Candidate>,
@@ -995,15 +995,15 @@ mod tests {
     let identities = [
       (
         "first",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
       (
         "second",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
       (
         "third",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
     ];
     let sessions = std::cell::Cell::new(0);
@@ -1055,11 +1055,11 @@ mod tests {
     let identities = [
       (
         "first",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
       (
         "second",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
     ];
     let clock = crate::common::deadline::test_clock::ManualClock::default();
@@ -1109,11 +1109,11 @@ mod tests {
     let identities = [
       (
         "chrome",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
       (
         "brave",
-        crate::browser::chromium_platform_keys::ChromiumKeyCredentials::default(),
+        crate::browser::chromium_platform_keys::ChromiumKeyIdentity::default(),
       ),
     ];
     let sessions = std::cell::Cell::new(0);

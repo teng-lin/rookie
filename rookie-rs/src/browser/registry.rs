@@ -42,7 +42,11 @@ struct BrowserDefinition {
   /// nothing about *which* OS credential a key provider should read, so a
   /// registry-only browser has no other source of truth for it. Values are
   /// lookup identifiers, never key material.
-  key_credentials: Option<chromium::KeyCredentials>,
+  ///
+  /// This deserializes straight into `chromium_platform_keys::ChromiumKeyIdentity`
+  /// (PR 7): that struct is both the registry JSON DTO and the runtime identity
+  /// type, so there is no separate DTO to keep in sync in this module.
+  key_credentials: Option<super::chromium_platform_keys::ChromiumKeyIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

@@ -2,8 +2,10 @@ use super::super::chromium::query_cookies_engine_outcome_with_runtime;
 #[cfg(all(test, target_os = "macos"))]
 use super::super::chromium_crypto::ChromiumKeyOutcome;
 use super::super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, KeyProvider};
+#[cfg(test)]
+use super::super::chromium_platform_keys::MacosKeychainCredentials;
 use super::super::chromium_platform_keys::{
-  ChromiumKeyCredentials, ChromiumKeyRequest, HostKeySession, MacosKeychainCredentials,
+  ChromiumKeyIdentity, ChromiumKeyRequest, HostKeySession,
 };
 use super::super::report_core::{
   CookieSourceFormatId, CookieSourceRoleId, InstallationId, ProfileId,
@@ -27,20 +29,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct KeyCredentials {
-  pub(super) macos_keychain: Option<MacosKeychainCredential>,
-  pub(super) linux_crypt_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct MacosKeychainCredential {
-  /// Keychain generic-password service, e.g. `"Chrome Safe Storage"`.
-  pub(super) service: String,
-  /// Its account name, e.g. `"Chrome"`.
-  pub(super) account: String,
-}
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -164,7 +152,7 @@ pub(super) struct BrowserInstallation {
   /// Parsed by the Windows compatibility prerequisite and reused by the
   /// system provider so the query cannot race a second Local State read.
   legacy_local_state: Option<serde_json::Value>,
-  key_credentials: ChromiumKeyCredentials,
+  key_credentials: ChromiumKeyIdentity,
   priority: u16,
   /// Registry-authored ordering used only by the compatibility named APIs.
   /// Generic reports continue to use `priority`.
@@ -732,7 +720,7 @@ fn discover_browser_with_context_and_selection<F: DiscoveryFs>(
         channel: root.channel.clone(),
         local_state_path: canonical_path.join("Local State"),
         legacy_local_state: None,
-        key_credentials: project_key_credentials(definition.key_credentials.as_ref()),
+        key_credentials: definition.key_credentials.clone().unwrap_or_default(),
         path: canonical_path,
         priority: root.priority,
         legacy_priority,
@@ -1160,18 +1148,18 @@ where
 /// and compatibility extraction.
 ///
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn registry_key_credentials(browser_id: &str) -> Result<ChromiumKeyCredentials> {
+pub(crate) fn registry_key_credentials(browser_id: &str) -> Result<ChromiumKeyIdentity> {
   let registry = embedded_registry()?;
   let platform = PlatformId::current()?;
   let definition = browser_definition(registry, platform, browser_id)?;
-  Ok(project_key_credentials(definition.key_credentials.as_ref()))
+  Ok(definition.key_credentials.clone().unwrap_or_default())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) enum DirectPathChromiumIdentity {
   Unknown,
   OtherEngine,
-  Chromium(Option<ChromiumKeyCredentials>),
+  Chromium(Option<ChromiumKeyIdentity>),
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1193,10 +1181,7 @@ pub(crate) fn direct_path_chromium_identity(
     return Ok(DirectPathChromiumIdentity::OtherEngine);
   }
   Ok(DirectPathChromiumIdentity::Chromium(
-    definition
-      .key_credentials
-      .as_ref()
-      .map(|credentials| project_key_credentials(Some(credentials))),
+    definition.key_credentials.clone(),
   ))
 }
 
@@ -1212,10 +1197,9 @@ pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<Option<crate:
         definition.engine.as_str()
       );
     }
-    let Some(key_credentials) = definition.key_credentials.as_ref() else {
+    let Some(credentials) = definition.key_credentials.as_ref() else {
       return Ok(None);
     };
-    let credentials = project_key_credentials(Some(key_credentials));
     #[cfg(target_os = "linux")]
     if credentials.linux_crypt_name.is_none() {
       bail!("browser id {browser_id:?} has no Linux crypt-name identity");
@@ -1224,7 +1208,7 @@ pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<Option<crate:
     if credentials.macos_keychain.is_none() {
       bail!("browser id {browser_id:?} has no macOS Keychain identity");
     }
-    Ok(Some(provider_input(&credentials)))
+    Ok(Some(provider_input(credentials)))
   }
 
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1234,21 +1218,9 @@ pub(crate) fn chromium_key_credentials(browser_id: &str) -> Result<Option<crate:
   }
 }
 
-fn project_key_credentials(credentials: Option<&KeyCredentials>) -> ChromiumKeyCredentials {
-  ChromiumKeyCredentials {
-    linux_crypt_name: credentials.and_then(|credentials| credentials.linux_crypt_name.clone()),
-    macos_keychain: credentials
-      .and_then(|credentials| credentials.macos_keychain.as_ref())
-      .map(|keychain| MacosKeychainCredentials {
-        service: keychain.service.clone(),
-        account: keychain.account.clone(),
-      }),
-  }
-}
-
 /// Compatibility adapter for direct APIs that still accept `config::Browser`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn provider_input(credentials: &ChromiumKeyCredentials) -> crate::config::Browser {
+fn provider_input(credentials: &ChromiumKeyIdentity) -> crate::config::Browser {
   let keychain = credentials.macos_keychain.as_ref();
   crate::config::Browser {
     paths: Vec::new(),
@@ -1649,15 +1621,14 @@ mod tests {
     // mapping directly with both halves present. Service and account are
     // deliberately distinct, so transposing them fails here on every platform
     // rather than only on the macOS job.
-    let both = KeyCredentials {
-      macos_keychain: Some(MacosKeychainCredential {
+    let both = ChromiumKeyIdentity {
+      macos_keychain: Some(MacosKeychainCredentials {
         service: "Probe Safe Storage".to_owned(),
         account: "Probe Account".to_owned(),
       }),
       linux_crypt_name: Some("probe-crypt".to_owned()),
     };
-    let projected = project_key_credentials(Some(&both));
-    let mapped = provider_input(&projected);
+    let mapped = provider_input(&both);
     assert_eq!(
       mapped.osx_key_service.as_deref(),
       Some("Probe Safe Storage")
@@ -1666,7 +1637,7 @@ mod tests {
     assert_eq!(mapped.unix_crypt_name.as_deref(), Some("probe-crypt"));
 
     // No credentials maps to no credentials, never to a blank lookup.
-    let empty = provider_input(&ChromiumKeyCredentials::default());
+    let empty = provider_input(&ChromiumKeyIdentity::default());
     assert_eq!(empty.osx_key_service, None);
     assert_eq!(empty.osx_key_user, None);
     assert_eq!(empty.unix_crypt_name, None);
@@ -1692,7 +1663,7 @@ mod tests {
 
   #[test]
   fn installation_key_request_carries_identity_and_prefers_parsed_local_state() {
-    let expected = ChromiumKeyCredentials {
+    let expected = ChromiumKeyIdentity {
       linux_crypt_name: Some("carried-crypt-name".to_string()),
       macos_keychain: Some(MacosKeychainCredentials {
         service: "Carried Safe Storage".to_string(),
@@ -2307,7 +2278,7 @@ mod tests {
         path: PathBuf::from("/nonexistent"),
         local_state_path: PathBuf::from("/nonexistent/Local State"),
         legacy_local_state: None,
-        key_credentials: ChromiumKeyCredentials::default(),
+        key_credentials: ChromiumKeyIdentity::default(),
         priority: 10,
         legacy_priority: 0,
         legacy_profile_layout: LegacyChromiumProfileLayout::DefaultAndProfiles,

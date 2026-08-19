@@ -20,22 +20,31 @@ pub(crate) use unsupported::HostKeySession;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::HostKeySession;
 
+use serde::Deserialize;
 use std::path::Path;
 
 /// Registry-resolved lookup identities, never key material.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ChromiumKeyCredentials {
+///
+/// Deserialized directly from `browser_registry.json`'s `key_credentials`
+/// object (Section 5.9). Field names are wire-frozen: `browser_registry.json`
+/// is not this program's to change, so this struct and
+/// [`MacosKeychainCredentials`] are also the JSON DTO — there is no separate
+/// registry-side projection type to keep in sync.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct ChromiumKeyIdentity {
   pub(crate) linux_crypt_name: Option<String>,
   pub(crate) macos_keychain: Option<MacosKeychainCredentials>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct MacosKeychainCredentials {
+  /// Keychain generic-password service, e.g. `"Chrome Safe Storage"`.
   pub(crate) service: String,
+  /// Its account name, e.g. `"Chrome"`.
   pub(crate) account: String,
 }
 
-impl ChromiumKeyCredentials {
+impl ChromiumKeyIdentity {
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   pub(crate) fn from_legacy_browser(config: &crate::config::Browser) -> Self {
     let macos_keychain = match (&config.osx_key_service, &config.osx_key_user) {
@@ -66,13 +75,13 @@ pub(crate) enum LocalStateInput<'a> {
 #[allow(dead_code)]
 pub(crate) struct ChromiumKeyRequest<'a> {
   browser_id: Option<&'a str>,
-  credentials: &'a ChromiumKeyCredentials,
+  credentials: &'a ChromiumKeyIdentity,
   local_state: LocalStateInput<'a>,
 }
 
 impl<'a> ChromiumKeyRequest<'a> {
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  pub(crate) fn direct(credentials: &'a ChromiumKeyCredentials) -> Self {
+  pub(crate) fn direct(credentials: &'a ChromiumKeyIdentity) -> Self {
     Self {
       browser_id: None,
       credentials,
@@ -81,10 +90,7 @@ impl<'a> ChromiumKeyRequest<'a> {
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  pub(crate) fn for_browser_id(
-    browser_id: &'a str,
-    credentials: &'a ChromiumKeyCredentials,
-  ) -> Self {
+  pub(crate) fn for_browser_id(browser_id: &'a str, credentials: &'a ChromiumKeyIdentity) -> Self {
     Self {
       browser_id: Some(browser_id),
       credentials,
@@ -94,7 +100,7 @@ impl<'a> ChromiumKeyRequest<'a> {
 
   pub(crate) fn for_installation(
     browser_id: &'a str,
-    credentials: &'a ChromiumKeyCredentials,
+    credentials: &'a ChromiumKeyIdentity,
     local_state_path: &'a Path,
     parsed_local_state: Option<&'a serde_json::Value>,
   ) -> Self {
@@ -112,7 +118,7 @@ impl<'a> ChromiumKeyRequest<'a> {
   /// App-Bound host resolution infers the vendor from the user-data path.
   #[cfg(target_os = "windows")]
   pub(crate) fn for_local_state_file(
-    credentials: &'a ChromiumKeyCredentials,
+    credentials: &'a ChromiumKeyIdentity,
     local_state_path: &'a Path,
   ) -> Self {
     Self {
@@ -136,7 +142,7 @@ impl<'a> ChromiumKeyRequest<'a> {
   }
 
   #[cfg(test)]
-  pub(crate) fn credentials(&self) -> &'a ChromiumKeyCredentials {
+  pub(crate) fn credentials(&self) -> &'a ChromiumKeyIdentity {
     self.credentials
   }
 
