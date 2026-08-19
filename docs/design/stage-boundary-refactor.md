@@ -36,7 +36,9 @@ Deliberately **not** lifted (would change public behavior or wire bytes): the li
 
 **Consistency pass (same day).** Folded in review of Rev 2 against itself and the tree. No new lifts. Fixes: Decision 18 reuses `report_core` id newtypes (the Decision 21 pattern) instead of inventing `registry.rs` twins or claiming wire fields stay `String`; PR 0b is typed against the old `EngineSourceDraft` bag; “done when,” Stage 2 gecko populate, the module table, and the target mermaid describe one end state (post-PR 8/9); leftover “rewrite / cookies-branch delete live in PR 1” sentences retargeted to PR 0b / PR 0c; `check-stage-boundary` lands in PR 1 (the types do not exist in PR 0a); PR 0a includes `internet_explorer_based`. Adds a mermaid class diagram of the post-PR 8/9 types next to Target language — illustration only; no design change.
 
-**Progress.** PR 0a/0b/0c landed as #270 and PR 1 as #271. PR 2 landed the Chromium tower: both towers now build cookie files from the same two types, and the only remaining engine-shaped extract results are Mozilla/Safari/IE (PR 3).
+**Progress.** PR 0a/0b/0c landed as #270, PR 1 as #271, PR 2 as #272, PR 7 as #273. PR 3 (#275) and PRs 4+5 (#276, stacked) are open. After PR 3 every engine's crate-visible result is a `Source`; after PR 5 `report_build` no longer names `chromium`, `mozilla`, `safari`, or `internet_explorer` anywhere. Remaining: PR 6, PR 8, PR 9.
+
+**What the goldens have been worth.** Four invariants were found *unpinned* by deliberately breaking each one and watching the suite stay green — the persistent failure stage's `BrowserDatabaseFailureKind::Query` arm, the direct-path Chromium compatibility family, and two earlier ones. Each was closed with a test in the PR that moved it. The lesson is narrow and repeatable: when a derivation moves between files, break it on purpose before trusting that a green suite means it survived.
 
 ---
 
@@ -1309,9 +1311,9 @@ Characterization tests move with the production they pin in the same PR. #218 al
 
 - Do **not** collapse `query_*` combinatorics. Do **not** move the Chromium acquire loop into `collect_report`.
 
-### PR 3 — Engine bags leave crate-visible APIs (Gecko / Safari / IE)
+### PR 3 — Engine bags leave crate-visible APIs (Gecko / Safari / IE) — **OPEN (#275)**
 
-- **Title:** `refactor: return Source from Mozilla/Safari/IE engines`
+- **Title:** `refactor: return Source from the Mozilla, Safari, and Internet Explorer engines`
 - **Files/components:**
   - `rookie-rs/src/browser/mozilla.rs` (crate-visible `query_cookies_engine_outcome*` returns `Vec<Source>`; drafts become file-private; **do not split the session walk**)
   - `rookie-rs/src/browser/safari.rs` (`safari_based_outcome*` returns `Source`)
@@ -1322,9 +1324,17 @@ Characterization tests move with the production they pin in the same PR. #218 al
 - **Dependencies:** PR 1. Can proceed in parallel with PR 2.
 - **Description:** Adapters stop copying `MozillaExtractionDraft` field-by-field. Walk stays private (Decision 14). Named `firefox_based` / `safari_based` still go through `canonical_direct_*` until PR 4.
 
-### PR 4 — Direct-path is a singleton candidate; delete `canonical_direct_*`
+**Errors stayed on `Result`.** Folding acquisition failures into `Source.failure` would reflow them through `{:#}`, and Safari's is the Full Disk Access message the public `safari()` API returns verbatim. That is a public error-text change, not a refactor, so `Err` still means "no source came back at all" and the adapters keep their `Err`-to-failure mapping — which is also where the `SafariParseFailure` stats and the `STABLE_READ_ATTEMPTS` count live.
 
-- **Title:** `refactor: finalize direct-path as a singleton SourceCandidate`
+**Mozilla's persistent gate is split, not moved.** `persistent_attempted` is the engine's knowledge; `persistent_source_discovered || persistent_exists(path)` belongs to the listing and the filesystem. So the engine emits the persistent source iff attempted and the adapter drops it otherwise; the net condition is unchanged. The consequence is stated on `MozillaExtract`: a persistent source in it does **not** mean the profile has a persistent store — a session-only profile still attempts the query. Removing the adapter's drop gate fails four tests.
+
+**Coverage gap closed.** Moving the persistent failure stage exposed that mapping `BrowserDatabaseFailureKind::Query` onto `SourceFailureStage::Query` was unpinned — flattening it to always-`Acquisition` passed the entire suite. `stage` is a frozen field consumers read to choose a remedy.
+
+**Windows lesson.** `registry/internet_explorer.rs` is `cfg(target_os = "windows")`, so a green macOS build said nothing about it and the IE adapter shipped uncompiled. Any PR touching an engine signature must assume the platform-gated adapters are invisible locally.
+
+### PR 4 — Direct-path is a singleton candidate; delete `canonical_direct_*` — **OPEN (#276)**
+
+- **Title:** `refactor: finalize direct-path as a singleton source and delete canonical_direct_*`
 - **Files/components:**
   - `rookie-rs/src/browser/source.rs` or `outcome.rs` (`finalize_singleton_source`)
   - `rookie-rs/src/browser/report_build.rs` (delete all `canonical_direct_*`)
@@ -1333,9 +1343,17 @@ Characterization tests move with the production they pin in the same PR. #218 al
 - **Dependencies:** PR 2 and PR 3 (engines return `Source`). Independent of PR 5's mapper collapse if the helper builds `SourceDraft` via `source_to_draft`.
 - **Description:** Direct-path stops inventing identities in `report_build`. Synthetic ids stay `"0"*64` / `"1"*64` / `"direct"`. Join keys come from the `Source`.
 
-### PR 5 — `report_build` only adapts thin bags, then finalizes and projects
+**Landed shape:** `finalize_singleton_source(browser_id, profile_path, sources, boundary_stop, runtime)`, in `report_build.rs` rather than `source.rs` — the helper needs `direct_engine_extract` and the finalizers, and `source.rs` is deliberately a leaf that must not depend on the report builder.
 
-- **Title:** `refactor: collapse report_build engine mappers into source_to_draft and profile_to_draft`
+`profile_path` stays a parameter rather than being derived from `sources`: a Gecko profile whose persistent store was never attempted leads with a *session* source, and `sessionstore-backups/recovery.baklz4` does not have the profile directory as its parent.
+
+**Coverage gap closed.** Routing Chromium through the shared finalizer means the compatibility family is looked up rather than hardcoded, and `engine_compatibility_family` had no `"chromium"` arm — it fell through to Gecko, and the whole suite passed that way. The two dispositions agree on everything one persistent source can produce except the all-rows-rejected fallback, which would have told Chromium users "all Firefox cookie database rows failed to decode".
+
+Deleting the Windows-gated IE helper left `report_build.rs` with no platform `cfg`, so its grandfathered allowlist entry was removed.
+
+### PR 5 — `report_build` only adapts thin bags, then finalizes and projects — **OPEN (#276)**
+
+- **Title:** `refactor: collapse the two profile mappers into one profile_to_draft`
 - **Files/components:**
   - `rookie-rs/src/browser/report_build.rs` (delete remaining tower-specific mappers; one `source_to_draft`; one `profile_to_draft`; keep `collect_report` match arms calling adapters; keep `engine_listing_outcome`; keep finalize/project/`load_extraction_report*`/second profile-id check/`discovery_severity`/compatibility family)
   - `rookie-rs/src/browser/report_build/dispatch/*`
@@ -1343,6 +1361,10 @@ Characterization tests move with the production they pin in the same PR. #218 al
 - **#218:** `report_build.rs` grandfathered (`max_cfg = 1`).
 - **Dependencies:** PR 2 and PR 3. PR 4 can land before or after.
 - **Description:** “Done when” for `report_build` mappers. **Does not** relocate the acquire loop. `profile_to_draft` takes `ProfileIdentity` fields + `browser_id`, not `&EngineProfileIdentity`. `EngineProfileIdentity.name` and `ChromiumProfile.display_name` both map to `display_name` at the call site. `collect_report` still receives `EngineExtract` / thin `ChromiumRegistryDraft` / `EngineListing`. No per-engine types imported from `chromium.rs` / `mozilla.rs` / `safari.rs`.
+
+**Landed shape:** one `profile_to_draft(identity, is_default, sources, no_sources)` taking an already-built `ProfileIdentity`, which is what lets a single function serve both towers — `EngineProfileIdentity.name` and `ChromiumProfile.display_name` are both just `display_name` by then.
+
+What could not be collapsed is now named. The towers mean opposite things by an empty source list, so `NoSources::SourceVanished` (listing admits a profile only when it found a source) and `NoSources::AbsentUnlessFailed` (Chromium lists only databases that exist) is an argument rather than something you learn from which function you called. `report_build.rs` now names no engine module at all.
 
 ### PR 6 — Inventory types leave the decoder files
 
@@ -1356,13 +1378,17 @@ Characterization tests move with the production they pin in the same PR. #218 al
 - **Dependencies:** PR 1 (`SourceCandidate`). Can proceed if PR 2–5 are skipped.
 - **Description:** Inventory leaves the Safari decoder. **Do not** split the Mozilla session walk in this PR.
 
-### PR 7 — Key identity home (`ChromiumKeyIdentity`)
+### PR 7 — Key identity home (`ChromiumKeyIdentity`) — **LANDED (#273)**
 
 - **Title:** `refactor: house Chromium key identity in chromium_platform_keys as ChromiumKeyIdentity`
 - **Files/components:** `chromium_platform_keys/mod.rs`, `registry/chromium.rs` serde DTO + projections, unix wrappers, `direct_path/**`
 - **#218:** leaves already; do not add cfg.
 - **Dependencies:** none on PR 1–6. Skippable for “done when” items 1–4.
 - **Description:** Deletes duplicate identity structs. `browser_registry.json` field names unchanged.
+
+**Landed shape:** the serde DTO and the runtime type were structurally identical with the same field names, and `project_key_credentials` copied one onto the other. One `ChromiumKeyIdentity` owned by `chromium_platform_keys` is now both. No `#[serde(rename)]` was ever load-bearing, and `project_key_credentials(None)` produced `Default`, which is what `.unwrap_or_default()` now spells.
+
+The one real consequence: `browser_registry.json`'s contract is bound directly to Rust field names, with no intermediate type whose rename would be the visible break. That is stated on the struct and gated by the existing tests that parse the real embedded registry.
 
 ### PR 8 — Mozilla path-in / `Source`-out (session walk split) — **[Rev 2] now required**
 

@@ -138,50 +138,20 @@ fn profile_identity(
 /// still decides is what an empty source list means, which is engine-specific
 /// -- Chromium lists only databases that exist, so having none is ordinary
 /// absence rather than the failure it is for the engine listing.
-fn chromium_profile_outcome(
-  browser_id: &BrowserId,
-  installation_id: &str,
-  extraction: ChromiumExtractedProfile,
-) -> Result<ProfileDraft> {
-  let ChromiumExtractedProfile {
-    profile,
-    sources,
-    failure,
-  } = extraction;
-  let identity = profile_identity(
-    browser_id,
-    installation_id,
-    profile.profile_id.as_str(),
-    &profile.display_name,
-    &profile.path,
-  )?;
-  let mut outcome = ProfileDraft::new(identity, profile.is_default);
-
-  if sources.is_empty() {
-    // A profile that simply has no cookie database is ordinary absence, but one
-    // that reports an extraction failure lost something, so it must not be
-    // downgraded to the same `info` signal as an empty profile.
-    outcome.issues.push(match failure {
-      Some(message) => issue(
-        "profile_extraction_failed",
-        ExtractionStageCode::acquisition(),
-        IssueSeverityCode::error(),
-        message,
-      ),
-      None => issue(
-        "profile_has_no_cookie_source",
-        ExtractionStageCode::discovery(),
-        IssueSeverityCode::info(),
-        "profile has no selected persistent source",
-      ),
-    });
-    return Ok(outcome);
-  }
-
-  outcome
-    .sources
-    .extend(sources.into_iter().map(source_to_draft));
-  Ok(outcome)
+/// What a profile with no sources means. The two towers disagree, because they
+/// discover differently, and that disagreement is the only thing the shared
+/// profile mapper cannot derive for itself.
+enum NoSources {
+  /// Listing admits a profile only when it found a persistent database or a
+  /// session candidate, so an extract with none means whatever justified that
+  /// admission is gone. Always a failure -- never the "nothing was ever there"
+  /// case `no_sources` means. Discovery-only profiles on a stopped extract are
+  /// pruned before the mapper and never reach this.
+  SourceVanished,
+  /// Chromium lists only databases that exist, so a profile with none is
+  /// ordinary absence. A profile that failed before it could name one lost
+  /// something, and must not be downgraded to the same `info` signal.
+  AbsentUnlessFailed(Option<String>),
 }
 
 /// Adapts one already-queried [`Source`] into the shared [`SourceDraft`].
@@ -323,39 +293,49 @@ fn source_issue_to_extraction(source_issue: SourceIssue) -> ExtractionIssue {
 /// Extract-only: a profile whose sources are all gone after a source present at
 /// discovery vanished raises `profile_extraction_failed`. Listing never reaches
 /// this path, so empty candidates there stay ordinary listing emptiness.
-fn extracted_profile_outcome(
-  browser_id: &BrowserId,
-  profile: ExtractedProfile,
-) -> Result<ProfileDraft> {
-  let identity = profile_identity(
-    browser_id,
-    profile.identity.installation_id.as_str(),
-    profile.identity.profile_id.as_str(),
-    &profile.identity.name,
-    &profile.identity.path,
-  )?;
-  let mut outcome = ProfileDraft::new(identity, profile.identity.is_default);
-  for source in profile.sources {
-    outcome.sources.push(source_to_draft(source));
+/// Adapts one extracted profile into a [`ProfileDraft`]. The only profile
+/// mapper: both towers reach the report through it.
+///
+/// A copy, like [`source_to_draft`]. It takes an already-built
+/// [`ProfileIdentity`] rather than either engine's profile bag, which is what
+/// lets one function serve both -- `EngineProfileIdentity.name` and
+/// `ChromiumProfile.display_name` are both just `display_name` by the time they
+/// arrive.
+fn profile_to_draft(
+  identity: ProfileIdentity,
+  is_default: bool,
+  sources: Vec<Source>,
+  no_sources: NoSources,
+) -> ProfileDraft {
+  let mut outcome = ProfileDraft::new(identity, is_default);
+  outcome
+    .sources
+    .extend(sources.into_iter().map(source_to_draft));
+  if !outcome.sources.is_empty() {
+    return outcome;
   }
-  if outcome.sources.is_empty() {
-    // Discovery only admits a profile when it found either a persistent
-    // database or a session candidate, so a profile that reaches extraction
-    // with zero sources means whatever justified its admission is gone by the
-    // time of extraction. That is a real failure, not the "nothing was ever
-    // there" case `no_sources` means. Discovery-only profiles on a stopped
-    // extract are pruned before this adapter and never reach this branch.
-    push_aggregated(
-      &mut outcome.issues,
-      issue(
-        "profile_extraction_failed",
-        ExtractionStageCode::acquisition(),
-        IssueSeverityCode::error(),
-        "a cookie source present at discovery could not be found by the time of extraction",
-      ),
-    );
-  }
-  Ok(outcome)
+  let empty = match no_sources {
+    NoSources::SourceVanished => issue(
+      "profile_extraction_failed",
+      ExtractionStageCode::acquisition(),
+      IssueSeverityCode::error(),
+      "a cookie source present at discovery could not be found by the time of extraction",
+    ),
+    NoSources::AbsentUnlessFailed(Some(message)) => issue(
+      "profile_extraction_failed",
+      ExtractionStageCode::acquisition(),
+      IssueSeverityCode::error(),
+      message,
+    ),
+    NoSources::AbsentUnlessFailed(None) => issue(
+      "profile_has_no_cookie_source",
+      ExtractionStageCode::discovery(),
+      IssueSeverityCode::info(),
+      "profile has no selected persistent source",
+    ),
+  };
+  push_aggregated(&mut outcome.issues, empty);
+  outcome
 }
 
 /// One registered browser's contribution to a report.
@@ -385,6 +365,10 @@ fn engine_compatibility_family(browser_id: &BrowserId) -> CompatibilityFamily {
   match browser_id.as_str() {
     "safari" => CompatibilityFamily::Safari,
     "internet_explorer" => CompatibilityFamily::InternetExplorer,
+    // Only the direct path reaches this arm: registry Chromium browsers are
+    // adapted by `chromium_browser_outcome`, which names the family itself.
+    // Without it a direct-path Chromium read would be dispositioned as Gecko.
+    "chromium" => CompatibilityFamily::Chromium,
     _ => CompatibilityFamily::Gecko,
   }
 }
@@ -428,12 +412,25 @@ fn chromium_browser_outcome(
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
   }
   for installation in report.installations {
-    for profile in installation.profiles {
-      outcome.profiles.push(chromium_profile_outcome(
+    for extracted in installation.profiles {
+      let ChromiumExtractedProfile {
+        profile,
+        sources,
+        failure,
+      } = extracted;
+      let identity = profile_identity(
         browser_id,
         &installation.installation_id,
-        profile,
-      )?);
+        profile.profile_id.as_str(),
+        &profile.display_name,
+        &profile.path,
+      )?;
+      outcome.profiles.push(profile_to_draft(
+        identity,
+        profile.is_default,
+        sources,
+        NoSources::AbsentUnlessFailed(failure),
+      ));
     }
   }
   Ok(outcome)
@@ -468,9 +465,19 @@ fn engine_extract_outcome(
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
   }
   for profile in extract.profiles {
-    outcome
-      .profiles
-      .push(extracted_profile_outcome(browser_id, profile)?);
+    let identity = profile_identity(
+      browser_id,
+      profile.identity.installation_id.as_str(),
+      profile.identity.profile_id.as_str(),
+      &profile.identity.name,
+      &profile.identity.path,
+    )?;
+    outcome.profiles.push(profile_to_draft(
+      identity,
+      profile.identity.is_default,
+      profile.sources,
+      NoSources::SourceVanished,
+    ));
   }
   Ok(outcome)
 }
@@ -1463,78 +1470,31 @@ pub(crate) fn canonical_chromium_extraction_with_runtime(
   ))
 }
 
-// Only reachable in production through the automatic multi-identity
-// Chromium selection, which is Linux/macOS-only; Windows exercises this via
-// `#[cfg(test)]`.
-#[allow(dead_code)]
-pub(crate) fn canonical_direct_chromium_extraction(source: Source) -> Result<Outcome> {
-  canonical_direct_chromium_extraction_impl(source, None)
-}
-
-pub(crate) fn canonical_direct_chromium_extraction_with_runtime(
-  source: Source,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_chromium_extraction_impl(source, Some(runtime))
-}
-
-fn canonical_direct_chromium_extraction_impl(
-  source: Source,
+/// Finalizes one direct-path read: the caller named a file, so there is exactly
+/// one profile and no discovery to consult.
+///
+/// This replaces the four `canonical_direct_*` helpers, which had converged on
+/// the same body once every engine started returning `Source`. Chromium's kept
+/// a hand-built `ProfileIdentity` / `BrowserDraft` beside the shared one; both
+/// produce the same report, because `profile_identity` applies the same
+/// `display_path` and the synthetic counters make `all_detected_roots_failed()`
+/// false either way.
+///
+/// `profile_path` is a parameter rather than derived from `sources`: a Gecko
+/// profile whose persistent store was never attempted leads with a session
+/// source, and `sessionstore-backups/recovery.baklz4` does not have the profile
+/// directory as its parent.
+pub(crate) fn finalize_singleton_source(
+  browser_id: &str,
+  profile_path: std::path::PathBuf,
+  sources: Vec<Source>,
+  boundary_stop: Option<BoundaryStop>,
   runtime: Option<&BoundaryRuntime<'_>>,
 ) -> Result<Outcome> {
-  let browser_id = BrowserId::known("chromium");
-  // The source's own path, not a second one threaded alongside it: the
-  // candidate the engine queried is the only place this is recorded.
-  let db_path = source.origin.path.clone();
-  let db_path = db_path.as_path();
-  let profile = ProfileIdentity {
-    browser_id: browser_id.clone(),
-    installation_id: "0".repeat(64).parse()?,
-    profile_id: "1".repeat(64).parse()?,
-    display_name: "direct".to_owned(),
-    path: display_path(db_path.parent().unwrap_or(db_path)).0,
-    path_lossy: db_path.parent().unwrap_or(db_path).to_str().is_none(),
-  };
-  let mut profile_draft = ProfileDraft::new(profile, true);
-  profile_draft.sources.push(source_to_draft(source));
-  Ok(finalize_outcomes_with_runtime(
-    1,
-    vec![BrowserDraft {
-      browser_id,
-      compatibility_family: CompatibilityFamily::Chromium,
-      detected: true,
-      installations_discovered: 1,
-      discovery_failed: false,
-      profiles: vec![profile_draft],
-      issues: Vec::new(),
-      termination: Termination::Completed,
-    }],
-    runtime,
-  ))
-}
-
-pub(crate) fn canonical_direct_mozilla_extraction_with_runtime(
-  db_path: &std::path::Path,
-  extract: super::mozilla::MozillaExtract,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_mozilla_extraction_impl(db_path, extract, Some(runtime))
-}
-
-fn canonical_direct_mozilla_extraction_impl(
-  db_path: &std::path::Path,
-  extract: super::mozilla::MozillaExtract,
-  runtime: Option<&BoundaryRuntime<'_>>,
-) -> Result<Outcome> {
-  // The engine already assembled every source, including its `row_read_failed`
-  // issues. The direct path gates the persistent source on `persistent_attempted`
-  // alone -- there is no discovery to consult -- which is exactly the engine's
-  // emit condition, so the engine's `Vec<Source>` is consumed as-is.
-  let profile_path = db_path.parent().unwrap_or(db_path).to_path_buf();
-  let engine_extract = direct_engine_extract(profile_path, extract.sources, extract.boundary_stop);
+  let extract = direct_engine_extract(profile_path, sources, boundary_stop);
   match runtime {
-    Some(runtime) => canonical_engine_extract_with_runtime("firefox", engine_extract, runtime),
-    None => canonical_engine_extract("firefox", engine_extract),
+    Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),
+    None => canonical_engine_extract(browser_id, extract),
   }
 }
 
@@ -1582,41 +1542,6 @@ fn direct_engine_extract(
       installations_enumerated: 1,
     },
     boundary_stop,
-  }
-}
-
-pub(crate) fn canonical_direct_safari_extraction_with_runtime(
-  source: Source,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_engine_source("safari", source, Some(runtime))
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn canonical_direct_internet_explorer_extraction_with_runtime(
-  source: Source,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Outcome> {
-  canonical_direct_engine_source("internet_explorer", source, Some(runtime))
-}
-
-/// Wraps one already-built [`Source`] as a single-profile direct-path extract.
-///
-/// The engine assembled the source, including its `row_read_failed` issue, so
-/// this only supplies the synthetic profile the direct path has no discovery
-/// for. The profile path is read off the source's own origin rather than
-/// threaded alongside it.
-fn canonical_direct_engine_source(
-  browser_id: &str,
-  source: Source,
-  runtime: Option<&BoundaryRuntime<'_>>,
-) -> Result<Outcome> {
-  let db_path = source.origin.path.clone();
-  let profile_path = db_path.parent().unwrap_or(&db_path).to_path_buf();
-  let extract = direct_engine_extract(profile_path, vec![source], None);
-  match runtime {
-    Some(runtime) => canonical_engine_extract_with_runtime(browser_id, extract, runtime),
-    None => canonical_engine_extract(browser_id, extract),
   }
 }
 
@@ -2297,6 +2222,53 @@ mod tests {
     }
   }
 
+  /// The Chromium half of what `chromium_browser_outcome` now does inline.
+  /// Kept so the adapter tests still drive the real mapper.
+  fn chromium_profile_outcome(
+    browser_id: &BrowserId,
+    installation_id: &str,
+    extraction: registry::ChromiumExtractedProfile,
+  ) -> Result<ProfileDraft> {
+    let registry::ChromiumExtractedProfile {
+      profile,
+      sources,
+      failure,
+    } = extraction;
+    let identity = profile_identity(
+      browser_id,
+      installation_id,
+      profile.profile_id.as_str(),
+      &profile.display_name,
+      &profile.path,
+    )?;
+    Ok(profile_to_draft(
+      identity,
+      profile.is_default,
+      sources,
+      NoSources::AbsentUnlessFailed(failure),
+    ))
+  }
+
+  /// The engine half of what `engine_extract_outcome` now does inline.
+  fn extracted_profile_outcome(
+    browser_id: &BrowserId,
+    profile: ExtractedProfile,
+  ) -> Result<ProfileDraft> {
+    let identity = profile_identity(
+      browser_id,
+      profile.identity.installation_id.as_str(),
+      profile.identity.profile_id.as_str(),
+      &profile.identity.name,
+      &profile.identity.path,
+    )?;
+    Ok(profile_to_draft(
+      identity,
+      profile.identity.is_default,
+      profile.sources,
+      NoSources::SourceVanished,
+    ))
+  }
+
   fn chromium_profile(
     sources: Vec<Source>,
     failure: Option<String>,
@@ -2428,6 +2400,42 @@ mod tests {
     );
     // A failed candidate beside a succeeding one is exactly the `partial` case.
     assert_eq!(report.status, ReportStatusCode::partial());
+  }
+
+  /// `finalize_singleton_source` picks the compatibility family from the
+  /// browser id, so a direct-path Chromium read must not be dispositioned by
+  /// Gecko's session-fallback arm. The two arms agree on every other outcome a
+  /// single persistent source can produce, which is why this asserts the one
+  /// place they differ: the all-rows-rejected fallback names the engine.
+  #[test]
+  fn a_direct_path_chromium_read_is_dispositioned_as_chromium() {
+    let mut source = Source::from_candidate(SourceCandidate {
+      path: PathBuf::from("/chrome/Default/Cookies"),
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known("chromium_sqlite"),
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition: registry::SourceAcquisition::NotAttempted,
+    });
+    source.stats.rows_seen = 2;
+    source.stats.rows_skipped = 2;
+    source.push_row_read_failed(None);
+
+    let outcome = finalize_singleton_source(
+      "chromium",
+      PathBuf::from("/chrome/Default"),
+      vec![source],
+      None,
+      None,
+    )
+    .expect("finalize the direct-path source");
+    let error = crate::browser::legacy::project_canonical_outcome("chromium", outcome)
+      .expect_err("every row was rejected, so the compatibility projection fails");
+    assert!(
+      format!("{error:#}").contains("all Chromium cookie rows failed to decode"),
+      "expected the Chromium fallback, got: {error:#}"
+    );
   }
 
   fn engine_source(
