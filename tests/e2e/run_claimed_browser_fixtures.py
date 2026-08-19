@@ -2,8 +2,8 @@
 """Exercise every claimed browser_id on this OS with engine fixtures.
 
 Release / manual lane. Does not launch a real browser. Gecko ids share one
-generated cookies.sqlite. Chromium ids on Windows share a current-user DPAPI
-fixture extracted with ``browser_id``. Every claimed id must appear in
+generated cookies.sqlite. Windows Chromium extraction uses one current-user
+DPAPI fixture (not per-id ``browser_id``). Every claimed id must appear in
 ``supported_browsers()``.
 """
 
