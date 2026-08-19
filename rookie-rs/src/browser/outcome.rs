@@ -1,7 +1,7 @@
 //! Canonical extraction result shared by every compatibility projection.
 
 use super::{
-  cookie_record::{FinalizedCookieRecord, SourceRef},
+  cookie_record::FinalizedCookieRecord,
   report_core::{
     AcquisitionStrategyCode, BrowserId, CookieSourceIdentity, ExtractionStageCode, InstallationId,
     IssueCode, IssueSeverityCode, ProfileId, ProfileIdentity,
@@ -397,16 +397,12 @@ pub(crate) fn source_digest(
   hasher.finalize().into()
 }
 
-pub(crate) fn source_ref(source_digest: [u8; 32], ordinal: usize) -> SourceRef {
-  SourceRef::pending(ordinal).with_digest(source_digest)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::{
     browser::{
-      cookie_record::FinalizedCookieRecord,
+      cookie_record::{FinalizedCookieRecord, SourceRef},
       report_core::{CookieSourceFormatId, CookieSourceRoleId, ExtractionStats},
     },
     common::enums::Cookie,

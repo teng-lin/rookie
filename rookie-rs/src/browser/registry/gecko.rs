@@ -1777,6 +1777,16 @@ mod tests {
   fn stopped_gecko_adapter_outcome(
     stop: crate::common::deadline::BoundaryStop,
   ) -> EngineExtractionDraft {
+    let retained_cookie = || Cookie {
+      domain: ".example.com".to_owned(),
+      path: "/".to_owned(),
+      secure: false,
+      expires: None,
+      name: "retained".to_owned(),
+      value: "value".to_owned(),
+      http_only: false,
+      same_site: 0,
+    };
     let profiles = (0..3)
       .map(|index| {
         let path = PathBuf::from(format!("/profiles/gecko-{index}"));
@@ -1817,16 +1827,15 @@ mod tests {
         if call == 0 {
           mozilla::MozillaExtractionDraft {
             persistent_attempted: true,
-            persistent_cookies: vec![Cookie {
-              domain: ".example.com".to_owned(),
-              path: "/".to_owned(),
-              secure: false,
-              expires: None,
-              name: "retained".to_owned(),
-              value: "value".to_owned(),
-              http_only: false,
-              same_site: 0,
-            }],
+            persistent_cookies: vec![retained_cookie()],
+            // Production gecko fills `records` and leaves `cookies` empty
+            // outside tests; finalization reads `records` only.
+            persistent_records: vec![
+              crate::browser::cookie_record::CookieRecord::from_cookie(
+                retained_cookie(),
+                crate::browser::cookie_record::SourceRef::pending(0),
+              ),
+            ],
             persistent_rows_seen: 1,
             persistent_acquisition_strategy: Some(
               DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,

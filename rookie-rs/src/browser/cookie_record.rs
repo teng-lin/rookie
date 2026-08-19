@@ -510,6 +510,12 @@ impl fmt::Debug for CookieRecord {
 }
 
 impl CookieRecord {
+  /// Build a record from an already-projected [`Cookie`].
+  ///
+  /// Test-only: production decodes into records directly, and finalization
+  /// takes its rows from `records` alone. Fixtures still need it to express
+  /// "this source produced this row" without running a decoder.
+  #[cfg(test)]
   pub(crate) fn from_cookie(cookie: Cookie, origin: SourceRef) -> Self {
     Self {
       domain: DomainScope::from_stored(cookie.domain),
