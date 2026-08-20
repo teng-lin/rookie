@@ -1319,6 +1319,8 @@ Golden/API impact is **none** unless a spec says otherwise; only PR 11b may re-g
 - **Dependencies:** PR 9.
 - **Description:** §14a, the keystone. After this, Gecko's populate body *is* the shared executor and the engine difference is a field. Chromium keeps skipping `!exists` at plan time; Gecko keeps planting `exists: true` with `Probe`. §12's divergent bytes are preserved because they are outputs of plan construction.
 - **Risk:** Medium-high. This is where an executor could quietly change acquisition order or the laziness guarantee. `select_session_sources` must remain the single first-valid rule and the iterator must stay lazy (ADR 0001 §8).
+- **The laziness guarantee is already pinned**, which Rev 12 wrongly implied it was not: `populate_stops_acquiring_session_candidates_after_the_first_valid_one` (`registry/gecko.rs:1361`) plants two live session candidates, counts acquisitions through the injected query closure, and asserts `session_reads == 1` — "the second session candidate must never be acquired". An eager executor fails it immediately. Run it first, and if the implementation makes the injected-closure seam unavailable, **port the counting test before changing the code**, because losing the counter is how this becomes silent again.
+- **What is still unpinned** and is what the independent reviewer should hunt: acquisition *order* within a profile beyond first-valid, and whether a policy-driven executor preserves the persistent-then-session emission order that the report's stable sort depends on (`mozilla.rs:944–948`).
 - **Golden/API impact:** none. This is the last PR in the program with a plausible route to a golden diff; re-verify on every OS.
 
 ### PR 12 — Split `SourceDraft` into listing and extract drafts
@@ -1446,7 +1448,7 @@ The default resolution when unsure: **a cheaper model behind a strong gate beats
 | 4b. Equality fix | **Sonnet** | Five lines, one subtle predicate, fully specified in §11 | The four named characterization tests byte-identical |
 | 5a. Frame design + Gecko body | **Opus** | Must hold three populates (265 lines) and their differences simultaneously | Walk order unchanged; goldens |
 | 5b. Apply frame to Safari/IE | **Fable** | Mechanical once the signature is fixed | Compiler + goldens |
-| 6. Policy becomes data | **Opus** | The laziness guarantee can break **without moving a golden** — extra I/O, same output | **Independent second session**, also Opus, prompted to disprove laziness |
+| 6. Policy becomes data | **Opus** | Widest semantic change; the laziness guarantee is invisible to goldens (extra I/O, same output) though a counting test does pin it | Run `populate_stops_acquiring_session_candidates_after_the_first_valid_one` first; **independent second session** to look for guarantees that test does *not* cover |
 | 7. Draft split | **Sonnet** | One file, bounded, and any golden movement proves it wrong | Goldens unchanged, which is the whole test |
 
 Rough shape: Opus on three items, Sonnet on two, Fable on three, Haiku on one. The expensive model is reserved for the three units that can fail silently and the two that produce durable law.
@@ -1459,7 +1461,7 @@ Rough shape: Opus on three items, Sonnet on two, Fable on three, Haiku on one. T
 
 ### Verification is not optional
 
-Every delegated unit gets its gate run before merge, including the ones assigned to the strongest model. Unit 6 additionally gets a second session that did not write the code, because "I checked my own laziness guarantee" is the claim most likely to be wrong and least likely to be caught.
+Every delegated unit gets its gate run before merge, including the ones assigned to the strongest model. Unit 6 additionally gets a second session that did not write the code — not because laziness is unpinned (it is pinned, see PR 10), but because the reviewer's job is to find the guarantees *no* test covers, and self-review is worst at exactly that.
 
 ## Appendix A — Prior-art claim tables
 
