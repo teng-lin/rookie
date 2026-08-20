@@ -127,16 +127,24 @@ try:
         timeout=30,
         cancellation=cancellation,
     ).as_list()
-except RuntimeError as error:
-    if "operation deadline expired" in str(error):
+except rookie_cookies.RookieEngineError as error:
+    if error.stop_reason == "timed_out":
         print("timed out")
-    elif "operation cancelled" in str(error):
+    elif error.stop_reason == "cancelled":
         print("cancelled")
     else:
         raise
 finally:
     timer.cancel()
 ```
+
+Binding exceptions expose stable `kind`, `code`, and `stop_reason` attributes.
+Current `stop_reason` values are `timed_out`, `cancelled`, and
+`resource_exhausted`; treat the attribute as an open string for forward
+compatibility.
+Ambiguous profile errors also carry opaque `profile_ids`; direct-path errors
+carry `source_kind`, `target_os`, and a `path_redacted` flag. Human-readable
+exception text remains diagnostic only.
 
 ## Netscape
 

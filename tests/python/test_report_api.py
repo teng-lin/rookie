@@ -72,6 +72,10 @@ class BrowserProfilesTest(unittest.TestCase):
 
         self.assertIsInstance(raised.exception, ValueError)
         self.assertIn("unknown browser id", str(raised.exception))
+        self.assertEqual(raised.exception.kind, "request")
+        self.assertEqual(raised.exception.code, "unknown_browser")
+        self.assertIsNone(raised.exception.stop_reason)
+        self.assertEqual(raised.exception.profile_ids, [])
 
     def test_absent_browser_returns_an_empty_list(self) -> None:
         with _synthetic_home():
@@ -191,6 +195,34 @@ class BrowserReportTest(unittest.TestCase):
 
         self.assertIsInstance(raised.exception, ValueError)
         self.assertIn("no chrome profile matches", str(raised.exception))
+        self.assertEqual(raised.exception.code, "unknown_profile")
+        self.assertEqual(raised.exception.profile_ids, [])
+
+    def test_ambiguous_profile_preserves_opaque_candidates(self) -> None:
+        with _synthetic_home() as home:
+            root = _seed_chrome(home)
+            (root / "Local State").write_text(
+                json.dumps(
+                    {
+                        "profile": {
+                            "info_cache": {
+                                "Default": {"name": "Shared"},
+                                "Profile 1": {"name": "Shared"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            expected = sorted(
+                profile["profile"]["profile_id"]
+                for profile in rookie_cookies.browser_profiles("chrome")
+            )
+            with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
+                rookie_cookies.browser_report("chrome", "Shared")
+
+        self.assertEqual(raised.exception.code, "ambiguous_profile")
+        self.assertEqual(sorted(raised.exception.profile_ids), expected)
 
     def test_absent_browser_reports_no_sources_instead_of_raising(self) -> None:
         with _synthetic_home():

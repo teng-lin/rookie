@@ -3,7 +3,7 @@
 #[macro_use]
 extern crate napi_derive;
 
-use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
+use napi::{bindgen_prelude::AsyncTask, Env, Result, Status, Task};
 use rookie_cookies::direct_path::{
   ChromiumCredentialSource, ChromiumPathRequest, DirectPathRequest,
 };
@@ -21,17 +21,105 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::Duration;
 
+const STRUCTURED_ERROR_PREFIX: &str = "__ROOKIE_ERROR_V1__";
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BindingErrorDetails {
+  message: String,
+  kind: &'static str,
+  rookie_code: Option<&'static str>,
+  stop_reason: Option<&'static str>,
+  profile_ids: Vec<String>,
+  source_kind: Option<String>,
+  target_os: Option<String>,
+  path_redacted: bool,
+}
+
+fn stop_reason_name(reason: rookie_cookies::StopReason) -> &'static str {
+  match reason {
+    rookie_cookies::StopReason::TimedOut => "timed_out",
+    rookie_cookies::StopReason::Cancelled => "cancelled",
+    rookie_cookies::StopReason::ResourceExhausted => "resource_exhausted",
+    _ => "unknown",
+  }
+}
+
+fn binding_error_details(error: &rookie_cookies::anyhow::Error) -> BindingErrorDetails {
+  let request = error.downcast_ref::<rookie_cookies::RequestError>();
+  let direct = error.downcast_ref::<rookie_cookies::direct_path::DirectPathError>();
+  let stop_reason = rookie_cookies::stop_reason(error).map(stop_reason_name);
+  let fault_kind = rookie_cookies::fault_kind(error);
+
+  BindingErrorDetails {
+    message: format!("{error:?}"),
+    kind: match fault_kind {
+      rookie_cookies::FaultKind::Request => "request",
+      rookie_cookies::FaultKind::Engine => "engine",
+      _ => "engine",
+    },
+    rookie_code: stop_reason
+      .or_else(|| request.map(rookie_cookies::RequestError::code))
+      .or_else(|| direct.map(rookie_cookies::direct_path::DirectPathError::code)),
+    stop_reason,
+    profile_ids: request
+      .map(rookie_cookies::RequestError::profile_ids)
+      .unwrap_or_default()
+      .to_vec(),
+    source_kind: direct
+      .and_then(rookie_cookies::direct_path::DirectPathError::source_kind)
+      .map(|source| source.to_string()),
+    target_os: direct
+      .and_then(rookie_cookies::direct_path::DirectPathError::target_os)
+      .map(str::to_owned),
+    path_redacted: direct
+      .and_then(rookie_cookies::direct_path::DirectPathError::path)
+      .is_some(),
+  }
+}
+
+fn status_for_kind(kind: &str) -> Status {
+  if kind == "request" {
+    Status::InvalidArg
+  } else {
+    Status::GenericFailure
+  }
+}
+
+fn structured_error_with_env(env: Env, details: BindingErrorDetails) -> napi::Error {
+  let status = status_for_kind(details.kind);
+  let mut js_error = match env.create_error(napi::Error::new(status, &details.message)) {
+    Ok(error) => error,
+    Err(error) => return error,
+  };
+  let attributes = (|| -> Result<()> {
+    js_error.set_named_property("kind", details.kind)?;
+    js_error.set_named_property("code", status.as_ref())?;
+    js_error.set_named_property("rookieCode", details.rookie_code)?;
+    js_error.set_named_property("stopReason", details.stop_reason)?;
+    js_error.set_named_property("profileIds", details.profile_ids)?;
+    js_error.set_named_property("sourceKind", details.source_kind)?;
+    js_error.set_named_property("targetOs", details.target_os)?;
+    js_error.set_named_property("pathRedacted", details.path_redacted)?;
+    Ok(())
+  })();
+  if let Err(error) = attributes {
+    return error;
+  }
+  napi::Error::from(js_error.into_unknown())
+}
+
 /// Converts a `rookie_cookies` error into a `napi::Error`, picking the status
 /// code from [`rookie_cookies::fault_kind`] instead of collapsing every
 /// failure into `Status::Unknown`. `FaultKind` is `#[non_exhaustive]`, so the
 /// match keeps a wildcard arm for kinds this binding doesn't know about yet.
 fn classify_fault(error: rookie_cookies::anyhow::Error) -> napi::Error {
-  match rookie_cookies::fault_kind(&error) {
-    rookie_cookies::FaultKind::Request => {
-      napi::Error::new(Status::InvalidArg, format!("{error:?}"))
-    }
-    _ => napi::Error::new(Status::GenericFailure, format!("{error:?}")),
-  }
+  let details = binding_error_details(&error);
+  let status = status_for_kind(details.kind);
+  let payload = serde_json::to_string(&details).unwrap_or_else(|serialization| {
+    format!(r#"{{"message":"error diagnostic serialization failed: {serialization}"}}"#)
+  });
+  napi::Error::new(status, format!("{STRUCTURED_ERROR_PREFIX}{payload}"))
 }
 
 /// A cross-thread cancellation token for an in-flight extraction.
@@ -1206,7 +1294,15 @@ pub struct FromPathOptions {
 pub struct ReadWarningObject {
   pub code: String,
   pub count: u32,
+  pub saturated: bool,
   pub message: String,
+}
+
+fn warning_count(count: u64) -> (u32, bool) {
+  match u32::try_from(count) {
+    Ok(count) => (count, false),
+    Err(_) => (u32::MAX, true),
+  }
 }
 
 fn clone_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
@@ -1251,10 +1347,14 @@ impl JsReadResult {
       .inner
       .warnings()
       .iter()
-      .map(|warning| ReadWarningObject {
-        code: warning.code().to_owned(),
-        count: u32::try_from(warning.count()).unwrap_or(u32::MAX),
-        message: warning.to_string(),
+      .map(|warning| {
+        let (count, saturated) = warning_count(warning.count());
+        ReadWarningObject {
+          code: warning.code().to_owned(),
+          count,
+          saturated,
+          message: warning.to_string(),
+        }
       })
       .collect()
   }
@@ -1270,8 +1370,11 @@ impl JsReadResult {
   }
 
   #[napi]
-  pub fn header(&self, url: String) -> Result<String> {
-    self.inner.header(&url).map_err(classify_fault)
+  pub fn header(&self, env: Env, url: String) -> Result<String> {
+    self.inner.header(&url).map_err(|error| {
+      let details = binding_error_details(&error);
+      structured_error_with_env(env, details)
+    })
   }
 }
 
@@ -1702,6 +1805,14 @@ mod tests {
       assert_eq!(error.status, Status::InvalidArg);
       assert_eq!(error.reason, "selectors are mutually exclusive");
     }
+  }
+
+  #[test]
+  fn warning_counts_report_saturation_instead_of_looking_exact() {
+    assert_eq!(warning_count(7), (7, false));
+    assert_eq!(warning_count(u64::from(u32::MAX)), (u32::MAX, false));
+    assert_eq!(warning_count(u64::from(u32::MAX) + 1), (u32::MAX, true));
+    assert_eq!(warning_count(u64::MAX), (u32::MAX, true));
   }
 
   /// Schema-parity check for the hand-written `#[napi(object)]` report DTOs.

@@ -301,6 +301,7 @@ export interface FromPathOptions {
 export interface ReadWarningObject {
   code: string
   count: number
+  saturated: boolean
   message: string
 }
 /** Unfiltered snapshot of one browser profile. Never URL-pre-sliced. */
@@ -341,6 +342,18 @@ export declare class ReadResult {
   header(url: string): string
 }
 /** rookie-cookies cross-platform facade */
+/** Structured diagnostics attached to errors rejected by facade operations. */
+export interface RookieError extends Error {
+  kind: 'request' | 'engine'
+  code?: string
+  rookieCode: string | null
+  /** Current values are timed_out, cancelled, and resource_exhausted; open for future reasons. */
+  stopReason: string | null
+  profileIds: string[]
+  sourceKind: string | null
+  targetOs: string | null
+  pathRedacted: boolean
+}
 /** Linux-only browsers */
 export declare function cachy(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** macOS and Windows-only browsers */

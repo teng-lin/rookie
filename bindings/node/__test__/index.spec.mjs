@@ -288,6 +288,26 @@ test("cookiesFromPath classifies Firefox and applies domain filters", async (t) 
   }
 });
 
+test("ReadResult.header exposes structured synchronous request errors", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-header-error-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+    );
+    const snapshot = await rookieCookies.fromPath({ path: dbPath, includeExpired: true });
+    const error = t.throws(() => snapshot.header("not a url"));
+    t.is(error.kind, "request");
+    t.is(error.code, "InvalidArg");
+    t.is(error.rookieCode, "invalid_url");
+    t.is(error.stopReason, null);
+    t.deepEqual(error.profileIds, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("CancellationHandle tracks its own cancelled state", (t) => {
   const handle = new rookieCookies.CancellationHandle();
   t.false(handle.isCancelled);
@@ -304,9 +324,14 @@ test("cookiesFromPath rejects once its timeout budget expires", async (t) => {
       dbPath,
       new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
     );
-    await t.throwsAsync(rookieCookies.cookiesFromPath(dbPath, null, 0), {
+    const error = await t.throwsAsync(rookieCookies.cookiesFromPath(dbPath, null, 0), {
       message: /operation deadline expired/,
     });
+    t.is(error.kind, "engine");
+    t.is(error.code, "GenericFailure");
+    t.is(error.rookieCode, "timed_out");
+    t.is(error.stopReason, "timed_out");
+    t.deepEqual(error.profileIds, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -322,10 +347,14 @@ test("cookiesFromPath rejects when handed an already-cancelled handle", async (t
     );
     const handle = new rookieCookies.CancellationHandle();
     handle.cancel();
-    await t.throwsAsync(
+    const error = await t.throwsAsync(
       rookieCookies.cookiesFromPath(dbPath, null, undefined, handle),
       { message: /operation cancelled/ },
     );
+    t.is(error.kind, "engine");
+    t.is(error.code, "GenericFailure");
+    t.is(error.rookieCode, "cancelled");
+    t.is(error.stopReason, "cancelled");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -455,7 +484,44 @@ test("fromPath rejects credential conflicts asynchronously before database I/O",
       message: /mutually exclusive/,
     });
     t.is(error.code, "InvalidArg");
+    t.is(error.kind, "request");
+    t.is(error.rookieCode, null);
+    t.is(error.stopReason, null);
+    t.deepEqual(error.profileIds, []);
+    t.is(error.sourceKind, null);
+    t.is(error.targetOs, null);
+    t.false(error.pathRedacted);
   }
+});
+
+test("facade Chromium option conflicts receive structured diagnostic defaults", async (t) => {
+  const missing = join(tmpdir(), "rookie-node-missing-canonical-conflict-Cookies");
+  const error = await t.throwsAsync(
+    rookieCookies.chromiumCookiesFromPath(missing, {
+      browserId: "chrome",
+      plaintextOnly: true,
+    }),
+    { instanceOf: TypeError, message: /mutually exclusive/ },
+  );
+
+  t.is(error.code, undefined, "a facade TypeError must not invent an N-API status");
+  t.is(error.kind, "request");
+  t.is(error.rookieCode, null);
+  t.is(error.stopReason, null);
+  t.deepEqual(error.profileIds, []);
+  t.is(error.sourceKind, null);
+  t.is(error.targetOs, null);
+  t.false(error.pathRedacted);
+});
+
+test("N-API conversion errors receive request diagnostic defaults", async (t) => {
+  const error = await t.throwsAsync(rookieCookies.browserProfiles(42));
+
+  t.is(error.code, "StringExpected");
+  t.is(error.kind, "request");
+  t.is(error.rookieCode, null);
+  t.is(error.stopReason, null);
+  t.deepEqual(error.profileIds, []);
 });
 
 test("null, false, and empty Chromium selectors retain their distinct meanings", async (t) => {
@@ -692,6 +758,14 @@ test("canonical direct-path declarations and compatibility deprecations are exac
   );
   t.regex(types, /@deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`/);
   t.regex(types, /@deprecated Use `cookiesFromPath`\. Earliest removal is 0\.7/);
+  t.regex(types, /export interface RookieError extends Error/);
+  t.regex(types, /code\?: string/);
+  t.regex(types, /rookieCode: string \| null/);
+  t.regex(types, /stopReason: string \| null/);
+  t.regex(
+    types,
+    /export interface ReadWarningObject \{[\s\S]*?saturated: boolean/,
+  );
   t.false(
     /@deprecated[^\n]*\nexport declare function firefoxBasedDetailed/.test(types),
     "detailed Firefox remains supported",
@@ -730,8 +804,50 @@ test("supportedBrowsers describes registered browsers in camelCase", async (t) =
 test("unknown browser identifiers reject rather than resolving empty", async (t) => {
   const profiles = await t.throwsAsync(rookieCookies.browserProfiles("not_a_browser"));
   const report = await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
-  t.is(profiles.code, "InvalidArg");
-  t.is(report.code, "InvalidArg");
+  for (const error of [profiles, report]) {
+    t.is(error.kind, "request");
+    t.is(error.code, "InvalidArg");
+    t.is(error.rookieCode, "unknown_browser");
+    t.is(error.stopReason, null);
+    t.deepEqual(error.profileIds, []);
+  }
+});
+
+test("direct-path request errors expose redacted structured metadata", async (t) => {
+  const missing = join(tmpdir(), "rookie-node-structured-missing", "cookies.sqlite");
+  const error = await t.throwsAsync(rookieCookies.cookiesFromPath(missing));
+
+  t.is(error.kind, "request");
+  t.is(error.code, "InvalidArg");
+  t.is(error.rookieCode, "not_a_regular_file");
+  t.is(error.stopReason, null);
+  t.is(error.pathRedacted, true);
+  t.is(error.sourceKind, null);
+  t.is(error.targetOs, null);
+  t.false(error.message.includes(missing), "the path must stay redacted");
+});
+
+test.serial("ambiguous profile errors preserve opaque candidate IDs", async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "rookie-node-ambiguous-profile-"));
+  const fixture = firefoxFixtureRoot(temp);
+  writeFirefoxProfileTree(fixture.root, 2, "shared");
+
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [fileURLToPath(new URL("ambiguous-error-child.mjs", import.meta.url))],
+      { env: { ...process.env, ...fixture.environment } },
+    );
+    const details = JSON.parse(stdout);
+    t.is(details.kind, "request");
+    t.is(details.code, "InvalidArg");
+    t.is(details.rookieCode, "ambiguous_profile");
+    t.is(details.stopReason, null);
+    t.is(details.profileIds.length, 2);
+    t.true(details.profileIds.every((id) => /^[0-9a-f]{64}$/.test(id)));
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test.serial("registry-only browsers are reachable through browserReport", async (t) => {
@@ -1364,7 +1480,7 @@ function firefoxFixtureRoot(temp) {
   };
 }
 
-function writeFirefoxProfileTree(root, count) {
+function writeFirefoxProfileTree(root, count, displayName) {
   const encoded = readFileSync(
     new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
     "ascii",
@@ -1376,7 +1492,7 @@ function writeFirefoxProfileTree(root, count) {
     const directory = join(root, "Profiles", `p${index}`);
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, "cookies.sqlite"), database);
-    ini += `[Profile${index}]\nName=p${index}\nIsRelative=1\nPath=Profiles/p${index}\n`;
+    ini += `[Profile${index}]\nName=${displayName ?? `p${index}`}\nIsRelative=1\nPath=Profiles/p${index}\n`;
     ini += index === 0 ? "Default=1\n\n" : "\n";
   }
   writeFileSync(join(root, "profiles.ini"), ini);

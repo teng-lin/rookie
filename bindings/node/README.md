@@ -101,11 +101,12 @@ ordinary numbers (never `BigInt`); overflow sets `countersSaturated`.
 `browserProfiles`. `report({ browser, profile })` is the job-layer name for
 `browserReport`. `loadReport()` is the report-shaped `load()`.
 
-These reject only on a **bad request** (`InvalidArg`): unknown browser, or a
-`profileId` that browser did not yield. `browserProfiles` also rejects when
-every installation root failed enumeration. An absent registered browser
-resolves to `[]` or `status: "no_sources"`. Other failures are
-`GenericFailure`.
+These reject only on a bad request (`kind === "request"`): unknown browser, or
+a `profileId` that browser did not yield. The stable `rookieCode` identifies
+the exact request fault; the existing N-API `code` remains `InvalidArg` or
+`GenericFailure`. `browserProfiles` also rejects when every installation root
+failed enumeration. An absent registered browser resolves to `[]` or `status:
+"no_sources"`. Other failures use `kind === "engine"`.
 
 `chrome()` stays default-first. `chromeProfiles()` / `chromeProfile()` add
 activity-hint order and a grouped report; lossy `pathLossy` selectors need
@@ -160,9 +161,9 @@ try {
   const cookies = await chrome(undefined, 30000, cancellation);
   console.log(cookies);
 } catch (error) {
-  if (error.message.includes("operation deadline expired")) {
+  if (error.stopReason === "timed_out") {
     console.log("timed out");
-  } else if (error.message.includes("operation cancelled")) {
+  } else if (error.stopReason === "cancelled") {
     console.log("cancelled");
   } else {
     throw error;
@@ -171,6 +172,19 @@ try {
   clearTimeout(timer);
 }
 ```
+
+Native rejections expose stable `kind`, `rookieCode`, and `stopReason`
+properties while retaining the N-API status in `code`.
+Current `stopReason` values are `timed_out`, `cancelled`, and
+`resource_exhausted`; treat the property as an open string for forward
+compatibility.
+Ambiguous profile errors also carry opaque `profileIds`; direct-path errors
+carry `sourceKind`, `targetOs`, and a `pathRedacted` flag. Human-readable
+`message` text remains diagnostic only. A `ReadResult` warning whose Rust
+`u64` count exceeds JavaScript's binding range sets `saturated: true` while
+clamping `count` to `4294967295`. Facade validation errors carry the same
+fields with safe empty/null metadata; because they do not cross N-API, their
+`code` is absent and `rookieCode` is `null`.
 
 ## Netscape
 
