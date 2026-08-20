@@ -1,3 +1,6 @@
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 // Exercise the platform-independent confidential-session primitives on every
 // host, including CI runners that cannot execute a Linux target binary.
 #[path = "../src/linux/zeroizing_dh.rs"]
