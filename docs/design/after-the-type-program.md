@@ -1190,7 +1190,7 @@ PR 3 (inside unit 4) also: `legacy.rs` and `report_build.rs` characterization te
 
 ## PR Plan
 
-**Seven shipping units.** The specifications below stayed as originally written — they are the useful part — but they ship grouped. Fifteen review cycles was tidiness, not risk management.
+**Six shipping units.** (A seventh, PR 10, was withdrawn on measurement — see its entry.) The specifications below stayed as originally written — they are the useful part — but they ship grouped. Fifteen review cycles was tidiness, not risk management.
 
 | Unit | Absorbs | Prod lines | Risk |
 | --- | --- | ---: | --- |
@@ -1199,7 +1199,6 @@ PR 3 (inside unit 4) also: `legacy.rs` and `report_build.rs` characterization te
 | **3. `SourceIdentity`** | PR 1 | ~150 | medium-high; two commits |
 | **4. Compatibility: fix and new home** | PR 3, PR 4 | ~265 moved, ~8 changed | low |
 | **5. Populate frame** | PR 9 | ~265 restructured, net ~−40 | medium |
-| **6. Policy becomes data** | PR 10 | ~80 | medium-high — the keystone |
 | **7. Draft split** | PR 12 | ~80 | low |
 
 Total production churn is roughly **1000 lines against ~20k**, and about half of it is code moving rather than code changing. This is not a rewrite.
@@ -1330,16 +1329,19 @@ Golden/API impact is **none** unless a spec says otherwise; only PR 11b may re-g
 - **Decide explicitly:** IE's populate never checks the runtime while Safari checks before and after every candidate. Sharing the frame forces the question. Recommend adopting Safari's checks for both and saying so in the PR; if that changes an IE stop boundary, that is a behavior change and gets its own PR.
 - **Golden/API impact:** none expected. Walk order must not change — the report orders sources by role and precedence under a stable sort, so equal keys reshuffle if production order moves (`mozilla.rs:944–948`).
 
-### PR 10 — Acquisition policy moves onto the candidate
+### PR 10 — NOT VIABLE AS SPECIFIED (was: acquisition policy moves onto the candidate)
 
-- **Title:** `refactor: Fixed | Probe | FirstValid is data, not control flow`
-- **Files:** `source.rs` (`AcquisitionPolicy`); the four plant sites; `registry/gecko.rs` (probe and first-valid become policy interpretations in the shared frame); `xtask/src/stage_boundary.rs` if the fence needs the new field named.
-- **Dependencies:** PR 9.
-- **Description:** §14a, the keystone. After this, Gecko's populate body *is* the shared executor and the engine difference is a field. Chromium keeps skipping `!exists` at plan time; Gecko keeps planting `exists: true` with `Probe`. §12's divergent bytes are preserved because they are outputs of plan construction.
-- **Risk:** Medium-high. This is where an executor could quietly change acquisition order or the laziness guarantee. `select_session_sources` must remain the single first-valid rule and the iterator must stay lazy (ADR 0001 §8).
-- **The laziness guarantee is already pinned**, which Rev 12 wrongly implied it was not: `populate_stops_acquiring_session_candidates_after_the_first_valid_one` (`registry/gecko.rs:1361`) plants two live session candidates, counts acquisitions through the injected query closure, and asserts `session_reads == 1` — "the second session candidate must never be acquired". An eager executor fails it immediately. Run it first, and if the implementation makes the injected-closure seam unavailable, **port the counting test before changing the code**, because losing the counter is how this becomes silent again.
-- **What is still unpinned** and is what the independent reviewer should hunt: acquisition *order* within a profile beyond first-valid, and whether a policy-driven executor preserves the persistent-then-session emission order that the report's stable sort depends on (`mozilla.rs:944–948`).
-- **Golden/API impact:** none. This is the last PR in the program with a plausible route to a golden diff; re-verify on every OS.
+**Withdrawn on measurement, before writing it.** Both halves are blocked, each by a constraint this document established elsewhere. The conflict is between §13, written from measurement, and §14a, written before it; the measured one wins.
+
+**`FirstValid` cannot move into the frame.** §13's own closing line reads: *"Not licensed: making Gecko 1:1, or hoisting first-valid into the shared frame."* A `FirstValid` policy that the frame interprets **is** hoisting first-valid into the frame. §14a proposed precisely what §13 forbids. `select_session_sources` is Mozilla's rule, shared with the direct-path walk, and its laziness is what keeps later candidates unopened; moving it into `registry.rs` under a generic name buys nothing and puts a Gecko invariant where no Gecko reader will look for it.
+
+**`Probe` cannot become candidate data without a wire change.** The policy would have to be planted at listing time, but Gecko's listing plants a persistent candidate only `if profile.identity.persistent_source_discovered` (`registry/gecko.rs:68`). Planting one unconditionally so it could carry `Probe` would add a phantom source to every profile with no `cookies.sqlite` — and the listing report is built by iterating `profile.candidates`, so that is a **published listing change**, not a refactor. The probe is irreducibly an extract-time synthesis, for exactly the reason §13 gives: Gecko's candidate list is not authoritative, and making it authoritative is the thing that would change what listing reports.
+
+What remains of the enum is `Fixed`, which is the absence of a policy.
+
+**Unit 5 already delivered what §14a was reaching for.** Its per-profile closure makes Gecko's probe, its existence recheck, and its first-valid selection *visible as a body inside the shared frame* — which is what §13 asked for, in those words. Pushing them one step further, into the frame under generic names, trades a legible engine-specific body for an opaque generic one. That is a worse design, not a more advanced one.
+
+**What would unblock it**, for a future reader: a decision to change the Gecko listing report so a profile always lists its persistent source, with `exists` telling the truth. That is Decision 20-shaped work — a deliberate wire change with a re-golden and a stated reason — and nothing has asked for it.
 
 ### PR 12 — Split `SourceDraft` into listing and extract drafts
 
