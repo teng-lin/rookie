@@ -93,11 +93,11 @@ paths = [
 [grandfathered]
 # Named in #218's own problem statement as the four original hot spots;
 # no rollout PR claims to have fully contained these.
-"rookie-rs/src/browser/chromium.rs" = { max_cfg = 60, reason = "original #218 hot spot, not a rollout target" }
+"rookie-rs/src/browser/chromium.rs" = { max_cfg = 34, reason = "original #218 hot spot, not a rollout target; ratcheted 60 -> 34 when the inline test module moved to browser/chromium/tests.rs and took 26 cfg with it" }
 "rookie-rs/src/browser/registry.rs" = { max_cfg = 8, reason = "original #218 hot spot at 27; now shared-core only after the chromium/gecko split (PR #251) moved its engine-specific cfg out, plus 2 new cfg-gated re-export lines needed so chromium.rs's platform-gated symbols aren't unconditionally re-exported" }
-"rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 20, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
+"rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 9, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target; ratcheted 20 -> 9 when the inline test module moved to browser/registry/chromium/tests.rs and took 11 cfg with it" }
 "rookie-rs/src/browser/registry/gecko.rs" = { max_cfg = 1, reason = "Gecko-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
-"rookie-rs/src/lib.rs" = { max_cfg = 27, reason = "original #218 hot spot, not a rollout target" }
+"rookie-rs/src/lib.rs" = { max_cfg = 14, reason = "original #218 hot spot, not a rollout target; ratcheted 27 -> 14 when the inline test module moved to src/tests.rs and took 13 cfg with it" }
 
 # mod.rs files whose cfg is only *partly* the module-selection gate
 # pattern the `leaves` tier is meant for: reviewed and found to have
@@ -123,6 +123,16 @@ paths = [
 "rookie-rs/src/common/date.rs" = { max_cfg = 1, reason = "not a rollout target" }
 "rookie-rs/src/common/deadline.rs" = { max_cfg = 3, reason = "not a rollout target" }
 "rookie-rs/src/common/secret.rs" = { max_cfg = 5, reason = "not a rollout target" }
-"rookie-rs/src/common/sqlite.rs" = { max_cfg = 1, reason = "not a rollout target" }
+"rookie-rs/src/common/sqlite.rs" = { max_cfg = 0, reason = "not a rollout target; ratcheted 1 -> 0 when the inline test module moved to common/sqlite/tests.rs and took its single cfg with it" }
+
+# Relocated inline test modules. Per Decision 12 these are grandfathered with
+# the exact count their parent shed, never added to `leaves`: a test module is
+# not a capability leaf, and its cfg should not be free to grow. Each parent's
+# ceiling above was ratcheted down by the same amount in the same PR, so the
+# crate-wide #218 budget is unchanged by the move.
+"rookie-rs/src/browser/chromium/tests.rs" = { max_cfg = 26, reason = "relocated verbatim from browser/chromium.rs's inline test module" }
+"rookie-rs/src/browser/registry/chromium/tests.rs" = { max_cfg = 11, reason = "relocated verbatim from browser/registry/chromium.rs's inline test module" }
+"rookie-rs/src/common/sqlite/tests.rs" = { max_cfg = 1, reason = "relocated verbatim from common/sqlite.rs's inline test module" }
+"rookie-rs/src/tests.rs" = { max_cfg = 13, reason = "relocated verbatim from lib.rs's inline test module" }
 "rookie-rs/src/config.rs" = { max_cfg = 6, reason = "not a rollout target" }
 "rookie-rs/src/utils.rs" = { max_cfg = 3, reason = "not a rollout target" }

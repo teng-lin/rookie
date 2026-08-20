@@ -1010,6 +1010,13 @@ Locked. Implementation PRs do not reopen these.
 
     The replacement rule: a characterization test **may** move from an internal seam to a public surface plus goldens, provided the PR demonstrates the new test goes red when the old behavior is deliberately broken. This document already teaches exactly that discipline for moved derivations ("break it deliberately before trusting a green suite" — four unpinned invariants were found that way); Decision 19 applies it to test *placement*. Weakening assertions is still forbidden; so is retargeting in bulk. This converts the safety net from a cage back into a net, and it is the difference between a ten-PR crawl and a three-PR walk.
 
+    **Amended 2026-08-19 (module-size review): "in bulk" applies to retargeting, not to relocating.** The rule above conflated two operations with very different risk, and the conservative half of it was being paid on the safe one.
+
+    - **Retargeting** rewrites a test to hit a *different* seam. The hazard is silent assertion weakening — the rewritten test may pin less than the original while still passing. Unchanged: one at a time, with a red-by-construction demonstration.
+    - **Relocating** moves a test *verbatim* to a different file: same seam, same assertions, same body. When the destination is a sibling file of the same module, the module path does not change either, so `cargo test --workspace --all-targets -- --list | sort` is byte-identical across the move. That output is a stronger proof than diff review — it shows no test was lost, renamed, added, or silently skipped — and it makes relocation **bulk-safe**.
+
+    A relocation that *does* change module paths (moving a misfiled test to the module it actually pins) sits between the two: the `--list` diff is legitimately non-empty and must be read by hand, so it stays a reviewed change rather than a mechanical one. PR 5 / PR B is un-dropped to exactly this extent — its stated blocker was collision with units 3 and 5, which shipped as #287 and #289.
+
 20. **SUSPENDED pending evidence — the direct-path identity does not surface publicly either.** The maintainer confirmed the DTO may change, and Rev 9 scoped three changes on that permission. Rev 10 retracted the largest after checking where the shape surfaced. Rev 13 retracts the rest, for the same reason, found the same way — by tracing to a public API instead of reasoning from the code's appearance.
 
     The synthetic identity (`"0"`×64 installation, `"1"`×64 profile, `display_name: "direct"`, `report_build.rs:1610–1650`) is real and is ugly. It is also **internal**:
@@ -1495,6 +1502,74 @@ Earlier drafts structured the audit as verdicts on named interlocutors. The meas
 
 ---
 
+## Addendum: the module-size program (2026-08-19)
+
+Recurring maintainer friction with seven long files — `mozilla.rs` 5219,
+`registry/chromium.rs` 4767, `chromium.rs` 4189, `report_build.rs` 3964,
+`registry.rs` 3387, `sqlite.rs` 2129, `lib.rs` 1868 — prompted a review of
+whether the architecture was at fault. It is not. **42–70% of each file was an
+inline `mod tests`**, and production responsibilities in all seven are
+coherent. This addendum replaces a standalone `module-size-and-cohesion.md`,
+which would have drifted from ADR 0005.
+
+**Two genuine defects were found, and neither is about size.**
+`load_from_browsers` is a `#[cfg(test)]`-only reimplementation of `load`'s
+aggregation rules that does not share production `load`'s `fan_out` path, so
+six tests can stay green while `load` regresses (`sniff_cookie_source` has the
+same shape). And `compatibility_dispatch/{macos,windows}.rs` call back into
+`crate::named_browser`, making the crate root and its submodule mutually
+dependent.
+
+**Three PRs**, each independently green against the full gate list:
+
+1. Amendments (ADR 0005 Decision 4, Consequences, Alternative 3; Decision 19
+   here) plus the test-body sweep across seven modules. Zero production lines
+   moved; proof is an unchanged `--list`.
+2. The `load_from_browsers` retarget, plus two hygiene items: Gecko calling the
+   shared `retain_engine_runtime_stop`, and `sqlite::connect` becoming
+   `#[cfg(test)]`.
+3. `mozilla.rs` decomposed into an orchestrator plus `mozilla_persistent.rs`,
+   `mozilla_session.rs`, and `mozilla_profiles.rs`; `lib.rs`'s named shims and
+   `load` moving to `compatibility_dispatch` to break the cycle.
+
+**Corrections to claims made during the review**, recorded because each was
+asserted confidently and was wrong:
+
+- `retain_gecko_runtime_stop` was called dead. It is live (`gecko.rs:554`,
+  `:626`) and byte-identical to the shared helper — a redirect, not a deletion.
+- `sqlite::connect` was called a free delete. It has zero production callers
+  but **eleven** test call sites, so the repo's own convention makes it
+  `#[cfg(test)]`, not deleted.
+- `VerifiedStaticSingleFile` was called dead speculative API. The enum
+  *variant* is live at `report_build.rs:98`; only the struct and
+  `open_verified_static_single_file` are test-only.
+- `load` was proposed for `browser/legacy.rs`, whose header forbids owning
+  acquisition. Its home is `compatibility_dispatch`.
+- `firefox_cookie_context` and `firefox_session_cookie_context` were called
+  duplicate implementations. The session one *delegates* to the sqlite one for
+  string values and handles only the JSON-object form. Already correct.
+- "No line budget" was attributed to Decision 2. It lives in §Consequences and
+  Alternative 3; Decision 2 is the mechanical fence.
+
+**Rejected, and why** — carried from the review and verified: Chromium listing
+bags → `EngineListing` (Decision 4, now trigger-gated); the two acquisition
+frames (documented §14b deferral); `common/fileio.rs` (Decision 6, and
+`sqlite.rs` is ~1021 lines after the sweep regardless); retiring the Chromium
+`query_*` tower (live at `direct_path/{linux,macos,windows}.rs`); draft-accumulator
+and `_with_runtime` unification (golden-sensitive, ~130-line payoff); a
+workspace crate split (`report_build` is called from `lib.rs` above and
+`direct_path`/`legacy.rs` below, so layering is bidirectional and would need
+fixing first — a `#[cfg(rookie_internals)]` module, the `tokio_unstable`
+pattern, would get most of the benefit if ever wanted).
+
+**Deliberately left undone:** moving misfiled tests to the module they pin
+(chromium's unseal/crypto tests to `unseal.rs`, which has no `mod tests` at
+all; registry's Safari/IE tests to their children). The sweep removed the size
+pressure, and this move splits tests from shared fixtures, so it needs a
+fixture module first. Opportunistic, not scheduled.
+
+---
+
 ## Verification log
 
 Every `path:line` in Audit findings and Proposed Design §10–§11 was re-checked against `74eddeb` on 2026-08-19 before Rev 6. Confirmed as written: the Mozilla forge and its two call sites; `.ends_with` at `report_build.rs:1371–1376` and the detection block at `:1335–1364`; `source_to_draft`'s identity-from-`origin` / wire-from-effective split; the gecko plant, probe candidate, and both direct-path candidate constructors; `escape_like_pattern` byte-identical in two decoders; all four characterization tests named in PR 3; `NoSources`, `finalize_singleton_source`, `direct_engine_extract`.
@@ -1517,6 +1592,8 @@ Corrected in Rev 6:
 **Only one producer of the family-fallback suffix.** `rg 'row\(s\) could not be read'` over `rookie-rs/` returns the generator at `source.rs:271` and the consumer at `report_build.rs:1374`, nothing else. PR 3's equality swap is therefore a strict narrowing with no reachable behaviour change — no message in the tree ends with that suffix without being equal to it.
 
 ## Revision Summary
+
+Rev 14, 2026-08-19. Module-size review. Addendum added recording that the seven long files are 42–70% inline tests rather than tangled production, and that the two real defects found (`load_from_browsers` shadowing `load`; the `lib.rs` ↔ `compatibility_dispatch` cycle) are not size problems. ADR 0005 amended a second time: Decision 4 records the accepted Chromium translator tax and a revisit trigger; Consequences and Alternative 3 separate production carving (still needs a cohesion argument, still no line budget) from test-body relocation (a no-op refactor). Decision 19 here amended to distinguish bulk-safe **relocation** from one-at-a-time **retargeting** — the conservative rule was being paid on the safe operation. PR 5 / PR B un-dropped to that extent; its blocker was collision with units 3 and 5, which shipped as #287 and #289. Six confidently-asserted claims from the review were checked and found wrong; all six are recorded in the addendum rather than silently dropped.
 
 Rev 2, 2026-08-19. Compatibility mechanism locked; Mozilla PR 1 specified; `_with_runtime` census 91/50/28; PR 2 optional; Open Question 3 deleted.
 

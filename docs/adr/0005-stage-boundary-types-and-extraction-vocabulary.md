@@ -127,6 +127,25 @@ abstraction, and ADR 0002 already separated discovery from selection with
 policies rather than plugins. Four `match` arms on `RegisteredBrowser.engine`
 are acceptable and are not a defect to be abstracted away.
 
+*Amended 2026-08-19 (second amendment): the accepted cost, stated once so it
+is not rediscovered as a defect.* Chromium keeping its own inventory shapes
+is a decision, not a leak, and the price is three dispatch sites that carry a
+Chromium arm the other engines do not need — `registry/profile_query.rs`
+(three of four arms identical), and `report_build.rs` twice (`collect_extraction`
+and `collect_listing`). The deeper cost is that the stage boundary is
+type-enforced for Gecko, Safari, and Internet Explorer but convention-enforced
+for Chromium, which is the largest and most security-sensitive engine.
+
+Unifying is not free and not a cleanup: Chromium skips `!exists` profiles
+while engine listing plants `exists: true`, and empty extract `sources` mean
+different things (vanished versus absent, via `NoSources`). Both are
+golden-pinned, so a merge changes observable bytes unless the shared type
+learns to carry both polarities. **Revisit when a fifth engine is added, or
+when a stage-boundary defect ships in the Chromium path** — either makes the
+tax compound instead of merely recur. Absent one of those, this stays closed,
+and it is not a size argument: `registry/chromium.rs` is ~1466 lines of
+production out of 4767.
+
 ### 5. Identifier types
 
 Ids are the existing public `report_core::{InstallationId, ProfileId}`, reused
@@ -211,6 +230,21 @@ This ADR was amended once, on 2026-08-19, from the follow-on program record
   every projection may name while `compatibility.rs` owns the rule one
   projection applies.
 
+A second amendment followed on 2026-08-19, from the module-size review. The
+type program had ended, and two of this ADR's positions were still written as
+if it were in flight:
+
+- **Decision 4** now records the accepted cost of Chromium's separate
+  inventory shapes — three Chromium-armed dispatch sites, and a boundary that
+  is convention-enforced rather than type-enforced for the largest engine —
+  together with a falsifiable revisit trigger. The decision itself is
+  unchanged; only its permanence was overstated.
+- **Consequences** and **Alternative 3** now distinguish production carving,
+  which still needs a cohesion argument and still has no line budget, from
+  relocating an inline test module body, which is a no-op refactor provable by
+  an unchanged `--list` output. "Some files remain long, and that is accepted"
+  had been read as forbidding the second; it was only ever about the first.
+
 ## Alternatives rejected
 
 1. **Carve files to a line budget** (GitHub #260, closed `NOT_PLANNED`).
@@ -222,7 +256,10 @@ This ADR was amended once, on 2026-08-19, from the follow-on program record
 3. **Test extraction alone** (`#[cfg(test)] #[path]` on the oversized files).
    Makes files scrollable while leaving the stage leak invisible to rustc.
    Available afterwards as a workbench when a production file is
-   unreviewable; not a substitute for the type boundary.
+   unreviewable; not a substitute for the type boundary. *Amended
+   2026-08-19 (second amendment): the type boundary now exists, so "alone"
+   no longer describes anything on offer. Relocating a test module body to
+   a sibling file is a no-op refactor, not an alternative to this ADR.*
 4. **One profile bag with `candidates` beside `sources`.** A listing type
    that can name `Vec<Source>` still accepts a push into it; the absence of a
    `Default` impl does not prevent construction.
@@ -245,6 +282,21 @@ belongs to this stage.
 Some files remain long, and that is accepted. A future proposal to shrink
 them by carving, by an engine trait, or by a size lint should read the
 rejected alternatives above before reopening the question.
+
+*Amended 2026-08-19 (second amendment).* "Accepted" was scoped to this
+program: while the type work was in flight, carving competed with it for the
+same lines and bought no correctness. That is no longer the trade. The rule
+now has two halves:
+
+- **Production splits still require a cohesion argument.** There is no line
+  budget and no size lint; #260 stays `NOT_PLANNED`. A production module is
+  split because two responsibilities are separable, never to reach a number.
+- **Inline test bulk is not a reason for a module to be unreviewable.** A
+  module whose production code is coherent may move its `#[cfg(test)] mod
+  tests` body to a sibling file at any time. The module path is unchanged by
+  the move, so `cargo test --workspace --all-targets -- --list` is
+  byte-identical across it; that diff is the proof, and it makes the change
+  bulk-safe in a way a rewrite never is.
 
 ## References
 
