@@ -97,11 +97,12 @@ macro_rules! string_identifier {
       /// this stays unused for them.
       #[allow(dead_code)]
       pub(crate) fn known(value: &str) -> Self {
-        debug_assert!(
-          $validate($kind, value).is_ok(),
-          "crate-produced {} identifier {value:?} is invalid",
-          $kind
-        );
+        $validate($kind, value).unwrap_or_else(|error| {
+          panic!(
+            "crate-produced {} identifier {value:?} is invalid: {error}",
+            $kind
+          )
+        });
         Self(value.to_owned())
       }
 
@@ -848,6 +849,14 @@ mod tests {
     for invalid in ["a".repeat(63), "A".repeat(64), "g".repeat(64)] {
       assert!(ProfileId::from_str(&invalid).is_err());
     }
+  }
+
+  #[test]
+  fn crate_produced_identifiers_reject_invalid_values() {
+    assert_eq!(IssueCode::known("future_issue").as_str(), "future_issue");
+    assert_eq!(ProfileId::known(&"a".repeat(64)).as_str().len(), 64);
+    assert!(std::panic::catch_unwind(|| IssueCode::known("Invalid-Code")).is_err());
+    assert!(std::panic::catch_unwind(|| ProfileId::known(&"A".repeat(64))).is_err());
   }
 
   #[cfg(feature = "dto-schema")]

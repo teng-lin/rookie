@@ -161,6 +161,9 @@ jobs:
       - name: Test without default features
         if: ${{ !cancelled() }}
         run: cargo test -p rookie-cookies --no-default-features --all-targets --locked
+      - name: Enforce producer identifier validation in release builds
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: cargo test -p rookie-cookies --release --locked crate_produced_identifiers_reject_invalid_values
       - name: Test documentation
         if: ${{ !cancelled() }}
         run: cargo test --workspace --doc --locked
