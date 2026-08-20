@@ -73,7 +73,12 @@ impl Sha256 {
     self.compress();
 
     let mut digest = Zeroizing::new([0_u8; 32]);
-    for (output, word) in digest.chunks_exact_mut(4).zip(self.state.iter()) {
+    for (output, word) in digest
+      .as_chunks_mut::<4>()
+      .0
+      .iter_mut()
+      .zip(self.state.iter())
+    {
       output.copy_from_slice(&word.to_be_bytes());
     }
     digest
@@ -81,8 +86,8 @@ impl Sha256 {
 
   fn compress(&mut self) {
     let mut schedule = Zeroizing::new([0_u32; 64]);
-    for (word, bytes) in schedule[..16].iter_mut().zip(self.block.chunks_exact(4)) {
-      *word = u32::from_be_bytes(bytes.try_into().expect("SHA-256 word has four bytes"));
+    for (word, bytes) in schedule[..16].iter_mut().zip(self.block.as_chunks::<4>().0) {
+      *word = u32::from_be_bytes(*bytes);
     }
     for index in 16..64 {
       let s0 = schedule[index - 15].rotate_right(7)
