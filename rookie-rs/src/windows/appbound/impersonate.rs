@@ -92,7 +92,7 @@ fn enable_privilege() -> Result<DebugPrivilegeGuard> {
   DebugPrivilegeGuard::acquire()
 }
 
-fn get_process_pids() -> Result<Vec<u32>> {
+fn get_process_pids(runtime: &crate::common::deadline::BoundaryRuntime<'_>) -> Result<Vec<u32>> {
   use windows::Win32::System::ProcessStatus::EnumProcesses;
 
   // EnumProcesses has no way to report "the buffer was too small" - it just
@@ -107,6 +107,7 @@ fn get_process_pids() -> Result<Vec<u32>> {
   let mut capacity: u32 = 1024;
 
   loop {
+    runtime.check()?;
     let mut a_processes: Vec<u32> = vec![0; capacity as usize];
     let mut cb_needed: u32 = 0;
 
@@ -162,10 +163,11 @@ fn get_process_name(pid: u32) -> Result<String> {
   }
 }
 
-fn get_system_process_pid() -> Result<u32> {
+fn get_system_process_pid(runtime: &crate::common::deadline::BoundaryRuntime<'_>) -> Result<u32> {
   let mut fallback_pid = None;
 
-  for pid in get_process_pids()? {
+  for pid in get_process_pids(runtime)? {
+    runtime.check()?;
     let process_name = get_process_name(pid).unwrap_or_default();
 
     if process_name == "lsass.exe" {
@@ -347,7 +349,10 @@ fn impersonate_with_token(duplicated_token: HandleGuard) -> Result<Impersonation
   impersonate_with_suspended_identity(duplicated_token, suspended_identity)
 }
 
-pub fn start_impersonate() -> Result<ImpersonationGuard> {
+pub fn start_impersonate(
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<ImpersonationGuard> {
+  runtime.check()?;
   // Service and RPC threads may already impersonate an unprivileged client.
   // Suspend that identity before process enumeration and LSASS access so the
   // process token (with temporary SeDebugPrivilege) governs those checks.
@@ -356,12 +361,15 @@ pub fn start_impersonate() -> Result<ImpersonationGuard> {
     let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
       .lock()
       .unwrap_or_else(|poisoned| poisoned.into_inner());
+    runtime.check()?;
     let mut debug_privilege = enable_privilege()?;
-    let pid = get_system_process_pid()?;
+    let pid = get_system_process_pid(runtime)?;
+    runtime.check()?;
     let lsass_handle = HandleGuard(get_process_handle(pid)?);
     debug_privilege.restore()?;
     lsass_handle
   };
+  runtime.check()?;
   let duplicated_token = HandleGuard(get_system_token(lsass_handle.0)?);
   impersonate_with_suspended_identity(duplicated_token, suspended_identity)
 }

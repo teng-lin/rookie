@@ -111,14 +111,14 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
     runtime.check()?;
     #[cfg(feature = "appbound")]
     {
-      let keys = crate::windows::appbound::get_keys(encoded_key, host)?;
+      let keys = crate::windows::appbound::get_keys(encoded_key, host, runtime)?;
       runtime.check()?;
       Ok(keys)
     }
 
     #[cfg(not(feature = "appbound"))]
     {
-      let _ = (encoded_key, host);
+      let _ = (encoded_key, host, runtime);
       bail!("Chromium v20 app-bound provider is unavailable in this build")
     }
   }
