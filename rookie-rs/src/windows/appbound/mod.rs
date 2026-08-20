@@ -35,13 +35,29 @@ const FLAG3_XOR_KEY: &[u8; 32] =
 // key. The results are wrapped in `SecretBytes` because they hold decrypted
 // key material that should be wiped from memory as soon as it is consumed,
 // rather than left in freed heap memory.
-fn decrypt_dpapi(key: &[u8], as_system: bool) -> Result<SecretBytes> {
-  let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
+fn decrypt_dpapi(
+  key: &[u8],
+  as_system: bool,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<SecretBytes> {
+  runtime.check()?;
+  let _impersonation = as_system
+    .then(|| impersonate::start_impersonate(runtime))
+    .transpose()?;
+  runtime.check()?;
   crate::windows::dpapi::decrypt(key)
 }
 
-fn decrypt_ncrypt(key: &[u8], as_system: bool) -> Result<SecretBytes> {
-  let _impersonation = as_system.then(impersonate::start_impersonate).transpose()?;
+fn decrypt_ncrypt(
+  key: &[u8],
+  as_system: bool,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<SecretBytes> {
+  runtime.check()?;
+  let _impersonation = as_system
+    .then(|| impersonate::start_impersonate(runtime))
+    .transpose()?;
+  runtime.check()?;
   crate::windows::ncrypt::decrypt(key)
 }
 
@@ -112,7 +128,10 @@ fn parse_key_blob_content(blob: &[u8]) -> Result<&[u8]> {
 /// or the scheme's cipher rejected the payload. `Err` means a known scheme could
 /// not be attempted at all (e.g. a flag-3 payload too short to hold the wrapped
 /// key, or a CNG failure).
-fn derive_v20_master_key(content: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
+fn derive_v20_master_key(
+  content: &[u8],
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
   let Some((&flag, payload)) = content.split_first() else {
     return Ok(None);
   };
@@ -131,7 +150,7 @@ fn derive_v20_master_key(content: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
         .get(..32)
         .ok_or_else(|| anyhow!("flag 3 payload too short for encrypted AES key"))?;
       let iv_and_ciphertext = &payload[32..];
-      let decrypted_aes_key = decrypt_ncrypt(encrypted_aes_key, true)?;
+      let decrypted_aes_key = decrypt_ncrypt(encrypted_aes_key, true, runtime)?;
       // XOR the CNG-unwrapped key with the hardcoded key; zipping yields a
       // 32-byte key when CNG returns the expected 32 bytes (as the reference does).
       let aes_key: Zeroizing<Vec<u8>> = Zeroizing::new(
@@ -163,7 +182,9 @@ fn derive_legacy_tail_key(user_decrypted: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
 pub fn retrieve_via_injection(
   key64: &str,
   host: &crate::browser::appbound_host::AppBoundHost,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Zeroizing<Vec<u8>>> {
+  runtime.check()?;
   let payload_bytes = payload::get_payload()
     .ok_or_else(|| anyhow!("App-Bound injection payload not available for this architecture"))?;
   let exe_path = browser_path::find_browser_executable(host)?;
@@ -176,19 +197,25 @@ pub fn retrieve_via_injection(
   };
   let stripped_b64 = BASE64_STANDARD.encode(stripped_key);
 
-  injector::inject_and_extract_key(&exe_path, payload_bytes, &stripped_b64)
+  injector::inject_and_extract_key(&exe_path, payload_bytes, &stripped_b64, runtime)
 }
 
 /// Unwraps the App-Bound master key using in-process DPAPI/CNG with elevated SYSTEM impersonation.
-fn get_keys_elevated_fallback(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+fn get_keys_elevated_fallback(
+  key64: &str,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  runtime.check()?;
   let mut keys: Vec<Zeroizing<Vec<u8>>> = Vec::new();
 
   let key_u8 = BASE64_STANDARD.decode(key64)?;
   if !key_u8.starts_with(b"APPB") {
     bail!("key does not start with APPB");
   }
-  let system_decrypted = decrypt_dpapi(&key_u8[4..], true)?;
-  let user_decrypted = decrypt_dpapi(&system_decrypted, false)?;
+  let system_decrypted = decrypt_dpapi(&key_u8[4..], true, runtime)?;
+  runtime.check()?;
+  let user_decrypted = decrypt_dpapi(&system_decrypted, false, runtime)?;
+  runtime.check()?;
 
   // Candidate 1: trailing 32 bytes
   if user_decrypted.len() >= 32 {
@@ -199,7 +226,7 @@ fn get_keys_elevated_fallback(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
 
   // Candidate 2: derive the wrapped v20 master key
   match parse_key_blob_content(&user_decrypted) {
-    Ok(content) => match derive_v20_master_key(content) {
+    Ok(content) => match derive_v20_master_key(content, runtime) {
       Ok(Some(master_key)) => keys.push(master_key),
       Ok(None) => log::warn!("app-bound v20 master key derivation yielded no key"),
       Err(err) => bail!("Failed to derive app-bound v20 master key: {err}"),
@@ -220,25 +247,31 @@ fn get_keys_elevated_fallback(key64: &str) -> Result<Vec<Zeroizing<Vec<u8>>>> {
 pub fn get_keys(
   key64: &str,
   host: &crate::browser::appbound_host::AppBoundHost,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+  runtime.check()?;
   let mode = std::env::var("ROOKIE_E2E_APPBOUND_MODE").unwrap_or_default();
   let mut errors: Vec<String> = Vec::new();
 
   if mode != "elevated_only" {
-    match retrieve_via_injection(key64, host) {
+    match retrieve_via_injection(key64, host, runtime) {
       Ok(key) => return Ok(vec![key]),
       Err(e) => {
+        runtime.check()?;
         log::debug!("App-Bound COM reflective injection failed: {e}");
         errors.push(format!("COM injection: {e}"));
       }
     }
   }
 
+  runtime.check()?;
+
   if mode != "injection_only" {
-    match get_keys_elevated_fallback(key64) {
+    match get_keys_elevated_fallback(key64, runtime) {
       Ok(keys) if !keys.is_empty() => return Ok(keys),
       Ok(_) => {}
       Err(e) => {
+        runtime.check()?;
         log::debug!("App-Bound elevated DPAPI fallback failed: {e}");
         errors.push(format!("Elevated fallback: {e}"));
       }
@@ -254,6 +287,11 @@ pub fn get_keys(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::common::deadline::{BoundaryRuntime, Deadline, SystemClock};
+
+  fn test_runtime() -> BoundaryRuntime<'static> {
+    BoundaryRuntime::new(&SystemClock, Deadline::standard())
+  }
 
   fn frame(header: &[u8], content: &[u8]) -> Vec<u8> {
     let mut blob = Vec::new();
@@ -323,25 +361,30 @@ mod tests {
 
   #[test]
   fn flag3_short_payload_errors() {
+    let runtime = test_runtime();
     // Flag byte + 19-byte payload: the get(..32) guard rejects it before any CNG
     // call, so this must be Err (not None, not a panic).
-    assert!(derive_v20_master_key(&[3u8; 20]).is_err());
+    assert!(derive_v20_master_key(&[3u8; 20], &runtime).is_err());
   }
 
   #[test]
   fn short_payload_for_known_flag_yields_none() {
+    let runtime = test_runtime();
     // Payload shorter than the 12-byte nonce: aead_decrypt bails to None.
-    assert!(derive_v20_master_key(&[1u8, 0, 0, 0, 0])
+    assert!(derive_v20_master_key(&[1u8, 0, 0, 0, 0], &runtime)
       .expect("no error")
       .is_none());
   }
 
   #[test]
   fn unknown_flag_yields_no_key() {
-    assert!(derive_v20_master_key(&[9u8; 61])
+    let runtime = test_runtime();
+    assert!(derive_v20_master_key(&[9u8; 61], &runtime)
       .expect("no error")
       .is_none());
-    assert!(derive_v20_master_key(&[]).expect("no error").is_none());
+    assert!(derive_v20_master_key(&[], &runtime)
+      .expect("no error")
+      .is_none());
   }
 
   // Encrypt a known master key with the corresponding elevation key, then check
@@ -364,12 +407,13 @@ mod tests {
 
   #[test]
   fn flag1_roundtrip_recovers_master_key() {
+    let runtime = test_runtime();
     let master = [0x42u8; 32];
     let iv = [7u8; 12];
     let sealed = seal::<Aes256Gcm>(AES256_ELEVATION_KEY, &iv, &master);
     let content = content_for(1, &iv, &sealed);
     assert_eq!(
-      derive_v20_master_key(&content)
+      derive_v20_master_key(&content, &runtime)
         .expect("no error")
         .expect("key")
         .as_slice(),
@@ -379,12 +423,13 @@ mod tests {
 
   #[test]
   fn flag2_roundtrip_recovers_master_key() {
+    let runtime = test_runtime();
     let master = [0x37u8; 32];
     let iv = [9u8; 12];
     let sealed = seal::<ChaCha20Poly1305>(CHACHA20_ELEVATION_KEY, &iv, &master);
     let content = content_for(2, &iv, &sealed);
     assert_eq!(
-      derive_v20_master_key(&content)
+      derive_v20_master_key(&content, &runtime)
         .expect("no error")
         .expect("key")
         .as_slice(),
@@ -394,8 +439,11 @@ mod tests {
 
   #[test]
   fn corrupt_ciphertext_yields_no_key() {
+    let runtime = test_runtime();
     let content = content_for(1, &[0u8; 12], &[0u8; 48]);
-    assert!(derive_v20_master_key(&content).expect("no error").is_none());
+    assert!(derive_v20_master_key(&content, &runtime)
+      .expect("no error")
+      .is_none());
   }
 
   #[test]
@@ -417,5 +465,57 @@ mod tests {
   #[test]
   fn legacy_tail_too_short_yields_none() {
     assert!(derive_legacy_tail_key(&[0u8; 60]).is_none());
+  }
+
+  struct EnvRestoreGuard {
+    key: &'static str,
+    original: Option<String>,
+  }
+
+  impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+      match &self.original {
+        Some(val) => std::env::set_var(self.key, val),
+        None => std::env::remove_var(self.key),
+      }
+    }
+  }
+
+  #[test]
+  fn appbound_mode_injection_only_does_not_attempt_elevated_fallback() {
+    let original = std::env::var("ROOKIE_E2E_APPBOUND_MODE").ok();
+    std::env::set_var("ROOKIE_E2E_APPBOUND_MODE", "injection_only");
+    let _restore = EnvRestoreGuard {
+      key: "ROOKIE_E2E_APPBOUND_MODE",
+      original,
+    };
+
+    let runtime = test_runtime();
+    let host = crate::browser::appbound_host::AppBoundHost::Browser("chrome".to_string());
+    let error = get_keys("YXBwYm91bmQ=", &host, &runtime).expect_err("should fail");
+    let msg = error.to_string();
+    assert!(
+      msg.contains("COM injection"),
+      "expected COM injection in error: {msg}"
+    );
+    assert!(
+      !msg.contains("Elevated fallback"),
+      "must not attempt elevated fallback: {msg}"
+    );
+  }
+
+  #[test]
+  fn appbound_get_keys_fails_early_when_runtime_cancelled() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(10)),
+      stop,
+    );
+    let host = crate::browser::appbound_host::AppBoundHost::Browser("chrome".to_string());
+    let error = get_keys("YXBwYm91bmQ=", &host, &runtime).expect_err("cancelled runtime must fail");
+    assert!(error.to_string().contains("operation cancelled"));
   }
 }

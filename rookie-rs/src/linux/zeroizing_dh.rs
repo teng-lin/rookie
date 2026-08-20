@@ -1,3 +1,6 @@
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use std::{
   cmp::Ordering,
   ops::{Deref, DerefMut},

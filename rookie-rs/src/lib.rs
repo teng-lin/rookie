@@ -17,6 +17,8 @@
 //! Compatibility APIs remain callable through 0.6 while their downstream use
 //! is deprecated. Internal adapters intentionally exercise those exact paths.
 #![allow(deprecated)]
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 // Public
 
