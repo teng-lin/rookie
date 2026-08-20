@@ -8,11 +8,11 @@ use super::DiscoveryCounters;
 use super::{
   acquire_by_policy, browser_definition, canonical_installation_root, embedded_registry,
   installation_id, installation_root_is_directory, normalized_path_bytes, populate_engine_sources,
-  profile_id, push_bounded_discovery_issue, retain_completed_engine_extract,
-  select_listing_profiles, sort_discovered_profiles, AcquisitionPolicy, BrowserEngine,
-  DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy,
-  EngineExtract, EngineListing, EngineProfileIdentity, ExtractCompletion, InstallationRoot,
-  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  profile_id, push_bounded_discovery_issue, retain_engine_runtime_stop, select_listing_profiles,
+  sort_discovered_profiles, AcquisitionPolicy, BrowserEngine, DiscoveredProfile, DiscoveryContext,
+  DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing,
+  EngineProfileIdentity, ExtractCompletion, InstallationRoot, LegacyRank, ProfileLocator,
+  ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{sort_cookies, test_seams, PlatformId, MAX_DISCOVERY_ISSUE_SAMPLES};
@@ -551,20 +551,7 @@ pub(crate) fn gecko_report_with_runtime(
       mozilla::acquire_candidate_source_with_runtime(candidate, domains, runtime)
     },
   )?;
-  Ok(retain_gecko_runtime_stop(extract, runtime))
-}
-
-fn retain_gecko_runtime_stop(
-  mut extract: EngineExtract,
-  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> EngineExtract {
-  if let Err(stop) = runtime.check() {
-    extract.boundary_stop.get_or_insert(stop);
-  }
-  if extract.boundary_stop.is_some() {
-    retain_completed_engine_extract(&mut extract);
-  }
-  extract
+  Ok(retain_engine_runtime_stop(extract, runtime))
 }
 
 fn sort_legacy_gecko_profiles(listing: &mut EngineListing) {
@@ -623,7 +610,7 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
     },
     |path| context.fs.exists(path),
   );
-  Ok(retain_gecko_runtime_stop(extract, runtime))
+  Ok(retain_engine_runtime_stop(extract, runtime))
 }
 
 /// Lists persistent Gecko profiles in the same deterministic registry order

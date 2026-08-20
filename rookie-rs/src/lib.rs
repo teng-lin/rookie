@@ -44,8 +44,6 @@ mod compatibility_dispatch;
 mod header_filter;
 mod read;
 mod request_error;
-#[cfg(test)]
-use anyhow::bail;
 pub use anyhow::{self, Result};
 use enums::Cookie;
 pub use read::{from_path, profiles, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning};
@@ -1082,41 +1080,60 @@ pub fn internet_explorer(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("internet_explorer", domains)
 }
 
-#[cfg(test)]
-fn load_from_browsers<F>(
-  browser_types: &[(&'static str, F)],
-  domains: Option<Vec<String>>,
-) -> Result<Vec<Cookie>>
-where
-  F: Fn(Option<Vec<String>>) -> Result<Vec<Cookie>>,
-{
+/// Folds one `fan_out` round's per-browser results into [`load`]'s answer.
+///
+/// Missing profiles were not extraction attempts. If at least one installed
+/// browser failed and none succeeded, surface the real failures; a machine
+/// with no supported browser installed legitimately has no cookies.
+///
+/// This is a separate function so the aggregation rules are reachable from a
+/// test without a second implementation of them. The `#[cfg(test)]`
+/// `load_from_browsers` that used to serve that purpose restated the rules
+/// sequentially and never modelled either stop path, so its tests could stay
+/// green while `load` regressed.
+fn aggregate_load_results(
+  names: &[&str],
+  results: Vec<Result<Vec<Cookie>>>,
+  runtime: &common::deadline::BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  // `fan_out` silently stops claiming further browsers once the runtime
+  // trips, so a shorter-than-`names` result set is itself evidence of a
+  // stop even if no individual browser's own attempt happened to observe
+  // and report it (e.g. every claimed browser was merely uninstalled).
+  let attempted = results.len();
   let mut cookies = Vec::new();
-  let mut errors: Vec<String> = Vec::new();
+  let mut errors = Vec::new();
+  let mut terminal_stop = None;
   let mut successful_extractions = 0;
-
-  for (browser_name, browser_fn) in browser_types.iter() {
-    match browser_fn(domains.clone()) {
+  for (browser_name, result) in names.iter().copied().zip(results) {
+    match result {
       Ok(browser_cookies) => {
         successful_extractions += 1;
         cookies.extend(browser_cookies);
       }
-      Err(err) if browser::legacy::is_browser_not_installed(&err) => {
-        log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {err}");
+      Err(error) if browser::legacy::is_browser_not_installed(&error) => {
+        log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {error}");
       }
-      Err(err) => {
-        log::warn!("rookie_cookies::load skipping {browser_name}: {err}");
-        errors.push(format!("{browser_name}: {err}"));
+      Err(error) => {
+        let stopped = error.chain().find_map(|cause| {
+          cause
+            .downcast_ref::<common::deadline::BoundaryStop>()
+            .copied()
+        });
+        log::warn!("rookie_cookies::load skipping {browser_name}: {error}");
+        errors.push(format!("{browser_name}: {error}"));
+        if stopped.is_some() && terminal_stop.is_none() {
+          terminal_stop = stopped;
+        }
       }
     }
   }
-
-  // Missing profiles were not extraction attempts. If at least one installed
-  // browser failed and none succeeded, surface the real failures; a machine
-  // with no supported browser installed legitimately has no cookies.
-  if successful_extractions == 0 && !errors.is_empty() {
-    bail!("all browser extractions failed:\n  {}", errors.join("\n  "));
+  if attempted < names.len() && terminal_stop.is_none() {
+    terminal_stop = runtime.check().err();
   }
-
+  if successful_extractions == 0 && (!errors.is_empty() || terminal_stop.is_some()) {
+    return Err(aggregate_load_failure(&errors, terminal_stop));
+  }
   Ok(cookies)
 }
 
@@ -1189,55 +1206,11 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
       browser::legacy::browser_cookies_with_runtime(browser_name, domains.clone(), &runtime)
     },
   );
-  // `fan_out` silently stops claiming further browsers once the runtime
-  // trips, so a shorter-than-`names` result set is itself evidence of a
-  // stop even if no individual browser's own attempt happened to observe
-  // and report it (e.g. every claimed browser was merely uninstalled).
-  let attempted = results.len();
-  let mut cookies = Vec::new();
-  let mut errors = Vec::new();
-  let mut terminal_stop = None;
-  let mut successful_extractions = 0;
-  for (browser_name, result) in names.iter().copied().zip(results) {
-    match result {
-      Ok(browser_cookies) => {
-        successful_extractions += 1;
-        cookies.extend(browser_cookies);
-      }
-      Err(error) if browser::legacy::is_browser_not_installed(&error) => {
-        log::debug!("rookie_cookies::load skipping uninstalled {browser_name}: {error}");
-      }
-      Err(error) => {
-        let stopped = error.chain().find_map(|cause| {
-          cause
-            .downcast_ref::<common::deadline::BoundaryStop>()
-            .copied()
-        });
-        log::warn!("rookie_cookies::load skipping {browser_name}: {error}");
-        errors.push(format!("{browser_name}: {error}"));
-        if stopped.is_some() && terminal_stop.is_none() {
-          terminal_stop = stopped;
-        }
-      }
-    }
-  }
-  if attempted < names.len() && terminal_stop.is_none() {
-    terminal_stop = runtime.check().err();
-  }
-  if successful_extractions == 0 && (!errors.is_empty() || terminal_stop.is_some()) {
-    return Err(aggregate_load_failure(&errors, terminal_stop));
-  }
-  Ok(cookies)
+  aggregate_load_results(&names, results, &runtime)
 }
 
 #[cfg(test)]
 use direct_path::CookieSourceKind as AnyBrowserSource;
-
-/// Inspects the source's on-disk signature before choosing a decoder family.
-#[cfg(test)]
-fn sniff_cookie_source(path: &std::path::Path) -> Result<AnyBrowserSource> {
-  direct_path::classify_cookie_source_legacy(path)
-}
 
 /// Returns cookies from specific browser
 /// Useful for CLI apps

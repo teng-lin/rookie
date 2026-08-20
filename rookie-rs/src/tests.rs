@@ -1,8 +1,6 @@
 use super::*;
 use crate::common::enums::SAME_SITE_UNSPECIFIED;
 
-type BrowserEntry = (&'static str, fn(Option<Vec<String>>) -> Result<Vec<Cookie>>);
-
 fn not_installed(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   Err(browser::legacy::BrowserNotInstalled::CookieDatabase.into())
 }
@@ -308,18 +306,36 @@ fn second_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   Ok(vec![named_cookie("second")])
 }
 
+/// Runs production `load`'s aggregation over a synthetic `fan_out` round.
+///
+/// The runtime is untripped and every browser is claimed, which is the state
+/// `fan_out` leaves behind when nothing stops it -- so these drive exactly the
+/// rules the old `load_from_browsers` twin restated, but through the code
+/// `load` actually runs.
+fn aggregated(entries: Vec<(&str, Result<Vec<Cookie>>)>) -> Result<Vec<Cookie>> {
+  let clock = common::deadline::SystemClock;
+  let runtime = common::deadline::BoundaryRuntime::standard(&clock);
+  let names: Vec<&str> = entries.iter().map(|(name, _)| *name).collect();
+  let results: Vec<_> = entries.into_iter().map(|(_, result)| result).collect();
+  aggregate_load_results(&names, results, &runtime)
+}
+
 #[test]
 fn no_installed_browsers_returns_ok_empty() {
-  let browsers: Vec<BrowserEntry> = vec![("firefox", not_installed), ("chrome", not_installed)];
-  let result = load_from_browsers(&browsers, None).expect("absence is not an extraction failure");
+  let result = aggregated(vec![
+    ("firefox", not_installed(None)),
+    ("chrome", not_installed(None)),
+  ])
+  .expect("absence is not an extraction failure");
   assert!(result.is_empty());
 }
 
 #[test]
 fn all_installed_browsers_failing_returns_aggregate_error() {
-  let browsers: Vec<BrowserEntry> =
-    vec![("firefox", extraction_fails), ("chrome", extraction_fails)];
-  let result = load_from_browsers(&browsers, None);
+  let result = aggregated(vec![
+    ("firefox", extraction_fails(None)),
+    ("chrome", extraction_fails(None)),
+  ]);
   assert!(result.is_err(), "expected Err when all browsers fail");
   let msg = result.unwrap_err().to_string();
   assert!(
@@ -353,8 +369,10 @@ fn aggregate_load_stop_keeps_its_summary_and_typed_source() {
 
 #[test]
 fn partial_failure_returns_ok() {
-  let browsers: Vec<BrowserEntry> = vec![("firefox", extraction_fails), ("chrome", always_ok)];
-  let result = load_from_browsers(&browsers, None);
+  let result = aggregated(vec![
+    ("firefox", extraction_fails(None)),
+    ("chrome", always_ok(None)),
+  ]);
   assert!(
     result.is_ok(),
     "expected Ok when at least one browser succeeds, got: {result:?}"
@@ -363,33 +381,67 @@ fn partial_failure_returns_ok() {
 
 #[test]
 fn missing_browsers_do_not_hide_an_installed_browser_failure() {
-  let browsers: Vec<BrowserEntry> = vec![("firefox", not_installed), ("chrome", extraction_fails)];
-  let message = load_from_browsers(&browsers, None)
-    .expect_err("the one installed browser failed")
-    .to_string();
+  let message = aggregated(vec![
+    ("firefox", not_installed(None)),
+    ("chrome", extraction_fails(None)),
+  ])
+  .expect_err("the one installed browser failed")
+  .to_string();
   assert!(message.contains("chrome: cookie database is corrupt"));
   assert!(!message.contains("firefox"));
 }
 
 #[test]
 fn empty_browser_list_returns_ok_empty() {
-  let browsers: Vec<BrowserEntry> = vec![];
-  let result = load_from_browsers(&browsers, None);
+  let result = aggregated(vec![]);
   assert!(result.is_ok());
   assert!(result.unwrap().is_empty());
 }
 
 #[test]
-fn load_from_browsers_preserves_source_order() {
-  let browsers: Vec<BrowserEntry> = vec![
-    ("first", first_ok),
-    ("missing", not_installed),
-    ("second", second_ok),
-  ];
-  let cookies = load_from_browsers(&browsers, None)
-    .expect("successful sources survive an intervening extraction error");
+fn load_aggregation_preserves_source_order() {
+  let cookies = aggregated(vec![
+    ("first", first_ok(None)),
+    ("missing", not_installed(None)),
+    ("second", second_ok(None)),
+  ])
+  .expect("successful sources survive an intervening extraction error");
   let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
   assert_eq!(names, vec!["first", "second"]);
+}
+
+#[test]
+fn a_browser_error_carrying_a_stop_makes_it_typed_on_the_aggregate() {
+  // Previously unreachable from a test: the twin never modelled a browser
+  // whose own failure carries a `BoundaryStop`.
+  let stopped: Result<Vec<Cookie>> =
+    Err(anyhow::Error::new(common::deadline::BoundaryStop::TimedOut).context("chrome gave up"));
+  let error = aggregated(vec![("chrome", stopped)]).expect_err("a stopped browser is a failure");
+  assert_eq!(
+    error.downcast_ref::<common::deadline::BoundaryStop>(),
+    Some(&common::deadline::BoundaryStop::TimedOut)
+  );
+}
+
+#[test]
+fn an_unclaimed_browser_under_a_tripped_runtime_is_itself_the_stop() {
+  // The other previously unreachable branch: `fan_out` returned fewer results
+  // than names because the runtime tripped, and no individual browser
+  // reported an error of its own -- every one it did claim was uninstalled.
+  let clock = common::deadline::SystemClock;
+  let stop = common::deadline::CancellationToken::default();
+  stop.cancel();
+  let runtime = common::deadline::BoundaryRuntime::with_stop(
+    &clock,
+    common::deadline::Deadline::standard(),
+    stop,
+  );
+  let error = aggregate_load_results(&["firefox", "chrome"], vec![not_installed(None)], &runtime)
+    .expect_err("an unclaimed browser under a tripped runtime is a stop, not an empty success");
+  assert_eq!(
+    error.downcast_ref::<common::deadline::BoundaryStop>(),
+    Some(&common::deadline::BoundaryStop::Cancelled)
+  );
 }
 
 #[cfg(target_os = "linux")]
@@ -429,11 +481,11 @@ fn any_browser_sniffs_sqlite_decoder_family_from_schema() {
   drop(mozilla);
 
   assert_eq!(
-    sniff_cookie_source(&chromium_path).expect("sniff Chromium"),
+    direct_path::classify_cookie_source_legacy(&chromium_path).expect("sniff Chromium"),
     AnyBrowserSource::ChromiumSqlite
   );
   assert_eq!(
-    sniff_cookie_source(&mozilla_path).expect("sniff Mozilla"),
+    direct_path::classify_cookie_source_legacy(&mozilla_path).expect("sniff Mozilla"),
     AnyBrowserSource::MozillaSqlite
   );
 }
@@ -446,7 +498,8 @@ fn any_browser_rejects_ambiguous_or_unrelated_sqlite_schemas() {
     .execute_batch("CREATE TABLE cookies (name TEXT); CREATE TABLE moz_cookies (name TEXT);")
     .expect("ambiguous tables");
   drop(ambiguous);
-  let error = sniff_cookie_source(&ambiguous_path).expect_err("ambiguous schema must fail");
+  let error = direct_path::classify_cookie_source_legacy(&ambiguous_path)
+    .expect_err("ambiguous schema must fail");
   assert!(error
     .to_string()
     .contains("both `cookies` and `moz_cookies`"));
@@ -457,7 +510,8 @@ fn any_browser_rejects_ambiguous_or_unrelated_sqlite_schemas() {
     .execute("CREATE TABLE unrelated (value TEXT)", [])
     .expect("unrelated table");
   drop(other);
-  let error = sniff_cookie_source(&other_path).expect_err("unrelated schema must fail");
+  let error = direct_path::classify_cookie_source_legacy(&other_path)
+    .expect_err("unrelated schema must fail");
   assert!(error.to_string().contains("unsupported SQLite database"));
 }
 
@@ -466,7 +520,7 @@ fn any_browser_sniffs_binary_cookie_signature_without_decoder_probing() {
   let (_dir, path) = source_test_path("Cookies.binarycookies");
   std::fs::write(&path, b"cooksynthetic").expect("Safari header fixture");
   assert_eq!(
-    sniff_cookie_source(&path).expect("sniff Safari"),
+    direct_path::classify_cookie_source_legacy(&path).expect("sniff Safari"),
     AnyBrowserSource::SafariBinaryCookies
   );
 }
@@ -477,7 +531,7 @@ fn any_browser_sniffs_ese_signature() {
   let (_dir, path) = source_test_path("WebCacheV01.dat");
   std::fs::write(&path, [0, 0, 0, 0, 0xef, 0xcd, 0xab, 0x89]).expect("ESE header fixture");
   assert_eq!(
-    sniff_cookie_source(&path).expect("sniff ESE"),
+    direct_path::classify_cookie_source_legacy(&path).expect("sniff ESE"),
     AnyBrowserSource::InternetExplorerEse
   );
 }

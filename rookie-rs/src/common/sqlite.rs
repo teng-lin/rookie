@@ -1,10 +1,10 @@
 #[cfg(test)]
+use crate::common::boundary::Acquire;
+#[cfg(test)]
 use crate::common::deadline::{Clock, Deadline};
-use crate::common::{
-  boundary::Acquire,
-  deadline::{BoundaryRuntime, DeadlineEnforcement, SystemClock},
-  diagnostic::REDACTED_PATH,
-};
+#[cfg(test)]
+use crate::common::deadline::{DeadlineEnforcement, SystemClock};
+use crate::common::{deadline::BoundaryRuntime, diagnostic::REDACTED_PATH};
 use crate::utils::TempDir;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -182,7 +182,13 @@ impl Deref for SqliteReader {
 /// rollback-journal writer therefore either permits that coherent read or
 /// returns SQLite's typed busy/locked error; this path never raw-copies or
 /// immutably opens the live database.
-#[allow(dead_code)]
+///
+/// Test-only: no production caller routes through this convenience wrapper --
+/// they all supply their own runtime via
+/// [`acquire_browser_database_with_runtime`]. Its eleven call sites are the
+/// acquisition tests, so this is `#[cfg(test)]` rather than deleted, per the
+/// rule that a wrapper with callers is gated and only a caller-less one goes.
+#[cfg(test)]
 pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   let acquire = BrowserDatabaseAcquire;
   let clock = SystemClock;
@@ -190,8 +196,10 @@ pub fn connect(path: PathBuf) -> Result<SqliteReader> {
   super::boundary::acquire(&acquire, &path, &runtime)
 }
 
+#[cfg(test)]
 struct BrowserDatabaseAcquire;
 
+#[cfg(test)]
 impl Acquire<PathBuf> for BrowserDatabaseAcquire {
   type Source = SqliteReader;
 
