@@ -100,7 +100,13 @@ fn profile_snapshot_with_runtime(
   // No domain filter: a domain-reduced snapshot makes `header()` silently
   // wrong, because it omits parent-domain cookies the browser would send.
   // `ReadRequest` has no `domains` for exactly this reason.
-  let draft = collect_extraction(&browser, Some(profile_id), None, session, runtime)?;
+  let draft = collect_extraction(
+    &browser,
+    registry::ProfileSelection::ProfileId(profile_id),
+    None,
+    session,
+    runtime,
+  )?;
   let warnings = draft_warnings(&draft);
   let outcome = finalize_outcomes_with_runtime(1, vec![draft], Some(runtime));
   let termination = outcome.termination;

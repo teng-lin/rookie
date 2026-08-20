@@ -15,8 +15,10 @@ use crate::header_filter::{
 };
 use crate::read_warning::{ReadWarningCode, ReadWarningCounts};
 use crate::report;
+use crate::selection::ProfileSelection;
 use crate::send_context::{selector, MethodClass, ResourceKind, SendContext};
 use crate::session::SessionPolicy;
+use crate::target::BrowserTarget;
 use crate::{CancellationHandle, RequestError, Result};
 use std::path::PathBuf;
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
@@ -82,10 +84,8 @@ impl std::fmt::Display for ReadWarning {
 /// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReadRequest {
-  browser_id: Option<String>,
-  profile: Option<String>,
+  target: BrowserTarget<ProfileSelection>,
   include_expired: bool,
-  session: SessionPolicy,
   control: ExecutionControl,
 }
 
@@ -96,10 +96,8 @@ impl ReadRequest {
   /// [`read`], not by this builder.
   pub fn browser(id: impl Into<String>) -> Self {
     Self {
-      browser_id: Some(id.into()),
-      profile: None,
+      target: BrowserTarget::browser(id),
       include_expired: false,
-      session: SessionPolicy::default(),
       control: ExecutionControl::default(),
     }
   }
@@ -110,7 +108,17 @@ impl ReadRequest {
   /// Resolution happens when [`read`] runs. Empty, unknown, ambiguous, and
   /// lossy-only selectors are structured request errors.
   pub fn profile(mut self, query: impl Into<String>) -> Self {
-    self.profile = Some(query.into());
+    self.target = self.target.profile(query);
+    self
+  }
+
+  /// Selects the profile explicitly.
+  ///
+  /// [`ProfileSelection`] has no "every profile" arm, so a snapshot cannot ask
+  /// for one. That is a type fact rather than a runtime rejection: a
+  /// `ReadResult` has one `profile_id` and could not describe more.
+  pub fn selection(mut self, selection: ProfileSelection) -> Self {
+    self.target = self.target.with_selection(selection);
     self
   }
 
@@ -135,13 +143,13 @@ impl ReadRequest {
   /// See [`SessionPolicy`] for why this is an acquire-time filter rather than
   /// a filter over the returned cookies.
   pub fn include_session(mut self) -> Self {
-    self.session = SessionPolicy::IncludeSession;
+    self.target = self.target.with_session(SessionPolicy::IncludeSession);
     self
   }
 
   /// Selects the session policy explicitly.
   pub fn session(mut self, policy: SessionPolicy) -> Self {
-    self.session = policy;
+    self.target = self.target.with_session(policy);
     self
   }
 
@@ -530,23 +538,23 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
 }
 
 fn read_inner(request: ReadRequest) -> anyhow::Result<ReadResult> {
-  let browser_id = request
-    .browser_id
-    .clone()
-    .filter(|id| !id.is_empty())
-    .ok_or(RequestError::MissingBrowser)?;
+  let browser_id = request.target.resolve()?.to_owned();
   let clock = SystemClock;
   let runtime = runtime_for_control(&clock, &request.control);
   let resolved_browser = registry::resolve_registered_browser(&browser_id)?;
   // Resolution and extraction share this one absolute budget. There is no
   // second request to build, so there is nothing that could reset it.
-  let selection = match request.profile.as_deref() {
-    None => SnapshotSelection::LegacyFirst,
-    Some(query) => SnapshotSelection::Profile(&registry::resolve_profile_query(
+  let resolved_profile = match request.target.selection() {
+    ProfileSelection::LegacyFirst => None,
+    ProfileSelection::Query(query) => Some(registry::resolve_profile_query(
       &browser_id,
       query,
       &runtime,
     )?),
+  };
+  let selection = match resolved_profile.as_deref() {
+    None => SnapshotSelection::LegacyFirst,
+    Some(profile_id) => SnapshotSelection::Profile(profile_id),
   };
   read_snapshot(
     &resolved_browser.canonical_id,
@@ -562,7 +570,8 @@ fn read_snapshot(
   request: &ReadRequest,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> anyhow::Result<ReadResult> {
-  let outcome = browser_snapshot_with_runtime(canonical_id, selection, request.session, runtime)?;
+  let outcome =
+    browser_snapshot_with_runtime(canonical_id, selection, request.target.session(), runtime)?;
   // A stop that reached the snapshot is an error, never a short list. Reports
   // return a stopped run as `Ok`; snapshots do not.
   if let Some(stop) = boundary_stop_for(outcome.termination) {
@@ -900,14 +909,7 @@ mod tests {
 
   #[test]
   fn missing_browser_is_request_error() {
-    let error = read(ReadRequest {
-      browser_id: None,
-      profile: None,
-      include_expired: false,
-      session: SessionPolicy::default(),
-      control: ExecutionControl::default(),
-    })
-    .unwrap_err();
+    let error = read(ReadRequest::browser("")).unwrap_err();
     let crate::Error::Request(request_error) = &error else {
       panic!("a missing browser is a request error, got {error:?}");
     };

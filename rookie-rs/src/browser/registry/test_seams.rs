@@ -214,7 +214,7 @@ pub(crate) fn seed_chromium_profile(root: &Path, directory: &str, name: &str) {
 pub(crate) fn chromium_report(
   context: &DiscoveryContext<RealDiscoveryFs>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   keys: ChromiumKeyOutcomes,
 ) -> Result<ChromiumRegistryDraft> {
@@ -230,7 +230,7 @@ pub(crate) fn chromium_report(
       self.0.clone()
     }
   }
-  extract_chromium_with_provider(context, browser_id, profile_id, domains, &FixedKeys(keys))
+  extract_chromium_with_provider(context, browser_id, selection, domains, &FixedKeys(keys))
 }
 
 pub(crate) fn chromium_profiles(
@@ -246,13 +246,13 @@ pub(crate) fn chromium_profiles(
 pub(crate) fn gecko_report(
   context: &DiscoveryContext<RealDiscoveryFs>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtract> {
   gecko_report_with_context(
     context,
     browser_id,
-    profile_id,
+    selection,
     domains,
     crate::SessionPolicy::IncludeSession,
   )
@@ -300,23 +300,23 @@ pub(crate) fn gecko_profiles(
 pub(crate) fn safari_report(
   context: &DiscoveryContext<RealDiscoveryFs>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtract> {
-  safari_report_with_context(context, browser_id, profile_id, domains)
+  safari_report_with_context(context, browser_id, selection, domains)
 }
 
 pub(crate) fn internet_explorer_report<Q>(
   context: &DiscoveryContext<RealDiscoveryFs>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
   query: Q,
 ) -> Result<EngineExtract>
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  internet_explorer_report_with_context(context, browser_id, profile_id, domains, query)
+  internet_explorer_report_with_context(context, browser_id, selection, domains, query)
 }
 
 pub(crate) struct TempDir(pub(crate) PathBuf);

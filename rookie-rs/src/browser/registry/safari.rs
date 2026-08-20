@@ -280,13 +280,13 @@ fn discover_safari_with_runtime<F: DiscoveryFs>(
 pub(super) fn safari_report_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtract> {
   safari_report_with_query(
     context,
     browser_id,
-    profile_id,
+    selection,
     domains,
     |origin, domains| {
       query_safari_file(
@@ -305,7 +305,7 @@ pub(super) fn safari_report_with_context<F: DiscoveryFs>(
 pub(super) fn safari_report_with_query<F, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
   query: Q,
 ) -> Result<EngineExtract>
@@ -318,7 +318,7 @@ where
   safari_report_with_context_using_runtime(
     context,
     browser_id,
-    profile_id,
+    selection,
     domains,
     &runtime,
     discover_safari_profiles_with_runtime,
@@ -329,7 +329,7 @@ where
 fn safari_report_with_context_using_runtime<F, Profiles, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
   discover_profiles: Profiles,
@@ -346,11 +346,7 @@ where
   let mut listing =
     discover_safari_with_context_using_runtime(context, browser_id, runtime, discover_profiles)?;
   runtime.check()?;
-  select_listing_profiles(
-    &mut listing,
-    browser_id,
-    ProfileSelection::from_profile_id(profile_id),
-  )?;
+  select_listing_profiles(&mut listing, browser_id, selection)?;
   runtime.check()?;
   let extract = populate_safari_sources_with_runtime(listing, domains, runtime, query);
   Ok(retain_engine_runtime_stop(extract, runtime))
@@ -443,18 +439,18 @@ where
 #[cfg(target_os = "macos")]
 pub(crate) fn safari_report(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  safari_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  safari_report_with_runtime(browser_id, selection, domains, &runtime)
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn safari_report_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<EngineExtract> {
@@ -464,7 +460,7 @@ pub(crate) fn safari_report_with_runtime(
   safari_report_with_context_using_runtime(
     &context,
     browser_id,
-    profile_id,
+    selection,
     domains.as_deref(),
     runtime,
     discover_safari_profiles_with_runtime,
@@ -1073,7 +1069,7 @@ mod tests {
     .expect("safari_profiles_with_runtime should discover the synthetic legacy home");
     assert_eq!(profiles.profiles.len(), 1);
 
-    let report = safari_report("safari", None, None)
+    let report = safari_report("safari", ProfileSelection::AllProfiles, None)
       .expect("safari_report should discover the synthetic legacy home");
     assert_eq!(report.profiles.len(), 1);
     let report_source = &report.profiles[0].sources[0];
@@ -1523,7 +1519,7 @@ mod tests {
     let error = safari_report_with_context_using_runtime(
       &context,
       "safari",
-      None,
+      ProfileSelection::AllProfiles,
       None,
       &runtime,
       |library, _| {
@@ -1814,7 +1810,8 @@ mod tests {
     .canonicalize()
     .expect("canonical named Safari source");
 
-    let all = safari_report_with_context(&context, "safari", None, None).expect("full report");
+    let all = safari_report_with_context(&context, "safari", ProfileSelection::AllProfiles, None)
+      .expect("full report");
     let canonical_library = library.canonicalize().expect("canonical Safari root");
     let expected_installation_id = installation_id(
       "safari",
@@ -1864,7 +1861,7 @@ mod tests {
     let one = safari_report_with_query(
       &context,
       "safari",
-      Some(selected.as_str()),
+      ProfileSelection::ProfileId(selected.as_str()),
       Some(&domains),
       |origin, forwarded_domains| {
         read.push(origin.path.clone());
@@ -1889,7 +1886,7 @@ mod tests {
     let unknown = safari_report_with_query(
       &context,
       "safari",
-      Some("not-a-profile"),
+      ProfileSelection::ProfileId("not-a-profile"),
       Some(&domains),
       |_, _| {
         unknown_queries += 1;

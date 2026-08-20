@@ -58,14 +58,14 @@ in a later major version.
 
 ## One operation, any registered browser
 
-`browser(id, domains)` and `extract(Request::browser(id))` remain the
+`browser(id, domains)` and `extract(ExtractRequest::browser(id))` remain the
 compatibility / multi-id store verbs. Prefer them when you need a domain filter
 on the frozen flat list; prefer `read` for profile-scoped inventory and Gecko
 session import.
 
 ```rust
 fn main() -> rookie_cookies::Result<()> {
-    let request = rookie_cookies::Request::browser("chrome")
+    let request = rookie_cookies::ExtractRequest::browser("chrome")
         .domains(Some(vec!["example.com".to_string()]));
     let cookies = rookie_cookies::extract(request)?;
     println!("{cookies:?}");
@@ -134,7 +134,7 @@ fn main() -> rookie_cookies::Result<()> {
         watcher.cancel();
     });
 
-    let request = rookie_cookies::Request::browser("chrome")
+    let request = rookie_cookies::ExtractRequest::browser("chrome")
         .timeout(Duration::from_secs(30))
         .cancellation(cancellation);
     match rookie_cookies::extract(request) {
@@ -354,7 +354,7 @@ fn main() {
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
 | Recommended entry | `chrome(None)` / `brave(Some(domains))` | `read(ReadRequest::browser(...).profile(...))` |
-| Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(Request::…)` |
+| Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(ExtractRequest::…)` |
 | Gecko session cookies | Not a first-class `profile()` | `ReadRequest::browser(gecko_id).profile(query)` includes the declared session source |
 | Path APIs | `*_based`, `any_browser` | `direct_path::{cookies_from_path, ChromiumPathRequest, …}` (legacy deprecated until 0.7) |
 | Errors | Flat `anyhow::Error` | Typed `rookie_cookies::Error` (`Request` / `Stopped` / `Source` / `Engine`) with a stable `code()`. **`rookie_cookies::Result` is no longer `anyhow::Result`**; bridge functions keep `anyhow::Result` and `rookie_cookies::anyhow::Result` still resolves |

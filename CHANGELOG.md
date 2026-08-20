@@ -8,6 +8,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`ProfileSelection` and `ReportScope` make an illegal selection
+  unrepresentable.** `Request` is renamed `ExtractRequest` (prerelease-only)
+  and joined by `ReportRequest`, whose scope may widen to every profile
+  because only a report can describe more than one. `ExtractRequest::browser`
+  selects the first legacy-eligible profile; `ReportRequest::browser` reports
+  every profile, matching v0.5.9's `browser_report(id, None, ..)`.
+  `From<ExtractRequest> for ReportRequest` narrows, never widens.
 - **`ReadResult::header` takes a `SendContext`** instead of a bare URL, and is
   send-safe: it never merges two isolated browsing contexts. A snapshot holding
   a partitioned or containered cookie demands the selector that identifies it
@@ -76,6 +83,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Code that caught `RookieEngineError` to read `stop_reason` must catch
   `RookieStoppedError` instead. `kind` is `request` / `stopped` / `source` /
   `engine` (was `request` / `engine`).
+- **One `Request` value no longer selects differently depending on which
+  function it is passed to.** In 0.6-beta the same value meant "the first
+  legacy-eligible profile" to `extract` and "every profile" to
+  `extract_report` — two calls that looked identical and read different
+  profiles. That is now a type-level distinction.
+- Engine extraction seams take the typed internal `ProfileSelection` instead
+  of `Option<&str>`, which could only express "one profile" or "all" and made
+  the legacy-first scope inexpressible on the report path.
 - **A profile-scoped `read` no longer flows through the report builder.** The
   report DTO is frozen at `schema_version: 1` and carries the eight-field
   `Cookie`, so a snapshot flattened out of it had already lost

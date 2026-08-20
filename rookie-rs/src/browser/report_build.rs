@@ -694,7 +694,7 @@ pub(crate) fn supported_browser_descriptors() -> Result<Vec<BrowserDescriptor>> 
 /// source, so the parameter is a no-op for them.
 fn collect_extraction(
   browser: &RegisteredBrowser,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
@@ -705,7 +705,7 @@ fn collect_extraction(
     "chromium" => {
       let report = registry::chromium_registry_report_with_runtime(
         &browser.canonical_id,
-        profile_id,
+        selection,
         domains,
         runtime,
       )?;
@@ -714,7 +714,7 @@ fn collect_extraction(
     "gecko" => {
       let engine = registry::gecko_report_with_runtime(
         &browser.canonical_id,
-        profile_id,
+        selection,
         domains,
         session,
         runtime,
@@ -725,7 +725,7 @@ fn collect_extraction(
       &browser_id,
       &browser.canonical_id,
       engine,
-      profile_id,
+      selection,
       domains,
       runtime,
     ),
@@ -1499,23 +1499,30 @@ fn direct_engine_extract(
 #[cfg(test)]
 pub(crate) fn browser_extraction_report(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
 ) -> Result<ExtractionReport> {
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  browser_extraction_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  browser_extraction_report_with_runtime(
+    browser_id,
+    selection,
+    domains,
+    crate::SessionPolicy::IncludeSession,
+    &runtime,
+  )
 }
 
 /// Report-shaped seam. Report jobs return a stop as an `Ok` report whose
 /// `termination` is not `completed`, so they never need the typed value.
 pub(crate) fn browser_extraction_report_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ExtractionReport> {
-  browser_extraction_outcome_with_runtime(browser_id, profile_id, domains, runtime)
+  browser_extraction_outcome_with_runtime(browser_id, selection, domains, session, runtime)
     .map(|(report, _termination)| report)
 }
 
@@ -1525,22 +1532,18 @@ pub(crate) fn browser_extraction_report_with_runtime(
 /// re-parsing `ExtractionReport::termination`.
 pub(crate) fn browser_extraction_outcome_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<(ExtractionReport, Termination)> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let canonical_id = &browser.canonical_id;
-  // Report-shaped jobs always retain session sources: a report's whole point
-  // is to describe every source the profile declares, including the ones a
-  // flat extract would have skipped.
-  let mut outcome = match collect_extraction(
-    &browser,
-    profile_id,
-    domains,
-    crate::SessionPolicy::IncludeSession,
-    runtime,
-  ) {
+  // Report-shaped callers pass `IncludeSession`: a report's whole point is to
+  // describe every source the profile declares. `extract` is the one caller
+  // that passes the request's own policy, because it produces a flat list and
+  // must honor a caller who asked not to touch the session store.
+  let mut outcome = match collect_extraction(&browser, selection, domains, session, runtime) {
     Ok(outcome) => outcome,
     Err(error) => match stop_from_error(&error) {
       Some(stop) => stopped_browser_draft(&browser, stop)?,
@@ -1553,7 +1556,10 @@ pub(crate) fn browser_extraction_outcome_with_runtime(
   // whose engine has no adapter compiled into this build reports no profiles at
   // all, and an unknown profile id must still be a request error there.
   if outcome.termination == Termination::Completed {
-    if let Some(profile_id) = profile_id {
+    // Only an explicit profile id needs this: `LegacyFirstProfile` and
+    // `AllProfiles` are both narrowed by the engine itself, and neither can
+    // name a profile that does not exist.
+    if let registry::ProfileSelection::ProfileId(profile_id) = selection {
       if !outcome
         .profiles
         .iter()
@@ -1613,7 +1619,7 @@ fn load_extraction_report_with_runtime(
   let attempts = fan_out(&browsers, DEFAULT_FAN_OUT_WIDTH, runtime, |browser| {
     collect_extraction(
       browser,
-      None,
+      registry::ProfileSelection::AllProfiles,
       domains.clone(),
       crate::SessionPolicy::IncludeSession,
       runtime,
@@ -1733,7 +1739,13 @@ pub(crate) fn chrome_profile_report(
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
   let profile_id = registry::resolve_profile_query("chrome", profile, &runtime)?;
-  browser_extraction_report_with_runtime("chrome", Some(profile_id.as_str()), domains, &runtime)
+  browser_extraction_report_with_runtime(
+    "chrome",
+    registry::ProfileSelection::ProfileId(profile_id.as_str()),
+    domains,
+    crate::SessionPolicy::IncludeSession,
+    &runtime,
+  )
 }
 
 fn chromium_profile_descriptor(

@@ -8,14 +8,14 @@ pub(super) fn remaining_engine_extraction(
   browser_id: &BrowserId,
   canonical_id: &str,
   engine: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
   if engine != "safari" {
     return Ok(undetected(browser_id));
   }
-  let engine = registry::safari_report_with_runtime(canonical_id, profile_id, domains, runtime)?;
+  let engine = registry::safari_report_with_runtime(canonical_id, selection, domains, runtime)?;
   super::super::engine_extract_outcome(browser_id, engine)
 }
 
@@ -35,6 +35,7 @@ pub(super) fn remaining_engine_listing(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::browser::registry::ProfileSelection;
 
   #[test]
   fn macos_leaf_reports_every_other_engine_as_undetected() {
@@ -45,7 +46,7 @@ mod tests {
       &browser_id,
       "internet_explorer",
       "internet_explorer",
-      None,
+      ProfileSelection::AllProfiles,
       None,
       &runtime,
     )

@@ -20,7 +20,7 @@ fn zero_timeout_stops_extraction_before_any_browser_lookup() {
   // observing TimedOut instead of that error proves the deadline check
   // runs before browser resolution, matching browser_cookies_with_runtime's
   // own ordering.
-  let request = Request::browser("unknown-browser-id").timeout(std::time::Duration::ZERO);
+  let request = ExtractRequest::browser("unknown-browser-id").timeout(std::time::Duration::ZERO);
   let error = extract(request).expect_err("a zero timeout must stop before doing any work");
   assert_eq!(error.stop_reason(), Some(StopReason::TimedOut));
 }
@@ -31,7 +31,7 @@ fn a_cancelled_handle_stops_extraction_before_any_browser_lookup() {
   assert!(handle.cancel());
   assert!(handle.is_cancelled());
 
-  let request = Request::browser("unknown-browser-id").cancellation(handle);
+  let request = ExtractRequest::browser("unknown-browser-id").cancellation(handle);
   let error = extract(request).expect_err("a pre-cancelled handle must stop before doing any work");
   assert_eq!(error.stop_reason(), Some(StopReason::Cancelled));
 }
@@ -117,7 +117,7 @@ fn cancel_after_an_unrelated_timeout_still_records_and_returns_true() {
   // never touches the handle's own state, so a cancel() afterward is not
   // rejected as "too late", it just has nothing left to affect.
   let handle = CancellationHandle::new();
-  let request = Request::browser("unknown-browser-id")
+  let request = ExtractRequest::browser("unknown-browser-id")
     .timeout(std::time::Duration::ZERO)
     .cancellation(handle.clone());
   let error = extract(request).expect_err("a zero timeout must stop the request");
@@ -132,8 +132,10 @@ fn cancel_after_an_unrelated_timeout_still_records_and_returns_true() {
 
 #[test]
 fn stop_reason_is_none_for_an_ordinary_request_error() {
-  let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
-    .expect_err("an unknown browser id is a request error");
+  let error = extract(ExtractRequest::browser(
+    "definitely-not-a-registered-browser-id",
+  ))
+  .expect_err("an unknown browser id is a request error");
   assert_eq!(error.stop_reason(), None);
 }
 
@@ -151,8 +153,10 @@ fn fault_kind_classifies_a_typed_direct_path_error_as_a_request_fault() {
 
 #[test]
 fn fault_kind_classifies_unknown_browser_on_extract_as_request() {
-  let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
-    .expect_err("an unknown browser id is a request error");
+  let error = extract(ExtractRequest::browser(
+    "definitely-not-a-registered-browser-id",
+  ))
+  .expect_err("an unknown browser id is a request error");
   assert_eq!(error.fault_kind(), FaultKind::Request);
   assert!(matches!(error, Error::Request(_)));
 }
@@ -217,7 +221,7 @@ fn registered_chromium_without_keychain_identity_is_plaintext_only() {
 
 /// `coccoc`/`yandex` are registered Chromium forks with no dedicated named
 /// function — unlike `chrome`, `brave`, and the rest, whose one hardcoded
-/// string can never name them. `browser`/`extract(Request::browser(..))`
+/// string can never name them. `browser`/`extract(ExtractRequest::browser(..))`
 /// must resolve them through the registry instead of reporting them as an
 /// unrecognized ID, the one failure mode a named function's fixed string
 /// structurally cannot produce.
@@ -235,7 +239,7 @@ fn public_browser_and_extract_reach_registry_only_browsers_no_named_function_can
     if let Err(error) = browser(browser_id, None) {
       assert_resolved_through_registry(browser_id, &error);
     }
-    if let Err(error) = extract(Request::browser(browser_id)) {
+    if let Err(error) = extract(ExtractRequest::browser(browser_id)) {
       assert_resolved_through_registry(browser_id, &error);
     }
   }
@@ -867,7 +871,7 @@ fn test_chrome_resolves_network_cookies_on_unix() {
 
 /// Complements `public_browser_and_extract_reach_registry_only_browsers_no_named_function_can_name`
 /// (which only asserts on the error path) with a positive case: `browser`/
-/// `extract(Request::browser(..))` actually resolve and read cookies from
+/// `extract(ExtractRequest::browser(..))` actually resolve and read cookies from
 /// CocCoc, a registered Chromium fork with no dedicated named function.
 #[cfg(target_os = "macos")]
 #[test]
@@ -892,8 +896,8 @@ fn browser_and_extract_read_real_cookies_from_a_registry_only_browser() {
   assert_eq!(cookies[0].name, "coccoc_cookie");
   assert_eq!(cookies[0].value, "coccoc_val");
 
-  let cookies = extract(Request::browser("coccoc"))
-    .expect("extract(Request::browser(\"coccoc\")) should find and parse cookies");
+  let cookies = extract(ExtractRequest::browser("coccoc"))
+    .expect("extract(ExtractRequest::browser(\"coccoc\")) should find and parse cookies");
   assert_eq!(cookies.len(), 1, "expected 1 cookie, got {cookies:?}");
   assert_eq!(cookies[0].name, "coccoc_cookie");
   assert_eq!(cookies[0].value, "coccoc_val");

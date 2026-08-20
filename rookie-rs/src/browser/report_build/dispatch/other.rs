@@ -1,4 +1,5 @@
 use super::{undetected, undetected_listing, BrowserDraft, BrowserListing};
+use crate::browser::registry::ProfileSelection;
 use crate::browser::report_core::BrowserId;
 use crate::common::deadline::BoundaryRuntime;
 use anyhow::Result;
@@ -7,7 +8,7 @@ pub(super) fn remaining_engine_extraction(
   browser_id: &BrowserId,
   _canonical_id: &str,
   _engine: &str,
-  _profile_id: Option<&str>,
+  _selection: crate::browser::registry::ProfileSelection<'_>,
   _domains: Option<Vec<String>>,
   _runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
@@ -36,9 +37,15 @@ mod tests {
       ("internet_explorer", "internet_explorer"),
     ] {
       let browser_id = BrowserId::known(canonical_id);
-      let draft =
-        remaining_engine_extraction(&browser_id, canonical_id, engine, None, None, &runtime)
-          .expect("undetected, not an error");
+      let draft = remaining_engine_extraction(
+        &browser_id,
+        canonical_id,
+        engine,
+        ProfileSelection::AllProfiles,
+        None,
+        &runtime,
+      )
+      .expect("undetected, not an error");
       assert!(!draft.detected);
 
       let listing = remaining_engine_listing(&browser_id, canonical_id, engine, &runtime)

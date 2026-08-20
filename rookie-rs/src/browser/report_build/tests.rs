@@ -76,6 +76,7 @@ fn ordering_source(role: CookieSourceRoleId, precedence: u16) -> SourceDraft {
   )
 }
 use super::*;
+use crate::browser::registry::ProfileSelection;
 use crate::browser::report_core::ReportStatusCode;
 use crate::execution::ExecutionControl;
 use std::path::PathBuf;
@@ -187,8 +188,14 @@ fn stop_reasons_reach_the_report_wire_as_typed_request_issues() {
       Deadline::after(&clock, Duration::from_secs(10)),
       token,
     );
-    let report = browser_extraction_report_with_runtime("firefox", None, None, &runtime)
-      .expect("typed stop becomes a report termination");
+    let report = browser_extraction_report_with_runtime(
+      "firefox",
+      ProfileSelection::AllProfiles,
+      None,
+      crate::SessionPolicy::IncludeSession,
+      &runtime,
+    )
+    .expect("typed stop becomes a report termination");
     assert_eq!(report.termination.as_str(), expected);
     assert_eq!(report.status.as_str(), "failed");
     assert_eq!(report.summary.browsers_detected, 0);
@@ -204,8 +211,14 @@ fn stop_reasons_reach_the_report_wire_as_typed_request_issues() {
 
   let clock = ManualClock::default();
   let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::ZERO));
-  let report = browser_extraction_report_with_runtime("firefox", None, None, &runtime)
-    .expect("expired runtime becomes a report termination");
+  let report = browser_extraction_report_with_runtime(
+    "firefox",
+    ProfileSelection::AllProfiles,
+    None,
+    crate::SessionPolicy::IncludeSession,
+    &runtime,
+  )
+  .expect("expired runtime becomes a report termination");
   assert_eq!(report.termination.as_str(), "timed_out");
   assert_eq!(report.status.as_str(), "failed");
   assert_eq!(report.summary.browsers_detected, 0);
@@ -987,12 +1000,17 @@ fn same_browser_repeating_an_issue_still_aggregates() {
 
 #[test]
 fn an_unknown_browser_id_is_a_request_error_not_a_report() {
-  assert!(browser_extraction_report("definitely_not_a_browser", None, None).is_err());
+  assert!(browser_extraction_report(
+    "definitely_not_a_browser",
+    ProfileSelection::AllProfiles,
+    None
+  )
+  .is_err());
   assert!(
     browser_profile_descriptors("definitely_not_a_browser", &ExecutionControl::default()).is_err()
   );
   // An alias-shaped but unregistered id must fail the same way.
-  assert!(browser_extraction_report("", None, None).is_err());
+  assert!(browser_extraction_report("", ProfileSelection::AllProfiles, None).is_err());
 }
 
 #[test]

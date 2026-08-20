@@ -354,8 +354,9 @@ fn unknown_profile_ids_are_request_errors() {
 fn extract_report_without_profile_matches_browser_report() {
   let _home = seeded_chrome("extract-report-eq");
   let via_report = rookie_cookies::browser_report("chrome", None, None).expect("report");
-  let via_extract = rookie_cookies::extract_report(rookie_cookies::Request::browser("chrome"))
-    .expect("extract_report");
+  let via_extract =
+    rookie_cookies::extract_report(rookie_cookies::ReportRequest::browser("chrome"))
+      .expect("extract_report");
   assert_eq!(via_report.status, via_extract.status);
   assert_eq!(via_report.profiles.len(), via_extract.profiles.len());
   assert_eq!(
@@ -378,7 +379,7 @@ fn no_profile_extract_matches_chrome() {
   let _home = seeded_chrome("extract-eq-chrome");
   let via_chrome = rookie_cookies::chrome(None).expect("chrome");
   let via_extract =
-    rookie_cookies::extract(rookie_cookies::Request::browser("chrome")).expect("extract");
+    rookie_cookies::extract(rookie_cookies::ExtractRequest::browser("chrome")).expect("extract");
   let mut chrome_keys: Vec<_> = via_chrome.iter().map(cookie_key).collect();
   let mut extract_keys: Vec<_> = via_extract.iter().map(cookie_key).collect();
   chrome_keys.sort();
@@ -1007,4 +1008,51 @@ fn a_row_with_an_empty_host_is_omitted_with_its_own_warning() {
     .find(|warning| warning.code() == "malformed_host_identity")
     .expect("the omission is counted, not silent");
   assert_eq!(warning.count(), 1);
+}
+
+/// PR 5's agreement test: one target, two shapes, the same profile.
+///
+/// 0.6-beta could not state this. One `Request` value meant "the first
+/// legacy-eligible profile" to `extract` and "every profile" to
+/// `extract_report`, so the two calls below would have described different
+/// profile sets while looking identical.
+#[test]
+fn an_extract_request_narrows_to_a_report_of_the_same_profile() {
+  let _home = seeded_chrome("extract-to-report");
+
+  let extract_request = rookie_cookies::ExtractRequest::browser("chrome");
+  let report =
+    rookie_cookies::extract_report(rookie_cookies::ReportRequest::from(extract_request.clone()))
+      .expect("narrowed report");
+  assert_eq!(
+    report.profiles.len(),
+    1,
+    "converting an extract request narrows to its one profile, never widens to all"
+  );
+
+  // ...and the report of the same browser without a conversion is still all
+  // profiles, which is what `browser_report(id, None, ..)` has always meant.
+  let all = rookie_cookies::extract_report(rookie_cookies::ReportRequest::browser("chrome"))
+    .expect("all-profiles report");
+  assert_eq!(all.profiles.len(), 2);
+
+  let flat = rookie_cookies::extract(extract_request).expect("flat extract");
+  assert!(!flat.is_empty());
+}
+
+#[test]
+fn an_empty_browser_id_is_missing_browser_on_every_browser_job() {
+  for code in [
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser(""))
+      .expect_err("read")
+      .code(),
+    rookie_cookies::extract(rookie_cookies::ExtractRequest::browser(""))
+      .expect_err("extract")
+      .code(),
+    rookie_cookies::extract_report(rookie_cookies::ReportRequest::browser(""))
+      .expect_err("extract_report")
+      .code(),
+  ] {
+    assert_eq!(code, "missing_browser");
+  }
 }

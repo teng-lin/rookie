@@ -621,7 +621,13 @@ mod tests {
     std::fs::create_dir_all(&cookie_directory).expect("create Safari cookie directory");
     std::fs::write(cookie_directory.join("Cookies.binarycookies"), fixture)
       .expect("write Safari fixture");
-    test_seams::safari_report(&context, "safari", None, None).expect("extract Safari fixture")
+    test_seams::safari_report(
+      &context,
+      "safari",
+      registry::ProfileSelection::AllProfiles,
+      None,
+    )
+    .expect("extract Safari fixture")
   }
 
   fn empty_outcome_with_issue(code: &'static str) -> EngineExtract {

@@ -50,7 +50,13 @@ fn a_real_gecko_profile_reaches_the_frozen_report() {
   )
   .expect("write profiles.ini");
 
-  let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
+  let engine = test_seams::gecko_report(
+    &context,
+    "firefox",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("gecko report");
   let browser = BrowserId::known("firefox");
   let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
   let report = assemble(1, vec![outcome]);
@@ -79,8 +85,14 @@ fn a_real_chromium_profile_reaches_the_frozen_report() {
   let root = test_seams::primary_root_path(&context, "chrome");
   test_seams::seed_chromium_profile(&root, "Default", "Person 1");
 
-  let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
-    .expect("chromium report");
+  let registry_report = test_seams::chromium_report(
+    &context,
+    "chrome",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    no_keys(),
+  )
+  .expect("chromium report");
   let browser = BrowserId::known("chrome");
   let outcome =
     chromium_browser_outcome(&browser, registry_report).expect("adapt the chromium report");
@@ -102,7 +114,13 @@ fn an_absent_installation_reaches_the_report_as_no_sources() {
   let temp = TempDir::new("absent");
   let context = test_seams::current_context(temp.path().to_path_buf());
 
-  let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
+  let engine = test_seams::gecko_report(
+    &context,
+    "firefox",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("gecko report");
   assert!(engine.profiles.is_empty());
   let browser = BrowserId::known("firefox");
   let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
@@ -244,7 +262,13 @@ fn a_real_safari_profile_reaches_the_frozen_report() {
   )
   .expect("seed Safari cookie file");
 
-  let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+  let engine = test_seams::safari_report(
+    &context,
+    "safari",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("safari report");
   let browser = BrowserId::known("safari");
   let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
   let report = assemble(1, vec![outcome]);
@@ -280,7 +304,13 @@ fn safari_report_from_embedded_nul_fixture(
   )
   .expect("seed Safari embedded-NUL fixture");
 
-  let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+  let engine = test_seams::safari_report(
+    &context,
+    "safari",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("safari report");
   let outcome =
     engine_extract_outcome(&BrowserId::known("safari"), engine).expect("adapt the Safari report");
   assemble(1, vec![outcome])
@@ -343,7 +373,13 @@ fn a_library_without_safari_data_is_not_a_safari_installation() {
   std::fs::create_dir_all(library.join("Application Support/Firefox/Profiles/other"))
     .expect("create an unrelated browser tree under the library root");
 
-  let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+  let engine = test_seams::safari_report(
+    &context,
+    "safari",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("safari report");
   let browser = BrowserId::known("safari");
   let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
   let report = assemble(1, vec![outcome]);
@@ -369,7 +405,13 @@ fn a_pre_sandbox_cookie_jar_is_still_a_safari_installation() {
   )
   .expect("seed Safari cookie file");
 
-  let engine = test_seams::safari_report(&context, "safari", None, None).expect("safari report");
+  let engine = test_seams::safari_report(
+    &context,
+    "safari",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("safari report");
   let browser = BrowserId::known("safari");
   let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
   let report = assemble(1, vec![outcome]);
@@ -390,8 +432,12 @@ fn a_real_internet_explorer_profile_reaches_the_frozen_report() {
 
   // The ESE reader is injected, so this exercises the adapter chain without
   // needing a real ESE database on a non-Windows host.
-  let engine =
-    test_seams::internet_explorer_report(&context, "internet_explorer", None, None, |origin, _| {
+  let engine = test_seams::internet_explorer_report(
+    &context,
+    "internet_explorer",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    |origin, _| {
       Ok(extracted_internet_explorer_source(
         origin,
         vec![crate::browser::cookie_record::CookieRecord::from_cookie(
@@ -412,8 +458,9 @@ fn a_real_internet_explorer_profile_reaches_the_frozen_report() {
         0,
         None,
       ))
-    })
-    .expect("internet explorer report");
+    },
+  )
+  .expect("internet explorer report");
 
   let browser = BrowserId::known("internet_explorer");
   let outcome = engine_extract_outcome(&browser, engine).expect("adapt the engine outcome");
@@ -449,8 +496,14 @@ fn an_installed_chromium_profile_without_a_cookie_store_is_no_sources() {
   test_seams::seed_chromium_profile(&root, "Default", "Person 1");
   std::fs::remove_file(root.join("Default/Cookies")).expect("remove the cookie database");
 
-  let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
-    .expect("chromium report");
+  let registry_report = test_seams::chromium_report(
+    &context,
+    "chrome",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    no_keys(),
+  )
+  .expect("chromium report");
   assert_eq!(registry_report.installations.len(), 1);
   assert!(registry_report.installations[0].profiles.is_empty());
 
@@ -495,7 +548,13 @@ fn a_rejected_row_keeps_the_gecko_source_succeeded_and_the_report_partial() {
     .expect("seed rows");
   drop(connection);
 
-  let engine = test_seams::gecko_report(&context, "firefox", None, None).expect("gecko report");
+  let engine = test_seams::gecko_report(
+    &context,
+    "firefox",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("gecko report");
   let outcome =
     engine_extract_outcome(&BrowserId::known("firefox"), engine).expect("adapt the engine outcome");
   let report = assemble(1, vec![outcome]);
@@ -554,15 +613,21 @@ fn selecting_a_chromium_profile_keeps_the_discovered_installation_count() {
   test_seams::seed_chromium_profile(&roots[0], "Default", "Person 1");
   test_seams::seed_chromium_profile(&roots[1], "Default", "Person 2");
 
-  let all = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
-    .expect("chromium report");
+  let all = test_seams::chromium_report(
+    &context,
+    "chrome",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    no_keys(),
+  )
+  .expect("chromium report");
   assert_eq!(all.installations_discovered, 2);
   let selected_profile = all.installations[0].profiles[0].profile.profile_id.clone();
 
   let one = test_seams::chromium_report(
     &context,
     "chrome",
-    Some(selected_profile.as_str()),
+    registry::ProfileSelection::ProfileId(selected_profile.as_str()),
     None,
     no_keys(),
   )
@@ -642,13 +707,24 @@ fn a_profile_selected_gecko_report_says_what_the_post_filtered_report_said() {
   .expect("write profiles.ini");
 
   let browser = BrowserId::known("firefox");
-  let full = test_seams::gecko_report(&context, "firefox", None, None).expect("full report");
+  let full = test_seams::gecko_report(
+    &context,
+    "firefox",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("full report");
   assert_eq!(full.profiles.len(), 2);
   let selected = full.profiles[1].identity.profile_id.as_str().to_owned();
   let expected = post_filtered_extract_report(&browser, full, &selected);
 
-  let engine = test_seams::gecko_report(&context, "firefox", Some(&selected), None)
-    .expect("profile-selected report");
+  let engine = test_seams::gecko_report(
+    &context,
+    "firefox",
+    registry::ProfileSelection::ProfileId(&selected),
+    None,
+  )
+  .expect("profile-selected report");
   let actual = selected_extract_report(&browser, engine);
 
   assert_eq!(actual.status, ReportStatusCode::partial());
@@ -683,13 +759,24 @@ fn a_profile_selected_safari_report_says_what_the_post_filtered_report_said() {
     .expect("create Safari profile marker directory");
 
   let browser = BrowserId::known("safari");
-  let full = test_seams::safari_report(&context, "safari", None, None).expect("full report");
+  let full = test_seams::safari_report(
+    &context,
+    "safari",
+    registry::ProfileSelection::AllProfiles,
+    None,
+  )
+  .expect("full report");
   assert_eq!(full.profiles.len(), 2);
   let selected = full.profiles[1].identity.profile_id.as_str().to_owned();
   let expected = post_filtered_extract_report(&browser, full, &selected);
 
-  let engine = test_seams::safari_report(&context, "safari", Some(&selected), None)
-    .expect("profile-selected report");
+  let engine = test_seams::safari_report(
+    &context,
+    "safari",
+    registry::ProfileSelection::ProfileId(&selected),
+    None,
+  )
+  .expect("profile-selected report");
   assert_eq!(
     wire(&selected_extract_report(&browser, engine)),
     wire(&expected)
@@ -735,8 +822,14 @@ fn a_profile_selected_internet_explorer_report_says_what_the_post_filtered_repor
   };
 
   let browser = BrowserId::known("internet_explorer");
-  let full = test_seams::internet_explorer_report(&context, "internet_explorer", None, None, rows)
-    .expect("full report");
+  let full = test_seams::internet_explorer_report(
+    &context,
+    "internet_explorer",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    rows,
+  )
+  .expect("full report");
   assert_eq!(full.profiles.len(), 2);
   let selected = full.profiles[1].identity.profile_id.as_str().to_owned();
   let expected = post_filtered_extract_report(&browser, full, &selected);
@@ -744,7 +837,7 @@ fn a_profile_selected_internet_explorer_report_says_what_the_post_filtered_repor
   let engine = test_seams::internet_explorer_report(
     &context,
     "internet_explorer",
-    Some(&selected),
+    registry::ProfileSelection::ProfileId(&selected),
     None,
     rows,
   )
@@ -784,8 +877,14 @@ fn an_undecryptable_row_does_not_fail_the_chromium_source() {
     .expect("insert encrypted cookie");
   drop(connection);
 
-  let registry_report = test_seams::chromium_report(&context, "chrome", None, None, no_keys())
-    .expect("chromium report");
+  let registry_report = test_seams::chromium_report(
+    &context,
+    "chrome",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    no_keys(),
+  )
+  .expect("chromium report");
   assert!(
     registry_report.installations[0].profiles[0]
       .sources
@@ -850,8 +949,14 @@ fn a_confidential_provider_failure_keeps_its_exact_report_code() {
     v11: ChromiumKeyOutcome::failure("Secret Service confidential-session negotiation failed"),
     v20: ChromiumKeyOutcome::NotApplicable,
   };
-  let registry_report =
-    test_seams::chromium_report(&context, "chrome", None, None, keys).expect("chromium report");
+  let registry_report = test_seams::chromium_report(
+    &context,
+    "chrome",
+    registry::ProfileSelection::AllProfiles,
+    None,
+    keys,
+  )
+  .expect("chromium report");
   let outcome = chromium_browser_outcome(&BrowserId::known("chrome"), registry_report)
     .expect("adapt the chromium report");
   let report = assemble(1, vec![outcome]);

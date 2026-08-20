@@ -9,7 +9,7 @@
 //! `lib.rs` re-exports the names, so every public path is unchanged.
 
 use super::legacy_load_browsers;
-use crate::{browser, common, enums::Cookie, MozillaProfile, Request};
+use crate::{browser, common, enums::Cookie, ExtractRequest, MozillaProfile};
 use anyhow::Result;
 
 /// Thin compatibility projection over registry-backed discovery/extraction.
@@ -31,7 +31,7 @@ pub(super) fn named_browser(name: &str, domains: Option<Vec<String>>) -> Result<
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"firefox\", domains) or extract(Request::browser(\"firefox\")) instead"
+  note = "use browser(\"firefox\", domains) or extract(ExtractRequest::browser(\"firefox\")) instead"
 )]
 pub fn firefox(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("firefox", domains)
@@ -79,14 +79,18 @@ pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use extract(Request::browser(\"firefox\").profile(q)); \
+  note = "use extract(ExtractRequest::browser(\"firefox\").profile(q)); \
           list with browser_profiles(\"firefox\")"
 )]
 pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+  // The bridge's Gecko profile selector has always included the profile's
+  // declared session store, so it opts in explicitly now that the new surface
+  // does not.
   crate::extract_inner(
-    Request::browser("firefox")
+    ExtractRequest::browser("firefox")
       .profile(profile)
       .domains(domains)
+      .include_session()
       .execution(crate::legacy_execution()),
   )
 }
@@ -105,7 +109,7 @@ pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Ve
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"librewolf\", domains) or extract(Request::browser(\"librewolf\")) instead"
+  note = "use browser(\"librewolf\", domains) or extract(ExtractRequest::browser(\"librewolf\")) instead"
 )]
 pub fn librewolf(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("librewolf", domains)
@@ -126,7 +130,7 @@ pub fn librewolf(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 #[cfg(target_os = "linux")]
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"cachy\", domains) or extract(Request::browser(\"cachy\")) instead"
+  note = "use browser(\"cachy\", domains) or extract(ExtractRequest::browser(\"cachy\")) instead"
 )]
 pub fn cachy(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("cachy", domains)
@@ -146,7 +150,7 @@ pub fn cachy(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"chrome\", domains) or extract(Request::browser(\"chrome\")) instead"
+  note = "use browser(\"chrome\", domains) or extract(ExtractRequest::browser(\"chrome\")) instead"
 )]
 pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("chrome", domains)
@@ -166,7 +170,7 @@ pub fn chrome(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"chromium\", domains) or extract(Request::browser(\"chromium\")) instead"
+  note = "use browser(\"chromium\", domains) or extract(ExtractRequest::browser(\"chromium\")) instead"
 )]
 pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("chromium", domains)
@@ -186,7 +190,7 @@ pub fn chromium(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"brave\", domains) or extract(Request::browser(\"brave\")) instead"
+  note = "use browser(\"brave\", domains) or extract(ExtractRequest::browser(\"brave\")) instead"
 )]
 pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("brave", domains)
@@ -206,7 +210,7 @@ pub fn brave(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"arc\", domains) or extract(Request::browser(\"arc\")) instead"
+  note = "use browser(\"arc\", domains) or extract(ExtractRequest::browser(\"arc\")) instead"
 )]
 pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("arc", domains)
@@ -226,7 +230,7 @@ pub fn arc(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"zen\", domains) or extract(Request::browser(\"zen\")) instead"
+  note = "use browser(\"zen\", domains) or extract(ExtractRequest::browser(\"zen\")) instead"
 )]
 pub fn zen(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("zen", domains)
@@ -246,7 +250,7 @@ pub fn zen(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"edge\", domains) or extract(Request::browser(\"edge\")) instead"
+  note = "use browser(\"edge\", domains) or extract(ExtractRequest::browser(\"edge\")) instead"
 )]
 pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("edge", domains)
@@ -266,7 +270,7 @@ pub fn edge(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"vivaldi\", domains) or extract(Request::browser(\"vivaldi\")) instead"
+  note = "use browser(\"vivaldi\", domains) or extract(ExtractRequest::browser(\"vivaldi\")) instead"
 )]
 pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("vivaldi", domains)
@@ -286,7 +290,7 @@ pub fn vivaldi(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"opera\", domains) or extract(Request::browser(\"opera\")) instead"
+  note = "use browser(\"opera\", domains) or extract(ExtractRequest::browser(\"opera\")) instead"
 )]
 pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("opera", domains)
@@ -308,7 +312,7 @@ pub fn opera(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   any(target_os = "macos", target_os = "windows"),
   deprecated(
     since = "0.6.0",
-    note = "use browser(\"opera_gx\", domains) or extract(Request::browser(\"opera_gx\")) instead"
+    note = "use browser(\"opera_gx\", domains) or extract(ExtractRequest::browser(\"opera_gx\")) instead"
   )
 )]
 #[cfg_attr(
@@ -337,7 +341,7 @@ pub fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"octo_browser\", domains) or extract(Request::browser(\"octo_browser\")) instead"
+  note = "use browser(\"octo_browser\", domains) or extract(ExtractRequest::browser(\"octo_browser\")) instead"
 )]
 pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("octo_browser", domains)
@@ -358,7 +362,7 @@ pub fn octo_browser(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 #[cfg(target_os = "macos")]
 #[deprecated(
   since = "0.6.0",
-  note = "use browser(\"safari\", domains) or extract(Request::browser(\"safari\")) instead"
+  note = "use browser(\"safari\", domains) or extract(ExtractRequest::browser(\"safari\")) instead"
 )]
 pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   named_browser("safari", domains)
@@ -378,7 +382,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// 2022, and this crate is not planning to build that containment for it.
 /// Internet Explorer support is deprecated for removal in a future major
 /// version instead. `browser("internet_explorer", domains)` /
-/// `extract(Request::browser("internet_explorer"))` remain available for
+/// `extract(ExtractRequest::browser("internet_explorer"))` remain available for
 /// the rest of the deprecation window.
 ///
 /// # Arguments
