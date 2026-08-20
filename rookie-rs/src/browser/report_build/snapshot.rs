@@ -149,11 +149,13 @@ fn profile_snapshot_with_runtime(
     } else {
       EngineCause::NoDiscoveredSource
     };
-    return Err(EngineFailure::new(
-      cause,
-      format!("no {browser_id} source succeeded for profile {profile_id:?}"),
-    )
-    .into());
+    return Err(
+      EngineFailure::new(
+        cause,
+        format!("no {browser_id} source succeeded for profile {profile_id:?}"),
+      )
+      .into(),
+    );
   }
 
   Ok(SnapshotOutcome {

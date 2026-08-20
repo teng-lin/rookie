@@ -1083,8 +1083,9 @@ fn a_profile_whose_only_source_fails_is_an_error_not_an_empty_snapshot() {
   std::fs::write(&database, b"SQLite format 3\0definitely not a database")
     .expect("corrupt the seeded database");
 
-  let error = rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").profile(&profile_id))
-    .expect_err("a snapshot cannot report a total failure as an empty list");
+  let error =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").profile(&profile_id))
+      .expect_err("a snapshot cannot report a total failure as an empty list");
   assert!(
     matches!(error, rookie_cookies::Error::Engine(_)),
     "expected an engine failure, got {error:?}"
