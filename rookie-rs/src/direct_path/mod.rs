@@ -110,6 +110,9 @@ pub enum InvalidDirectPathOptionsReason {
   UnknownBrowserId,
   /// The requested registry identity belongs to another browser engine.
   BrowserIdIsNotChromium,
+  /// A Chromium database was recognized but the request named no credential
+  /// source, so only plaintext rows are readable.
+  MissingChromiumCredentials,
 }
 
 impl InvalidDirectPathOptionsReason {
@@ -122,6 +125,7 @@ impl InvalidDirectPathOptionsReason {
       Self::ProcessShutdownNotSupportedOnTarget => "process_shutdown_not_supported_on_target",
       Self::UnknownBrowserId => "unknown_browser_id",
       Self::BrowserIdIsNotChromium => "browser_id_is_not_chromium",
+      Self::MissingChromiumCredentials => "missing_chromium_credentials",
     }
   }
 }
@@ -274,27 +278,97 @@ impl fmt::Display for DirectPathError {
 
 impl std::error::Error for DirectPathError {}
 
-/// An owned request for automatic extraction from an explicit cookie source.
+/// An owned request for one explicit cookie file.
+///
+/// **New in 0.6.0**, replacing `DirectPathRequest` and `ChromiumPathRequest`.
+/// `DirectPathRequest` was `ChromiumPathRequest` minus credentials minus the
+/// locked-database policy, so the pair was one type split by whether the
+/// caller happened to know the file was Chromium -- a distinction that belongs
+/// in the credential *value*, not in the type. The split also produced a live
+/// asymmetry, where only one of them could ask for expired rows.
+///
+/// There is deliberately no `new`. A credential strategy is chosen at
+/// construction, so a request that cannot succeed on the target it was
+/// compiled for cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectPathRequest {
-  path: PathBuf,
-  domains: Option<Vec<String>>,
-  control: ExecutionControl,
+pub struct PathExtractRequest {
+  pub(crate) target: PathTarget,
+  pub(crate) domains: Option<Vec<String>>,
+  pub(crate) control: ExecutionControl,
 }
 
-impl DirectPathRequest {
-  /// Creates a request with no domain filter.
-  pub fn new(path: impl Into<PathBuf>) -> Self {
+/// Crate-private state shared by both path jobs, so the credential check and
+/// the locked-database policy are written once rather than per request type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathTarget {
+  pub(crate) path: PathBuf,
+  pub(crate) credentials: Option<ChromiumCredentialSource>,
+  pub(crate) locked_database_policy: ChromiumLockedDatabasePolicy,
+}
+
+impl PathExtractRequest {
+  /// Reads an encrypted Chromium database using one registry browser identity
+  /// (Linux keyring / macOS Keychain).
+  ///
+  /// Unix-only, because a registry identity means nothing on Windows. The body
+  /// lives in the platform leaf so `direct_path/mod.rs` gains no platform
+  /// `cfg` beyond the selection gate here.
+  #[cfg(unix)]
+  pub fn unix_identity(path: impl Into<PathBuf>, browser_id: impl Into<String>) -> Self {
+    platform::unix_identity(path, browser_id)
+  }
+
+  /// Reads an encrypted Chromium database using a caller-supplied
+  /// `Local State` file. Windows-only, for the same reason in reverse.
+  #[cfg(windows)]
+  pub fn windows_local_state(path: impl Into<PathBuf>, local_state: impl Into<PathBuf>) -> Self {
+    platform::windows_local_state(path, local_state)
+  }
+
+  /// Reads only plaintext rows. Portable, and fails the whole request if any
+  /// row is encrypted.
+  pub fn plaintext(path: impl Into<PathBuf>) -> Self {
+    Self::with_credentials(path, Some(ChromiumCredentialSource::PlaintextOnly))
+  }
+
+  /// Identifies the source from its signature and schema, with no credentials.
+  ///
+  /// A Mozilla, Safari, or Internet Explorer store needs none. A Chromium
+  /// store is then plaintext-capable only: an encrypted row is
+  /// `missing_chromium_credentials` rather than a guess at which browser wrote
+  /// it. On Unix this is a real narrowing -- `cookies_from_path` used to probe
+  /// every registry identity. On Windows it is a widening: that call returned
+  /// `missing_local_state_file` before attempting extraction, so even a fully
+  /// plaintext database failed.
+  pub fn sniff(path: impl Into<PathBuf>) -> Self {
+    Self::with_credentials(path, None)
+  }
+
+  pub(crate) fn with_credentials(
+    path: impl Into<PathBuf>,
+    credentials: Option<ChromiumCredentialSource>,
+  ) -> Self {
     Self {
-      path: path.into(),
+      target: PathTarget {
+        path: path.into(),
+        credentials,
+        locked_database_policy: ChromiumLockedDatabasePolicy::NonDisruptive,
+      },
       domains: None,
       control: ExecutionControl::default(),
     }
   }
 
-  /// Restricts emitted cookies to the supplied domain boundaries.
-  pub fn domains(mut self, domains: Vec<String>) -> Self {
-    self.domains = Some(domains);
+  /// Restricts emitted cookies to the supplied domain boundaries, or clears a
+  /// prior restriction on `None`.
+  pub fn domains(mut self, domains: Option<Vec<String>>) -> Self {
+    self.domains = domains;
+    self
+  }
+
+  /// Selects whether Windows may stop processes to acquire a locked database.
+  pub fn locked_database_policy(mut self, policy: ChromiumLockedDatabasePolicy) -> Self {
+    self.target.locked_database_policy = policy;
     self
   }
 
@@ -304,7 +378,7 @@ impl DirectPathRequest {
     self
   }
 
-  /// Lets `handle` cancel this request from another thread while it runs —
+  /// Lets `handle` cancel this request from another thread while it runs --
   /// see [`crate::CancellationHandle`].
   pub fn cancellation(mut self, handle: crate::CancellationHandle) -> Self {
     self.control = self.control.cancellation(handle);
@@ -326,16 +400,24 @@ impl DirectPathRequest {
 }
 
 /// How an explicit Chromium request obtains decryption credentials.
+///
+/// **`Automatic` was removed in 0.6.0.** It was the default on
+/// `ChromiumPathRequest::new`, it worked on Unix through a historical ordered
+/// identity probe, and it could never succeed on Windows -- every Windows
+/// request built that way returned `missing_local_state_file` before
+/// attempting extraction. A default that cannot work on one of three
+/// platforms is a defect in the default, not a property of direct-path
+/// extraction, so a strategy valid for the target is now chosen at
+/// construction.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChromiumCredentialSource {
-  /// Uses the platform's historical ordered identity probe.
-  Automatic,
   /// Rejects the entire request if any row is encrypted.
   PlaintextOnly,
-  /// Uses one exact registry browser identity on supported targets.
+  /// Uses one exact registry browser identity. Invalid on Windows.
   BrowserId(String),
-  /// Uses a caller-supplied Windows Chromium Local State file.
+  /// Uses a caller-supplied Windows Chromium Local State file. Invalid on
+  /// Unix.
   LocalStateFile(PathBuf),
 }
 
@@ -350,137 +432,62 @@ pub enum ChromiumLockedDatabasePolicy {
   AllowProcessShutdown,
 }
 
-/// An owned, builder-only request for an explicit Chromium cookie database.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChromiumPathRequest {
-  path: PathBuf,
-  domains: Option<Vec<String>>,
-  credentials: ChromiumCredentialSource,
-  locked_database_policy: ChromiumLockedDatabasePolicy,
-  control: ExecutionControl,
+/// Extracts cookies from one explicit cookie file.
+///
+/// **New in 0.6.0**, replacing `cookies_from_path`,
+/// `chromium_cookies_from_path`, and `chromium_cookies_from_path_detailed`.
+/// The Chromium-vs-sniff distinction is carried by the request's credential
+/// value rather than by three functions.
+///
+/// Detailed (isolation-carrying) output from a path now comes from
+/// [`crate::from_path`]`(..).detailed_cookies()`, which is the same rule the
+/// browser axis already follows.
+///
+/// # Examples
+///
+/// ```no_run
+/// use rookie_cookies::direct_path::{extract_from_path, PathExtractRequest};
+///
+/// let cookies = extract_from_path(
+///   PathExtractRequest::plaintext("/path/to/Cookies")
+///     .domains(Some(vec!["example.com".to_owned()])),
+/// )?;
+/// println!("{}", cookies.len());
+/// # Ok::<(), rookie_cookies::Error>(())
+/// ```
+pub fn extract_from_path(request: PathExtractRequest) -> crate::Result<Vec<Cookie>> {
+  crate::error::map_job_result(extract_from_path_inner(request))
 }
 
-impl ChromiumPathRequest {
-  /// Creates an automatic, non-disruptive request with no domain filter.
-  pub fn new(path: impl Into<PathBuf>) -> Self {
-    Self {
-      path: path.into(),
-      domains: None,
-      credentials: ChromiumCredentialSource::Automatic,
-      locked_database_policy: ChromiumLockedDatabasePolicy::NonDisruptive,
-      control: ExecutionControl::default(),
-    }
-  }
-
-  /// Restricts emitted cookies to the supplied domain boundaries.
-  pub fn domains(mut self, domains: Vec<String>) -> Self {
-    self.domains = Some(domains);
-    self
-  }
-
-  /// Selects how decryption credentials are obtained.
-  pub fn credentials(mut self, credentials: ChromiumCredentialSource) -> Self {
-    self.credentials = credentials;
-    self
-  }
-
-  /// Selects whether Windows may stop processes to acquire a locked database.
-  pub fn locked_database_policy(mut self, policy: ChromiumLockedDatabasePolicy) -> Self {
-    self.locked_database_policy = policy;
-    self
-  }
-
-  /// Overrides the default 30-second extraction budget.
-  pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
-    self.control = self.control.timeout(timeout);
-    self
-  }
-
-  /// Lets `handle` cancel this request from another thread while it runs —
-  /// see [`crate::CancellationHandle`].
-  pub fn cancellation(mut self, handle: crate::CancellationHandle) -> Self {
-    self.control = self.control.cancellation(handle);
-    self
-  }
-
-  /// Selects the Windows App-Bound (v20) recovery policy for this request.
-  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
-    self.control = self.control.app_bound(policy);
-    self
-  }
-
-  /// Replaces this request's execution control **wholesale**, discarding an
-  /// earlier `timeout` / `cancellation` / `app_bound` call.
-  pub fn execution(mut self, control: ExecutionControl) -> Self {
-    self.control = control;
-    self
-  }
-}
-
-/// Extracts cookies after identifying the explicit source by signature/schema.
-pub fn cookies_from_path(request: DirectPathRequest) -> crate::Result<Vec<Cookie>> {
-  crate::error::map_job_result(cookies_from_path_inner(request))
-}
-
-pub(crate) fn cookies_from_path_inner(request: DirectPathRequest) -> Result<Vec<Cookie>> {
+pub(crate) fn extract_from_path_inner(request: PathExtractRequest) -> Result<Vec<Cookie>> {
   Ok(
-    cookies_from_path_detailed_inner(request)?
+    detailed_from_path_inner(request)?
       .into_iter()
       .map(DetailedCookie::into_cookie)
       .collect(),
   )
 }
 
-/// The detailed seam behind both `cookies_from_path` and `from_path`.
+/// The detailed seam behind both [`extract_from_path`] and
+/// [`crate::from_path`].
 ///
-/// `from_path` is a snapshot job, so it must keep isolation; the flat
-/// direct-path function projects it away at its own edge rather than in the
-/// middle of the pipeline.
-pub(crate) fn cookies_from_path_detailed_inner(
-  request: DirectPathRequest,
-) -> Result<Vec<DetailedCookie>> {
+/// `from_path` is a snapshot job, so it must keep isolation; the flat function
+/// above projects it away at its own edge rather than in the middle of the
+/// pipeline, which is where the projection used to be lost.
+pub(crate) fn detailed_from_path_inner(request: PathExtractRequest) -> Result<Vec<DetailedCookie>> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::runtime_for_control(&clock, &request.control);
-  let source = classify_cookie_source(&request.path, &runtime)?;
-  platform::cookies_from_path_detailed(request, source, &runtime)
-}
-
-/// Extracts cookies from an explicit Chromium SQLite database.
-pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> crate::Result<Vec<Cookie>> {
-  crate::error::map_job_result(chromium_cookies_from_path_inner(request))
-}
-
-pub(crate) fn chromium_cookies_from_path_inner(
-  request: ChromiumPathRequest,
-) -> Result<Vec<Cookie>> {
-  let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::runtime_for_control(&clock, &request.control);
-  #[cfg(not(target_os = "windows"))]
-  {
-    let source = classify_cookie_source(&request.path, &runtime)?;
-    require_chromium_source(&request.path, source)?;
+  // Windows Chromium acquisition owns its own classification, because a locked
+  // database has to be recovered before it can be classified at all.
+  #[cfg(target_os = "windows")]
+  if request.target.credentials.is_some() {
+    return platform::chromium_from_path_detailed(request, &runtime);
   }
-  platform::chromium_cookies_from_path(request, &runtime)
-}
-
-/// Detailed counterpart to [`chromium_cookies_from_path`].
-pub fn chromium_cookies_from_path_detailed(
-  request: ChromiumPathRequest,
-) -> crate::Result<Vec<DetailedCookie>> {
-  crate::error::map_job_result(chromium_cookies_from_path_detailed_inner(request))
-}
-
-pub(crate) fn chromium_cookies_from_path_detailed_inner(
-  request: ChromiumPathRequest,
-) -> Result<Vec<DetailedCookie>> {
-  let clock = crate::common::deadline::SystemClock;
-  let runtime = crate::common::deadline::runtime_for_control(&clock, &request.control);
-  #[cfg(not(target_os = "windows"))]
-  {
-    let source = classify_cookie_source(&request.path, &runtime)?;
-    require_chromium_source(&request.path, source)?;
+  let source = classify_cookie_source(&request.target.path, &runtime)?;
+  if request.target.credentials.is_some() {
+    require_chromium_source(&request.target.path, source)?;
   }
-  platform::chromium_cookies_from_path_detailed(request, &runtime)
+  platform::detailed_from_path(request, source, &runtime)
 }
 
 fn classify_cookie_source(
@@ -565,34 +572,6 @@ fn automatic_chromium_cookies(
         runtime,
       );
       crate::browser::chromium::chromium_based_probe_with_key_outcomes(
-        outcomes, db_path, domains, false, runtime,
-      )
-    },
-    |candidate| (candidate.cookie_count(), candidate.rows_skipped),
-    |candidate| candidate.project_committed(),
-  )
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn automatic_chromium_detailed(
-  ids: &[&'static str],
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<Vec<DetailedCookie>> {
-  let identities = automatic_identities(ids)?;
-  automatic_chromium_with(
-    &identities,
-    db_path,
-    domains,
-    runtime,
-    crate::browser::chromium_platform_keys::HostKeySession::new,
-    |session, _name, credentials, db_path, domains| {
-      let outcomes = session.retrieve(
-        crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
-        runtime,
-      );
-      crate::browser::chromium::chromium_based_detailed_probe_with_key_outcomes(
         outcomes, db_path, domains, false, runtime,
       )
     },
@@ -699,15 +678,17 @@ pub(crate) fn legacy_windows_chromium_with_runtime(
   force_kill: bool,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let mut request = ChromiumPathRequest::new(db_path)
-    .credentials(ChromiumCredentialSource::LocalStateFile(local_state));
+  let mut request = PathExtractRequest::with_credentials(
+    db_path,
+    Some(ChromiumCredentialSource::LocalStateFile(local_state)),
+  );
   if let Some(domains) = domains {
     request = request.domains(domains);
   }
   if force_kill {
     request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
   }
-  platform::chromium_cookies_from_path(request, runtime)
+  platform::extract_from_path(request, runtime)
 }
 
 #[cfg(target_os = "windows")]
@@ -718,15 +699,17 @@ pub(crate) fn legacy_windows_chromium_detailed_with_runtime(
   force_kill: bool,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let mut request = ChromiumPathRequest::new(db_path)
-    .credentials(ChromiumCredentialSource::LocalStateFile(local_state));
+  let mut request = PathExtractRequest::with_credentials(
+    db_path,
+    Some(ChromiumCredentialSource::LocalStateFile(local_state)),
+  );
   if let Some(domains) = domains {
     request = request.domains(domains);
   }
   if force_kill {
     request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
   }
-  platform::chromium_cookies_from_path_detailed(request, runtime)
+  platform::detailed_from_path_inner(request, runtime)
 }
 
 #[cfg(test)]
@@ -841,7 +824,7 @@ mod tests {
       .join("missing");
     // The inner seam, so the assertion below can prove the `io::Error` cause
     // survives classification. The public edge deliberately drops the chain.
-    let error = cookies_from_path_inner(DirectPathRequest::new(&missing)).unwrap_err();
+    let error = extract_from_path_inner(PathExtractRequest::sniff(&missing)).unwrap_err();
     let typed = direct_path_error(&error);
     assert_eq!(typed.kind(), "invalid_source");
     assert_eq!(typed.code(), "not_a_regular_file");
@@ -863,7 +846,7 @@ mod tests {
     let path = directory.path().join("corrupt.sqlite");
     std::fs::write(&path, b"SQLite format 3\0corrupt fixture").unwrap();
 
-    let error = cookies_from_path_inner(DirectPathRequest::new(&path)).unwrap_err();
+    let error = extract_from_path_inner(PathExtractRequest::sniff(&path)).unwrap_err();
     let typed = direct_path_error(&error);
     assert_eq!(typed.kind(), "invalid_source");
     assert_eq!(typed.code(), "source_inspection_failed");
@@ -883,20 +866,53 @@ mod tests {
   #[test]
   fn explicit_chromium_rejects_a_recognized_mozilla_source_before_options() {
     let (_directory, path) = mozilla_database();
-    let request = ChromiumPathRequest::new(&path)
-      .credentials(ChromiumCredentialSource::BrowserId(String::new()))
-      .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
-    let error = chromium_cookies_from_path(request).unwrap_err();
+    let request = PathExtractRequest::with_credentials(
+      &path,
+      Some(ChromiumCredentialSource::BrowserId(String::new())),
+    )
+    .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+    let error = extract_from_path(request).unwrap_err();
     let typed = source_error(&error);
     assert_eq!(typed.code(), "expected_chromium_sqlite");
     assert_eq!(typed.source_kind(), Some(CookieSourceKind::MozillaSqlite));
     assert_eq!(typed.target_os(), None);
   }
 
+  /// The 0.6.0 sniff rule, in both directions.
+  ///
+  /// A sniffed Chromium database is plaintext-capable only. On Unix that is a
+  /// narrowing -- `cookies_from_path` used to probe every registry identity
+  /// and could decrypt. On Windows it is a widening -- that call returned
+  /// `missing_local_state_file` before attempting extraction, so even a fully
+  /// plaintext database failed. Both halves are the same rule.
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+  #[test]
+  fn sniffing_a_plaintext_chromium_database_succeeds_on_every_target() {
+    let (_directory, path) = chromium_database(&[("wanted.test", "plaintext", b"")]);
+    let cookies =
+      extract_from_path(PathExtractRequest::sniff(path)).expect("a plaintext sniff must succeed");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].value, "plaintext");
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+  #[test]
+  fn sniffing_an_encrypted_chromium_database_is_missing_chromium_credentials() {
+    let (_directory, path) = chromium_database(&[("wanted.test", "", b"v10encrypted")]);
+    let error =
+      extract_from_path(PathExtractRequest::sniff(path)).expect_err("no credentials were named");
+    assert_eq!(
+      source_error(&error).invalid_options_reason(),
+      Some(&InvalidDirectPathOptionsReason::MissingChromiumCredentials),
+      "a sniffed Chromium database must not guess which browser wrote it"
+    );
+    assert_eq!(error.code(), "missing_chromium_credentials");
+  }
+
   #[test]
   fn mozilla_direct_path_is_available_on_every_compile_target() {
     let (_directory, path) = mozilla_database();
-    let cookies = cookies_from_path(DirectPathRequest::new(path)).unwrap();
+    let cookies = extract_from_path(PathExtractRequest::sniff(path)).unwrap();
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "portable");
     assert_eq!(cookies[0].value, "mozilla");
@@ -905,8 +921,9 @@ mod tests {
   #[test]
   fn direct_path_request_zero_timeout_stops_a_real_extraction() {
     let (_directory, path) = mozilla_database();
-    let error = cookies_from_path(DirectPathRequest::new(path).timeout(std::time::Duration::ZERO))
-      .expect_err("a zero timeout must stop before reading the real database");
+    let error =
+      extract_from_path(PathExtractRequest::sniff(path).timeout(std::time::Duration::ZERO))
+        .expect_err("a zero timeout must stop before reading the real database");
     assert_eq!(error.stop_reason(), Some(crate::StopReason::TimedOut));
     // A timeout checked during source classification still gets wrapped in a
     // `DirectPathError` (inspection failed, for whichever reason); the job edge
@@ -919,7 +936,7 @@ mod tests {
     let (_directory, path) = mozilla_database();
     let handle = crate::CancellationHandle::new();
     handle.cancel();
-    let error = cookies_from_path(DirectPathRequest::new(path).cancellation(handle))
+    let error = extract_from_path(PathExtractRequest::sniff(path).cancellation(handle))
       .expect_err("a pre-cancelled handle must stop before reading the real database");
     assert_eq!(error.stop_reason(), Some(crate::StopReason::Cancelled));
   }
@@ -927,9 +944,10 @@ mod tests {
   #[test]
   fn direct_path_request_with_a_generous_timeout_still_succeeds() {
     let (_directory, path) = mozilla_database();
-    let cookies =
-      cookies_from_path(DirectPathRequest::new(path).timeout(std::time::Duration::from_secs(30)))
-        .expect("a generous explicit timeout must not interfere with a real extraction");
+    let cookies = extract_from_path(
+      PathExtractRequest::sniff(path).timeout(std::time::Duration::from_secs(30)),
+    )
+    .expect("a generous explicit timeout must not interfere with a real extraction");
     assert_eq!(cookies.len(), 1);
   }
 
@@ -940,10 +958,8 @@ mod tests {
       ("wanted.test", "plaintext", b""),
       ("outside.test", "", b"v10encrypted"),
     ]);
-    let error = chromium_cookies_from_path(
-      ChromiumPathRequest::new(path)
-        .domains(vec!["wanted.test".to_owned()])
-        .credentials(ChromiumCredentialSource::PlaintextOnly),
+    let error = extract_from_path(
+      PathExtractRequest::plaintext(path).domains(Some(vec!["wanted.test".to_owned()])),
     )
     .expect_err("plaintext-only is a whole-request guarantee");
     assert!(error.to_string().contains("no browser key identity"));
@@ -964,19 +980,18 @@ mod tests {
     drop(connection);
 
     for detailed in [false, true] {
-      let request = ChromiumPathRequest::new(&path)
-        .domains(vec!["wanted.test".to_owned()])
-        .credentials(ChromiumCredentialSource::PlaintextOnly);
-      let error = if detailed {
-        chromium_cookies_from_path_detailed(request)
-          .map(|_| ())
+      let request =
+        PathExtractRequest::plaintext(&path).domains(Some(vec!["wanted.test".to_owned()]));
+      let message = if detailed {
+        detailed_from_path_inner(request)
           .expect_err("detailed plaintext-only request must not skip an encrypted malformed row")
+          .to_string()
       } else {
-        chromium_cookies_from_path(request)
-          .map(|_| ())
-          .expect_err("legacy plaintext-only request must not skip an encrypted malformed row")
+        extract_from_path_inner(request)
+          .expect_err("flat plaintext-only request must not skip an encrypted malformed row")
+          .to_string()
       };
-      assert!(error.to_string().contains("no browser key identity"));
+      assert!(message.contains("no browser key identity"));
     }
   }
 
@@ -984,14 +999,8 @@ mod tests {
   #[test]
   fn plaintext_only_supports_legacy_and_detailed_projection() {
     let (_directory, path) = chromium_database(&[("example.test", "value", b"")]);
-    let cookies = chromium_cookies_from_path(
-      ChromiumPathRequest::new(&path).credentials(ChromiumCredentialSource::PlaintextOnly),
-    )
-    .unwrap();
-    let detailed = chromium_cookies_from_path_detailed(
-      ChromiumPathRequest::new(&path).credentials(ChromiumCredentialSource::PlaintextOnly),
-    )
-    .unwrap();
+    let cookies = extract_from_path(PathExtractRequest::plaintext(&path)).unwrap();
+    let detailed = detailed_from_path_inner(PathExtractRequest::plaintext(&path)).unwrap();
     assert_eq!(cookies.len(), 1);
     assert_eq!(detailed.len(), 1);
     assert_eq!(cookies[0].name, detailed[0].cookie.name);
@@ -1002,10 +1011,8 @@ mod tests {
   #[test]
   fn chromium_path_request_zero_timeout_stops_a_real_extraction() {
     let (_directory, path) = chromium_database(&[("example.test", "value", b"")]);
-    let request = ChromiumPathRequest::new(&path)
-      .credentials(ChromiumCredentialSource::PlaintextOnly)
-      .timeout(std::time::Duration::ZERO);
-    let error = chromium_cookies_from_path(request)
+    let request = PathExtractRequest::plaintext(&path).timeout(std::time::Duration::ZERO);
+    let error = extract_from_path(request)
       .expect_err("a zero timeout must stop before reading the real database");
     assert_eq!(error.stop_reason(), Some(crate::StopReason::TimedOut));
   }
@@ -1016,10 +1023,8 @@ mod tests {
     let (_directory, path) = chromium_database(&[("example.test", "value", b"")]);
     let handle = crate::CancellationHandle::new();
     handle.cancel();
-    let request = ChromiumPathRequest::new(&path)
-      .credentials(ChromiumCredentialSource::PlaintextOnly)
-      .cancellation(handle);
-    let error = chromium_cookies_from_path(request)
+    let request = PathExtractRequest::plaintext(&path).cancellation(handle);
+    let error = extract_from_path(request)
       .expect_err("a pre-cancelled handle must stop before reading the real database");
     assert_eq!(error.stop_reason(), Some(crate::StopReason::Cancelled));
   }
@@ -1207,10 +1212,10 @@ mod tests {
         InvalidDirectPathOptionsReason::BrowserIdIsNotChromium,
       ),
     ] {
-      let error = chromium_cookies_from_path(
-        ChromiumPathRequest::new(&path)
-          .credentials(ChromiumCredentialSource::BrowserId(browser_id.to_owned())),
-      )
+      let error = extract_from_path(PathExtractRequest::with_credentials(
+        &path,
+        Some(ChromiumCredentialSource::BrowserId(browser_id.to_owned())),
+      ))
       .unwrap_err();
       assert_eq!(
         source_error(&error).invalid_options_reason(),
@@ -1224,30 +1229,35 @@ mod tests {
   fn unsupported_native_chromium_options_fail_before_credential_io() {
     let (_directory, path) = chromium_database(&[]);
     let local_state = PathBuf::from("this path must never be read");
-    let local_state_error =
-      chromium_cookies_from_path(ChromiumPathRequest::new(&path).credentials(
-        ChromiumCredentialSource::LocalStateFile(local_state.clone()),
-      ))
-      .unwrap_err();
+    let local_state_error = extract_from_path(PathExtractRequest::with_credentials(
+      &path,
+      Some(ChromiumCredentialSource::LocalStateFile(
+        local_state.clone(),
+      )),
+    ))
+    .unwrap_err();
     assert_eq!(
       source_error(&local_state_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
     );
 
-    let detailed_local_state_error = chromium_cookies_from_path_detailed(
-      ChromiumPathRequest::new(&path)
-        .credentials(ChromiumCredentialSource::LocalStateFile(local_state)),
-    )
-    .unwrap_err();
+    let detailed_local_state_error =
+      detailed_from_path_inner(PathExtractRequest::with_credentials(
+        &path,
+        Some(ChromiumCredentialSource::LocalStateFile(local_state)),
+      ))
+      .unwrap_err();
     assert_eq!(
-      source_error(&detailed_local_state_error).invalid_options_reason(),
+      direct_path_error(&detailed_local_state_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
     );
 
-    let shutdown_error = chromium_cookies_from_path(
-      ChromiumPathRequest::new(path)
-        .credentials(ChromiumCredentialSource::BrowserId("chrome".to_owned()))
-        .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
+    let shutdown_error = extract_from_path(
+      PathExtractRequest::with_credentials(
+        path,
+        Some(ChromiumCredentialSource::BrowserId("chrome".to_owned())),
+      )
+      .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
     )
     .unwrap_err();
     assert_eq!(
@@ -1261,18 +1271,20 @@ mod tests {
   fn windows_chromium_options_keep_the_explicit_credential_contract() {
     let (_directory, path) = chromium_database(&[]);
 
-    let generic_error = cookies_from_path(DirectPathRequest::new(&path)).unwrap_err();
+    let generic_error = extract_from_path(PathExtractRequest::sniff(&path)).unwrap_err();
     assert_eq!(
       direct_path_error(&generic_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
     );
 
     for request in [
-      ChromiumPathRequest::new(&path),
-      ChromiumPathRequest::new(&path)
-        .credentials(ChromiumCredentialSource::LocalStateFile(PathBuf::new())),
+      PathExtractRequest::sniff(&path),
+      PathExtractRequest::with_credentials(
+        &path,
+        Some(ChromiumCredentialSource::LocalStateFile(PathBuf::new())),
+      ),
     ] {
-      let error = chromium_cookies_from_path(request).unwrap_err();
+      let error = extract_from_path(request).unwrap_err();
       assert_eq!(
         source_error(&error).invalid_options_reason(),
         Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
@@ -1286,10 +1298,10 @@ mod tests {
         InvalidDirectPathOptionsReason::BrowserIdNotSupportedOnTarget,
       ),
     ] {
-      let error = chromium_cookies_from_path(
-        ChromiumPathRequest::new(&path)
-          .credentials(ChromiumCredentialSource::BrowserId(browser_id.to_owned())),
-      )
+      let error = extract_from_path(PathExtractRequest::with_credentials(
+        &path,
+        Some(ChromiumCredentialSource::BrowserId(browser_id.to_owned())),
+      ))
       .unwrap_err();
       assert_eq!(
         source_error(&error).invalid_options_reason(),
@@ -1297,9 +1309,8 @@ mod tests {
       );
     }
 
-    let cookies = chromium_cookies_from_path(
-      ChromiumPathRequest::new(path)
-        .credentials(ChromiumCredentialSource::PlaintextOnly)
+    let cookies = extract_from_path(
+      PathExtractRequest::plaintext(path)
         .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
     )
     .unwrap();
@@ -1310,33 +1321,33 @@ mod tests {
   #[test]
   fn browser_without_target_credentials_reads_plaintext_but_rejects_encrypted_rows() {
     let (_plain_directory, plain_path) = chromium_database(&[("example.test", "plaintext", b"")]);
-    let cookies = chromium_cookies_from_path(
-      ChromiumPathRequest::new(&plain_path)
-        .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
-    )
+    let cookies = extract_from_path(PathExtractRequest::with_credentials(
+      &plain_path,
+      Some(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
+    ))
     .unwrap();
     assert_eq!(cookies[0].value, "plaintext");
-    let detailed = chromium_cookies_from_path_detailed(
-      ChromiumPathRequest::new(plain_path)
-        .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
-    )
+    let detailed = detailed_from_path_inner(PathExtractRequest::with_credentials(
+      plain_path,
+      Some(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
+    ))
     .unwrap();
     assert_eq!(detailed[0].cookie.value, "plaintext");
 
     let (_encrypted_directory, encrypted_path) =
       chromium_database(&[("example.test", "", b"v10encrypted")]);
-    let error = chromium_cookies_from_path(
-      ChromiumPathRequest::new(&encrypted_path)
-        .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
-    )
+    let error = extract_from_path(PathExtractRequest::with_credentials(
+      &encrypted_path,
+      Some(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
+    ))
     .unwrap_err();
     let diagnostic = format!("{error:#}");
     assert!(diagnostic.contains("has no"), "{diagnostic}");
     assert!(diagnostic.contains("identity"), "{diagnostic}");
-    let detailed_error = chromium_cookies_from_path_detailed(
-      ChromiumPathRequest::new(encrypted_path)
-        .credentials(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
-    )
+    let detailed_error = detailed_from_path_inner(PathExtractRequest::with_credentials(
+      encrypted_path,
+      Some(ChromiumCredentialSource::BrowserId("coccoc".to_owned())),
+    ))
     .unwrap_err();
     let detailed_diagnostic = format!("{detailed_error:#}");
     assert!(
@@ -1355,7 +1366,7 @@ mod tests {
     let safari_directory = TempDir::new().unwrap();
     let safari_path = safari_directory.path().join("Cookies.binarycookies");
     std::fs::write(&safari_path, b"cookfixture-not-a-real-binarycookies-file").unwrap();
-    let safari_error = cookies_from_path(DirectPathRequest::new(&safari_path)).unwrap_err();
+    let safari_error = extract_from_path(PathExtractRequest::sniff(&safari_path)).unwrap_err();
     assert!(
       !matches!(safari_error, crate::Error::Source(_)),
       "a recognized Safari signature must reach the real parser, not stay a classification error: {safari_error:#}"
@@ -1510,7 +1521,7 @@ mod tests {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("Cookies.binarycookies");
     std::fs::write(&path, b"cookfixture").unwrap();
-    let error = cookies_from_path(DirectPathRequest::new(path)).unwrap_err();
+    let error = extract_from_path(PathExtractRequest::sniff(path)).unwrap_err();
     assert!(matches!(
       source_error(&error),
       DirectPathError::UnsupportedTarget {
@@ -1526,7 +1537,7 @@ mod tests {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("WebCacheV01.dat");
     std::fs::write(&path, [0, 0, 0, 0, 0xef, 0xcd, 0xab, 0x89]).unwrap();
-    let error = cookies_from_path(DirectPathRequest::new(path)).unwrap_err();
+    let error = extract_from_path(PathExtractRequest::sniff(path)).unwrap_err();
     assert!(matches!(
       source_error(&error),
       DirectPathError::UnsupportedTarget {

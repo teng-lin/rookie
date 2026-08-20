@@ -4,35 +4,35 @@
     {
       "path": "rookie_cookies::any_browser",
       "since": "0.6.0",
-      "note": "use direct_path::cookies_from_path with DirectPathRequest",
+      "note": "use direct_path::extract_from_path with PathExtractRequest",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
       "path": "rookie_cookies::chromium_based",
       "since": "0.6.0",
-      "note": "use direct_path::chromium_cookies_from_path with ChromiumPathRequest",
+      "note": "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
       "path": "rookie_cookies::chromium_based_detailed",
       "since": "0.6.0",
-      "note": "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest",
+      "note": "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
       "path": "rookie_cookies::internet_explorer_based",
       "since": "0.6.0",
-      "note": "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::cookies_from_path with DirectPathRequest for the rest of the deprecation window",
+      "note": "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::extract_from_path with PathExtractRequest for the rest of the deprecation window",
       "platforms": ["windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
       "path": "rookie_cookies::firefox_based",
       "since": "0.6.0",
-      "note": "use direct_path::cookies_from_path with DirectPathRequest",
+      "note": "use direct_path::extract_from_path with PathExtractRequest",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
@@ -46,7 +46,7 @@
     {
       "path": "rookie_cookies::safari_based",
       "since": "0.6.0",
-      "note": "use direct_path::cookies_from_path with DirectPathRequest",
+      "note": "use direct_path::extract_from_path with PathExtractRequest",
       "platforms": ["macos"],
       "feature_sets": ["all-features", "no-default-features"]
     },
@@ -60,14 +60,14 @@
     {
       "path": "rookie_cookies::chromium_based_detailed_with_browser_id",
       "since": "0.6.0",
-      "note": "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest",
+      "note": "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()",
       "platforms": ["linux", "macos"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
       "path": "rookie_cookies::chromium_based_with_browser_id",
       "since": "0.6.0",
-      "note": "use direct_path::chromium_cookies_from_path with ChromiumPathRequest",
+      "note": "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state",
       "platforms": ["linux", "macos"],
       "feature_sets": ["all-features", "no-default-features"]
     },

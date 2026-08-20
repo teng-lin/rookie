@@ -76,32 +76,52 @@ fn main() -> rookie_cookies::Result<()> {
 ## Explicit paths
 
 ```rust
-use std::path::PathBuf;
-use rookie_cookies::direct_path::{
-    chromium_cookies_from_path_detailed, cookies_from_path, ChromiumCredentialSource,
-    ChromiumPathRequest, DirectPathRequest,
-};
+use rookie_cookies::direct_path::{extract_from_path, PathExtractRequest};
 
 fn main() -> rookie_cookies::Result<()> {
-    let mozilla = cookies_from_path(DirectPathRequest::new(PathBuf::from(
-        "/path/to/cookies.sqlite",
-    )))?;
-    let chromium = chromium_cookies_from_path_detailed(
-        ChromiumPathRequest::new("/path/to/Network/Cookies")
-            .domains(vec!["example.com".to_owned()])
-            .credentials(ChromiumCredentialSource::BrowserId("brave".to_owned())),
+    // Sniff: identify the file from its signature. Mozilla, Safari, and IE
+    // stores need no credentials; a Chromium store is plaintext-capable only.
+    let mozilla = extract_from_path(PathExtractRequest::sniff("/path/to/cookies.sqlite"))?;
+
+    // An encrypted Chromium store needs an explicit strategy. The constructor
+    // that names one is platform-gated, because a registry identity means
+    // nothing on Windows and a `Local State` file means nothing on Unix.
+    #[cfg(unix)]
+    let chromium = extract_from_path(
+        PathExtractRequest::unix_identity("/path/to/Network/Cookies", "brave")
+            .domains(Some(vec!["example.com".to_owned()])),
     )?;
+    #[cfg(windows)]
+    let chromium = extract_from_path(
+        PathExtractRequest::windows_local_state(
+            "/path/to/Network/Cookies",
+            "/path/to/Local State",
+        )
+        .domains(Some(vec!["example.com".to_owned()])),
+    )?;
+
     println!("{} {}", mozilla.len(), chromium.len());
     Ok(())
 }
 ```
 
+**There is no `ChromiumPathRequest::new`.** Its default was
+`ChromiumCredentialSource::Automatic`, which worked on Unix and could never
+succeed on Windows — every Windows request built that way returned
+`missing_local_state_file` before attempting extraction. The constructors above
+require a strategy that is valid for the target they compile for.
+
+Isolation-carrying output from a path comes from
+`from_path(FromPathRequest::new(path)).detailed_cookies()`; `extract_from_path`
+is the domain-reducible flat list. That is the same shape rule the browser axis
+follows, and it is why there is no `chromium_cookies_from_path_detailed`.
+
 Every 0.6 job function returns `rookie_cookies::Result`, whose error is the
 typed `rookie_cookies::Error`:
 
 ```rust
-match rookie_cookies::direct_path::cookies_from_path(
-    rookie_cookies::direct_path::DirectPathRequest::new("/path/to/Cookies"),
+match rookie_cookies::direct_path::extract_from_path(
+    rookie_cookies::direct_path::PathExtractRequest::sniff("/path/to/Cookies"),
 ) {
     Ok(cookies) => println!("{}", cookies.len()),
     Err(rookie_cookies::Error::Source(source)) => {
@@ -356,7 +376,7 @@ fn main() {
 | Recommended entry | `chrome(None)` / `brave(Some(domains))` | `read(ReadRequest::browser(...).profile(...))` |
 | Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(ExtractRequest::…)` |
 | Gecko session cookies | Not a first-class `profile()` | `ReadRequest::browser(gecko_id).profile(query)` includes the declared session source |
-| Path APIs | `*_based`, `any_browser` | `direct_path::{cookies_from_path, ChromiumPathRequest, …}` (legacy deprecated until 0.7) |
+| Path APIs | `*_based`, `any_browser` | `direct_path::{extract_from_path, PathExtractRequest}` (legacy deprecated until 0.7) |
 | Errors | Flat `anyhow::Error` | Typed `rookie_cookies::Error` (`Request` / `Stopped` / `Source` / `Engine`) with a stable `code()`. **`rookie_cookies::Result` is no longer `anyhow::Result`**; bridge functions keep `anyhow::Result` and `rookie_cookies::anyhow::Result` still resolves |
 | Header / get | Not a job view | `ReadResult::header(url)` — **no** crate-root `get` or `report` |
 | IE helpers | `internet_explorer` / `internet_explorer_based` | Deprecated (ESE native C library; IE discontinued) |

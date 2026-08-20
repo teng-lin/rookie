@@ -146,7 +146,7 @@ fn fault_kind_classifies_a_typed_direct_path_error_as_a_request_fault() {
     .path()
     .join("no such parent directory")
     .join("missing");
-  let error = direct_path::cookies_from_path(direct_path::DirectPathRequest::new(&missing))
+  let error = direct_path::extract_from_path(direct_path::PathExtractRequest::sniff(&missing))
     .expect_err("a missing explicit source is a typed DirectPathError");
   assert_eq!(error.fault_kind(), FaultKind::Request);
 }

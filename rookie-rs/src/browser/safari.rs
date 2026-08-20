@@ -52,7 +52,7 @@ const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::cookies_from_path with DirectPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest"
 )]
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let clock = SystemClock;

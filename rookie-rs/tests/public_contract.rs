@@ -11,8 +11,8 @@ use rookie_cookies::config::{
   get_browser_config, try_get_browser_config, Browser, BrowsersMap, Config, CONFIG,
 };
 use rookie_cookies::direct_path::{
-  ChromiumCredentialSource, ChromiumLockedDatabasePolicy, ChromiumPathRequest, CookieSourceKind,
-  DirectPathError, DirectPathRequest, InvalidCookieSourceReason, InvalidDirectPathOptionsReason,
+  ChromiumLockedDatabasePolicy, CookieSourceKind, DirectPathError, InvalidCookieSourceReason,
+  InvalidDirectPathOptionsReason, PathExtractRequest,
 };
 use rookie_cookies::enums::{
   Cookie, CookieContext, CookieToString, DetailedCookie, SAME_SITE_UNSPECIFIED,
@@ -239,25 +239,30 @@ fn public_function_signatures_remain_compatible() {
 }
 
 #[test]
-fn direct_path_request_builders_and_functions_are_unconditional() {
-  let direct = DirectPathRequest::new("cookies.sqlite").domains(vec!["example.test".to_owned()]);
-  let chromium = ChromiumPathRequest::new("Cookies")
-    .domains(vec!["example.test".to_owned()])
-    .credentials(ChromiumCredentialSource::BrowserId("chrome".to_owned()))
+fn path_request_builders_and_functions_are_unconditional() {
+  // `sniff` and `plaintext` compile on every target; the credential-bearing
+  // constructors are deliberately platform-gated, and are pinned separately
+  // below so a cross-platform break is a compile error rather than a runtime
+  // one.
+  let sniffed =
+    PathExtractRequest::sniff("cookies.sqlite").domains(Some(vec!["example.test".to_owned()]));
+  let plaintext = PathExtractRequest::plaintext("Cookies")
     .locked_database_policy(ChromiumLockedDatabasePolicy::NonDisruptive);
-  let local_state = ChromiumPathRequest::new("Cookies").credentials(
-    ChromiumCredentialSource::LocalStateFile("Local State".into()),
-  );
-  let plaintext =
-    ChromiumPathRequest::new("Cookies").credentials(ChromiumCredentialSource::PlaintextOnly);
 
-  let _: fn(DirectPathRequest) -> Result<Vec<Cookie>> =
-    rookie_cookies::direct_path::cookies_from_path;
-  let _: fn(ChromiumPathRequest) -> Result<Vec<Cookie>> =
-    rookie_cookies::direct_path::chromium_cookies_from_path;
-  let _: fn(ChromiumPathRequest) -> Result<Vec<DetailedCookie>> =
-    rookie_cookies::direct_path::chromium_cookies_from_path_detailed;
-  let _ = (direct, chromium, local_state, plaintext);
+  let _: fn(PathExtractRequest) -> Result<Vec<Cookie>> =
+    rookie_cookies::direct_path::extract_from_path;
+  let _ = (sniffed, plaintext);
+}
+
+/// The credential constructors are the one place this crate's public surface
+/// deliberately differs per platform: a registry identity means nothing on
+/// Windows, and a `Local State` file means nothing on Unix.
+#[test]
+fn platform_credential_constructors_exist_only_where_they_can_work() {
+  #[cfg(unix)]
+  let _ = PathExtractRequest::unix_identity("Cookies", "chrome");
+  #[cfg(windows)]
+  let _ = PathExtractRequest::windows_local_state("Cookies", "Local State");
 }
 
 #[test]
@@ -277,7 +282,7 @@ fn direct_path_error_accessors_are_stable_for_downstream_consumers() {
     "rookie-public-direct-path-missing-{}",
     std::process::id()
   ));
-  let error = rookie_cookies::direct_path::cookies_from_path(DirectPathRequest::new(missing))
+  let error = rookie_cookies::direct_path::extract_from_path(PathExtractRequest::sniff(missing))
     .expect_err("missing source is invalid");
   let rookie_cookies::Error::Source(typed) = &error else {
     panic!("a path fault is Error::Source, got {error:?}");

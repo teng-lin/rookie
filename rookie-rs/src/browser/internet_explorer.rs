@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 /// available for the rest of the deprecation window.
 #[deprecated(
   since = "0.6.0",
-  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::cookies_from_path with DirectPathRequest for the rest of the deprecation window"
+  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::extract_from_path with PathExtractRequest for the rest of the deprecation window"
 )]
 pub fn internet_explorer_based(
   db_path: PathBuf,

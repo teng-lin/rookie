@@ -133,7 +133,6 @@ pub fn rookie_cookies::config::try_get_browser_config(&str) -> core::option::Opt
 pub type rookie_cookies::config::BrowsersMap = std::collections::hash::map::HashMap<alloc::string::String, rookie_cookies::config::Browser>
 pub mod rookie_cookies::direct_path
 #[non_exhaustive] pub enum rookie_cookies::direct_path::ChromiumCredentialSource
-pub rookie_cookies::direct_path::ChromiumCredentialSource::Automatic
 pub rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(alloc::string::String)
 pub rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(std::path::PathBuf)
 pub rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly
@@ -259,6 +258,7 @@ pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::BrowserIdIsNotC
 pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::BrowserIdNotSupportedOnTarget
 pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::EmptyBrowserId
 pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget
+pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::MissingChromiumCredentials
 pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::MissingLocalStateFile
 pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::ProcessShutdownNotSupportedOnTarget
 pub rookie_cookies::direct_path::InvalidDirectPathOptionsReason::UnknownBrowserId
@@ -277,55 +277,32 @@ impl core::marker::Sync for rookie_cookies::direct_path::InvalidDirectPathOption
 impl core::marker::Unpin for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
-pub struct rookie_cookies::direct_path::ChromiumPathRequest
-impl rookie_cookies::direct_path::ChromiumPathRequest
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::credentials(self, rookie_cookies::direct_path::ChromiumCredentialSource) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::locked_database_policy(self, rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::timeout(self, core::time::Duration) -> Self
-impl core::clone::Clone for rookie_cookies::direct_path::ChromiumPathRequest
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::clone(&self) -> rookie_cookies::direct_path::ChromiumPathRequest
-impl core::cmp::Eq for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::cmp::PartialEq for rookie_cookies::direct_path::ChromiumPathRequest
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::eq(&self, &rookie_cookies::direct_path::ChromiumPathRequest) -> bool
-impl core::fmt::Debug for rookie_cookies::direct_path::ChromiumPathRequest
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::marker::Freeze for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::marker::Send for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::marker::Sync for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::marker::Unpin for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::ChromiumPathRequest
-impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::ChromiumPathRequest
-pub struct rookie_cookies::direct_path::DirectPathRequest
-impl rookie_cookies::direct_path::DirectPathRequest
-pub fn rookie_cookies::direct_path::DirectPathRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
-pub fn rookie_cookies::direct_path::DirectPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
-pub fn rookie_cookies::direct_path::DirectPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
-pub fn rookie_cookies::direct_path::DirectPathRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
-pub fn rookie_cookies::direct_path::DirectPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
-pub fn rookie_cookies::direct_path::DirectPathRequest::timeout(self, core::time::Duration) -> Self
-impl core::clone::Clone for rookie_cookies::direct_path::DirectPathRequest
-pub fn rookie_cookies::direct_path::DirectPathRequest::clone(&self) -> rookie_cookies::direct_path::DirectPathRequest
-impl core::cmp::Eq for rookie_cookies::direct_path::DirectPathRequest
-impl core::cmp::PartialEq for rookie_cookies::direct_path::DirectPathRequest
-pub fn rookie_cookies::direct_path::DirectPathRequest::eq(&self, &rookie_cookies::direct_path::DirectPathRequest) -> bool
-impl core::fmt::Debug for rookie_cookies::direct_path::DirectPathRequest
-pub fn rookie_cookies::direct_path::DirectPathRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::DirectPathRequest
-impl core::marker::Freeze for rookie_cookies::direct_path::DirectPathRequest
-impl core::marker::Send for rookie_cookies::direct_path::DirectPathRequest
-impl core::marker::Sync for rookie_cookies::direct_path::DirectPathRequest
-impl core::marker::Unpin for rookie_cookies::direct_path::DirectPathRequest
-impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::DirectPathRequest
-impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::DirectPathRequest
-pub fn rookie_cookies::direct_path::chromium_cookies_from_path(rookie_cookies::direct_path::ChromiumPathRequest) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
-pub fn rookie_cookies::direct_path::chromium_cookies_from_path_detailed(rookie_cookies::direct_path::ChromiumPathRequest) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>
-pub fn rookie_cookies::direct_path::cookies_from_path(rookie_cookies::direct_path::DirectPathRequest) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub struct rookie_cookies::direct_path::PathExtractRequest
+impl rookie_cookies::direct_path::PathExtractRequest
+pub fn rookie_cookies::direct_path::PathExtractRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::locked_database_policy(self, rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::plaintext(impl core::convert::Into<std::path::PathBuf>) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::sniff(impl core::convert::Into<std::path::PathBuf>) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::timeout(self, core::time::Duration) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::windows_local_state(impl core::convert::Into<std::path::PathBuf>, impl core::convert::Into<std::path::PathBuf>) -> Self
+impl core::clone::Clone for rookie_cookies::direct_path::PathExtractRequest
+pub fn rookie_cookies::direct_path::PathExtractRequest::clone(&self) -> rookie_cookies::direct_path::PathExtractRequest
+impl core::cmp::Eq for rookie_cookies::direct_path::PathExtractRequest
+impl core::cmp::PartialEq for rookie_cookies::direct_path::PathExtractRequest
+pub fn rookie_cookies::direct_path::PathExtractRequest::eq(&self, &rookie_cookies::direct_path::PathExtractRequest) -> bool
+impl core::fmt::Debug for rookie_cookies::direct_path::PathExtractRequest
+pub fn rookie_cookies::direct_path::PathExtractRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::direct_path::PathExtractRequest
+impl core::marker::Freeze for rookie_cookies::direct_path::PathExtractRequest
+impl core::marker::Send for rookie_cookies::direct_path::PathExtractRequest
+impl core::marker::Sync for rookie_cookies::direct_path::PathExtractRequest
+impl core::marker::Unpin for rookie_cookies::direct_path::PathExtractRequest
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::PathExtractRequest
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::PathExtractRequest
+pub fn rookie_cookies::direct_path::extract_from_path(rookie_cookies::direct_path::PathExtractRequest) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub mod rookie_cookies::enums
 pub struct rookie_cookies::enums::Cookie
 pub rookie_cookies::enums::Cookie::domain: alloc::string::String
@@ -1571,7 +1548,10 @@ pub struct rookie_cookies::FromPathRequest
 impl rookie_cookies::FromPathRequest
 pub fn rookie_cookies::FromPathRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
 pub fn rookie_cookies::FromPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
+pub fn rookie_cookies::FromPathRequest::chromium_browser_id(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn rookie_cookies::FromPathRequest::chromium_credentials(self, rookie_cookies::direct_path::ChromiumCredentialSource) -> Self
+pub fn rookie_cookies::FromPathRequest::chromium_local_state(self, impl core::convert::Into<std::path::PathBuf>) -> Self
+pub fn rookie_cookies::FromPathRequest::chromium_plaintext(self) -> Self
 pub fn rookie_cookies::FromPathRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
 pub fn rookie_cookies::FromPathRequest::include_expired(self, bool) -> Self
 pub fn rookie_cookies::FromPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self

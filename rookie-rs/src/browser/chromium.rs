@@ -45,7 +45,7 @@ use super::chromium_database_acquisition;
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state"
 )]
 pub fn chromium_based(
   key: PathBuf,
@@ -65,7 +65,7 @@ pub fn chromium_based(
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+  note = "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()"
 )]
 pub fn chromium_based_detailed(
   key: PathBuf,
@@ -149,7 +149,7 @@ pub(crate) fn chromium_based_detailed_plaintext_only_with_runtime(
 #[cfg(unix)]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state"
 )]
 pub fn chromium_based(
   config: &Browser,
@@ -180,7 +180,7 @@ pub fn chromium_based(
 #[cfg(unix)]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+  note = "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()"
 )]
 pub fn chromium_based_detailed(
   config: &Browser,
@@ -282,25 +282,6 @@ impl ChromiumProbeResult {
 
   pub(crate) fn project_committed(self) -> Result<Vec<Cookie>> {
     project_legacy_draft(&self.db_path, self.draft)
-  }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug)]
-pub(crate) struct ChromiumDetailedProbeResult {
-  db_path: PathBuf,
-  draft: ChromiumExtractionDraft,
-  pub(crate) rows_skipped: usize,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl ChromiumDetailedProbeResult {
-  pub(crate) fn cookie_count(&self) -> usize {
-    self.draft.records.len()
-  }
-
-  pub(crate) fn project_committed(self) -> Result<Vec<DetailedCookie>> {
-    project_detailed_draft(&self.db_path, self.draft)
   }
 }
 
@@ -801,32 +782,6 @@ pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn chromium_based_detailed_probe_with_key_outcomes(
-  outcomes: ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  force_kill: bool,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumDetailedProbeResult> {
-  let draft = acquire_chromium_source(
-    &outcomes,
-    db_path.clone(),
-    domains.as_deref(),
-    ChromiumAcquireOptions {
-      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
-      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
-    },
-    runtime,
-  )?;
-  let rows_skipped = draft.stats.rows_skipped;
-  Ok(ChromiumDetailedProbeResult {
-    db_path,
-    draft,
-    rows_skipped,
-  })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

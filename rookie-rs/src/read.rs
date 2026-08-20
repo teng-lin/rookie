@@ -6,7 +6,7 @@ use crate::browser::registry;
 use crate::browser::report_build::snapshot::{browser_snapshot_with_runtime, SnapshotSelection};
 use crate::common::deadline::{runtime_for_control, SystemClock};
 use crate::common::enums::{Cookie, DetailedCookie};
-use crate::direct_path::{self, ChromiumCredentialSource, DirectPathRequest};
+use crate::direct_path::{self, ChromiumCredentialSource, PathExtractRequest};
 use crate::error::map_job_result;
 use crate::execution::{AppBoundPolicy, ExecutionControl};
 use crate::header_filter::{
@@ -710,14 +710,31 @@ impl FromPathRequest {
 
   /// Treats the path as Chromium and selects its credential source.
   ///
-  /// [`ChromiumCredentialSource::Automatic`] and
-  /// [`ChromiumCredentialSource::BrowserId`] are supported on Linux/macOS;
-  /// [`ChromiumCredentialSource::LocalStateFile`] is the Windows encrypted-row
-  /// form; [`ChromiumCredentialSource::PlaintextOnly`] is portable. Invalid
-  /// platform/source combinations are rejected before credential I/O.
+  /// Unlike [`direct_path::PathExtractRequest`], this type stays **portable**:
+  /// it is what the bindings and the CLI wrap, and they need one options
+  /// object that compiles everywhere with runtime validation. An invalid
+  /// platform/source combination is rejected before any credential I/O, not
+  /// at compile time.
   pub fn chromium_credentials(mut self, source: ChromiumCredentialSource) -> Self {
     self.credentials = Some(source);
     self
+  }
+
+  /// Reads only plaintext Chromium rows. Portable.
+  pub fn chromium_plaintext(self) -> Self {
+    self.chromium_credentials(ChromiumCredentialSource::PlaintextOnly)
+  }
+
+  /// Uses one registry browser identity for Chromium credentials. Valid on
+  /// Unix; rejected on Windows before credential I/O.
+  pub fn chromium_browser_id(self, id: impl Into<String>) -> Self {
+    self.chromium_credentials(ChromiumCredentialSource::BrowserId(id.into()))
+  }
+
+  /// Uses a Windows Chromium `Local State` file. Rejected on Unix before
+  /// credential I/O.
+  pub fn chromium_local_state(self, local_state: impl Into<PathBuf>) -> Self {
+    self.chromium_credentials(ChromiumCredentialSource::LocalStateFile(local_state.into()))
   }
 }
 
@@ -739,22 +756,14 @@ pub fn from_path(request: FromPathRequest) -> Result<ReadResult> {
 }
 
 fn from_path_inner(request: FromPathRequest) -> anyhow::Result<ReadResult> {
-  let cookies = match request.credentials {
-    None => {
-      // The `_inner` seam, not the public job function: `from_path` maps the
-      // chain to `Error` once, at its own edge. Going through the public
-      // direct-path edge first would flatten a `BoundaryStop` into an opaque
-      // `Error` and lose the stop classification here.
-      direct_path::cookies_from_path_detailed_inner(
-        DirectPathRequest::new(&request.path).execution(request.control),
-      )?
-    }
-    Some(source) => direct_path::chromium_cookies_from_path_detailed_inner(
-      direct_path::ChromiumPathRequest::new(&request.path)
-        .credentials(source)
-        .execution(request.control),
-    )?,
-  };
+  // The `_inner` seam, not the public job function: `from_path` maps the chain
+  // to `Error` once, at its own edge. Going through the public direct-path
+  // edge first would flatten a `BoundaryStop` into an opaque `Error` and lose
+  // the stop classification here.
+  let cookies = direct_path::detailed_from_path_inner(
+    PathExtractRequest::with_credentials(&request.path, request.credentials)
+      .execution(request.control),
+  )?;
   let (cookies, omitted) = filter_snapshot(cookies, request.include_expired)?;
   let mut warning_counts = ReadWarningCounts::default();
   omitted.record_into(&mut warning_counts);

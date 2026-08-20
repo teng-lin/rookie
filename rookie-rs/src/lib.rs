@@ -249,10 +249,10 @@ pub enum FaultKind {
 /// # Examples
 ///
 /// ```no_run
-/// let request = rookie_cookies::direct_path::ChromiumPathRequest::new(
+/// let request = rookie_cookies::direct_path::PathExtractRequest::sniff(
 ///   "/nonexistent/Cookies",
 /// );
-/// if let Err(error) = rookie_cookies::direct_path::chromium_cookies_from_path(request) {
+/// if let Err(error) = rookie_cookies::direct_path::extract_from_path(request) {
 ///   assert!(matches!(error, rookie_cookies::Error::Source(_)));
 /// }
 /// ```
@@ -756,7 +756,7 @@ pub(crate) fn legacy_execution() -> ExecutionControl {
 #[cfg(unix)]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state"
 )]
 pub fn chromium_based_with_browser_id(
   browser_id: Option<&str>,
@@ -778,7 +778,7 @@ pub fn chromium_based_with_browser_id(
 #[cfg(unix)]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+  note = "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()"
 )]
 pub fn chromium_based_detailed_with_browser_id(
   browser_id: Option<&str>,
@@ -1135,7 +1135,7 @@ use direct_path::CookieSourceKind as AnyBrowserSource;
 /// ```
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::cookies_from_path with DirectPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest"
 )]
 pub fn any_browser(
   cookies_path: &str,

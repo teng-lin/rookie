@@ -1,7 +1,7 @@
 use super::{
-  automatic_chromium_cookies, automatic_chromium_detailed, invalid_options, shared,
-  unsupported_target, ChromiumCredentialSource, ChromiumLockedDatabasePolicy, ChromiumPathRequest,
-  CookieSourceKind, DirectPathRequest, InvalidDirectPathOptionsReason,
+  automatic_chromium_cookies, invalid_options, shared, unsupported_target,
+  ChromiumCredentialSource, ChromiumLockedDatabasePolicy, CookieSourceKind,
+  InvalidDirectPathOptionsReason, PathExtractRequest,
 };
 use crate::browser::chromium_crypto::ChromiumKeyOutcomes;
 use crate::browser::chromium_platform_keys::{ChromiumKeyRequest, HostKeySession};
@@ -14,6 +14,24 @@ pub(super) const AUTOMATIC_BROWSER_IDS: &[&str] = &[
   "chrome", "brave", "chromium", "edge", "opera", "vivaldi", "arc",
 ];
 
+/// Reads an encrypted Chromium database using one registry browser identity.
+///
+/// This constructor is Unix-only, and it lives in this platform leaf rather
+/// than in `mod.rs` because `check-cfg-locations` pins `direct_path/mod.rs` to
+/// its current platform-`cfg` count. Defining it here and re-exporting it
+/// through the module's existing selection gate keeps that ceiling where it is
+/// -- and it is also the honest home for a value that means nothing on
+/// Windows.
+pub(super) fn unix_identity(
+  path: impl Into<PathBuf>,
+  browser_id: impl Into<String>,
+) -> PathExtractRequest {
+  PathExtractRequest::with_credentials(
+    path,
+    Some(ChromiumCredentialSource::BrowserId(browser_id.into())),
+  )
+}
+
 pub(super) fn classify_cookie_source(
   path: &Path,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
@@ -21,92 +39,64 @@ pub(super) fn classify_cookie_source(
   shared::classify_path_with_runtime(path, runtime)
 }
 
-pub(super) fn cookies_from_path_detailed(
-  request: DirectPathRequest,
+pub(super) fn detailed_from_path(
+  request: PathExtractRequest,
   source: CookieSourceKind,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  match source {
-    CookieSourceKind::ChromiumSqlite => automatic_chromium_detailed(
-      AUTOMATIC_BROWSER_IDS,
-      request.path,
-      request.domains,
-      runtime,
-    ),
-    CookieSourceKind::MozillaSqlite => {
-      crate::browser::mozilla::firefox_based_detailed_with_runtime(
-        request.path,
-        request.domains,
-        runtime,
-      )
+  let PathExtractRequest {
+    target, domains, ..
+  } = request;
+  match target.credentials {
+    Some(credentials) => {
+      validate_lock_policy(target.locked_database_policy)?;
+      chromium_detailed(credentials, target.path, domains, runtime)
     }
-    CookieSourceKind::SafariBinaryCookies | CookieSourceKind::InternetExplorerEse => {
-      Err(unsupported_target(source))
-    }
+    // No credentials: the caller asked this file to be identified, not
+    // decrypted. Chromium is therefore plaintext-capable only -- the ordered
+    // identity probe this used to fall back to is a guess at which browser
+    // wrote the file, and 0.6.0 does not guess.
+    None => match source {
+      CookieSourceKind::ChromiumSqlite => {
+        crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+          target.path,
+          domains,
+          false,
+          runtime,
+        )
+        .map_err(|error| {
+          error.context(super::DirectPathError::InvalidOptions {
+            source: CookieSourceKind::ChromiumSqlite,
+            reason: InvalidDirectPathOptionsReason::MissingChromiumCredentials,
+          })
+        })
+      }
+      CookieSourceKind::MozillaSqlite => {
+        crate::browser::mozilla::firefox_based_detailed_with_runtime(target.path, domains, runtime)
+      }
+      CookieSourceKind::SafariBinaryCookies | CookieSourceKind::InternetExplorerEse => {
+        Err(unsupported_target(source))
+      }
+    },
   }
 }
 
-pub(super) fn chromium_cookies_from_path(
-  request: ChromiumPathRequest,
-  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  validate_lock_policy(request.locked_database_policy)?;
-  match request.credentials {
-    ChromiumCredentialSource::Automatic => {
-      automatic_chromium(request.path, request.domains, runtime)
-    }
-    ChromiumCredentialSource::PlaintextOnly => {
-      crate::browser::chromium::chromium_based_plaintext_only_with_runtime(
-        request.path,
-        request.domains,
-        false,
-        runtime,
-      )
-    }
-    ChromiumCredentialSource::BrowserId(browser_id) => {
-      let outcomes = browser_id_outcomes(&browser_id, runtime)?;
-      crate::browser::chromium::query_cookies_with_key_outcomes_runtime(
-        outcomes,
-        request.path,
-        request.domains,
-        false,
-        runtime,
-      )
-    }
-    ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(
-      InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget,
-    )),
-  }
-}
-
-pub(super) fn chromium_cookies_from_path_detailed(
-  request: ChromiumPathRequest,
+fn chromium_detailed(
+  credentials: ChromiumCredentialSource,
+  path: PathBuf,
+  domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  validate_lock_policy(request.locked_database_policy)?;
-  match request.credentials {
-    ChromiumCredentialSource::Automatic => automatic_chromium_detailed(
-      AUTOMATIC_BROWSER_IDS,
-      request.path,
-      request.domains,
-      runtime,
-    ),
+  match credentials {
     ChromiumCredentialSource::PlaintextOnly => {
       crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
-        request.path,
-        request.domains,
-        false,
-        runtime,
+        path, domains, false, runtime,
       )
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
       let outcomes = browser_id_outcomes(&browser_id, runtime)?;
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
-        outcomes,
-        request.path,
-        request.domains,
-        false,
-        runtime,
+        outcomes, path, domains, false, runtime,
       )
     }
     ChromiumCredentialSource::LocalStateFile(_) => Err(invalid_options(

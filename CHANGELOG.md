@@ -8,6 +8,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Three path request types become two.** `DirectPathRequest` and
+  `ChromiumPathRequest` are replaced by `PathExtractRequest` +
+  `extract_from_path`; `DirectPathRequest` was `ChromiumPathRequest` minus
+  credentials minus the locked-database policy, so the pair was one type split
+  by whether the caller happened to know the file was Chromium. Constructors:
+  `plaintext`, `sniff`, and the platform-gated `unix_identity` (Unix) /
+  `windows_local_state` (Windows).
+  `ChromiumCredentialSource::Automatic` is gone: it was the default and it
+  could never succeed on Windows. Isolation-carrying path output now comes
+  from `from_path(..).detailed_cookies()`, so
+  `chromium_cookies_from_path_detailed` is gone too — a real narrowing, since
+  a domain-filtered *detailed* path list is no longer expressible.
+- Sniffing a Chromium database is plaintext-capable only; an encrypted row is
+  the new `missing_chromium_credentials`. On Unix that is a narrowing (the
+  ordered identity probe is gone). On Windows it is a widening: the old call
+  returned `missing_local_state_file` before attempting extraction, so even a
+  fully plaintext database failed.
 - **`ProfileSelection` and `ReportScope` make an illegal selection
   unrepresentable.** `Request` is renamed `ExtractRequest` (prerelease-only)
   and joined by `ReportRequest`, whose scope may widen to every profile
