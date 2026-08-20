@@ -349,6 +349,26 @@ fn impersonate_with_token(duplicated_token: HandleGuard) -> Result<Impersonation
   impersonate_with_suspended_identity(duplicated_token, suspended_identity)
 }
 
+fn acquire_debug_privilege_lock<'a>(
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> Result<std::sync::MutexGuard<'a, ()>> {
+  const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+  loop {
+    runtime.check()?;
+    match DEBUG_PRIVILEGE_LOCK.try_lock() {
+      Ok(guard) => return Ok(guard),
+      Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+      Err(std::sync::TryLockError::WouldBlock) => {
+        let sleep_time = runtime.deadline.remaining(runtime.clock).min(POLL_INTERVAL);
+        if sleep_time.is_zero() {
+          runtime.check()?;
+        }
+        runtime.clock.sleep(sleep_time);
+      }
+    }
+  }
+}
+
 pub fn start_impersonate(
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<ImpersonationGuard> {
@@ -358,9 +378,7 @@ pub fn start_impersonate(
   // process token (with temporary SeDebugPrivilege) governs those checks.
   let suspended_identity = SuspendedThreadIdentity::suspend()?;
   let lsass_handle = {
-    let _debug_privilege_lock = DEBUG_PRIVILEGE_LOCK
-      .lock()
-      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _debug_privilege_lock = acquire_debug_privilege_lock(runtime)?;
     runtime.check()?;
     let mut debug_privilege = enable_privilege()?;
     let pid = get_system_process_pid(runtime)?;
@@ -494,5 +512,19 @@ mod tests {
       original_id,
       "the suspended caller token must be restored on exit"
     );
+  }
+
+  #[test]
+  fn acquire_debug_privilege_lock_honors_runtime_cancellation_and_deadline() {
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    stop.cancel();
+    let runtime = crate::common::deadline::BoundaryRuntime::with_stop(
+      &clock,
+      crate::common::deadline::Deadline::after(&clock, std::time::Duration::from_secs(10)),
+      stop,
+    );
+    let result = acquire_debug_privilege_lock(&runtime);
+    assert!(result.is_err());
   }
 }

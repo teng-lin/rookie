@@ -11,12 +11,43 @@ use crate::common::deadline::BoundaryRuntime;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const ENV_ENC_KEY_B64: &str = "HBD_ABE_ENC_B64";
 
+fn to_utf16_key_val<K: AsRef<OsStr>, V: AsRef<OsStr>>(k: K, v: V) -> (Vec<u16>, Vec<u16>) {
+  #[cfg(windows)]
+  {
+    use std::os::windows::ffi::OsStrExt;
+    (
+      k.as_ref().encode_wide().collect(),
+      v.as_ref().encode_wide().collect(),
+    )
+  }
+  #[cfg(not(windows))]
+  {
+    (
+      k.as_ref().to_string_lossy().encode_utf16().collect(),
+      v.as_ref().to_string_lossy().encode_utf16().collect(),
+    )
+  }
+}
+
+fn ascii_fold_utf16(units: &[u16]) -> Vec<u16> {
+  units
+    .iter()
+    .map(|&c| {
+      if (b'a' as u16..=b'z' as u16).contains(&c) {
+        c - 32
+      } else {
+        c
+      }
+    })
+    .collect()
+}
+
 /// Constructs a Windows Unicode environment block (UTF-16) from an iterator of
 /// environment variables, applying the provided key-value overrides without
 /// mutating the parent process environment.
 ///
 /// The returned buffer contains null-terminated `KEY=VALUE\0` strings sorted
-/// case-insensitively by variable name, terminated by a final null character (`\0\0`).
+/// case-insensitively (ordinal ASCII folding) by variable name, terminated by a final null character (`\0\0`).
 pub fn create_environment_block<I, K, V>(base_vars: I, overrides: &[(&str, &str)]) -> Vec<u16>
 where
   I: IntoIterator<Item = (K, V)>,
@@ -25,42 +56,27 @@ where
 {
   use std::collections::BTreeMap;
 
-  // Case-insensitive key ordering to satisfy Windows environment block requirements.
-  let mut env_map: BTreeMap<String, (OsString, OsString)> = BTreeMap::new();
+  // Ordinal case-insensitive key ordering to satisfy Windows environment block requirements.
+  let mut env_map: BTreeMap<Vec<u16>, (Vec<u16>, Vec<u16>)> = BTreeMap::new();
 
   for (k, v) in base_vars {
-    let key_os = k.as_ref().to_os_string();
-    let val_os = v.as_ref().to_os_string();
-    let key_upper = key_os.to_string_lossy().to_uppercase();
-    env_map.insert(key_upper, (key_os, val_os));
+    let (key_u16, val_u16) = to_utf16_key_val(k, v);
+    let key_folded = ascii_fold_utf16(&key_u16);
+    env_map.insert(key_folded, (key_u16, val_u16));
   }
 
   for &(k, v) in overrides {
-    let key_os = OsString::from(k);
-    let val_os = OsString::from(v);
-    let key_upper = k.to_uppercase();
-    env_map.insert(key_upper, (key_os, val_os));
+    let (key_u16, val_u16) = to_utf16_key_val(k, v);
+    let key_folded = ascii_fold_utf16(&key_u16);
+    env_map.insert(key_folded, (key_u16, val_u16));
   }
 
   let mut block = Vec::new();
-  for (_key_upper, (k, v)) in env_map {
-    #[cfg(windows)]
-    {
-      use std::os::windows::ffi::OsStrExt;
-      block.extend(k.encode_wide());
-      block.push('=' as u16);
-      block.extend(v.encode_wide());
-      block.push(0);
-    }
-    #[cfg(not(windows))]
-    {
-      let k_str = k.to_string_lossy();
-      let v_str = v.to_string_lossy();
-      block.extend(k_str.encode_utf16());
-      block.push('=' as u16);
-      block.extend(v_str.encode_utf16());
-      block.push(0);
-    }
+  for (_key_folded, (k, v)) in env_map {
+    block.extend(k);
+    block.push('=' as u16);
+    block.extend(v);
+    block.push(0);
   }
 
   if block.is_empty() {
@@ -524,6 +540,34 @@ mod tests {
         ("TEMP".to_string(), "C:\\Temp".to_string()),
       ]
     );
+  }
+
+  #[test]
+  fn environment_block_preserves_distinct_unicode_keys_under_ordinal_folding() {
+    let base = vec![
+      ("ß_VAR", "value_sharp_s"),
+      ("SS_VAR", "value_double_s"),
+      ("mixed_case", "val1"),
+      ("MIXED_CASE", "val2_overwritten"),
+    ];
+    let overrides = [("NEW_VAR", "val3")];
+    let block = create_environment_block(base, &overrides);
+    let parsed = parse_environment_block(&block);
+
+    // ß and SS must both be preserved as distinct variables under Windows ordinal folding
+    assert!(parsed
+      .iter()
+      .any(|(k, v)| k == "ß_VAR" && v == "value_sharp_s"));
+    assert!(parsed
+      .iter()
+      .any(|(k, v)| k == "SS_VAR" && v == "value_double_s"));
+    // Case-insensitive ASCII collision correctly overrides
+    let mixed: Vec<_> = parsed
+      .iter()
+      .filter(|(k, _)| k.eq_ignore_ascii_case("mixed_case"))
+      .collect();
+    assert_eq!(mixed.len(), 1);
+    assert_eq!(mixed[0].1, "val2_overwritten");
   }
 
   #[test]
