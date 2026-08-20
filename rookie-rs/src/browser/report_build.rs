@@ -572,27 +572,38 @@ fn engine_extract_outcome(
   Ok(outcome)
 }
 
-/// Adapts a Gecko listing into a browser draft (`browser_profiles`).
+/// One registered browser's listing contribution: the profiles and cookie
+/// sources discovery found, with no read ever attempted.
 ///
-/// Every discovered candidate becomes a `not_attempted` source descriptor with
-/// its frozen `selected`/`acquisition`; there is no `exists` filter (Gecko
-/// candidates are all `exists: true`). Empty candidates are ordinary listing
-/// emptiness, never `profile_extraction_failed` — that error is extract-only.
-fn engine_listing_outcome(browser_id: &BrowserId, listing: EngineListing) -> Result<BrowserDraft> {
-  let mut outcome = BrowserDraft {
-    browser_id: browser_id.clone(),
-    compatibility_family: engine_compatibility_family(browser_id),
-    detected: listing.counters.installations_discovered > 0
-      || listing.counters.installations_detected > 0,
-    installations_discovered: listing.counters.installations_discovered,
+/// Deliberately not a [`BrowserDraft`]. That type exists to carry an
+/// extraction's outcome, and two of its per-source facts have nowhere
+/// honest to go here: `failed` would assert something about a read that
+/// never happened, and `acquisition_strategy` -- though the listing claim
+/// behind it (`not_attempted` for Chromium/Gecko/IE, `stable_file_image` for
+/// Safari) is real -- describes what an extraction *would* do, not one that
+/// did. Listing has no draft envelope at all: it builds the wire
+/// [`ProfileDescriptor`]/`CookieSourceDescriptor` directly, so those fields
+/// are not just unset, they are unrepresentable.
+struct BrowserListing {
+  discovery_failed: bool,
+  profiles: Vec<ProfileDescriptor>,
+  issues: Vec<ExtractionIssue>,
+}
+
+/// Adapts a Gecko/Safari/IE listing into a browser listing (`browser_profiles`).
+///
+/// Every discovered candidate becomes a source descriptor; there is no
+/// `exists` filter (Gecko candidates are all `exists: true`). Empty
+/// candidates are ordinary listing emptiness, never `profile_extraction_failed`
+/// -- that error is extract-only.
+fn engine_listing_outcome(
+  browser_id: &BrowserId,
+  listing: EngineListing,
+) -> Result<BrowserListing> {
+  let mut outcome = BrowserListing {
     discovery_failed: listing.all_detected_roots_failed(),
     profiles: Vec::new(),
     issues: Vec::new(),
-    // Listing never acquires, so a request stop during discovery is the only
-    // termination it can carry.
-    termination: listing
-      .boundary_stop
-      .map_or(Termination::Completed, termination_from_stop),
   };
   for discovery in &listing.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -600,15 +611,15 @@ fn engine_listing_outcome(browser_id: &BrowserId, listing: EngineListing) -> Res
   for profile in listing.profiles {
     outcome
       .profiles
-      .push(discovered_profile_outcome(browser_id, profile)?);
+      .push(discovered_profile_descriptor(browser_id, profile)?);
   }
   Ok(outcome)
 }
 
-fn discovered_profile_outcome(
+fn discovered_profile_descriptor(
   browser_id: &BrowserId,
   profile: DiscoveredProfile,
-) -> Result<ProfileDraft> {
+) -> Result<ProfileDescriptor> {
   let identity = profile_identity(
     browser_id,
     profile.identity.installation_id.as_str(),
@@ -616,16 +627,26 @@ fn discovered_profile_outcome(
     &profile.identity.name,
     &profile.identity.path,
   )?;
-  let mut outcome = ProfileDraft::new(identity, profile.identity.is_default);
-  for candidate in profile.candidates {
-    outcome.sources.push(SourceDraft::new(
-      source_identity(&candidate.identity()),
-      &candidate.path,
-      candidate.selected,
-      acquisition_code(candidate.acquisition),
-    ));
-  }
-  Ok(outcome)
+  let mut sources = profile
+    .candidates
+    .iter()
+    .map(|candidate| {
+      let source = source_identity(&candidate.identity());
+      CookieSourceDescriptor {
+        role: source.role,
+        format: source.format,
+        path: source.path,
+        path_lossy: source.path_lossy,
+        precedence: source.precedence,
+      }
+    })
+    .collect::<Vec<_>>();
+  sort_source_descriptors(&mut sources);
+  Ok(ProfileDescriptor {
+    profile: identity,
+    is_default: profile.identity.is_default,
+    sources,
+  })
 }
 
 fn capabilities(browser: &RegisteredBrowser) -> Result<BrowserCapabilitiesDescriptor> {
@@ -662,10 +683,9 @@ pub(crate) fn supported_browser_descriptors() -> Result<Vec<BrowserDescriptor>> 
     .collect()
 }
 
-fn collect_report(
+fn collect_extraction(
   browser: &RegisteredBrowser,
   profile_id: Option<&str>,
-  extract: bool,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
@@ -673,37 +693,48 @@ fn collect_report(
   let browser_id: BrowserId = browser.canonical_id.parse()?;
   match browser.engine {
     "chromium" => {
-      let report = if extract {
-        registry::chromium_registry_report_with_runtime(
-          &browser.canonical_id,
-          profile_id,
-          domains,
-          runtime,
-        )?
-      } else {
-        return chromium_listing_outcome(&browser_id, &browser.canonical_id, runtime);
-      };
+      let report = registry::chromium_registry_report_with_runtime(
+        &browser.canonical_id,
+        profile_id,
+        domains,
+        runtime,
+      )?;
       chromium_browser_outcome(&browser_id, report)
     }
     "gecko" => {
-      if extract {
-        let engine =
-          registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?;
-        engine_extract_outcome(&browser_id, engine)
-      } else {
-        let listing = registry::gecko_profiles_with_runtime(&browser.canonical_id, runtime)?;
-        engine_listing_outcome(&browser_id, listing)
-      }
+      let engine =
+        registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?;
+      engine_extract_outcome(&browser_id, engine)
     }
-    engine => dispatch::remaining_engine_report(
+    engine => dispatch::remaining_engine_extraction(
       &browser_id,
       &browser.canonical_id,
       engine,
       profile_id,
-      extract,
       domains,
       runtime,
     ),
+  }
+}
+
+/// The listing counterpart of [`collect_extraction`], serving only
+/// `browser_profile_descriptors`. Never opens a source, so it returns a
+/// [`BrowserListing`] rather than a [`BrowserDraft`].
+fn collect_listing(
+  browser: &RegisteredBrowser,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<BrowserListing> {
+  runtime.check()?;
+  let browser_id: BrowserId = browser.canonical_id.parse()?;
+  match browser.engine {
+    "chromium" => chromium_listing_outcome(&browser_id, &browser.canonical_id, runtime),
+    "gecko" => {
+      let listing = registry::gecko_profiles_with_runtime(&browser.canonical_id, runtime)?;
+      engine_listing_outcome(&browser_id, listing)
+    }
+    engine => {
+      dispatch::remaining_engine_listing(&browser_id, &browser.canonical_id, engine, runtime)
+    }
   }
 }
 
@@ -711,17 +742,12 @@ fn chromium_listing_outcome(
   browser_id: &BrowserId,
   canonical_id: &str,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<BrowserDraft> {
+) -> Result<BrowserListing> {
   let listing = registry::chromium_listing_with_runtime(canonical_id, runtime)?;
-  let mut outcome = BrowserDraft {
-    browser_id: browser_id.clone(),
-    compatibility_family: CompatibilityFamily::Chromium,
-    detected: listing.installations_discovered > 0,
-    installations_discovered: listing.installations_discovered,
+  let mut outcome = BrowserListing {
     discovery_failed: listing.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
-    termination: Termination::Completed,
   };
   for discovery in &listing.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -734,22 +760,30 @@ fn chromium_listing_outcome(
       &profile.display_name,
       &profile.path,
     )?;
-    let mut engine = ProfileDraft::new(identity, profile.is_default);
-    for candidate in &profile.persistent_candidates {
+    let mut sources = profile
+      .persistent_candidates
+      .iter()
       // Chromium listing policy, not a property of `SourceCandidate`: this
       // engine stats both layouts and lists only what is on disk, while the
       // engine listing plants `exists: true` candidates that must all survive.
-      if !candidate.exists {
-        continue;
-      }
-      engine.sources.push(SourceDraft::new(
-        source_identity(&candidate.identity()),
-        &candidate.path,
-        candidate.selected,
-        acquisition_code(candidate.acquisition),
-      ));
-    }
-    outcome.profiles.push(engine);
+      .filter(|candidate| candidate.exists)
+      .map(|candidate| {
+        let source = source_identity(&candidate.identity());
+        CookieSourceDescriptor {
+          role: source.role,
+          format: source.format,
+          path: source.path,
+          path_lossy: source.path_lossy,
+          precedence: source.precedence,
+        }
+      })
+      .collect::<Vec<_>>();
+    sort_source_descriptors(&mut sources);
+    outcome.profiles.push(ProfileDescriptor {
+      profile: identity,
+      is_default: profile.is_default,
+      sources,
+    });
   }
   Ok(outcome)
 }
@@ -1388,7 +1422,7 @@ pub(crate) fn browser_extraction_report_with_runtime(
 ) -> Result<ExtractionReport> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let canonical_id = &browser.canonical_id;
-  let mut outcome = match collect_report(&browser, profile_id, true, domains, runtime) {
+  let mut outcome = match collect_extraction(&browser, profile_id, domains, runtime) {
     Ok(outcome) => outcome,
     Err(error) => match stop_from_error(&error) {
       Some(stop) => stopped_browser_draft(&browser, stop)?,
@@ -1456,7 +1490,7 @@ fn load_extraction_report_with_runtime(
   // browser's collection finished first, matching the ordering contract the
   // rest of this module already relies on.
   let attempts = fan_out(&browsers, DEFAULT_FAN_OUT_WIDTH, runtime, |browser| {
-    collect_report(browser, None, true, domains.clone(), runtime)
+    collect_extraction(browser, None, domains.clone(), runtime)
   });
   // `fan_out` silently stops claiming further browsers once the runtime
   // trips, so a shorter-than-`browsers` result set is itself evidence of a
@@ -1519,7 +1553,7 @@ pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<Profil
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
   let browser = registry::resolve_registered_browser(browser_id)?;
-  let outcome = collect_report(&browser, None, false, None, &runtime)?;
+  let outcome = collect_listing(&browser, &runtime)?;
   profile_descriptors_from_outcome(browser_id, outcome)
 }
 
@@ -1610,7 +1644,7 @@ fn chromium_profile_descriptor(
 
 fn profile_descriptors_from_outcome(
   browser_id: &str,
-  outcome: BrowserDraft,
+  outcome: BrowserListing,
 ) -> Result<Vec<ProfileDescriptor>> {
   // An empty list must mean "looked, found nothing". Roots that all failed to
   // enumerate are one way to lose everything; profiles that were all found and
@@ -1646,34 +1680,9 @@ fn profile_descriptors_from_outcome(
       lost_profiles.join("; ")
     )
   }
-  Ok(
-    outcome
-      .profiles
-      .into_iter()
-      .map(|engine| {
-        let mut sources = engine
-          .sources
-          .into_iter()
-          .map(|source| CookieSourceDescriptor {
-            role: source.source.role,
-            format: source.source.format,
-            path: source.source.path,
-            path_lossy: source.source.path_lossy,
-            precedence: source.source.precedence,
-          })
-          .collect::<Vec<_>>();
-        sort_source_descriptors(&mut sources);
-        ProfileDescriptor {
-          // Carried from discovery rather than inferred from position: engines
-          // sort default-first, but that is presentation, and a later ordering
-          // change must not silently rename which profile is the default.
-          is_default: engine.is_default,
-          profile: engine.profile,
-          sources,
-        }
-      })
-      .collect(),
-  )
+  // Every engine already builds the wire `ProfileDescriptor` (sources sorted)
+  // as it lists, so there is nothing left to adapt here.
+  Ok(outcome.profiles)
 }
 
 #[cfg(test)]
@@ -3194,43 +3203,37 @@ mod engine_chain_tests {
       let browser = BrowserId::known(browser_id);
 
       // All three non-Chromium engines share the listing tower now, so a
-      // metadata-denied root produces one browser draft the same way.
-      let listing =
-        test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root.clone())
-          .expect("discovery retains the metadata failure");
+      // metadata-denied root produces one browser listing the same way.
+      //
+      // `discovery_failed`/`ReportStatusCode::failed()` propagation through
+      // `finalize_outcomes` is a `BrowserDraft` concern and already covered by
+      // `a_root_that_could_not_be_enumerated_is_failed_not_no_sources`; a
+      // `BrowserListing` never reaches that pipeline, so this test only
+      // exercises the listing tower's own two consumers: the issue it carries,
+      // and the error `profile_descriptors_from_outcome` raises from it.
+      let expected_sample = root.to_str().expect("temp path is valid utf-8").to_owned();
+      let listing = test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root)
+        .expect("discovery retains the metadata failure");
       let counters = listing.counters;
       let all_failed = listing.all_detected_roots_failed();
-      let report_outcome =
-        engine_listing_outcome(&browser, listing).expect("adapt engine discovery");
-      let repeat = test_seams::non_chromium_discovery_with_denied_root(&context, browser_id, root)
-        .expect("repeat deterministic discovery for listing");
       let listing_outcome =
-        engine_listing_outcome(&browser, repeat).expect("adapt listing discovery");
+        engine_listing_outcome(&browser, listing).expect("adapt listing discovery");
 
       assert_eq!(counters.installations_detected, 1, "{name}");
       assert_eq!(counters.installations_discovered, 0, "{name}");
       assert_eq!(counters.installations_enumerated, 0, "{name}");
       assert!(all_failed, "{name}");
 
-      assert!(report_outcome.detected, "{name}");
-      assert!(report_outcome.discovery_failed, "{name}");
-      let report = assemble(1, vec![report_outcome]);
-      assert_eq!(report.status, ReportStatusCode::failed(), "{name}");
-      assert_eq!(report.summary.browsers_detected, 1, "{name}");
-      let issue = report
+      assert!(listing_outcome.discovery_failed, "{name}");
+      let issue = listing_outcome
         .issues
         .iter()
         .find(|issue| issue.code.as_str() == "installation_metadata_failed")
         .expect("stable root metadata issue");
       assert!(issue.is_error(), "{name}");
-      assert_eq!(issue.samples, ["<path>"], "{name}");
-      assert!(
-        report
-          .issues
-          .iter()
-          .all(|issue| issue.code.as_str() != "browser_not_detected"),
-        "{name}"
-      );
+      // Unlike the extraction-report path, listing issues never pass through
+      // `Failure`/`Diagnostic`, so nothing here redacts the sample path.
+      assert_eq!(issue.samples, [expected_sample], "{name}");
 
       let error = profile_descriptors_from_outcome(browser_id, listing_outcome)
         .expect_err("an unreadable root must not become an empty profile list");
@@ -3294,7 +3297,7 @@ mod engine_chain_tests {
     assert!(issue.is_error());
   }
 
-  /// Safari and Internet Explorer are OS-gated in `collect_report`, so their
+  /// Safari and Internet Explorer are OS-gated in `collect_extraction`, so their
   /// adapters cannot be reached through the dispatch on a Linux CI host. These
   /// drive the same engine chain with an overridden platform context, so both
   /// engines are still proven to reach the frozen contract.
