@@ -380,7 +380,8 @@ where
 /// Candidate-driven populate (unlike Gecko's path/query walk): discovery plants
 /// exactly the Safari candidates, and each is acquired in turn. Safari inherits
 /// the candidate's frozen `selected: true` + `StableFileImage` through
-/// [`Source::from_candidate`]; only records/attempts/failure are overlaid.
+/// [`Source::new`] from the candidate's own values; only records, attempts,
+/// and failure are overlaid.
 fn populate_safari_sources_impl<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
@@ -421,7 +422,11 @@ where
         });
         break 'profiles;
       }
-      let mut source = Source::from_candidate(candidate.clone());
+      let mut source = Source::new(
+        candidate.identity(),
+        candidate.selected,
+        candidate.acquisition,
+      );
       match query(candidate, domains) {
         // The engine already built the `Source` from this candidate, so there
         // is nothing to copy across.

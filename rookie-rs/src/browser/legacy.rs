@@ -404,7 +404,7 @@ mod tests {
     SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
   };
   use crate::browser::report_core::{CookieSourceFormatId, CookieSourceRoleId};
-  use crate::browser::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
+  use crate::browser::source::{Source, SourceFailureStage, SourceIdentity, SourceStats};
   use std::path::PathBuf;
 
   fn profile_with(source: Option<Source>) -> EngineExtract {
@@ -450,14 +450,11 @@ mod tests {
     acquisition: SourceAcquisition,
   ) -> Source {
     Source {
-      origin: SourceCandidate {
+      origin: SourceIdentity {
         path: PathBuf::from(path),
         role,
         format: CookieSourceFormatId::known(format),
         precedence,
-        exists: true,
-        selected,
-        acquisition,
       },
       selected,
       acquisition,

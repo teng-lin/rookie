@@ -35,6 +35,26 @@ struct Fence {
 
 const FENCES: &[Fence] = &[
   Fence {
+    type_name: "SourceIdentity",
+    path: "rookie-rs/src/browser/source.rs",
+    // Identity is the join keys and nothing else. The listing decisions
+    // (`selected`, `acquisition`, `exists`) belong to the candidate that made
+    // them; letting them back in here would hand every `Source` a listing
+    // value again through `origin`, which is the leak the split closed.
+    forbidden_fields: &[
+      "selected",
+      "exists",
+      "acquisition",
+      "records",
+      "cookies",
+      "stats",
+      "issues",
+      "failure",
+    ],
+    reason: "identity is the join keys a candidate and a result share; stage \
+             state belongs to whichever of them decided it",
+  },
+  Fence {
     type_name: "SourceCandidate",
     path: "rookie-rs/src/browser/source.rs",
     // `failure` is here for the same reason as `records`: a candidate that

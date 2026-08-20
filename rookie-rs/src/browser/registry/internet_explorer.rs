@@ -37,7 +37,7 @@ pub(crate) fn extracted_internet_explorer_source(
   records_rejected: usize,
   row_error: Option<String>,
 ) -> Source {
-  let mut source = Source::from_candidate(origin);
+  let mut source = Source::new(origin.identity(), origin.selected, origin.acquisition);
   // The engine overlays the effective acquisition once the query is attempted.
   source.acquisition = SourceAcquisition::EseDatabase;
   source.acquisition_attempts = 1;
@@ -222,7 +222,11 @@ where
     } = profile;
     let mut sources = Vec::new();
     for candidate in candidates {
-      let mut source = Source::from_candidate(candidate.clone());
+      let mut source = Source::new(
+        candidate.identity(),
+        candidate.selected,
+        candidate.acquisition,
+      );
       match query(candidate, domains) {
         // The engine already built the `Source` from this candidate -- stats,
         // records, attempts, the effective acquisition, and any

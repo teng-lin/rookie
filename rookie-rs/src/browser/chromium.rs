@@ -437,7 +437,7 @@ impl ChromiumExtractionDraft {
       acquisition_attempts,
       legacy_error,
     } = self;
-    let mut source = Source::from_candidate(origin);
+    let mut source = Source::new(origin.identity(), origin.selected, origin.acquisition);
     source.acquisition = acquisition_strategy.into();
     source.acquisition_attempts = acquisition_attempts;
     source.records = records;

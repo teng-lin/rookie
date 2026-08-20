@@ -18,6 +18,23 @@ use super::report_core::{
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
 use std::path::PathBuf;
 
+/// The join keys of one cookie source: what identifies it, independent of
+/// stage.
+///
+/// Carried by a [`SourceCandidate`] through [`SourceCandidate::identity`] and
+/// held by a [`Source`] as its `origin`, so a result's provenance cannot drift
+/// from what discovery found. This is the only part of a candidate an
+/// extraction result may carry: the listing fields (`selected`, `acquisition`,
+/// `exists`) belong to the stage that decided them and have no meaning on a
+/// result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceIdentity {
+  pub(crate) path: PathBuf,
+  pub(crate) role: CookieSourceRoleId,
+  pub(crate) format: CookieSourceFormatId,
+  pub(crate) precedence: u16,
+}
+
 /// Inventory: a cookie source that may exist on disk.
 ///
 /// Must not carry cookies, records, stats, or issues. It is what listing
@@ -37,6 +54,23 @@ pub(crate) struct SourceCandidate {
   /// Listing metadata, frozen per engine. Not "how the cookie DB was opened" --
   /// that is [`Source::acquisition`], and only exists after a query returns.
   pub(crate) acquisition: SourceAcquisition,
+}
+
+impl SourceCandidate {
+  /// The join keys, without the listing decisions.
+  ///
+  /// Fields stay flat on the candidate rather than nested behind this: the
+  /// crate reads `candidate.path` / `role` / `format` / `precedence` in dozens
+  /// of places, and nesting would rewrite every one of them plus every plant,
+  /// for a layout preference with no semantic content.
+  pub(crate) fn identity(&self) -> SourceIdentity {
+    SourceIdentity {
+      path: self.path.clone(),
+      role: self.role.clone(),
+      format: self.format.clone(),
+      precedence: self.precedence,
+    }
+  }
 }
 
 /// How a source was made readable.
@@ -197,13 +231,16 @@ impl SourceIssue {
 /// the only supply of finalized rows.
 #[derive(Debug)]
 pub(crate) struct Source {
-  /// The candidate this result came from. Path, role, format and precedence
-  /// are read through here so they cannot drift from what discovery found.
-  pub(crate) origin: SourceCandidate,
-  /// Effective values, which extract may overwrite: Gecko selects its
-  /// persistent source at populate, and Internet Explorer overlays
-  /// `EseDatabase` once a query has been attempted. The frozen listing values
-  /// stay readable on `origin`.
+  /// The identity of the candidate this result came from. Path, role, format
+  /// and precedence are read through here so they cannot drift from what
+  /// discovery found. It is deliberately not the whole candidate: a result has
+  /// no business naming a listing `selected`, `acquisition`, or `exists`.
+  pub(crate) origin: SourceIdentity,
+  /// Effective values, stated by whoever built this source rather than
+  /// inherited: Gecko selects its persistent source at populate, and Internet
+  /// Explorer overlays `EseDatabase` once a query has been attempted. They are
+  /// constructor arguments precisely so that an engine which forgets to state
+  /// one gets a compile error instead of a silently wrong report field.
   pub(crate) selected: bool,
   pub(crate) acquisition: SourceAcquisition,
   pub(crate) records: Vec<CookieRecord>,
@@ -218,13 +255,17 @@ pub(crate) struct Source {
 impl Source {
   /// A source whose query has been attempted but which carries no rows yet.
   ///
-  /// Callers fill in what the query returned. `acquisition` starts from the
-  /// candidate so an engine that does not overlay one keeps the frozen value.
-  /// The candidate-driven engines (Chromium/Safari/IE) build their `Source`s
-  /// this way; Gecko's path/query populate builds `Source` directly.
-  pub(crate) fn from_candidate(origin: SourceCandidate) -> Self {
-    let selected = origin.selected;
-    let acquisition = origin.acquisition;
+  /// Callers fill in what the query returned. The effective `selected` and
+  /// `acquisition` are arguments rather than defaults inherited from a
+  /// candidate: inheriting them is how an engine that forgot to overlay one
+  /// used to emit a listing value as a result. A caller holding a candidate
+  /// and wanting today's behaviour writes
+  /// `Source::new(c.identity(), c.selected, c.acquisition)`, which says so.
+  pub(crate) fn new(
+    origin: SourceIdentity,
+    selected: bool,
+    acquisition: SourceAcquisition,
+  ) -> Self {
     Self {
       origin,
       selected,

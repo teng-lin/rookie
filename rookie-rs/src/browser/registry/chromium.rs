@@ -1100,7 +1100,11 @@ where
             error.downcast_ref::<crate::common::sqlite::BrowserDatabaseFailure>();
           // The source was named and reached for, so the failure belongs to it
           // rather than to the profile.
-          let mut source = Source::from_candidate(candidate);
+          let mut source = Source::new(
+            candidate.identity(),
+            candidate.selected,
+            candidate.acquisition,
+          );
           source.acquisition = database_failure.and_then(|failure| failure.strategy).into();
           source.acquisition_attempts = database_failure.map_or(1, |failure| failure.attempts);
           // `Acquisition` unconditionally, deliberately. The Chromium report
