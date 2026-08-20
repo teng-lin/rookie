@@ -141,11 +141,11 @@ Extraction is async. Always `await`.
 ### Rust
 
 ```rust
-use rookie_cookies::{read, ReadRequest};
+use rookie_cookies::{read, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
     let snapshot = read(ReadRequest::browser("firefox").profile("default-release"))?;
-    println!("{}", snapshot.header("https://example.com/")?);
+    println!("{}", snapshot.header(&SendContext::url("https://example.com/"))?);
     Ok(())
 }
 ```

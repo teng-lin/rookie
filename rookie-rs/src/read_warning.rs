@@ -10,6 +10,7 @@ pub(crate) enum ReadWarningCode {
   RowReadFailed,
   InvalidOctets,
   MalformedHostIdentity,
+  UnparsablePartitionKey,
 }
 
 impl ReadWarningCode {
@@ -19,6 +20,7 @@ impl ReadWarningCode {
       Self::RowReadFailed => "row_read_failed",
       Self::InvalidOctets => "invalid_octets",
       Self::MalformedHostIdentity => "malformed_host_identity",
+      Self::UnparsablePartitionKey => "unparsable_partition_key",
     }
   }
 
@@ -43,6 +45,7 @@ pub(crate) struct ReadWarningCounts {
   row_read_failed: u64,
   invalid_octets: u64,
   malformed_host_identity: u64,
+  unparsable_partition_key: u64,
 }
 
 impl ReadWarningCounts {
@@ -58,6 +61,7 @@ impl ReadWarningCounts {
       ReadWarningCode::RowReadFailed => &mut self.row_read_failed,
       ReadWarningCode::InvalidOctets => &mut self.invalid_octets,
       ReadWarningCode::MalformedHostIdentity => &mut self.malformed_host_identity,
+      ReadWarningCode::UnparsablePartitionKey => &mut self.unparsable_partition_key,
     };
     *count = count.saturating_add(occurrences);
   }
@@ -70,6 +74,10 @@ impl ReadWarningCounts {
       (
         ReadWarningCode::MalformedHostIdentity,
         self.malformed_host_identity,
+      ),
+      (
+        ReadWarningCode::UnparsablePartitionKey,
+        self.unparsable_partition_key,
       ),
     ]
     .into_iter()

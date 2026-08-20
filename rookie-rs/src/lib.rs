@@ -3,11 +3,11 @@
 //! The recommended 0.6 entry is [`read`] with [`ReadRequest`]:
 //!
 //! ```no_run
-//! use rookie_cookies::{read, ReadRequest};
+//! use rookie_cookies::{read, ReadRequest, SendContext};
 //!
 //! let snapshot = read(ReadRequest::browser("chrome").profile("Default"))?;
-//! let _header = snapshot.header("https://example.com/")?;
-//! # Ok::<(), rookie_cookies::anyhow::Error>(())
+//! let _header = snapshot.header(&SendContext::url("https://example.com/"))?;
+//! # Ok::<(), rookie_cookies::Error>(())
 //! ```
 //!
 //! Named helpers such as [`chrome`] stay as a compatibility bridge and are
@@ -59,6 +59,7 @@ mod header_filter;
 mod read;
 mod read_warning;
 mod request_error;
+mod send_context;
 mod session;
 /// The `anyhow` crate, re-exported so the deprecated v0.5.9 bridge functions
 /// (which still return [`anyhow::Result`]) can be named without a direct
@@ -74,6 +75,7 @@ pub use read::{
   from_path, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning,
 };
 pub use request_error::RequestError;
+pub use send_context::{MethodClass, ResourceKind, SendContext};
 pub use session::SessionPolicy;
 
 /// The result type of every 0.6 job function.

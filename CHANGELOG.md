@@ -8,6 +8,17 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`ReadResult::header` takes a `SendContext`** instead of a bare URL, and is
+  send-safe: it never merges two isolated browsing contexts. A snapshot holding
+  a partitioned or containered cookie demands the selector that identifies it
+  and raises `RequestError::IncompleteSendContext` (with a stable `required`
+  token list) rather than guessing. New `SendContext`, `ResourceKind`, and
+  `MethodClass`; `SameSite` is now applied, with `Site` defined as
+  (scheme, host). Firefox `partitionKey` tuples and Chromium
+  `top_frame_site_key` values are normalized into that one space, so a Firefox
+  dFPI cookie is matched rather than silently absent from every header. New
+  warning `unparsable_partition_key` for a key neither parser understands —
+  such a row is a non-match everywhere, never treated as unpartitioned.
 - **`ReadResult` is isolation-aware on both source axes.** Its native
   representation is `DetailedCookie`, so a CHIPS partition key or a Firefox
   container survives to `header()`. New: `detailed_cookies()`,
