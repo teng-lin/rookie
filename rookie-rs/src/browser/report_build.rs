@@ -2328,6 +2328,53 @@ mod tests {
     );
   }
 
+  /// Pins the narrowing from `.ends_with` to equality.
+  ///
+  /// The family fallback exists to replace the *generic* row-read message,
+  /// which has exactly one producer: `push_row_read_failed(None)`. A custom
+  /// diagnostic that merely happens to end in the same English suffix is an
+  /// engine telling the caller something specific, and swallowing it loses
+  /// that. Under the previous `.ends_with` test this message was replaced by
+  /// the Chromium fallback; without this test, reverting to `.ends_with`
+  /// leaves the whole suite green.
+  #[test]
+  fn a_custom_diagnostic_ending_in_the_generic_suffix_survives_verbatim() {
+    let mut source = Source::from_candidate(SourceCandidate {
+      path: PathBuf::from("/chrome/Default/Cookies"),
+      role: CookieSourceRoleId::persistent(),
+      format: CookieSourceFormatId::known("chromium_sqlite"),
+      precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      exists: true,
+      selected: true,
+      acquisition: registry::SourceAcquisition::NotAttempted,
+    });
+    source.stats.rows_seen = 2;
+    source.stats.rows_skipped = 2;
+    // Ends with the generic suffix but is not equal to it: the generator for
+    // this source would produce exactly "2 row(s) could not be read".
+    source.push_row_read_failed(Some("v20 tier unavailable, 2 row(s) could not be read".to_owned()));
+
+    let outcome = finalize_singleton_source(
+      "chromium",
+      PathBuf::from("/chrome/Default"),
+      vec![source],
+      None,
+      None,
+    )
+    .expect("finalize the direct-path source");
+    let error = crate::browser::legacy::project_canonical_outcome("chromium", outcome)
+      .expect_err("every row was rejected, so the compatibility projection fails");
+    let rendered = format!("{error:#}");
+    assert!(
+      rendered.contains("v20 tier unavailable"),
+      "the engine's own diagnostic must survive, got: {rendered}"
+    );
+    assert!(
+      !rendered.contains("all Chromium cookie rows failed to decode"),
+      "the family fallback must not replace a custom diagnostic, got: {rendered}"
+    );
+  }
+
   fn engine_source(
     name: &str,
     role: &'static str,
