@@ -196,7 +196,8 @@ impl ReadResult {
   ///
   /// # Errors
   ///
-  /// Returns an error when `url` is invalid or does not use HTTP or HTTPS.
+  /// Returns an error when `url` is invalid or does not use HTTP or HTTPS, or
+  /// when the system clock is earlier than the Unix epoch.
   pub fn header(&self, url: &str) -> Result<String> {
     self.header_at(url, SystemTime::now())
   }
