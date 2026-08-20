@@ -499,9 +499,9 @@ mod tests {
   #[test]
   fn environment_block_creates_sorted_unicode_block_with_overrides() {
     let base = vec![
-      ("PATH".into(), "C:\\Windows".into()),
-      ("TEMP".into(), "C:\\Temp".into()),
-      ("HBD_ABE_ENC_B64".into(), "stale_value".into()),
+      ("PATH", "C:\\Windows"),
+      ("TEMP", "C:\\Temp"),
+      ("HBD_ABE_ENC_B64", "stale_value"),
     ];
     let overrides = [("HBD_ABE_ENC_B64", "new_fresh_encrypted_blob")];
     let block = create_environment_block(base, &overrides);
