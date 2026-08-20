@@ -136,7 +136,7 @@ paths = [
 # not a capability leaf, and its cfg should not be free to grow. Each parent's
 # ceiling above was ratcheted down by the same amount in the same PR, so the
 # crate-wide #218 budget is unchanged by the move.
-"rookie-rs/src/browser/chromium/tests.rs" = { max_cfg = 15, reason = "relocated verbatim from browser/chromium.rs's inline test module; ratcheted 26 -> 15 when the unseal decrypt/decode tests moved to browser/unseal.rs and took 12 cfg with them, less 1 added for the Windows-only GCM fixture import" }
+"rookie-rs/src/browser/chromium/tests.rs" = { max_cfg = 16, reason = "relocated verbatim from browser/chromium.rs's inline test module; ratcheted 26 -> 16 when the unseal decrypt/decode tests moved to browser/unseal.rs and took 12 cfg with them, less 2 added for fixture imports the remaining tests need under one platform only -- the Windows GCM encoder and, after the unseal tests left, the now-unix-only host_bound_plaintext" }
 
 # Tests that moved to the module whose code they pin, rather than the module
 # that happened to import it. Same grandfathered tier and the same rule: the
