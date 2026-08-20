@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Result};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
