@@ -1128,6 +1128,164 @@ pub(crate) fn retain_completed_engine_extract(extract: &mut EngineExtract) {
     .retain(|profile| !profile.sources.is_empty());
 }
 
+/// How an engine finishes an extract whose walk stopped at a boundary.
+///
+/// The three engines answer this differently, and the answers are frozen: no
+/// golden covers a reconciliation, so making them agree would be a behaviour
+/// change rather than a refactor. Naming the policy at each call site is the
+/// point of this type -- the disagreement stops being an accident of which
+/// file each loop happened to be written in and becomes an argument a reviewer
+/// can see all three values of at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtractCompletion {
+  /// Drop every source the walk never attempted, then every profile the drop
+  /// left owning nothing. Gecko and Internet Explorer.
+  RetainAttempted,
+  /// Keep every source the walk committed; drop only the stopped profile, and
+  /// only when it committed no source at all. Safari.
+  DropStoppedProfileIfEmpty,
+}
+
+impl ExtractCompletion {
+  /// Applies the policy to an extract whose walk has just broken on `stop`.
+  /// Never called on a walk that ran to completion: the two engines that
+  /// truncate do it only for a stop they observed themselves.
+  fn apply(self, extract: &mut EngineExtract) {
+    match self {
+      Self::RetainAttempted => retain_completed_engine_extract(extract),
+      // Profiles after the stop never ran and sources hold exactly the queries
+      // that completed, so the only thing left to drop is a stopped profile
+      // that committed nothing -- it is the profile the loop pushed on its way
+      // out, not an extraction failure.
+      Self::DropStoppedProfileIfEmpty => {
+        if extract
+          .profiles
+          .last()
+          .is_some_and(|profile| profile.sources.is_empty())
+        {
+          extract.profiles.pop();
+        }
+      }
+    }
+  }
+}
+
+/// The engine populate frame: the listing-to-extract envelope every engine
+/// repeats, with the per-profile acquisition and the stop policy passed in.
+///
+/// `acquire_profile` is one engine's body. It gets the profile's identity and
+/// the candidates discovery planted for it, and answers with the sources it
+/// committed plus the boundary stop that ended it, if any. The frame commits
+/// the profile *before* honouring that stop, so whatever the body acquired
+/// before the boundary is a real outcome; `completion` -- not this loop --
+/// decides whether it survives.
+///
+/// The output is 1:1 with the post-select listing up to the stop: a profile
+/// whose candidates produced nothing still appears with `sources: vec![]`, so
+/// the report layer can tell a source that vanished before extraction from a
+/// browser that was never installed.
+pub(crate) fn populate_engine_sources<A>(
+  listing: EngineListing,
+  completion: ExtractCompletion,
+  mut acquire_profile: A,
+) -> EngineExtract
+where
+  A: FnMut(
+    &EngineProfileIdentity,
+    Vec<SourceCandidate>,
+  ) -> (Vec<Source>, Option<crate::common::deadline::BoundaryStop>),
+{
+  let EngineListing {
+    profiles,
+    discovery_issues,
+    counters,
+    boundary_stop,
+  } = listing;
+  let mut extract = EngineExtract {
+    profiles: Vec::with_capacity(profiles.len()),
+    discovery_issues,
+    counters,
+    boundary_stop,
+  };
+  for profile in profiles {
+    let DiscoveredProfile {
+      identity,
+      legacy,
+      candidates,
+    } = profile;
+    let (sources, stop) = acquire_profile(&identity, candidates);
+    extract.profiles.push(ExtractedProfile {
+      identity,
+      legacy,
+      sources,
+    });
+    if let Some(stop) = stop {
+      extract.boundary_stop.get_or_insert(stop);
+      completion.apply(&mut extract);
+      break;
+    }
+  }
+  extract
+}
+
+/// The 1:1 per-profile body Safari and Internet Explorer share: acquire every
+/// candidate in turn, and record a failed query on the candidate's own
+/// placeholder rather than losing it.
+///
+/// `fill_failure` is the only difference left between those two engines -- how
+/// a non-boundary `Err` is written onto the placeholder. The deadline is the
+/// other half of the shape: `runtime` is sampled before and after every
+/// candidate, so a stop can end the walk on its own rather than only when the
+/// next query happens to surface one through its error chain. The query result
+/// is committed before the trailing sample, so a stop that races with the
+/// return cannot discard records and counters that already completed.
+///
+/// Only reachable through the safari/internet_explorer engine adapters, whose
+/// modules are compiled on macOS/Windows and in tests; other targets see this
+/// as dead. registry.rs's cfg ceiling (#218) keeps the gate out of this file.
+#[allow(dead_code)]
+fn acquire_each_candidate<Q, F>(
+  candidates: Vec<SourceCandidate>,
+  domains: Option<&[String]>,
+  runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
+  mut query: Q,
+  mut fill_failure: F,
+) -> (Vec<Source>, Option<crate::common::deadline::BoundaryStop>)
+where
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
+  F: FnMut(&mut Source, anyhow::Error),
+{
+  let mut sources = Vec::new();
+  for candidate in candidates {
+    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      return (sources, Some(stop));
+    }
+    let mut source = Source::new(
+      candidate.identity(),
+      candidate.selected,
+      candidate.acquisition,
+    );
+    match query(candidate, domains) {
+      // The engine already built the `Source` from this candidate, so there is
+      // nothing to copy across.
+      Ok(extraction) => source = extraction,
+      Err(error) => {
+        if let Some(stop) = boundary_stop_from_error(&error) {
+          // `source` is dropped uncommitted: the query did not return, so
+          // there is no outcome to report for it.
+          return (sources, Some(stop));
+        }
+        fill_failure(&mut source, error);
+      }
+    }
+    sources.push(source);
+    if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
+      return (sources, Some(stop));
+    }
+  }
+  (sources, None)
+}
+
 // Only reachable through the safari/internet_explorer engine adapters, whose
 // modules are compiled on macOS/Windows and in tests; other targets see this
 // as dead. registry.rs's cfg ceiling (#218) keeps the gate out of this file.
