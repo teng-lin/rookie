@@ -606,12 +606,18 @@ fn select_legacy_gecko_profile(listing: &mut EngineListing) {
 fn legacy_gecko_outcome(browser_id: &str, domains: Option<Vec<String>>) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  legacy_gecko_outcome_with_runtime(browser_id, domains, &runtime)
+  legacy_gecko_outcome_with_runtime(
+    browser_id,
+    domains,
+    crate::SessionPolicy::PersistentOnly,
+    &runtime,
+  )
 }
 
 pub(crate) fn legacy_gecko_outcome_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<EngineExtract> {
   runtime.check()?;
@@ -620,12 +626,12 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
   let mut listing = gecko_profiles_with_context(&context, browser_id)?;
   select_legacy_gecko_profile(&mut listing);
   // The legacy selector keeps only profiles with a persistent source, so the
-  // session alternation would be planned and then never contribute. Stating
-  // `PersistentOnly` here makes that a fact rather than an accident.
+  // chosen profile is unaffected by `session`. What `session` decides is
+  // whether that profile's declared session store is also planned.
   let extract = populate_gecko_sources(
     listing,
     domains.as_deref(),
-    crate::SessionPolicy::PersistentOnly,
+    session,
     |candidate, domains| {
       mozilla::acquire_candidate_source_with_runtime(candidate, domains, runtime)
     },
@@ -1490,6 +1496,64 @@ mod tests {
         profile_path.join(GECKO_PERSISTENT_SOURCE),
         profile_path.join("sessionstore-backups/recovery.jsonlz4"),
       ]
+    );
+  }
+
+  /// The legacy-first route reaches the session store too, when asked.
+  ///
+  /// This is the capability 0.6-beta could not express: session cookies were
+  /// reachable only by naming a profile, and naming one always took them. The
+  /// *profile* selector is unchanged -- legacy-first still requires a
+  /// persistent source -- so what `IncludeSession` adds is that profile's
+  /// declared session store, and nothing else.
+  #[test]
+  fn the_legacy_first_profile_can_include_its_session_store() {
+    let temp = TempDir::new("gecko-legacy-first-session");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    seed_empty_gecko_database(&profile);
+    let session_store = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(&session_store, b"present").expect("write session candidate");
+    // Discovery publishes canonicalized paths (`/private/var/...` on macOS),
+    // so compare by suffix rather than against the fixture path.
+    let session_suffix = std::path::Path::new("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let read_paths = |session| -> Vec<std::path::PathBuf> {
+      let mut listing = gecko_profiles_with_context(&context, "firefox").expect("discover");
+      select_legacy_gecko_profile(&mut listing);
+      let mut read = Vec::new();
+      populate_gecko_sources(
+        listing,
+        None,
+        session,
+        |candidate, domains| {
+          read.push(candidate.path.clone());
+          mozilla::acquire_candidate_source(candidate, domains)
+        },
+        |path| context.fs.exists(path),
+      );
+      read
+    };
+
+    let opened_session = |session| {
+      read_paths(session)
+        .iter()
+        .any(|path| path.ends_with(session_suffix))
+    };
+    assert!(
+      !opened_session(crate::SessionPolicy::PersistentOnly),
+      "the default policy must not open the session store"
+    );
+    assert!(
+      opened_session(crate::SessionPolicy::IncludeSession),
+      "include_session must reach the legacy-first profile's session store"
     );
   }
 

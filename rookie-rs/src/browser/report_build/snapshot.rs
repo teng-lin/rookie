@@ -71,13 +71,14 @@ pub(crate) fn browser_snapshot_with_runtime(
       // The legacy-first route already projects records, not a report. It
       // never had the defect; it only needed its richer projection to survive
       // the job boundary.
-      // `LegacyFirst` never plants a session candidate: the compatibility
-      // selector requires a persistent source, so `session` cannot change what
-      // it acquires. The parameter is still taken so callers do not have to
-      // know that, and so the seam is one function rather than two.
-      let _ = session;
+      // `session` reaches this route too. The legacy-first *profile* selector
+      // is unchanged -- it still requires a persistent source -- but the
+      // chosen profile's declared session store is planned only when asked.
+      // That is what makes `read(ReadRequest::browser("firefox")
+      // .include_session())` expressible: 0.6-beta could reach session cookies
+      // only by naming a profile, and always did.
       let (cookies, warnings) =
-        legacy::browser_detailed_and_warnings_with_runtime(browser_id, None, runtime)?;
+        legacy::browser_detailed_and_warnings_with_runtime(browser_id, None, session, runtime)?;
       Ok(SnapshotOutcome {
         cookies,
         warnings,

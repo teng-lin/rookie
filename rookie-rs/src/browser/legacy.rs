@@ -319,11 +319,13 @@ pub(super) type LegacySnapshot = (Vec<DetailedCookie>, ReadWarningCounts);
 pub(crate) fn browser_cookies_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
   browser_cookies_and_warnings_with_stop_projection(
     browser_id,
     domains,
+    session,
     runtime,
     StopProjection::ReturnError,
   )
@@ -346,6 +348,9 @@ pub(crate) fn browser_cookies_for_load_with_runtime(
   browser_cookies_and_warnings_with_stop_projection(
     browser_id,
     domains,
+    // `load()` is the v0.5.9 bridge. It never read session JSON, and it has
+    // no options argument to ask with.
+    crate::SessionPolicy::PersistentOnly,
     runtime,
     StopProjection::PreserveCommitted,
   )
@@ -363,19 +368,30 @@ pub(crate) fn browser_cookies_for_load_with_runtime(
 pub(crate) fn browser_detailed_and_warnings_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<LegacySnapshot> {
   browser_cookies_and_warnings_with_stop_projection(
     browser_id,
     domains,
+    session,
     runtime,
     StopProjection::ReturnError,
   )
 }
 
+/// `session` reaches the Gecko plan, not a filter over the results.
+///
+/// The legacy-first *profile* selector is unchanged: it still requires a
+/// persistent source, so a session-only profile is never chosen. What
+/// `IncludeSession` adds is the chosen profile's declared session store --
+/// which is what makes `read(ReadRequest::browser("firefox").include_session())`
+/// expressible for the first time. 0.6-beta could reach session cookies only
+/// by naming a profile, and always did.
 fn browser_cookies_and_warnings_with_stop_projection(
   browser_id: &str,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
   stop_projection: StopProjection,
 ) -> Result<LegacySnapshot> {
@@ -400,8 +416,12 @@ fn browser_cookies_and_warnings_with_stop_projection(
       Ok((cookies, warnings))
     }
     "gecko" => {
-      let extract =
-        registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
+      let extract = registry::legacy_gecko_outcome_with_runtime(
+        &browser.canonical_id,
+        domains,
+        session,
+        runtime,
+      )?;
       let skipped = engine_extract_skipped_row_count(&extract);
       let outcome = super::report_build::canonical_engine_extract_with_runtime(
         &browser.canonical_id,

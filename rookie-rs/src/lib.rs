@@ -538,7 +538,7 @@ pub(crate) fn extract_inner(request: ExtractRequest) -> anyhow::Result<Vec<Cooki
   let session = request.target.session();
   match request.target.selection() {
     ProfileSelection::LegacyFirst => {
-      browser::legacy::browser_cookies_with_runtime(&browser_id, request.domains, &runtime)
+      browser::legacy::browser_cookies_with_runtime(&browser_id, request.domains, session, &runtime)
     }
     ProfileSelection::Query(query) => {
       let (_profile_id, report, termination) = profile_extraction_report_with_runtime(
