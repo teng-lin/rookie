@@ -5,10 +5,10 @@ use super::DiscoveryCounters;
 use super::{
   boundary_stop_from_error, canonical_installation_root, embedded_registry, engine_roots,
   installation_id, installation_root_is_directory, normalized_path_bytes, profile_id,
-  retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles,
-  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
-  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles, BrowserEngine,
+  DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy,
+  EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile, LegacyRank,
+  ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use crate::common::deadline::SystemClock;
