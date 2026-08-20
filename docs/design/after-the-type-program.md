@@ -1168,7 +1168,23 @@ PR 3 must not change a diagnostic in the §11 truth table. Goldens are the wrong
 
 Not a feature flag. Independently green PRs. Rollback = revert.
 
-Each PR: `cargo test --workspace --all-targets --locked` (and `--no-default-features` as CI does), Clippy `-D warnings`, `check-cfg-locations`, `check-stage-boundary`, goldens byte-identical, `check-public-api.py` unchanged. PR 3 also: `legacy.rs` and `report_build.rs` characterization tests in §11 byte-identical.
+Each PR, in the order CI runs them:
+
+```console
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo test -p rookie-cookies --no-default-features --all-targets --locked
+cargo run -p xtask --locked -- check-cfg-locations
+cargo run -p xtask --locked -- check-stage-boundary
+git status --porcelain -- rookie-rs/tests/goldens/ rookie-rs/public-api/   # must be empty
+```
+
+**`cargo fmt --all -- --check` is first because it is the cheapest and it is the one that actually broke.** Rev 12 listed the gate without it; three of the first four PRs then failed CI on formatting alone, twice on widened `use` blocks that rustfmt reflows and once on a hand-written test. Nothing about those diffs was wrong — the gate was. A verification list that omits the cheapest check is worse than no list, because it reads as complete.
+
+`--no-default-features` matters for the same reason: CI runs it (`test-rust.yml:168`) so the non-`appbound` Windows branch cannot rot, and a workspace-only run will not catch it.
+
+PR 3 (inside unit 4) also: `legacy.rs` and `report_build.rs` characterization tests in §11 byte-identical.
 
 ---
 
