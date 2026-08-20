@@ -68,7 +68,27 @@ fn lexical_string_schema(
 
 #[cfg(feature = "dto-schema")]
 fn open_identifier_schema() -> schemars::schema::Schema {
-  lexical_string_schema("^[a-z][a-z0-9_]*$", 1, None)
+  let mut schema = lexical_string_schema("^[a-z]", 1, None);
+  let schemars::schema::Schema::Object(object) = &mut schema else {
+    unreachable!("lexical string schemas are always schema objects")
+  };
+  object.subschemas = Some(Box::new(schemars::schema::SubschemaValidation {
+    // Draft-07 treats `$` as a soft end anchor that may match before a final
+    // line terminator. Rejecting every byte outside the vocabulary avoids
+    // that interoperability trap while keeping the vocabulary open.
+    not: Some(Box::new(
+      schemars::schema::SchemaObject {
+        string: Some(Box::new(schemars::schema::StringValidation {
+          pattern: Some("[^a-z0-9_]".to_owned()),
+          ..Default::default()
+        })),
+        ..Default::default()
+      }
+      .into(),
+    )),
+    ..Default::default()
+  }));
+  schema
 }
 
 #[cfg(feature = "dto-schema")]
@@ -879,11 +899,28 @@ mod tests {
     {
       return false;
     }
-    validation.pattern.as_ref().is_none_or(|pattern| {
+    let matches_string = validation.pattern.as_ref().is_none_or(|pattern| {
       regex::Regex::new(pattern)
         .expect("generated identifier pattern is valid")
         .is_match(value)
-    })
+    });
+    let excluded = schema
+      .subschemas
+      .and_then(|subschemas| subschemas.not)
+      .is_some_and(|not_schema| {
+        let schemars::schema::Schema::Object(not_schema) = *not_schema else {
+          return false;
+        };
+        not_schema
+          .string
+          .and_then(|validation| validation.pattern)
+          .is_some_and(|pattern| {
+            regex::Regex::new(&pattern)
+              .expect("generated exclusion pattern is valid")
+              .is_match(value)
+          })
+      });
+    matches_string && !excluded
   }
 
   #[cfg(feature = "dto-schema")]
@@ -893,7 +930,17 @@ mod tests {
       assert!(BrowserId::from_str(valid).is_ok());
       assert!(generated_schema_accepts::<BrowserId>(valid));
     }
-    for invalid in ["", "Uppercase", "1leading", "has-dash", "has space"] {
+    for invalid in [
+      "",
+      "Uppercase",
+      "1leading",
+      "has-dash",
+      "has space",
+      "future_browser\n",
+      "future_browser\r",
+      "future_browser\u{2028}",
+      "future_browser\u{2029}",
+    ] {
       assert!(BrowserId::from_str(invalid).is_err());
       assert!(!generated_schema_accepts::<BrowserId>(invalid));
     }

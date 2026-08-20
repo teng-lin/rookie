@@ -40,8 +40,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shape failures consistently use `RookieRequestError`.
 - Stopped report work now carries a typed request issue and cannot be reported
   as ordinary `no_sources`; completed source data remains available with a
-  partial status. Finalization issues preserve decrypt, decode, provider-
-  unavailable, and provider-failed causes.
+  partial status. Finalization issues preserve causes including decrypt,
+  decode, encrypted, provider-unavailable, and provider-failed.
 - CI is split into PR, nightly, and release lanes. Pull requests run one
   `check` job per OS (fmt, package, metadata, cargo-audit, rust lint+test,
   public API), and stagger Node build+test (22/24/26)

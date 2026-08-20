@@ -102,8 +102,11 @@
       "properties": {
         "id": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "aliases": {
           "type": "array",
@@ -116,8 +119,11 @@
         },
         "engine": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "capabilities": {
           "$ref": "#/definitions/BrowserCapabilitiesDescriptor"
@@ -138,32 +144,44 @@
           "type": "array",
           "items": {
             "type": "string",
+            "not": {
+              "pattern": "[^a-z0-9_]"
+            },
             "minLength": 1,
-            "pattern": "^[a-z][a-z0-9_]*$"
+            "pattern": "^[a-z]"
           }
         },
         "session_formats": {
           "type": "array",
           "items": {
             "type": "string",
+            "not": {
+              "pattern": "[^a-z0-9_]"
+            },
             "minLength": 1,
-            "pattern": "^[a-z][a-z0-9_]*$"
+            "pattern": "^[a-z]"
           }
         },
         "declared_decryption_tiers": {
           "type": "array",
           "items": {
             "type": "string",
+            "not": {
+              "pattern": "[^a-z0-9_]"
+            },
             "minLength": 1,
-            "pattern": "^[a-z][a-z0-9_]*$"
+            "pattern": "^[a-z]"
           }
         },
         "available_decryption_tiers": {
           "type": "array",
           "items": {
             "type": "string",
+            "not": {
+              "pattern": "[^a-z0-9_]"
+            },
             "minLength": 1,
-            "pattern": "^[a-z][a-z0-9_]*$"
+            "pattern": "^[a-z]"
           }
         }
       }
@@ -205,8 +223,11 @@
       "properties": {
         "browser_id": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "installation_id": {
           "type": "string",
@@ -244,13 +265,19 @@
       "properties": {
         "role": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "format": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "path": {
           "type": "string"
@@ -284,15 +311,21 @@
         },
         "status": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "termination": {
           "description": "Why execution stopped. This is independent from `status`: a timed-out request may still contain complete source outcomes collected earlier.",
           "default": "completed",
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "summary": {
           "$ref": "#/definitions/ReportStats"
@@ -447,16 +480,22 @@
         },
         "status": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "selected": {
           "type": "boolean"
         },
         "acquisition_strategy": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "cookies": {
           "type": "array",
@@ -488,13 +527,19 @@
       "properties": {
         "role": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "format": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "path": {
           "type": "string"
@@ -574,18 +619,27 @@
       "properties": {
         "code": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "stage": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "severity": {
           "type": "string",
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "cause": {
           "description": "Stable machine-readable origin of the failure.",
@@ -629,8 +683,11 @@
             "string",
             "null"
           ],
+          "not": {
+            "pattern": "[^a-z0-9_]"
+          },
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "pattern": "^[a-z]"
         },
         "installation_id": {
           "type": [

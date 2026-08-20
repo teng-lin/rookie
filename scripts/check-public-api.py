@@ -140,30 +140,63 @@ def render_rustdoc_json(repo: Path, feature_args: list[str]) -> dict[str, object
         raise PublicApiCommandError(diagnostic) from None
 
 
-def load_deprecation_contract(path: Path) -> list[dict[str, str]]:
+def load_deprecation_contract(path: Path) -> list[dict[str, object]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("schema_version") != 1 or not isinstance(data.get("deprecated"), list):
+    if data.get("schema_version") != 2 or not isinstance(data.get("deprecated"), list):
         raise ValueError(f"invalid deprecation contract in {path}")
 
-    required = {"path", "since", "note"}
-    seen: set[str] = set()
+    required = {"path", "since", "note", "platforms", "feature_sets"}
+    seen: set[tuple[str, str, str]] = set()
     for item in data["deprecated"]:
-        if set(item) != required or not all(
-            isinstance(item[field], str) and item[field].strip() for field in required
+        if not isinstance(item, dict) or set(item) != required or not all(
+            isinstance(item[field], str) and item[field].strip()
+            for field in ("path", "since", "note")
         ):
             raise ValueError(
-                f"deprecated API item must have three non-empty string fields: {item!r}"
+                f"deprecated API item has invalid fields: {item!r}"
             )
-        if item["path"] in seen:
-            raise ValueError(f"duplicate deprecated API path: {item['path']}")
-        seen.add(item["path"])
+        platforms = item["platforms"]
+        feature_sets = item["feature_sets"]
+        if (
+            not isinstance(platforms, list)
+            or not platforms
+            or not all(isinstance(platform, str) and platform in PLATFORMS for platform in platforms)
+            or len(platforms) != len(set(platforms))
+        ):
+            raise ValueError(f"invalid deprecation platforms: {item!r}")
+        if (
+            not isinstance(feature_sets, list)
+            or not feature_sets
+            or not all(
+                isinstance(feature_set, str) and feature_set in FEATURE_SETS
+                for feature_set in feature_sets
+            )
+            or len(feature_sets) != len(set(feature_sets))
+        ):
+            raise ValueError(f"invalid deprecation feature sets: {item!r}")
+        for platform in platforms:
+            for feature_set in feature_sets:
+                key = (platform, feature_set, item["path"])
+                if key in seen:
+                    raise ValueError(f"duplicate scoped deprecated API path: {key!r}")
+                seen.add(key)
     return data["deprecated"]
+
+
+def scoped_deprecations(
+    contract: list[dict[str, object]], platform: str, feature_set: str
+) -> list[dict[str, str]]:
+    return [
+        {"path": item["path"], "since": item["since"], "note": item["note"]}
+        for item in contract
+        if platform in item["platforms"] and feature_set in item["feature_sets"]
+    ]
 
 
 def check_deprecation_contract(
     rustdoc: dict[str, object], expected: list[dict[str, str]], label: str
 ) -> bool:
-    """Require selected public items to retain exact deprecation metadata."""
+    """Require the complete scoped deprecated set and its exact metadata."""
     index = rustdoc.get("index")
     paths = rustdoc.get("paths")
     if not isinstance(index, dict) or not isinstance(paths, dict):
@@ -181,16 +214,25 @@ def check_deprecation_contract(
         path = paths.get(str(item_id))
         if not isinstance(path, dict) or not isinstance(path.get("path"), list):
             continue
-        actual["::".join(path["path"])] = item.get("deprecation")
+        deprecation = item.get("deprecation")
+        if deprecation is not None:
+            actual["::".join(path["path"])] = deprecation
 
+    wanted = {
+        item["path"]: {"since": item["since"], "note": item["note"]} for item in expected
+    }
     success = True
-    for item in expected:
-        deprecation = actual.get(item["path"])
-        wanted = {"since": item["since"], "note": item["note"]}
-        if deprecation != wanted:
+    for path in sorted(wanted.keys() | actual.keys()):
+        if path not in wanted:
+            print(f"unexpected deprecated API item in {label}: {path}", file=sys.stderr)
+            success = False
+        elif path not in actual:
+            print(f"missing deprecated API item in {label}: {path}", file=sys.stderr)
+            success = False
+        elif actual[path] != wanted[path]:
             print(
-                f"deprecation contract mismatch for {item['path']} in {label}: "
-                f"expected {wanted!r}, got {deprecation!r}",
+                f"deprecation contract mismatch for {path} in {label}: "
+                f"expected {wanted[path]!r}, got {actual[path]!r}",
                 file=sys.stderr,
             )
             success = False
@@ -298,7 +340,7 @@ def main() -> int:
 
     try:
         exceptions = load_exceptions(exception_file)
-        deprecations = load_deprecation_contract(deprecation_file)
+        deprecation_contract = load_deprecation_contract(deprecation_file)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)
         return 2
@@ -341,7 +383,11 @@ def main() -> int:
         except PublicApiCommandError as error:
             print(f"rustdoc JSON failed for {filename}: {error}", file=sys.stderr)
             return 2
-        success &= check_deprecation_contract(rustdoc, deprecations, filename)
+        success &= check_deprecation_contract(
+            rustdoc,
+            scoped_deprecations(deprecation_contract, args.platform, feature_set),
+            filename,
+        )
 
     return 0 if success else 1
 
