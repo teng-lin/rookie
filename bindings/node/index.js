@@ -333,13 +333,61 @@ function requiredNative(nativeFunction, name) {
   return nativeFunction
 }
 
+const structuredErrorPrefix = '__ROOKIE_ERROR_V1__'
+const requestStatusCodes = new Set([
+  'InvalidArg',
+  'ObjectExpected',
+  'StringExpected',
+  'NameExpected',
+  'FunctionExpected',
+  'NumberExpected',
+  'BooleanExpected',
+  'ArrayExpected',
+  'BigintExpected',
+  'DateExpected',
+  'ArrayBufferExpected',
+  'DetachableArraybufferExpected',
+])
+
+function decorateNativeError(error) {
+  if (!error || (typeof error !== 'object' && typeof error !== 'function')) {
+    return error
+  }
+
+  let details
+  if (
+    typeof error.message === 'string'
+    && error.message.startsWith(structuredErrorPrefix)
+  ) {
+    try {
+      details = JSON.parse(error.message.slice(structuredErrorPrefix.length))
+      error.message = details.message
+    } catch (_) {
+      // Preserve the native message if a future payload is not understood by
+      // this loader version, then attach safe diagnostic defaults below.
+    }
+  }
+
+  error.kind = details?.kind
+    ?? (error instanceof TypeError || requestStatusCodes.has(error.code) ? 'request' : 'engine')
+  error.rookieCode = details?.rookieCode ?? null
+  error.stopReason = details?.stopReason ?? null
+  error.profileIds = Array.isArray(details?.profileIds) ? details.profileIds : []
+  error.sourceKind = details?.sourceKind ?? null
+  error.targetOs = details?.targetOs ?? null
+  error.pathRedacted = details?.pathRedacted ?? false
+  return error
+}
+
 function asyncNative(nativeFunction, name) {
   requiredNative(nativeFunction, name)
   return (...args) => {
     try {
-      return Promise.resolve(nativeFunction(...args))
+      return Promise.resolve(nativeFunction(...args)).catch((error) => {
+        throw decorateNativeError(error)
+      })
     } catch (error) {
-      return Promise.reject(error)
+      return Promise.reject(decorateNativeError(error))
     }
   }
 }

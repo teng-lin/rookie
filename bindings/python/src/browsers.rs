@@ -1,6 +1,6 @@
+use crate::errors::request_error;
 use crate::{detailed_to_dict, to_dict, PyCancellationHandle};
 use ::rookie_cookies as rookie_core;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyList, PyString};
 use std::path::PathBuf;
@@ -50,10 +50,10 @@ fn validate_option_keys(options: &Bound<'_, PyDict>) -> PyResult<()> {
   for (key, _) in options.iter() {
     let key = key
       .cast::<PyString>()
-      .map_err(|_| PyValueError::new_err("Chromium path option keys must be strings"))?;
+      .map_err(|_| request_error("Chromium path option keys must be strings"))?;
     let key = key.extract::<String>()?;
     if !CHROMIUM_PATH_OPTION_KEYS.contains(&key.as_str()) {
-      return Err(PyValueError::new_err(format!(
+      return Err(request_error(format!(
         "unknown Chromium path option: {key}"
       )));
     }
@@ -66,7 +66,7 @@ fn string_option(options: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<Stri
     return Ok(None);
   };
   let value = value.cast::<PyString>().map_err(|_| {
-    PyValueError::new_err(format!(
+    request_error(format!(
       "Chromium path option '{key}' must be a string or None"
     ))
   })?;
@@ -78,7 +78,7 @@ fn domains_option(options: &Bound<'_, PyDict>) -> PyResult<Option<Vec<String>>> 
     return Ok(None);
   };
   let values = value.cast::<PyList>().map_err(|_| {
-    PyValueError::new_err("Chromium path option 'domains' must be a list of strings or None")
+    request_error("Chromium path option 'domains' must be a list of strings or None")
   })?;
   values
     .iter()
@@ -87,7 +87,7 @@ fn domains_option(options: &Bound<'_, PyDict>) -> PyResult<Option<Vec<String>>> 
       value
         .cast::<PyString>()
         .map_err(|_| {
-          PyValueError::new_err(format!(
+          request_error(format!(
             "Chromium path option 'domains' element {index} must be a string"
           ))
         })?
@@ -109,9 +109,7 @@ fn timeout_option(options: &Bound<'_, PyDict>) -> PyResult<Option<std::time::Dur
         .extract::<i64>()
         .map(|value| value as f64)
         .map_err(|_| {
-          PyValueError::new_err(
-            "Chromium path option 'timeout' must be a number of seconds or None",
-          )
+          request_error("Chromium path option 'timeout' must be a number of seconds or None")
         })
     })?;
   duration_from_seconds(seconds).map(Some)
@@ -124,9 +122,7 @@ fn cancellation_option(
     return Ok(None);
   };
   let handle = value.extract::<PyCancellationHandle>().map_err(|_| {
-    PyValueError::new_err(
-      "Chromium path option 'cancellation' must be a CancellationHandle or None",
-    )
+    request_error("Chromium path option 'cancellation' must be a CancellationHandle or None")
   })?;
   Ok(Some(handle.0))
 }
@@ -135,9 +131,9 @@ fn plaintext_only_option(options: &Bound<'_, PyDict>) -> PyResult<bool> {
   let Some(value) = option_value(options, "plaintext_only")? else {
     return Ok(false);
   };
-  let value = value.cast::<PyBool>().map_err(|_| {
-    PyValueError::new_err("Chromium path option 'plaintext_only' must be a bool or None")
-  })?;
+  let value = value
+    .cast::<PyBool>()
+    .map_err(|_| request_error("Chromium path option 'plaintext_only' must be a bool or None"))?;
   Ok(value.is_true())
 }
 
@@ -153,7 +149,7 @@ fn chromium_path_request(
   }
   let options = options
     .cast::<PyDict>()
-    .map_err(|_| PyValueError::new_err("Chromium path options must be a dict or None"))?;
+    .map_err(|_| request_error("Chromium path options must be a dict or None"))?;
   validate_option_keys(options)?;
 
   let domains = domains_option(options)?;
@@ -167,7 +163,7 @@ fn chromium_path_request(
     + usize::from(local_state_path.is_some())
     + usize::from(plaintext_only);
   if selector_count > 1 {
-    return Err(PyValueError::new_err(
+    return Err(request_error(
       "Chromium path options browser_id, local_state_path, and plaintext_only are mutually exclusive",
     ));
   }
@@ -206,7 +202,7 @@ fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
   // would otherwise panic on: negative, non-finite, and merely finite values
   // too large to represent as a `Duration`.
   std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
-    PyValueError::new_err(
+    request_error(
       "timeout must be a non-negative, finite number of seconds representable as a Duration",
     )
   })

@@ -124,6 +124,40 @@ class JobApiTest(unittest.TestCase):
         self.assertEqual(warning.count, 1)
         self.assertEqual(len(result), 0)
 
+    def test_header_invalid_url_exposes_structured_request_error(self) -> None:
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "cookies.sqlite"
+            connection = sqlite3.connect(str(db))
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE moz_cookies (
+                      host TEXT NOT NULL,
+                      path TEXT NOT NULL,
+                      isSecure INTEGER NOT NULL,
+                      expiry INTEGER NOT NULL,
+                      name TEXT NOT NULL,
+                      value TEXT NOT NULL,
+                      isHttpOnly INTEGER NOT NULL,
+                      sameSite INTEGER NOT NULL
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            result = rookie_cookies.from_path(str(db), include_expired=True)
+
+        with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
+            result.header("not a url")
+        self.assertEqual(raised.exception.kind, "request")
+        self.assertEqual(raised.exception.code, "invalid_url")
+        self.assertIsNone(raised.exception.stop_reason)
+
     def test_unknown_browser_is_request_error(self) -> None:
         with _synthetic_home():
             with self.assertRaises(rookie_cookies.RookieRequestError):

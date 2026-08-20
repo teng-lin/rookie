@@ -155,11 +155,11 @@ pub enum JobCommand {
     include_expired: bool,
     #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
     format: String,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["browser_id", "plaintext_only"])]
     key_path: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["key_path", "plaintext_only"])]
     browser_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["key_path", "browser_id"])]
     plaintext_only: bool,
     #[arg(long)]
     timeout_secs: Option<u64>,

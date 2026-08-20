@@ -869,17 +869,30 @@ fn canonicalize_profile(
             &mut canonical.stats.rows_rejected,
             &mut canonical.stats.counters_saturated,
           );
-          let kind = match error {
+          let cause = match error {
             FinalizationError::Encrypted => "encrypted",
-            FinalizationError::Unavailable(_) => "unavailable",
+            FinalizationError::Unavailable(super::cookie_record::UnavailableCode::Decrypt) => {
+              "decrypt"
+            }
+            FinalizationError::Unavailable(super::cookie_record::UnavailableCode::Decode) => {
+              "decode"
+            }
+            FinalizationError::Unavailable(
+              super::cookie_record::UnavailableCode::ProviderUnavailable,
+            ) => "provider_unavailable",
+            FinalizationError::Unavailable(
+              super::cookie_record::UnavailableCode::ProviderFailed,
+            ) => "provider_failed",
           };
+          let mut finalization_issue = issue(
+            "invalid_final_record",
+            ExtractionStageCode::decode(),
+            IssueSeverityCode::error(),
+            format!("{cause} cookie value rejected before canonical finalization"),
+          );
+          finalization_issue.cause = cause.to_owned();
           ledger.push(Failure::from_issue(
-            issue(
-              "invalid_final_record",
-              ExtractionStageCode::decode(),
-              IssueSeverityCode::error(),
-              format!("{kind} cookie value rejected before canonical finalization"),
-            ),
+            finalization_issue,
             source_scope.clone(),
             &[],
           ));
@@ -1075,6 +1088,11 @@ fn project_canonical_report_with_runtime(
       .map(|source| u64::from(source.stats.provider_failures))
       .sum();
   }
+  append_stop_failure(
+    &mut failures,
+    &mut outcome.result_status,
+    outcome.termination,
+  );
   let issues = failures.into_iter().map(Failure::into_issue).collect();
   let mut saturated = outcome.counters.counters_saturated;
   let summary = ReportStats {
@@ -1126,6 +1144,53 @@ fn project_canonical_report_with_runtime(
     profiles,
     issues,
   }
+}
+
+/// Schema-v1-compatible representation of work that stopped before the report
+/// could finish. Version 1 has no `unattempted` counter, so the exact stop is
+/// carried by `termination` plus an error-severity request issue. This keeps
+/// an empty stopped run out of `no_sources` without adding a wire field.
+fn append_stop_failure(
+  failures: &mut Vec<Failure>,
+  status: &mut ResultStatus,
+  termination: Termination,
+) {
+  let (code, message) = match termination {
+    Termination::Completed => return,
+    Termination::TimedOut => (
+      "request_timed_out",
+      "cookie extraction stopped because its deadline expired",
+    ),
+    Termination::Cancelled => (
+      "request_cancelled",
+      "cookie extraction stopped because cancellation was requested",
+    ),
+    Termination::ResourceExhausted => (
+      "request_resource_exhausted",
+      "cookie extraction stopped because its resource budget was exhausted",
+    ),
+  };
+  if !failures
+    .iter()
+    .any(|failure| failure.code.as_str() == code && matches!(&failure.scope, FailureScope::Request))
+  {
+    failures.push(Failure::from_issue(
+      issue(
+        code,
+        ExtractionStageCode::registry(),
+        IssueSeverityCode::error(),
+        message,
+      ),
+      FailureScope::Request,
+      &[],
+    ));
+  }
+  *status = match *status {
+    ResultStatus::Complete => ResultStatus::Partial,
+    ResultStatus::NoSources => ResultStatus::Failed,
+    ResultStatus::Partial => ResultStatus::Partial,
+    ResultStatus::Failed => ResultStatus::Failed,
+  };
 }
 
 /// Adds to a wire counter, recording any clamp. Every `ReportStats` counter is
@@ -1183,7 +1248,10 @@ fn finalize_outcomes_with_runtime(
     discovery_failed |= outcome.discovery_failed;
     if outcome.detected {
       browsers_detected += 1;
-    } else {
+    } else if !outcome_stopped {
+      // Schema v1 has no unattempted/unknown counter. A stopped browser whose
+      // discovery never established presence or absence belongs in neither
+      // bucket; `append_stop_failure` makes that state explicit on the wire.
       browsers_not_detected += 1;
     }
     installations_discovered += outcome.installations_discovered;

@@ -209,6 +209,9 @@ pub(crate) struct SourceIssue {
 }
 
 impl SourceIssue {
+  /// A source saw one or more rows it could not project into cookies.
+  pub(crate) const ROW_READ_FAILED: &'static str = "row_read_failed";
+
   /// Carries the legacy "every row was rejected" error without giving `Source`
   /// a sibling field for it.
   ///
@@ -363,7 +366,7 @@ impl Source {
     }
     self.issues.push(
       SourceIssue::new(
-        "row_read_failed",
+        SourceIssue::ROW_READ_FAILED,
         ExtractionStageCode::parse(),
         IssueSeverityCode::error(),
         row_error.unwrap_or_else(|| SourceIssue::generic_row_read_failed_message(skipped)),

@@ -3,7 +3,7 @@
 #[macro_use]
 extern crate napi_derive;
 
-use napi::{bindgen_prelude::AsyncTask, Result, Status, Task};
+use napi::{bindgen_prelude::AsyncTask, Env, Result, Status, Task};
 use rookie_cookies::direct_path::{
   ChromiumCredentialSource, ChromiumPathRequest, DirectPathRequest,
 };
@@ -21,17 +21,105 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::Duration;
 
+const STRUCTURED_ERROR_PREFIX: &str = "__ROOKIE_ERROR_V1__";
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BindingErrorDetails {
+  message: String,
+  kind: &'static str,
+  rookie_code: Option<&'static str>,
+  stop_reason: Option<&'static str>,
+  profile_ids: Vec<String>,
+  source_kind: Option<String>,
+  target_os: Option<String>,
+  path_redacted: bool,
+}
+
+fn stop_reason_name(reason: rookie_cookies::StopReason) -> &'static str {
+  match reason {
+    rookie_cookies::StopReason::TimedOut => "timed_out",
+    rookie_cookies::StopReason::Cancelled => "cancelled",
+    rookie_cookies::StopReason::ResourceExhausted => "resource_exhausted",
+    _ => "unknown",
+  }
+}
+
+fn binding_error_details(error: &rookie_cookies::anyhow::Error) -> BindingErrorDetails {
+  let request = error.downcast_ref::<rookie_cookies::RequestError>();
+  let direct = error.downcast_ref::<rookie_cookies::direct_path::DirectPathError>();
+  let stop_reason = rookie_cookies::stop_reason(error).map(stop_reason_name);
+  let fault_kind = rookie_cookies::fault_kind(error);
+
+  BindingErrorDetails {
+    message: format!("{error:?}"),
+    kind: match fault_kind {
+      rookie_cookies::FaultKind::Request => "request",
+      rookie_cookies::FaultKind::Engine => "engine",
+      _ => "engine",
+    },
+    rookie_code: stop_reason
+      .or_else(|| request.map(rookie_cookies::RequestError::code))
+      .or_else(|| direct.map(rookie_cookies::direct_path::DirectPathError::code)),
+    stop_reason,
+    profile_ids: request
+      .map(rookie_cookies::RequestError::profile_ids)
+      .unwrap_or_default()
+      .to_vec(),
+    source_kind: direct
+      .and_then(rookie_cookies::direct_path::DirectPathError::source_kind)
+      .map(|source| source.to_string()),
+    target_os: direct
+      .and_then(rookie_cookies::direct_path::DirectPathError::target_os)
+      .map(str::to_owned),
+    path_redacted: direct
+      .and_then(rookie_cookies::direct_path::DirectPathError::path)
+      .is_some(),
+  }
+}
+
+fn status_for_kind(kind: &str) -> Status {
+  if kind == "request" {
+    Status::InvalidArg
+  } else {
+    Status::GenericFailure
+  }
+}
+
+fn structured_error_with_env(env: Env, details: BindingErrorDetails) -> napi::Error {
+  let status = status_for_kind(details.kind);
+  let mut js_error = match env.create_error(napi::Error::new(status, &details.message)) {
+    Ok(error) => error,
+    Err(error) => return error,
+  };
+  let attributes = (|| -> Result<()> {
+    js_error.set_named_property("kind", details.kind)?;
+    js_error.set_named_property("code", status.as_ref())?;
+    js_error.set_named_property("rookieCode", details.rookie_code)?;
+    js_error.set_named_property("stopReason", details.stop_reason)?;
+    js_error.set_named_property("profileIds", details.profile_ids)?;
+    js_error.set_named_property("sourceKind", details.source_kind)?;
+    js_error.set_named_property("targetOs", details.target_os)?;
+    js_error.set_named_property("pathRedacted", details.path_redacted)?;
+    Ok(())
+  })();
+  if let Err(error) = attributes {
+    return error;
+  }
+  napi::Error::from(js_error.into_unknown())
+}
+
 /// Converts a `rookie_cookies` error into a `napi::Error`, picking the status
 /// code from [`rookie_cookies::fault_kind`] instead of collapsing every
 /// failure into `Status::Unknown`. `FaultKind` is `#[non_exhaustive]`, so the
 /// match keeps a wildcard arm for kinds this binding doesn't know about yet.
 fn classify_fault(error: rookie_cookies::anyhow::Error) -> napi::Error {
-  match rookie_cookies::fault_kind(&error) {
-    rookie_cookies::FaultKind::Request => {
-      napi::Error::new(Status::InvalidArg, format!("{error:?}"))
-    }
-    _ => napi::Error::new(Status::GenericFailure, format!("{error:?}")),
-  }
+  let details = binding_error_details(&error);
+  let status = status_for_kind(details.kind);
+  let payload = serde_json::to_string(&details).unwrap_or_else(|serialization| {
+    format!(r#"{{"message":"error diagnostic serialization failed: {serialization}"}}"#)
+  });
+  napi::Error::new(status, format!("{STRUCTURED_ERROR_PREFIX}{payload}"))
 }
 
 /// A cross-thread cancellation token for an in-flight extraction.
@@ -578,6 +666,32 @@ fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
   }
 }
 
+fn chromium_credentials(
+  browser_id: Option<&str>,
+  local_state_path: Option<&str>,
+  plaintext_only: bool,
+  option_names: &'static str,
+) -> Result<Option<ChromiumCredentialSource>> {
+  let selector_count = usize::from(browser_id.is_some())
+    + usize::from(local_state_path.is_some())
+    + usize::from(plaintext_only);
+  if selector_count > 1 {
+    return Err(napi::Error::new(Status::InvalidArg, option_names));
+  }
+
+  Ok(if let Some(browser_id) = browser_id {
+    Some(ChromiumCredentialSource::BrowserId(browser_id.to_owned()))
+  } else if let Some(local_state_path) = local_state_path {
+    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+      local_state_path,
+    )))
+  } else if plaintext_only {
+    Some(ChromiumCredentialSource::PlaintextOnly)
+  } else {
+    None
+  })
+}
+
 fn chromium_path_request(
   path: String,
   options: Option<ChromiumPathOptions>,
@@ -590,28 +704,12 @@ fn chromium_path_request(
     request = request.domains(domains);
   }
 
-  let plaintext_only = options.plaintext_only.unwrap_or(false);
-  let selector_count = usize::from(options.browser_id.is_some())
-    + usize::from(options.local_state_path.is_some())
-    + usize::from(plaintext_only);
-  if selector_count > 1 {
-    return Err(napi::Error::new(
-      Status::InvalidArg,
-      "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
-    ));
-  }
-
-  let credentials = if let Some(browser_id) = options.browser_id {
-    Some(ChromiumCredentialSource::BrowserId(browser_id))
-  } else if let Some(local_state_path) = options.local_state_path {
-    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-      local_state_path,
-    )))
-  } else if plaintext_only {
-    Some(ChromiumCredentialSource::PlaintextOnly)
-  } else {
-    None
-  };
+  let credentials = chromium_credentials(
+    options.browser_id.as_deref(),
+    options.local_state_path.as_deref(),
+    options.plaintext_only.unwrap_or(false),
+    "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
+  )?;
   if let Some(credentials) = credentials {
     request = request.credentials(credentials);
   }
@@ -1196,7 +1294,15 @@ pub struct FromPathOptions {
 pub struct ReadWarningObject {
   pub code: String,
   pub count: u32,
+  pub saturated: bool,
   pub message: String,
+}
+
+fn warning_count(count: u64) -> (u32, bool) {
+  match u32::try_from(count) {
+    Ok(count) => (count, false),
+    Err(_) => (u32::MAX, true),
+  }
 }
 
 fn clone_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
@@ -1241,10 +1347,14 @@ impl JsReadResult {
       .inner
       .warnings()
       .iter()
-      .map(|warning| ReadWarningObject {
-        code: warning.code().to_owned(),
-        count: u32::try_from(warning.count()).unwrap_or(u32::MAX),
-        message: warning.to_string(),
+      .map(|warning| {
+        let (count, saturated) = warning_count(warning.count());
+        ReadWarningObject {
+          code: warning.code().to_owned(),
+          count,
+          saturated,
+          message: warning.to_string(),
+        }
       })
       .collect()
   }
@@ -1260,8 +1370,11 @@ impl JsReadResult {
   }
 
   #[napi]
-  pub fn header(&self, url: String) -> Result<String> {
-    self.inner.header(&url).map_err(classify_fault)
+  pub fn header(&self, env: Env, url: String) -> Result<String> {
+    self.inner.header(&url).map_err(|error| {
+      let details = binding_error_details(&error);
+      structured_error_with_env(env, details)
+    })
   }
 }
 
@@ -1372,6 +1485,7 @@ pub fn report(options: ReportOptions) -> AsyncTask<JobReportTask> {
 
 pub struct FromPathTask {
   options: FromPathOptions,
+  credentials: Option<ChromiumCredentialSource>,
   cancellation: Option<CancellationHandle>,
 }
 
@@ -1392,20 +1506,8 @@ impl Task for FromPathTask {
       if let Some(handle) = self.cancellation.take() {
         request = request.cancellation(handle);
       }
-      if options.plaintext_only == Some(true) {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly,
-        );
-      } else if let Some(browser_id) = options.browser_id.as_deref() {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(browser_id.to_owned()),
-        );
-      } else if let Some(key_path) = options.key_path.as_deref() {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-            key_path,
-          )),
-        );
+      if let Some(credentials) = self.credentials.take() {
+        request = request.chromium_credentials(credentials);
       }
       rookie_cookies::from_path(request).map_err(classify_fault)
     })
@@ -1421,11 +1523,18 @@ impl Task for FromPathTask {
 pub fn from_path(
   options: FromPathOptions,
   cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<FromPathTask> {
-  AsyncTask::new(FromPathTask {
+) -> Result<AsyncTask<FromPathTask>> {
+  let credentials = chromium_credentials(
+    options.browser_id.as_deref(),
+    options.key_path.as_deref(),
+    options.plaintext_only.unwrap_or(false),
+    "fromPath options browserId, keyPath, and plaintextOnly are mutually exclusive",
+  )?;
+  Ok(AsyncTask::new(FromPathTask {
     options,
+    credentials,
     cancellation: cancellation.map(|handle| handle.0.clone()),
-  })
+  }))
 }
 
 // Windows only browsers
@@ -1675,6 +1784,35 @@ mod tests {
 
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].expires, None);
+  }
+
+  #[test]
+  fn chromium_credential_selectors_reject_every_conflicting_shape() {
+    for (browser_id, key_path, plaintext_only) in [
+      (Some("chrome"), Some("Local State"), false),
+      (Some("chrome"), None, true),
+      (None, Some("Local State"), true),
+      (Some("chrome"), Some("Local State"), true),
+    ] {
+      let error = chromium_credentials(
+        browser_id,
+        key_path,
+        plaintext_only,
+        "selectors are mutually exclusive",
+      )
+      .expect_err("conflicting selectors must fail before a task is scheduled");
+
+      assert_eq!(error.status, Status::InvalidArg);
+      assert_eq!(error.reason, "selectors are mutually exclusive");
+    }
+  }
+
+  #[test]
+  fn warning_counts_report_saturation_instead_of_looking_exact() {
+    assert_eq!(warning_count(7), (7, false));
+    assert_eq!(warning_count(u64::from(u32::MAX)), (u32::MAX, false));
+    assert_eq!(warning_count(u64::from(u32::MAX) + 1), (u32::MAX, true));
+    assert_eq!(warning_count(u64::MAX), (u32::MAX, true));
   }
 
   /// Schema-parity check for the hand-written `#[napi(object)]` report DTOs.

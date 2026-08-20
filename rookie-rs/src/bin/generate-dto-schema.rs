@@ -127,12 +127,12 @@ fn main() {
   // closed enum -- see report_core.rs. Strip any `enum`/`const` constraint
   // schemars may have inferred so a generated DTO class stays forward
   // compatible with values this build has never heard of. Every open
-  // identifier today is a `#[serde(transparent)]` newtype that schemars
-  // inlines as a bare `{"type": "string"}` with nothing nested underneath,
-  // so a shallow strip would happen to be enough right now -- but strip
-  // recursively anyway, so a future report field backed by a real Rust
-  // `enum`, or a nested inlined type, can't silently smuggle a closed
-  // `enum`/`const` constraint into the generated schema.
+  // identifier today is a `#[serde(transparent)]` newtype with a custom,
+  // inlined lexical string schema. A shallow strip would happen to be enough
+  // right now, but strip recursively anyway so a future report field backed
+  // by a real Rust `enum`, or a nested inlined type, can't silently smuggle a
+  // closed `enum`/`const` constraint into the generated schema. Lexical
+  // `pattern`/length constraints are intentionally retained.
   for schema in definitions.values_mut() {
     strip_enum_and_const(schema);
   }
@@ -156,4 +156,48 @@ fn main() {
   fs::write(&output_path, rendered + "\n")
     .unwrap_or_else(|error| panic!("failed to write {}: {error}", output_path.display()));
   eprintln!("wrote {}", output_path.display());
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn property<'a>(roots: &'a Map<String, Value>, type_name: &str, field: &str) -> &'a Value {
+    &roots[type_name]["properties"][field]
+  }
+
+  #[test]
+  fn generated_definitions_preserve_open_and_opaque_identifier_constraints() {
+    let mut generator = SchemaSettings::draft07().into_generator();
+    let _roots = root_definitions(&mut generator);
+    let definitions: Map<String, Value> = generator
+      .definitions()
+      .iter()
+      .map(|(name, schema)| (name.clone(), schema_value(schema.clone())))
+      .collect();
+    let open = property(&definitions, "BrowserDescriptor", "id");
+    assert_eq!(open["type"], "string");
+    assert_eq!(open["minLength"], 1);
+    assert_eq!(open["pattern"], "^[a-z]");
+    assert_eq!(open["not"]["type"], "string");
+    assert_eq!(open["not"]["pattern"], "[^a-z0-9_]");
+    assert!(open.get("enum").is_none(), "open vocabulary must stay open");
+
+    let optional_open = property(&definitions, "ExtractionIssue", "browser_id");
+    assert_eq!(optional_open["type"], json!(["string", "null"]));
+    assert_eq!(optional_open["not"]["type"], "string");
+    assert_eq!(optional_open["not"]["pattern"], "[^a-z0-9_]");
+
+    let opaque = property(&definitions, "ProfileIdentity", "profile_id");
+    assert_eq!(opaque["type"], "string");
+    assert_eq!(opaque["minLength"], 64);
+    assert_eq!(opaque["maxLength"], 64);
+    assert_eq!(opaque["pattern"], "^[0-9a-f]{64}$");
+
+    let optional_opaque = property(&definitions, "ExtractionIssue", "installation_id");
+    assert_eq!(optional_opaque["type"], json!(["string", "null"]));
+    assert_eq!(optional_opaque["minLength"], 64);
+    assert_eq!(optional_opaque["maxLength"], 64);
+    assert_eq!(optional_opaque["pattern"], "^[0-9a-f]{64}$");
+  }
 }

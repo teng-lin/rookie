@@ -608,7 +608,7 @@ mod tests {
         base.copy_from_slice(reduced.as_slice());
       }
       let mut exponent = [0_u8; KEY_BYTES];
-      for chunk in exponent[KEY_BYTES - 8..].chunks_exact_mut(4) {
+      for chunk in exponent[KEY_BYTES - 8..].as_chunks_mut::<4>().0 {
         chunk.copy_from_slice(&next_word(&mut state).to_be_bytes());
       }
       assert_eq!(

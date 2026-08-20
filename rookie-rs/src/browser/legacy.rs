@@ -9,10 +9,24 @@ use super::cookie_record::{FinalizedCookieRecord, LegacyProjectionSemantics};
 use super::mozilla::MozillaProfile;
 use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome, Termination};
 use super::registry::{self, EngineExtract, EngineListing};
+use super::source::SourceIssue;
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::enums::{Cookie, DetailedCookie};
+use crate::read_warning::ReadWarningCounts;
 use anyhow::{bail, Result};
 use std::{error::Error, fmt};
+
+/// Whether a compatibility projection may retain committed records after the
+/// shared runtime stops.
+///
+/// Single-browser compatibility APIs promise a typed stop error. Flat
+/// `load()` is different: an already-claimed browser runs to completion and
+/// contributes any cookies it committed before observing the shared stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopProjection {
+  ReturnError,
+  PreserveCommitted,
+}
 
 /// The authoritative registry found no source eligible for a named wrapper.
 ///
@@ -97,18 +111,6 @@ pub(crate) fn project_engine_extract_outcome(
   )
 }
 
-fn project_engine_extract_with_runtime(
-  browser_id: &str,
-  extract: EngineExtract,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  project_canonical_outcome_with_runtime(
-    browser_id,
-    super::report_build::canonical_engine_extract_with_runtime(browser_id, extract, runtime)?,
-    runtime,
-  )
-}
-
 #[cfg(test)]
 pub(crate) fn project_chromium_outcome(
   browser_id: &str,
@@ -120,24 +122,12 @@ pub(crate) fn project_chromium_outcome(
   )
 }
 
-fn project_chromium_outcome_with_runtime(
-  browser_id: &str,
-  outcome: registry::ChromiumRegistryDraft,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  project_canonical_outcome_with_runtime(
-    browser_id,
-    super::report_build::canonical_chromium_extraction_with_runtime(browser_id, outcome, runtime)?,
-    runtime,
-  )
-}
-
 // Only reachable in production through the automatic multi-identity
 // Chromium selection, which is Linux/macOS-only; Windows exercises this via
 // `#[cfg(test)]`.
 #[allow(dead_code)]
 pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> Result<Vec<Cookie>> {
-  let selected = selected_records(browser_id, outcome, None)?;
+  let selected = selected_records(browser_id, outcome, None, StopProjection::ReturnError)?;
   Ok(
     selected
       .into_iter()
@@ -155,8 +145,22 @@ pub(crate) fn project_canonical_outcome_with_runtime(
   outcome: Outcome,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
+  project_canonical_outcome_with_stop_projection(
+    browser_id,
+    outcome,
+    runtime,
+    StopProjection::ReturnError,
+  )
+}
+
+pub(crate) fn project_canonical_outcome_with_stop_projection(
+  browser_id: &str,
+  outcome: Outcome,
+  runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
+) -> Result<Vec<Cookie>> {
   let completed = outcome.termination == Termination::Completed;
-  let selected = selected_records(browser_id, outcome, Some(runtime))?;
+  let selected = selected_records(browser_id, outcome, Some(runtime), stop_projection)?;
   if completed {
     runtime.check()?;
   }
@@ -176,6 +180,7 @@ fn selected_records(
   browser_id: &str,
   outcome: Outcome,
   runtime: Option<&BoundaryRuntime<'_>>,
+  stop_projection: StopProjection,
 ) -> Result<Vec<(LegacyProjectionSemantics, Vec<FinalizedCookieRecord>)>> {
   let boundary_stop = match outcome.termination {
     Termination::Completed => None,
@@ -198,6 +203,9 @@ fn selected_records(
     ));
   match disposition {
     CompatibilityDisposition::Emit { source_digests } => {
+      if let (Some(stop), StopProjection::ReturnError) = (boundary_stop, stop_projection) {
+        return Err(stop.into());
+      }
       let mut selected = Vec::new();
       for source in sources {
         if let Some(runtime) = runtime {
@@ -239,7 +247,7 @@ pub(crate) fn project_canonical_detailed_outcome(
   browser_id: &str,
   outcome: Outcome,
 ) -> Result<Vec<DetailedCookie>> {
-  let selected = selected_records(browser_id, outcome, None)?;
+  let selected = selected_records(browser_id, outcome, None, StopProjection::ReturnError)?;
   Ok(
     selected
       .into_iter()
@@ -258,7 +266,12 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
   let completed = outcome.termination == Termination::Completed;
-  let selected = selected_records(browser_id, outcome, Some(runtime))?;
+  let selected = selected_records(
+    browser_id,
+    outcome,
+    Some(runtime),
+    StopProjection::ReturnError,
+  )?;
   if completed {
     runtime.check()?;
   }
@@ -274,15 +287,37 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   )
 }
 
-pub(super) type LegacySnapshot = (Vec<Cookie>, Vec<(&'static str, u64)>);
+pub(super) type LegacySnapshot = (Vec<Cookie>, ReadWarningCounts);
 
 pub(crate) fn browser_cookies_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  browser_cookies_and_warnings_with_runtime(browser_id, domains, runtime)
-    .map(|(cookies, _warnings)| cookies)
+  browser_cookies_and_warnings_with_stop_projection(
+    browser_id,
+    domains,
+    runtime,
+    StopProjection::ReturnError,
+  )
+  .map(|(cookies, _warnings)| cookies)
+}
+
+/// Flat `load()` projection. Unlike single-browser compatibility surfaces,
+/// this keeps records committed by an in-flight browser before the shared
+/// runtime stopped.
+pub(crate) fn browser_cookies_for_load_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  browser_cookies_and_warnings_with_stop_projection(
+    browser_id,
+    domains,
+    runtime,
+    StopProjection::PreserveCommitted,
+  )
+  .map(|(cookies, _warnings)| cookies)
 }
 
 /// One LegacyFirst extract: compatibility cookies plus skip counts from the
@@ -292,28 +327,63 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<LegacySnapshot> {
+  browser_cookies_and_warnings_with_stop_projection(
+    browser_id,
+    domains,
+    runtime,
+    StopProjection::ReturnError,
+  )
+}
+
+fn browser_cookies_and_warnings_with_stop_projection(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
+) -> Result<LegacySnapshot> {
   runtime.check()?;
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
     "chromium" => {
       let draft =
         registry::legacy_chromium_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
-      let decrypt = chromium_decrypt_skip_count(&draft);
-      let cookies = project_chromium_outcome_with_runtime(&browser.canonical_id, draft, runtime)?;
-      Ok((cookies, skip_warnings(decrypt, 0)))
+      let warnings = chromium_warning_counts(&draft);
+      let outcome = super::report_build::canonical_chromium_extraction_with_runtime(
+        &browser.canonical_id,
+        draft,
+        runtime,
+      )?;
+      let cookies = project_canonical_outcome_with_stop_projection(
+        &browser.canonical_id,
+        outcome,
+        runtime,
+        stop_projection,
+      )?;
+      Ok((cookies, warnings))
     }
     "gecko" => {
       let extract =
         registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
       let skipped = engine_extract_skipped_row_count(&extract);
-      let cookies = project_engine_extract_with_runtime(&browser.canonical_id, extract, runtime)?;
-      Ok((cookies, skip_warnings(0, skipped)))
+      let outcome = super::report_build::canonical_engine_extract_with_runtime(
+        &browser.canonical_id,
+        extract,
+        runtime,
+      )?;
+      let cookies = project_canonical_outcome_with_stop_projection(
+        &browser.canonical_id,
+        outcome,
+        runtime,
+        stop_projection,
+      )?;
+      Ok((cookies, row_read_warnings(skipped)))
     }
     engine => dispatch::remaining_engine_snapshot_with_runtime(
       &browser.canonical_id,
       engine,
       domains,
       runtime,
+      stop_projection,
     ),
   }
 }
@@ -327,33 +397,38 @@ pub(super) fn cookies_and_skipped_from_engine_extract(
   canonical_id: &str,
   extract: EngineExtract,
   runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
 ) -> Result<LegacySnapshot> {
   let skipped = engine_extract_skipped_row_count(&extract);
-  let cookies = project_engine_extract_with_runtime(canonical_id, extract, runtime)?;
-  Ok((cookies, skip_warnings(0, skipped)))
+  let outcome =
+    super::report_build::canonical_engine_extract_with_runtime(canonical_id, extract, runtime)?;
+  let cookies = project_canonical_outcome_with_stop_projection(
+    canonical_id,
+    outcome,
+    runtime,
+    stop_projection,
+  )?;
+  Ok((cookies, row_read_warnings(skipped)))
 }
 
-fn skip_warnings(decrypt_failed: u64, row_read_failed: u64) -> Vec<(&'static str, u64)> {
-  let mut warnings = Vec::new();
-  if decrypt_failed > 0 {
-    warnings.push(("decrypt_failed", decrypt_failed));
-  }
-  if row_read_failed > 0 {
-    warnings.push(("row_read_failed", row_read_failed));
-  }
+fn row_read_warnings(skipped: u64) -> ReadWarningCounts {
+  let mut warnings = ReadWarningCounts::default();
+  warnings.record_issue(SourceIssue::ROW_READ_FAILED, skipped);
   warnings
 }
 
-fn chromium_decrypt_skip_count(draft: &registry::ChromiumRegistryDraft) -> u64 {
-  draft
+fn chromium_warning_counts(draft: &registry::ChromiumRegistryDraft) -> ReadWarningCounts {
+  let mut warnings = ReadWarningCounts::default();
+  for issue in draft
     .installations
     .iter()
     .flat_map(|installation| installation.profiles.iter())
     .flat_map(|profile| profile.sources.iter())
     .flat_map(|source| source.issues.iter())
-    .filter(|issue| crate::browser::chromium::CHROMIUM_UNSEAL_ISSUE_CODES.contains(&issue.code))
-    .map(|issue| u64::from(issue.occurrences))
-    .fold(0u64, u64::saturating_add)
+  {
+    warnings.record_issue(issue.code, u64::from(issue.occurrences));
+  }
+  warnings
 }
 
 fn engine_extract_skipped_row_count(extract: &EngineExtract) -> u64 {

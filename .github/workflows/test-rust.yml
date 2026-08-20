@@ -161,9 +161,17 @@ jobs:
       - name: Test without default features
         if: ${{ !cancelled() }}
         run: cargo test -p rookie-cookies --no-default-features --all-targets --locked
+      - name: Enforce producer identifier validation in release builds
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: cargo test -p rookie-cookies --release --locked crate_produced_identifiers_reject_invalid_values
       - name: Test documentation
         if: ${{ !cancelled() }}
         run: cargo test --workspace --doc --locked
+      - name: Deny rustdoc warnings
+        if: ${{ !cancelled() }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p rookie-cookies --all-features --no-deps --locked
       - name: Check packaged Rust consumer resolution
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: python scripts/check-packaged-rust-consumer.py

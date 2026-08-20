@@ -6,9 +6,11 @@ that script's module docstring for why this exists alongside the
 dict-returning API rather than instead of it.
 
 Every open string identifier (browser/engine/cipher-tier/issue-code/...) is
-typed as a plain `str`, matching the schema: a value this build has never
-seen is still representable, exactly like the Rust source it is generated
-from -- see `report_core.rs`'s module docs.
+typed as a plain `str`: a value this build has never seen is still
+representable, exactly like the Rust source it is generated from. The JSON
+Schema and Rust constructors enforce the identifier's lexical shape; these
+dataclasses intentionally do not perform runtime validation -- see
+`report_core.rs`'s module docs.
 """
 
 from __future__ import annotations

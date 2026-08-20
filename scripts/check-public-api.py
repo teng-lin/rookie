@@ -23,6 +23,7 @@ FEATURE_SETS = {
     "no-default-features": ["--no-default-features"],
 }
 CHANGES = {"added", "removed", "missing-baseline"}
+DEPRECATION_CONTRACT = "deprecated-items.json"
 
 
 class PublicApiCommandError(RuntimeError):
@@ -109,6 +110,225 @@ def render_public_api(repo: Path, feature_args: list[str]) -> str:
     return result.stdout.rstrip("\n") + "\n"
 
 
+def render_rustdoc_json(repo: Path, feature_args: list[str]) -> dict[str, object]:
+    """Build rustdoc JSON because cargo-public-api omits deprecation metadata."""
+    command = [
+        "cargo",
+        f"+{NIGHTLY}",
+        "rustdoc",
+        "--manifest-path",
+        str(repo / "rookie-rs" / "Cargo.toml"),
+        "--target-dir",
+        str(repo / "target"),
+        "--lib",
+        "--locked",
+        *feature_args,
+        "--",
+        "-Z",
+        "unstable-options",
+        "--output-format",
+        "json",
+    ]
+    try:
+        subprocess.run(command, check=True, text=True, capture_output=True, cwd=repo)
+        return json.loads((repo / "target" / "doc" / "rookie_cookies.json").read_text())
+    except (OSError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
+        if isinstance(error, subprocess.CalledProcessError):
+            diagnostic = (error.stderr or error.stdout or str(error)).strip()
+        else:
+            diagnostic = str(error)
+        raise PublicApiCommandError(diagnostic) from None
+
+
+def load_deprecation_contract(path: Path) -> list[dict[str, object]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 2 or not isinstance(data.get("deprecated"), list):
+        raise ValueError(f"invalid deprecation contract in {path}")
+
+    required = {"path", "since", "note", "platforms", "feature_sets"}
+    seen: set[tuple[str, str, str]] = set()
+    for item in data["deprecated"]:
+        if not isinstance(item, dict) or set(item) != required or not all(
+            isinstance(item[field], str) and item[field].strip()
+            for field in ("path", "since", "note")
+        ):
+            raise ValueError(
+                f"deprecated API item has invalid fields: {item!r}"
+            )
+        platforms = item["platforms"]
+        feature_sets = item["feature_sets"]
+        if (
+            not isinstance(platforms, list)
+            or not platforms
+            or not all(isinstance(platform, str) and platform in PLATFORMS for platform in platforms)
+            or len(platforms) != len(set(platforms))
+        ):
+            raise ValueError(f"invalid deprecation platforms: {item!r}")
+        if (
+            not isinstance(feature_sets, list)
+            or not feature_sets
+            or not all(
+                isinstance(feature_set, str) and feature_set in FEATURE_SETS
+                for feature_set in feature_sets
+            )
+            or len(feature_sets) != len(set(feature_sets))
+        ):
+            raise ValueError(f"invalid deprecation feature sets: {item!r}")
+        for platform in platforms:
+            for feature_set in feature_sets:
+                key = (platform, feature_set, item["path"])
+                if key in seen:
+                    raise ValueError(f"duplicate scoped deprecated API path: {key!r}")
+                seen.add(key)
+    return data["deprecated"]
+
+
+def scoped_deprecations(
+    contract: list[dict[str, object]], platform: str, feature_set: str
+) -> list[dict[str, str]]:
+    return [
+        {"path": item["path"], "since": item["since"], "note": item["note"]}
+        for item in contract
+        if platform in item["platforms"] and feature_set in item["feature_sets"]
+    ]
+
+
+def check_deprecation_contract(
+    rustdoc: dict[str, object], expected: list[dict[str, str]], label: str
+) -> bool:
+    """Require the complete scoped deprecated set and its exact metadata."""
+    index = rustdoc.get("index")
+    root = rustdoc.get("root")
+    if not isinstance(index, dict) or not isinstance(root, int):
+        print(f"invalid rustdoc JSON structure for {label}", file=sys.stderr)
+        return False
+
+    actual: dict[str, object] = {}
+    success = True
+
+    # rustdoc's `paths` table describes definition paths, so a `pub` item in a
+    # private module appears there even though downstream crates cannot name it.
+    # Walk outward from the crate root instead, following only public modules
+    # and re-exports and recording the path a downstream crate actually uses.
+
+    def item_for(item_id: object) -> dict[str, object] | None:
+        item = index.get(str(item_id))
+        return item if isinstance(item, dict) else None
+
+    def record(path: list[str], deprecation: object) -> None:
+        nonlocal success
+        rendered = "::".join(path)
+        previous = actual.get(rendered)
+        if previous is not None and previous != deprecation:
+            print(
+                f"conflicting deprecation metadata for {rendered} in {label}: "
+                f"{previous!r} versus {deprecation!r}",
+                file=sys.stderr,
+            )
+            success = False
+        actual[rendered] = deprecation
+
+    def visit(
+        item_id: object,
+        public_path: list[str],
+        ancestors: frozenset[str],
+        reexport_deprecation: object = None,
+    ) -> None:
+        item_key = str(item_id)
+        if item_key in ancestors:
+            return
+        item = item_for(item_id)
+        if (
+            item is None
+            or item.get("crate_id") != 0
+            or item.get("visibility") != "public"
+        ):
+            return
+
+        deprecation = (
+            reexport_deprecation
+            if reexport_deprecation is not None
+            else item.get("deprecation")
+        )
+        if deprecation is not None:
+            record(public_path, deprecation)
+
+        inner = item.get("inner")
+        if not isinstance(inner, dict):
+            return
+        module = inner.get("module")
+        if not isinstance(module, dict) or not isinstance(module.get("items"), list):
+            return
+
+        next_ancestors = ancestors | {item_key}
+        for child_id in module["items"]:
+            child = item_for(child_id)
+            if child is None or child.get("visibility") != "public":
+                continue
+            child_inner = child.get("inner")
+            imported = child_inner.get("use") if isinstance(child_inner, dict) else None
+            if isinstance(imported, dict):
+                target_id = imported.get("id")
+                if target_id is None:
+                    continue
+                if imported.get("is_glob"):
+                    target = item_for(target_id)
+                    target_inner = target.get("inner") if target is not None else None
+                    target_module = (
+                        target_inner.get("module") if isinstance(target_inner, dict) else None
+                    )
+                    if not isinstance(target_module, dict) or not isinstance(
+                        target_module.get("items"), list
+                    ):
+                        continue
+                    for target_child_id in target_module["items"]:
+                        target_child = item_for(target_child_id)
+                        target_name = (
+                            target_child.get("name") if target_child is not None else None
+                        )
+                        if isinstance(target_name, str):
+                            visit(
+                                target_child_id,
+                                [*public_path, target_name],
+                                next_ancestors | {str(target_id)},
+                            )
+                    continue
+                imported_name = imported.get("name")
+                if isinstance(imported_name, str):
+                    visit(
+                        target_id,
+                        [*public_path, imported_name],
+                        next_ancestors,
+                        child.get("deprecation"),
+                    )
+                continue
+
+            child_name = child.get("name")
+            if isinstance(child_name, str):
+                visit(child_id, [*public_path, child_name], next_ancestors)
+
+    visit(root, ["rookie_cookies"], frozenset())
+
+    wanted = {
+        item["path"]: {"since": item["since"], "note": item["note"]} for item in expected
+    }
+    for path in sorted(wanted.keys() | actual.keys()):
+        if path not in wanted:
+            print(f"unexpected deprecated API item in {label}: {path}", file=sys.stderr)
+            success = False
+        elif path not in actual:
+            print(f"missing deprecated API item in {label}: {path}", file=sys.stderr)
+            success = False
+        elif actual[path] != wanted[path]:
+            print(
+                f"deprecation contract mismatch for {path} in {label}: "
+                f"expected {wanted[path]!r}, got {actual[path]!r}",
+                file=sys.stderr,
+            )
+            success = False
+    return success
+
+
 def scoped_exceptions(
     exceptions: list[dict[str, str]], platform: str, feature_set: str
 ) -> list[dict[str, str]]:
@@ -192,6 +412,7 @@ def main() -> int:
     repo = Path(__file__).resolve().parents[1]
     baseline_dir = repo / "rookie-rs" / "public-api"
     exception_file = baseline_dir / "temporary-exceptions.json"
+    deprecation_file = baseline_dir / DEPRECATION_CONTRACT
 
     try:
         installed_tool_version = tool_version()
@@ -209,6 +430,7 @@ def main() -> int:
 
     try:
         exceptions = load_exceptions(exception_file)
+        deprecation_contract = load_deprecation_contract(deprecation_file)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)
         return 2
@@ -245,6 +467,16 @@ def main() -> int:
             continue
         success &= compare_with_exceptions(
             baseline.read_text(encoding="utf-8"), actual, current_exceptions, filename
+        )
+        try:
+            rustdoc = render_rustdoc_json(repo, feature_args)
+        except PublicApiCommandError as error:
+            print(f"rustdoc JSON failed for {filename}: {error}", file=sys.stderr)
+            return 2
+        success &= check_deprecation_contract(
+            rustdoc,
+            scoped_deprecations(deprecation_contract, args.platform, feature_set),
+            filename,
         )
 
     return 0 if success else 1

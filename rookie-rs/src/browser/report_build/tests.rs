@@ -162,13 +162,17 @@ fn status(outcome: BrowserDraft) -> ReportStatusCode {
 }
 
 #[test]
-fn cancellation_and_resource_exhaustion_reach_the_report_wire_without_source_errors() {
+fn stop_reasons_reach_the_report_wire_as_typed_request_issues() {
   use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
   use std::time::Duration;
 
-  for (stop, expected) in [
-    (BoundaryStop::Cancelled, "cancelled"),
-    (BoundaryStop::ResourceExhausted, "resource_exhausted"),
+  for (stop, expected, issue_code) in [
+    (BoundaryStop::Cancelled, "cancelled", "request_cancelled"),
+    (
+      BoundaryStop::ResourceExhausted,
+      "resource_exhausted",
+      "request_resource_exhausted",
+    ),
   ] {
     let clock = ManualClock::default();
     let token = CancellationToken::default();
@@ -185,7 +189,14 @@ fn cancellation_and_resource_exhaustion_reach_the_report_wire_without_source_err
     let report = browser_extraction_report_with_runtime("firefox", None, None, &runtime)
       .expect("typed stop becomes a report termination");
     assert_eq!(report.termination.as_str(), expected);
-    assert!(report.issues.is_empty());
+    assert_eq!(report.status.as_str(), "failed");
+    assert_eq!(report.summary.browsers_detected, 0);
+    assert_eq!(report.summary.browsers_not_detected, 0);
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].code.as_str(), issue_code);
+    assert_eq!(report.issues[0].cause, issue_code);
+    assert_eq!(report.issues[0].stage.as_str(), "registry");
+    assert_eq!(report.issues[0].severity.as_str(), "error");
     let wire = serde_json::to_value(report).expect("serialize stopped report");
     assert_eq!(wire["termination"], expected);
   }
@@ -195,11 +206,126 @@ fn cancellation_and_resource_exhaustion_reach_the_report_wire_without_source_err
   let report = browser_extraction_report_with_runtime("firefox", None, None, &runtime)
     .expect("expired runtime becomes a report termination");
   assert_eq!(report.termination.as_str(), "timed_out");
-  assert!(report.issues.is_empty());
+  assert_eq!(report.status.as_str(), "failed");
+  assert_eq!(report.summary.browsers_detected, 0);
+  assert_eq!(report.summary.browsers_not_detected, 0);
+  assert_eq!(report.issues.len(), 1);
+  assert_eq!(report.issues[0].code.as_str(), "request_timed_out");
 }
 
 #[test]
-fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection() {
+fn stopped_report_semantics_cover_before_discovery_after_detection_and_after_one_source() {
+  let before_discovery = BrowserDraft {
+    browser_id: BrowserId::known("firefox"),
+    compatibility_family: CompatibilityFamily::Gecko,
+    detected: false,
+    installations_discovered: 0,
+    discovery_failed: false,
+    profiles: Vec::new(),
+    issues: Vec::new(),
+    termination: Termination::TimedOut,
+  };
+  let report = assemble(1, vec![before_discovery]);
+  assert_eq!(
+    serde_json::json!({
+      "schema_version": report.schema_version,
+      "status": report.status.as_str(),
+      "termination": report.termination.as_str(),
+      "registered": report.summary.registered_browsers,
+      "detected": report.summary.browsers_detected,
+      "not_detected": report.summary.browsers_not_detected,
+      "issue": report.issues[0].code.as_str(),
+    }),
+    serde_json::json!({
+      "schema_version": 1,
+      "status": "failed",
+      "termination": "timed_out",
+      "registered": 1,
+      "detected": 0,
+      "not_detected": 0,
+      "issue": "request_timed_out",
+    })
+  );
+
+  let mut after_detection = outcome(Vec::new(), false);
+  after_detection.termination = Termination::Cancelled;
+  let report = assemble(1, vec![after_detection]);
+  assert_eq!(
+    serde_json::json!({
+      "status": report.status.as_str(),
+      "termination": report.termination.as_str(),
+      "detected": report.summary.browsers_detected,
+      "not_detected": report.summary.browsers_not_detected,
+      "issue": report.issues[0].code.as_str(),
+    }),
+    serde_json::json!({
+      "status": "failed",
+      "termination": "cancelled",
+      "detected": 1,
+      "not_detected": 0,
+      "issue": "request_cancelled",
+    })
+  );
+
+  let mut profile = ProfileDraft::new(identity(), true);
+  profile.sources.push(completed_source("retained"));
+  let mut after_source = outcome(vec![profile], false);
+  after_source.termination = Termination::ResourceExhausted;
+  let report = assemble(1, vec![after_source]);
+  assert_eq!(
+    serde_json::json!({
+      "status": report.status.as_str(),
+      "termination": report.termination.as_str(),
+      "sources_succeeded": report.summary.sources_succeeded,
+      "cookie": report.profiles[0].sources[0].cookies[0].name.as_str(),
+      "issue": report.issues[0].code.as_str(),
+    }),
+    serde_json::json!({
+      "status": "partial",
+      "termination": "resource_exhausted",
+      "sources_succeeded": 1,
+      "cookie": "retained",
+      "issue": "request_resource_exhausted",
+    })
+  );
+}
+
+#[test]
+fn stop_issue_follows_existing_diagnostics_without_reclassifying_detection() {
+  let mut stopped = outcome(Vec::new(), false);
+  stopped.issues.push(
+    issue(
+      "discovery_degraded",
+      ExtractionStageCode::discovery(),
+      IssueSeverityCode::warning(),
+      "discovery recovered before cancellation",
+    )
+    .with_context(Some(&stopped.browser_id), None, None),
+  );
+  stopped.termination = Termination::Cancelled;
+
+  let report = assemble(1, vec![stopped]);
+  assert_eq!(report.summary.registered_browsers, 1);
+  assert_eq!(report.summary.browsers_detected, 1);
+  assert_eq!(report.summary.browsers_not_detected, 0);
+  assert_eq!(report.status.as_str(), "failed");
+  assert_eq!(
+    report
+      .issues
+      .iter()
+      .map(|issue| issue.code.as_str())
+      .collect::<Vec<_>>(),
+    vec!["discovery_degraded", "request_cancelled"]
+  );
+  assert_eq!(
+    report.issues[0].browser_id.as_ref(),
+    Some(&BrowserId::known("firefox"))
+  );
+  assert!(report.issues[1].browser_id.is_none());
+}
+
+#[test]
+fn stopped_drafts_keep_atomic_sources_in_reports_but_single_browser_projection_returns_the_stop() {
   use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
   use std::time::Duration;
 
@@ -240,7 +366,8 @@ fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection
       BoundaryStop::ResourceExhausted => "resource_exhausted",
     };
     assert_eq!(report.termination.as_str(), expected_termination);
-    assert_eq!(report.status.as_str(), "complete");
+    assert_eq!(report.status.as_str(), "partial");
+    assert_eq!(report.issues.len(), 1);
     assert_eq!(report.summary.sources_succeeded, 1);
     assert_eq!(report.summary.rows_seen, 1);
     assert_eq!(report.summary.cookies_emitted, 1);
@@ -250,9 +377,27 @@ fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection
     assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
 
     let canonical = finalize_outcomes_with_runtime(1, vec![stopped()], Some(&runtime));
-    let cookies =
+    let error =
       super::super::legacy::project_canonical_outcome_with_runtime("firefox", canonical, &runtime)
-        .expect("completed legacy source survives a later typed stop");
+        .expect_err("single-browser projection must surface a later typed stop");
+    let expected_reason = match stop {
+      BoundaryStop::TimedOut => crate::StopReason::TimedOut,
+      BoundaryStop::Cancelled => crate::StopReason::Cancelled,
+      BoundaryStop::ResourceExhausted => crate::StopReason::ResourceExhausted,
+    };
+    assert_eq!(crate::stop_reason(&error), Some(expected_reason));
+    assert!(error
+      .chain()
+      .any(|cause| cause.downcast_ref::<BoundaryStop>() == Some(&stop)));
+
+    let canonical = finalize_outcomes_with_runtime(1, vec![stopped()], Some(&runtime));
+    let cookies = super::super::legacy::project_canonical_outcome_with_stop_projection(
+      "firefox",
+      canonical,
+      &runtime,
+      super::super::legacy::StopProjection::PreserveCommitted,
+    )
+    .expect("flat load keeps a completed in-flight source after the stop");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "retained");
   }
@@ -418,7 +563,9 @@ fn finalization_and_projection_share_runtime_and_keep_completed_partial_sources(
   assert_eq!(report.profiles.len(), 1);
   assert_eq!(report.profiles[0].sources.len(), 1);
   assert_eq!(report.profiles[0].sources[0].cookies[0].name, "first");
-  assert!(report.issues.is_empty());
+  assert_eq!(report.issues.len(), 1);
+  assert_eq!(report.issues[0].code.as_str(), "request_cancelled");
+  assert_eq!(report.issues[0].cause, "request_cancelled");
 }
 
 fn chromium_candidate() -> SourceCandidate {
@@ -888,6 +1035,79 @@ fn rejecting_an_invalid_record_marks_already_maxed_row_counters_saturated() {
   assert_eq!(report.summary.rows_skipped, u32::MAX);
   assert_eq!(report.summary.rows_rejected, u32::MAX);
   assert!(report.summary.counters_saturated);
+}
+
+#[test]
+fn finalization_preserves_every_rejected_value_cause_code() {
+  use crate::browser::cookie_record::{
+    CipherTier, CookieValue, SourceRef, UnavailableCode, UnavailableReason,
+  };
+  use crate::common::enums::Cookie;
+
+  for (value, expected_cause) in [
+    (
+      CookieValue::Encrypted {
+        tier: CipherTier::V10,
+        bytes: vec![1, 2, 3],
+      },
+      "encrypted",
+    ),
+    (
+      CookieValue::Unavailable(UnavailableReason {
+        code: UnavailableCode::Decrypt,
+        message: "rejected".to_owned(),
+      }),
+      "decrypt",
+    ),
+    (
+      CookieValue::Unavailable(UnavailableReason {
+        code: UnavailableCode::Decode,
+        message: "rejected".to_owned(),
+      }),
+      "decode",
+    ),
+    (
+      CookieValue::Unavailable(UnavailableReason {
+        code: UnavailableCode::ProviderUnavailable,
+        message: "rejected".to_owned(),
+      }),
+      "provider_unavailable",
+    ),
+    (
+      CookieValue::Unavailable(UnavailableReason {
+        code: UnavailableCode::ProviderFailed,
+        message: "rejected".to_owned(),
+      }),
+      "provider_failed",
+    ),
+  ] {
+    let mut draft = source(false);
+    draft.stats.rows_seen = 1;
+    draft.stats.cookies_emitted = 1;
+    let mut record = CookieRecord::from_cookie(
+      Cookie {
+        domain: ".example.test".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires: None,
+        name: "invalid".to_owned(),
+        value: "sentinel".to_owned(),
+        http_only: false,
+        same_site: 0,
+      },
+      SourceRef::pending(0),
+    );
+    record.value = value;
+    draft.records.push(record);
+    let mut profile = ProfileDraft::new(identity(), true);
+    profile.sources.push(draft);
+
+    let report = assemble(1, vec![outcome(vec![profile], false)]);
+    let issue = &report.profiles[0].sources[0].issues[0];
+    assert_eq!(issue.code.as_str(), "invalid_final_record");
+    assert_eq!(issue.cause, expected_cause);
+    assert!(issue.message.starts_with(expected_cause));
+  }
 }
 
 #[test]

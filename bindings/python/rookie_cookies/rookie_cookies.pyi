@@ -1,5 +1,5 @@
 from sys import platform
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from . import dto as dto
 
@@ -57,9 +57,27 @@ class RookieRequestError(ValueError):
     source that does not match its declared kind. Fixable by changing what
     was passed in.
     """
+    kind: Literal["request"]
+    code: str | None
+    # Current values: "timed_out", "cancelled", and "resource_exhausted".
+    # This remains an open string so future native stop reasons are representable.
+    stop_reason: str | None
+    profile_ids: list[str]
+    source_kind: str | None
+    target_os: str | None
+    path_redacted: bool
 
 class RookieEngineError(RuntimeError):
     """Extraction or engine failure unrelated to caller input."""
+    kind: Literal["engine"]
+    code: str | None
+    # Current values: "timed_out", "cancelled", and "resource_exhausted".
+    # This remains an open string so future native stop reasons are representable.
+    stop_reason: str | None
+    profile_ids: list[str]
+    source_kind: str | None
+    target_os: str | None
+    path_redacted: bool
 
 DetailedCookieList = List[DetailedCookie]
 FirefoxProfile = Dict[str, Any]

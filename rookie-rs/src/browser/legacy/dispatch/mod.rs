@@ -27,8 +27,15 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   engine: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
+  stop_projection: super::StopProjection,
 ) -> Result<super::LegacySnapshot> {
-  platform::remaining_engine_snapshot_with_runtime(canonical_id, engine, domains, runtime)
+  platform::remaining_engine_snapshot_with_runtime(
+    canonical_id,
+    engine,
+    domains,
+    runtime,
+    stop_projection,
+  )
 }
 
 fn unsupported_engine(canonical_id: &str, engine: &str) -> Result<super::LegacySnapshot> {

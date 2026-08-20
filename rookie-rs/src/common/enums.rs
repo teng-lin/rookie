@@ -113,7 +113,20 @@ impl DetailedCookie {
   }
 }
 
+/// Compatibility formatter for joining cookies as unfiltered `name=value`
+/// pairs.
+///
+/// This trait does not apply domain, path, Secure, expiry, SameSite,
+/// partition, or container rules. It must not be used to decide which cookies
+/// are safe to send to a URL; use [`crate::ReadResult::header`] for the legacy
+/// context-aware view instead.
+#[deprecated(
+  since = "0.6.0",
+  note = "unfiltered compatibility formatter; use ReadResult::header(url) for a URL-scoped header view"
+)]
 pub trait CookieToString {
+  /// Joins every cookie in the vector as semicolon-separated `name=value`
+  /// pairs without any send-match filtering.
   fn to_string(&self) -> String;
 }
 

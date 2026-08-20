@@ -101,7 +101,13 @@
       ],
       "properties": {
         "id": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "aliases": {
           "type": "array",
@@ -113,7 +119,13 @@
           "type": "string"
         },
         "engine": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "capabilities": {
           "$ref": "#/definitions/BrowserCapabilitiesDescriptor"
@@ -133,25 +145,49 @@
         "persistent_formats": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "not": {
+              "type": "string",
+              "pattern": "[^a-z0-9_]"
+            },
+            "minLength": 1,
+            "pattern": "^[a-z]"
           }
         },
         "session_formats": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "not": {
+              "type": "string",
+              "pattern": "[^a-z0-9_]"
+            },
+            "minLength": 1,
+            "pattern": "^[a-z]"
           }
         },
         "declared_decryption_tiers": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "not": {
+              "type": "string",
+              "pattern": "[^a-z0-9_]"
+            },
+            "minLength": 1,
+            "pattern": "^[a-z]"
           }
         },
         "available_decryption_tiers": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "not": {
+              "type": "string",
+              "pattern": "[^a-z0-9_]"
+            },
+            "minLength": 1,
+            "pattern": "^[a-z]"
           }
         }
       }
@@ -192,13 +228,25 @@
       ],
       "properties": {
         "browser_id": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "installation_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "profile_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "display_name": {
           "type": "string"
@@ -223,10 +271,22 @@
       ],
       "properties": {
         "role": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "format": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "path": {
           "type": "string"
@@ -259,12 +319,24 @@
           "minimum": 0.0
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "termination": {
           "description": "Why execution stopped. This is independent from `status`: a timed-out request may still contain complete source outcomes collected earlier.",
           "default": "completed",
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "summary": {
           "$ref": "#/definitions/ReportStats"
@@ -306,11 +378,13 @@
           "minimum": 0.0
         },
         "browsers_detected": {
+          "description": "Browsers whose discovery established that an installation was present.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
         },
         "browsers_not_detected": {
+          "description": "Browsers whose discovery completed and established absence.\n\nA request stopped before discovery completed is in neither detection counter in schema v1. Its error-severity stop issue and non-completed termination distinguish that unattempted/unknown state from absence.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
@@ -416,13 +490,25 @@
           "$ref": "#/definitions/CookieSourceIdentity"
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "selected": {
           "type": "boolean"
         },
         "acquisition_strategy": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "cookies": {
           "type": "array",
@@ -453,10 +539,22 @@
       ],
       "properties": {
         "role": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "format": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "path": {
           "type": "string"
@@ -535,13 +633,31 @@
       ],
       "properties": {
         "code": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "stage": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "severity": {
-          "type": "string"
+          "type": "string",
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "cause": {
           "description": "Stable machine-readable origin of the failure.",
@@ -584,19 +700,31 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "not": {
+            "type": "string",
+            "pattern": "[^a-z0-9_]"
+          },
+          "minLength": 1,
+          "pattern": "^[a-z]"
         },
         "installation_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "profile_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "message": {
           "type": "string"

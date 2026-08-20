@@ -782,7 +782,13 @@ fn parse_table<T: ByteOrder>(bs: &[u8], count: usize) -> Result<Vec<u32>> {
   data
     .try_reserve_exact(count)
     .context("Failed to reserve memory for Safari offset table")?;
-  data.extend(bs[..end].chunks_exact(4).map(T::read_u32));
+  data.extend(
+    bs[..end]
+      .as_chunks::<4>()
+      .0
+      .iter()
+      .map(|chunk| T::read_u32(chunk)),
+  );
   Ok(data)
 }
 

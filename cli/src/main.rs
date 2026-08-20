@@ -114,6 +114,34 @@ fn apply_timeout(
   request
 }
 
+fn chromium_credential_selector(
+  key_path: Option<String>,
+  browser_id: Option<String>,
+  plaintext_only: bool,
+) -> std::io::Result<Option<ChromiumCredentialSource>> {
+  let selector_count = usize::from(key_path.is_some())
+    + usize::from(browser_id.is_some())
+    + usize::from(plaintext_only);
+  if selector_count > 1 {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::InvalidInput,
+      "--key-path, --browser-id, and --plaintext-only are mutually exclusive",
+    ));
+  }
+
+  Ok(if let Some(key_path) = key_path {
+    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+      key_path,
+    )))
+  } else if let Some(browser_id) = browser_id {
+    Some(ChromiumCredentialSource::BrowserId(browser_id))
+  } else if plaintext_only {
+    Some(ChromiumCredentialSource::PlaintextOnly)
+  } else {
+    None
+  })
+}
+
 fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>> {
   match command {
     JobCommand::Read {
@@ -159,20 +187,9 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       if let Some(secs) = timeout_secs {
         request = request.timeout(std::time::Duration::from_secs(secs));
       }
-      if plaintext_only {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly,
-        );
-      } else if let Some(browser_id) = browser_id {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(browser_id),
-        );
-      } else if let Some(key_path) = key_path {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-            key_path,
-          )),
-        );
+      if let Some(credentials) = chromium_credential_selector(key_path, browser_id, plaintext_only)?
+      {
+        request = request.chromium_credentials(credentials);
       }
       let result = rookie_cookies::from_path(request)?;
       emit_warnings(result.warnings());
@@ -250,17 +267,7 @@ fn cookies_from_explicit_path(
   plaintext_only: bool,
   cancellation: CancellationHandle,
 ) -> rookie_cookies::Result<Vec<Cookie>> {
-  let credential_selector = if let Some(key_path) = key_path {
-    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-      key_path,
-    )))
-  } else if let Some(browser_id) = browser_id {
-    Some(ChromiumCredentialSource::BrowserId(browser_id))
-  } else if plaintext_only {
-    Some(ChromiumCredentialSource::PlaintextOnly)
-  } else {
-    None
-  };
+  let credential_selector = chromium_credential_selector(key_path, browser_id, plaintext_only)?;
 
   let Some(credentials) = credential_selector else {
     let mut request = DirectPathRequest::new(path).cancellation(cancellation);
@@ -471,4 +478,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   print_cookies(args_c, cookies);
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn credential_selector_rejects_every_conflicting_shape() {
+    for (key_path, browser_id, plaintext_only) in [
+      (Some("Local State"), Some("chrome"), false),
+      (Some("Local State"), None, true),
+      (None, Some("chrome"), true),
+      (Some("Local State"), Some("chrome"), true),
+    ] {
+      let error = chromium_credential_selector(
+        key_path.map(str::to_owned),
+        browser_id.map(str::to_owned),
+        plaintext_only,
+      )
+      .expect_err("conflicting selectors must fail before extraction");
+
+      assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+  }
 }

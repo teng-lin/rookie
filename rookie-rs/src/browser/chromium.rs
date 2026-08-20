@@ -465,7 +465,7 @@ impl ChromiumExtractionDraft {
   }
 }
 
-const COLUMN_READ_FAILED: &str = "column_read_failed";
+pub(crate) const COLUMN_READ_FAILED: &str = "column_read_failed";
 const DECRYPT_FAILED: &str = "decrypt_failed";
 const DECODE_FAILED: &str = "decode_failed";
 const PROVIDER_FAILED: &str = "provider_failed";
