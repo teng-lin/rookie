@@ -26,6 +26,7 @@ cargo test --workspace --doc --locked
 cargo test -p rookie-cookies --no-default-features --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo run -p xtask --locked -- check-cfg-locations
+cargo run -p xtask --locked -- check-stage-boundary
 
 python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
 python3 -m unittest discover -s tests/release -p 'test_*.py' -v
@@ -67,6 +68,8 @@ expands the language matrix.
 - **Authoritative discovery:** `config.json` and `common/paths.rs` must stay
   gone; packaged crate must contain `browser_registry.json`.
 - **cfg allowlist:** `cargo run -p xtask -- check-cfg-locations`.
+- **Stage boundary:** `cargo run -p xtask -- check-stage-boundary` — listing types
+  must have nowhere to put an extraction result (ADR 0005).
 - **DTO schema + generated Python dataclasses** must match `report_core.rs`.
 - **Release metadata** (`check-release.py`, platform contract, consumer
   harness coverage) and `tests/e2e/test_browser_coverage.py`.
