@@ -2352,7 +2352,9 @@ mod tests {
     source.stats.rows_skipped = 2;
     // Ends with the generic suffix but is not equal to it: the generator for
     // this source would produce exactly "2 row(s) could not be read".
-    source.push_row_read_failed(Some("v20 tier unavailable, 2 row(s) could not be read".to_owned()));
+    source.push_row_read_failed(Some(
+      "v20 tier unavailable, 2 row(s) could not be read".to_owned(),
+    ));
 
     let outcome = finalize_singleton_source(
       "chromium",
