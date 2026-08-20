@@ -383,8 +383,14 @@ pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
 
 #[cfg(test)]
 mod tests {
+  use super::super::test_seams::{
+    self, browser_root, context_for, with_test_fs, TempDir, TestDiscoveryFs,
+  };
+  use super::super::PlatformId;
   use super::*;
+  use anyhow::bail;
   use std::cell::Cell;
+  use std::collections::BTreeMap;
 
   fn discovered_source_draft(path: PathBuf) -> SourceCandidate {
     internet_explorer_source_candidate(path)
@@ -727,5 +733,409 @@ mod tests {
       assert_eq!(retained.boundary_stop, Some(stop));
       assert!(retained.profiles.is_empty());
     }
+  }
+
+  #[test]
+  fn a_profile_selected_internet_explorer_report_reads_only_the_selected_profile() {
+    let temp = TempDir::new("ie-profile-selection");
+    let home = temp.path().to_path_buf();
+    let context = context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    // A WebCache root is its own profile, so two roots are two profiles.
+    let roots = test_seams::resolvable_root_paths(&context, "internet_explorer");
+    assert_eq!(roots.len(), 2, "IE must declare two WebCache roots");
+    for root in &roots {
+      std::fs::create_dir_all(root).expect("create WebCache root");
+      std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+        .expect("seed WebCache database");
+    }
+    let canonical_roots = roots
+      .iter()
+      .map(|root| root.canonicalize().expect("canonical WebCache root"))
+      .collect::<Vec<_>>();
+    let expected_installation_ids = ["ie-webcache-roaming", "ie-webcache-local"]
+      .into_iter()
+      .zip(&canonical_roots)
+      .map(|(root_id, root)| {
+        installation_id(
+          "internet_explorer",
+          root_id,
+          "stable",
+          &normalized_path_bytes(root),
+        )
+      })
+      .collect::<Vec<_>>();
+    let expected_profile_ids = expected_installation_ids
+      .iter()
+      .map(|installation_id| {
+        profile_id(
+          installation_id.as_str(),
+          ProfileLocator::Relative(Path::new("")),
+        )
+      })
+      .collect::<Vec<_>>();
+    let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
+      .expect("discover both WebCache roots");
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 2);
+    assert_eq!(discovery.counters.installations_enumerated, 2);
+    assert_eq!(
+      discovery
+        .profiles
+        .iter()
+        .map(|profile| profile.identity.installation_priority)
+        .collect::<Vec<_>>(),
+      [10, 20]
+    );
+    assert_eq!(
+      discovery
+        .profiles
+        .iter()
+        .map(|profile| profile.identity.installation_path.clone())
+        .collect::<Vec<_>>(),
+      canonical_roots
+    );
+    assert_eq!(
+      discovery
+        .profiles
+        .iter()
+        .map(|profile| profile.identity.installation_id.clone())
+        .collect::<Vec<_>>(),
+      expected_installation_ids
+    );
+    assert_eq!(
+      discovery
+        .profiles
+        .iter()
+        .map(|profile| profile.identity.profile_id.clone())
+        .collect::<Vec<_>>(),
+      expected_profile_ids
+    );
+    for profile in &discovery.profiles {
+      for id in [
+        profile.identity.installation_id.as_str(),
+        profile.identity.profile_id.as_str(),
+      ] {
+        assert_eq!(id.len(), 64);
+        assert!(id
+          .bytes()
+          .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+      }
+      // Discovery output: a candidate that has not been queried. The frozen
+      // placeholder shape (`NotAttempted`, not selected until extract) is
+      // unchanged; a `SourceCandidate` is a listing leaf with no attempt count.
+      assert_eq!(profile.candidates.len(), 1);
+      assert_eq!(
+        profile.candidates[0].acquisition,
+        SourceAcquisition::NotAttempted
+      );
+      assert!(profile.candidates[0].exists);
+    }
+    let rediscovery = discover_internet_explorer_with_context(&context, "internet_explorer")
+      .expect("rediscover both WebCache roots");
+    assert_eq!(
+      rediscovery
+        .profiles
+        .iter()
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
+        .collect::<Vec<_>>(),
+      discovery
+        .profiles
+        .iter()
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
+        .collect::<Vec<_>>()
+    );
+    let rows = |origin: SourceCandidate, _: Option<&[String]>| {
+      Ok(extracted_internet_explorer_source(
+        origin,
+        Vec::new(),
+        0,
+        0,
+        0,
+        None,
+      ))
+    };
+
+    let all =
+      internet_explorer_report_with_context(&context, "internet_explorer", None, None, rows)
+        .expect("full report");
+    assert_eq!(all.profiles.len(), 2);
+    assert_eq!(all.counters.installations_detected, 2);
+    assert_eq!(all.counters.installations_discovered, 2);
+    assert_eq!(all.counters.installations_enumerated, 2);
+    assert_eq!(
+      all
+        .profiles
+        .iter()
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
+        .collect::<Vec<_>>(),
+      discovery
+        .profiles
+        .iter()
+        .map(|profile| (
+          &profile.identity.installation_id,
+          &profile.identity.profile_id
+        ))
+        .collect::<Vec<_>>()
+    );
+    assert!(all.profiles.iter().all(|profile| {
+      profile.sources[0].acquisition == SourceAcquisition::EseDatabase
+        && profile.sources[0].acquisition_attempts == 1
+    }));
+    let selected = all.profiles[1].identity.profile_id.clone();
+    let selected_source = all.profiles[1].sources[0].origin.path.clone();
+
+    let mut read = Vec::new();
+    let one = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      Some(selected.as_str()),
+      None,
+      |origin, domains| {
+        read.push(origin.path.clone());
+        rows(origin, domains)
+      },
+    )
+    .expect("profile-selected report");
+
+    assert_eq!(read, vec![selected_source]);
+    assert_eq!(one.profiles.len(), 1);
+    assert_eq!(one.profiles[0].identity.profile_id, selected);
+    assert_eq!(
+      one.counters.installations_discovered,
+      all.counters.installations_discovered
+    );
+
+    let unknown = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      Some("not-a-profile"),
+      None,
+      rows,
+    )
+    .expect_err("an unknown profile id is a request error");
+    assert!(unknown
+      .to_string()
+      .contains("unknown internet_explorer profile id"));
+  }
+
+  #[test]
+  fn internet_explorer_existing_root_without_webcache_is_profile_absence() {
+    let temp = TempDir::new("ie-root-without-webcache");
+    let home = temp.path().to_path_buf();
+    let context = context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let root = test_seams::primary_root_path(&context, "internet_explorer");
+    std::fs::create_dir_all(&root).expect("create WebCache root without database");
+    let canonical_root = root.canonicalize().expect("canonical WebCache root");
+
+    let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
+      .expect("missing WebCache is profile absence");
+
+    assert_eq!(discovery.counters.installations_detected, 1);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
+    assert!(discovery.profiles.is_empty());
+    assert!(!discovery.all_detected_roots_failed());
+    assert_eq!(discovery.discovery_issues.len(), 1);
+    assert_eq!(
+      discovery.discovery_issues[0].code,
+      "profile_has_no_cookie_source"
+    );
+    assert_eq!(discovery.discovery_issues[0].path, canonical_root);
+  }
+
+  #[test]
+  fn internet_explorer_duplicate_canonical_root_keeps_first_registry_owner() {
+    let temp = TempDir::new("ie-duplicate-canonical-root");
+    let home = temp.path().to_path_buf();
+    let real_context = context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let roots = test_seams::resolvable_root_paths(&real_context, "internet_explorer");
+    assert_eq!(roots.len(), 2);
+    for root in &roots {
+      std::fs::create_dir_all(root).expect("create aliased WebCache root");
+    }
+    let shared = temp.path().join("shared-webcache");
+    std::fs::create_dir_all(&shared).expect("create shared WebCache root");
+    std::fs::write(shared.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+      .expect("seed shared WebCache database");
+    let shared = shared
+      .canonicalize()
+      .expect("canonical shared WebCache root");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        canonical_aliases: BTreeMap::from([
+          (roots[0].clone(), shared.clone()),
+          (roots[1].clone(), shared.clone()),
+        ]),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
+      .expect("deduplicate canonical WebCache roots");
+
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
+    assert_eq!(discovery.profiles.len(), 1);
+    assert_eq!(discovery.profiles[0].identity.installation_priority, 10);
+    assert_eq!(discovery.profiles[0].identity.installation_path, shared);
+    let duplicate = discovery
+      .discovery_issues
+      .iter()
+      .find(|issue| issue.code == "duplicate_installation")
+      .expect("duplicate installation issue");
+    assert_eq!(duplicate.occurrences, 1);
+    assert!(!discovery
+      .discovery_issues
+      .iter()
+      .any(|issue| issue.code == "duplicate_profile"));
+  }
+
+  #[test]
+  fn internet_explorer_report_preserves_row_errors() {
+    let temp = TempDir::new("ie-row-error");
+    let home = temp.path().to_path_buf();
+    let context = context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let root = test_seams::resolvable_root_paths(&context, "internet_explorer")
+      .into_iter()
+      .next()
+      .expect("Internet Explorer root");
+    std::fs::create_dir_all(&root).expect("create WebCache root");
+    std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+      .expect("seed WebCache database");
+
+    let outcome = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      None,
+      None,
+      |origin, _| {
+        Ok(extracted_internet_explorer_source(
+          origin,
+          Vec::new(),
+          2,
+          1,
+          1,
+          Some("invalid WebCache record".to_owned()),
+        ))
+      },
+    )
+    .expect("Internet Explorer report");
+
+    let source = &outcome.profiles[0].sources[0];
+    assert_eq!(source.stats.rows_seen, 2);
+    assert_eq!(source.stats.rows_skipped, 1);
+    assert_eq!(source.stats.rows_rejected, 1);
+    let row_issue = source
+      .issues
+      .iter()
+      .find(|issue| issue.code == "row_read_failed")
+      .expect("skipped rows are reported");
+    assert_eq!(row_issue.message, "invalid WebCache record");
+  }
+
+  #[test]
+  fn internet_explorer_query_failures_remain_parse_failures() {
+    let temp = TempDir::new("ie-query-failure-stage");
+    let home = temp.path().to_path_buf();
+    let context = context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let root = test_seams::primary_root_path(&context, "internet_explorer");
+    std::fs::create_dir_all(&root).expect("create WebCache root");
+    std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+      .expect("seed WebCache database");
+
+    let outcome =
+      internet_explorer_report_with_context(&context, "internet_explorer", None, None, |_, _| {
+        bail!("injected WebCache query failure")
+      })
+      .expect("query failures remain report data");
+
+    let source = &outcome.profiles[0].sources[0];
+    let failure = source.failure.as_ref().expect("query failure recorded");
+    assert_eq!(failure.stage, SourceFailureStage::Parse);
+    assert_eq!(failure.message, "injected WebCache query failure");
+  }
+
+  #[test]
+  fn later_valid_ie_root_survives_an_earlier_metadata_failure() {
+    let temp = TempDir::new("ie-root-metadata-partial-failure");
+    let home = temp.path().join("home");
+    let real_context = context_for(
+      PlatformId::Windows,
+      home.clone(),
+      [
+        ("APPDATA", home.join("AppData")),
+        ("LOCALAPPDATA", home.join("LocalAppData")),
+      ],
+    );
+    let denied = browser_root(&real_context, "internet_explorer", "ie-webcache-roaming");
+    let valid = browser_root(&real_context, "internet_explorer", "ie-webcache-local");
+    std::fs::create_dir_all(&valid).expect("create the later IE root");
+    std::fs::write(valid.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
+      .expect("seed the later IE root");
+    let context = with_test_fs(
+      real_context,
+      TestDiscoveryFs {
+        denied_metadata: Some(denied.clone()),
+        ..TestDiscoveryFs::default()
+      },
+    );
+
+    let discovery = discover_internet_explorer_with_context(&context, "internet_explorer")
+      .expect("retain the valid IE root");
+    assert_eq!(discovery.counters.installations_detected, 2);
+    assert_eq!(discovery.counters.installations_discovered, 1);
+    assert_eq!(discovery.counters.installations_enumerated, 1);
+    assert_eq!(discovery.profiles.len(), 1);
+    assert!(!discovery.all_detected_roots_failed());
+    assert!(discovery
+      .discovery_issues
+      .iter()
+      .any(|issue| { issue.code == "installation_metadata_failed" && issue.path == denied }));
   }
 }

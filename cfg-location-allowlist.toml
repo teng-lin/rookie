@@ -93,7 +93,7 @@ paths = [
 [grandfathered]
 # Named in #218's own problem statement as the four original hot spots;
 # no rollout PR claims to have fully contained these.
-"rookie-rs/src/browser/chromium.rs" = { max_cfg = 34, reason = "original #218 hot spot, not a rollout target; ratcheted 60 -> 34 when the inline test module moved to browser/chromium/tests.rs and took 26 cfg with it" }
+"rookie-rs/src/browser/chromium.rs" = { max_cfg = 33, reason = "original #218 hot spot, not a rollout target; ratcheted 60 -> 34 when the inline test module moved to browser/chromium/tests.rs, then 34 -> 33 when the unseal test imports it had carried for that module left with the tests" }
 "rookie-rs/src/browser/registry.rs" = { max_cfg = 8, reason = "original #218 hot spot at 27; now shared-core only after the chromium/gecko split (PR #251) moved its engine-specific cfg out, plus 2 new cfg-gated re-export lines needed so chromium.rs's platform-gated symbols aren't unconditionally re-exported" }
 "rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 9, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target; ratcheted 20 -> 9 when the inline test module moved to browser/registry/chromium/tests.rs and took 11 cfg with it" }
 "rookie-rs/src/browser/registry/gecko.rs" = { max_cfg = 1, reason = "Gecko-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
@@ -136,7 +136,13 @@ paths = [
 # not a capability leaf, and its cfg should not be free to grow. Each parent's
 # ceiling above was ratcheted down by the same amount in the same PR, so the
 # crate-wide #218 budget is unchanged by the move.
-"rookie-rs/src/browser/chromium/tests.rs" = { max_cfg = 26, reason = "relocated verbatim from browser/chromium.rs's inline test module" }
+"rookie-rs/src/browser/chromium/tests.rs" = { max_cfg = 15, reason = "relocated verbatim from browser/chromium.rs's inline test module; ratcheted 26 -> 15 when the unseal decrypt/decode tests moved to browser/unseal.rs and took 12 cfg with them, less 1 added for the Windows-only GCM fixture import" }
+
+# Tests that moved to the module whose code they pin, rather than the module
+# that happened to import it. Same grandfathered tier and the same rule: the
+# source file's ceiling drops by what it shed in the same PR.
+"rookie-rs/src/browser/unseal.rs" = { max_cfg = 12, reason = "decrypt/decode tests moved here from browser/chromium.rs's test module, where they reached these pub(super) fns through `use super::*`; unseal.rs had no test module at all before" }
+"rookie-rs/src/browser/chromium_test_support.rs" = { max_cfg = 1, reason = "the one Windows-only fixture (encrypt_windows_gcm_cookie) shared by the Chromium engine tests and the relocated unseal tests" }
 "rookie-rs/src/browser/registry/chromium/tests.rs" = { max_cfg = 11, reason = "relocated verbatim from browser/registry/chromium.rs's inline test module" }
 "rookie-rs/src/common/sqlite/tests.rs" = { max_cfg = 1, reason = "relocated verbatim from common/sqlite.rs's inline test module" }
 "rookie-rs/src/tests.rs" = { max_cfg = 13, reason = "relocated verbatim from lib.rs's inline test module" }

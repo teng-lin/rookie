@@ -770,4 +770,20 @@ mod tests {
     assert_eq!(records[6].origin.ordinal, 7);
     assert_eq!(records[0].origin.source_digest, [0; 32]);
   }
+
+  #[test]
+  fn chromium_schema_version_is_read_strictly() {
+    let missing = rusqlite::Connection::open_in_memory().expect("open missing-meta database");
+    assert!(chromium_schema_version(&missing).is_err());
+
+    let malformed = rusqlite::Connection::open_in_memory().expect("open malformed-meta database");
+    malformed
+      .execute("CREATE TABLE meta (key TEXT, value TEXT)", [])
+      .expect("create metadata table");
+    malformed
+      .execute("INSERT INTO meta VALUES ('version', 'v24')", [])
+      .expect("seed malformed version");
+    let error = chromium_schema_version(&malformed).expect_err("malformed version must fail");
+    assert!(error.to_string().contains("Invalid Chromium"));
+  }
 }
