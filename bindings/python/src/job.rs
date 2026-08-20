@@ -1,8 +1,8 @@
 //! Job-layer bindings: `read` / `from_path` / `ReadResult` / `ReadWarning`.
 
+use crate::errors::request_error;
 use crate::{to_dict, PyCancellationHandle};
 use ::rookie_cookies as rookie_core;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use rookie_core::enums::Cookie;
@@ -107,7 +107,7 @@ fn clone_cookies(cookies: &[Cookie]) -> Vec<Cookie> {
 
 fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
   std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
-    PyValueError::new_err(
+    request_error(
       "timeout must be a non-negative, finite number of seconds representable as a Duration",
     )
   })

@@ -431,6 +431,33 @@ test("Chromium path option validation rejects asynchronously before database I/O
   }
 });
 
+test("fromPath rejects credential conflicts asynchronously before database I/O", async (t) => {
+  const missing = join(tmpdir(), "rookie-node-missing-from-path-Cookies");
+  const invalidOptions = [
+    { path: missing, browserId: "chrome", keyPath: "Local State" },
+    { path: missing, browserId: "chrome", plaintextOnly: true },
+    { path: missing, keyPath: "Local State", plaintextOnly: true },
+    {
+      path: missing,
+      browserId: "chrome",
+      keyPath: "Local State",
+      plaintextOnly: true,
+    },
+  ];
+
+  for (const options of invalidOptions) {
+    let promise;
+    t.notThrows(() => {
+      promise = rookieCookies.fromPath(options);
+    });
+    t.true(promise instanceof Promise);
+    const error = await t.throwsAsync(promise, {
+      message: /mutually exclusive/,
+    });
+    t.is(error.code, "InvalidArg");
+  }
+});
+
 test("null, false, and empty Chromium selectors retain their distinct meanings", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rookie-node-canonical-selectors-"));
   const dbPath = join(dir, "Cookies");

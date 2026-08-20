@@ -149,6 +149,38 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             with self.assertRaises(rookie_cookies.RookieEngineError):
                 rookie_cookies.cookies_from_path(str(db_path), timeout=0.0)
 
+    def test_python_option_shape_errors_are_request_errors(self) -> None:
+        missing = str(Path(tempfile.gettempdir()) / "rookie-missing-db" / "Cookies")
+        invalid_options = [
+            "not-a-dict",
+            {"unknown": True},
+            {1: "value"},
+            {"domains": "example.test"},
+            {"domains": ["example.test", 1]},
+            {"browser_id": 42},
+            {"local_state_path": 42},
+            {"plaintext_only": "yes"},
+            {"timeout": "soon"},
+            {"timeout": -1.0},
+            {"timeout": float("inf")},
+            {"cancellation": object()},
+            {"browser_id": "chrome", "plaintext_only": True},
+            {"local_state_path": "Local State", "plaintext_only": True},
+            {"browser_id": "chrome", "local_state_path": "Local State"},
+            {
+                "browser_id": "chrome",
+                "local_state_path": "Local State",
+                "plaintext_only": True,
+            },
+        ]
+        for options in invalid_options:
+            with self.subTest(options=options):
+                with self.assertRaises(rookie_cookies.RookieRequestError):
+                    rookie_cookies.chromium_cookies_from_path(missing, options)
+
+        with self.assertRaises(rookie_cookies.RookieRequestError):
+            rookie_cookies.from_path(missing, timeout=-1.0)
+
     @unittest.skipUnless(
         sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
         "Chromium direct paths are supported on desktop targets",

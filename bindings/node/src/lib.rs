@@ -578,6 +578,32 @@ fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
   }
 }
 
+fn chromium_credentials(
+  browser_id: Option<&str>,
+  local_state_path: Option<&str>,
+  plaintext_only: bool,
+  option_names: &'static str,
+) -> Result<Option<ChromiumCredentialSource>> {
+  let selector_count = usize::from(browser_id.is_some())
+    + usize::from(local_state_path.is_some())
+    + usize::from(plaintext_only);
+  if selector_count > 1 {
+    return Err(napi::Error::new(Status::InvalidArg, option_names));
+  }
+
+  Ok(if let Some(browser_id) = browser_id {
+    Some(ChromiumCredentialSource::BrowserId(browser_id.to_owned()))
+  } else if let Some(local_state_path) = local_state_path {
+    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
+      local_state_path,
+    )))
+  } else if plaintext_only {
+    Some(ChromiumCredentialSource::PlaintextOnly)
+  } else {
+    None
+  })
+}
+
 fn chromium_path_request(
   path: String,
   options: Option<ChromiumPathOptions>,
@@ -590,28 +616,12 @@ fn chromium_path_request(
     request = request.domains(domains);
   }
 
-  let plaintext_only = options.plaintext_only.unwrap_or(false);
-  let selector_count = usize::from(options.browser_id.is_some())
-    + usize::from(options.local_state_path.is_some())
-    + usize::from(plaintext_only);
-  if selector_count > 1 {
-    return Err(napi::Error::new(
-      Status::InvalidArg,
-      "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
-    ));
-  }
-
-  let credentials = if let Some(browser_id) = options.browser_id {
-    Some(ChromiumCredentialSource::BrowserId(browser_id))
-  } else if let Some(local_state_path) = options.local_state_path {
-    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-      local_state_path,
-    )))
-  } else if plaintext_only {
-    Some(ChromiumCredentialSource::PlaintextOnly)
-  } else {
-    None
-  };
+  let credentials = chromium_credentials(
+    options.browser_id.as_deref(),
+    options.local_state_path.as_deref(),
+    options.plaintext_only.unwrap_or(false),
+    "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
+  )?;
   if let Some(credentials) = credentials {
     request = request.credentials(credentials);
   }
@@ -1372,6 +1382,7 @@ pub fn report(options: ReportOptions) -> AsyncTask<JobReportTask> {
 
 pub struct FromPathTask {
   options: FromPathOptions,
+  credentials: Option<ChromiumCredentialSource>,
   cancellation: Option<CancellationHandle>,
 }
 
@@ -1392,20 +1403,8 @@ impl Task for FromPathTask {
       if let Some(handle) = self.cancellation.take() {
         request = request.cancellation(handle);
       }
-      if options.plaintext_only == Some(true) {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly,
-        );
-      } else if let Some(browser_id) = options.browser_id.as_deref() {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(browser_id.to_owned()),
-        );
-      } else if let Some(key_path) = options.key_path.as_deref() {
-        request = request.chromium_credentials(
-          rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-            key_path,
-          )),
-        );
+      if let Some(credentials) = self.credentials.take() {
+        request = request.chromium_credentials(credentials);
       }
       rookie_cookies::from_path(request).map_err(classify_fault)
     })
@@ -1421,11 +1420,18 @@ impl Task for FromPathTask {
 pub fn from_path(
   options: FromPathOptions,
   cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<FromPathTask> {
-  AsyncTask::new(FromPathTask {
+) -> Result<AsyncTask<FromPathTask>> {
+  let credentials = chromium_credentials(
+    options.browser_id.as_deref(),
+    options.key_path.as_deref(),
+    options.plaintext_only.unwrap_or(false),
+    "fromPath options browserId, keyPath, and plaintextOnly are mutually exclusive",
+  )?;
+  Ok(AsyncTask::new(FromPathTask {
     options,
+    credentials,
     cancellation: cancellation.map(|handle| handle.0.clone()),
-  })
+  }))
 }
 
 // Windows only browsers
@@ -1675,6 +1681,27 @@ mod tests {
 
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].expires, None);
+  }
+
+  #[test]
+  fn chromium_credential_selectors_reject_every_conflicting_shape() {
+    for (browser_id, key_path, plaintext_only) in [
+      (Some("chrome"), Some("Local State"), false),
+      (Some("chrome"), None, true),
+      (None, Some("Local State"), true),
+      (Some("chrome"), Some("Local State"), true),
+    ] {
+      let error = chromium_credentials(
+        browser_id,
+        key_path,
+        plaintext_only,
+        "selectors are mutually exclusive",
+      )
+      .expect_err("conflicting selectors must fail before a task is scheduled");
+
+      assert_eq!(error.status, Status::InvalidArg);
+      assert_eq!(error.reason, "selectors are mutually exclusive");
+    }
   }
 
   /// Schema-parity check for the hand-written `#[napi(object)]` report DTOs.

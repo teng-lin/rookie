@@ -49,6 +49,15 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
   Ok(())
 }
 
+/// Builds a caller-input exception through one binding-owned seam.
+///
+/// Structured diagnostic attributes are added here by the binding diagnostics
+/// layer, so option parsers must not construct [`RookieRequestError`]
+/// directly.
+pub(crate) fn request_error(message: impl Into<String>) -> PyErr {
+  RookieRequestError::new_err(message.into())
+}
+
 /// Converts `error` into the exception [`rookie_core::fault_kind`] says it
 /// is. Use this in place of the `?`-operator's blanket `anyhow` conversion
 /// wherever a call site wants the request/engine split.

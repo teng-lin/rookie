@@ -865,6 +865,49 @@ fn subcommand_conflicts_with_top_level_report_flag() {
 }
 
 #[test]
+fn from_path_subcommand_rejects_every_credential_selector_conflict() {
+  for args in [
+    &[
+      "from-path",
+      "missing.sqlite",
+      "--key-path",
+      "Local State",
+      "--browser-id",
+      "chrome",
+    ][..],
+    &[
+      "from-path",
+      "missing.sqlite",
+      "--key-path",
+      "Local State",
+      "--plaintext-only",
+    ][..],
+    &[
+      "from-path",
+      "missing.sqlite",
+      "--browser-id",
+      "chrome",
+      "--plaintext-only",
+    ][..],
+    &[
+      "from-path",
+      "missing.sqlite",
+      "--key-path",
+      "Local State",
+      "--browser-id",
+      "chrome",
+      "--plaintext-only",
+    ][..],
+  ] {
+    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
+    assert!(
+      stderr.contains("cannot be used with"),
+      "credential conflict reached extraction instead of clap validation: {stderr}"
+    );
+  }
+}
+
+#[test]
 fn header_subcommand_requires_browser() {
   let stderr = assert_usage_error(
     &run_rookie(&["header", "https://example.com/"]),
