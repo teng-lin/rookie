@@ -83,6 +83,15 @@ impl SyntheticHome<'_> {
     return self.home.join(".config/google-chrome");
   }
 
+  fn firefox_root(&self) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return self.home.join("Library/Application Support/Firefox");
+    #[cfg(target_os = "windows")]
+    return self.home.join("AppData/Roaming/Mozilla/Firefox");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return self.home.join(".mozilla/firefox");
+  }
+
   /// Chrome's real beta-channel root, a second installation root of the same
   /// browser, used to prove one failing root does not hide another.
   #[cfg(unix)]
@@ -236,6 +245,32 @@ fn seeded_chrome(tag: &str) -> SyntheticHome<'static> {
   home
 }
 
+fn seed_firefox_with_rejected_row(home: &SyntheticHome<'_>) {
+  let root = home.firefox_root();
+  let profile = root.join("Profiles/default");
+  std::fs::create_dir_all(&profile).expect("create Firefox profile");
+  std::fs::write(
+    root.join("profiles.ini"),
+    "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/default\nDefault=1\n",
+  )
+  .expect("write profiles.ini");
+  let connection =
+    rusqlite::Connection::open(profile.join("cookies.sqlite")).expect("open Firefox database");
+  connection
+    .execute_batch(
+      "PRAGMA user_version = 15;
+       CREATE TABLE moz_cookies (
+         host TEXT, path, isSecure, expiry, name TEXT, value TEXT,
+         isHttpOnly, sameSite, originAttributes
+       );
+       INSERT INTO moz_cookies VALUES
+         ('.example.test', '/', 0, 0, 'kept', 'value', 0, 0, '');
+       INSERT INTO moz_cookies VALUES
+         ('.example.test', '/', 0, 0, X'00ff', 'value', 0, 0, '');",
+    )
+    .expect("seed readable and rejected Firefox rows");
+}
+
 fn is_opaque_id(value: &str) -> bool {
   value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -377,6 +412,58 @@ fn no_profile_read_reports_decrypt_failed_for_undecryptable_rows() {
   assert_eq!(warning.count(), 1);
   assert_eq!(result.cookies().len(), 1);
   assert_eq!(result.cookies()[0].name, "kept");
+
+  let profile_id = rookie_cookies::profiles("chrome")
+    .expect("profiles")
+    .into_iter()
+    .next()
+    .expect("seeded profile")
+    .profile
+    .profile_id
+    .to_string();
+  let selected = rookie_cookies::read(
+    rookie_cookies::ReadRequest::browser("chrome")
+      .profile(profile_id)
+      .include_expired(true),
+  )
+  .expect("profile read");
+  assert_eq!(
+    selected.warnings(),
+    result.warnings(),
+    "legacy and report-backed reads must project unseal loss identically"
+  );
+  let _ = home;
+}
+
+#[test]
+fn gecko_row_loss_warning_matches_profile_and_no_profile_reads() {
+  let home = SyntheticHome::new("read-gecko-row-loss");
+  seed_firefox_with_rejected_row(&home);
+
+  let compatibility =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("firefox").include_expired(true))
+      .expect("no-profile Firefox read");
+  let profile_id = rookie_cookies::profiles("firefox")
+    .expect("profiles")
+    .into_iter()
+    .next()
+    .expect("seeded profile")
+    .profile
+    .profile_id
+    .to_string();
+  let selected = rookie_cookies::read(
+    rookie_cookies::ReadRequest::browser("firefox")
+      .profile(profile_id)
+      .include_expired(true),
+  )
+  .expect("profile Firefox read");
+
+  assert_eq!(compatibility.cookies().len(), 1);
+  assert_eq!(selected.cookies().len(), 1);
+  assert_eq!(compatibility.warnings(), selected.warnings());
+  assert_eq!(compatibility.warnings().len(), 1);
+  assert_eq!(compatibility.warnings()[0].code(), "row_read_failed");
+  assert_eq!(compatibility.warnings()[0].count(), 1);
   let _ = home;
 }
 

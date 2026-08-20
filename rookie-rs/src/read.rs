@@ -7,10 +7,11 @@ use crate::common::deadline::{boundary_runtime, SystemClock};
 use crate::common::enums::Cookie;
 use crate::direct_path::{self, cookies_from_path, ChromiumCredentialSource, DirectPathRequest};
 use crate::header_filter::{sendable_octets, GetFilter};
+use crate::read_warning::{ReadWarningCode, ReadWarningCounts};
 use crate::report::{self, ExtractionReport};
 use crate::{CancellationHandle, RequestError, Result};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 
 /// Structured snapshot warning. `code` + `count` are the machine contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,10 @@ impl ReadRequest {
     self
   }
 
+  /// Controls whether expired cookies remain in [`ReadResult::cookies`].
+  ///
+  /// This is an inventory option only. [`ReadResult::header`] always applies
+  /// expiry at send time and never emits an expired cookie.
   pub fn include_expired(mut self, yes: bool) -> Self {
     self.include_expired = yes;
     self
@@ -113,12 +118,21 @@ impl ReadResult {
     self.profile_id.as_deref()
   }
 
+  /// Builds a send-time Cookie header view for `url`.
+  ///
+  /// Expiry is checked when this method is called, independently of whether
+  /// the snapshot was created with [`ReadRequest::include_expired`].
   pub fn header(&self, url: &str) -> Result<String> {
+    self.header_at(url, SystemTime::now())
+  }
+
+  fn header_at(&self, url: &str, now: SystemTime) -> Result<String> {
     let filter = GetFilter::for_url(url)?;
+    let now_epoch = unix_seconds(now)?;
     let mut kept: Vec<&Cookie> = self
       .cookies
       .iter()
-      .filter(|cookie| filter.keeps(cookie))
+      .filter(|cookie| is_unexpired(cookie, now_epoch) && filter.keeps(cookie))
       .collect();
     kept.sort_by(|left, right| {
       right
@@ -162,15 +176,11 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
     .unwrap_or_default();
   let runtime = boundary_runtime(&clock, request.timeout, cancel_token);
   let resolved_browser = registry::resolve_registered_browser(&browser_id)?;
-  let (cookies, mut warnings, profile_id) = match request.profile {
+  let (cookies, mut warning_counts, profile_id) = match request.profile {
     None => {
       let (cookies, skips) =
         legacy::browser_cookies_and_warnings_with_runtime(&browser_id, None, &runtime)?;
-      let warnings = skips
-        .into_iter()
-        .map(|(code, count)| ReadWarning::new(code, count))
-        .collect();
-      (cookies, warnings, None)
+      (cookies, skips, None)
     }
     Some(query) => {
       let (profile_id, report) =
@@ -180,10 +190,11 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
       (cookies, warnings, Some(profile_id))
     }
   };
-  let (cookies, octet_count) = filter_snapshot(cookies, request.include_expired);
+  let (cookies, octet_count) = filter_snapshot(cookies, request.include_expired)?;
   if octet_count > 0 {
-    warnings.push(ReadWarning::new("invalid_octets", octet_count));
+    warning_counts.record(ReadWarningCode::InvalidOctets, octet_count);
   }
+  let warnings = read_warnings(warning_counts);
   Ok(ReadResult {
     cookies,
     warnings,
@@ -217,6 +228,10 @@ impl FromPathRequest {
     }
   }
 
+  /// Controls whether expired cookies remain in [`ReadResult::cookies`].
+  ///
+  /// This is an inventory option only. [`ReadResult::header`] always applies
+  /// expiry at send time and never emits an expired cookie.
   pub fn include_expired(mut self, yes: bool) -> Self {
     self.include_expired = yes;
     self
@@ -261,11 +276,12 @@ pub fn from_path(request: FromPathRequest) -> Result<ReadResult> {
       direct_path::chromium_cookies_from_path(chromium)?
     }
   };
-  let (cookies, octet_count) = filter_snapshot(cookies, request.include_expired);
-  let mut warnings = Vec::new();
+  let (cookies, octet_count) = filter_snapshot(cookies, request.include_expired)?;
+  let mut warning_counts = ReadWarningCounts::default();
   if octet_count > 0 {
-    warnings.push(ReadWarning::new("invalid_octets", octet_count));
+    warning_counts.record(ReadWarningCode::InvalidOctets, octet_count);
   }
+  let warnings = read_warnings(warning_counts);
   Ok(ReadResult {
     cookies,
     warnings,
@@ -274,11 +290,16 @@ pub fn from_path(request: FromPathRequest) -> Result<ReadResult> {
   })
 }
 
-fn filter_snapshot(cookies: Vec<Cookie>, include_expired: bool) -> (Vec<Cookie>, u64) {
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .map(|duration| duration.as_secs())
-    .unwrap_or(0);
+fn filter_snapshot(cookies: Vec<Cookie>, include_expired: bool) -> Result<(Vec<Cookie>, u64)> {
+  filter_snapshot_at(cookies, include_expired, SystemTime::now())
+}
+
+fn filter_snapshot_at(
+  cookies: Vec<Cookie>,
+  include_expired: bool,
+  now: SystemTime,
+) -> Result<(Vec<Cookie>, u64)> {
+  let now = unix_seconds(now)?;
   let mut omitted = 0;
   let kept = cookies
     .into_iter()
@@ -289,7 +310,7 @@ fn filter_snapshot(cookies: Vec<Cookie>, include_expired: bool) -> (Vec<Cookie>,
       }
       if !include_expired {
         if let Some(expires) = cookie.expires {
-          if expires < now {
+          if expires <= now {
             return false;
           }
         }
@@ -297,25 +318,42 @@ fn filter_snapshot(cookies: Vec<Cookie>, include_expired: bool) -> (Vec<Cookie>,
       true
     })
     .collect();
-  (kept, omitted)
+  Ok((kept, omitted))
 }
 
-fn harvest_report_warnings(report: &ExtractionReport) -> Vec<ReadWarning> {
-  let mut decrypt = 0u64;
+fn unix_seconds(now: SystemTime) -> std::result::Result<u64, SystemTimeError> {
+  now
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| duration.as_secs())
+}
+
+fn is_unexpired(cookie: &Cookie, now_epoch: u64) -> bool {
+  cookie.expires.is_none_or(|expires| expires > now_epoch)
+}
+
+fn harvest_report_warnings(report: &ExtractionReport) -> ReadWarningCounts {
+  let mut warnings = ReadWarningCounts::default();
+  for issue in &report.issues {
+    warnings.record_issue(issue.code.as_str(), u64::from(issue.occurrences));
+  }
   for profile in &report.profiles {
+    for issue in &profile.issues {
+      warnings.record_issue(issue.code.as_str(), u64::from(issue.occurrences));
+    }
     for source in &profile.sources {
       for issue in &source.issues {
-        if issue.code.as_str().contains("decrypt") || issue.code.as_str() == "decrypt_failed" {
-          decrypt = decrypt.saturating_add(u64::from(issue.occurrences));
-        }
+        warnings.record_issue(issue.code.as_str(), u64::from(issue.occurrences));
       }
     }
   }
-  let mut warnings = Vec::new();
-  if decrypt > 0 {
-    warnings.push(ReadWarning::new("decrypt_failed", decrypt));
-  }
   warnings
+}
+
+fn read_warnings(counts: ReadWarningCounts) -> Vec<ReadWarning> {
+  counts
+    .into_entries()
+    .map(|(code, count)| ReadWarning::new(code.as_str(), count))
+    .collect()
 }
 
 #[allow(dead_code)]
@@ -324,6 +362,33 @@ fn _keep_record_link(_: &CookieRecord) {}
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::time::Duration;
+
+  fn epoch(seconds: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(seconds)
+  }
+
+  fn cookie(name: &str, expires: Option<u64>) -> Cookie {
+    Cookie {
+      domain: ".example.test".to_owned(),
+      path: "/".to_owned(),
+      secure: false,
+      expires,
+      name: name.to_owned(),
+      value: "value".to_owned(),
+      http_only: false,
+      same_site: -1,
+    }
+  }
+
+  fn result(cookies: Vec<Cookie>) -> ReadResult {
+    ReadResult {
+      cookies,
+      warnings: Vec::new(),
+      browser_id: "chrome".into(),
+      profile_id: None,
+    }
+  }
 
   #[test]
   fn missing_browser_is_request_error() {
@@ -344,13 +409,78 @@ mod tests {
 
   #[test]
   fn header_rejects_ftp() {
-    let result = ReadResult {
-      cookies: Vec::new(),
-      warnings: Vec::new(),
-      browser_id: "chrome".into(),
-      profile_id: None,
-    };
+    let result = result(Vec::new());
     assert!(result.header("ftp://example.com/").is_err());
+  }
+
+  #[test]
+  fn snapshot_omits_a_cookie_expired_before_the_snapshot() {
+    let (cookies, omitted_octets) =
+      filter_snapshot_at(vec![cookie("old", Some(99))], false, epoch(100)).expect("valid clock");
+    assert!(cookies.is_empty());
+    assert_eq!(omitted_octets, 0);
+  }
+
+  #[test]
+  fn snapshot_treats_expiry_equal_to_now_as_expired() {
+    let (cookies, omitted_octets) =
+      filter_snapshot_at(vec![cookie("boundary", Some(100))], false, epoch(100))
+        .expect("valid clock");
+    assert!(cookies.is_empty());
+    assert_eq!(omitted_octets, 0);
+  }
+
+  #[test]
+  fn header_omits_a_cookie_that_expires_after_snapshot_creation() {
+    let (cookies, _) =
+      filter_snapshot_at(vec![cookie("short-lived", Some(101))], false, epoch(100))
+        .expect("valid snapshot clock");
+    assert_eq!(cookies.len(), 1, "cookie is live in the snapshot");
+
+    let result = result(cookies);
+    assert_eq!(
+      result
+        .header_at("https://example.test/", epoch(100))
+        .expect("valid header clock"),
+      "short-lived=value"
+    );
+    assert_eq!(
+      result
+        .header_at("https://example.test/", epoch(101))
+        .expect("valid header clock"),
+      ""
+    );
+  }
+
+  #[test]
+  fn include_expired_retains_inventory_but_never_makes_it_sendable() {
+    let (cookies, _) = filter_snapshot_at(vec![cookie("historical", Some(99))], true, epoch(100))
+      .expect("valid snapshot clock");
+    assert_eq!(cookies.len(), 1, "inventory retains the expired cookie");
+
+    let result = result(cookies);
+    assert_eq!(result.cookies().len(), 1);
+    assert_eq!(
+      result
+        .header_at("https://example.test/", epoch(100))
+        .expect("valid header clock"),
+      ""
+    );
+  }
+
+  #[test]
+  fn pre_epoch_clock_is_a_typed_error_instead_of_epoch_zero() {
+    let before_epoch = UNIX_EPOCH
+      .checked_sub(Duration::from_secs(1))
+      .expect("SystemTime represents the pre-epoch test value");
+    let error = filter_snapshot_at(Vec::new(), false, before_epoch)
+      .expect_err("a pre-epoch clock is invalid");
+    assert!(error.downcast_ref::<SystemTimeError>().is_some());
+
+    let error = result(Vec::new())
+      .header_at("https://example.test/", before_epoch)
+      .expect_err("header uses the same typed clock conversion");
+    assert!(error.downcast_ref::<SystemTimeError>().is_some());
   }
 
   fn seed_firefox_db(path: &std::path::Path, name: &str, value: &str) {

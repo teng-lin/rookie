@@ -9,8 +9,10 @@ use super::cookie_record::{FinalizedCookieRecord, LegacyProjectionSemantics};
 use super::mozilla::MozillaProfile;
 use super::outcome::{CompatibilityAbsence, CompatibilityDisposition, Outcome, Termination};
 use super::registry::{self, EngineExtract, EngineListing};
+use super::source::SourceIssue;
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::enums::{Cookie, DetailedCookie};
+use crate::read_warning::ReadWarningCounts;
 use anyhow::{bail, Result};
 use std::{error::Error, fmt};
 
@@ -285,7 +287,7 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   )
 }
 
-pub(super) type LegacySnapshot = (Vec<Cookie>, Vec<(&'static str, u64)>);
+pub(super) type LegacySnapshot = (Vec<Cookie>, ReadWarningCounts);
 
 pub(crate) fn browser_cookies_with_runtime(
   browser_id: &str,
@@ -345,7 +347,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
     "chromium" => {
       let draft =
         registry::legacy_chromium_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
-      let decrypt = chromium_decrypt_skip_count(&draft);
+      let warnings = chromium_warning_counts(&draft);
       let outcome = super::report_build::canonical_chromium_extraction_with_runtime(
         &browser.canonical_id,
         draft,
@@ -357,7 +359,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
         runtime,
         stop_projection,
       )?;
-      Ok((cookies, skip_warnings(decrypt, 0)))
+      Ok((cookies, warnings))
     }
     "gecko" => {
       let extract =
@@ -374,7 +376,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
         runtime,
         stop_projection,
       )?;
-      Ok((cookies, skip_warnings(0, skipped)))
+      Ok((cookies, row_read_warnings(skipped)))
     }
     engine => dispatch::remaining_engine_snapshot_with_runtime(
       &browser.canonical_id,
@@ -406,30 +408,27 @@ pub(super) fn cookies_and_skipped_from_engine_extract(
     runtime,
     stop_projection,
   )?;
-  Ok((cookies, skip_warnings(0, skipped)))
+  Ok((cookies, row_read_warnings(skipped)))
 }
 
-fn skip_warnings(decrypt_failed: u64, row_read_failed: u64) -> Vec<(&'static str, u64)> {
-  let mut warnings = Vec::new();
-  if decrypt_failed > 0 {
-    warnings.push(("decrypt_failed", decrypt_failed));
-  }
-  if row_read_failed > 0 {
-    warnings.push(("row_read_failed", row_read_failed));
-  }
+fn row_read_warnings(skipped: u64) -> ReadWarningCounts {
+  let mut warnings = ReadWarningCounts::default();
+  warnings.record_issue(SourceIssue::ROW_READ_FAILED, skipped);
   warnings
 }
 
-fn chromium_decrypt_skip_count(draft: &registry::ChromiumRegistryDraft) -> u64 {
-  draft
+fn chromium_warning_counts(draft: &registry::ChromiumRegistryDraft) -> ReadWarningCounts {
+  let mut warnings = ReadWarningCounts::default();
+  for issue in draft
     .installations
     .iter()
     .flat_map(|installation| installation.profiles.iter())
     .flat_map(|profile| profile.sources.iter())
     .flat_map(|source| source.issues.iter())
-    .filter(|issue| crate::browser::chromium::CHROMIUM_UNSEAL_ISSUE_CODES.contains(&issue.code))
-    .map(|issue| u64::from(issue.occurrences))
-    .fold(0u64, u64::saturating_add)
+  {
+    warnings.record_issue(issue.code, u64::from(issue.occurrences));
+  }
+  warnings
 }
 
 fn engine_extract_skipped_row_count(extract: &EngineExtract) -> u64 {
