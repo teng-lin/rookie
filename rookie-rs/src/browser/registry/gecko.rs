@@ -666,6 +666,19 @@ mod tests {
   };
   use super::*;
 
+  /// Test convenience: the mechanical `from_candidate` conversion.
+  ///
+  /// Production states effective `selected` / `acquisition` explicitly so a
+  /// forgotten overlay is a compile error; fixtures that only want "whatever
+  /// the candidate said" go through here rather than repeating it.
+  fn source_from_candidate(candidate: SourceCandidate) -> Source {
+    Source::new(
+      candidate.identity(),
+      candidate.selected,
+      candidate.acquisition,
+    )
+  }
+
   #[test]
   fn gecko_profiles_are_default_first_then_name_and_path() {
     let temp = TempDir::new("gecko-order");
@@ -1890,7 +1903,7 @@ mod tests {
         if call == 0 {
           // The engine returns an already-built persistent `Source`. Production
           // fills `records` and finalization reads records only.
-          let mut source = Source::from_candidate(SourceCandidate {
+          let mut source = source_from_candidate(SourceCandidate {
             path: candidate.path.clone(),
             role: CookieSourceRoleId::persistent(),
             format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),

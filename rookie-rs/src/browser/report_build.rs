@@ -20,7 +20,6 @@ use super::outcome::{
 use super::registry::{
   self, ChromiumExtractedProfile, ChromiumRegistryDraft, DiscoveredProfile, DiscoveryIssue,
   EngineExtract, EngineListing, ExtractedProfile, RegisteredBrowser, SourceAcquisition,
-  SOURCE_ROLE_PERSISTENT,
 };
 #[cfg(test)]
 use super::report_core::SourceStatusCode;
@@ -28,12 +27,20 @@ use super::report_core::{
   compare_source_identity, display_path, issue, push_aggregated, sort_cookies,
   sort_source_descriptors, source_status, AcquisitionStrategyCode, BrowserCapabilitiesDescriptor,
   BrowserDescriptor, BrowserId, CipherTierId, CookieSourceDescriptor, CookieSourceFormatId,
-  CookieSourceIdentity, CookieSourceRoleId, CounterSet, EngineId, ExtractionIssue,
-  ExtractionReport, ExtractionStageCode, ExtractionStats, InstallationId, IssueSeverityCode,
-  ProfileDescriptor, ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, ReportStatusCode,
-  SourceExtraction, StatsAccumulator, TerminationCode, MAX_ISSUE_SAMPLES,
+  CookieSourceIdentity, CounterSet, EngineId, ExtractionIssue, ExtractionReport,
+  ExtractionStageCode, ExtractionStats, InstallationId, IssueSeverityCode, ProfileDescriptor,
+  ProfileExtraction, ProfileId, ProfileIdentity, ReportStats, ReportStatusCode, SourceExtraction,
+  StatsAccumulator, TerminationCode, MAX_ISSUE_SAMPLES,
 };
-use super::source::{Source, SourceFailureStage as SourceFailureStageNew, SourceIssue};
+// Both are production-dead after `source_identity` began taking a
+// `SourceIdentity`; the fixtures still need them.
+#[cfg(test)]
+use super::registry::SOURCE_ROLE_PERSISTENT;
+#[cfg(test)]
+use super::report_core::CookieSourceRoleId;
+use super::source::{
+  Source, SourceFailureStage as SourceFailureStageNew, SourceIdentity, SourceIssue,
+};
 #[cfg(test)]
 use super::source::{SourceCandidate, SourceStats};
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
@@ -97,19 +104,19 @@ fn acquisition_code(acquisition: SourceAcquisition) -> AcquisitionStrategyCode {
   }
 }
 
-fn source_identity(
-  path: &std::path::Path,
-  role: &str,
-  format: &str,
-  precedence: u16,
-) -> CookieSourceIdentity {
-  let (path, path_lossy) = display_path(path);
+/// The wire identity of one cookie source.
+///
+/// Takes the whole [`SourceIdentity`] rather than four positional keys: the
+/// previous signature put `role` and `format` adjacent as `&str`, so
+/// transposing them was a silent behaviour change rather than a compile error.
+fn source_identity(origin: &SourceIdentity) -> CookieSourceIdentity {
+  let (path, path_lossy) = display_path(&origin.path);
   CookieSourceIdentity {
-    role: CookieSourceRoleId::known(role),
-    format: CookieSourceFormatId::known(format),
+    role: origin.role.clone(),
+    format: origin.format.clone(),
     path,
     path_lossy,
-    precedence,
+    precedence: origin.precedence,
   }
 }
 
@@ -288,12 +295,7 @@ fn source_to_draft(source: Source) -> SourceDraft {
     issues,
   } = source;
   let mut outcome = SourceDraft::new(
-    source_identity(
-      &origin.path,
-      origin.role.as_str(),
-      origin.format.as_str(),
-      origin.precedence,
-    ),
+    source_identity(&origin),
     &origin.path,
     selected,
     acquisition_code(acquisition),
@@ -617,12 +619,7 @@ fn discovered_profile_outcome(
   let mut outcome = ProfileDraft::new(identity, profile.identity.is_default);
   for candidate in profile.candidates {
     outcome.sources.push(SourceDraft::new(
-      source_identity(
-        &candidate.path,
-        candidate.role.as_str(),
-        candidate.format.as_str(),
-        candidate.precedence,
-      ),
+      source_identity(&candidate.identity()),
       &candidate.path,
       candidate.selected,
       acquisition_code(candidate.acquisition),
@@ -746,12 +743,7 @@ fn chromium_listing_outcome(
         continue;
       }
       engine.sources.push(SourceDraft::new(
-        source_identity(
-          &candidate.path,
-          candidate.role.as_str(),
-          candidate.format.as_str(),
-          candidate.precedence,
-        ),
+        source_identity(&candidate.identity()),
         &candidate.path,
         candidate.selected,
         acquisition_code(candidate.acquisition),
@@ -1594,12 +1586,11 @@ fn chromium_profile_descriptor(
     .into_iter()
     .filter(|candidate| candidate.exists)
     .map(|candidate| {
-      let source = source_identity(
-        &candidate.path,
-        SOURCE_ROLE_PERSISTENT,
-        "chromium_sqlite",
-        candidate.precedence,
-      );
+      // Reads the candidate's own role and format instead of restating
+      // `SOURCE_ROLE_PERSISTENT` / "chromium_sqlite": Chromium's only
+      // persistent plant sets exactly those, so this is the same bytes with
+      // one fewer place for them to drift.
+      let source = source_identity(&candidate.identity());
       CookieSourceDescriptor {
         role: source.role,
         format: source.format,
@@ -1688,6 +1679,19 @@ fn profile_descriptors_from_outcome(
 #[cfg(test)]
 mod tests {
 
+  /// Test convenience: the mechanical `from_candidate` conversion.
+  ///
+  /// Production states effective `selected` / `acquisition` explicitly so a
+  /// forgotten overlay is a compile error; fixtures that only want "whatever
+  /// the candidate said" go through here rather than repeating it.
+  fn source_from_candidate(candidate: SourceCandidate) -> Source {
+    Source::new(
+      candidate.identity(),
+      candidate.selected,
+      candidate.acquisition,
+    )
+  }
+
   #[test]
   fn source_outcomes_sort_persistent_before_session_then_by_precedence() {
     let mut sources = vec![
@@ -1770,12 +1774,12 @@ mod tests {
   fn source(failed: bool) -> SourceDraft {
     let source_path = PathBuf::from("/profiles/default/cookies.sqlite");
     let mut source = SourceDraft::new(
-      source_identity(
-        &source_path,
-        SOURCE_ROLE_PERSISTENT,
-        "mozilla_sqlite",
-        registry::PERSISTENT_SOURCE_PRECEDENCE,
-      ),
+      source_identity(&SourceIdentity {
+        path: source_path.clone(),
+        role: CookieSourceRoleId::persistent(),
+        format: CookieSourceFormatId::known("mozilla_sqlite"),
+        precedence: registry::PERSISTENT_SOURCE_PRECEDENCE,
+      }),
       &source_path,
       true,
       AcquisitionStrategyCode::live_read_only(),
@@ -2064,12 +2068,12 @@ mod tests {
     for (index, name) in ["first", "second"].into_iter().enumerate() {
       let path = PathBuf::from(format!("/profiles/default/cookies-{index}.sqlite"));
       let mut source = SourceDraft::new(
-        source_identity(
-          &path,
-          SOURCE_ROLE_PERSISTENT,
-          "mozilla_sqlite",
-          registry::PERSISTENT_SOURCE_PRECEDENCE + index as u16,
-        ),
+        source_identity(&SourceIdentity {
+          path: path.clone(),
+          role: CookieSourceRoleId::persistent(),
+          format: CookieSourceFormatId::known("mozilla_sqlite"),
+          precedence: registry::PERSISTENT_SOURCE_PRECEDENCE + index as u16,
+        }),
         &path,
         true,
         AcquisitionStrategyCode::live_read_only(),
@@ -2226,7 +2230,10 @@ mod tests {
   #[test]
   fn chromium_adapter_projects_a_selected_candidate_as_a_succeeding_source() {
     let browser = BrowserId::known("chrome");
-    let mut source = Source::from_candidate(chromium_candidate());
+    let mut source = {
+      let c = chromium_candidate();
+      Source::new(c.identity(), c.selected, c.acquisition)
+    };
     source.acquisition_attempts = 1;
     let engine = chromium_profile_outcome(
       &browser,
@@ -2299,7 +2306,7 @@ mod tests {
   /// place they differ: the all-rows-rejected fallback names the engine.
   #[test]
   fn a_direct_path_chromium_read_is_dispositioned_as_chromium() {
-    let mut source = Source::from_candidate(SourceCandidate {
+    let mut source = source_from_candidate(SourceCandidate {
       path: PathBuf::from("/chrome/Default/Cookies"),
       role: CookieSourceRoleId::persistent(),
       format: CookieSourceFormatId::known("chromium_sqlite"),
@@ -2339,7 +2346,7 @@ mod tests {
   /// leaves the whole suite green.
   #[test]
   fn a_custom_diagnostic_ending_in_the_generic_suffix_survives_verbatim() {
-    let mut source = Source::from_candidate(SourceCandidate {
+    let mut source = source_from_candidate(SourceCandidate {
       path: PathBuf::from("/chrome/Default/Cookies"),
       role: CookieSourceRoleId::persistent(),
       format: CookieSourceFormatId::known("chromium_sqlite"),
@@ -2385,14 +2392,11 @@ mod tests {
     error: Option<&str>,
   ) -> Source {
     let mut source = Source {
-      origin: SourceCandidate {
+      origin: SourceIdentity {
         path: PathBuf::from("/firefox/Profiles/default").join(name),
         role: CookieSourceRoleId::known(role),
         format: CookieSourceFormatId::known("mozilla_sqlite"),
         precedence,
-        exists: true,
-        selected,
-        acquisition: registry::SourceAcquisition::StableFileImage,
       },
       selected,
       acquisition: registry::SourceAcquisition::StableFileImage,
@@ -2801,7 +2805,10 @@ mod tests {
     // Chromium is built the same way as the other three now: one `Source` the
     // engine already translated. The adapter has no engine-specific counters
     // left to reconcile, only the shared ones.
-    let mut chromium_source = Source::from_candidate(chromium_candidate());
+    let mut chromium_source = {
+      let c = chromium_candidate();
+      Source::new(c.identity(), c.selected, c.acquisition)
+    };
     chromium_source.records = vec![fixture_record(cookie("chromium"), 0)];
     chromium_source.stats = SourceStats {
       rows_seen: 4,
@@ -2988,7 +2995,7 @@ mod tests {
   }
 
   fn source_with_issues(issues: Vec<SourceIssue>) -> Source {
-    let mut source = Source::from_candidate(SourceCandidate {
+    let mut source = source_from_candidate(SourceCandidate {
       path: PathBuf::from("/chrome/Default/Network/Cookies"),
       role: CookieSourceRoleId::persistent(),
       format: CookieSourceFormatId::known("chromium_sqlite"),

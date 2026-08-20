@@ -25,7 +25,9 @@ use super::cookie_record::{
 };
 use super::registry::PERSISTENT_SOURCE_PRECEDENCE;
 use super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
-use super::source::{Source, SourceAcquisition, SourceCandidate, SourceFailureStage, SourceStats};
+use super::source::{
+  Source, SourceAcquisition, SourceCandidate, SourceFailureStage, SourceIdentity, SourceStats,
+};
 
 // Firefox 142 migrated schema 15 to 16 by multiplying persistent cookie
 // expiry values by 1000 (https://bugzilla.mozilla.org/show_bug.cgi?id=1972757).
@@ -808,15 +810,14 @@ fn persistent_source(path: PathBuf, draft: MozillaPersistentDraft) -> Source {
   let records = draft.records;
   let cookies_emitted = records.len();
   let mut source = Source {
-    origin: SourceCandidate {
+    origin: SourceIdentity {
       path,
       role: CookieSourceRoleId::persistent(),
       format: CookieSourceFormatId::known(PERSISTENT_FORMAT_ID),
       precedence: PERSISTENT_SOURCE_PRECEDENCE,
-      exists: true,
-      selected: true,
-      acquisition,
     },
+    // Effective, not inherited: a profile's authoritative persistent store is
+    // always its selected source, even though the listing plants `false`.
     selected: true,
     acquisition,
     records,
@@ -858,15 +859,14 @@ fn persistent_source(path: PathBuf, draft: MozillaPersistentDraft) -> Source {
 /// `rows_skipped` and described by `diagnostics`, so it carries no row error.
 fn session_source(session: MozillaSessionDraft) -> Source {
   let mut source = Source {
-    origin: SourceCandidate {
+    origin: SourceIdentity {
       path: session.path,
       role: CookieSourceRoleId::session(),
       format: CookieSourceFormatId::known(session.format),
       precedence: session.precedence,
-      exists: true,
-      selected: session.selected,
-      acquisition: SourceAcquisition::StableFileImage,
     },
+    // Effective only: first-valid selection is decided by reading, so it must
+    // never be written back as though discovery had decided it.
     selected: session.selected,
     acquisition: SourceAcquisition::StableFileImage,
     records: session.records,
@@ -1163,7 +1163,11 @@ pub(crate) fn acquire_candidate_source_with_runtime(
     // SESSION_CANDIDATES formats, so this is a programming error -- surfaced
     // as a failed source rather than silently skipped or panicked on.
     None => {
-      let mut source = Source::from_candidate(candidate.clone());
+      let mut source = Source::new(
+        candidate.identity(),
+        candidate.selected,
+        candidate.acquisition,
+      );
       source.fail(
         SourceFailureStage::Parse,
         format!(

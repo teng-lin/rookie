@@ -132,7 +132,7 @@ pub(crate) fn safari_source(
   row_error: Option<String>,
   acquisition_attempts: u32,
 ) -> Source {
-  let mut source = Source::from_candidate(origin);
+  let mut source = Source::new(origin.identity(), origin.selected, origin.acquisition);
   source.stats = SourceStats {
     rows_seen: stats.records_seen,
     cookies_emitted: records.len(),
