@@ -23,6 +23,7 @@ use crate::browser::outcome::Termination;
 use crate::browser::registry;
 use crate::common::deadline::BoundaryRuntime;
 use crate::common::enums::DetailedCookie;
+use crate::error::{EngineCause, EngineFailure};
 use crate::read_warning::ReadWarningCounts;
 use anyhow::Result;
 
@@ -81,6 +82,9 @@ pub(crate) fn browser_snapshot_with_runtime(
         cookies,
         warnings,
         profile_id: None,
+        // `Completed` is a fact here, not an assumption: this route projects
+        // under `StopProjection::ReturnError`, so a stop is already an `Err`
+        // above and cannot reach this line.
         termination: Termination::Completed,
       })
     }
@@ -112,17 +116,44 @@ fn profile_snapshot_with_runtime(
   let termination = outcome.termination;
 
   let mut cookies = Vec::new();
+  let mut selected_any = false;
+  let mut succeeded_any = false;
   for source in outcome.sources {
-    if !source.selected || source.failed {
+    if !source.selected || source.profile.profile_id.as_str() != profile_id {
       continue;
     }
-    if source.profile.profile_id.as_str() != profile_id {
+    selected_any = true;
+    if source.failed {
       continue;
     }
+    succeeded_any = true;
     let semantics = LegacyProjectionSemantics::for_source_format(source.source.format.as_str());
     for record in source.records {
       cookies.push(record.into_detailed_cookie_with_semantics(semantics));
     }
+  }
+
+  // A snapshot is not a report: it has nowhere to put "every source failed"
+  // and must not answer it with an empty list. `flatten_selected_report_cookies`
+  // made the same distinction on the route this seam replaces, and dropping it
+  // here would turn a total failure into a silent success on the path the
+  // migration guide recommends.
+  //
+  // The two codes differ in what a caller can do about it: nothing was
+  // *selected* means discovery finished and found nothing to acquire, while
+  // everything selected *failed* means the sources were there and could not be
+  // read. Only the second is worth retrying.
+  if termination == Termination::Completed && !succeeded_any {
+    let cause = if selected_any {
+      EngineCause::NoSelectedSource
+    } else {
+      EngineCause::NoDiscoveredSource
+    };
+    return Err(EngineFailure::new(
+      cause,
+      format!("no {browser_id} source succeeded for profile {profile_id:?}"),
+    )
+    .into());
   }
 
   Ok(SnapshotOutcome {

@@ -110,20 +110,31 @@ sqlite/session layout on all three OSes.
 
 ## Recommended 0.6 usage
 
-Pass a **profile** to select one discovered profile. For Gecko-family browsers,
-that route also includes the separately declared session JSON source. Chromium
-registrations have no separate session source: selecting a Chrome profile does
-not recover session state that exists only in browser memory. Omit the profile
-to match the old first-profile, legacy-compatible helpers. `read` never
-URL-filters the snapshot; `ReadResult.header(url)` is a view. There is no
-top-level binding `header()`, and no crate-root Rust `get` / `report`.
+Pass a **profile** to select one discovered profile; omit it to match the old
+first-profile, legacy-compatible helpers.
+
+**Session cookies are a separate question in 0.6.0.** Ask for them with
+`include_session` (`includeSession` in Node, `--include-session` on the CLI).
+Naming a profile no longer implies them, and the change is quiet: a Gecko
+`jar(profile="Default")` returns a smaller jar than it did in 0.6-beta, with
+no error. Chromium registrations declare no separate session source, so
+selecting a Chrome profile never recovered session state held only in browser
+memory.
+
+`read` never URL-filters the snapshot; `ReadResult.header` is a **view** that
+takes a send context, not a bare URL — a URL cannot say which browsing context
+a request comes from, so it could not tell a partitioned cookie from an
+unpartitioned one. There is no top-level binding `header()`, and no crate-root
+Rust `get` / `report`.
 
 ### Python
 
 ```python
 import rookie_cookies as cookies
 
-session_jar = cookies.jar(browser="firefox", profile="default-release")
+session_jar = cookies.jar(
+    browser="firefox", profile="default-release", include_session=True
+)
 rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```
 
@@ -132,7 +143,11 @@ rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```javascript
 import { read } from "rookie-cookies";
 
-const snapshot = await read({ browser: "firefox", profile: "default-release" });
+const snapshot = await read({
+  browser: "firefox",
+  profile: "default-release",
+  includeSession: true,
+});
 console.log(snapshot.cookies, snapshot.header("https://example.com/"));
 ```
 
@@ -144,7 +159,11 @@ Extraction is async. Always `await`.
 use rookie_cookies::{read, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
-    let snapshot = read(ReadRequest::browser("firefox").profile("default-release"))?;
+    let snapshot = read(
+        ReadRequest::browser("firefox")
+            .profile("default-release")
+            .include_session(),
+    )?;
     println!("{}", snapshot.header(&SendContext::url("https://example.com/"))?);
     Ok(())
 }
@@ -153,16 +172,19 @@ fn main() -> rookie_cookies::Result<()> {
 ### CLI
 
 ```console
-rookie-cookies read --browser firefox --profile default-release
-rookie-cookies header --browser chrome https://example.com/
+rookie-cookies read --browser firefox --profile default-release --include-session
+rookie-cookies header --url https://example.com/ --browser chrome
 rookie-cookies from-path /path/to/cookies.sqlite
 rookie-cookies from-path /path/to/Cookies --browser-id chrome
+rookie-cookies report --browser chrome
+rookie-cookies report
 ```
 
-Chromium credential flags (`--browser-id`, `--key-path`, `--plaintext-only`)
-are mutually exclusive on `from-path`. `--key-path` is a Windows `Local State`
-file. The old top-level `--path` / `--browser` flags remain only as the 0.6
-compatibility form.
+Chromium credential flags (`--browser-id`, `--local-state-path`,
+`--plaintext-only`) are mutually exclusive on `from-path`. The CLI is job
+subcommands only: `header` takes `--url` rather than a positional, `report`
+takes an optional `--browser` (omitting it means the aggregate report), and
+the old top-level `--path` / `--browser` flags are gone.
 
 Coming from 0.5.6 named helpers? Each language guide has a **0.5.6 API**
 section and a **migrate 0.5.6 → 0.6.0** section:

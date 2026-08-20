@@ -1056,3 +1056,42 @@ fn an_empty_browser_id_is_missing_browser_on_every_browser_job() {
     assert_eq!(code, "missing_browser");
   }
 }
+
+/// A snapshot has nowhere to put "every source failed", so it must not answer
+/// that with an empty list.
+///
+/// The route this replaced (`flatten_selected_report_cookies`) made the same
+/// distinction; losing it here would turn a total failure into a silent
+/// success on the path the migration guide recommends.
+#[test]
+fn a_profile_whose_only_source_fails_is_an_error_not_an_empty_snapshot() {
+  let home = SyntheticHome::new("snapshot-total-failure");
+  let root = home.chrome_root();
+  seed_chromium_profile(&root, "Default", "session", "value");
+
+  // Corrupt the database after discovery has a valid file to find, so the
+  // profile is discovered and its one selected source then fails to read.
+  let database = root.join("Default/Network/Cookies");
+  let profiles = rookie_cookies::browser_profiles("chrome").expect("listed seeded chrome");
+  let profile_id = profiles
+    .iter()
+    .find(|profile| profile.profile.path.ends_with("Default"))
+    .expect("seeded Default profile")
+    .profile
+    .profile_id
+    .to_string();
+  std::fs::write(&database, b"SQLite format 3\0definitely not a database")
+    .expect("corrupt the seeded database");
+
+  let error = rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").profile(&profile_id))
+    .expect_err("a snapshot cannot report a total failure as an empty list");
+  assert!(
+    matches!(error, rookie_cookies::Error::Engine(_)),
+    "expected an engine failure, got {error:?}"
+  );
+  assert!(
+    matches!(error.code(), "no_selected_source" | "no_discovered_source"),
+    "unexpected code {}",
+    error.code()
+  );
+}
