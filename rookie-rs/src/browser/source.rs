@@ -154,6 +154,15 @@ impl SourceIssue {
     )
   }
 
+  /// The generic `row_read_failed` message a source with no detailed row
+  /// error falls back to. The compatibility projection compares a
+  /// diagnostic against this exact generator -- for that source's own skip
+  /// count -- to decide whether to substitute the family fallback string, so
+  /// this is the single producer both sides must agree on.
+  pub(crate) fn generic_row_read_failed_message(skipped: usize) -> String {
+    format!("{skipped} row(s) could not be read")
+  }
+
   pub(crate) fn new(
     code: &'static str,
     stage: ExtractionStageCode,
@@ -268,7 +277,7 @@ impl Source {
         "row_read_failed",
         ExtractionStageCode::parse(),
         IssueSeverityCode::error(),
-        row_error.unwrap_or_else(|| format!("{skipped} row(s) could not be read")),
+        row_error.unwrap_or_else(|| SourceIssue::generic_row_read_failed_message(skipped)),
       )
       .with_occurrences(u32::try_from(skipped).unwrap_or(u32::MAX)),
     );

@@ -6,6 +6,7 @@ pub(crate) mod chromium_crypto;
 pub(crate) mod chromium_database_acquisition;
 pub(crate) mod chromium_decoder;
 pub(crate) mod chromium_platform_keys;
+pub(crate) mod compatibility;
 pub(crate) mod cookie_record;
 pub(crate) mod internet_explorer_model;
 pub(crate) mod legacy;
