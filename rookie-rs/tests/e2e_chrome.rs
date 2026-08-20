@@ -328,6 +328,10 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
 #[test]
 #[ignore]
 fn extracts_seeded_cookie_via_injection_only() {
+  // The bridge function below carries `AllowElevatedFallback`; the steering
+  // variable narrows it to injection only. Narrowing is the only direction it
+  // can move, and it is compiled in only for this suite (see the
+  // `e2e-appbound-steering` feature).
   std::env::set_var("ROOKIE_E2E_APPBOUND_MODE", "injection_only");
   let db_path = helpers::resolve_db_path();
   let key_path = helpers::resolve_key_path();

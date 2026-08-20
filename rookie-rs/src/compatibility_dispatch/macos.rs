@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::bail;
 
 use super::LoadFn;
-use crate::{Cookie, Result};
+use crate::Cookie;
+use anyhow::Result;
 
 pub(super) fn extend_legacy_load_browsers(browser_types: &mut Vec<(&'static str, LoadFn)>) {
   browser_types.push(("chrome", super::named::chrome));

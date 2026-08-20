@@ -14,7 +14,11 @@ impl fmt::Debug for RedactedCookieValue {
 /// which this crate already passes through untouched.
 pub const SAME_SITE_UNSPECIFIED: i64 = -1;
 
-#[derive(Serialize, Deserialize)]
+/// `Clone`/`PartialEq`/`Eq`/`Hash` are additive in 0.6.0. Bindings used to
+/// hand-copy the eight fields to get a second owned value, and `ReadResult`
+/// needs one clone per row to keep `cookies()` a borrow. `Debug` still
+/// redacts `value`.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct Cookie {
   pub domain: String,
@@ -85,7 +89,7 @@ pub struct CookieContext {
 /// this additive type instead; [`DetailedCookie::into_cookie`] deliberately
 /// discards the context and yields that legacy projection.
 #[non_exhaustive]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailedCookie {
   pub cookie: Cookie,
   pub context: CookieContext,

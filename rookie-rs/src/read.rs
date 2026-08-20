@@ -1,14 +1,18 @@
 //! Job-layer snapshot: `read` / `from_path` / `ReadResult` / `ReadWarning`.
 
 use crate::browser::cookie_record::CookieRecord;
-use crate::browser::legacy;
+use crate::browser::outcome::Termination;
 use crate::browser::registry;
-use crate::common::deadline::{boundary_runtime, SystemClock};
-use crate::common::enums::Cookie;
-use crate::direct_path::{self, cookies_from_path, ChromiumCredentialSource, DirectPathRequest};
+use crate::browser::report_build::snapshot::{browser_snapshot_with_runtime, SnapshotSelection};
+use crate::common::deadline::{runtime_for_control, SystemClock};
+use crate::common::enums::{Cookie, DetailedCookie};
+use crate::direct_path::{self, ChromiumCredentialSource, DirectPathRequest};
+use crate::error::map_job_result;
+use crate::execution::{AppBoundPolicy, ExecutionControl};
 use crate::header_filter::{sendable_octets, GetFilter};
 use crate::read_warning::{ReadWarningCode, ReadWarningCounts};
-use crate::report::{self, ExtractionReport};
+use crate::report;
+use crate::session::SessionPolicy;
 use crate::{CancellationHandle, RequestError, Result};
 use std::path::PathBuf;
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
@@ -77,8 +81,8 @@ pub struct ReadRequest {
   browser_id: Option<String>,
   profile: Option<String>,
   include_expired: bool,
-  timeout: Option<std::time::Duration>,
-  cancellation: Option<CancellationHandle>,
+  session: SessionPolicy,
+  control: ExecutionControl,
 }
 
 impl ReadRequest {
@@ -91,8 +95,8 @@ impl ReadRequest {
       browser_id: Some(id.into()),
       profile: None,
       include_expired: false,
-      timeout: None,
-      cancellation: None,
+      session: SessionPolicy::default(),
+      control: ExecutionControl::default(),
     }
   }
 
@@ -116,49 +120,129 @@ impl ReadRequest {
     self
   }
 
+  /// Also acquires the browser's declared session store.
+  ///
+  /// **Changed in 0.6.0.** Session cookies used to be an accident of asking
+  /// for a profile: 0.6-beta reached them only through
+  /// [`profile`](Self::profile), and always did so. They are now their own
+  /// question, so `read(ReadRequest::browser("firefox").include_session())`
+  /// is expressible and `.profile(q)` alone no longer opens a session store.
+  ///
+  /// See [`SessionPolicy`] for why this is an acquire-time filter rather than
+  /// a filter over the returned cookies.
+  pub fn include_session(mut self) -> Self {
+    self.session = SessionPolicy::IncludeSession;
+    self
+  }
+
+  /// Selects the session policy explicitly.
+  pub fn session(mut self, policy: SessionPolicy) -> Self {
+    self.session = policy;
+    self
+  }
+
   /// Overrides the default 30-second timeout for this request.
   ///
-  /// Timeout enforcement is cooperative at native boundaries. When the
-  /// operation observes expiry it returns an error for which
-  /// [`crate::stop_reason`] is [`Some`](Option::Some).
+  /// Timeout enforcement is cooperative at native boundaries. A stop is
+  /// returned as [`crate::Error::Stopped`].
   pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
-    self.timeout = Some(timeout);
+    self.control = self.control.timeout(timeout);
     self
   }
 
   /// Allows `handle` to cancel this request from another thread.
   ///
   /// Cancellation is cooperative. A cancellation observed before a usable
-  /// snapshot is complete is returned as an error classified by
-  /// [`crate::stop_reason`].
+  /// snapshot is complete is returned as [`crate::Error::Stopped`].
   pub fn cancellation(mut self, handle: CancellationHandle) -> Self {
-    self.cancellation = Some(handle);
+    self.control = self.control.cancellation(handle);
+    self
+  }
+
+  /// Selects the Windows App-Bound (v20) recovery policy for this request.
+  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
+    self.control = self.control.app_bound(policy);
+    self
+  }
+
+  /// Replaces this request's execution control **wholesale**.
+  ///
+  /// This discards any earlier [`timeout`](Self::timeout),
+  /// [`cancellation`](Self::cancellation), or [`app_bound`](Self::app_bound)
+  /// call, so call it before the individual field setters.
+  pub fn execution(mut self, control: ExecutionControl) -> Self {
+    self.control = control;
     self
   }
 }
 
 /// An unfiltered snapshot of one browser profile or one explicit cookie file.
 ///
-/// Inspect the inventory with [`cookies`](Self::cookies), consume it with
-/// [`into_cookies`](Self::into_cookies), and derive a legacy request-header
-/// view with [`header`](Self::header). The value is intentionally not `Clone`
-/// so large snapshots and credential-like cookie values are not duplicated by
-/// accident.
+/// The snapshot's native representation is [`DetailedCookie`], so CHIPS
+/// partition keys and Firefox container identity survive to
+/// [`header`](Self::header). [`cookies`](Self::cookies) is the eight-field
+/// compatibility projection, built once at construction so it stays a free
+/// borrow for bindings that call it on every access.
+///
+/// **Cost, stated plainly:** the snapshot therefore holds two copies of every
+/// name and value. For a large Chrome profile that is real memory, and it is
+/// the price of `cookies()` being a borrow rather than a rebuild.
+/// [`into_cookies`](Self::into_cookies) and
+/// [`into_detailed_cookies`](Self::into_detailed_cookies) move instead of
+/// duplicating. The value is intentionally not `Clone` so large snapshots and
+/// credential-like cookie values are not duplicated by accident.
 pub struct ReadResult {
-  cookies: Vec<Cookie>,
+  cookies: Vec<DetailedCookie>,
+  projected: Vec<Cookie>,
   warnings: Vec<ReadWarning>,
-  browser_id: String,
+  browser_id: Option<String>,
   profile_id: Option<String>,
 }
 
 impl ReadResult {
-  /// Borrows the snapshot's compatibility cookies in stable extraction order.
+  fn new(
+    cookies: Vec<DetailedCookie>,
+    warnings: Vec<ReadWarning>,
+    browser_id: Option<String>,
+    profile_id: Option<String>,
+  ) -> Self {
+    let projected = cookies
+      .iter()
+      .map(|detailed| detailed.cookie.clone())
+      .collect();
+    Self {
+      cookies,
+      projected,
+      warnings,
+      browser_id,
+      profile_id,
+    }
+  }
+
+  /// Borrows the compatibility projection in stable extraction order.
+  ///
+  /// Isolation is discarded here: the eight-field [`Cookie`] cannot represent
+  /// a CHIPS partition or a Firefox container. Use
+  /// [`detailed_cookies`](Self::detailed_cookies) when that matters, and never
+  /// merge two isolated contexts on the strength of this list.
   pub fn cookies(&self) -> &[Cookie] {
+    &self.projected
+  }
+
+  /// Borrows the snapshot's native records, isolation intact.
+  ///
+  /// This is the recommended accessor.
+  pub fn detailed_cookies(&self) -> &[DetailedCookie] {
     &self.cookies
   }
 
-  /// Consumes the snapshot and returns its compatibility cookies.
+  /// Consumes the snapshot and returns its compatibility projection.
   pub fn into_cookies(self) -> Vec<Cookie> {
+    self.projected
+  }
+
+  /// Consumes the snapshot and returns its native records.
+  pub fn into_detailed_cookies(self) -> Vec<DetailedCookie> {
     self.cookies
   }
 
@@ -167,12 +251,15 @@ impl ReadResult {
     &self.warnings
   }
 
-  /// Returns the canonical registered browser ID.
+  /// Returns the canonical registered browser ID, or `None` for a direct-path
+  /// snapshot.
   ///
-  /// Direct-path snapshots currently return an empty string because they do
-  /// not pass through browser discovery.
-  pub fn browser_id(&self) -> &str {
-    &self.browser_id
+  /// **Changed in 0.6.0.** This was `&str` and returned the empty string for
+  /// [`from_path`], which is an in-band sentinel a caller had to know about.
+  /// `from_path` does not pass through browser discovery, and the explicit
+  /// path — not a registry identity — is authoritative for it.
+  pub fn browser_id(&self) -> Option<&str> {
+    self.browser_id.as_deref()
   }
 
   /// Returns the resolved opaque profile ID when the request selected one.
@@ -188,25 +275,23 @@ impl ReadResult {
   /// Expiry is checked when this method is called, independently of whether
   /// the snapshot was created with [`ReadRequest::include_expired`].
   ///
-  /// This compatibility view is not browser-equivalent: the frozen
-  /// [`Cookie`] projection does not retain CHIPS partition keys or Firefox
-  /// container identity, and a URL alone cannot express top-level-site,
-  /// navigation, method, or SameSite context. Do not merge isolated browser
-  /// contexts based on this helper.
+  /// This compatibility view is not browser-equivalent: a URL alone cannot
+  /// express top-level-site, navigation, method, or SameSite context. Do not
+  /// merge isolated browser contexts based on this helper.
   ///
   /// # Errors
   ///
   /// Returns an error when `url` is invalid or does not use HTTP or HTTPS, or
   /// when the system clock is earlier than the Unix epoch.
   pub fn header(&self, url: &str) -> Result<String> {
-    self.header_at(url, SystemTime::now())
+    map_job_result(self.header_at(url, SystemTime::now()))
   }
 
-  fn header_at(&self, url: &str, now: SystemTime) -> Result<String> {
+  fn header_at(&self, url: &str, now: SystemTime) -> anyhow::Result<String> {
     let filter = GetFilter::for_url(url)?;
     let now_epoch = unix_seconds(now)?;
     let mut kept: Vec<&Cookie> = self
-      .cookies
+      .projected
       .iter()
       .filter(|cookie| is_unexpired(cookie, now_epoch) && filter.keeps(cookie))
       .collect();
@@ -274,43 +359,67 @@ impl std::fmt::Debug for ReadResult {
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn read(request: ReadRequest) -> Result<ReadResult> {
+  map_job_result(read_inner(request))
+}
+
+fn read_inner(request: ReadRequest) -> anyhow::Result<ReadResult> {
   let browser_id = request
     .browser_id
+    .clone()
     .filter(|id| !id.is_empty())
     .ok_or(RequestError::MissingBrowser)?;
   let clock = SystemClock;
-  let cancel_token = request
-    .cancellation
-    .as_ref()
-    .map(|handle| handle.0.clone())
-    .unwrap_or_default();
-  let runtime = boundary_runtime(&clock, request.timeout, cancel_token);
+  let runtime = runtime_for_control(&clock, &request.control);
   let resolved_browser = registry::resolve_registered_browser(&browser_id)?;
-  let (cookies, mut warning_counts, profile_id) = match request.profile {
-    None => {
-      let (cookies, skips) =
-        legacy::browser_cookies_and_warnings_with_runtime(&browser_id, None, &runtime)?;
-      (cookies, skips, None)
-    }
-    Some(query) => {
-      let (profile_id, report) =
-        crate::profile_extraction_report_with_runtime(&browser_id, &query, None, &runtime)?;
-      let warnings = harvest_report_warnings(&report);
-      let cookies = crate::flatten_selected_report_cookies(report)?;
-      (cookies, warnings, Some(profile_id))
-    }
+  // Resolution and extraction share this one absolute budget. There is no
+  // second request to build, so there is nothing that could reset it.
+  let selection = match request.profile.as_deref() {
+    None => SnapshotSelection::LegacyFirst,
+    Some(query) => SnapshotSelection::Profile(&registry::resolve_profile_query(
+      &browser_id,
+      query,
+      &runtime,
+    )?),
   };
-  let (cookies, octet_count) = filter_snapshot(cookies, request.include_expired)?;
-  if octet_count > 0 {
-    warning_counts.record(ReadWarningCode::InvalidOctets, octet_count);
+  read_snapshot(
+    &resolved_browser.canonical_id,
+    selection,
+    &request,
+    &runtime,
+  )
+}
+
+fn read_snapshot(
+  canonical_id: &str,
+  selection: SnapshotSelection<'_>,
+  request: &ReadRequest,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+) -> anyhow::Result<ReadResult> {
+  let outcome = browser_snapshot_with_runtime(canonical_id, selection, request.session, runtime)?;
+  // A stop that reached the snapshot is an error, never a short list. Reports
+  // return a stopped run as `Ok`; snapshots do not.
+  if let Some(stop) = boundary_stop_for(outcome.termination) {
+    return Err(stop.into());
   }
-  let warnings = read_warnings(warning_counts);
-  Ok(ReadResult {
+  let mut warning_counts = outcome.warnings;
+  let (cookies, omitted) = filter_snapshot(outcome.cookies, request.include_expired)?;
+  omitted.record_into(&mut warning_counts);
+  Ok(ReadResult::new(
     cookies,
-    warnings,
-    browser_id: resolved_browser.canonical_id,
-    profile_id,
-  })
+    read_warnings(warning_counts),
+    Some(canonical_id.to_owned()),
+    outcome.profile_id,
+  ))
+}
+
+fn boundary_stop_for(termination: Termination) -> Option<crate::common::deadline::BoundaryStop> {
+  use crate::common::deadline::BoundaryStop;
+  match termination {
+    Termination::Completed => None,
+    Termination::TimedOut => Some(BoundaryStop::TimedOut),
+    Termination::Cancelled => Some(BoundaryStop::Cancelled),
+    Termination::ResourceExhausted => Some(BoundaryStop::ResourceExhausted),
+  }
 }
 
 /// Lists discovered profiles for one registered browser without extracting
@@ -326,6 +435,18 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
 /// empty list.
 pub fn profiles(browser_id: &str) -> Result<Vec<report::ProfileDescriptor>> {
   crate::browser_profiles(browser_id)
+}
+
+/// [`profiles`] under caller-supplied execution control.
+///
+/// Listing still touches the filesystem, so it takes the same timeout and
+/// cancellation knobs every other I/O job takes. It has no App-Bound work to
+/// do; the policy on `control` is simply unused here.
+pub fn profiles_with(
+  browser_id: &str,
+  control: ExecutionControl,
+) -> Result<Vec<report::ProfileDescriptor>> {
+  crate::browser_profiles_with(browser_id, control)
 }
 
 /// A request for a snapshot from one explicit cookie database path.
@@ -349,9 +470,8 @@ pub fn profiles(browser_id: &str) -> Result<Vec<report::ProfileDescriptor>> {
 pub struct FromPathRequest {
   path: PathBuf,
   include_expired: bool,
-  timeout: Option<std::time::Duration>,
-  cancellation: Option<CancellationHandle>,
   credentials: Option<ChromiumCredentialSource>,
+  control: ExecutionControl,
 }
 
 impl FromPathRequest {
@@ -367,9 +487,8 @@ impl FromPathRequest {
     Self {
       path: path.into(),
       include_expired: false,
-      timeout: None,
-      cancellation: None,
       credentials: None,
+      control: ExecutionControl::default(),
     }
   }
 
@@ -384,16 +503,32 @@ impl FromPathRequest {
 
   /// Overrides the default 30-second timeout for this request.
   ///
-  /// Timeout enforcement is cooperative at native boundaries. Inspect a
-  /// returned error with [`crate::stop_reason`].
+  /// Timeout enforcement is cooperative at native boundaries. A stop is
+  /// returned as [`crate::Error::Stopped`].
   pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
-    self.timeout = Some(timeout);
+    self.control = self.control.timeout(timeout);
     self
   }
 
   /// Allows `handle` to cancel this request from another thread.
   pub fn cancellation(mut self, handle: CancellationHandle) -> Self {
-    self.cancellation = Some(handle);
+    self.control = self.control.cancellation(handle);
+    self
+  }
+
+  /// Selects the Windows App-Bound (v20) recovery policy for this request.
+  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
+    self.control = self.control.app_bound(policy);
+    self
+  }
+
+  /// Replaces this request's execution control **wholesale**.
+  ///
+  /// This discards any earlier [`timeout`](Self::timeout),
+  /// [`cancellation`](Self::cancellation), or [`app_bound`](Self::app_bound)
+  /// call, so call it before the individual field setters.
+  pub fn execution(mut self, control: ExecutionControl) -> Self {
+    self.control = control;
     self
   }
 
@@ -424,58 +559,90 @@ impl FromPathRequest {
 /// decryption failures are engine errors. Timeout and cancellation are errors
 /// classified by [`crate::stop_reason`].
 pub fn from_path(request: FromPathRequest) -> Result<ReadResult> {
-  let cookies = match request.credentials {
-    None => {
-      let mut path_request = DirectPathRequest::new(&request.path);
-      if let Some(timeout) = request.timeout {
-        path_request = path_request.timeout(timeout);
-      }
-      if let Some(handle) = request.cancellation {
-        path_request = path_request.cancellation(handle);
-      }
-      cookies_from_path(path_request)?
-    }
-    Some(source) => {
-      let mut chromium = direct_path::ChromiumPathRequest::new(&request.path).credentials(source);
-      if let Some(timeout) = request.timeout {
-        chromium = chromium.timeout(timeout);
-      }
-      if let Some(handle) = request.cancellation {
-        chromium = chromium.cancellation(handle);
-      }
-      direct_path::chromium_cookies_from_path(chromium)?
-    }
-  };
-  let (cookies, octet_count) = filter_snapshot(cookies, request.include_expired)?;
-  let mut warning_counts = ReadWarningCounts::default();
-  if octet_count > 0 {
-    warning_counts.record(ReadWarningCode::InvalidOctets, octet_count);
-  }
-  let warnings = read_warnings(warning_counts);
-  Ok(ReadResult {
-    cookies,
-    warnings,
-    browser_id: String::new(),
-    profile_id: None,
-  })
+  map_job_result(from_path_inner(request))
 }
 
-fn filter_snapshot(cookies: Vec<Cookie>, include_expired: bool) -> Result<(Vec<Cookie>, u64)> {
+fn from_path_inner(request: FromPathRequest) -> anyhow::Result<ReadResult> {
+  let cookies = match request.credentials {
+    None => {
+      // The `_inner` seam, not the public job function: `from_path` maps the
+      // chain to `Error` once, at its own edge. Going through the public
+      // direct-path edge first would flatten a `BoundaryStop` into an opaque
+      // `Error` and lose the stop classification here.
+      direct_path::cookies_from_path_detailed_inner(
+        DirectPathRequest::new(&request.path).execution(request.control),
+      )?
+    }
+    Some(source) => direct_path::chromium_cookies_from_path_detailed_inner(
+      direct_path::ChromiumPathRequest::new(&request.path)
+        .credentials(source)
+        .execution(request.control),
+    )?,
+  };
+  let (cookies, omitted) = filter_snapshot(cookies, request.include_expired)?;
+  let mut warning_counts = ReadWarningCounts::default();
+  omitted.record_into(&mut warning_counts);
+  // No browser id: this job never passed through registry discovery, and the
+  // explicit path -- not a registry identity -- is what identifies it.
+  Ok(ReadResult::new(
+    cookies,
+    read_warnings(warning_counts),
+    None,
+    None,
+  ))
+}
+
+/// Rows a snapshot omitted, with the reason each was omitted for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OmittedRows {
+  invalid_octets: u64,
+  malformed_host_identity: u64,
+}
+
+impl OmittedRows {
+  fn record_into(self, warnings: &mut ReadWarningCounts) {
+    if self.invalid_octets > 0 {
+      warnings.record(ReadWarningCode::InvalidOctets, self.invalid_octets);
+    }
+    if self.malformed_host_identity > 0 {
+      warnings.record(
+        ReadWarningCode::MalformedHostIdentity,
+        self.malformed_host_identity,
+      );
+    }
+  }
+}
+
+fn filter_snapshot(
+  cookies: Vec<DetailedCookie>,
+  include_expired: bool,
+) -> anyhow::Result<(Vec<DetailedCookie>, OmittedRows)> {
   filter_snapshot_at(cookies, include_expired, SystemTime::now())
 }
 
 fn filter_snapshot_at(
-  cookies: Vec<Cookie>,
+  cookies: Vec<DetailedCookie>,
   include_expired: bool,
   now: SystemTime,
-) -> Result<(Vec<Cookie>, u64)> {
+) -> anyhow::Result<(Vec<DetailedCookie>, OmittedRows)> {
   let now = unix_seconds(now)?;
-  let mut omitted = 0;
+  let mut omitted = OmittedRows::default();
   let kept = cookies
     .into_iter()
-    .filter(|cookie| {
+    .filter(|detailed| {
+      let cookie = &detailed.cookie;
+      // A row whose required host identity did not survive decode is omitted
+      // rather than emitted as `domain: ""`. An empty domain matches nothing
+      // and belongs to no site, so keeping it would put a value in the
+      // inventory no send-match rule can ever act on -- and the count is how a
+      // caller learns it happened. Unknown *optional* isolation fields stay
+      // `None` and never drop a row.
+      if cookie.domain.is_empty() {
+        omitted.malformed_host_identity += 1;
+        return false;
+      }
       if !sendable_octets(&cookie.name, &cookie.value) {
-        omitted += 1;
+        omitted.invalid_octets += 1;
         return false;
       }
       if !include_expired {
@@ -501,24 +668,6 @@ fn is_unexpired(cookie: &Cookie, now_epoch: u64) -> bool {
   cookie.expires.is_none_or(|expires| expires > now_epoch)
 }
 
-fn harvest_report_warnings(report: &ExtractionReport) -> ReadWarningCounts {
-  let mut warnings = ReadWarningCounts::default();
-  for issue in &report.issues {
-    warnings.record_issue(issue.code.as_str(), u64::from(issue.occurrences));
-  }
-  for profile in &report.profiles {
-    for issue in &profile.issues {
-      warnings.record_issue(issue.code.as_str(), u64::from(issue.occurrences));
-    }
-    for source in &profile.sources {
-      for issue in &source.issues {
-        warnings.record_issue(issue.code.as_str(), u64::from(issue.occurrences));
-      }
-    }
-  }
-  warnings
-}
-
 fn read_warnings(counts: ReadWarningCounts) -> Vec<ReadWarning> {
   counts
     .into_entries()
@@ -538,26 +687,33 @@ mod tests {
     UNIX_EPOCH + Duration::from_secs(seconds)
   }
 
-  fn cookie(name: &str, expires: Option<u64>) -> Cookie {
-    Cookie {
-      domain: ".example.test".to_owned(),
-      path: "/".to_owned(),
-      secure: false,
-      expires,
-      name: name.to_owned(),
-      value: "value".to_owned(),
-      http_only: false,
-      same_site: -1,
-    }
+  fn cookie(name: &str, expires: Option<u64>) -> DetailedCookie {
+    detailed(
+      Cookie {
+        domain: ".example.test".to_owned(),
+        path: "/".to_owned(),
+        secure: false,
+        expires,
+        name: name.to_owned(),
+        value: "value".to_owned(),
+        http_only: false,
+        same_site: -1,
+      },
+      crate::enums::CookieContext::default(),
+    )
   }
 
-  fn result(cookies: Vec<Cookie>) -> ReadResult {
-    ReadResult {
-      cookies,
-      warnings: Vec::new(),
-      browser_id: "chrome".into(),
-      profile_id: None,
-    }
+  fn detailed(cookie: Cookie, context: crate::enums::CookieContext) -> DetailedCookie {
+    let mut detailed = DetailedCookie {
+      cookie,
+      context: crate::enums::CookieContext::default(),
+    };
+    detailed.context = context;
+    detailed
+  }
+
+  fn result(cookies: Vec<DetailedCookie>) -> ReadResult {
+    ReadResult::new(cookies, Vec::new(), Some("chrome".to_owned()), None)
   }
 
   #[test]
@@ -566,15 +722,14 @@ mod tests {
       browser_id: None,
       profile: None,
       include_expired: false,
-      timeout: None,
-      cancellation: None,
+      session: SessionPolicy::default(),
+      control: ExecutionControl::default(),
     })
     .unwrap_err();
-    assert!(error.downcast_ref::<RequestError>().is_some());
-    assert_eq!(
-      error.downcast_ref::<RequestError>().unwrap().code(),
-      "missing_browser"
-    );
+    let crate::Error::Request(request_error) = &error else {
+      panic!("a missing browser is a request error, got {error:?}");
+    };
+    assert_eq!(request_error.code(), "missing_browser");
   }
 
   #[test]
@@ -585,19 +740,19 @@ mod tests {
 
   #[test]
   fn snapshot_omits_a_cookie_expired_before_the_snapshot() {
-    let (cookies, omitted_octets) =
+    let (cookies, omitted) =
       filter_snapshot_at(vec![cookie("old", Some(99))], false, epoch(100)).expect("valid clock");
     assert!(cookies.is_empty());
-    assert_eq!(omitted_octets, 0);
+    assert_eq!(omitted, OmittedRows::default());
   }
 
   #[test]
   fn snapshot_treats_expiry_equal_to_now_as_expired() {
-    let (cookies, omitted_octets) =
+    let (cookies, omitted) =
       filter_snapshot_at(vec![cookie("boundary", Some(100))], false, epoch(100))
         .expect("valid clock");
     assert!(cookies.is_empty());
-    assert_eq!(omitted_octets, 0);
+    assert_eq!(omitted, OmittedRows::default());
   }
 
   #[test]
@@ -728,9 +883,6 @@ mod tests {
         .cancellation(handle),
     )
     .expect_err("cancelled from_path");
-    assert_eq!(
-      crate::stop_reason(&error),
-      Some(crate::StopReason::Cancelled)
-    );
+    assert_eq!(error.stop_reason(), Some(crate::StopReason::Cancelled));
   }
 }

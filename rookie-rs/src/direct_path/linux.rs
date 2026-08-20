@@ -21,15 +21,24 @@ pub(super) fn classify_cookie_source(
   shared::classify_path_with_runtime(path, runtime)
 }
 
-pub(super) fn cookies_from_path(
+pub(super) fn cookies_from_path_detailed(
   request: DirectPathRequest,
   source: CookieSourceKind,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
+) -> Result<Vec<DetailedCookie>> {
   match source {
-    CookieSourceKind::ChromiumSqlite => automatic_chromium(request.path, request.domains, runtime),
+    CookieSourceKind::ChromiumSqlite => automatic_chromium_detailed(
+      AUTOMATIC_BROWSER_IDS,
+      request.path,
+      request.domains,
+      runtime,
+    ),
     CookieSourceKind::MozillaSqlite => {
-      crate::browser::mozilla::firefox_based_with_runtime(request.path, request.domains, runtime)
+      crate::browser::mozilla::firefox_based_detailed_with_runtime(
+        request.path,
+        request.domains,
+        runtime,
+      )
     }
     CookieSourceKind::SafariBinaryCookies | CookieSourceKind::InternetExplorerEse => {
       Err(unsupported_target(source))

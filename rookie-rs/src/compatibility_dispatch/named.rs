@@ -9,7 +9,8 @@
 //! `lib.rs` re-exports the names, so every public path is unchanged.
 
 use super::legacy_load_browsers;
-use crate::{browser, common, enums::Cookie, extract, MozillaProfile, Request, Result};
+use crate::{browser, common, enums::Cookie, MozillaProfile, Request};
+use anyhow::Result;
 
 /// Thin compatibility projection over registry-backed discovery/extraction.
 pub(super) fn named_browser(name: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
@@ -82,10 +83,11 @@ pub fn firefox_profiles() -> Result<Vec<MozillaProfile>> {
           list with browser_profiles(\"firefox\")"
 )]
 pub fn firefox_profile(profile: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  extract(
+  crate::extract_inner(
     Request::browser("firefox")
       .profile(profile)
-      .domains(domains),
+      .domains(domains)
+      .execution(crate::legacy_execution()),
   )
 }
 

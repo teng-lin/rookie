@@ -12,8 +12,9 @@ use super::registry::{self, EngineExtract, EngineListing};
 use super::source::SourceIssue;
 use crate::common::deadline::{BoundaryRuntime, BoundaryStop};
 use crate::common::enums::{Cookie, DetailedCookie};
+use crate::error::{EngineCause, EngineFailure};
 use crate::read_warning::ReadWarningCounts;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::{error::Error, fmt};
 
 /// Whether a compatibility projection may retain committed records after the
@@ -153,26 +154,27 @@ pub(crate) fn project_canonical_outcome_with_runtime(
   )
 }
 
+/// Compatibility projection: the detailed one below, with isolation discarded.
+///
+/// Projecting through the detailed form rather than beside it is the point.
+/// The crate had two parallel projectors and threw the richer one away at the
+/// job boundary; now there is one, and every caller chooses what to keep.
 pub(crate) fn project_canonical_outcome_with_stop_projection(
   browser_id: &str,
   outcome: Outcome,
   runtime: &BoundaryRuntime<'_>,
   stop_projection: StopProjection,
 ) -> Result<Vec<Cookie>> {
-  let completed = outcome.termination == Termination::Completed;
-  let selected = selected_records(browser_id, outcome, Some(runtime), stop_projection)?;
-  if completed {
-    runtime.check()?;
-  }
   Ok(
-    selected
-      .into_iter()
-      .flat_map(|(semantics, records)| {
-        records
-          .into_iter()
-          .map(move |record| record.into_cookie_with_semantics(semantics))
-      })
-      .collect(),
+    project_canonical_detailed_outcome_with_stop_projection(
+      browser_id,
+      outcome,
+      runtime,
+      stop_projection,
+    )?
+    .into_iter()
+    .map(DetailedCookie::into_cookie)
+    .collect(),
   )
 }
 
@@ -236,7 +238,16 @@ fn selected_records(
     }
     CompatibilityDisposition::Failed(diagnostic) => match boundary_stop {
       Some(stop) => Err(stop.into()),
-      None => bail!(diagnostic.as_str().to_owned()),
+      // Every selected source was attempted and none produced a usable
+      // result. Typed so the job edge emits `no_selected_source` without
+      // parsing this diagnostic, and transparent so the diagnostic survives.
+      None => Err(
+        EngineFailure::new(
+          EngineCause::NoSelectedSource,
+          diagnostic.as_str().to_owned(),
+        )
+        .into(),
+      ),
     },
   }
 }
@@ -265,13 +276,22 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   outcome: Outcome,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let completed = outcome.termination == Termination::Completed;
-  let selected = selected_records(
+  project_canonical_detailed_outcome_with_stop_projection(
     browser_id,
     outcome,
-    Some(runtime),
+    runtime,
     StopProjection::ReturnError,
-  )?;
+  )
+}
+
+pub(crate) fn project_canonical_detailed_outcome_with_stop_projection(
+  browser_id: &str,
+  outcome: Outcome,
+  runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
+) -> Result<Vec<DetailedCookie>> {
+  let completed = outcome.termination == Termination::Completed;
+  let selected = selected_records(browser_id, outcome, Some(runtime), stop_projection)?;
   if completed {
     runtime.check()?;
   }
@@ -287,7 +307,14 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   )
 }
 
-pub(super) type LegacySnapshot = (Vec<Cookie>, ReadWarningCounts);
+/// One compatibility extract, still carrying isolation.
+///
+/// The snapshot job needs `DetailedCookie`; `extract` and `load` need the
+/// eight-field projection. Carrying the richer value here and projecting at
+/// each consumer means the context is discarded once, by whoever asked for a
+/// flat list -- not thrown away in the middle of the pipeline where `read`
+/// could never get it back.
+pub(super) type LegacySnapshot = (Vec<DetailedCookie>, ReadWarningCounts);
 
 pub(crate) fn browser_cookies_with_runtime(
   browser_id: &str,
@@ -300,7 +327,12 @@ pub(crate) fn browser_cookies_with_runtime(
     runtime,
     StopProjection::ReturnError,
   )
-  .map(|(cookies, _warnings)| cookies)
+  .map(|(cookies, _warnings)| {
+    cookies
+      .into_iter()
+      .map(DetailedCookie::into_cookie)
+      .collect()
+  })
 }
 
 /// Flat `load()` projection. Unlike single-browser compatibility surfaces,
@@ -317,12 +349,18 @@ pub(crate) fn browser_cookies_for_load_with_runtime(
     runtime,
     StopProjection::PreserveCommitted,
   )
-  .map(|(cookies, _warnings)| cookies)
+  .map(|(cookies, _warnings)| {
+    cookies
+      .into_iter()
+      .map(DetailedCookie::into_cookie)
+      .collect()
+  })
 }
 
-/// One LegacyFirst extract: compatibility cookies plus skip counts from the
-/// same draft. Callers must not run a second `legacy_*_outcome_with_runtime`.
-pub(crate) fn browser_cookies_and_warnings_with_runtime(
+/// One LegacyFirst extract: isolation-carrying cookies plus skip counts from
+/// the same draft. Callers must not run a second
+/// `legacy_*_outcome_with_runtime`.
+pub(crate) fn browser_detailed_and_warnings_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
@@ -353,7 +391,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
         draft,
         runtime,
       )?;
-      let cookies = project_canonical_outcome_with_stop_projection(
+      let cookies = project_canonical_detailed_outcome_with_stop_projection(
         &browser.canonical_id,
         outcome,
         runtime,
@@ -370,7 +408,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
         extract,
         runtime,
       )?;
-      let cookies = project_canonical_outcome_with_stop_projection(
+      let cookies = project_canonical_detailed_outcome_with_stop_projection(
         &browser.canonical_id,
         outcome,
         runtime,
@@ -402,7 +440,7 @@ pub(super) fn cookies_and_skipped_from_engine_extract(
   let skipped = engine_extract_skipped_row_count(&extract);
   let outcome =
     super::report_build::canonical_engine_extract_with_runtime(canonical_id, extract, runtime)?;
-  let cookies = project_canonical_outcome_with_stop_projection(
+  let cookies = project_canonical_detailed_outcome_with_stop_projection(
     canonical_id,
     outcome,
     runtime,
@@ -453,7 +491,7 @@ pub(crate) fn gecko_profiles_with_runtime(
 ) -> Result<Vec<MozillaProfile>> {
   let listing = registry::legacy_gecko_profiles_with_runtime(browser_id, runtime)?;
   if let Some(error) = listing_discovery_failure(&listing, browser_id) {
-    bail!(error)
+    return Err(EngineFailure::new(EngineCause::DiscoveryFailed, error).into());
   }
   let profiles = listing
     .profiles

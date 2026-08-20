@@ -318,9 +318,7 @@ fn unknown_profile_ids_are_request_errors() {
     error.to_string().contains("no chrome profile matches"),
     "unexpected message: {error:#}"
   );
-  assert!(error
-    .downcast_ref::<rookie_cookies::RequestError>()
-    .is_some());
+  assert!(matches!(error, rookie_cookies::Error::Request(_)));
 
   // Listing stores canonicalized paths (`/private/var/...` on macOS). Query
   // with the path the listing itself published — that is the Path-eq key.
@@ -808,4 +806,205 @@ fn a_detected_installation_whose_roots_all_fail_reports_failed() {
     !error_issues(&report).is_empty(),
     "a failed report must say why"
   );
+}
+
+/// Seeds a Chromium profile whose one cookie is CHIPS-partitioned.
+///
+/// The `top_frame_site_key` column is optional in the Chromium schema, so a
+/// fixture that omits it cannot tell a snapshot that preserves isolation from
+/// one that discards it.
+fn seed_partitioned_chromium_profile(root: &Path, profile: &str, partition: &str) {
+  let database = root.join(profile).join("Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '24');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL,
+        path TEXT NOT NULL,
+        is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL,
+        is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL,
+        top_frame_site_key TEXT NOT NULL,
+        has_cross_site_ancestor INTEGER NOT NULL
+      );",
+    )
+    .expect("create cookies table");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'chips', 'partitioned', ?1, 0, 0, ?2, 1)",
+      rusqlite::params![Vec::<u8>::new(), partition],
+    )
+    .expect("insert partitioned cookie");
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+}
+
+/// The load-bearing snapshot-seam test.
+///
+/// A profile-scoped `read` used to route through the report builder, whose DTO
+/// carries the eight-field `Cookie` — so isolation was already gone before the
+/// job could return it. A test that only covered the no-profile path passes
+/// against that broken implementation, because the legacy route never went
+/// through the report at all. This one asserts the `Query` path.
+#[test]
+fn a_profile_scoped_snapshot_keeps_the_partition_key() {
+  let home = SyntheticHome::new("snapshot-isolation");
+  seed_partitioned_chromium_profile(&home.chrome_root(), "Default", "https://top.example");
+
+  let profiles = rookie_cookies::browser_profiles("chrome").expect("listed seeded chrome");
+  let profile_id = profiles
+    .iter()
+    .find(|profile| profile.profile.path.ends_with("Default"))
+    .expect("seeded Default profile")
+    .profile
+    .profile_id
+    .to_string();
+
+  let snapshot = rookie_cookies::read(
+    rookie_cookies::ReadRequest::browser("chrome")
+      .profile(&profile_id)
+      .include_expired(true),
+  )
+  .expect("profile-scoped snapshot");
+
+  assert_eq!(snapshot.profile_id(), Some(profile_id.as_str()));
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|detailed| detailed.cookie.name == "chips")
+    .expect("the seeded partitioned cookie");
+  assert_eq!(
+    detailed.context.top_frame_site_key.as_deref(),
+    Some("https://top.example"),
+    "a profile-scoped snapshot must not lose the CHIPS partition key"
+  );
+  assert_eq!(detailed.context.has_cross_site_ancestor, Some(true));
+  assert_ne!(
+    detailed.context,
+    rookie_cookies::enums::CookieContext::default(),
+    "a default context is exactly what the report route produced"
+  );
+
+  // The eight-field projection is still there, and still discards isolation.
+  assert!(snapshot
+    .cookies()
+    .iter()
+    .any(|cookie| cookie.name == "chips"));
+}
+
+#[test]
+fn a_legacy_first_snapshot_keeps_the_partition_key_too() {
+  let home = SyntheticHome::new("snapshot-isolation-legacy");
+  seed_partitioned_chromium_profile(&home.chrome_root(), "Default", "https://top.example");
+
+  let snapshot =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("legacy-first snapshot");
+  assert_eq!(snapshot.browser_id(), Some("chrome"));
+  assert_eq!(snapshot.profile_id(), None);
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|detailed| detailed.cookie.name == "chips")
+    .expect("the seeded partitioned cookie");
+  assert_eq!(
+    detailed.context.top_frame_site_key.as_deref(),
+    Some("https://top.example")
+  );
+}
+
+#[test]
+fn a_direct_path_snapshot_keeps_isolation_and_has_no_browser_id() {
+  let home = SyntheticHome::new("snapshot-isolation-path");
+  let root = home.chrome_root();
+  seed_partitioned_chromium_profile(&root, "Default", "https://top.example");
+
+  let snapshot = rookie_cookies::from_path(
+    rookie_cookies::FromPathRequest::new(root.join("Default/Network/Cookies"))
+      .chromium_credentials(rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly)
+      .include_expired(true),
+  )
+  .expect("direct-path snapshot");
+
+  assert_eq!(
+    snapshot.browser_id(),
+    None,
+    "from_path does not pass through browser discovery"
+  );
+  assert_eq!(snapshot.profile_id(), None);
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|detailed| detailed.cookie.name == "chips")
+    .expect("the seeded partitioned cookie");
+  assert_eq!(
+    detailed.context.top_frame_site_key.as_deref(),
+    Some("https://top.example")
+  );
+}
+
+/// A7: a row whose required host identity did not survive decode is omitted
+/// from the inventory and counted, rather than emitted as `domain: ""`.
+#[test]
+fn a_row_with_an_empty_host_is_omitted_with_its_own_warning() {
+  let home = SyntheticHome::new("snapshot-malformed-host");
+  let root = home.chrome_root();
+  let database = root.join("Default/Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '23');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL
+      );",
+    )
+    .expect("create cookies table");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('', '/', 0, 0, 'hostless', 'value', ?1, 0, 0)",
+      rusqlite::params![Vec::<u8>::new()],
+    )
+    .expect("insert hostless cookie");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'kept', 'value', ?1, 0, 0)",
+      rusqlite::params![Vec::<u8>::new()],
+    )
+    .expect("insert well-formed cookie");
+  drop(connection);
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+
+  let snapshot =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("snapshot");
+  assert!(
+    snapshot
+      .cookies()
+      .iter()
+      .all(|cookie| !cookie.domain.is_empty()),
+    "a malformed host must never reach the inventory as an empty domain"
+  );
+  assert!(snapshot
+    .cookies()
+    .iter()
+    .any(|cookie| cookie.name == "kept"));
+  let warning = snapshot
+    .warnings()
+    .iter()
+    .find(|warning| warning.code() == "malformed_host_identity")
+    .expect("the omission is counted, not silent");
+  assert_eq!(warning.count(), 1);
 }

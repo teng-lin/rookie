@@ -8,6 +8,31 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`ReadResult` is isolation-aware on both source axes.** Its native
+  representation is `DetailedCookie`, so a CHIPS partition key or a Firefox
+  container survives to `header()`. New: `detailed_cookies()`,
+  `into_detailed_cookies()`, `common::format::detailed_json`, and CLI
+  `--format detailed`. `cookies()` keeps its `&[Cookie]` signature, backed by a
+  projection built once at construction. `Cookie` gains `Clone`/`PartialEq`/
+  `Eq`/`Hash`; `DetailedCookie` gains `Clone`/`PartialEq`/`Eq`.
+- `SessionPolicy` and `ReadRequest::include_session()`. Session cookies used to
+  be an accident of naming a profile; they are now their own question, and
+  `read(ReadRequest::browser("firefox").include_session())` is expressible for
+  the first time.
+- Rust: `ExecutionControl` (timeout, cancellation, and the new
+  `AppBoundPolicy`) composed once into every request type instead of copied
+  per type, plus `execution(..)` setters and `load_report_with`,
+  `browser_profiles_with`, `chrome_profiles_with`, `profiles_with`, and
+  `LoadReportRequest` so the stable v0.5.9 listing and aggregate signatures can
+  stay unchanged while still taking control.
+- Rust: one typed public `Error` (`Request` / `Stopped` / `Source` / `Engine`)
+  with a stable `code()` on every variant, plus `EngineError` carrying the
+  `no_selected_source`, `no_discovered_source`, `discovery_failed`, and
+  `engine_failure` codes. Those codes were previously unrecoverable: the sites
+  that produce them raised formatted strings. Python gains `RookieError`,
+  `RookieStoppedError`, and `RookieSourceError` beside the existing request and
+  engine exceptions; Node's `kind` is now `request` / `stopped` / `source` /
+  `engine`.
 - Native linux-arm64 artifacts: PyPI manylinux aarch64 wheel, npm
   `rookie-cookies-linux-arm64-gnu`, and a CLI
   `aarch64-unknown-linux-gnu` binary, all built on `ubuntu-24.04-arm`.
@@ -25,6 +50,62 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking (Rust):** `rookie_cookies::Result<T>` is now
+  `Result<T, rookie_cookies::Error>`. It was `anyhow::Result<T>` through
+  v0.5.9. A caller who wrote `rookie_cookies::Result<T>` around a bridge
+  function should use `rookie_cookies::anyhow::Result<T>`, which still
+  resolves. The deprecated v0.5.9 bridge functions are unaffected: they keep
+  returning `anyhow::Result`, spelled explicitly. `Error` implements
+  `std::error::Error + Send + Sync`, so `?` from the new surface into an
+  `anyhow` call site keeps working.
+- **Breaking (Python):** a timeout, cancellation, or resource-exhaustion stop
+  now raises `RookieStoppedError`, not `RookieEngineError`. The two-way
+  request/engine split had no separate bucket for a cooperative stop, so it
+  fell under the engine class; the new four-way split gives it its own class.
+  Code that caught `RookieEngineError` to read `stop_reason` must catch
+  `RookieStoppedError` instead. `kind` is `request` / `stopped` / `source` /
+  `engine` (was `request` / `engine`).
+- **A profile-scoped `read` no longer flows through the report builder.** The
+  report DTO is frozen at `schema_version: 1` and carries the eight-field
+  `Cookie`, so a snapshot flattened out of it had already lost
+  `CookieContext` — `header()` would have seen no isolated cookies and merged
+  partitions on the recommended path. `read` now stops at the finalized record
+  and projects `DetailedCookie` for both single-profile selections.
+- **Breaking:** `ReadResult::browser_id()` returns `Option<&str>` instead of
+  `&str`. It was the empty string for `from_path`, an in-band sentinel a caller
+  had to know about. Python exposes `Optional[str]`, Node `string | null`.
+- **Breaking (Gecko):** `.profile(q)` alone no longer imports session cookies.
+  `SessionPolicy` defaults to `PersistentOnly`, enforced before lookup, so the
+  crate does not open `sessionstore.js` or `recovery.jsonlz4` unless asked.
+  Pass `include_session()` (Rust), `include_session=True` (Python),
+  `includeSession: true` (Node), or `--include-session` (CLI). This fails
+  quietly — a smaller list, no error. Report jobs are unaffected: they always
+  retain session sources.
+- A row whose required host identity did not survive decode is omitted from a
+  snapshot and counted under the new `malformed_host_identity` warning, rather
+  than emitted as `domain: ""`. Unknown *optional* isolation fields stay `None`
+  and never drop a row.
+- **Windows App-Bound (v20) is now opt-in on the 0.6 job surface.**
+  `AppBoundPolicy` defaults to `Disabled`, so `read` / `extract` /
+  `extract_report` / `from_path` no longer inject into a browser process, spawn
+  one, enumerate processes, or impersonate SYSTEM unless asked. A caller who
+  needs v20 rows passes `.app_bound(AppBoundPolicy::InjectionOnly)` (or
+  `AllowElevatedFallback`), or `--app-bound` on the CLI. The deprecated v0.5.9
+  bridge keeps `AllowElevatedFallback`, so its 0.5.8 capability is unchanged.
+  Python's `read`, `from_path`, `browser_report`, and `load_report` gain an
+  `app_bound: str = "disabled"` keyword (`"disabled"` / `"injection_only"` /
+  `"allow_elevated_fallback"`); an unrecognized string raises
+  `RookieRequestError` before any I/O. `browser_profiles` and
+  `chrome_profiles` also gain `timeout` / `cancellation` but no `app_bound`
+  parameter, since listing does no App-Bound work. Python's deprecated
+  v0.5.9 bridge functions are unaffected, same as Rust's.
+- `ROOKIE_E2E_APPBOUND_MODE` no longer steers a published build. It is compiled
+  in only under `cfg(test)` or the off-by-default `e2e-appbound-steering`
+  feature, and even there it can only narrow what the request policy already
+  permits -- it can never widen one or override `Disabled`.
+- Internal stop classification no longer round-trips a typed value through the
+  report DTO's `termination` string. `TerminationCode` exists only at the wire
+  edge; the flatten seam behind `extract` reads the enum.
 - Single-browser compatibility APIs now return typed timeout, cancellation,
   and resource-exhaustion errors instead of silently returning partial
   cookies. Flat Rust `load()` retains its documented best-effort behavior for
@@ -63,6 +144,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   snapshots and `load_report()` for grouped diagnostics. `CookieToString` is
   an unfiltered compatibility formatter; use `ReadResult::header(url)` for a
   URL-scoped header view.
+- The free `stop_reason` / `fault_kind` functions and `Error::fault_kind`.
+  `FaultKind` is a two-way FFI split that collapses three of `Error`'s four
+  variants; match on `Error`, or compare `Error::code()`.
 
 ### Fixed
 

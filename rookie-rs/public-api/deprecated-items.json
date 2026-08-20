@@ -252,6 +252,20 @@
       "note": "legacy direct-path configuration; use direct_path request builders",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
+    },
+    {
+      "path": "rookie_cookies::stop_reason",
+      "since": "0.6.0",
+      "note": "use Error::stop_reason",
+      "platforms": ["linux", "macos", "windows"],
+      "feature_sets": ["all-features", "no-default-features"]
+    },
+    {
+      "path": "rookie_cookies::fault_kind",
+      "since": "0.6.0",
+      "note": "match Error; FaultKind is a two-way FFI split",
+      "platforms": ["linux", "macos", "windows"],
+      "feature_sets": ["all-features", "no-default-features"]
     }
   ]
 }

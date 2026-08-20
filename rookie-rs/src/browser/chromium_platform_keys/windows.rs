@@ -12,6 +12,7 @@ use crate::common::deadline::BoundaryRuntime;
 #[cfg(test)]
 use crate::common::deadline::{Deadline, SystemClock};
 use crate::common::secret::SecretBytes;
+use crate::execution::AppBoundPolicy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalStateKey<'a> {
@@ -116,10 +117,20 @@ impl WindowsKeyBackend for SystemWindowsKeyBackend {
       Ok(keys)
     }
 
+    // The capability gate and the request policy are *anded*: this arm is the
+    // capability half. It is reached only when the job actually needs a v20
+    // key, so a Firefox read or a listing on a `no-default-features` Windows
+    // build never sees it -- rejecting at the job edge instead would fail
+    // those too, for a policy they never exercise.
     #[cfg(not(feature = "appbound"))]
     {
-      let _ = (encoded_key, host, runtime);
-      bail!("Chromium v20 app-bound provider is unavailable in this build")
+      let _ = (encoded_key, host);
+      Err(
+        crate::RequestError::AppBoundUnavailable {
+          policy: runtime.app_bound,
+        }
+        .into(),
+      )
     }
   }
 }
@@ -194,8 +205,21 @@ where
           Retryability::NotRetryable,
         )
       }
+      // `Disabled` is the default, and it means exactly what it says: no
+      // injection, no browser process spawn, no process enumeration, no SYSTEM
+      // impersonation. v20 rows stay unreadable, and saying so is not
+      // retryable -- retrying cannot change a policy fixed for the job.
+      LocalStateKey::Encoded(_) if runtime.app_bound == AppBoundPolicy::Disabled => {
+        ChromiumKeyOutcome::failure_with_retryability(
+          "Chromium v20 app-bound recovery is disabled by this request's app_bound policy",
+          Retryability::NotRetryable,
+        )
+      }
       LocalStateKey::Encoded(_) if !backend.appbound_compiled() => {
-        ChromiumKeyOutcome::failure("Chromium v20 app-bound provider is unavailable in this build")
+        ChromiumKeyOutcome::failure_with_retryability(
+          "Chromium v20 app-bound provider is unavailable in this build",
+          Retryability::NotRetryable,
+        )
       }
       LocalStateKey::Encoded(encoded) => {
         let legacy_note = if matches!(v10, ChromiumKeyOutcome::Success(_)) {

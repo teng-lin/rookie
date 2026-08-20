@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use crate::execution::AppBoundPolicy;
+
 /// Structured request fault produced on the `resolve_registered_browser` path
 /// and by the unified profile resolver.
 #[non_exhaustive]
@@ -33,6 +35,25 @@ pub enum RequestError {
   InvalidUrl {
     display: String,
   },
+  /// A top-level site supplied to [`crate::SendContext`] was invalid.
+  InvalidTopLevelSite {
+    display: String,
+  },
+  /// The system clock could not be represented as Unix epoch seconds.
+  ClockUnrepresentable,
+  /// The snapshot contains isolated cookies but the send selector is absent.
+  IncompleteSendContext {
+    display: String,
+    required: Vec<String>,
+  },
+  /// App-Bound recovery was requested but is unavailable in this build.
+  AppBoundUnavailable {
+    policy: AppBoundPolicy,
+  },
+  /// Bindings supplied more than one Chromium credential selector.
+  ConflictingCredentialSelectors,
+  /// Bindings supplied incompatible `profile` and `select` values.
+  ConflictingProfileSelection,
 }
 
 impl RequestError {
@@ -45,6 +66,12 @@ impl RequestError {
       Self::LossyProfilePath { .. } => "lossy_profile_path",
       Self::MissingBrowser => "missing_browser",
       Self::InvalidUrl { .. } => "invalid_url",
+      Self::InvalidTopLevelSite { .. } => "invalid_top_level_site",
+      Self::ClockUnrepresentable => "clock_unrepresentable",
+      Self::IncompleteSendContext { .. } => "incomplete_send_context",
+      Self::AppBoundUnavailable { .. } => "app_bound_unavailable",
+      Self::ConflictingCredentialSelectors => "conflicting_credential_selectors",
+      Self::ConflictingProfileSelection => "conflicting_profile_selection",
     }
   }
 
@@ -58,7 +85,15 @@ impl RequestError {
       | Self::UnknownProfile { browser_id, .. }
       | Self::AmbiguousProfile { browser_id, .. }
       | Self::LossyProfilePath { browser_id, .. } => Some(browser_id.as_str()),
-      Self::EmptyProfileSelector | Self::MissingBrowser | Self::InvalidUrl { .. } => None,
+      Self::EmptyProfileSelector
+      | Self::MissingBrowser
+      | Self::InvalidUrl { .. }
+      | Self::InvalidTopLevelSite { .. }
+      | Self::ClockUnrepresentable
+      | Self::IncompleteSendContext { .. }
+      | Self::AppBoundUnavailable { .. }
+      | Self::ConflictingCredentialSelectors
+      | Self::ConflictingProfileSelection => None,
     }
   }
 
@@ -107,6 +142,28 @@ impl fmt::Display for RequestError {
       ),
       Self::MissingBrowser => formatter.write_str("browser is required"),
       Self::InvalidUrl { display } => write!(formatter, "invalid url {display}"),
+      Self::InvalidTopLevelSite { display } => {
+        write!(formatter, "invalid top-level site {display}")
+      }
+      Self::ClockUnrepresentable => {
+        formatter.write_str("system time cannot be represented as Unix epoch seconds")
+      }
+      Self::IncompleteSendContext { display, required } => write!(
+        formatter,
+        "send context for {display} is missing required selectors: {}",
+        required.join(", ")
+      ),
+      Self::AppBoundUnavailable { policy } => write!(
+        formatter,
+        "App-Bound policy {} is unavailable in this build",
+        policy.as_str()
+      ),
+      Self::ConflictingCredentialSelectors => {
+        formatter.write_str("Chromium credential selectors are mutually exclusive")
+      }
+      Self::ConflictingProfileSelection => {
+        formatter.write_str("profile and select options conflict")
+      }
     }
   }
 }

@@ -80,6 +80,33 @@ pub(crate) fn safari_based_with_runtime(
   )
 }
 
+/// Detailed twin of [`safari_based_with_runtime`].
+///
+/// `binarycookies` carries no partition or container columns, so every record
+/// projects an empty [`crate::enums::CookieContext`]. That is the honest
+/// answer, not a placeholder: the format cannot express isolation, and the
+/// context contract already states that a missing field means the source did
+/// not expose it.
+pub(crate) fn safari_based_detailed_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<crate::enums::DetailedCookie>> {
+  let source =
+    safari_based_outcome_with_runtime(direct_path_candidate(&db_path), domains, runtime)?;
+  super::legacy::project_canonical_detailed_outcome_with_runtime(
+    "safari",
+    super::report_build::finalize_singleton_source(
+      "safari",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      vec![source],
+      None,
+      Some(runtime),
+    )?,
+    runtime,
+  )
+}
+
 /// The candidate a direct-path Safari read is aimed at.
 ///
 /// A caller who names a file has done no discovery, so there is no candidate to

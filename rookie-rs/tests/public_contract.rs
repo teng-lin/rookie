@@ -27,7 +27,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-type BrowserFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
+/// The v0.5.9 named selectors are the deprecated compatibility bridge, so they
+/// keep returning `anyhow::Result` through 0.6.x. Only the 0.6 job surface
+/// moved to `rookie_cookies::Result`.
+type BrowserFn = fn(Option<Vec<String>>) -> rookie_cookies::anyhow::Result<Vec<Cookie>>;
 
 #[cfg_attr(target_os = "linux", allow(deprecated))]
 const COMMON_BROWSER_SELECTORS: &[(&str, BrowserFn)] = &[
@@ -63,8 +66,15 @@ fn read_mozilla_profile_fields(profile: &MozillaProfile) -> (&String, &PathBuf, 
   (&profile.name, &profile.path, profile.is_default)
 }
 
-fn result_reexport_identity(value: rookie_cookies::anyhow::Result<()>) -> Result<()> {
-  value
+/// 0.6.0's one deliberate stable break: `rookie_cookies::Result` is no longer
+/// `anyhow::Result`. What replaces the old identity is that the re-export still
+/// resolves, and that [`rookie_cookies::Error`] satisfies `anyhow`'s blanket
+/// `From`, so `?` from the new surface into an `anyhow` call site keeps working.
+fn typed_error_flows_into_an_anyhow_call_site(
+  value: Result<()>,
+) -> rookie_cookies::anyhow::Result<()> {
+  value?;
+  Ok(())
 }
 
 fn cookie() -> Cookie {
@@ -150,6 +160,11 @@ fn detailed_cookie_is_additive_and_projects_to_the_unchanged_cookie() {
 
 #[test]
 fn public_function_signatures_remain_compatible() {
+  // Every function pinned in this test is the deprecated v0.5.9 bridge, which
+  // keeps returning `anyhow::Result` through the whole 0.6.x line. The 0.6 job
+  // surface is pinned against `rookie_cookies::Result` in the tests below.
+  use rookie_cookies::anyhow::Result;
+
   type FirefoxProfileFn = fn(&str, Option<Vec<String>>) -> Result<Vec<Cookie>>;
   type AnyBrowserFn = fn(&str, Option<Vec<String>>, Option<&str>) -> Result<Vec<Cookie>>;
 
@@ -182,7 +197,8 @@ fn public_function_signatures_remain_compatible() {
   let _: fn() -> String = rookie_cookies::version;
   let _: fn(&str) -> &Browser = get_browser_config;
   let _: fn(&str) -> Option<&Browser> = try_get_browser_config;
-  let _: fn(rookie_cookies::anyhow::Result<()>) -> Result<()> = result_reexport_identity;
+  let _: fn(rookie_cookies::Result<()>) -> rookie_cookies::anyhow::Result<()> =
+    typed_error_flows_into_an_anyhow_call_site;
 
   let _: FirefoxProfileFn = rookie_cookies::firefox_profile;
   let _: fn() -> Result<Vec<MozillaProfile>> = rookie_cookies::firefox_profiles;
@@ -263,11 +279,10 @@ fn direct_path_error_accessors_are_stable_for_downstream_consumers() {
   ));
   let error = rookie_cookies::direct_path::cookies_from_path(DirectPathRequest::new(missing))
     .expect_err("missing source is invalid");
-  inspect(
-    error
-      .downcast_ref::<DirectPathError>()
-      .expect("DirectPathError stays downcastable through anyhow"),
-  );
+  let rookie_cookies::Error::Source(typed) = &error else {
+    panic!("a path fault is Error::Source, got {error:?}");
+  };
+  inspect(typed);
 }
 
 #[cfg(unix)]
@@ -281,7 +296,7 @@ fn fault_kind_keeps_chromium_based_unknown_browser_as_engine() {
   )
   .expect_err("direct browser_definition path stays unstructured");
   assert_eq!(
-    rookie_cookies::fault_kind(&error),
+    rookie_cookies::Error::from(error).fault_kind(),
     rookie_cookies::FaultKind::Engine
   );
 }
@@ -310,7 +325,9 @@ fn generic_report_api_signatures_are_the_section_5_8_surface() {
 fn additive_chrome_profile_apis_do_not_change_the_legacy_selector_signature() {
   let _: BrowserFn = rookie_cookies::chrome;
   let _: fn() -> Result<Vec<ProfileDescriptor>> = rookie_cookies::chrome_profiles;
-  let _: fn(&str, Option<Vec<String>>) -> Result<ExtractionReport> = rookie_cookies::chrome_profile;
+  // `chrome_profile` is deprecated bridge surface and keeps `anyhow::Result`.
+  let _: fn(&str, Option<Vec<String>>) -> rookie_cookies::anyhow::Result<ExtractionReport> =
+    rookie_cookies::chrome_profile;
 }
 
 #[test]

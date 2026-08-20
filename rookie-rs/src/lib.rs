@@ -53,14 +53,37 @@ pub use compatibility_dispatch::named::{
 };
 #[cfg(target_os = "windows")]
 pub use compatibility_dispatch::named::{internet_explorer, octo_browser};
+mod error;
+mod execution;
 mod header_filter;
 mod read;
 mod read_warning;
 mod request_error;
-pub use anyhow::{self, Result};
+mod session;
+/// The `anyhow` crate, re-exported so the deprecated v0.5.9 bridge functions
+/// (which still return [`anyhow::Result`]) can be named without a direct
+/// dependency.
+///
+/// Deprecated in 0.6.0 and removed in 0.7.0. New code should use
+/// [`Error`] and [`Result`].
+pub use anyhow;
 use enums::Cookie;
-pub use read::{from_path, profiles, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning};
+pub use error::{EngineError, Error};
+pub use execution::{AppBoundPolicy, ExecutionControl};
+pub use read::{
+  from_path, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning,
+};
 pub use request_error::RequestError;
+pub use session::SessionPolicy;
+
+/// The result type of every 0.6 job function.
+///
+/// **Changed in 0.6.0.** This alias was `anyhow::Result<T>` through v0.5.9.
+/// It now names the crate's own typed [`Error`]. A v0.5.9 caller that spelled
+/// `rookie_cookies::Result<T>` around a bridge function should use
+/// `rookie_cookies::anyhow::Result<T>`, which still resolves; the bridge
+/// functions themselves are unchanged and still return `anyhow::Result`.
+pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(target_os = "linux")]
 mod linux;
 use std::fmt;
@@ -151,18 +174,33 @@ pub enum StopReason {
 /// discovery error. Returns `None` for every other error this crate
 /// returns.
 ///
+/// Prefer [`Error::stop_reason`]: the classification is a variant match on
+/// [`Error`] now, not a downcast through an opaque chain.
+///
 /// # Examples
 ///
 /// ```no_run
 /// let request = rookie_cookies::Request::browser("chrome")
 ///   .timeout(std::time::Duration::from_secs(5));
 /// if let Err(error) = rookie_cookies::extract(request) {
-///   if rookie_cookies::stop_reason(&error) == Some(rookie_cookies::StopReason::TimedOut) {
+///   if error.stop_reason() == Some(rookie_cookies::StopReason::TimedOut) {
 ///     eprintln!("extraction timed out");
 ///   }
 /// }
 /// ```
-pub fn stop_reason(error: &anyhow::Error) -> Option<StopReason> {
+#[deprecated(since = "0.6.0", note = "use Error::stop_reason")]
+pub fn stop_reason(error: &Error) -> Option<StopReason> {
+  error.stop_reason()
+}
+
+/// Reports why an internal `anyhow` chain stopped.
+///
+/// The internal seams (and the v0.5.9 bridge) still carry `anyhow::Error`, so
+/// their errors are not [`Error`] values and cannot be classified by the
+/// public [`stop_reason`]. Tests that exercise a seam below a job edge use
+/// this; production code classifies once, at the edge, via [`Error`].
+#[cfg(test)]
+pub(crate) fn anyhow_stop_reason(error: &anyhow::Error) -> Option<StopReason> {
   error.chain().find_map(|cause| {
     cause
       .downcast_ref::<common::deadline::BoundaryStop>()
@@ -198,21 +236,10 @@ pub enum FaultKind {
 /// fault, for bindings that raise distinct exception types at the FFI
 /// boundary.
 ///
-/// Only errors carrying a structured, downcastable cause classify as
-/// [`FaultKind::Request`]: [`direct_path::DirectPathError`] and
-/// [`RequestError`]. [`RequestError`] is produced for an unknown browser id
-/// on the registered-browser resolve path and for empty / unknown /
-/// ambiguous / lossy profile queries. Unstructured `bail!` on other
-/// surfaces — including `chromium_based_with_browser_id` — still
-/// classifies as [`FaultKind::Engine`].
-///
-/// This is also coarser than "caller-fixable" in one more way: every
-/// [`direct_path::DirectPathError`] classifies as `Request`, including
-/// [`direct_path::InvalidCookieSourceReason::SourceInspectionFailed`] --
-/// which covers a genuinely corrupt/locked/unreadable source as well as a
-/// caller simply pointing at the wrong file. Both currently surface the
-/// same way; splitting that reason out to `Engine` is a reasonable future
-/// refinement, not attempted here.
+/// Deprecated in 0.6.0: [`Error`] already distinguishes
+/// [`Request`](Error::Request) / [`Stopped`](Error::Stopped) /
+/// [`Source`](Error::Source) / [`Engine`](Error::Engine), and this two-way
+/// split collapses three of them. Match on [`Error`] instead.
 ///
 /// # Examples
 ///
@@ -221,15 +248,28 @@ pub enum FaultKind {
 ///   "/nonexistent/Cookies",
 /// );
 /// if let Err(error) = rookie_cookies::direct_path::chromium_cookies_from_path(request) {
-///   assert_eq!(rookie_cookies::fault_kind(&error), rookie_cookies::FaultKind::Request);
+///   assert!(matches!(error, rookie_cookies::Error::Source(_)));
 /// }
 /// ```
-pub fn fault_kind(error: &anyhow::Error) -> FaultKind {
+#[deprecated(
+  since = "0.6.0",
+  note = "match Error; FaultKind is a two-way FFI split"
+)]
+pub fn fault_kind(error: &Error) -> FaultKind {
+  error.fault_kind()
+}
+
+/// Classifies an internal `anyhow` chain the way the v0.5.9 bridge did.
+///
+/// Test-only counterpart to [`anyhow_stop_reason`], for seams below a job
+/// edge that have not been mapped to [`Error`] yet.
+#[cfg(test)]
+pub(crate) fn anyhow_fault_kind(error: &anyhow::Error) -> FaultKind {
   // A timeout or cancellation checked *during* source classification still
   // gets wrapped in a `DirectPathError` (inspection failed, for whichever
   // reason), so this must rule out an operational stop first: that is never
   // a caller input mistake, regardless of what wraps it afterward.
-  if stop_reason(error).is_some() {
+  if anyhow_stop_reason(error).is_some() {
     return FaultKind::Engine;
   }
   // `direct_path::DirectPathError` is attached with `anyhow::Error::context`,
@@ -273,8 +313,7 @@ pub struct Request {
   browser_id: String,
   profile: Option<String>,
   domains: Option<Vec<String>>,
-  timeout: Option<std::time::Duration>,
-  cancellation: Option<CancellationHandle>,
+  control: ExecutionControl,
 }
 
 impl Request {
@@ -285,8 +324,7 @@ impl Request {
       browser_id: id.into(),
       profile: None,
       domains: None,
-      timeout: None,
-      cancellation: None,
+      control: ExecutionControl::default(),
     }
   }
 
@@ -312,14 +350,31 @@ impl Request {
 
   /// Overrides the default 30-second extraction budget.
   pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
-    self.timeout = Some(timeout);
+    self.control = self.control.timeout(timeout);
     self
   }
 
   /// Lets `handle` cancel this request from another thread while it runs —
   /// see [`CancellationHandle`].
   pub fn cancellation(mut self, handle: CancellationHandle) -> Self {
-    self.cancellation = Some(handle);
+    self.control = self.control.cancellation(handle);
+    self
+  }
+
+  /// Selects the Windows App-Bound (v20) recovery policy for this request.
+  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
+    self.control = self.control.app_bound(policy);
+    self
+  }
+
+  /// Replaces this request's execution control **wholesale**.
+  ///
+  /// This discards any earlier [`timeout`](Self::timeout),
+  /// [`cancellation`](Self::cancellation), or [`app_bound`](Self::app_bound)
+  /// call. The two granularities are deliberate: call `execution` first when
+  /// you have a shared control value, then adjust individual fields.
+  pub fn execution(mut self, control: ExecutionControl) -> Self {
+    self.control = control;
     self
   }
 }
@@ -347,27 +402,24 @@ impl Request {
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn extract(request: Request) -> Result<Vec<Cookie>> {
+  error::map_job_result(extract_inner(request))
+}
+
+pub(crate) fn extract_inner(request: Request) -> anyhow::Result<Vec<Cookie>> {
   let clock = common::deadline::SystemClock;
-  let runtime = common::deadline::boundary_runtime(
-    &clock,
-    request.timeout,
-    request
-      .cancellation
-      .map(|handle| handle.0)
-      .unwrap_or_default(),
-  );
+  let runtime = common::deadline::runtime_for_control(&clock, &request.control);
   match request.profile {
     None => {
       browser::legacy::browser_cookies_with_runtime(&request.browser_id, request.domains, &runtime)
     }
     Some(query) => {
-      let (_profile_id, report) = profile_extraction_report_with_runtime(
+      let (_profile_id, report, termination) = profile_extraction_report_with_runtime(
         &request.browser_id,
         &query,
         request.domains,
         &runtime,
       )?;
-      flatten_selected_report_cookies(report)
+      flatten_selected_report_cookies(report, termination)
     }
   }
 }
@@ -380,21 +432,26 @@ pub(crate) fn profile_extraction_report_with_runtime(
   query: &str,
   domains: Option<Vec<String>>,
   runtime: &common::deadline::BoundaryRuntime<'_>,
-) -> Result<(String, report::ExtractionReport)> {
-  resolve_then_extract_profile_with_runtime(
+) -> anyhow::Result<(
+  String,
+  report::ExtractionReport,
+  browser::outcome::Termination,
+)> {
+  let (profile_id, (report, termination)) = resolve_then_extract_profile_with_runtime(
     browser_id,
     query,
     runtime,
     browser::registry::resolve_profile_query,
     |resolved_browser_id, profile_id, runtime| {
-      browser::report_build::browser_extraction_report_with_runtime(
+      browser::report_build::browser_extraction_outcome_with_runtime(
         resolved_browser_id,
         Some(profile_id),
         domains,
         runtime,
       )
     },
-  )
+  )?;
+  Ok((profile_id, report, termination))
 }
 
 fn resolve_then_extract_profile_with_runtime<T, Resolve, Extract>(
@@ -403,10 +460,10 @@ fn resolve_then_extract_profile_with_runtime<T, Resolve, Extract>(
   runtime: &common::deadline::BoundaryRuntime<'_>,
   resolve: Resolve,
   extract: Extract,
-) -> Result<(String, T)>
+) -> anyhow::Result<(String, T)>
 where
-  Resolve: FnOnce(&str, &str, &common::deadline::BoundaryRuntime<'_>) -> Result<String>,
-  Extract: FnOnce(&str, &str, &common::deadline::BoundaryRuntime<'_>) -> Result<T>,
+  Resolve: FnOnce(&str, &str, &common::deadline::BoundaryRuntime<'_>) -> anyhow::Result<String>,
+  Extract: FnOnce(&str, &str, &common::deadline::BoundaryRuntime<'_>) -> anyhow::Result<T>,
 {
   runtime.check()?;
   let profile_id = resolve(browser_id, query, runtime)?;
@@ -417,15 +474,12 @@ where
 /// Labeled extract. No profile → today's [`browser_report`]`(id, None)`
 /// (`AllProfiles`). With a profile query → one-profile report.
 pub fn extract_report(request: Request) -> Result<report::ExtractionReport> {
+  error::map_job_result(extract_report_inner(request))
+}
+
+fn extract_report_inner(request: Request) -> anyhow::Result<report::ExtractionReport> {
   let clock = common::deadline::SystemClock;
-  let runtime = common::deadline::boundary_runtime(
-    &clock,
-    request.timeout,
-    request
-      .cancellation
-      .map(|handle| handle.0)
-      .unwrap_or_default(),
-  );
+  let runtime = common::deadline::runtime_for_control(&clock, &request.control);
   let profile_id = match request.profile.as_deref() {
     None => None,
     Some(query) => Some(browser::registry::resolve_profile_query(
@@ -442,15 +496,26 @@ pub fn extract_report(request: Request) -> Result<report::ExtractionReport> {
   )
 }
 
+/// Projects a one-profile report down to the flat cookie list `extract`
+/// returns.
+///
+/// `termination` is the **typed** value the report DTO's open-vocabulary
+/// `termination` string was projected from. Classifying the stop from the enum
+/// rather than re-parsing the string keeps the "never classify by parsing a
+/// string" rule intact on the crate's own internal path, and removes the
+/// unreachable catch-all arm the string match needed.
 pub(crate) fn flatten_selected_report_cookies(
   report: report::ExtractionReport,
-) -> Result<Vec<Cookie>> {
-  match report.termination.as_str() {
-    "completed" => {}
-    "timed_out" => return Err(common::deadline::BoundaryStop::TimedOut.into()),
-    "cancelled" => return Err(common::deadline::BoundaryStop::Cancelled.into()),
-    "resource_exhausted" => return Err(common::deadline::BoundaryStop::ResourceExhausted.into()),
-    termination => anyhow::bail!("extraction stopped with termination {termination:?}"),
+  termination: browser::outcome::Termination,
+) -> anyhow::Result<Vec<Cookie>> {
+  use browser::outcome::Termination;
+  match termination {
+    Termination::Completed => {}
+    Termination::TimedOut => return Err(common::deadline::BoundaryStop::TimedOut.into()),
+    Termination::Cancelled => return Err(common::deadline::BoundaryStop::Cancelled.into()),
+    Termination::ResourceExhausted => {
+      return Err(common::deadline::BoundaryStop::ResourceExhausted.into())
+    }
   }
   let mut cookies = Vec::new();
   let mut any_selected_success = false;
@@ -463,7 +528,13 @@ pub(crate) fn flatten_selected_report_cookies(
     }
   }
   if !any_selected_success {
-    anyhow::bail!("no selected cookie source succeeded");
+    return Err(
+      error::EngineFailure::new(
+        error::EngineCause::NoSelectedSource,
+        "no selected cookie source succeeded",
+      )
+      .into(),
+    );
   }
   Ok(cookies)
 }
@@ -496,8 +567,24 @@ pub(crate) fn flatten_selected_report_cookies(
 /// let cookies = rookie_cookies::browser("chrome", None)?;
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
-pub fn browser(id: &str, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  extract(Request::browser(id).domains(domains))
+pub fn browser(id: &str, domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
+  extract_inner(
+    Request::browser(id)
+      .domains(domains)
+      .execution(legacy_execution()),
+  )
+}
+
+/// Execution control for the deprecated v0.5.9 bridge.
+///
+/// The new job surface defaults [`AppBoundPolicy`] to `Disabled`, because
+/// unsolicited process injection should be something a caller asks for. The
+/// bridge cannot ask: `chrome(None)` and `browser(id, None)` have no options
+/// argument, and their Windows v20 capability shipped in 0.5.8. Defaulting
+/// them to `Disabled` would silently stop decrypting rows they read today, on
+/// the surface this release promises to keep working.
+pub(crate) fn legacy_execution() -> ExecutionControl {
+  ExecutionControl::default().app_bound(AppBoundPolicy::AllowElevatedFallback)
 }
 
 /// Extracts an explicit Chromium cookie database using registry-resolved key
@@ -517,7 +604,7 @@ pub fn chromium_based_with_browser_id(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-) -> Result<Vec<Cookie>> {
+) -> anyhow::Result<Vec<Cookie>> {
   match browser_id
     .map(browser::registry::chromium_key_credentials)
     .transpose()?
@@ -539,7 +626,7 @@ pub fn chromium_based_detailed_with_browser_id(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
-) -> Result<Vec<enums::DetailedCookie>> {
+) -> anyhow::Result<Vec<enums::DetailedCookie>> {
   match browser_id
     .map(browser::registry::chromium_key_credentials)
     .transpose()?
@@ -583,7 +670,7 @@ pub fn version() -> String {
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn supported_browsers() -> Result<Vec<report::BrowserDescriptor>> {
-  browser::report_build::supported_browser_descriptors()
+  error::map_job_result(browser::report_build::supported_browser_descriptors())
 }
 
 /// Returns the discovered profiles of one registered browser.
@@ -610,7 +697,31 @@ pub fn supported_browsers() -> Result<Vec<report::BrowserDescriptor>> {
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn browser_profiles(browser_id: &str) -> Result<Vec<report::ProfileDescriptor>> {
-  browser::report_build::browser_profile_descriptors(browser_id)
+  browser_profiles_with(browser_id, ExecutionControl::default())
+}
+
+/// [`browser_profiles`] under caller-supplied execution control.
+///
+/// The v0.5.9 signature above takes no control and cannot grow one without
+/// breaking, so the knobs arrive through this twin instead.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// let control = rookie_cookies::ExecutionControl::default().timeout(Duration::from_secs(5));
+/// let profiles = rookie_cookies::browser_profiles_with("chrome", control)?;
+/// println!("{}", profiles.len());
+/// # Ok::<(), rookie_cookies::Error>(())
+/// ```
+pub fn browser_profiles_with(
+  browser_id: &str,
+  control: ExecutionControl,
+) -> Result<Vec<report::ProfileDescriptor>> {
+  error::map_job_result(browser::report_build::browser_profile_descriptors(
+    browser_id, &control,
+  ))
 }
 
 /// Returns every discovered Google Chrome profile, preferring the active one.
@@ -637,7 +748,20 @@ pub fn browser_profiles(browser_id: &str) -> Result<Vec<report::ProfileDescripto
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn chrome_profiles() -> Result<Vec<report::ProfileDescriptor>> {
-  browser::report_build::chrome_profile_descriptors()
+  chrome_profiles_with(ExecutionControl::default())
+}
+
+/// [`chrome_profiles`] under caller-supplied execution control.
+///
+/// # Examples
+///
+/// ```no_run
+/// let profiles = rookie_cookies::chrome_profiles_with(Default::default())?;
+/// println!("{}", profiles.len());
+/// # Ok::<(), rookie_cookies::Error>(())
+/// ```
+pub fn chrome_profiles_with(control: ExecutionControl) -> Result<Vec<report::ProfileDescriptor>> {
+  error::map_job_result(browser::report_build::chrome_profile_descriptors(&control))
 }
 
 /// Extracts one selected Google Chrome profile as a grouped report.
@@ -672,8 +796,13 @@ pub fn chrome_profiles() -> Result<Vec<report::ProfileDescriptor>> {
 pub fn chrome_profile(
   profile: &str,
   domains: Option<Vec<String>>,
-) -> Result<report::ExtractionReport> {
-  extract_report(Request::browser("chrome").profile(profile).domains(domains))
+) -> anyhow::Result<report::ExtractionReport> {
+  extract_report_inner(
+    Request::browser("chrome")
+      .profile(profile)
+      .domains(domains)
+      .execution(legacy_execution()),
+  )
 }
 
 /// Extracts cookies from one browser as a grouped report.
@@ -752,7 +881,74 @@ pub fn browser_report(
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
 pub fn load_report(domains: Option<Vec<String>>) -> Result<report::ExtractionReport> {
-  browser::report_build::load_extraction_report(domains)
+  load_report_with(LoadReportRequest::default().domains(domains))
+}
+
+/// The aggregate report job as data, so it can carry execution control.
+///
+/// There is deliberately no request type for the *listing* jobs
+/// ([`browser_profiles`], [`chrome_profiles`]): listing has no selection,
+/// session policy, or domain filter to carry, so an envelope struct would be
+/// ceremony. This one exists because `load_report` already takes a domain
+/// filter.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoadReportRequest {
+  domains: Option<Vec<String>>,
+  control: ExecutionControl,
+}
+
+impl LoadReportRequest {
+  /// Restricts the report to the given domains, or clears a prior restriction
+  /// on `None`.
+  pub fn domains(mut self, domains: Option<Vec<String>>) -> Self {
+    self.domains = domains;
+    self
+  }
+
+  /// Overrides the default 30-second budget shared by the whole fan-out.
+  pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+    self.control = self.control.timeout(timeout);
+    self
+  }
+
+  /// Lets `handle` cancel the whole fan-out from another thread.
+  pub fn cancellation(mut self, handle: CancellationHandle) -> Self {
+    self.control = self.control.cancellation(handle);
+    self
+  }
+
+  /// Selects the Windows App-Bound (v20) recovery policy for every browser in
+  /// the fan-out.
+  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
+    self.control = self.control.app_bound(policy);
+    self
+  }
+
+  /// Replaces this request's execution control **wholesale**, discarding an
+  /// earlier `timeout` / `cancellation` / `app_bound` call.
+  pub fn execution(mut self, control: ExecutionControl) -> Self {
+    self.control = control;
+    self
+  }
+}
+
+/// [`load_report`] under caller-supplied execution control.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+///
+/// let request = rookie_cookies::LoadReportRequest::default().timeout(Duration::from_secs(10));
+/// let report = rookie_cookies::load_report_with(request)?;
+/// println!("{}", report.status);
+/// # Ok::<(), rookie_cookies::Error>(())
+/// ```
+pub fn load_report_with(request: LoadReportRequest) -> Result<report::ExtractionReport> {
+  error::map_job_result(browser::report_build::load_extraction_report(
+    request.domains,
+    &request.control,
+  ))
 }
 
 #[cfg(test)]
@@ -783,7 +979,7 @@ pub fn any_browser(
   cookies_path: &str,
   domains: Option<Vec<String>>,
   key_path: Option<&str>,
-) -> Result<Vec<Cookie>> {
+) -> anyhow::Result<Vec<Cookie>> {
   compatibility_dispatch::any_browser(cookies_path, domains, key_path)
 }
 

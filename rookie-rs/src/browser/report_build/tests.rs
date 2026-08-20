@@ -77,6 +77,7 @@ fn ordering_source(role: CookieSourceRoleId, precedence: u16) -> SourceDraft {
 }
 use super::*;
 use crate::browser::report_core::ReportStatusCode;
+use crate::execution::ExecutionControl;
 use std::path::PathBuf;
 
 fn identity() -> ProfileIdentity {
@@ -359,7 +360,7 @@ fn stopped_drafts_keep_atomic_sources_in_reports_but_single_browser_projection_r
       browser
     };
 
-    let report = assemble_with_runtime(1, vec![stopped()], &runtime);
+    let (report, _termination) = assemble_with_runtime(1, vec![stopped()], &runtime);
     let expected_termination = match stop {
       BoundaryStop::TimedOut => "timed_out",
       BoundaryStop::Cancelled => "cancelled",
@@ -385,7 +386,7 @@ fn stopped_drafts_keep_atomic_sources_in_reports_but_single_browser_projection_r
       BoundaryStop::Cancelled => crate::StopReason::Cancelled,
       BoundaryStop::ResourceExhausted => crate::StopReason::ResourceExhausted,
     };
-    assert_eq!(crate::stop_reason(&error), Some(expected_reason));
+    assert_eq!(crate::anyhow_stop_reason(&error), Some(expected_reason));
     assert!(error
       .chain()
       .any(|cause| cause.downcast_ref::<BoundaryStop>() == Some(&stop)));
@@ -432,7 +433,7 @@ fn a_stopped_draft_that_is_not_last_still_keeps_every_other_drafts_completed_wor
   let mut later = outcome(vec![later_profile], false);
   later.browser_id = BrowserId::known("chrome");
 
-  let report = assemble_with_runtime(2, vec![stopped, later], &runtime);
+  let (report, _termination) = assemble_with_runtime(2, vec![stopped, later], &runtime);
 
   assert_eq!(
     report.summary.sources_succeeded, 2,
@@ -557,7 +558,8 @@ fn finalization_and_projection_share_runtime_and_keep_completed_partial_sources(
     profile.sources.push(source);
   }
 
-  let report = assemble_with_runtime(1, vec![outcome(vec![profile], false)], &runtime);
+  let (report, _termination) =
+    assemble_with_runtime(1, vec![outcome(vec![profile], false)], &runtime);
   assert_eq!(report.termination.as_str(), "cancelled");
   assert_eq!(report.status.as_str(), "partial");
   assert_eq!(report.profiles.len(), 1);
@@ -986,7 +988,9 @@ fn same_browser_repeating_an_issue_still_aggregates() {
 #[test]
 fn an_unknown_browser_id_is_a_request_error_not_a_report() {
   assert!(browser_extraction_report("definitely_not_a_browser", None, None).is_err());
-  assert!(browser_profile_descriptors("definitely_not_a_browser").is_err());
+  assert!(
+    browser_profile_descriptors("definitely_not_a_browser", &ExecutionControl::default()).is_err()
+  );
   // An alias-shaped but unregistered id must fail the same way.
   assert!(browser_extraction_report("", None, None).is_err());
 }

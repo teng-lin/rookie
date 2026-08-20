@@ -11,16 +11,8 @@ pub rookie_cookies::common::enums::Cookie::path: alloc::string::String
 pub rookie_cookies::common::enums::Cookie::same_site: i64
 pub rookie_cookies::common::enums::Cookie::secure: bool
 pub rookie_cookies::common::enums::Cookie::value: alloc::string::String
-impl core::clone::Clone for rookie_cookies::common::enums::Cookie
-pub fn rookie_cookies::common::enums::Cookie::clone(&self) -> rookie_cookies::common::enums::Cookie
-impl core::cmp::Eq for rookie_cookies::common::enums::Cookie
-impl core::cmp::PartialEq for rookie_cookies::common::enums::Cookie
-pub fn rookie_cookies::common::enums::Cookie::eq(&self, &rookie_cookies::common::enums::Cookie) -> bool
 impl core::fmt::Debug for rookie_cookies::common::enums::Cookie
 pub fn rookie_cookies::common::enums::Cookie::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for rookie_cookies::common::enums::Cookie
-pub fn rookie_cookies::common::enums::Cookie::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for rookie_cookies::common::enums::Cookie
 impl serde_core::ser::Serialize for rookie_cookies::common::enums::Cookie
 pub fn rookie_cookies::common::enums::Cookie::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::common::enums::Cookie
@@ -67,14 +59,8 @@ pub rookie_cookies::common::enums::DetailedCookie::cookie: rookie_cookies::commo
 impl rookie_cookies::common::enums::DetailedCookie
 pub fn rookie_cookies::common::enums::DetailedCookie::cookie(&self) -> &rookie_cookies::common::enums::Cookie
 pub fn rookie_cookies::common::enums::DetailedCookie::into_cookie(self) -> rookie_cookies::common::enums::Cookie
-impl core::clone::Clone for rookie_cookies::common::enums::DetailedCookie
-pub fn rookie_cookies::common::enums::DetailedCookie::clone(&self) -> rookie_cookies::common::enums::DetailedCookie
-impl core::cmp::Eq for rookie_cookies::common::enums::DetailedCookie
-impl core::cmp::PartialEq for rookie_cookies::common::enums::DetailedCookie
-pub fn rookie_cookies::common::enums::DetailedCookie::eq(&self, &rookie_cookies::common::enums::DetailedCookie) -> bool
 impl core::fmt::Debug for rookie_cookies::common::enums::DetailedCookie
 pub fn rookie_cookies::common::enums::DetailedCookie::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rookie_cookies::common::enums::DetailedCookie
 impl serde_core::ser::Serialize for rookie_cookies::common::enums::DetailedCookie
 pub fn rookie_cookies::common::enums::DetailedCookie::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::common::enums::DetailedCookie
@@ -91,7 +77,6 @@ pub fn rookie_cookies::common::enums::CookieToString::to_string(&self) -> alloc:
 impl rookie_cookies::common::enums::CookieToString for alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
 pub fn alloc::vec::Vec<rookie_cookies::common::enums::Cookie>::to_string(&self) -> alloc::string::String
 pub mod rookie_cookies::common::format
-pub fn rookie_cookies::common::format::detailed_json(alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>) -> alloc::string::String
 pub fn rookie_cookies::common::format::json(alloc::vec::Vec<rookie_cookies::common::enums::Cookie>) -> alloc::string::String
 pub fn rookie_cookies::common::format::netscape(alloc::vec::Vec<rookie_cookies::common::enums::Cookie>) -> alloc::string::String
 pub mod rookie_cookies::config
@@ -279,11 +264,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::In
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::InvalidDirectPathOptionsReason
 pub struct rookie_cookies::direct_path::ChromiumPathRequest
 impl rookie_cookies::direct_path::ChromiumPathRequest
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::credentials(self, rookie_cookies::direct_path::ChromiumCredentialSource) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
-pub fn rookie_cookies::direct_path::ChromiumPathRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::locked_database_policy(self, rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn rookie_cookies::direct_path::ChromiumPathRequest::timeout(self, core::time::Duration) -> Self
@@ -303,10 +286,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::direct_path::Ch
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::direct_path::ChromiumPathRequest
 pub struct rookie_cookies::direct_path::DirectPathRequest
 impl rookie_cookies::direct_path::DirectPathRequest
-pub fn rookie_cookies::direct_path::DirectPathRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
 pub fn rookie_cookies::direct_path::DirectPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::direct_path::DirectPathRequest::domains(self, alloc::vec::Vec<alloc::string::String>) -> Self
-pub fn rookie_cookies::direct_path::DirectPathRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
 pub fn rookie_cookies::direct_path::DirectPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn rookie_cookies::direct_path::DirectPathRequest::timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for rookie_cookies::direct_path::DirectPathRequest
@@ -336,16 +317,8 @@ pub rookie_cookies::enums::Cookie::path: alloc::string::String
 pub rookie_cookies::enums::Cookie::same_site: i64
 pub rookie_cookies::enums::Cookie::secure: bool
 pub rookie_cookies::enums::Cookie::value: alloc::string::String
-impl core::clone::Clone for rookie_cookies::common::enums::Cookie
-pub fn rookie_cookies::common::enums::Cookie::clone(&self) -> rookie_cookies::common::enums::Cookie
-impl core::cmp::Eq for rookie_cookies::common::enums::Cookie
-impl core::cmp::PartialEq for rookie_cookies::common::enums::Cookie
-pub fn rookie_cookies::common::enums::Cookie::eq(&self, &rookie_cookies::common::enums::Cookie) -> bool
 impl core::fmt::Debug for rookie_cookies::common::enums::Cookie
 pub fn rookie_cookies::common::enums::Cookie::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for rookie_cookies::common::enums::Cookie
-pub fn rookie_cookies::common::enums::Cookie::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for rookie_cookies::common::enums::Cookie
 impl serde_core::ser::Serialize for rookie_cookies::common::enums::Cookie
 pub fn rookie_cookies::common::enums::Cookie::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::common::enums::Cookie
@@ -392,14 +365,8 @@ pub rookie_cookies::enums::DetailedCookie::cookie: rookie_cookies::common::enums
 impl rookie_cookies::common::enums::DetailedCookie
 pub fn rookie_cookies::common::enums::DetailedCookie::cookie(&self) -> &rookie_cookies::common::enums::Cookie
 pub fn rookie_cookies::common::enums::DetailedCookie::into_cookie(self) -> rookie_cookies::common::enums::Cookie
-impl core::clone::Clone for rookie_cookies::common::enums::DetailedCookie
-pub fn rookie_cookies::common::enums::DetailedCookie::clone(&self) -> rookie_cookies::common::enums::DetailedCookie
-impl core::cmp::Eq for rookie_cookies::common::enums::DetailedCookie
-impl core::cmp::PartialEq for rookie_cookies::common::enums::DetailedCookie
-pub fn rookie_cookies::common::enums::DetailedCookie::eq(&self, &rookie_cookies::common::enums::DetailedCookie) -> bool
 impl core::fmt::Debug for rookie_cookies::common::enums::DetailedCookie
 pub fn rookie_cookies::common::enums::DetailedCookie::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rookie_cookies::common::enums::DetailedCookie
 impl serde_core::ser::Serialize for rookie_cookies::common::enums::DetailedCookie
 pub fn rookie_cookies::common::enums::DetailedCookie::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for rookie_cookies::common::enums::DetailedCookie
@@ -1352,26 +1319,6 @@ impl core::marker::Sync for rookie_cookies::RequestError
 impl core::marker::Unpin for rookie_cookies::RequestError
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::RequestError
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::RequestError
-#[non_exhaustive] pub enum rookie_cookies::SessionPolicy
-pub rookie_cookies::SessionPolicy::IncludeSession
-pub rookie_cookies::SessionPolicy::PersistentOnly
-impl core::clone::Clone for rookie_cookies::SessionPolicy
-pub fn rookie_cookies::SessionPolicy::clone(&self) -> rookie_cookies::SessionPolicy
-impl core::cmp::Eq for rookie_cookies::SessionPolicy
-impl core::cmp::PartialEq for rookie_cookies::SessionPolicy
-pub fn rookie_cookies::SessionPolicy::eq(&self, &rookie_cookies::SessionPolicy) -> bool
-impl core::default::Default for rookie_cookies::SessionPolicy
-pub fn rookie_cookies::SessionPolicy::default() -> rookie_cookies::SessionPolicy
-impl core::fmt::Debug for rookie_cookies::SessionPolicy
-pub fn rookie_cookies::SessionPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for rookie_cookies::SessionPolicy
-impl core::marker::StructuralPartialEq for rookie_cookies::SessionPolicy
-impl core::marker::Freeze for rookie_cookies::SessionPolicy
-impl core::marker::Send for rookie_cookies::SessionPolicy
-impl core::marker::Sync for rookie_cookies::SessionPolicy
-impl core::marker::Unpin for rookie_cookies::SessionPolicy
-impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::SessionPolicy
-impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::SessionPolicy
 #[non_exhaustive] pub enum rookie_cookies::StopReason
 pub rookie_cookies::StopReason::Cancelled
 pub rookie_cookies::StopReason::ResourceExhausted
@@ -1455,10 +1402,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::ExecutionContro
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::ExecutionControl
 pub struct rookie_cookies::FromPathRequest
 impl rookie_cookies::FromPathRequest
-pub fn rookie_cookies::FromPathRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
 pub fn rookie_cookies::FromPathRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::FromPathRequest::chromium_credentials(self, rookie_cookies::direct_path::ChromiumCredentialSource) -> Self
-pub fn rookie_cookies::FromPathRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
 pub fn rookie_cookies::FromPathRequest::include_expired(self, bool) -> Self
 pub fn rookie_cookies::FromPathRequest::new(impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn rookie_cookies::FromPathRequest::timeout(self, core::time::Duration) -> Self
@@ -1476,29 +1421,6 @@ impl core::marker::Sync for rookie_cookies::FromPathRequest
 impl core::marker::Unpin for rookie_cookies::FromPathRequest
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::FromPathRequest
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::FromPathRequest
-pub struct rookie_cookies::LoadReportRequest
-impl rookie_cookies::LoadReportRequest
-pub fn rookie_cookies::LoadReportRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
-pub fn rookie_cookies::LoadReportRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
-pub fn rookie_cookies::LoadReportRequest::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
-pub fn rookie_cookies::LoadReportRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
-pub fn rookie_cookies::LoadReportRequest::timeout(self, core::time::Duration) -> Self
-impl core::clone::Clone for rookie_cookies::LoadReportRequest
-pub fn rookie_cookies::LoadReportRequest::clone(&self) -> rookie_cookies::LoadReportRequest
-impl core::cmp::Eq for rookie_cookies::LoadReportRequest
-impl core::cmp::PartialEq for rookie_cookies::LoadReportRequest
-pub fn rookie_cookies::LoadReportRequest::eq(&self, &rookie_cookies::LoadReportRequest) -> bool
-impl core::default::Default for rookie_cookies::LoadReportRequest
-pub fn rookie_cookies::LoadReportRequest::default() -> rookie_cookies::LoadReportRequest
-impl core::fmt::Debug for rookie_cookies::LoadReportRequest
-pub fn rookie_cookies::LoadReportRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for rookie_cookies::LoadReportRequest
-impl core::marker::Freeze for rookie_cookies::LoadReportRequest
-impl core::marker::Send for rookie_cookies::LoadReportRequest
-impl core::marker::Sync for rookie_cookies::LoadReportRequest
-impl core::marker::Unpin for rookie_cookies::LoadReportRequest
-impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::LoadReportRequest
-impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::LoadReportRequest
 #[non_exhaustive] pub struct rookie_cookies::MozillaProfile
 pub rookie_cookies::MozillaProfile::is_default: bool
 pub rookie_cookies::MozillaProfile::name: alloc::string::String
@@ -1519,14 +1441,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::MozillaProfile
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MozillaProfile
 pub struct rookie_cookies::ReadRequest
 impl rookie_cookies::ReadRequest
-pub fn rookie_cookies::ReadRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
 pub fn rookie_cookies::ReadRequest::browser(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn rookie_cookies::ReadRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
-pub fn rookie_cookies::ReadRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
 pub fn rookie_cookies::ReadRequest::include_expired(self, bool) -> Self
-pub fn rookie_cookies::ReadRequest::include_session(self) -> Self
 pub fn rookie_cookies::ReadRequest::profile(self, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn rookie_cookies::ReadRequest::session(self, rookie_cookies::SessionPolicy) -> Self
 pub fn rookie_cookies::ReadRequest::timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for rookie_cookies::ReadRequest
 pub fn rookie_cookies::ReadRequest::clone(&self) -> rookie_cookies::ReadRequest
@@ -1544,12 +1462,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::ReadRequest
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::ReadRequest
 pub struct rookie_cookies::ReadResult
 impl rookie_cookies::ReadResult
-pub fn rookie_cookies::ReadResult::browser_id(&self) -> core::option::Option<&str>
+pub fn rookie_cookies::ReadResult::browser_id(&self) -> &str
 pub fn rookie_cookies::ReadResult::cookies(&self) -> &[rookie_cookies::common::enums::Cookie]
-pub fn rookie_cookies::ReadResult::detailed_cookies(&self) -> &[rookie_cookies::common::enums::DetailedCookie]
 pub fn rookie_cookies::ReadResult::header(&self, &str) -> rookie_cookies::Result<alloc::string::String>
 pub fn rookie_cookies::ReadResult::into_cookies(self) -> alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
-pub fn rookie_cookies::ReadResult::into_detailed_cookies(self) -> alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>
 pub fn rookie_cookies::ReadResult::profile_id(&self) -> core::option::Option<&str>
 pub fn rookie_cookies::ReadResult::warnings(&self) -> &[rookie_cookies::ReadWarning]
 impl core::fmt::Debug for rookie_cookies::ReadResult
@@ -1582,11 +1498,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::ReadWarning
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::ReadWarning
 pub struct rookie_cookies::Request
 impl rookie_cookies::Request
-pub fn rookie_cookies::Request::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self
 pub fn rookie_cookies::Request::browser(impl core::convert::Into<alloc::string::String>) -> Self
 pub fn rookie_cookies::Request::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::Request::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
-pub fn rookie_cookies::Request::execution(self, rookie_cookies::ExecutionControl) -> Self
 pub fn rookie_cookies::Request::profile(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn rookie_cookies::Request::timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for rookie_cookies::Request
@@ -1608,18 +1522,13 @@ pub fn rookie_cookies::arc(core::option::Option<alloc::vec::Vec<alloc::string::S
 pub fn rookie_cookies::brave(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::browser(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::browser_profiles(&str) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
-pub fn rookie_cookies::browser_profiles_with(&str, rookie_cookies::ExecutionControl) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
 pub fn rookie_cookies::browser_report(&str, core::option::Option<&str>, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> rookie_cookies::Result<rookie_cookies::report::ExtractionReport>
-pub fn rookie_cookies::cachy(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::chrome(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::chrome_profile(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<rookie_cookies::report::ExtractionReport>
 pub fn rookie_cookies::chrome_profiles() -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
-pub fn rookie_cookies::chrome_profiles_with(rookie_cookies::ExecutionControl) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
 pub fn rookie_cookies::chromium(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
-pub fn rookie_cookies::chromium_based(&rookie_cookies::config::Browser, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
-pub fn rookie_cookies::chromium_based_detailed(&rookie_cookies::config::Browser, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>
-pub fn rookie_cookies::chromium_based_detailed_with_browser_id(core::option::Option<&str>, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>
-pub fn rookie_cookies::chromium_based_with_browser_id(core::option::Option<&str>, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::chromium_based(std::path::PathBuf, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::chromium_based_detailed(std::path::PathBuf, std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>>
 pub fn rookie_cookies::edge(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::extract(rookie_cookies::Request) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::extract_report(rookie_cookies::Request) -> rookie_cookies::Result<rookie_cookies::report::ExtractionReport>
@@ -1630,14 +1539,15 @@ pub fn rookie_cookies::firefox_based_detailed(std::path::PathBuf, core::option::
 pub fn rookie_cookies::firefox_profile(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox_profiles() -> anyhow::Result<alloc::vec::Vec<rookie_cookies::MozillaProfile>>
 pub fn rookie_cookies::from_path(rookie_cookies::FromPathRequest) -> rookie_cookies::Result<rookie_cookies::ReadResult>
+pub fn rookie_cookies::internet_explorer(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::internet_explorer_based(std::path::PathBuf, core::option::Option<alloc::vec::Vec<alloc::string::String>>, bool) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::librewolf(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::load(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::load_report(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> rookie_cookies::Result<rookie_cookies::report::ExtractionReport>
-pub fn rookie_cookies::load_report_with(rookie_cookies::LoadReportRequest) -> rookie_cookies::Result<rookie_cookies::report::ExtractionReport>
+pub fn rookie_cookies::octo_browser(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::opera(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::opera_gx(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::profiles(&str) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
-pub fn rookie_cookies::profiles_with(&str, rookie_cookies::ExecutionControl) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::ProfileDescriptor>>
 pub fn rookie_cookies::read(rookie_cookies::ReadRequest) -> rookie_cookies::Result<rookie_cookies::ReadResult>
 pub fn rookie_cookies::stop_reason(&rookie_cookies::Error) -> core::option::Option<rookie_cookies::StopReason>
 pub fn rookie_cookies::supported_browsers() -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::report::BrowserDescriptor>>

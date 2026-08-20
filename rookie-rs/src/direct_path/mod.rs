@@ -25,6 +25,7 @@ use unsupported as platform;
 use windows as platform;
 
 use crate::enums::{Cookie, DetailedCookie};
+use crate::execution::{AppBoundPolicy, ExecutionControl};
 use anyhow::Result;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -278,8 +279,7 @@ impl std::error::Error for DirectPathError {}
 pub struct DirectPathRequest {
   path: PathBuf,
   domains: Option<Vec<String>>,
-  timeout: Option<std::time::Duration>,
-  cancellation: Option<crate::CancellationHandle>,
+  control: ExecutionControl,
 }
 
 impl DirectPathRequest {
@@ -288,8 +288,7 @@ impl DirectPathRequest {
     Self {
       path: path.into(),
       domains: None,
-      timeout: None,
-      cancellation: None,
+      control: ExecutionControl::default(),
     }
   }
 
@@ -301,14 +300,27 @@ impl DirectPathRequest {
 
   /// Overrides the default 30-second extraction budget.
   pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
-    self.timeout = Some(timeout);
+    self.control = self.control.timeout(timeout);
     self
   }
 
   /// Lets `handle` cancel this request from another thread while it runs —
   /// see [`crate::CancellationHandle`].
   pub fn cancellation(mut self, handle: crate::CancellationHandle) -> Self {
-    self.cancellation = Some(handle);
+    self.control = self.control.cancellation(handle);
+    self
+  }
+
+  /// Selects the Windows App-Bound (v20) recovery policy for this request.
+  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
+    self.control = self.control.app_bound(policy);
+    self
+  }
+
+  /// Replaces this request's execution control **wholesale**, discarding an
+  /// earlier `timeout` / `cancellation` / `app_bound` call.
+  pub fn execution(mut self, control: ExecutionControl) -> Self {
+    self.control = control;
     self
   }
 }
@@ -345,8 +357,7 @@ pub struct ChromiumPathRequest {
   domains: Option<Vec<String>>,
   credentials: ChromiumCredentialSource,
   locked_database_policy: ChromiumLockedDatabasePolicy,
-  timeout: Option<std::time::Duration>,
-  cancellation: Option<crate::CancellationHandle>,
+  control: ExecutionControl,
 }
 
 impl ChromiumPathRequest {
@@ -357,8 +368,7 @@ impl ChromiumPathRequest {
       domains: None,
       credentials: ChromiumCredentialSource::Automatic,
       locked_database_policy: ChromiumLockedDatabasePolicy::NonDisruptive,
-      timeout: None,
-      cancellation: None,
+      control: ExecutionControl::default(),
     }
   }
 
@@ -382,45 +392,69 @@ impl ChromiumPathRequest {
 
   /// Overrides the default 30-second extraction budget.
   pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
-    self.timeout = Some(timeout);
+    self.control = self.control.timeout(timeout);
     self
   }
 
   /// Lets `handle` cancel this request from another thread while it runs —
   /// see [`crate::CancellationHandle`].
   pub fn cancellation(mut self, handle: crate::CancellationHandle) -> Self {
-    self.cancellation = Some(handle);
+    self.control = self.control.cancellation(handle);
+    self
+  }
+
+  /// Selects the Windows App-Bound (v20) recovery policy for this request.
+  pub fn app_bound(mut self, policy: AppBoundPolicy) -> Self {
+    self.control = self.control.app_bound(policy);
+    self
+  }
+
+  /// Replaces this request's execution control **wholesale**, discarding an
+  /// earlier `timeout` / `cancellation` / `app_bound` call.
+  pub fn execution(mut self, control: ExecutionControl) -> Self {
+    self.control = control;
     self
   }
 }
 
-fn boundary_runtime_for<'a>(
-  clock: &'a crate::common::deadline::SystemClock,
-  timeout: Option<std::time::Duration>,
-  cancellation: &Option<crate::CancellationHandle>,
-) -> crate::common::deadline::BoundaryRuntime<'a> {
-  crate::common::deadline::boundary_runtime(
-    clock,
-    timeout,
-    cancellation
-      .clone()
-      .map(|handle| handle.0)
-      .unwrap_or_default(),
+/// Extracts cookies after identifying the explicit source by signature/schema.
+pub fn cookies_from_path(request: DirectPathRequest) -> crate::Result<Vec<Cookie>> {
+  crate::error::map_job_result(cookies_from_path_inner(request))
+}
+
+pub(crate) fn cookies_from_path_inner(request: DirectPathRequest) -> Result<Vec<Cookie>> {
+  Ok(
+    cookies_from_path_detailed_inner(request)?
+      .into_iter()
+      .map(DetailedCookie::into_cookie)
+      .collect(),
   )
 }
 
-/// Extracts cookies after identifying the explicit source by signature/schema.
-pub fn cookies_from_path(request: DirectPathRequest) -> Result<Vec<Cookie>> {
+/// The detailed seam behind both `cookies_from_path` and `from_path`.
+///
+/// `from_path` is a snapshot job, so it must keep isolation; the flat
+/// direct-path function projects it away at its own edge rather than in the
+/// middle of the pipeline.
+pub(crate) fn cookies_from_path_detailed_inner(
+  request: DirectPathRequest,
+) -> Result<Vec<DetailedCookie>> {
   let clock = crate::common::deadline::SystemClock;
-  let runtime = boundary_runtime_for(&clock, request.timeout, &request.cancellation);
+  let runtime = crate::common::deadline::runtime_for_control(&clock, &request.control);
   let source = classify_cookie_source(&request.path, &runtime)?;
-  platform::cookies_from_path(request, source, &runtime)
+  platform::cookies_from_path_detailed(request, source, &runtime)
 }
 
 /// Extracts cookies from an explicit Chromium SQLite database.
-pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Cookie>> {
+pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> crate::Result<Vec<Cookie>> {
+  crate::error::map_job_result(chromium_cookies_from_path_inner(request))
+}
+
+pub(crate) fn chromium_cookies_from_path_inner(
+  request: ChromiumPathRequest,
+) -> Result<Vec<Cookie>> {
   let clock = crate::common::deadline::SystemClock;
-  let runtime = boundary_runtime_for(&clock, request.timeout, &request.cancellation);
+  let runtime = crate::common::deadline::runtime_for_control(&clock, &request.control);
   #[cfg(not(target_os = "windows"))]
   {
     let source = classify_cookie_source(&request.path, &runtime)?;
@@ -432,9 +466,15 @@ pub fn chromium_cookies_from_path(request: ChromiumPathRequest) -> Result<Vec<Co
 /// Detailed counterpart to [`chromium_cookies_from_path`].
 pub fn chromium_cookies_from_path_detailed(
   request: ChromiumPathRequest,
+) -> crate::Result<Vec<DetailedCookie>> {
+  crate::error::map_job_result(chromium_cookies_from_path_detailed_inner(request))
+}
+
+pub(crate) fn chromium_cookies_from_path_detailed_inner(
+  request: ChromiumPathRequest,
 ) -> Result<Vec<DetailedCookie>> {
   let clock = crate::common::deadline::SystemClock;
-  let runtime = boundary_runtime_for(&clock, request.timeout, &request.cancellation);
+  let runtime = crate::common::deadline::runtime_for_control(&clock, &request.control);
   #[cfg(not(target_os = "windows"))]
   {
     let source = classify_cookie_source(&request.path, &runtime)?;
@@ -780,6 +820,18 @@ mod tests {
       .expect("typed DirectPathError in anyhow chain")
   }
 
+  /// Reads the typed source error a public job edge returns.
+  ///
+  /// The internal `*_inner` seams still produce an `anyhow` chain, so tests
+  /// that assert a *cause* is preserved use `direct_path_error` against those;
+  /// tests that assert the public contract use this.
+  fn source_error(error: &crate::Error) -> &DirectPathError {
+    match error {
+      crate::Error::Source(source) => source,
+      other => panic!("expected Error::Source, got {other:?}"),
+    }
+  }
+
   #[test]
   fn invalid_source_is_typed_without_discarding_io_error() {
     let directory = TempDir::new().unwrap();
@@ -787,7 +839,9 @@ mod tests {
       .path()
       .join("absolute path sentinel with spaces")
       .join("missing");
-    let error = cookies_from_path(DirectPathRequest::new(&missing)).unwrap_err();
+    // The inner seam, so the assertion below can prove the `io::Error` cause
+    // survives classification. The public edge deliberately drops the chain.
+    let error = cookies_from_path_inner(DirectPathRequest::new(&missing)).unwrap_err();
     let typed = direct_path_error(&error);
     assert_eq!(typed.kind(), "invalid_source");
     assert_eq!(typed.code(), "not_a_regular_file");
@@ -809,7 +863,7 @@ mod tests {
     let path = directory.path().join("corrupt.sqlite");
     std::fs::write(&path, b"SQLite format 3\0corrupt fixture").unwrap();
 
-    let error = cookies_from_path(DirectPathRequest::new(&path)).unwrap_err();
+    let error = cookies_from_path_inner(DirectPathRequest::new(&path)).unwrap_err();
     let typed = direct_path_error(&error);
     assert_eq!(typed.kind(), "invalid_source");
     assert_eq!(typed.code(), "source_inspection_failed");
@@ -833,7 +887,7 @@ mod tests {
       .credentials(ChromiumCredentialSource::BrowserId(String::new()))
       .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
     let error = chromium_cookies_from_path(request).unwrap_err();
-    let typed = direct_path_error(&error);
+    let typed = source_error(&error);
     assert_eq!(typed.code(), "expected_chromium_sqlite");
     assert_eq!(typed.source_kind(), Some(CookieSourceKind::MozillaSqlite));
     assert_eq!(typed.target_os(), None);
@@ -853,14 +907,11 @@ mod tests {
     let (_directory, path) = mozilla_database();
     let error = cookies_from_path(DirectPathRequest::new(path).timeout(std::time::Duration::ZERO))
       .expect_err("a zero timeout must stop before reading the real database");
-    assert_eq!(
-      crate::stop_reason(&error),
-      Some(crate::StopReason::TimedOut)
-    );
+    assert_eq!(error.stop_reason(), Some(crate::StopReason::TimedOut));
     // A timeout checked during source classification still gets wrapped in a
-    // `DirectPathError` (inspection failed, for whichever reason); `fault_kind`
-    // must not read that wrapping as a caller input mistake.
-    assert_eq!(crate::fault_kind(&error), crate::FaultKind::Engine);
+    // `DirectPathError` (inspection failed, for whichever reason); the job edge
+    // must classify the stop first and not read that wrapping as caller input.
+    assert!(matches!(error, crate::Error::Stopped(_)));
   }
 
   #[test]
@@ -870,10 +921,7 @@ mod tests {
     handle.cancel();
     let error = cookies_from_path(DirectPathRequest::new(path).cancellation(handle))
       .expect_err("a pre-cancelled handle must stop before reading the real database");
-    assert_eq!(
-      crate::stop_reason(&error),
-      Some(crate::StopReason::Cancelled)
-    );
+    assert_eq!(error.stop_reason(), Some(crate::StopReason::Cancelled));
   }
 
   #[test]
@@ -959,10 +1007,7 @@ mod tests {
       .timeout(std::time::Duration::ZERO);
     let error = chromium_cookies_from_path(request)
       .expect_err("a zero timeout must stop before reading the real database");
-    assert_eq!(
-      crate::stop_reason(&error),
-      Some(crate::StopReason::TimedOut)
-    );
+    assert_eq!(error.stop_reason(), Some(crate::StopReason::TimedOut));
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -976,10 +1021,7 @@ mod tests {
       .cancellation(handle);
     let error = chromium_cookies_from_path(request)
       .expect_err("a pre-cancelled handle must stop before reading the real database");
-    assert_eq!(
-      crate::stop_reason(&error),
-      Some(crate::StopReason::Cancelled)
-    );
+    assert_eq!(error.stop_reason(), Some(crate::StopReason::Cancelled));
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1171,7 +1213,7 @@ mod tests {
       )
       .unwrap_err();
       assert_eq!(
-        direct_path_error(&error).invalid_options_reason(),
+        source_error(&error).invalid_options_reason(),
         Some(&expected)
       );
     }
@@ -1188,7 +1230,7 @@ mod tests {
       ))
       .unwrap_err();
     assert_eq!(
-      direct_path_error(&local_state_error).invalid_options_reason(),
+      source_error(&local_state_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
     );
 
@@ -1198,7 +1240,7 @@ mod tests {
     )
     .unwrap_err();
     assert_eq!(
-      direct_path_error(&detailed_local_state_error).invalid_options_reason(),
+      source_error(&detailed_local_state_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::LocalStateNotSupportedOnTarget)
     );
 
@@ -1209,7 +1251,7 @@ mod tests {
     )
     .unwrap_err();
     assert_eq!(
-      direct_path_error(&shutdown_error).invalid_options_reason(),
+      source_error(&shutdown_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::ProcessShutdownNotSupportedOnTarget)
     );
   }
@@ -1232,7 +1274,7 @@ mod tests {
     ] {
       let error = chromium_cookies_from_path(request).unwrap_err();
       assert_eq!(
-        direct_path_error(&error).invalid_options_reason(),
+        source_error(&error).invalid_options_reason(),
         Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
       );
     }
@@ -1250,7 +1292,7 @@ mod tests {
       )
       .unwrap_err();
       assert_eq!(
-        direct_path_error(&error).invalid_options_reason(),
+        source_error(&error).invalid_options_reason(),
         Some(&expected)
       );
     }
@@ -1315,7 +1357,7 @@ mod tests {
     std::fs::write(&safari_path, b"cookfixture-not-a-real-binarycookies-file").unwrap();
     let safari_error = cookies_from_path(DirectPathRequest::new(&safari_path)).unwrap_err();
     assert!(
-      safari_error.downcast_ref::<DirectPathError>().is_none(),
+      !matches!(safari_error, crate::Error::Source(_)),
       "a recognized Safari signature must reach the real parser, not stay a classification error: {safari_error:#}"
     );
   }
@@ -1470,7 +1512,7 @@ mod tests {
     std::fs::write(&path, b"cookfixture").unwrap();
     let error = cookies_from_path(DirectPathRequest::new(path)).unwrap_err();
     assert!(matches!(
-      direct_path_error(&error),
+      source_error(&error),
       DirectPathError::UnsupportedTarget {
         source: CookieSourceKind::SafariBinaryCookies,
         ..
@@ -1486,7 +1528,7 @@ mod tests {
     std::fs::write(&path, [0, 0, 0, 0, 0xef, 0xcd, 0xab, 0x89]).unwrap();
     let error = cookies_from_path(DirectPathRequest::new(path)).unwrap_err();
     assert!(matches!(
-      direct_path_error(&error),
+      source_error(&error),
       DirectPathError::UnsupportedTarget {
         source: CookieSourceKind::InternetExplorerEse,
         ..

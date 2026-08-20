@@ -9,6 +9,7 @@ pub(crate) enum ReadWarningCode {
   DecryptFailed,
   RowReadFailed,
   InvalidOctets,
+  MalformedHostIdentity,
 }
 
 impl ReadWarningCode {
@@ -17,6 +18,7 @@ impl ReadWarningCode {
       Self::DecryptFailed => "decrypt_failed",
       Self::RowReadFailed => "row_read_failed",
       Self::InvalidOctets => "invalid_octets",
+      Self::MalformedHostIdentity => "malformed_host_identity",
     }
   }
 
@@ -40,6 +42,7 @@ pub(crate) struct ReadWarningCounts {
   decrypt_failed: u64,
   row_read_failed: u64,
   invalid_octets: u64,
+  malformed_host_identity: u64,
 }
 
 impl ReadWarningCounts {
@@ -54,6 +57,7 @@ impl ReadWarningCounts {
       ReadWarningCode::DecryptFailed => &mut self.decrypt_failed,
       ReadWarningCode::RowReadFailed => &mut self.row_read_failed,
       ReadWarningCode::InvalidOctets => &mut self.invalid_octets,
+      ReadWarningCode::MalformedHostIdentity => &mut self.malformed_host_identity,
     };
     *count = count.saturating_add(occurrences);
   }
@@ -63,6 +67,10 @@ impl ReadWarningCounts {
       (ReadWarningCode::DecryptFailed, self.decrypt_failed),
       (ReadWarningCode::RowReadFailed, self.row_read_failed),
       (ReadWarningCode::InvalidOctets, self.invalid_octets),
+      (
+        ReadWarningCode::MalformedHostIdentity,
+        self.malformed_host_identity,
+      ),
     ]
     .into_iter()
     .filter(|(_, count)| *count > 0)

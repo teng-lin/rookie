@@ -249,7 +249,13 @@ pub(crate) fn gecko_report(
   profile_id: Option<&str>,
   domains: Option<&[String]>,
 ) -> Result<EngineExtract> {
-  gecko_report_with_context(context, browser_id, profile_id, domains)
+  gecko_report_with_context(
+    context,
+    browser_id,
+    profile_id,
+    domains,
+    crate::SessionPolicy::IncludeSession,
+  )
 }
 
 /// Like `gecko_report`, but calls `on_before_query` once per profile right
@@ -270,6 +276,7 @@ where
   Ok(populate_gecko_sources(
     discovery,
     domains,
+    crate::SessionPolicy::IncludeSession,
     |candidate, domains| {
       // The persistent probe is always the first candidate a profile
       // acquires, so gating on it fires the hook once per profile, before

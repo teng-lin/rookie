@@ -206,21 +206,25 @@ mod tests {
   }
 }
 
-pub(super) fn cookies_from_path(
+pub(super) fn cookies_from_path_detailed(
   request: DirectPathRequest,
   source: CookieSourceKind,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
+) -> Result<Vec<DetailedCookie>> {
   match source {
     CookieSourceKind::ChromiumSqlite => Err(invalid_options(
       InvalidDirectPathOptionsReason::MissingLocalStateFile,
     )),
     CookieSourceKind::MozillaSqlite => {
-      crate::browser::mozilla::firefox_based_with_runtime(request.path, request.domains, runtime)
+      crate::browser::mozilla::firefox_based_detailed_with_runtime(
+        request.path,
+        request.domains,
+        runtime,
+      )
     }
     CookieSourceKind::SafariBinaryCookies => Err(unsupported_target(source)),
     CookieSourceKind::InternetExplorerEse => {
-      crate::browser::internet_explorer::internet_explorer_based_with_runtime(
+      crate::browser::internet_explorer::internet_explorer_based_detailed_with_runtime(
         request.path,
         request.domains,
         false,

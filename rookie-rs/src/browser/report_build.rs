@@ -6,6 +6,7 @@
 //! [`crate::browser_report`], and [`crate::load_report`].
 
 mod dispatch;
+pub(crate) mod snapshot;
 
 use super::compatibility::{
   compatibility_decision, engine_compatibility_family, CompatibilityFamily,
@@ -44,9 +45,11 @@ use super::source::{
 #[cfg(test)]
 use super::source::{SourceCandidate, SourceStats};
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
-use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
+use crate::common::deadline::{runtime_for_control, BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::enums::Cookie;
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
+use crate::error::{EngineCause, EngineFailure};
+use crate::execution::ExecutionControl;
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 
@@ -683,10 +686,17 @@ pub(crate) fn supported_browser_descriptors() -> Result<Vec<BrowserDescriptor>> 
     .collect()
 }
 
+/// Acquires one browser's cookies.
+///
+/// `session` is an **acquire-time** filter, not a post-projection one: under
+/// `PersistentOnly` the Gecko plan never plants its session candidates, so no
+/// session store is opened. The other engines declare no separate session
+/// source, so the parameter is a no-op for them.
 fn collect_extraction(
   browser: &RegisteredBrowser,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
   runtime.check()?;
@@ -702,8 +712,13 @@ fn collect_extraction(
       chromium_browser_outcome(&browser_id, report)
     }
     "gecko" => {
-      let engine =
-        registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?;
+      let engine = registry::gecko_report_with_runtime(
+        &browser.canonical_id,
+        profile_id,
+        domains,
+        session,
+        runtime,
+      )?;
       engine_extract_outcome(&browser_id, engine)
     }
     engine => dispatch::remaining_engine_extraction(
@@ -917,13 +932,20 @@ fn increment_counter(counter: &mut u32, saturated: &mut bool) {
 
 #[cfg(test)]
 fn project_canonical_report(outcome: Outcome) -> ExtractionReport {
-  project_canonical_report_with_runtime(outcome, None)
+  project_canonical_report_with_runtime(outcome, None).0
 }
 
+/// Projects the canonical outcome and returns the DTO beside the *typed*
+/// termination it was built from.
+///
+/// `ExtractionReport::termination` is a [`TerminationCode`] -- an open string
+/// vocabulary for the wire. Callers inside the crate that must classify a stop
+/// (the flatten seam behind `extract`) take the enum returned here instead, so
+/// no internal decision is ever made by parsing a string.
 fn project_canonical_report_with_runtime(
   mut outcome: Outcome,
   runtime: Option<&BoundaryRuntime<'_>>,
-) -> ExtractionReport {
+) -> (ExtractionReport, Termination) {
   debug_assert_eq!(outcome.counters.sources_discovered, outcome.sources.len());
   // An extraction stop belongs to work that attempted to start after these
   // sources completed. Projecting the immutable completed sources must not
@@ -1131,19 +1153,22 @@ fn project_canonical_report_with_runtime(
     ResultStatus::Failed => ReportStatusCode::failed(),
     ResultStatus::NoSources => ReportStatusCode::no_sources(),
   };
-  ExtractionReport {
-    schema_version: super::report_core::EXTRACTION_REPORT_SCHEMA_VERSION,
-    status,
-    termination: match outcome.termination {
-      Termination::Completed => TerminationCode::completed(),
-      Termination::Cancelled => TerminationCode::cancelled(),
-      Termination::TimedOut => TerminationCode::timed_out(),
-      Termination::ResourceExhausted => TerminationCode::resource_exhausted(),
+  (
+    ExtractionReport {
+      schema_version: super::report_core::EXTRACTION_REPORT_SCHEMA_VERSION,
+      status,
+      termination: match outcome.termination {
+        Termination::Completed => TerminationCode::completed(),
+        Termination::Cancelled => TerminationCode::cancelled(),
+        Termination::TimedOut => TerminationCode::timed_out(),
+        Termination::ResourceExhausted => TerminationCode::resource_exhausted(),
+      },
+      summary,
+      profiles,
+      issues,
     },
-    summary,
-    profiles,
-    issues,
-  }
+    outcome.termination,
+  )
 }
 
 /// Schema-v1-compatible representation of work that stopped before the report
@@ -1326,7 +1351,7 @@ fn assemble_with_runtime(
   registered_browsers: usize,
   outcomes: Vec<BrowserDraft>,
   runtime: &BoundaryRuntime<'_>,
-) -> ExtractionReport {
+) -> (ExtractionReport, Termination) {
   let outcome = finalize_outcomes_with_runtime(registered_browsers, outcomes, Some(runtime));
   project_canonical_report_with_runtime(outcome, Some(runtime))
 }
@@ -1482,15 +1507,40 @@ pub(crate) fn browser_extraction_report(
   browser_extraction_report_with_runtime(browser_id, profile_id, domains, &runtime)
 }
 
+/// Report-shaped seam. Report jobs return a stop as an `Ok` report whose
+/// `termination` is not `completed`, so they never need the typed value.
 pub(crate) fn browser_extraction_report_with_runtime(
   browser_id: &str,
   profile_id: Option<&str>,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ExtractionReport> {
+  browser_extraction_outcome_with_runtime(browser_id, profile_id, domains, runtime)
+    .map(|(report, _termination)| report)
+}
+
+/// Flatten-shaped seam: the same work, plus the typed [`Termination`] the DTO
+/// string was projected from. `extract` and profile-scoped `read` must turn a
+/// stop into `Error::Stopped`, and they classify it from this enum rather than
+/// re-parsing `ExtractionReport::termination`.
+pub(crate) fn browser_extraction_outcome_with_runtime(
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(ExtractionReport, Termination)> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let canonical_id = &browser.canonical_id;
-  let mut outcome = match collect_extraction(&browser, profile_id, domains, runtime) {
+  // Report-shaped jobs always retain session sources: a report's whole point
+  // is to describe every source the profile declares, including the ones a
+  // flat extract would have skipped.
+  let mut outcome = match collect_extraction(
+    &browser,
+    profile_id,
+    domains,
+    crate::SessionPolicy::IncludeSession,
+    runtime,
+  ) {
     Ok(outcome) => outcome,
     Err(error) => match stop_from_error(&error) {
       Some(stop) => stopped_browser_draft(&browser, stop)?,
@@ -1538,9 +1588,12 @@ pub(crate) fn browser_extraction_report_with_runtime(
 
 /// Private `load_report` seam. Uninstalled registered browsers are summarized
 /// in counters instead of emitting a per-browser warning.
-pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<ExtractionReport> {
+pub(crate) fn load_extraction_report(
+  domains: Option<Vec<String>>,
+  control: &ExecutionControl,
+) -> Result<ExtractionReport> {
   let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
+  let runtime = runtime_for_control(&clock, control);
   load_extraction_report_with_runtime(domains, &runtime)
 }
 
@@ -1558,7 +1611,13 @@ fn load_extraction_report_with_runtime(
   // browser's collection finished first, matching the ordering contract the
   // rest of this module already relies on.
   let attempts = fan_out(&browsers, DEFAULT_FAN_OUT_WIDTH, runtime, |browser| {
-    collect_extraction(browser, None, domains.clone(), runtime)
+    collect_extraction(
+      browser,
+      None,
+      domains.clone(),
+      crate::SessionPolicy::IncludeSession,
+      runtime,
+    )
   });
   // `fan_out` silently stops claiming further browsers once the runtime
   // trips, so a shorter-than-`browsers` result set is itself evidence of a
@@ -1610,16 +1669,19 @@ fn load_extraction_report_with_runtime(
       outcomes.push(stopped_browser_draft(&browsers[claimed], stop)?);
     }
   }
-  Ok(assemble_with_runtime(browsers.len(), outcomes, runtime))
+  Ok(assemble_with_runtime(browsers.len(), outcomes, runtime).0)
 }
 
 /// Private `browser_profiles` seam. An unknown ID fails; a known browser with
 /// no detected installation returns an empty list; a browser whose every
 /// detected root failed enumeration fails rather than returning an
 /// indistinguishable empty list.
-pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<ProfileDescriptor>> {
+pub(crate) fn browser_profile_descriptors(
+  browser_id: &str,
+  control: &ExecutionControl,
+) -> Result<Vec<ProfileDescriptor>> {
   let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
+  let runtime = runtime_for_control(&clock, control);
   let browser = registry::resolve_registered_browser(browser_id)?;
   let outcome = collect_listing(&browser, &runtime)?;
   profile_descriptors_from_outcome(browser_id, outcome)
@@ -1647,9 +1709,11 @@ fn stopped_browser_draft(browser: &RegisteredBrowser, stop: BoundaryStop) -> Res
 /// Chrome-specific listing whose first entry follows the advisory `Local
 /// State` activity hints. The generic `browser_profiles("chrome")` path keeps
 /// its frozen default-first order.
-pub(crate) fn chrome_profile_descriptors() -> Result<Vec<ProfileDescriptor>> {
+pub(crate) fn chrome_profile_descriptors(
+  control: &ExecutionControl,
+) -> Result<Vec<ProfileDescriptor>> {
   let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
+  let runtime = runtime_for_control(&clock, control);
   let browser_id = BrowserId::known("chrome");
   registry::chrome_profiles_with_runtime(&runtime)?
     .into_iter()
@@ -1736,17 +1800,29 @@ fn profile_descriptors_from_outcome(
       .collect::<Vec<_>>()
   };
   if outcome.discovery_failed {
-    bail!(
-      "every detected {browser_id} installation failed profile enumeration: {}",
-      errors(&outcome.issues, false).join("; ")
-    )
+    return Err(
+      EngineFailure::new(
+        EngineCause::DiscoveryFailed,
+        format!(
+          "every detected {browser_id} installation failed profile enumeration: {}",
+          errors(&outcome.issues, false).join("; ")
+        ),
+      )
+      .into(),
+    );
   }
   let lost_profiles = errors(&outcome.issues, true);
   if outcome.profiles.is_empty() && !lost_profiles.is_empty() {
-    bail!(
-      "every discovered {browser_id} profile failed discovery: {}",
-      lost_profiles.join("; ")
-    )
+    return Err(
+      EngineFailure::new(
+        EngineCause::DiscoveryFailed,
+        format!(
+          "every discovered {browser_id} profile failed discovery: {}",
+          lost_profiles.join("; ")
+        ),
+      )
+      .into(),
+    );
   }
   // Every engine already builds the wire `ProfileDescriptor` (sources sorted)
   // as it lists, so there is nothing left to adapt here.

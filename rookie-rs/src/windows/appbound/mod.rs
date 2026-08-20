@@ -14,6 +14,7 @@ use chacha20poly1305::ChaCha20Poly1305;
 use zeroize::Zeroizing;
 
 use crate::common::secret::SecretBytes;
+use crate::execution::AppBoundPolicy;
 
 pub mod browser_path;
 pub mod constants;
@@ -242,18 +243,83 @@ fn get_keys_elevated_fallback(
   Ok(keys)
 }
 
-/// Retrieves candidate v20 master keys, attempting non-elevated COM injection first,
-/// with fallback to elevated DPAPI impersonation if available.
+/// Which recovery attempts one job is allowed to make.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Attempts {
+  injection: bool,
+  elevated: bool,
+}
+
+impl Attempts {
+  fn for_policy(policy: AppBoundPolicy) -> Self {
+    match policy {
+      AppBoundPolicy::Disabled => Self {
+        injection: false,
+        elevated: false,
+      },
+      AppBoundPolicy::InjectionOnly => Self {
+        injection: true,
+        elevated: false,
+      },
+      AppBoundPolicy::AllowElevatedFallback => Self {
+        injection: true,
+        elevated: true,
+      },
+      // `AppBoundPolicy` is `#[non_exhaustive]`. A policy this build does not
+      // know about must not be read as permission to do more.
+      _ => Self {
+        injection: false,
+        elevated: false,
+      },
+    }
+  }
+}
+
+/// Test-only narrowing of the request policy.
+///
+/// `ROOKIE_E2E_APPBOUND_MODE` used to steer production `get_keys` directly,
+/// which is process-global steering of a per-job decision -- exactly what
+/// [`AppBoundPolicy`] replaces. It is now compiled only into unit-test builds
+/// and behind the off-by-default `e2e-appbound-steering` feature, so a
+/// published binary cannot be steered by the environment at all.
+///
+/// Where it *is* compiled in, it can only **clear** an attempt the policy
+/// already permits. It can never re-enable injection under a policy that
+/// forbids it, and it can never override `Disabled`, which does not reach this
+/// function. The Windows canary still needs it because "attempt the elevated
+/// fallback without first attempting injection" is deliberately not a public
+/// policy value.
+#[cfg(any(test, feature = "e2e-appbound-steering"))]
+fn narrow_for_tests(mut attempts: Attempts) -> Attempts {
+  match std::env::var("ROOKIE_E2E_APPBOUND_MODE").as_deref() {
+    Ok("injection_only") => attempts.elevated = false,
+    Ok("elevated_only") => attempts.injection = false,
+    _ => {}
+  }
+  attempts
+}
+
+#[cfg(not(any(test, feature = "e2e-appbound-steering")))]
+fn narrow_for_tests(attempts: Attempts) -> Attempts {
+  attempts
+}
+
+/// Retrieves candidate v20 master keys under the request's
+/// [`AppBoundPolicy`], attempting non-elevated COM injection first and, when
+/// the policy allows it, falling back to elevated DPAPI impersonation.
 pub fn get_keys(
   key64: &str,
   host: &crate::browser::appbound_host::AppBoundHost,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Zeroizing<Vec<u8>>>> {
   runtime.check()?;
-  let mode = std::env::var("ROOKIE_E2E_APPBOUND_MODE").unwrap_or_default();
+  let attempts = narrow_for_tests(Attempts::for_policy(runtime.app_bound));
+  // `Disabled` never reaches here: the v20 lookup short-circuits before the
+  // provider is called, so a job that opted out performs no native work at all.
+  debug_assert!(attempts.injection || attempts.elevated);
   let mut errors: Vec<String> = Vec::new();
 
-  if mode != "elevated_only" {
+  if attempts.injection {
     match retrieve_via_injection(key64, host, runtime) {
       Ok(key) => return Ok(vec![key]),
       Err(e) => {
@@ -266,7 +332,7 @@ pub fn get_keys(
 
   runtime.check()?;
 
-  if mode != "injection_only" {
+  if attempts.elevated {
     match get_keys_elevated_fallback(key64, runtime) {
       Ok(keys) if !keys.is_empty() => return Ok(keys),
       Ok(_) => {}
@@ -490,7 +556,9 @@ mod tests {
       original,
     };
 
-    let runtime = test_runtime();
+    // The request policy allows the elevated fallback; the test-only env var
+    // narrows it away. Narrowing is the only direction it can move.
+    let runtime = test_runtime().with_app_bound(AppBoundPolicy::AllowElevatedFallback);
     let host = crate::browser::appbound_host::AppBoundHost::Browser("chrome".to_string());
     let error = get_keys("YXBwYm91bmQ=", &host, &runtime).expect_err("should fail");
     let msg = error.to_string();
@@ -513,7 +581,8 @@ mod tests {
       &clock,
       Deadline::after(&clock, std::time::Duration::from_secs(10)),
       stop,
-    );
+    )
+    .with_app_bound(AppBoundPolicy::InjectionOnly);
     let host = crate::browser::appbound_host::AppBoundHost::Browser("chrome".to_string());
     let error = get_keys("YXBwYm91bmQ=", &host, &runtime).expect_err("cancelled runtime must fail");
     assert!(error.to_string().contains("operation cancelled"));

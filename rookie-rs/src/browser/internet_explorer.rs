@@ -63,6 +63,35 @@ pub(crate) fn internet_explorer_based_with_runtime(
   )
 }
 
+/// Detailed twin of [`internet_explorer_based_with_runtime`].
+///
+/// The WebCache ESE store has no partition or container columns, so every
+/// record projects an empty [`crate::enums::CookieContext`].
+pub(crate) fn internet_explorer_based_detailed_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<crate::enums::DetailedCookie>> {
+  let source = internet_explorer_outcome_with_runtime(
+    direct_path_candidate(&db_path),
+    domains,
+    force_kill,
+    runtime,
+  )?;
+  crate::browser::legacy::project_canonical_detailed_outcome_with_runtime(
+    "internet_explorer",
+    crate::browser::report_build::finalize_singleton_source(
+      "internet_explorer",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      vec![source],
+      None,
+      Some(runtime),
+    )?,
+    runtime,
+  )
+}
+
 /// Record accounting while the WebCache walk is in progress.
 ///
 /// File-private scratch: it is copied onto [`SourceStats`] before the walk

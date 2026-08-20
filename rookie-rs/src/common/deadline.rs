@@ -165,11 +165,28 @@ pub(crate) enum DeadlineEnforcement {
   Enforceable,
 }
 
+/// The per-job execution control every boundary already receives.
+///
+/// `app_bound` rides here rather than through a parallel parameter because it
+/// is the same kind of value as the deadline and the stop token: created once
+/// at the job boundary, immutable for the job's lifetime, and needed at a leaf
+/// (the Windows v20 key lookup) many layers below the caller. Threading it
+/// separately would duplicate this plumbing for one field, and storing it in a
+/// process global is exactly the steering this design removes.
+///
+/// The constructors here default `app_bound` to
+/// [`AllowElevatedFallback`](crate::AppBoundPolicy::AllowElevatedFallback),
+/// **not** to the public default. They back the deprecated v0.5.9 bridge,
+/// whose App-Bound capability shipped in 0.5.8 and must keep working through
+/// 0.6.x. Only [`runtime_for_control`] carries the request's own policy, whose
+/// default is `Disabled` -- so opting out is a property of the new job
+/// surface, not a silent capability loss on the old one.
 #[derive(Clone)]
 pub(crate) struct BoundaryRuntime<'a> {
   pub(crate) clock: &'a dyn Clock,
   pub(crate) deadline: Deadline,
   pub(crate) stop: CancellationToken,
+  pub(crate) app_bound: crate::execution::AppBoundPolicy,
 }
 
 impl<'a> BoundaryRuntime<'a> {
@@ -178,6 +195,7 @@ impl<'a> BoundaryRuntime<'a> {
       clock,
       deadline,
       stop: CancellationToken::default(),
+      app_bound: crate::execution::AppBoundPolicy::AllowElevatedFallback,
     }
   }
 
@@ -190,6 +208,7 @@ impl<'a> BoundaryRuntime<'a> {
       clock,
       deadline,
       stop,
+      app_bound: crate::execution::AppBoundPolicy::AllowElevatedFallback,
     }
   }
 
@@ -197,22 +216,36 @@ impl<'a> BoundaryRuntime<'a> {
     Self::new(clock, Deadline::after(clock, DEFAULT_EXTRACTION_BUDGET))
   }
 
+  /// Selects the App-Bound recovery policy for this job. Callers build the
+  /// runtime and then set the policy once, at the boundary.
+  pub(crate) fn with_app_bound(mut self, policy: crate::execution::AppBoundPolicy) -> Self {
+    self.app_bound = policy;
+    self
+  }
+
   pub(crate) fn check(&self) -> Result<(), BoundaryStop> {
     checkpoint(self.clock, self.deadline, &self.stop)
   }
 }
 
-/// Builds the runtime backing a public request's `.timeout(..)` /
-/// cancellation handle: `timeout` overrides [`DEFAULT_EXTRACTION_BUDGET`]
-/// when given, and `stop` is the caller-supplied (or default, never
-/// cancelled) control token.
-pub(crate) fn boundary_runtime(
-  clock: &dyn Clock,
-  timeout: Option<Duration>,
-  stop: CancellationToken,
-) -> BoundaryRuntime<'_> {
-  let deadline = Deadline::after(clock, timeout.unwrap_or(DEFAULT_EXTRACTION_BUDGET));
-  BoundaryRuntime::with_stop(clock, deadline, stop)
+/// Builds the runtime for one public job from its [`ExecutionControl`].
+///
+/// This is the single place a public request's execution knobs become the
+/// internal boundary value, so a job cannot acquire a timeout, a cancellation
+/// token, and an App-Bound policy from three different places.
+///
+/// [`ExecutionControl`]: crate::execution::ExecutionControl
+pub(crate) fn runtime_for_control<'a>(
+  clock: &'a dyn Clock,
+  control: &crate::execution::ExecutionControl,
+) -> BoundaryRuntime<'a> {
+  let deadline = Deadline::after(clock, control.timeout.unwrap_or(DEFAULT_EXTRACTION_BUDGET));
+  let stop = control
+    .cancellation
+    .as_ref()
+    .map(|handle| handle.0.clone())
+    .unwrap_or_default();
+  BoundaryRuntime::with_stop(clock, deadline, stop).with_app_bound(control.app_bound)
 }
 
 #[cfg(test)]
