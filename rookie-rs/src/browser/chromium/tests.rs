@@ -4,6 +4,7 @@ use crate::browser::chromium_crypto::LegacySharedKeyProvider;
 use crate::browser::chromium_database_acquisition::{WindowsDatabaseLocked, WindowsLockedFile};
 #[cfg(target_os = "windows")]
 use crate::browser::chromium_test_support::encrypt_windows_gcm_cookie;
+#[cfg(unix)]
 use crate::browser::chromium_test_support::host_bound_plaintext;
 use crate::browser::cookie_record::{Observation, RawValue};
 use std::cell::Cell;
