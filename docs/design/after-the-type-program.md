@@ -1562,6 +1562,28 @@ workspace crate split (`report_build` is called from `lib.rs` above and
 fixing first — a `#[cfg(rookie_internals)]` module, the `tokio_unstable`
 pattern, would get most of the benefit if ever wanted).
 
+**Measured outcome.** No production line was moved in PR 1, and no golden,
+DTO, `browser_registry.json`, or `public-api` byte changed in any of the three.
+
+| File | Before | After |
+| --- | ---: | ---: |
+| `mozilla.rs` | 5219 | 1134 (+ 798 session, 451 persistent, 289 profiles) |
+| `registry/chromium.rs` | 4767 | 1468 |
+| `chromium.rs` | 4189 | 1268 |
+| `report_build.rs` | 3964 | 1697 |
+| `registry.rs` | 3387 | 1481 |
+| `sqlite.rs` | 2129 | 1023 |
+| `lib.rs` | 1868 | 739 (+ 528 `compatibility_dispatch/named.rs`) |
+
+Test count went 835 → 837: the two additions cover `load`'s stop branches,
+which nothing reached before. Four deliberate breaks were run rather than the
+one Decision 19 requires, because two of the moves were behaviour-adjacent:
+removing `load`'s `attempted < names.len()` inference, neutering its
+total-failure condition, deleting the session store's size guard, and making
+the relocated aggregator treat every failure as uninstalled. Each went red on
+the expected tests; the second and fourth would have stayed green under the old
+`load_from_browsers` twin.
+
 **Deliberately left undone:** moving misfiled tests to the module they pin
 (chromium's unseal/crypto tests to `unseal.rs`, which has no `mod tests` at
 all; registry's Safari/IE tests to their children). The sweep removed the size

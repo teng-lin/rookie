@@ -6,13 +6,13 @@ use super::LoadFn;
 use crate::{Cookie, Result};
 
 pub(super) fn extend_legacy_load_browsers(browser_types: &mut Vec<(&'static str, LoadFn)>) {
-  browser_types.push(("chrome", crate::chrome));
-  browser_types.push(("opera_gx", crate::opera_gx));
-  browser_types.push(("safari", crate::safari));
+  browser_types.push(("chrome", super::named::chrome));
+  browser_types.push(("opera_gx", super::named::opera_gx));
+  browser_types.push(("safari", super::named::safari));
 }
 
 pub(super) fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-  crate::named_browser("opera_gx", domains)
+  super::named::named_browser("opera_gx", domains)
 }
 
 pub(super) fn chromium_from_path(

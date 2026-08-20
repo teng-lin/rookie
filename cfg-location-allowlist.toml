@@ -97,7 +97,13 @@ paths = [
 "rookie-rs/src/browser/registry.rs" = { max_cfg = 8, reason = "original #218 hot spot at 27; now shared-core only after the chromium/gecko split (PR #251) moved its engine-specific cfg out, plus 2 new cfg-gated re-export lines needed so chromium.rs's platform-gated symbols aren't unconditionally re-exported" }
 "rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 9, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target; ratcheted 20 -> 9 when the inline test module moved to browser/registry/chromium/tests.rs and took 11 cfg with it" }
 "rookie-rs/src/browser/registry/gecko.rs" = { max_cfg = 1, reason = "Gecko-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
-"rookie-rs/src/lib.rs" = { max_cfg = 14, reason = "original #218 hot spot, not a rollout target; ratcheted 27 -> 14 when the inline test module moved to src/tests.rs and took 13 cfg with it" }
+"rookie-rs/src/lib.rs" = { max_cfg = 11, reason = "original #218 hot spot, not a rollout target; ratcheted 27 -> 14 when the inline test module moved to src/tests.rs, then 14 -> 11 when the deprecated named-browser shims moved to compatibility_dispatch/named.rs" }
+
+# Not a `leaves` entry: its siblings in this directory are platform-selection
+# files, but this one gates individual deprecated shims by target, which is the
+# scattered pattern `grandfathered` ceilings exist to ratchet. lib.rs dropped by
+# the same 3 in the same PR.
+"rookie-rs/src/compatibility_dispatch/named.rs" = { max_cfg = 6, reason = "deprecated named-browser shims moved out of lib.rs; per-item target gating, not module selection" }
 
 # mod.rs files whose cfg is only *partly* the module-selection gate
 # pattern the `leaves` tier is meant for: reviewed and found to have

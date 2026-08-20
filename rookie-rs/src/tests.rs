@@ -1,5 +1,6 @@
 use super::*;
 use crate::common::enums::SAME_SITE_UNSPECIFIED;
+use crate::compatibility_dispatch::named::{aggregate_load_failure, aggregate_load_results};
 
 fn not_installed(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   Err(browser::legacy::BrowserNotInstalled::CookieDatabase.into())
