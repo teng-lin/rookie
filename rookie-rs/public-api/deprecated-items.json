@@ -266,6 +266,13 @@
       "note": "match Error; FaultKind is a two-way FFI split",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
+    },
+    {
+      "path": "rookie_cookies::browser",
+      "since": "0.6.0",
+      "note": "use extract(ExtractRequest::browser(id).domains(..))",
+      "platforms": ["linux", "macos", "windows"],
+      "feature_sets": ["all-features", "no-default-features"]
     }
   ]
 }

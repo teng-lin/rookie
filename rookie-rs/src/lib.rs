@@ -67,8 +67,13 @@ mod target;
 /// (which still return [`anyhow::Result`]) can be named without a direct
 /// dependency.
 ///
-/// Deprecated in 0.6.0 and removed in 0.7.0. New code should use
-/// [`Error`] and [`Result`].
+/// This is also the escape hatch for the one deliberate stable break:
+/// `rookie_cookies::Result` used to be `anyhow::Result`, and
+/// `rookie_cookies::anyhow::Result` still resolves.
+#[deprecated(
+  since = "0.6.0",
+  note = "use rookie_cookies::Error and rookie_cookies::Result"
+)]
 pub use anyhow;
 use enums::Cookie;
 pub use error::{EngineError, Error};
@@ -726,6 +731,10 @@ pub(crate) fn flatten_selected_report_cookies(
 /// let cookies = rookie_cookies::browser("chrome", None)?;
 /// # Ok::<(), rookie_cookies::anyhow::Error>(())
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use extract(ExtractRequest::browser(id).domains(..))"
+)]
 pub fn browser(id: &str, domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
   extract_inner(
     ExtractRequest::browser(id)

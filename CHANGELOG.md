@@ -190,6 +190,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The free `stop_reason` / `fault_kind` functions and `Error::fault_kind`.
   `FaultKind` is a two-way FFI split that collapses three of `Error`'s four
   variants; match on `Error`, or compare `Error::code()`.
+- Rust `browser(id, domains)`, superseded by
+  `extract(ExtractRequest::browser(id).domains(..))`. It was missing a
+  `#[deprecated]` and is scheduled for deletion in 0.7.0.
+- The crate-root `pub use anyhow` re-export, superseded by
+  `rookie_cookies::Error` / `rookie_cookies::Result`. **The compiler cannot
+  warn on this one:** `#[deprecated]` on a `pub use` of an external crate root
+  does not fire for `rookie_cookies::anyhow::Result<T>`. The attribute is
+  present so rustdoc shows the banner, and this entry is the notice. It is
+  also, deliberately, the escape hatch for the `Result` alias break above, so
+  it stays working for the whole 0.6.x line.
 
 ### Fixed
 

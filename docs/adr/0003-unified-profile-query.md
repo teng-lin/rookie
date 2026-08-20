@@ -23,6 +23,10 @@ Those rules produced three disagreeing selectors (`browser_report` opaque-id-onl
 
 `chrome_profile` / `firefox_profile` become shims onto this resolver. `firefox_profiles()` remains persistent-only `MozillaProfile` (ADR 0002). `extract` without a profile remains `LegacyFirstProfile`. Flattening every profile into a bare cookie list remains forbidden.
 
+### Amendment (0.6.0): scope is a separate type
+
+The query vocabulary above is unchanged. What changed is *who may decline to name a profile*: `ProfileSelection` (snapshot and flat extract) has `LegacyFirst` and `Query(String)` and no "every profile" arm, while `ReportScope` adds `AllProfiles`. Before 0.6.0 one request value carried both meanings, and which one applied depended on the function it was passed to — `extract` read the first legacy-eligible profile and `extract_report` read every profile from the same value.
+
 ## Consequences
 
 Callers who passed a non-id string to `browser_report` and depended on a request error must stop; that path can now succeed. Downstream that already passed opaque ids needs no change. Implementers treat this file, not ADR 0001 §3/§9 as originally written, as the selector/CLI contract.
