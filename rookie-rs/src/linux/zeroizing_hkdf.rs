@@ -1,3 +1,6 @@
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 //! The Secret Service DH protocol uses the first 16 bytes of HKDF-SHA256 with
 //! empty salt and info. RustCrypto's `hkdf`/`hmac` 0.12 contexts do not
 //! implement `Zeroize`, so this deliberately small implementation keeps every
