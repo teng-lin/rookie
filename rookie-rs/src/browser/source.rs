@@ -35,6 +35,50 @@ pub(crate) struct SourceIdentity {
   pub(crate) precedence: u16,
 }
 
+/// How a candidate is to be acquired: the rule the executor follows when it
+/// reaches this entry in a profile's plan.
+///
+/// This is the one place the four engines genuinely disagree, and the whole
+/// point of the type is that the disagreement is now a *value on the
+/// candidate* rather than a control-flow fork in whichever file happened to
+/// own that engine's walk. Deciding it at plant time also keeps the divergent
+/// listing bytes each engine has always emitted: Chromium omits a `!exists`
+/// entry from the plan altogether, while Gecko plants its persistent entry
+/// with `Probe` — same mechanism, different plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcquisitionPolicy {
+  /// Acquire exactly this candidate and keep whatever came back. Chromium,
+  /// Safari, and Internet Explorer plant nothing else: their listing already
+  /// decided the entry is real, so the read is unconditional and its outcome
+  /// is the answer.
+  Fixed,
+  /// Acquire this candidate even if discovery planted nothing for it, and keep
+  /// the resulting source only if the path exists — either because discovery
+  /// vouched for it (`exists`) or because it is on disk at the moment of the
+  /// recheck. Gecko's persistent `cookies.sqlite`.
+  ///
+  /// Both halves are load-bearing. Attempting regardless is how a database
+  /// created between discovery and query is still read; rechecking existence
+  /// *after* the read rather than inferring it from the read's success is how a
+  /// database that appeared and was corrupt or locked is reported instead of
+  /// silenced, and how one deleted since discovery still reports its failure
+  /// instead of vanishing. Discovery's snapshot goes stale in both directions.
+  ///
+  /// The variant is unconstructed on no target — Gecko compiles everywhere —
+  /// so it needs no platform allow.
+  Probe,
+  /// One entry of an ordered alternation: the executor acquires the run of
+  /// `FirstValid` candidates in plan order and stops at the first success.
+  /// Gecko's session stores, where `SESSION_CANDIDATES` order is frozen
+  /// (ADR 0001 §8).
+  ///
+  /// A contiguous run in the plan is one group. The rule itself is not
+  /// reimplemented here: the executor hands the run to
+  /// `mozilla::select_session_sources`, which stays the single definition of
+  /// first-valid shared with the direct-path walk.
+  FirstValid,
+}
+
 /// Inventory: a cookie source that may exist on disk.
 ///
 /// Must not carry cookies, records, stats, or issues. It is what listing
@@ -54,6 +98,10 @@ pub(crate) struct SourceCandidate {
   /// Listing metadata, frozen per engine. Not "how the cookie DB was opened" --
   /// that is [`Source::acquisition`], and only exists after a query returns.
   pub(crate) acquisition: SourceAcquisition,
+  /// The acquisition rule for this entry, decided by whoever planted it. A
+  /// listing decision like `selected` and `exists`, not a result: it says how
+  /// the source will be read, never anything about the read.
+  pub(crate) policy: AcquisitionPolicy,
 }
 
 impl SourceCandidate {

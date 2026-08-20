@@ -10,6 +10,12 @@
 #[cfg(test)]
 use super::report_core::sort_cookies;
 use super::report_core::{InstallationId, ProfileId};
+// `acquire_by_policy` interprets `FirstValid` by handing the run to the one
+// first-valid rule, which lives in the Mozilla engine and is shared with its
+// direct-path walk. The rule must not fork, so the frame borrows it rather
+// than restating it; the outcome type comes along until §14b unifies it with
+// the `Result<Source>` the other engines answer with.
+use super::mozilla;
 pub(crate) use super::source::{Source, SourceCandidate, SourceFailureStage, SourceIssue};
 use crate::common::diagnostic::REDACTED_PATH;
 use anyhow::{anyhow, bail, Context, Result};
@@ -831,7 +837,7 @@ pub(crate) const PERSISTENT_SOURCE_PRECEDENCE: u16 = 10;
 // The source-work leaf vocabulary lives in `browser/source.rs`. Re-exported
 // here so every engine names the same `SourceAcquisition` / `SourceFailureStage`
 // through `registry`, one definition with no divergence.
-pub(crate) use super::source::SourceAcquisition;
+pub(crate) use super::source::{AcquisitionPolicy, SourceAcquisition};
 
 /// Identity fields shared by the Gecko/Safari/IE listing and extract profile
 /// types.
@@ -1228,9 +1234,98 @@ where
   extract
 }
 
+/// The policy interpreter: acquires one profile's plan in plan order, doing
+/// what each entry's [`AcquisitionPolicy`] says.
+///
+/// This is the per-profile body that used to be Gecko's bespoke walk. Nothing
+/// in it is Gecko-specific any more -- the probe and the alternation are read
+/// off the candidates rather than known by the caller -- so the engine
+/// difference is the plan the caller planted, not the code that runs it.
+///
+/// * [`AcquisitionPolicy::Fixed`] -- query and commit whatever came back.
+/// * [`AcquisitionPolicy::Probe`] -- query, then commit only if the candidate's
+///   listing vouched for the path (`exists`) or `exists_now` still finds it.
+///   The recheck happens *after* the query and is spent only when listing did
+///   not already vouch, so a store that appeared since discovery is committed
+///   even when reading it then failed, and one deleted since discovery still
+///   reports its failure rather than vanishing.
+/// * [`AcquisitionPolicy::FirstValid`] -- the maximal contiguous run starting
+///   here is one alternation, handed to [`mozilla::select_session_sources`] as
+///   a **lazy** iterator. That laziness is the guarantee: the rule returns at
+///   the first success without pulling another outcome, so the candidates after
+///   it are never acquired (ADR 0001 §8). Collecting the run's outcomes first
+///   would satisfy every content assertion and silently read them all.
+///
+/// A boundary stop from any entry ends the walk immediately and is returned
+/// with whatever was committed before it; entries after the stop are not
+/// acquired.
+fn acquire_by_policy<Q, E>(
+  plan: &[SourceCandidate],
+  domains: Option<&[String]>,
+  mut query: Q,
+  mut exists_now: E,
+) -> (Vec<Source>, Option<crate::common::deadline::BoundaryStop>)
+where
+  Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
+  E: FnMut(&Path) -> bool,
+{
+  let mut sources = Vec::new();
+  let mut index = 0;
+  while let Some(candidate) = plan.get(index) {
+    match candidate.policy {
+      AcquisitionPolicy::FirstValid => {
+        let group = index
+          + plan[index..]
+            .iter()
+            .take_while(|entry| entry.policy == AcquisitionPolicy::FirstValid)
+            .count();
+        // `map` over a slice iterator, never a collected `Vec`:
+        // `select_session_sources` returns on the first selected source without
+        // pulling again, so the alternatives behind it are never queried.
+        let stop = mozilla::select_session_sources(
+          plan[index..group].iter().map(|entry| query(entry, domains)),
+          &mut sources,
+        );
+        if stop.is_some() {
+          return (sources, stop);
+        }
+        index = group;
+      }
+      AcquisitionPolicy::Fixed | AcquisitionPolicy::Probe => {
+        index += 1;
+        match query(candidate, domains) {
+          mozilla::MozillaCandidateOutcome::Source(source) => {
+            // `Fixed` commits unconditionally. `Probe` asked for the read
+            // whether or not the path was planted, so it owes the existence
+            // question an answer -- taken from listing when listing vouched,
+            // and from the filesystem only otherwise.
+            if candidate.policy == AcquisitionPolicy::Fixed
+              || candidate.exists
+              || exists_now(&candidate.path)
+            {
+              sources.push(source);
+            }
+          }
+          // Absence is normal and silent: a candidate that is not there is not
+          // an outcome, so there is nothing to commit.
+          mozilla::MozillaCandidateOutcome::Missing => {}
+          mozilla::MozillaCandidateOutcome::Stop(stop) => return (sources, Some(stop)),
+        }
+      }
+    }
+  }
+  (sources, None)
+}
+
 /// The 1:1 per-profile body Safari and Internet Explorer share: acquire every
 /// candidate in turn, and record a failed query on the candidate's own
 /// placeholder rather than losing it.
+///
+/// This is [`AcquisitionPolicy::Fixed`] over a whole plan, spelled separately
+/// because these two engines answer with `Result<Source>` rather than a
+/// [`mozilla::MozillaCandidateOutcome`]; folding them into
+/// [`acquire_by_policy`] is the outcome-type unification of §14b, not this
+/// change. Their candidates still carry `Fixed`, so the plan says what they do.
 ///
 /// `fill_failure` is the only difference left between those two engines -- how
 /// a non-boundary `Err` is written onto the placeholder. The deadline is the
@@ -3209,5 +3304,84 @@ mod tests {
       .discovery_issues
       .iter()
       .any(|issue| { issue.code == "installation_metadata_failed" && issue.path == denied }));
+  }
+  /// A plan entry for the interpreter tests. `policy` is the only thing under
+  /// test, so everything else is a fixed persistent-shaped value.
+  fn policy_candidate(path: &str, policy: AcquisitionPolicy) -> SourceCandidate {
+    SourceCandidate {
+      path: PathBuf::from(path),
+      role: crate::browser::report_core::CookieSourceRoleId::persistent(),
+      format: crate::browser::report_core::CookieSourceFormatId::known("mozilla_sqlite"),
+      precedence: PERSISTENT_SOURCE_PRECEDENCE,
+      exists: false,
+      selected: false,
+      acquisition: SourceAcquisition::NotAttempted,
+      policy,
+    }
+  }
+
+  fn acquired(candidate: &SourceCandidate, selected: bool) -> mozilla::MozillaCandidateOutcome {
+    let mut source = Source::new(candidate.identity(), selected, candidate.acquisition);
+    source.acquisition_attempts = 1;
+    mozilla::MozillaCandidateOutcome::Source(source)
+  }
+
+  /// `Fixed` is unconditional: the listing already decided the entry is real,
+  /// so the executor must not spend the existence recheck that `Probe` needs.
+  /// A `Fixed` entry that inherited the probe gate would silently drop every
+  /// Safari/IE/Chromium source whose file moved after listing.
+  #[test]
+  fn acquire_by_policy_keeps_a_fixed_source_without_rechecking_the_filesystem() {
+    let plan = [policy_candidate("/gone/Cookies", AcquisitionPolicy::Fixed)];
+    let mut rechecks = 0;
+    let (sources, stop) = acquire_by_policy(
+      &plan,
+      None,
+      |candidate, _| acquired(candidate, true),
+      |_| {
+        rechecks += 1;
+        false
+      },
+    );
+
+    assert!(stop.is_none());
+    assert_eq!(sources.len(), 1, "a fixed source is kept unconditionally");
+    assert_eq!(rechecks, 0, "only a probe spends the existence recheck");
+  }
+
+  /// A `FirstValid` run is one alternation and ends where the run ends: the
+  /// entries after the first success inside the run are never acquired, and the
+  /// next entry outside it still is. Without this, an executor that treated
+  /// "first valid" as "stop the profile" would look correct for Gecko -- whose
+  /// alternation happens to be last -- and be wrong the moment a plan puts
+  /// anything after it.
+  #[test]
+  fn acquire_by_policy_resumes_after_a_first_valid_group() {
+    let plan = [
+      policy_candidate("/profile/recovery.jsonlz4", AcquisitionPolicy::FirstValid),
+      policy_candidate("/profile/recovery.baklz4", AcquisitionPolicy::FirstValid),
+      policy_candidate("/profile/after", AcquisitionPolicy::Fixed),
+    ];
+    let mut read = Vec::new();
+    let (sources, stop) = acquire_by_policy(
+      &plan,
+      None,
+      |candidate, _| {
+        read.push(candidate.path.clone());
+        acquired(candidate, candidate.policy == AcquisitionPolicy::FirstValid)
+      },
+      |_| true,
+    );
+
+    assert!(stop.is_none());
+    assert_eq!(
+      read,
+      [
+        PathBuf::from("/profile/recovery.jsonlz4"),
+        PathBuf::from("/profile/after"),
+      ],
+      "the losing alternative is skipped; the entry after the group is not"
+    );
+    assert_eq!(sources.len(), 2);
   }
 }

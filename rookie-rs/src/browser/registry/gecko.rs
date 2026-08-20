@@ -6,13 +6,13 @@ use super::super::source::SourceCandidate;
 #[cfg(test)]
 use super::DiscoveryCounters;
 use super::{
-  browser_definition, canonical_installation_root, embedded_registry, installation_id,
-  installation_root_is_directory, normalized_path_bytes, populate_engine_sources, profile_id,
-  push_bounded_discovery_issue, retain_completed_engine_extract, select_listing_profiles,
-  sort_discovered_profiles, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
-  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
-  ExtractCompletion, InstallationRoot, LegacyRank, ProfileLocator, ProfileSelection,
-  SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  acquire_by_policy, browser_definition, canonical_installation_root, embedded_registry,
+  installation_id, installation_root_is_directory, normalized_path_bytes, populate_engine_sources,
+  profile_id, push_bounded_discovery_issue, retain_completed_engine_extract,
+  select_listing_profiles, sort_discovered_profiles, AcquisitionPolicy, BrowserEngine,
+  DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy,
+  EngineExtract, EngineListing, EngineProfileIdentity, ExtractCompletion, InstallationRoot,
+  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{sort_cookies, test_seams, PlatformId, MAX_DISCOVERY_ISSUE_SAMPLES};
@@ -40,6 +40,7 @@ fn source_candidate(
   role: CookieSourceRoleId,
   format: CookieSourceFormatId,
   precedence: u16,
+  policy: AcquisitionPolicy,
 ) -> SourceCandidate {
   SourceCandidate {
     path,
@@ -52,6 +53,7 @@ fn source_candidate(
     exists: true,
     selected: false,
     acquisition: SourceAcquisition::NotAttempted,
+    policy,
   }
 }
 
@@ -71,6 +73,10 @@ pub(super) fn gecko_profiles_with_context<F: DiscoveryFs>(
         CookieSourceRoleId::persistent(),
         CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
         PERSISTENT_SOURCE_PRECEDENCE,
+        // Planted or not, the persistent store is probed: this plant only
+        // decides that discovery vouched for it (`exists: true`), which is one
+        // of the two ways a probed source survives.
+        AcquisitionPolicy::Probe,
       ));
     }
     for (index, (relative, format)) in mozilla::SESSION_CANDIDATES.into_iter().enumerate() {
@@ -81,6 +87,10 @@ pub(super) fn gecko_profiles_with_context<F: DiscoveryFs>(
           CookieSourceRoleId::session(),
           CookieSourceFormatId::known(format.format_id()),
           mozilla::session_candidate_precedence(index),
+          // The session stores are one alternation in frozen
+          // `SESSION_CANDIDATES` order, so they are planted contiguously and in
+          // that order: the run *is* the group.
+          AcquisitionPolicy::FirstValid,
         ));
       }
     }
@@ -418,7 +428,8 @@ where
 /// The persistent probe for a profile whose listing planted no persistent
 /// candidate. The engine attempts the persistent query for every profile --
 /// the database may have appeared since discovery -- so the probe cannot be
-/// read from the listing alone. `exists` records what discovery knew.
+/// read from the listing alone. `exists` records what discovery knew, which is
+/// half of what [`AcquisitionPolicy::Probe`] keeps the resulting source for.
 fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandidate {
   SourceCandidate {
     path: identity.path.join(GECKO_PERSISTENT_SOURCE),
@@ -428,18 +439,58 @@ fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandida
     exists: identity.persistent_source_discovered,
     selected: false,
     acquisition: SourceAcquisition::NotAttempted,
+    policy: AcquisitionPolicy::Probe,
   }
 }
 
-/// Turns a post-select [`EngineListing`] into an [`EngineExtract`] by acquiring
-/// each profile's candidates, the way the Safari/IE populates do.
+/// One Gecko profile's acquisition plan: the persistent probe first, then the
+/// session alternation in the order listing planted it.
 ///
-/// The persistent candidate is always queried -- planted or not -- because the
-/// database may have appeared since discovery; the adapter half of the gate
-/// below decides whether the resulting source survives. The session candidates
-/// are the ones listing planted (in `SESSION_CANDIDATES` declaration order),
-/// and [`mozilla::select_session_sources`] applies the first-valid rule over
-/// them: after the first success no later candidate is acquired.
+/// Plan construction is where the engine difference now lives. Gecko's is the
+/// only plan with an entry discovery did not necessarily plant -- the
+/// persistent store may have appeared since -- so a profile whose listing
+/// carries no [`AcquisitionPolicy::Probe`] entry gets one synthesized here
+/// rather than the executor knowing to look for it.
+///
+/// The order is not incidental. The report sorts sources by role and
+/// precedence under a *stable* sort, so equal keys keep the order production
+/// emitted them in; persistent-then-sessions is the order the direct-path walk
+/// emits (`mozilla::query_cookies_engine_outcome_with_session_probe`) and the
+/// order `gecko_report_with_race` relies on to fire its hook once per profile.
+/// Building the plan explicitly rather than executing the listing's `Vec`
+/// as-is keeps that pinned to one line here.
+fn gecko_profile_plan(
+  identity: &EngineProfileIdentity,
+  candidates: Vec<SourceCandidate>,
+) -> Vec<SourceCandidate> {
+  let probe = candidates
+    .iter()
+    .find(|candidate| candidate.policy == AcquisitionPolicy::Probe)
+    .cloned()
+    .unwrap_or_else(|| persistent_probe_candidate(identity));
+  std::iter::once(probe)
+    .chain(
+      candidates
+        .into_iter()
+        .filter(|candidate| candidate.policy == AcquisitionPolicy::FirstValid),
+    )
+    .collect()
+}
+
+/// Turns a post-select [`EngineListing`] into an [`EngineExtract`] by acquiring
+/// each profile's plan, the way the Safari/IE populates do.
+///
+/// Gecko no longer has a walk of its own. What was its bespoke body is now two
+/// halves that are both shared: [`gecko_profile_plan`] states the plan --
+/// the persistent probe first, then the session alternation in
+/// `SESSION_CANDIDATES` declaration order -- and [`acquire_by_policy`] executes
+/// it by reading each entry's [`AcquisitionPolicy`]. The engine difference that
+/// used to be control flow here is now the `Probe` and `FirstValid` values the
+/// listing plants; the other three engines plant `Fixed` and get the 1:1 walk
+/// out of the same vocabulary.
+///
+/// `persistent_exists` is the post-query existence recheck `Probe` spends when
+/// listing did not already vouch for the store.
 ///
 /// The output is 1:1 with the post-select listing: a profile whose candidates
 /// produced nothing still appears with `sources: vec![]`, so the report layer
@@ -447,10 +498,7 @@ fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandida
 /// from a browser that was never installed.
 ///
 /// The envelope -- destructuring the listing, sizing the extract, pushing each
-/// profile, and honouring a stop -- is [`populate_engine_sources`]. What is
-/// below is only Gecko's per-profile body, which is the point: the probe and
-/// first-valid selection are visibly Gecko's rather than a differently shaped
-/// function.
+/// profile, and honouring a stop -- is [`populate_engine_sources`].
 pub(super) fn populate_gecko_sources<Q, E>(
   listing: EngineListing,
   domains: Option<&[String]>,
@@ -465,51 +513,12 @@ where
     listing,
     ExtractCompletion::RetainAttempted,
     |identity, candidates| {
-      let persistent = identity.path.join(GECKO_PERSISTENT_SOURCE);
-      let persistent_candidate = candidates
-        .iter()
-        .find(|candidate| candidate.role == CookieSourceRoleId::persistent())
-        .cloned()
-        .unwrap_or_else(|| persistent_probe_candidate(identity));
-      let mut sources = Vec::new();
-      let mut stop = None;
-      // The Mozilla engine emits a persistent source whenever the query was
-      // attempted -- which it always is, even for a profile with no
-      // cookies.sqlite. The adapter half of the gate lives here: drop that
-      // persistent source unless the profile either discovered a persistent
-      // store or has one on disk now.
-      //
-      // Discovery's snapshot goes stale in both directions, so existence is
-      // rechecked after the query rather than inferred from it: a database that
-      // appeared since discovery is projected even when reading it then failed,
-      // and one deleted since discovery is still projected so its failure is
-      // reported instead of vanishing. Inferring from the query alone would
-      // silence a database that appeared and was corrupt or locked. The `exists`
-      // probe is spent only when discovery did not already vouch for the store.
-      match query(&persistent_candidate, domains) {
-        mozilla::MozillaCandidateOutcome::Source(source) => {
-          if identity.persistent_source_discovered || persistent_exists(&persistent) {
-            sources.push(source);
-          }
-        }
-        // The engine never reports the persistent probe as missing -- an absent
-        // database is a failed attempt -- so there is nothing to record.
-        mozilla::MozillaCandidateOutcome::Missing => {}
-        mozilla::MozillaCandidateOutcome::Stop(boundary) => stop = Some(boundary),
-      }
-      if stop.is_none() {
-        // First-valid selection lives in the engine and is shared with the
-        // direct-path walk; laziness of this iterator is what guarantees the
-        // candidates after the first success are never acquired.
-        stop = mozilla::select_session_sources(
-          candidates
-            .iter()
-            .filter(|candidate| candidate.role == CookieSourceRoleId::session())
-            .map(|candidate| query(candidate, domains)),
-          &mut sources,
-        );
-      }
-      (sources, stop)
+      acquire_by_policy(
+        &gecko_profile_plan(identity, candidates),
+        domains,
+        &mut query,
+        &mut persistent_exists,
+      )
     },
   )
 }
@@ -1345,6 +1354,128 @@ mod tests {
     assert!(report.profiles[0].sources.is_empty());
   }
 
+  /// Acquisition order within a profile: the persistent probe first, then the
+  /// session alternation in frozen `SESSION_CANDIDATES` declaration order. Both
+  /// halves are relied on elsewhere and neither is implied by first-valid.
+  ///
+  /// The probe-first half is what `registry::test_seams::gecko_report_with_race`
+  /// documents when it fires its hook on the persistent candidate to get one
+  /// call per profile *before* any of that profile's reads. The declaration
+  /// order is ADR 0001 SS8. Every candidate here fails, so first-valid never
+  /// short-circuits and the whole plan is observable.
+  #[test]
+  fn populate_acquires_the_persistent_probe_before_sessions_in_declared_order() {
+    let temp = TempDir::new("gecko-populate-plan-order");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    seed_empty_gecko_database(&profile);
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create session dir");
+    // Three of the five declared candidates, deliberately seeded out of
+    // declaration order so a plan that followed the filesystem would differ.
+    for relative in [
+      "sessionstore-backups/previous.jsonlz4",
+      "sessionstore.js",
+      "sessionstore-backups/recovery.jsonlz4",
+    ] {
+      std::fs::write(profile.join(relative), b"present but unreadable")
+        .expect("write session candidate");
+    }
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
+    let profile_path = discovery.profiles[0].identity.path.clone();
+    let expected: Vec<PathBuf> = [
+      GECKO_PERSISTENT_SOURCE,
+      "sessionstore-backups/recovery.jsonlz4",
+      "sessionstore.js",
+      "sessionstore-backups/previous.jsonlz4",
+    ]
+    .iter()
+    .map(|relative| profile_path.join(relative))
+    .collect();
+
+    let mut read = Vec::new();
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      |candidate, domains| {
+        read.push(candidate.path.clone());
+        mozilla::acquire_candidate_source(candidate, domains)
+      },
+      |path| path.exists(),
+    );
+
+    assert_eq!(read, expected, "plan order is probe-first, then declared");
+    // Emission follows the walk, and must: the report sorts sources by role and
+    // precedence under a *stable* sort, so equal keys keep production's order.
+    assert_eq!(
+      report.profiles[0]
+        .sources
+        .iter()
+        .map(|source| source.origin.path.clone())
+        .collect::<Vec<_>>(),
+      expected,
+      "sources are emitted in walk order"
+    );
+  }
+
+  /// The same order for a profile whose listing planted no persistent
+  /// candidate: the synthesized probe still leads. This is the case
+  /// `gecko_report_with_race` is actually exercised on -- a session-only
+  /// profile -- and the one where a plan built by concatenating the listing's
+  /// candidates would put a session read first.
+  #[test]
+  fn a_session_only_profile_still_probes_the_persistent_store_first() {
+    let temp = TempDir::new("gecko-populate-probe-first");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    std::fs::write(
+      profile.join("sessionstore-backups/recovery.jsonlz4"),
+      b"present but unreadable",
+    )
+    .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
+    assert!(!discovery.profiles[0].identity.persistent_source_discovered);
+    assert_eq!(
+      discovery.profiles[0].candidates.len(),
+      1,
+      "listing planted only the session candidate"
+    );
+    let profile_path = discovery.profiles[0].identity.path.clone();
+
+    let mut read = Vec::new();
+    populate_gecko_sources(
+      discovery,
+      None,
+      |candidate, domains| {
+        read.push(candidate.path.clone());
+        mozilla::acquire_candidate_source(candidate, domains)
+      },
+      |path| path.exists(),
+    );
+
+    assert_eq!(
+      read,
+      [
+        profile_path.join(GECKO_PERSISTENT_SOURCE),
+        profile_path.join("sessionstore-backups/recovery.jsonlz4"),
+      ]
+    );
+  }
+
   /// The candidate-driven populate must inherit first-valid selection: once a
   /// session candidate is read successfully, the later planted candidates must
   /// never be acquired. This counts the acquisitions rather than the emitted
@@ -1889,6 +2020,9 @@ mod tests {
           precedence: PERSISTENT_SOURCE_PRECEDENCE,
           exists: true,
           selected: true,
+          // The source this fixture hands back, not a plan entry: the policy
+          // is inert here and `Fixed` says so.
+          policy: AcquisitionPolicy::Fixed,
           acquisition: SourceAcquisition::Database(
             DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
           ),
@@ -1978,6 +2112,7 @@ mod tests {
             acquisition: SourceAcquisition::Database(
               DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
             ),
+            policy: AcquisitionPolicy::Probe,
           });
           source.records = vec![crate::browser::cookie_record::CookieRecord::from_cookie(
             retained_cookie(),

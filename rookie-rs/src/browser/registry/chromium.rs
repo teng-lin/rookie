@@ -12,10 +12,10 @@ use super::super::report_core::{
 };
 use super::{
   browser_definition, embedded_registry, installation_id, is_informational_discovery_issue,
-  normalized_path_bytes, profile_id, BrowserDefinition, BrowserEngine, DiscoveryContext,
-  DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, InstallationRoot, PlatformId, ProfileLocator,
-  ProfileSelection, Source, SourceAcquisition, SourceCandidate, SourceFailureStage, SourceIssue,
-  MAX_DISCOVERY_ISSUE_SAMPLES,
+  normalized_path_bytes, profile_id, AcquisitionPolicy, BrowserDefinition, BrowserEngine,
+  DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, InstallationRoot, PlatformId,
+  ProfileLocator, ProfileSelection, Source, SourceAcquisition, SourceCandidate, SourceFailureStage,
+  SourceIssue, MAX_DISCOVERY_ISSUE_SAMPLES,
 };
 #[cfg(test)]
 use super::{
@@ -316,6 +316,10 @@ fn persistent_candidate(path: PathBuf, precedence: u16) -> SourceCandidate {
     exists: false,
     selected: false,
     acquisition: SourceAcquisition::NotAttempted,
+    // Chromium's plan holds only entries discovery stat'd and kept, so every
+    // one of them is read unconditionally; the `!exists` skip happens when the
+    // plan is built, not when it is executed.
+    policy: AcquisitionPolicy::Fixed,
   }
 }
 
