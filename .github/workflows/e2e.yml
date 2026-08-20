@@ -80,6 +80,17 @@ jobs:
           node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
+        env:
+          # Playwright's 30s default is too tight for a headed, cold-start
+          # Chrome under Xvfb. Runner image 20260816.277.1 (Chrome
+          # 151.0.7922.108 -> 151.0.7922.137) moved this job's
+          # launchPersistentContext from a 11.9s median / 14.6s max to a 30.3s
+          # median, so the default bound landed inside the launch distribution
+          # and ~40% of runs timed out. Nothing about extraction changed:
+          # whenever the launch completes, all four bindings still decrypt
+          # rookie_ci=bar, and they do it in ~1.5s. This bounds a genuine hang
+          # without slicing normal variance.
+          ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS: '120000'
         run: |
           mkdir -p "$ROOKIE_E2E_USER_DATA_DIR"
           dbus-run-session -- bash -euxo pipefail <<'SH'
