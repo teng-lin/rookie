@@ -15,6 +15,7 @@ use super::outcome::{
 };
 use super::registry;
 use super::report_core::{BrowserId, IssueSeverityCode, MAX_ISSUE_SAMPLES};
+use super::source::SourceIssue;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,10 +166,8 @@ fn compatibility_disposition(
       return Some(diagnostic.clone());
     }
     all_rows_failure(source).map(|failure| {
-      if failure
-        .diagnostic
-        .as_str()
-        .ends_with("row(s) could not be read")
+      if failure.diagnostic.as_str()
+        == SourceIssue::generic_row_read_failed_message(source.stats.rows_skipped as usize)
       {
         Diagnostic::new_with_secrets(fallback, &[])
       } else {
