@@ -164,6 +164,11 @@ jobs:
       - name: Test documentation
         if: ${{ !cancelled() }}
         run: cargo test --workspace --doc --locked
+      - name: Deny rustdoc warnings
+        if: ${{ !cancelled() }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p rookie-cookies --all-features --no-deps --locked
       - name: Check packaged Rust consumer resolution
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: python scripts/check-packaged-rust-consumer.py

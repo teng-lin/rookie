@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "deprecated": [
+    {
+      "path": "rookie_cookies::common::enums::CookieToString",
+      "since": "0.6.0",
+      "note": "unfiltered compatibility formatter; use ReadResult::header(url) for a URL-scoped header view"
+    },
+    {
+      "path": "rookie_cookies::compatibility_dispatch::named::load",
+      "since": "0.6.0",
+      "note": "use read(ReadRequest::browser(...)) for snapshots or load_report for grouped multi-browser diagnostics"
+    }
+  ]
+}

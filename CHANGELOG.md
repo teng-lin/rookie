@@ -11,6 +11,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Native linux-arm64 artifacts: PyPI manylinux aarch64 wheel, npm
   `rookie-cookies-linux-arm64-gnu`, and a CLI
   `aarch64-unknown-linux-gnu` binary, all built on `ubuntu-24.04-arm`.
+- Node and Python errors expose stable request/engine identity, library fault
+  codes, stop reasons, ambiguous-profile IDs, and redacted direct-path
+  metadata. Node read warnings also report when their count was saturated to
+  the binding's `u32` range.
+- The generated report JSON Schema now enforces the same lexical constraints
+  as Rust for open vocabulary identifiers and opaque installation/profile IDs.
 
 ### Removed
 
@@ -19,6 +25,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Single-browser compatibility APIs now return typed timeout, cancellation,
+  and resource-exhaustion errors instead of silently returning partial
+  cookies. Flat Rust `load()` retains its documented best-effort behavior for
+  cookies committed by browsers already in flight when the shared job stops.
+- Profile-scoped `extract()` and `read()` resolve the profile once and share
+  one absolute deadline across resolution and extraction.
+- `ReadResult::header()` now re-checks expiration at send time and excludes a
+  cookie whose expiry equals the current second. `include_expired` controls
+  snapshot inventory only. Profile-scoped and compatibility reads now project
+  the same decrypt and row-read warning categories.
+- Node `fromPath` and the CLI `from-path` command reject every combination of
+  conflicting Chromium credential selectors before source I/O. Python option
+  shape failures consistently use `RookieRequestError`.
+- Stopped report work now carries a typed request issue and cannot be reported
+  as ordinary `no_sources`; completed source data remains available with a
+  partial status. Finalization issues preserve decrypt, decode, provider-
+  unavailable, and provider-failed causes.
 - CI is split into PR, nightly, and release lanes. Pull requests run one
   `check` job per OS (fmt, package, metadata, cargo-audit, rust lint+test,
   public API), and stagger Node build+test (22/24/26)
@@ -33,6 +56,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `v*` tags, GitHub Releases, or `workflow_dispatch`.
 - `docs/testing.md` lists every registry browser against hosted CI, release
   fixtures, or manual (Safari / Internet Explorer).
+
+### Deprecated
+
+- Rust `load()` is superseded by `read(ReadRequest::browser(...))` for
+  snapshots and `load_report()` for grouped diagnostics. `CookieToString` is
+  an unfiltered compatibility formatter; use `ReadResult::header(url)` for a
+  URL-scoped header view.
 
 ### Fixed
 

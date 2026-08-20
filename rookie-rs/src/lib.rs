@@ -684,15 +684,17 @@ pub fn chrome_profile(
 /// # Arguments
 ///
 /// * `browser_id` - A canonical browser ID or alias from [`supported_browsers`]
-/// * `profile_id` - An optional [`ProfileId`](report::ProfileId) from
-///   [`browser_profiles`], restricting the report to that one profile. Display
-///   paths and names are not selection keys.
+/// * `profile_id` - An optional profile query, restricting the report to one
+///   profile. The unified resolver accepts an opaque
+///   [`ProfileId`](report::ProfileId) from [`browser_profiles`], a display
+///   name, a directory name, or a non-lossy full path. Empty, unknown,
+///   ambiguous, and lossy-only queries are rejected.
 /// * `domains` - An optional list for getting specific domains only
 ///
 /// # Errors
 ///
-/// Only a bad request fails: an unknown browser ID or alias, or a profile ID
-/// that this browser did not yield. Extraction problems are reported instead —
+/// Only a bad request fails: an unknown browser ID or alias, or an invalid
+/// profile query. Extraction problems are reported instead —
 /// a browser that is registered but not installed is an `Ok` report with
 /// [`no_sources`](report::ReportStatusCode::no_sources), and a total extraction
 /// failure is an `Ok` report with

@@ -4,7 +4,7 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **Python guide** (PyPI landing page and repo tutorial). Rust
 stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The tree may still publish as `0.6.0-alpha.x`. The recommended 0.6 entry is
+The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
 `jar` / `read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 
 CPython **≥ 3.11**. Wheels are `cp311-abi3` (tested 3.11–3.14). CPython 3.8–3.10
@@ -19,8 +19,8 @@ pip install rookie-cookies
 ```python
 import rookie_cookies as cookies
 
-# Session import — pass profile= for session cookies
-session_jar = cookies.jar(browser="chrome", profile="Default")
+# Gecko session import — select the profile whose session JSON should be read
+session_jar = cookies.jar(browser="firefox", profile="default-release")
 
 # Domain-intact records (storage_state / allowlists)
 rows = cookies.read(browser="chrome", profile="Work").as_list()
@@ -35,8 +35,9 @@ send-match. There is **no** module-level `header()` — call
 
 - No-profile `read(browser="chrome")` matches `chrome()` (persistent /
   legacy-eligible cookies).
-- Naming a profile includes session cookies.
-- Session import (including NotebookLM-style flows) should pass `profile=`.
+- A Gecko profile includes its separately declared session JSON source.
+- Chromium registrations have no separate session source; selecting a Chrome
+  profile cannot recover session state that exists only in browser memory.
 
 Named helpers (`chrome()`, `firefox()`, `load()`) still work. They are the
 compatibility bridge from
@@ -171,7 +172,7 @@ Wheels were `cp38-abi3` until the 0.6 break.
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
 | Recommended entry | `chrome()` / `to_cookiejar(...)` | `jar(browser=..., profile=...)` or `read(...).as_list()` |
-| Session cookies | Not a first-class `profile=` | Pass `profile=` to `read` / `jar` |
+| Gecko session cookies | Not a first-class `profile=` | Pass `profile=` to `read` / `jar` for a Gecko browser |
 | CPython | 3.8-era / `cp38-abi3` | **≥ 3.11**, `cp311-abi3` |
 | Path APIs | `firefox_based`, `chromium_based`, `any_browser` | `cookies_from_path` / `chromium_cookies_from_path` (legacy deprecated until ≥ 0.7) |
 | Path request faults | Flat `RuntimeError` | `RookieRequestError` (`ValueError` subclass) |
@@ -179,7 +180,7 @@ Wheels were `cp38-abi3` until the 0.6 break.
 | Reports | Not in 0.5.6 | `report(...)` / `browser_report(...)`, `profiles(...)` |
 
 1. Bump to CPython 3.11+.
-2. Replace `to_cookiejar(chrome())` with `jar(browser="chrome", profile="Default")`.
+2. For Gecko session import, use `jar(browser="firefox", profile="default-release")`.
 3. Keep named helpers only for the frozen compatibility set.
 4. Move explicit DB paths off `*_based` / `any_browser`.
 5. Catch `RookieRequestError` (and optionally `RookieEngineError`).

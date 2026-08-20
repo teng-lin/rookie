@@ -20,7 +20,7 @@ job API (`read` / Python `jar`). Later releases will break the old surface as we
 add capabilities and clean up the design. Plan on migrating; do not take the
 legacy helpers as frozen forever.
 
-The tree may still publish as `0.6.0-alpha.x`. The snippets below are the
+The workspace is currently `0.6.0-beta.1`. The snippets below are the
 **0.6.0** recommended surface.
 
 ## What is different from upstream rookie
@@ -29,7 +29,7 @@ We keep the old names working while the library grows past a bag of
 per-browser functions:
 
 - One recommended job (`read` / `jar`) instead of “call `chrome()` and hope”.
-- Profile queries so session cookies are a deliberate choice.
+- Profile queries so profile and Gecko session-source selection are explicit.
 - Structured reports, explicit-path builders, timeouts, and cancellation.
 - Chromium formats through **legacy DPAPI**, **`v10` / `v11`**, and **App-Bound
   `v20`** where the host and browser allow it.
@@ -78,7 +78,7 @@ labels.
 | **legacy DPAPI** | Windows Chromium | Oldest Windows Chromium cookies: current-user DPAPI, no App-Bound wrapping. Still declared for every Windows Chromium browser in the registry. |
 | **`v10`** | Windows, macOS, Linux Chromium | AES-GCM (Windows) or AES-CBC (Unix) values prefixed `v10`. Windows unwraps the AES key from `Local State` with DPAPI. macOS uses Keychain; Linux uses the OS crypt (often paired with `v11`). |
 | **`v11`** | Linux Chromium | Same family as `v10`, prefixed `v11`, typically Secret Service / KWallet. |
-| **App-Bound `v20`** | Windows Chrome-family | Chrome 133+ App-Bound Encryption (`APPB` key in `Local State`, values prefixed `v20`). Needs the default `appbound` feature. Decrypts via COM injection into a spawned browser process, with elevated SYSTEM impersonation as fallback. Hosted canaries: Chrome, Edge, Brave. Also declared for Cốc Cốc and Avast. |
+| **App-Bound `v20`** | Windows Chrome-family | Chrome 127+ App-Bound Encryption (`APPB` key in `Local State`, values prefixed `v20`). Needs the default `appbound` feature. The unprivileged COM-injection path targets Chrome 127+; the elevated DPAPI/CNG fallback covers the 127-era formats and the flag-3 form introduced in Chrome 133+. Hosted canaries: Chrome, Edge, Brave. Also declared for Cốc Cốc and Avast. |
 | **(none)** | Gecko, Safari, IE | Firefox / LibreWolf / Zen / Cachy: plaintext `cookies.sqlite` plus session JSON. Safari: `Cookies.binarycookies` (Full Disk Access). IE: ESE WebCache — functions exist in 0.6 and are deprecated. |
 
 Windows Chromium at a glance:
@@ -94,8 +94,10 @@ may need elevation or a live host process; this project does not implement
 Device Bound Session Credentials (DBSC). Coverage details:
 [docs/testing.md](docs/testing.md).
 
-Linux Chromium is `v10` + `v11` (libsecret / KWallet). macOS Chromium is `v10`
-via Keychain. Gecko is the same sqlite/session layout on all three OSes.
+Linux Chromium is `v10` + `v11` (libsecret / KWallet). Most macOS Chromium
+registrations declare Keychain-backed `v10`; macOS Cốc Cốc and Yandex declare
+no encrypted tier and can emit only plaintext rows. Gecko uses the same
+sqlite/session layout on all three OSes.
 
 ## Install
 
@@ -108,17 +110,20 @@ via Keychain. Gecko is the same sqlite/session layout on all three OSes.
 
 ## Recommended 0.6 usage
 
-Pass a **profile** when you want session cookies. Omit it to match the old
-first-profile, persistent-only helpers. `read` never URL-filters the snapshot;
-`ReadResult.header(url)` is a view. There is no top-level binding `header()`,
-and no crate-root Rust `get` / `report`.
+Pass a **profile** to select one discovered profile. For Gecko-family browsers,
+that route also includes the separately declared session JSON source. Chromium
+registrations have no separate session source: selecting a Chrome profile does
+not recover session state that exists only in browser memory. Omit the profile
+to match the old first-profile, legacy-compatible helpers. `read` never
+URL-filters the snapshot; `ReadResult.header(url)` is a view. There is no
+top-level binding `header()`, and no crate-root Rust `get` / `report`.
 
 ### Python
 
 ```python
 import rookie_cookies as cookies
 
-session_jar = cookies.jar(browser="chrome", profile="Default")
+session_jar = cookies.jar(browser="firefox", profile="default-release")
 rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```
 
@@ -127,7 +132,7 @@ rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```javascript
 import { read } from "rookie-cookies";
 
-const snapshot = await read({ browser: "chrome", profile: "Default" });
+const snapshot = await read({ browser: "firefox", profile: "default-release" });
 console.log(snapshot.cookies, snapshot.header("https://example.com/"));
 ```
 
@@ -139,7 +144,7 @@ Extraction is async. Always `await`.
 use rookie_cookies::{read, ReadRequest};
 
 fn main() -> rookie_cookies::Result<()> {
-    let snapshot = read(ReadRequest::browser("chrome").profile("Default"))?;
+    let snapshot = read(ReadRequest::browser("firefox").profile("default-release"))?;
     println!("{}", snapshot.header("https://example.com/")?);
     Ok(())
 }
@@ -148,13 +153,16 @@ fn main() -> rookie_cookies::Result<()> {
 ### CLI
 
 ```console
-rookie-cookies --path /path/to/cookies.sqlite
-rookie-cookies --path /path/to/Cookies --browser-id chrome
+rookie-cookies read --browser firefox --profile default-release
+rookie-cookies header --browser chrome https://example.com/
+rookie-cookies from-path /path/to/cookies.sqlite
+rookie-cookies from-path /path/to/Cookies --browser-id chrome
 ```
 
 Chromium credential flags (`--browser-id`, `--key-path`, `--plaintext-only`)
-require `--path` and are mutually exclusive. `--key-path` is a Windows
-`Local State` file.
+are mutually exclusive on `from-path`. `--key-path` is a Windows `Local State`
+file. The old top-level `--path` / `--browser` flags remain only as the 0.6
+compatibility form.
 
 Coming from 0.5.6 named helpers? Each language guide has a **0.5.6 API**
 section and a **migrate 0.5.6 → 0.6.0** section:
@@ -181,7 +189,7 @@ Platform quirks (Keychain prompts, Safari Full Disk Access):
 | Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Security | [docs/security.md](docs/security.md) (corrections + SQLite inventory) |
-| Design | [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
+| Design | [architecture](docs/architecture.md) · [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
 | Examples | [python](examples/python) · [javascript](examples/javascript) · [rust](examples/rust) |
 
 ```console

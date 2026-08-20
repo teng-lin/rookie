@@ -4,7 +4,7 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **JavaScript guide** (npm landing page and repo tutorial).
 Rust stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The tree may still publish as `0.6.0-alpha.x`. The recommended 0.6 entry is
+The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
 `read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 
 **Node.js ≥ 22** (tested 22, 24, 26). Every extraction export returns a
@@ -19,17 +19,20 @@ npm install rookie-cookies
 ```js
 import { read } from "rookie-cookies";
 
-const snapshot = await read({ browser: "chrome", profile: "Default" });
+const snapshot = await read({ browser: "firefox", profile: "default-release" });
 console.log(snapshot.cookies, snapshot.warnings);
 console.log(snapshot.header("https://example.com/"));
 ```
 
-Pass `profile` for session cookies. `read` never URL-filters. There is **no**
+Pass `profile` to select one discovered profile. For Gecko-family browsers,
+that route also includes the separately declared session JSON source. Chromium
+registrations have no separate session source and cannot recover session state
+that exists only in browser memory. `read` never URL-filters. There is **no**
 top-level `header()` — call `ReadResult.header(url)` on the snapshot.
 
 - No-profile `await read({ browser: "chrome" })` matches legacy `chrome()`
   (persistent / legacy-eligible cookies).
-- Naming `profile` includes session cookies.
+- Naming a Gecko profile includes its declared session source.
 
 Named helpers (`chrome()`, `brave()`, `load()`) still work and also return
 Promises. They are the compatibility bridge from
@@ -74,7 +77,16 @@ Job-layer aliases:
 import { profiles, report } from "rookie-cookies";
 
 const listed = await profiles("chrome");
-const viaJob = await report({ browser: "chrome", profile: listed[0]?.profile.profileId });
+if (listed.length === 0) {
+  console.log("Chrome is not installed");
+} else {
+  // Never use optional chaining here: `undefined` means every profile.
+  const viaJob = await report({
+    browser: "chrome",
+    profile: listed[0].profile.profileId,
+  });
+  console.log(viaJob.status);
+}
 ```
 
 A profile's cookie stream is its **selected** sources whose `status` is
@@ -193,7 +205,7 @@ const all = load();
 | Recommended entry | `chrome()` / `brave()` (sync) | `await read({ browser, profile })` |
 | Async contract | Sync return values | **Every** extraction export is a Promise (since 0.5.8) |
 | Node.js | 18 / 20 accepted | **≥ 22** (tested 22 / 24 / 26) |
-| Session cookies | Not a first-class `profile` | Pass `profile` in `read({ … })` |
+| Gecko session cookies | Not a first-class `profile` | Pass `profile` in `read({ browser: geckoId, … })` |
 | Path APIs | `firefoxBased`, `chromiumBased`, `anyBrowser` | `cookiesFromPath` / `chromiumCookiesFromPath` (legacy deprecated until ≥ 0.7) |
 | Errors | Flat `Unknown` | Request faults → `InvalidArg`; else `GenericFailure` |
 | Header view | Manual | `snapshot.header(url)` — **no** top-level `header()` |
@@ -201,7 +213,7 @@ const all = load();
 
 1. Bump Node.js to 22+.
 2. Add `await` (or `.then`) to every extraction call.
-3. Prefer `read`; pass `profile` for session cookies.
+3. Prefer `read`; select a Gecko profile when importing its session source.
 4. Move explicit DB paths off `*Based` / `anyBrowser`.
 5. Inspect `.status` / `.code` for `InvalidArg` vs `GenericFailure`.
 6. Do not invent a top-level `header()`.

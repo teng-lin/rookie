@@ -478,9 +478,8 @@ pub(crate) fn aggregate_load_failure(
 /// Returns cookies from all browsers
 ///
 /// This is a best-effort aggregator: browsers are probed concurrently on a
-/// small bounded worker pool (see [`common::concurrency::fan_out`], not part
-/// of the public API) sharing one deadline/cancellation budget, rather than
-/// one at a time -- a slow or hung source no longer starves every other
+/// small bounded worker pool sharing one deadline/cancellation budget, rather
+/// than one at a time -- a slow or hung source no longer starves every other
 /// source's share of that budget. Individual extraction failures are
 /// surfaced via [`log::warn!`] but do not abort the load (a locked profile or
 /// a decrypt failure on one browser should not lose cookies from the
@@ -489,7 +488,7 @@ pub(crate) fn aggregate_load_failure(
 /// `tracing-subscriber` and watch for `rookie_cookies::load` warnings.
 ///
 /// The returned cookies are grouped by browser in the same fixed order every
-/// call attempts browsers in ([`load_report`]'s browser ordering is tracked
+/// call attempts browsers in ([`crate::load_report`]'s browser ordering is tracked
 /// separately, from the registry rather than this function's own list),
 /// regardless of which browser's extraction actually finished first. Once
 /// the shared deadline or cancellation trips, no not-yet-started browser is
@@ -511,6 +510,10 @@ pub(crate) fn aggregate_load_failure(
 /// let domains = vec!["google.com".to_string()];
 /// let cookies = rookie_cookies::load(Some(domains));
 /// ```
+#[deprecated(
+  since = "0.6.0",
+  note = "use read(ReadRequest::browser(...)) for snapshots or load_report for grouped multi-browser diagnostics"
+)]
 pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let browser_types = legacy_load_browsers();
   let names: Vec<&str> = browser_types.iter().map(|(name, _)| *name).collect();

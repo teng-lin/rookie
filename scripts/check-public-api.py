@@ -23,6 +23,7 @@ FEATURE_SETS = {
     "no-default-features": ["--no-default-features"],
 }
 CHANGES = {"added", "removed", "missing-baseline"}
+DEPRECATION_CONTRACT = "deprecated-items.json"
 
 
 class PublicApiCommandError(RuntimeError):
@@ -109,6 +110,93 @@ def render_public_api(repo: Path, feature_args: list[str]) -> str:
     return result.stdout.rstrip("\n") + "\n"
 
 
+def render_rustdoc_json(repo: Path, feature_args: list[str]) -> dict[str, object]:
+    """Build rustdoc JSON because cargo-public-api omits deprecation metadata."""
+    command = [
+        "cargo",
+        f"+{NIGHTLY}",
+        "rustdoc",
+        "--manifest-path",
+        str(repo / "rookie-rs" / "Cargo.toml"),
+        "--target-dir",
+        str(repo / "target"),
+        "--lib",
+        "--locked",
+        *feature_args,
+        "--",
+        "-Z",
+        "unstable-options",
+        "--output-format",
+        "json",
+    ]
+    try:
+        subprocess.run(command, check=True, text=True, capture_output=True, cwd=repo)
+        return json.loads((repo / "target" / "doc" / "rookie_cookies.json").read_text())
+    except (OSError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
+        if isinstance(error, subprocess.CalledProcessError):
+            diagnostic = (error.stderr or error.stdout or str(error)).strip()
+        else:
+            diagnostic = str(error)
+        raise PublicApiCommandError(diagnostic) from None
+
+
+def load_deprecation_contract(path: Path) -> list[dict[str, str]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 1 or not isinstance(data.get("deprecated"), list):
+        raise ValueError(f"invalid deprecation contract in {path}")
+
+    required = {"path", "since", "note"}
+    seen: set[str] = set()
+    for item in data["deprecated"]:
+        if set(item) != required or not all(
+            isinstance(item[field], str) and item[field].strip() for field in required
+        ):
+            raise ValueError(
+                f"deprecated API item must have three non-empty string fields: {item!r}"
+            )
+        if item["path"] in seen:
+            raise ValueError(f"duplicate deprecated API path: {item['path']}")
+        seen.add(item["path"])
+    return data["deprecated"]
+
+
+def check_deprecation_contract(
+    rustdoc: dict[str, object], expected: list[dict[str, str]], label: str
+) -> bool:
+    """Require selected public items to retain exact deprecation metadata."""
+    index = rustdoc.get("index")
+    paths = rustdoc.get("paths")
+    if not isinstance(index, dict) or not isinstance(paths, dict):
+        print(f"invalid rustdoc JSON structure for {label}", file=sys.stderr)
+        return False
+
+    actual: dict[str, object] = {}
+    for item_id, item in index.items():
+        if (
+            not isinstance(item, dict)
+            or item.get("crate_id") != 0
+            or item.get("visibility") != "public"
+        ):
+            continue
+        path = paths.get(str(item_id))
+        if not isinstance(path, dict) or not isinstance(path.get("path"), list):
+            continue
+        actual["::".join(path["path"])] = item.get("deprecation")
+
+    success = True
+    for item in expected:
+        deprecation = actual.get(item["path"])
+        wanted = {"since": item["since"], "note": item["note"]}
+        if deprecation != wanted:
+            print(
+                f"deprecation contract mismatch for {item['path']} in {label}: "
+                f"expected {wanted!r}, got {deprecation!r}",
+                file=sys.stderr,
+            )
+            success = False
+    return success
+
+
 def scoped_exceptions(
     exceptions: list[dict[str, str]], platform: str, feature_set: str
 ) -> list[dict[str, str]]:
@@ -192,6 +280,7 @@ def main() -> int:
     repo = Path(__file__).resolve().parents[1]
     baseline_dir = repo / "rookie-rs" / "public-api"
     exception_file = baseline_dir / "temporary-exceptions.json"
+    deprecation_file = baseline_dir / DEPRECATION_CONTRACT
 
     try:
         installed_tool_version = tool_version()
@@ -209,6 +298,7 @@ def main() -> int:
 
     try:
         exceptions = load_exceptions(exception_file)
+        deprecations = load_deprecation_contract(deprecation_file)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)
         return 2
@@ -246,6 +336,12 @@ def main() -> int:
         success &= compare_with_exceptions(
             baseline.read_text(encoding="utf-8"), actual, current_exceptions, filename
         )
+        try:
+            rustdoc = render_rustdoc_json(repo, feature_args)
+        except PublicApiCommandError as error:
+            print(f"rustdoc JSON failed for {filename}: {error}", file=sys.stderr)
+            return 2
+        success &= check_deprecation_contract(rustdoc, deprecations, filename)
 
     return 0 if success else 1
 
