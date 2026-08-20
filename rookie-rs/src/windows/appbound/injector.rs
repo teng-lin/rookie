@@ -355,7 +355,11 @@ pub fn inject_and_extract_key(
   unsafe {
     let _ = ResumeThread(pi.hThread);
   }
-  runtime.clock.sleep(Duration::from_millis(50));
+  let loader_wait = runtime
+    .deadline
+    .remaining(runtime.clock)
+    .min(Duration::from_millis(50));
+  runtime.clock.sleep(loader_wait);
   runtime.check()?;
 
   let entry_addr = (remote_base as usize + bootstrap_offset) as *const ();
@@ -416,6 +420,8 @@ pub fn inject_and_extract_key(
       );
     }
   }
+
+  runtime.check()?;
 
   // Read scratch result
   let mut hdr = [0u8; 12];
