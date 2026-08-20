@@ -2,17 +2,16 @@ use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
 #[cfg(test)]
 use super::super::source::SourceStats;
 use super::super::source::{Source, SourceCandidate, SourceFailureStage};
-#[cfg(test)]
-use super::DiscoveryCounters;
 use super::{
-  boundary_stop_from_error, canonical_installation_root, embedded_registry, engine_roots,
-  installation_id, installation_root_is_directory, normalized_path_bytes, profile_id,
-  retain_completed_engine_extract, retain_engine_runtime_stop, select_listing_profiles,
-  sort_discovered_profiles, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
-  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
-  ExtractedProfile, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
-  PERSISTENT_SOURCE_PRECEDENCE,
+  acquire_each_candidate, canonical_installation_root, embedded_registry, engine_roots,
+  installation_id, installation_root_is_directory, normalized_path_bytes, populate_engine_sources,
+  profile_id, retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles,
+  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
+  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractCompletion,
+  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
+#[cfg(test)]
+use super::{DiscoveryCounters, ExtractedProfile};
 use crate::browser::internet_explorer_model::{
   InternetExplorerFailure, InternetExplorerFailureStage,
 };
@@ -181,87 +180,94 @@ where
   F: DiscoveryFs,
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
+  internet_explorer_report_with_context_using_runtime(
+    context, browser_id, profile_id, domains, None, query,
+  )
+}
+
+/// The Internet Explorer report with the deadline threaded to the populate
+/// walk. The production Windows callers pass a runtime; the injected-query test
+/// seam passes `None` and gets the same walk with the deadline samples elided.
+fn internet_explorer_report_with_context_using_runtime<F, Q>(
+  context: &DiscoveryContext<F>,
+  browser_id: &str,
+  profile_id: Option<&str>,
+  domains: Option<&[String]>,
+  runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
+  query: Q,
+) -> Result<EngineExtract>
+where
+  F: DiscoveryFs,
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
+{
   let mut listing = discover_internet_explorer_with_context(context, browser_id)?;
   select_listing_profiles(
     &mut listing,
     browser_id,
     ProfileSelection::from_profile_id(profile_id),
   )?;
-  Ok(populate_internet_explorer_sources(listing, domains, query))
+  Ok(populate_internet_explorer_sources_impl(
+    listing, domains, runtime, query,
+  ))
+}
+
+pub(super) fn populate_internet_explorer_sources<Q>(
+  listing: EngineListing,
+  domains: Option<&[String]>,
+  query: Q,
+) -> EngineExtract
+where
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
+{
+  populate_internet_explorer_sources_impl(listing, domains, None, query)
+}
+
+fn populate_internet_explorer_sources_with_runtime<Q>(
+  listing: EngineListing,
+  domains: Option<&[String]>,
+  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
+  query: Q,
+) -> EngineExtract
+where
+  Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
+{
+  populate_internet_explorer_sources_impl(listing, domains, Some(runtime), query)
 }
 
 /// Candidate-driven populate. Each candidate is acquired in turn. A successful
 /// query returns the engine-built [`Source`], which already carries the
 /// effective `EseDatabase` acquisition; a failed query overlays it here after
 /// the attempt, matching the frozen listing-to-extract behaviour.
-pub(super) fn populate_internet_explorer_sources<Q>(
+///
+/// The envelope is [`populate_engine_sources`] and the per-candidate walk is
+/// [`acquire_each_candidate`], shared with Safari; all that is left here is how
+/// Internet Explorer writes a failed query onto the placeholder. Sharing the
+/// walk is also how this engine acquired Safari's deadline samples: it
+/// previously relied entirely on a stop surfacing through the query's error
+/// chain, which is still the path a stop mid-read takes.
+fn populate_internet_explorer_sources_impl<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
+  runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
   mut query: Q,
 ) -> EngineExtract
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  let EngineListing {
-    profiles,
-    discovery_issues,
-    counters,
-    boundary_stop,
-  } = listing;
-  let mut extract = EngineExtract {
-    profiles: Vec::with_capacity(profiles.len()),
-    discovery_issues,
-    counters,
-    boundary_stop,
-  };
-  for profile in profiles {
-    let DiscoveredProfile {
-      identity,
-      legacy,
-      candidates,
-    } = profile;
-    let mut sources = Vec::new();
-    for candidate in candidates {
-      let mut source = Source::new(
-        candidate.identity(),
-        candidate.selected,
-        candidate.acquisition,
-      );
-      match query(candidate, domains) {
-        // The engine already built the `Source` from this candidate -- stats,
-        // records, attempts, the effective acquisition, and any
-        // `row_read_failed` issue -- so there is nothing to copy across.
-        Ok(extraction) => source = extraction,
-        Err(error) => {
-          if let Some(stop) = boundary_stop_from_error(&error) {
-            extract.boundary_stop.get_or_insert(stop);
-            // `source` is dropped uncommitted: the query did not return, so
-            // there is no outcome to report for it.
-            extract.profiles.push(ExtractedProfile {
-              identity,
-              legacy,
-              sources,
-            });
-            retain_completed_engine_extract(&mut extract);
-            return extract;
-          }
-          source.acquisition = SourceAcquisition::EseDatabase;
-          source.acquisition_attempts = 1;
-          source.fail(
-            internet_explorer_failure_stage(&error),
-            format!("{error:#}"),
-          );
-        }
-      }
-      sources.push(source);
-    }
-    extract.profiles.push(ExtractedProfile {
-      identity,
-      legacy,
-      sources,
-    });
-  }
-  extract
+  populate_engine_sources(
+    listing,
+    ExtractCompletion::RetainAttempted,
+    |_identity, candidates| {
+      acquire_each_candidate(candidates, domains, runtime, &mut query, |source, error| {
+        source.acquisition = SourceAcquisition::EseDatabase;
+        source.acquisition_attempts = 1;
+        source.fail(
+          internet_explorer_failure_stage(&error),
+          format!("{error:#}"),
+        );
+      })
+    },
+  )
 }
 
 fn internet_explorer_failure_stage(error: &anyhow::Error) -> SourceFailureStage {
@@ -316,11 +322,12 @@ pub(crate) fn internet_explorer_report_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let outcome = internet_explorer_report_with_context(
+  let outcome = internet_explorer_report_with_context_using_runtime(
     &context,
     browser_id,
     profile_id,
     domains.as_deref(),
+    Some(runtime),
     |origin, domains| {
       query_internet_explorer_non_disruptive(origin, domains, |origin, domains, force_kill| {
         crate::browser::internet_explorer::internet_explorer_outcome_with_runtime(
@@ -357,14 +364,18 @@ pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
     browser_id,
     ProfileSelection::LegacyFirstProfile,
   )?;
-  let outcome =
-    populate_internet_explorer_sources(listing, domains.as_deref(), |origin, domains| {
+  let outcome = populate_internet_explorer_sources_with_runtime(
+    listing,
+    domains.as_deref(),
+    runtime,
+    |origin, domains| {
       query_internet_explorer_non_disruptive(origin, domains, |origin, domains, force_kill| {
         crate::browser::internet_explorer::internet_explorer_outcome_with_runtime(
           origin, domains, force_kill, runtime,
         )
       })
-    });
+    },
+  );
   Ok(retain_engine_runtime_stop(outcome, runtime))
 }
 
@@ -510,6 +521,86 @@ mod tests {
       assert!(populated.profiles[0].sources[0].failure.is_none());
       assert_eq!(populated.profiles[0].sources.len(), 1);
     }
+  }
+
+  /// Sharing Safari's candidate walk gave this engine Safari's deadline
+  /// samples: one before and one after every candidate. Before that it named
+  /// the runtime nowhere and could only stop once a query surfaced one through
+  /// its error chain -- which the production reader always does, since it
+  /// checks the deadline on entry, so the stop boundary is unmoved. These two
+  /// tests pin the samples themselves rather than that coupling.
+  #[test]
+  fn populate_stops_after_the_candidate_that_exhausted_the_deadline() {
+    use crate::common::deadline::{
+      test_clock::ManualClock, BoundaryStop, CancellationToken, Deadline,
+    };
+    use std::time::Duration;
+
+    for stop in [
+      BoundaryStop::TimedOut,
+      BoundaryStop::Cancelled,
+      BoundaryStop::ResourceExhausted,
+    ] {
+      let clock = ManualClock::default();
+      let token = CancellationToken::default();
+      let runtime = crate::common::deadline::BoundaryRuntime::with_stop(
+        &clock,
+        Deadline::after(&clock, Duration::from_secs(1)),
+        token.clone(),
+      );
+      let calls = Cell::new(0);
+      let populated = populate_internet_explorer_sources_with_runtime(
+        discovered_sources(),
+        None,
+        &runtime,
+        |origin, _| {
+          calls.set(calls.get() + 1);
+          let source = extracted_internet_explorer_source(origin, Vec::new(), 3, 0, 0, None);
+          match stop {
+            BoundaryStop::TimedOut => clock.advance(Duration::from_secs(1)),
+            BoundaryStop::Cancelled => assert!(token.cancel()),
+            BoundaryStop::ResourceExhausted => assert!(token.exhaust_resources()),
+          }
+          Ok(source)
+        },
+      );
+
+      assert_eq!(calls.get(), 1, "the later candidate must never be queried");
+      assert_eq!(populated.boundary_stop, Some(stop));
+      assert_eq!(populated.profiles.len(), 1);
+      assert_eq!(populated.profiles[0].sources.len(), 1);
+      assert_eq!(populated.profiles[0].sources[0].stats.rows_seen, 3);
+    }
+  }
+
+  #[test]
+  fn populate_queries_nothing_when_the_deadline_is_already_spent() {
+    use crate::common::deadline::{
+      test_clock::ManualClock, BoundaryStop, CancellationToken, Deadline,
+    };
+    use std::time::Duration;
+
+    let clock = ManualClock::default();
+    let runtime = crate::common::deadline::BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, Duration::from_secs(1)),
+      CancellationToken::default(),
+    );
+    clock.advance(Duration::from_secs(1));
+    let populated = populate_internet_explorer_sources_with_runtime(
+      discovered_sources(),
+      None,
+      &runtime,
+      |_origin, _| -> Result<Source> {
+        unreachable!("no candidate may be queried once the deadline is spent")
+      },
+    );
+
+    assert_eq!(populated.boundary_stop, Some(BoundaryStop::TimedOut));
+    // The profile committed nothing, so `RetainAttempted` drops it rather than
+    // leaving a zero-attempt placeholder that reads as a successful empty
+    // source.
+    assert!(populated.profiles.is_empty());
   }
 
   fn stopped_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {

@@ -1,15 +1,16 @@
 use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
 use super::super::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
-#[cfg(test)]
-use super::DiscoveryCounters;
 use super::{
-  boundary_stop_from_error, canonical_installation_root, embedded_registry, engine_roots,
-  installation_id, installation_root_is_directory, normalized_path_bytes, profile_id,
-  retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles, BrowserEngine,
-  DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy,
-  EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile, LegacyRank,
-  ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  acquire_each_candidate, boundary_stop_from_error, canonical_installation_root, embedded_registry,
+  engine_roots, installation_id, installation_root_is_directory, normalized_path_bytes,
+  populate_engine_sources, profile_id, retain_engine_runtime_stop, select_listing_profiles,
+  sort_discovered_profiles, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
+  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
+  ExtractCompletion, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
+  PERSISTENT_SOURCE_PRECEDENCE,
 };
+#[cfg(test)]
+use super::{DiscoveryCounters, ExtractedProfile};
 #[cfg(test)]
 use crate::common::deadline::SystemClock;
 use crate::common::{deadline::BoundaryRuntime, diagnostic::REDACTED_PATH, sqlite};
@@ -382,6 +383,12 @@ where
 /// the candidate's frozen `selected: true` + `StableFileImage` through
 /// [`Source::new`] from the candidate's own values; only records, attempts,
 /// and failure are overlaid.
+///
+/// The envelope is [`populate_engine_sources`] and the per-candidate walk is
+/// [`acquire_each_candidate`], shared with Internet Explorer. All that is left
+/// here is how Safari writes a failed query onto the placeholder, and the
+/// completion policy: on a stop, keep everything committed and drop only a
+/// stopped profile that committed nothing.
 fn populate_safari_sources_impl<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
@@ -391,110 +398,34 @@ fn populate_safari_sources_impl<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  let EngineListing {
-    profiles,
-    discovery_issues,
-    counters,
-    boundary_stop,
-  } = listing;
-  let mut extract = EngineExtract {
-    profiles: Vec::with_capacity(profiles.len()),
-    discovery_issues,
-    counters,
-    boundary_stop,
-  };
-  let mut stop_position = None;
-  'profiles: for (profile_index, profile) in profiles.into_iter().enumerate() {
-    let DiscoveredProfile {
-      identity,
-      legacy,
-      candidates,
-    } = profile;
-    let mut sources = Vec::new();
-    for candidate in candidates {
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        extract.boundary_stop.get_or_insert(stop);
-        stop_position = Some(profile_index);
-        extract.profiles.push(ExtractedProfile {
-          identity,
-          legacy,
-          sources,
-        });
-        break 'profiles;
-      }
-      let mut source = Source::new(
-        candidate.identity(),
-        candidate.selected,
-        candidate.acquisition,
-      );
-      match query(candidate, domains) {
-        // The engine already built the `Source` from this candidate, so there
-        // is nothing to copy across.
-        Ok(extraction) => source = extraction,
-        Err(error) => {
-          if let Some(stop) = boundary_stop_from_error(&error) {
-            extract.boundary_stop.get_or_insert(stop);
-            stop_position = Some(profile_index);
-            extract.profiles.push(ExtractedProfile {
-              identity,
-              legacy,
-              sources,
-            });
-            break 'profiles;
+  populate_engine_sources(
+    listing,
+    ExtractCompletion::DropStoppedProfileIfEmpty,
+    |_identity, candidates| {
+      acquire_each_candidate(candidates, domains, runtime, &mut query, |source, error| {
+        // Exhausting the retries is itself the failure, so report the
+        // attempts spent rather than the placeholder.
+        source.acquisition_attempts = crate::browser::safari::STABLE_READ_ATTEMPTS as u32;
+        let message = format!("{error:#}");
+        match error.downcast_ref::<crate::browser::safari::SafariParseFailure>() {
+          Some(failure) => {
+            source.stats = SourceStats {
+              rows_seen: failure.stats.records_seen,
+              cookies_emitted: 0,
+              rows_skipped: failure.stats.records_skipped,
+              rows_rejected: failure.stats.records_rejected,
+              provider_failures: 0,
+            };
+            source.push_row_read_failed(Some(message.clone()));
+            source.fail(SourceFailureStage::Parse, message);
           }
-          // Exhausting the retries is itself the failure, so report the
-          // attempts spent rather than the placeholder.
-          source.acquisition_attempts = crate::browser::safari::STABLE_READ_ATTEMPTS as u32;
-          let message = format!("{error:#}");
-          match error.downcast_ref::<crate::browser::safari::SafariParseFailure>() {
-            Some(failure) => {
-              source.stats = SourceStats {
-                rows_seen: failure.stats.records_seen,
-                cookies_emitted: 0,
-                rows_skipped: failure.stats.records_skipped,
-                rows_rejected: failure.stats.records_rejected,
-                provider_failures: 0,
-              };
-              source.push_row_read_failed(Some(message.clone()));
-              source.fail(SourceFailureStage::Parse, message);
-            }
-            None => {
-              source.fail(SourceFailureStage::Acquisition, message);
-            }
+          None => {
+            source.fail(SourceFailureStage::Acquisition, message);
           }
         }
-      }
-      // The query result above is an atomic source outcome. Commit it before
-      // sampling the shared stop state so a stop that races with the return
-      // cannot discard records and counters that already completed.
-      sources.push(source);
-      if let Some(stop) = runtime.and_then(|runtime| runtime.check().err()) {
-        extract.boundary_stop.get_or_insert(stop);
-        stop_position = Some(profile_index);
-        extract.profiles.push(ExtractedProfile {
-          identity,
-          legacy,
-          sources,
-        });
-        break 'profiles;
-      }
-    }
-    extract.profiles.push(ExtractedProfile {
-      identity,
-      legacy,
-      sources,
-    });
-  }
-  if let Some(profile_index) = stop_position {
-    // Sources hold exactly the queries that completed, so there is nothing to
-    // truncate within a profile any more. Profiles after the stop never ran,
-    // and the stopped profile itself is dropped if it committed nothing.
-    extract.profiles.truncate(profile_index + 1);
-    if extract.profiles[profile_index].sources.is_empty() {
-      extract.profiles.truncate(profile_index);
-    }
-  }
-  extract
+      })
+    },
+  )
 }
 
 fn query_safari_file<Q>(

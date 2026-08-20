@@ -7,12 +7,12 @@ use super::super::source::SourceCandidate;
 use super::DiscoveryCounters;
 use super::{
   browser_definition, canonical_installation_root, embedded_registry, installation_id,
-  installation_root_is_directory, normalized_path_bytes, profile_id, push_bounded_discovery_issue,
-  retain_completed_engine_extract, select_listing_profiles, sort_discovered_profiles,
-  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
-  InstallationRoot, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
-  PERSISTENT_SOURCE_PRECEDENCE,
+  installation_root_is_directory, normalized_path_bytes, populate_engine_sources, profile_id,
+  push_bounded_discovery_issue, retain_completed_engine_extract, select_listing_profiles,
+  sort_discovered_profiles, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
+  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
+  ExtractCompletion, InstallationRoot, LegacyRank, ProfileLocator, ProfileSelection,
+  SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{sort_cookies, test_seams, PlatformId, MAX_DISCOVERY_ISSUE_SAMPLES};
@@ -445,6 +445,12 @@ fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandida
 /// produced nothing still appears with `sources: vec![]`, so the report layer
 /// can tell a source that vanished before extraction (`profile_extraction_failed`)
 /// from a browser that was never installed.
+///
+/// The envelope -- destructuring the listing, sizing the extract, pushing each
+/// profile, and honouring a stop -- is [`populate_engine_sources`]. What is
+/// below is only Gecko's per-profile body, which is the point: the probe and
+/// first-valid selection are visibly Gecko's rather than a differently shaped
+/// function.
 pub(super) fn populate_gecko_sources<Q, E>(
   listing: EngineListing,
   domains: Option<&[String]>,
@@ -455,82 +461,57 @@ where
   Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
   E: FnMut(&Path) -> bool,
 {
-  let EngineListing {
-    profiles,
-    discovery_issues,
-    counters,
-    boundary_stop,
-  } = listing;
-  let mut extract = EngineExtract {
-    profiles: Vec::with_capacity(profiles.len()),
-    discovery_issues,
-    counters,
-    boundary_stop,
-  };
-  for profile in profiles {
-    let DiscoveredProfile {
-      identity,
-      legacy,
-      candidates,
-    } = profile;
-    let persistent = identity.path.join(GECKO_PERSISTENT_SOURCE);
-    let persistent_candidate = candidates
-      .iter()
-      .find(|candidate| candidate.role == CookieSourceRoleId::persistent())
-      .cloned()
-      .unwrap_or_else(|| persistent_probe_candidate(&identity));
-    let mut sources = Vec::new();
-    let mut stop = None;
-    // The Mozilla engine emits a persistent source whenever the query was
-    // attempted -- which it always is, even for a profile with no
-    // cookies.sqlite. The adapter half of the gate lives here: drop that
-    // persistent source unless the profile either discovered a persistent
-    // store or has one on disk now.
-    //
-    // Discovery's snapshot goes stale in both directions, so existence is
-    // rechecked after the query rather than inferred from it: a database that
-    // appeared since discovery is projected even when reading it then failed,
-    // and one deleted since discovery is still projected so its failure is
-    // reported instead of vanishing. Inferring from the query alone would
-    // silence a database that appeared and was corrupt or locked. The `exists`
-    // probe is spent only when discovery did not already vouch for the store.
-    match query(&persistent_candidate, domains) {
-      mozilla::MozillaCandidateOutcome::Source(source) => {
-        if identity.persistent_source_discovered || persistent_exists(&persistent) {
-          sources.push(source);
+  populate_engine_sources(
+    listing,
+    ExtractCompletion::RetainAttempted,
+    |identity, candidates| {
+      let persistent = identity.path.join(GECKO_PERSISTENT_SOURCE);
+      let persistent_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.role == CookieSourceRoleId::persistent())
+        .cloned()
+        .unwrap_or_else(|| persistent_probe_candidate(identity));
+      let mut sources = Vec::new();
+      let mut stop = None;
+      // The Mozilla engine emits a persistent source whenever the query was
+      // attempted -- which it always is, even for a profile with no
+      // cookies.sqlite. The adapter half of the gate lives here: drop that
+      // persistent source unless the profile either discovered a persistent
+      // store or has one on disk now.
+      //
+      // Discovery's snapshot goes stale in both directions, so existence is
+      // rechecked after the query rather than inferred from it: a database that
+      // appeared since discovery is projected even when reading it then failed,
+      // and one deleted since discovery is still projected so its failure is
+      // reported instead of vanishing. Inferring from the query alone would
+      // silence a database that appeared and was corrupt or locked. The `exists`
+      // probe is spent only when discovery did not already vouch for the store.
+      match query(&persistent_candidate, domains) {
+        mozilla::MozillaCandidateOutcome::Source(source) => {
+          if identity.persistent_source_discovered || persistent_exists(&persistent) {
+            sources.push(source);
+          }
         }
+        // The engine never reports the persistent probe as missing -- an absent
+        // database is a failed attempt -- so there is nothing to record.
+        mozilla::MozillaCandidateOutcome::Missing => {}
+        mozilla::MozillaCandidateOutcome::Stop(boundary) => stop = Some(boundary),
       }
-      // The engine never reports the persistent probe as missing -- an absent
-      // database is a failed attempt -- so there is nothing to record.
-      mozilla::MozillaCandidateOutcome::Missing => {}
-      mozilla::MozillaCandidateOutcome::Stop(boundary) => stop = Some(boundary),
-    }
-    if stop.is_none() {
-      // First-valid selection lives in the engine and is shared with the
-      // direct-path walk; laziness of this iterator is what guarantees the
-      // candidates after the first success are never acquired.
-      stop = mozilla::select_session_sources(
-        candidates
-          .iter()
-          .filter(|candidate| candidate.role == CookieSourceRoleId::session())
-          .map(|candidate| query(candidate, domains)),
-        &mut sources,
-      );
-    }
-    extract.profiles.push(ExtractedProfile {
-      identity,
-      legacy,
-      sources,
-    });
-    if stop.is_some() {
-      extract.boundary_stop = stop;
-      break;
-    }
-  }
-  if extract.boundary_stop.is_some() {
-    retain_completed_engine_extract(&mut extract);
-  }
-  extract
+      if stop.is_none() {
+        // First-valid selection lives in the engine and is shared with the
+        // direct-path walk; laziness of this iterator is what guarantees the
+        // candidates after the first success are never acquired.
+        stop = mozilla::select_session_sources(
+          candidates
+            .iter()
+            .filter(|candidate| candidate.role == CookieSourceRoleId::session())
+            .map(|candidate| query(candidate, domains)),
+          &mut sources,
+        );
+      }
+      (sources, stop)
+    },
+  )
 }
 
 fn gecko_report(
@@ -1844,6 +1825,90 @@ mod tests {
     assert!(issues
       .iter()
       .all(|issue| !issue.message.contains("additional")));
+  }
+
+  /// A stop the *listing* carried into a walk that never stopped is the one
+  /// case where the shared frame's completion trigger and Gecko's former
+  /// post-loop gate could disagree. That gate read `extract.boundary_stop`,
+  /// which is seeded from the listing, so it also fired for an inherited stop;
+  /// the frame fires only for a stop a profile body returned, which is what
+  /// Safari and Internet Explorer already did.
+  ///
+  /// The case is unreachable in production: no code in this crate ever writes
+  /// a `Some` into an `EngineListing::boundary_stop`, and both Gecko callers
+  /// that could observe a difference run `retain_gecko_runtime_stop`
+  /// afterwards anyway. It is pinned here so the contract is a test rather
+  /// than something a later reader has to re-derive from every call site.
+  #[test]
+  fn a_stop_inherited_from_the_listing_does_not_retain_a_walk_that_never_stopped() {
+    use crate::common::deadline::BoundaryStop;
+
+    let path = PathBuf::from("/profiles/gecko-0");
+    let discovered = EngineListing {
+      profiles: vec![DiscoveredProfile {
+        identity: EngineProfileIdentity {
+          profile_id: format!("{0:064x}", 0).parse().expect("valid profile id"),
+          installation_id: "0".repeat(64).parse().expect("valid installation id"),
+          installation_priority: 10,
+          installation_path: PathBuf::from("/profiles"),
+          name: "profile-0".to_owned(),
+          path,
+          is_default: true,
+          persistent_source_discovered: true,
+        },
+        legacy: LegacyRank {
+          installation_priority: 10,
+          profile_order: 0,
+          is_default: true,
+          eligible: true,
+          installation_path: PathBuf::from("/profiles"),
+          name: "profile-0".to_owned(),
+        },
+        candidates: Vec::new(),
+      }],
+      discovery_issues: Vec::new(),
+      counters: DiscoveryCounters {
+        installations_discovered: 1,
+        installations_detected: 1,
+        installations_enumerated: 1,
+      },
+      boundary_stop: Some(BoundaryStop::TimedOut),
+    };
+
+    let populated = populate_gecko_sources(
+      discovered,
+      None,
+      |candidate, _| {
+        // A source the walk committed without spending an attempt: exactly
+        // what `retain_completed_engine_extract` exists to drop. Emitting it
+        // is what makes the two triggers distinguishable at all.
+        mozilla::MozillaCandidateOutcome::Source(source_from_candidate(SourceCandidate {
+          path: candidate.path.clone(),
+          role: CookieSourceRoleId::persistent(),
+          format: CookieSourceFormatId::known(mozilla::PERSISTENT_FORMAT_ID),
+          precedence: PERSISTENT_SOURCE_PRECEDENCE,
+          exists: true,
+          selected: true,
+          acquisition: SourceAcquisition::Database(
+            DatabaseAcquisitionStrategy::VerifiedStaticSingleFile,
+          ),
+        }))
+      },
+      |_| true,
+    );
+
+    assert_eq!(
+      populated.boundary_stop,
+      Some(BoundaryStop::TimedOut),
+      "the listing's stop is carried into the extract untouched"
+    );
+    assert_eq!(
+      populated.profiles.len(),
+      1,
+      "no profile body returned a stop, so no completion policy runs"
+    );
+    assert_eq!(populated.profiles[0].sources.len(), 1);
+    assert_eq!(populated.profiles[0].sources[0].acquisition_attempts, 0);
   }
 
   fn stopped_gecko_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {
