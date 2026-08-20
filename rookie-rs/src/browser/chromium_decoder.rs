@@ -178,13 +178,6 @@ fn sqlite_table_columns(
   Ok(columns)
 }
 
-fn escape_like_pattern(input: &str) -> String {
-  input
-    .replace('\\', "\\\\")
-    .replace('%', "\\%")
-    .replace('_', "\\_")
-}
-
 pub(super) struct ChromiumCookieDecoder<'connection> {
   statement: rusqlite::Statement<'connection>,
   domains: Option<Vec<String>>,
@@ -285,7 +278,7 @@ pub(super) fn prepare_cookie_decoder<'connection>(
       domains
         .iter()
         .filter_map(|domain| utils::normalized_domain_for_match(domain))
-        .map(|domain| format!("%{}%", escape_like_pattern(domain)))
+        .map(|domain| format!("%{}%", utils::escape_like_pattern(domain)))
         .collect()
     })
     .unwrap_or_default();

@@ -112,16 +112,6 @@ pub(crate) fn firefox_based_detailed_with_runtime(
   )
 }
 
-/// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
-/// character itself so a caller-supplied domain is matched as literal text,
-/// not interpreted as a wildcard pattern. Pair with an `ESCAPE '\'` clause.
-fn escape_like_pattern(input: &str) -> String {
-  input
-    .replace('\\', "\\\\")
-    .replace('%', "\\%")
-    .replace('_', "\\_")
-}
-
 struct PersistentCookieQuery {
   records: Vec<CookieRecord>,
   rows_seen: usize,
@@ -272,7 +262,7 @@ fn decode_persistent_cookies(
       domains
         .iter()
         .filter_map(|domain| utils::normalized_domain_for_match(domain))
-        .map(|domain| format!("%{}%", escape_like_pattern(domain)))
+        .map(|domain| format!("%{}%", utils::escape_like_pattern(domain)))
         .collect()
     })
     .unwrap_or_default();

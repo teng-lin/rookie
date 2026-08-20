@@ -5,12 +5,13 @@ use super::super::source::{Source, SourceCandidate, SourceFailureStage};
 #[cfg(test)]
 use super::DiscoveryCounters;
 use super::{
-  canonical_installation_root, embedded_registry, engine_roots, installation_id,
-  installation_root_is_directory, normalized_path_bytes, profile_id,
-  retain_completed_engine_extract, select_listing_profiles, sort_discovered_profiles,
-  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractedProfile,
-  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  boundary_stop_from_error, canonical_installation_root, embedded_registry, engine_roots,
+  installation_id, installation_root_is_directory, normalized_path_bytes, profile_id,
+  retain_completed_engine_extract, retain_engine_runtime_stop, select_listing_profiles,
+  sort_discovered_profiles, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
+  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
+  ExtractedProfile, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
+  PERSISTENT_SOURCE_PRECEDENCE,
 };
 use crate::browser::internet_explorer_model::{
   InternetExplorerFailure, InternetExplorerFailureStage,
@@ -259,29 +260,6 @@ where
   extract
 }
 
-fn boundary_stop_from_error(
-  error: &anyhow::Error,
-) -> Option<crate::common::deadline::BoundaryStop> {
-  error.chain().find_map(|cause| {
-    cause
-      .downcast_ref::<crate::common::deadline::BoundaryStop>()
-      .copied()
-  })
-}
-
-fn retain_internet_explorer_runtime_stop(
-  mut extract: EngineExtract,
-  runtime: &crate::common::deadline::BoundaryRuntime<'_>,
-) -> EngineExtract {
-  if let Err(stop) = runtime.check() {
-    extract.boundary_stop.get_or_insert(stop);
-  }
-  if extract.boundary_stop.is_some() {
-    retain_completed_engine_extract(&mut extract);
-  }
-  extract
-}
-
 fn internet_explorer_failure_stage(error: &anyhow::Error) -> SourceFailureStage {
   match error
     .downcast_ref::<InternetExplorerFailure>()
@@ -347,7 +325,7 @@ pub(crate) fn internet_explorer_report_with_runtime(
       })
     },
   )?;
-  Ok(retain_internet_explorer_runtime_stop(outcome, runtime))
+  Ok(retain_engine_runtime_stop(outcome, runtime))
 }
 
 #[cfg(target_os = "windows")]
@@ -383,7 +361,7 @@ pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
         )
       })
     });
-  Ok(retain_internet_explorer_runtime_stop(outcome, runtime))
+  Ok(retain_engine_runtime_stop(outcome, runtime))
 }
 
 #[cfg(test)]
@@ -647,7 +625,7 @@ mod tests {
         counters: listing.counters,
         boundary_stop: listing.boundary_stop,
       };
-      let retained = retain_internet_explorer_runtime_stop(discovery_only, &runtime);
+      let retained = retain_engine_runtime_stop(discovery_only, &runtime);
 
       assert_eq!(retained.boundary_stop, Some(stop));
       assert!(retained.profiles.is_empty());

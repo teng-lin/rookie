@@ -45,6 +45,16 @@ pub(crate) fn normalized_domain_for_match(value: &str) -> Option<&str> {
   }
 }
 
+/// Escapes SQL `LIKE` wildcard metacharacters (`%`, `_`) and the escape
+/// character itself so a caller-supplied domain is matched as literal text,
+/// not interpreted as a wildcard pattern. Pair with an `ESCAPE '\'` clause.
+pub(crate) fn escape_like_pattern(input: &str) -> String {
+  input
+    .replace('\\', "\\\\")
+    .replace('%', "\\%")
+    .replace('_', "\\_")
+}
+
 pub fn some_domain_in_host(domains: Option<&[String]>, host: &str) -> bool {
   if let Some(strings) = domains {
     for d in strings {
