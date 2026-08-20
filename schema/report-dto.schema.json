@@ -101,7 +101,9 @@
       ],
       "properties": {
         "id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "aliases": {
           "type": "array",
@@ -113,7 +115,9 @@
           "type": "string"
         },
         "engine": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "capabilities": {
           "$ref": "#/definitions/BrowserCapabilitiesDescriptor"
@@ -133,25 +137,33 @@
         "persistent_formats": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$"
           }
         },
         "session_formats": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$"
           }
         },
         "declared_decryption_tiers": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$"
           }
         },
         "available_decryption_tiers": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_]*$"
           }
         }
       }
@@ -192,13 +204,21 @@
       ],
       "properties": {
         "browser_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "installation_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "profile_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "display_name": {
           "type": "string"
@@ -223,10 +243,14 @@
       ],
       "properties": {
         "role": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "format": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "path": {
           "type": "string"
@@ -259,12 +283,16 @@
           "minimum": 0.0
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "termination": {
           "description": "Why execution stopped. This is independent from `status`: a timed-out request may still contain complete source outcomes collected earlier.",
           "default": "completed",
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "summary": {
           "$ref": "#/definitions/ReportStats"
@@ -306,11 +334,13 @@
           "minimum": 0.0
         },
         "browsers_detected": {
+          "description": "Browsers whose discovery established that an installation was present.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
         },
         "browsers_not_detected": {
+          "description": "Browsers whose discovery completed and established absence.\n\nA request stopped before discovery completed is in neither detection counter in schema v1. Its error-severity stop issue and non-completed termination distinguish that unattempted/unknown state from absence.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
@@ -416,13 +446,17 @@
           "$ref": "#/definitions/CookieSourceIdentity"
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "selected": {
           "type": "boolean"
         },
         "acquisition_strategy": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "cookies": {
           "type": "array",
@@ -453,10 +487,14 @@
       ],
       "properties": {
         "role": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "format": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "path": {
           "type": "string"
@@ -535,13 +573,19 @@
       ],
       "properties": {
         "code": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "stage": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "severity": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "cause": {
           "description": "Stable machine-readable origin of the failure.",
@@ -584,19 +628,27 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$"
         },
         "installation_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "profile_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
         },
         "message": {
           "type": "string"

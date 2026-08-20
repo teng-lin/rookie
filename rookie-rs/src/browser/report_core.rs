@@ -48,8 +48,36 @@ fn validate_opaque_identifier(kind: &str, value: &str) -> Result<()> {
   Ok(())
 }
 
+#[cfg(feature = "dto-schema")]
+fn lexical_string_schema(
+  pattern: &'static str,
+  min_length: u32,
+  max_length: Option<u32>,
+) -> schemars::schema::Schema {
+  schemars::schema::SchemaObject {
+    instance_type: Some(schemars::schema::InstanceType::String.into()),
+    string: Some(Box::new(schemars::schema::StringValidation {
+      max_length,
+      min_length: Some(min_length),
+      pattern: Some(pattern.to_owned()),
+    })),
+    ..Default::default()
+  }
+  .into()
+}
+
+#[cfg(feature = "dto-schema")]
+fn open_identifier_schema() -> schemars::schema::Schema {
+  lexical_string_schema("^[a-z][a-z0-9_]*$", 1, None)
+}
+
+#[cfg(feature = "dto-schema")]
+fn opaque_identifier_schema() -> schemars::schema::Schema {
+  lexical_string_schema("^[0-9a-f]{64}$", 64, Some(64))
+}
+
 macro_rules! string_identifier {
-  ($name:ident, $kind:literal, $validate:ident) => {
+  ($name:ident, $kind:literal, $validate:ident, $schema:ident) => {
     #[doc = concat!("Open ", $kind, " identifier.")]
     ///
     /// The vocabulary is deliberately not a closed enum: a value this build
@@ -57,7 +85,6 @@ macro_rules! string_identifier {
     /// issue code cannot break a downstream match. Compare with
     /// [`Self::as_str`] and parse untrusted input with [`FromStr`].
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-    #[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
     #[serde(transparent)]
     pub struct $name(String);
 
@@ -112,43 +139,112 @@ macro_rules! string_identifier {
         Ok(Self(value))
       }
     }
+
+    #[cfg(feature = "dto-schema")]
+    impl schemars::JsonSchema for $name {
+      fn is_referenceable() -> bool {
+        false
+      }
+
+      fn schema_name() -> String {
+        stringify!($name).to_owned()
+      }
+
+      fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::", stringify!($name)))
+      }
+
+      fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        $schema()
+      }
+    }
   };
 }
 
-string_identifier!(BrowserId, "browser", validate_open_identifier);
-string_identifier!(EngineId, "engine", validate_open_identifier);
+string_identifier!(
+  BrowserId,
+  "browser",
+  validate_open_identifier,
+  open_identifier_schema
+);
+string_identifier!(
+  EngineId,
+  "engine",
+  validate_open_identifier,
+  open_identifier_schema
+);
 string_identifier!(
   CookieSourceRoleId,
   "cookie source role",
-  validate_open_identifier
+  validate_open_identifier,
+  open_identifier_schema
 );
 string_identifier!(
   CookieSourceFormatId,
   "cookie source format",
-  validate_open_identifier
+  validate_open_identifier,
+  open_identifier_schema
 );
-string_identifier!(CipherTierId, "cipher tier", validate_open_identifier);
-string_identifier!(ReportStatusCode, "report status", validate_open_identifier);
-string_identifier!(TerminationCode, "termination", validate_open_identifier);
-string_identifier!(SourceStatusCode, "source status", validate_open_identifier);
+string_identifier!(
+  CipherTierId,
+  "cipher tier",
+  validate_open_identifier,
+  open_identifier_schema
+);
+string_identifier!(
+  ReportStatusCode,
+  "report status",
+  validate_open_identifier,
+  open_identifier_schema
+);
+string_identifier!(
+  TerminationCode,
+  "termination",
+  validate_open_identifier,
+  open_identifier_schema
+);
+string_identifier!(
+  SourceStatusCode,
+  "source status",
+  validate_open_identifier,
+  open_identifier_schema
+);
 string_identifier!(
   AcquisitionStrategyCode,
   "acquisition strategy",
-  validate_open_identifier
+  validate_open_identifier,
+  open_identifier_schema
 );
-string_identifier!(IssueCode, "issue code", validate_open_identifier);
+string_identifier!(
+  IssueCode,
+  "issue code",
+  validate_open_identifier,
+  open_identifier_schema
+);
 string_identifier!(
   ExtractionStageCode,
   "extraction stage",
-  validate_open_identifier
+  validate_open_identifier,
+  open_identifier_schema
 );
 string_identifier!(
   IssueSeverityCode,
   "issue severity",
-  validate_open_identifier
+  validate_open_identifier,
+  open_identifier_schema
 );
-string_identifier!(InstallationId, "installation", validate_opaque_identifier);
-string_identifier!(ProfileId, "profile", validate_opaque_identifier);
+string_identifier!(
+  InstallationId,
+  "installation",
+  validate_opaque_identifier,
+  opaque_identifier_schema
+);
+string_identifier!(
+  ProfileId,
+  "profile",
+  validate_opaque_identifier,
+  opaque_identifier_schema
+);
 
 /// Constructors for the vocabulary values Section 5.7 freezes.
 ///
@@ -372,7 +468,13 @@ pub struct ExtractionStats {
 #[cfg_attr(feature = "dto-schema", derive(schemars::JsonSchema))]
 pub struct ReportStats {
   pub registered_browsers: u32,
+  /// Browsers whose discovery established that an installation was present.
   pub browsers_detected: u32,
+  /// Browsers whose discovery completed and established absence.
+  ///
+  /// A request stopped before discovery completed is in neither detection
+  /// counter in schema v1. Its error-severity stop issue and non-completed
+  /// termination distinguish that unattempted/unknown state from absence.
   pub browsers_not_detected: u32,
   pub installations_discovered: u32,
   pub profiles_discovered: u32,
@@ -745,6 +847,59 @@ mod tests {
     assert!(InstallationId::from_str(&digest).is_ok());
     for invalid in ["a".repeat(63), "A".repeat(64), "g".repeat(64)] {
       assert!(ProfileId::from_str(&invalid).is_err());
+    }
+  }
+
+  #[cfg(feature = "dto-schema")]
+  fn generated_schema_accepts<T: schemars::JsonSchema>(value: &str) -> bool {
+    let mut generator = schemars::r#gen::SchemaSettings::draft07().into_generator();
+    let schema = T::json_schema(&mut generator);
+    let schemars::schema::Schema::Object(schema) = schema else {
+      return false;
+    };
+    let Some(validation) = schema.string else {
+      return false;
+    };
+    let length = value.chars().count() as u32;
+    if validation
+      .min_length
+      .is_some_and(|minimum| length < minimum)
+      || validation
+        .max_length
+        .is_some_and(|maximum| length > maximum)
+    {
+      return false;
+    }
+    validation.pattern.as_ref().is_none_or(|pattern| {
+      regex::Regex::new(pattern)
+        .expect("generated identifier pattern is valid")
+        .is_match(value)
+    })
+  }
+
+  #[cfg(feature = "dto-schema")]
+  #[test]
+  fn generated_identifier_schemas_match_rust_lexical_validation() {
+    for valid in ["future_browser", "vendor99_mode", "x"] {
+      assert!(BrowserId::from_str(valid).is_ok());
+      assert!(generated_schema_accepts::<BrowserId>(valid));
+    }
+    for invalid in ["", "Uppercase", "1leading", "has-dash", "has space"] {
+      assert!(BrowserId::from_str(invalid).is_err());
+      assert!(!generated_schema_accepts::<BrowserId>(invalid));
+    }
+
+    let valid_opaque = "0123456789abcdef".repeat(4);
+    assert!(ProfileId::from_str(&valid_opaque).is_ok());
+    assert!(generated_schema_accepts::<ProfileId>(&valid_opaque));
+    for invalid in [
+      "a".repeat(63),
+      "a".repeat(65),
+      "A".repeat(64),
+      "g".repeat(64),
+    ] {
+      assert!(ProfileId::from_str(&invalid).is_err());
+      assert!(!generated_schema_accepts::<ProfileId>(&invalid));
     }
   }
 
