@@ -81,8 +81,7 @@ expands the language matrix.
 
 **Nightly only**
 
-- Node: addon built on **22** on all three OSes, then tests on the full
-  3 OS × 22/24/26 product (proves a 22-built addon loads on 24 and 26).
+- Node: build+tests on the full 3 OS × 22/24/26 product.
 - Python build+tests on the full 3 OS × 3.11–3.14 product.
 - **FreeBSD VM:** Mozilla `--path` works; Chromium SQLite is unsupported there
   (typed error). No `--allow-process-shutdown`.
