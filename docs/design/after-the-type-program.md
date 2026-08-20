@@ -1584,11 +1584,33 @@ the relocated aggregator treat every failure as uninstalled. Each went red on
 the expected tests; the second and fourth would have stayed green under the old
 `load_from_browsers` twin.
 
-**Deliberately left undone:** moving misfiled tests to the module they pin
-(chromium's unseal/crypto tests to `unseal.rs`, which has no `mod tests` at
-all; registry's Safari/IE tests to their children). The sweep removed the size
-pressure, and this move splits tests from shared fixtures, so it needs a
-fixture module first. Opportunistic, not scheduled.
+**Follow-up, since landed.** Misfiled tests moved to the module they pin — the
+one piece the three PRs deliberately skipped. 22 decrypt/decode tests left
+`chromium.rs`'s test module for `unseal.rs`, which had **no `mod tests` at all**
+despite owning `decode_chromium_cookie_value` and all three
+`decrypt_encrypted_value*` entry points; one schema test went to
+`chromium_decoder.rs`; and 14 Safari/IE discovery tests went to
+`registry/{safari,internet_explorer}.rs`, which already had their own modules.
+
+The two engine tests that merely *name* unseal symbols
+(`late_missing_identity_error_wipes_staged_plaintext_before_returning`,
+`unwind_during_later_unseal_wipes_every_staged_success`) stayed, as did three
+cross-engine registry tests that use Safari or IE only as a vehicle for
+`DiscoveryContext` and catalog assertions. The distinction that decided each
+case was whether the test touches an engine fixture (`seed_chromium_cookies`,
+`unique_tmpdir`) or only the pure function under test.
+
+Two fixtures were genuinely shared and became
+`browser/chromium_test_support.rs` rather than being duplicated:
+`host_bound_plaintext` and the Windows-only `encrypt_windows_gcm_cookie`.
+`chromium.rs` also shed a `#[cfg(test)] const CHROMIUM_HOST_HASH_LEN` that
+duplicated `unseal.rs`'s real one and was reachable only from the moved tests.
+
+Unlike the PR 1 sweep this changes module paths, so `--list` is not a
+byte-identical check; the count held at 837 and each moved name was matched by
+hand. Disabling `unseal.rs`'s host-hash strip fails seven of the relocated
+tests plus one engine test, which is the proof they still pin what they used
+to.
 
 ---
 

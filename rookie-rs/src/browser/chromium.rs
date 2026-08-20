@@ -1,14 +1,12 @@
 use super::outcome::Retryability;
 use crate::common::deadline::BoundaryRuntime;
 #[cfg(test)]
-use crate::common::secret::{SecretBytes, SecretString};
+use crate::common::secret::SecretString;
 use crate::common::{enums::*, sqlite};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
 use super::chromium_crypto::ChromiumKeyOutcomes;
-#[cfg(test)]
-use super::chromium_crypto::LegacyCipherOutcome;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use super::chromium_crypto::{retrieve_key_outcomes, KeyProvider};
 #[cfg(test)]
@@ -31,19 +29,8 @@ enum CookieProjection {
 use super::cookie_record::{CookieRecord, UnavailableCode};
 use super::report_core::{ExtractionStageCode, IssueSeverityCode};
 use super::source::{Source, SourceCandidate, SourceIssue, SourceStats};
-#[cfg(all(test, unix))]
-use super::unseal::decrypt_encrypted_value_with_outcomes;
-#[cfg(test)]
-use super::unseal::{
-  decode_chromium_cookie_value, decrypt_encrypted_value,
-  decrypt_encrypted_value_with_cipher_adapter, ChromiumCookieDecodeError, CipherAdapter,
-};
 use super::unseal::{unseal_chromium_record, ChromiumCookieValueError};
-#[cfg(test)]
-use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-const CHROMIUM_HOST_HASH_LEN: usize = 32;
 #[cfg(target_os = "linux")]
 use super::chromium_platform_keys::LinuxPlatformKeyProvider;
 #[cfg(target_os = "macos")]
