@@ -178,8 +178,15 @@ mod tests {
     let open = property(&definitions, "BrowserDescriptor", "id");
     assert_eq!(open["type"], "string");
     assert_eq!(open["minLength"], 1);
-    assert_eq!(open["pattern"], "^[a-z][a-z0-9_]*$");
+    assert_eq!(open["pattern"], "^[a-z]");
+    assert_eq!(open["not"]["type"], "string");
+    assert_eq!(open["not"]["pattern"], "[^a-z0-9_]");
     assert!(open.get("enum").is_none(), "open vocabulary must stay open");
+
+    let optional_open = property(&definitions, "ExtractionIssue", "browser_id");
+    assert_eq!(optional_open["type"], json!(["string", "null"]));
+    assert_eq!(optional_open["not"]["type"], "string");
+    assert_eq!(optional_open["not"]["pattern"], "[^a-z0-9_]");
 
     let opaque = property(&definitions, "ProfileIdentity", "profile_id");
     assert_eq!(opaque["type"], "string");

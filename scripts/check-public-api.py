@@ -198,30 +198,120 @@ def check_deprecation_contract(
 ) -> bool:
     """Require the complete scoped deprecated set and its exact metadata."""
     index = rustdoc.get("index")
-    paths = rustdoc.get("paths")
-    if not isinstance(index, dict) or not isinstance(paths, dict):
+    root = rustdoc.get("root")
+    if not isinstance(index, dict) or not isinstance(root, int):
         print(f"invalid rustdoc JSON structure for {label}", file=sys.stderr)
         return False
 
     actual: dict[str, object] = {}
-    for item_id, item in index.items():
+    success = True
+
+    # rustdoc's `paths` table describes definition paths, so a `pub` item in a
+    # private module appears there even though downstream crates cannot name it.
+    # Walk outward from the crate root instead, following only public modules
+    # and re-exports and recording the path a downstream crate actually uses.
+
+    def item_for(item_id: object) -> dict[str, object] | None:
+        item = index.get(str(item_id))
+        return item if isinstance(item, dict) else None
+
+    def record(path: list[str], deprecation: object) -> None:
+        nonlocal success
+        rendered = "::".join(path)
+        previous = actual.get(rendered)
+        if previous is not None and previous != deprecation:
+            print(
+                f"conflicting deprecation metadata for {rendered} in {label}: "
+                f"{previous!r} versus {deprecation!r}",
+                file=sys.stderr,
+            )
+            success = False
+        actual[rendered] = deprecation
+
+    def visit(
+        item_id: object,
+        public_path: list[str],
+        ancestors: frozenset[str],
+        reexport_deprecation: object = None,
+    ) -> None:
+        item_key = str(item_id)
+        if item_key in ancestors:
+            return
+        item = item_for(item_id)
         if (
-            not isinstance(item, dict)
+            item is None
             or item.get("crate_id") != 0
             or item.get("visibility") != "public"
         ):
-            continue
-        path = paths.get(str(item_id))
-        if not isinstance(path, dict) or not isinstance(path.get("path"), list):
-            continue
-        deprecation = item.get("deprecation")
+            return
+
+        deprecation = (
+            reexport_deprecation
+            if reexport_deprecation is not None
+            else item.get("deprecation")
+        )
         if deprecation is not None:
-            actual["::".join(path["path"])] = deprecation
+            record(public_path, deprecation)
+
+        inner = item.get("inner")
+        if not isinstance(inner, dict):
+            return
+        module = inner.get("module")
+        if not isinstance(module, dict) or not isinstance(module.get("items"), list):
+            return
+
+        next_ancestors = ancestors | {item_key}
+        for child_id in module["items"]:
+            child = item_for(child_id)
+            if child is None or child.get("visibility") != "public":
+                continue
+            child_inner = child.get("inner")
+            imported = child_inner.get("use") if isinstance(child_inner, dict) else None
+            if isinstance(imported, dict):
+                target_id = imported.get("id")
+                if target_id is None:
+                    continue
+                if imported.get("is_glob"):
+                    target = item_for(target_id)
+                    target_inner = target.get("inner") if target is not None else None
+                    target_module = (
+                        target_inner.get("module") if isinstance(target_inner, dict) else None
+                    )
+                    if not isinstance(target_module, dict) or not isinstance(
+                        target_module.get("items"), list
+                    ):
+                        continue
+                    for target_child_id in target_module["items"]:
+                        target_child = item_for(target_child_id)
+                        target_name = (
+                            target_child.get("name") if target_child is not None else None
+                        )
+                        if isinstance(target_name, str):
+                            visit(
+                                target_child_id,
+                                [*public_path, target_name],
+                                next_ancestors | {str(target_id)},
+                            )
+                    continue
+                imported_name = imported.get("name")
+                if isinstance(imported_name, str):
+                    visit(
+                        target_id,
+                        [*public_path, imported_name],
+                        next_ancestors,
+                        child.get("deprecation"),
+                    )
+                continue
+
+            child_name = child.get("name")
+            if isinstance(child_name, str):
+                visit(child_id, [*public_path, child_name], next_ancestors)
+
+    visit(root, ["rookie_cookies"], frozenset())
 
     wanted = {
         item["path"]: {"since": item["since"], "note": item["note"]} for item in expected
     }
-    success = True
     for path in sorted(wanted.keys() | actual.keys()):
         if path not in wanted:
             print(f"unexpected deprecated API item in {label}: {path}", file=sys.stderr)

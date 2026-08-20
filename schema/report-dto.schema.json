@@ -103,6 +103,7 @@
         "id": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -120,6 +121,7 @@
         "engine": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -145,6 +147,7 @@
           "items": {
             "type": "string",
             "not": {
+              "type": "string",
               "pattern": "[^a-z0-9_]"
             },
             "minLength": 1,
@@ -156,6 +159,7 @@
           "items": {
             "type": "string",
             "not": {
+              "type": "string",
               "pattern": "[^a-z0-9_]"
             },
             "minLength": 1,
@@ -167,6 +171,7 @@
           "items": {
             "type": "string",
             "not": {
+              "type": "string",
               "pattern": "[^a-z0-9_]"
             },
             "minLength": 1,
@@ -178,6 +183,7 @@
           "items": {
             "type": "string",
             "not": {
+              "type": "string",
               "pattern": "[^a-z0-9_]"
             },
             "minLength": 1,
@@ -224,6 +230,7 @@
         "browser_id": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -266,6 +273,7 @@
         "role": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -274,6 +282,7 @@
         "format": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -312,6 +321,7 @@
         "status": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -322,6 +332,7 @@
           "default": "completed",
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -481,6 +492,7 @@
         "status": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -492,6 +504,7 @@
         "acquisition_strategy": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -528,6 +541,7 @@
         "role": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -536,6 +550,7 @@
         "format": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -620,6 +635,7 @@
         "code": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -628,6 +644,7 @@
         "stage": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -636,6 +653,7 @@
         "severity": {
           "type": "string",
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,
@@ -684,6 +702,7 @@
             "null"
           ],
           "not": {
+            "type": "string",
             "pattern": "[^a-z0-9_]"
           },
           "minLength": 1,

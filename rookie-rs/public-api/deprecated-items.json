@@ -9,45 +9,45 @@
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::browser::chromium::chromium_based",
+      "path": "rookie_cookies::chromium_based",
       "since": "0.6.0",
       "note": "use direct_path::chromium_cookies_from_path with ChromiumPathRequest",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::browser::chromium::chromium_based_detailed",
+      "path": "rookie_cookies::chromium_based_detailed",
       "since": "0.6.0",
       "note": "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::browser::internet_explorer::internet_explorer_based",
+      "path": "rookie_cookies::internet_explorer_based",
       "since": "0.6.0",
       "note": "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::cookies_from_path with DirectPathRequest for the rest of the deprecation window",
       "platforms": ["windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::browser::mozilla::firefox_based",
+      "path": "rookie_cookies::firefox_based",
       "since": "0.6.0",
       "note": "use direct_path::cookies_from_path with DirectPathRequest",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::browser::mozilla::firefox_based_detailed",
+      "path": "rookie_cookies::firefox_based_detailed",
       "since": "0.6.0",
       "note": "the canonical direct-path API returns legacy Cookie values; this compatibility function remains through 0.6",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::browser::safari::safari_based",
+      "path": "rookie_cookies::safari_based",
       "since": "0.6.0",
       "note": "use direct_path::cookies_from_path with DirectPathRequest",
-      "platforms": ["linux", "macos", "windows"],
+      "platforms": ["macos"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
@@ -79,133 +79,140 @@
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::arc",
+      "path": "rookie_cookies::enums::CookieToString",
+      "since": "0.6.0",
+      "note": "unfiltered compatibility formatter; use ReadResult::header(url) for a URL-scoped header view",
+      "platforms": ["linux", "macos", "windows"],
+      "feature_sets": ["all-features", "no-default-features"]
+    },
+    {
+      "path": "rookie_cookies::arc",
       "since": "0.6.0",
       "note": "use browser(\"arc\", domains) or extract(Request::browser(\"arc\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::brave",
+      "path": "rookie_cookies::brave",
       "since": "0.6.0",
       "note": "use browser(\"brave\", domains) or extract(Request::browser(\"brave\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::cachy",
+      "path": "rookie_cookies::cachy",
       "since": "0.6.0",
       "note": "use browser(\"cachy\", domains) or extract(Request::browser(\"cachy\")) instead",
       "platforms": ["linux"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::chrome",
+      "path": "rookie_cookies::chrome",
       "since": "0.6.0",
       "note": "use browser(\"chrome\", domains) or extract(Request::browser(\"chrome\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::chromium",
+      "path": "rookie_cookies::chromium",
       "since": "0.6.0",
       "note": "use browser(\"chromium\", domains) or extract(Request::browser(\"chromium\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::edge",
+      "path": "rookie_cookies::edge",
       "since": "0.6.0",
       "note": "use browser(\"edge\", domains) or extract(Request::browser(\"edge\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::firefox",
+      "path": "rookie_cookies::firefox",
       "since": "0.6.0",
       "note": "use browser(\"firefox\", domains) or extract(Request::browser(\"firefox\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::firefox_profile",
+      "path": "rookie_cookies::firefox_profile",
       "since": "0.6.0",
       "note": "use extract(Request::browser(\"firefox\").profile(q)); list with browser_profiles(\"firefox\")",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::firefox_profiles",
+      "path": "rookie_cookies::firefox_profiles",
       "since": "0.6.0",
       "note": "use browser_profiles(\"firefox\") for ProfileDescriptor (includes session-only profiles this list hides)",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::internet_explorer",
+      "path": "rookie_cookies::internet_explorer",
       "since": "0.6.0",
       "note": "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022",
       "platforms": ["windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::librewolf",
+      "path": "rookie_cookies::librewolf",
       "since": "0.6.0",
       "note": "use browser(\"librewolf\", domains) or extract(Request::browser(\"librewolf\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::load",
+      "path": "rookie_cookies::load",
       "since": "0.6.0",
       "note": "use read(ReadRequest::browser(...)) for snapshots or load_report for grouped multi-browser diagnostics",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::octo_browser",
+      "path": "rookie_cookies::octo_browser",
       "since": "0.6.0",
       "note": "use browser(\"octo_browser\", domains) or extract(Request::browser(\"octo_browser\")) instead",
       "platforms": ["windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::opera",
+      "path": "rookie_cookies::opera",
       "since": "0.6.0",
       "note": "use browser(\"opera\", domains) or extract(Request::browser(\"opera\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::opera_gx",
+      "path": "rookie_cookies::opera_gx",
       "since": "0.5.9",
       "note": "Opera GX is unsupported on this target; this compatibility shim will be removed in 0.7",
       "platforms": ["linux"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::opera_gx",
+      "path": "rookie_cookies::opera_gx",
       "since": "0.6.0",
       "note": "use browser(\"opera_gx\", domains) or extract(Request::browser(\"opera_gx\")) instead",
       "platforms": ["macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::safari",
+      "path": "rookie_cookies::safari",
       "since": "0.6.0",
       "note": "use browser(\"safari\", domains) or extract(Request::browser(\"safari\")) instead",
       "platforms": ["macos"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::vivaldi",
+      "path": "rookie_cookies::vivaldi",
       "since": "0.6.0",
       "note": "use browser(\"vivaldi\", domains) or extract(Request::browser(\"vivaldi\")) instead",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
-      "path": "rookie_cookies::compatibility_dispatch::named::zen",
+      "path": "rookie_cookies::zen",
       "since": "0.6.0",
       "note": "use browser(\"zen\", domains) or extract(Request::browser(\"zen\")) instead",
       "platforms": ["linux", "macos", "windows"],

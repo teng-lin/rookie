@@ -78,6 +78,7 @@ fn open_identifier_schema() -> schemars::schema::Schema {
     // that interoperability trap while keeping the vocabulary open.
     not: Some(Box::new(
       schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::String.into()),
         string: Some(Box::new(schemars::schema::StringValidation {
           pattern: Some("[^a-z0-9_]".to_owned()),
           ..Default::default()
