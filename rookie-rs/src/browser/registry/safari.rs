@@ -4,10 +4,10 @@ use super::{
   acquire_each_candidate, boundary_stop_from_error, canonical_installation_root, embedded_registry,
   engine_roots, installation_id, installation_root_is_directory, normalized_path_bytes,
   populate_engine_sources, profile_id, retain_engine_runtime_stop, select_listing_profiles,
-  sort_discovered_profiles, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
-  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
-  ExtractCompletion, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
-  PERSISTENT_SOURCE_PRECEDENCE,
+  sort_discovered_profiles, AcquisitionPolicy, BrowserEngine, DiscoveredProfile, DiscoveryContext,
+  DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing,
+  EngineProfileIdentity, ExtractCompletion, LegacyRank, ProfileLocator, ProfileSelection,
+  SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{DiscoveryCounters, ExtractedProfile};
@@ -260,6 +260,7 @@ fn safari_source_candidate(path: PathBuf, precedence: u16) -> SourceCandidate {
     exists: true,
     selected: true,
     acquisition: SourceAcquisition::StableFileImage,
+    policy: AcquisitionPolicy::Fixed,
   }
 }
 

@@ -26,7 +26,7 @@ use super::cookie_record::{
   Attributes, CookieRecord, CookieValue, Observation, RawValue, SourceRef,
 };
 use super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
-use super::source::{Source, SourceAcquisition, SourceCandidate, SourceStats};
+use super::source::{AcquisitionPolicy, Source, SourceAcquisition, SourceCandidate, SourceStats};
 
 /// `Cookies.binarycookies` is a per-user metadata store and is normally only a
 /// few MiB. Keep a generous ceiling so a corrupt or replaced file cannot make
@@ -92,6 +92,7 @@ pub(crate) fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
     exists: true,
     selected: true,
     acquisition: SourceAcquisition::StableFileImage,
+    policy: AcquisitionPolicy::Fixed,
   }
 }
 

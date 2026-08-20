@@ -2122,6 +2122,7 @@ mod tests {
       exists: true,
       selected: true,
       acquisition: registry::SourceAcquisition::NotAttempted,
+      policy: registry::AcquisitionPolicy::Fixed,
     }
   }
 
@@ -2323,6 +2324,7 @@ mod tests {
       exists: true,
       selected: true,
       acquisition: registry::SourceAcquisition::NotAttempted,
+      policy: registry::AcquisitionPolicy::Fixed,
     });
     source.stats.rows_seen = 2;
     source.stats.rows_skipped = 2;
@@ -2363,6 +2365,7 @@ mod tests {
       exists: true,
       selected: true,
       acquisition: registry::SourceAcquisition::NotAttempted,
+      policy: registry::AcquisitionPolicy::Fixed,
     });
     source.stats.rows_seen = 2;
     source.stats.rows_skipped = 2;
@@ -3012,6 +3015,7 @@ mod tests {
       exists: true,
       selected: true,
       acquisition: registry::SourceAcquisition::NotAttempted,
+      policy: registry::AcquisitionPolicy::Fixed,
     });
     source.issues = issues;
     source

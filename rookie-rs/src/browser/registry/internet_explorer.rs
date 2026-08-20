@@ -6,9 +6,10 @@ use super::{
   acquire_each_candidate, canonical_installation_root, embedded_registry, engine_roots,
   installation_id, installation_root_is_directory, normalized_path_bytes, populate_engine_sources,
   profile_id, retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles,
-  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
-  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractCompletion,
-  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  AcquisitionPolicy, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
+  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
+  ExtractCompletion, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
+  PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{DiscoveryCounters, ExtractedProfile};
@@ -155,6 +156,7 @@ fn internet_explorer_source_candidate(path: PathBuf) -> SourceCandidate {
     exists: true,
     selected: true,
     acquisition: SourceAcquisition::NotAttempted,
+    policy: AcquisitionPolicy::Fixed,
   }
 }
 

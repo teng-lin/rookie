@@ -591,6 +591,7 @@ fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
     exists: true,
     selected: true,
     acquisition: super::source::SourceAcquisition::NotAttempted,
+    policy: super::source::AcquisitionPolicy::Fixed,
   }
 }
 

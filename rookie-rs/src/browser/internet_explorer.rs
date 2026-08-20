@@ -3,7 +3,9 @@ use crate::browser::internet_explorer_model::{
   RawCookieRecord,
 };
 use crate::browser::report_core::{CookieSourceFormatId, CookieSourceRoleId};
-use crate::browser::source::{Source, SourceAcquisition, SourceCandidate, SourceStats};
+use crate::browser::source::{
+  AcquisitionPolicy, Source, SourceAcquisition, SourceCandidate, SourceStats,
+};
 use crate::common::enums::Cookie;
 use crate::common::{
   deadline::{BoundaryRuntime, BoundaryStop, SystemClock},
@@ -94,6 +96,7 @@ pub(crate) fn direct_path_candidate(db_path: &Path) -> SourceCandidate {
     exists: true,
     selected: true,
     acquisition: SourceAcquisition::EseDatabase,
+    policy: AcquisitionPolicy::Fixed,
   }
 }
 
