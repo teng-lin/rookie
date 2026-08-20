@@ -24,6 +24,8 @@ mod unsupported;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 use unsupported as platform;
 
+pub(crate) mod named;
+
 pub(super) type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 
 /// The legacy `load` probe order is observable through cookie ordering and
@@ -31,15 +33,15 @@ pub(super) type LoadFn = fn(Option<Vec<String>>) -> Result<Vec<Cookie>>;
 /// can pin the exact browser set without probing browsers installed on a host.
 pub(super) fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
   let mut browser_types: Vec<(&'static str, LoadFn)> = vec![
-    ("firefox", crate::firefox),
-    ("zen", crate::zen),
-    ("librewolf", crate::librewolf),
-    ("opera", crate::opera),
-    ("edge", crate::edge),
-    ("chromium", crate::chromium),
-    ("brave", crate::brave),
-    ("vivaldi", crate::vivaldi),
-    ("arc", crate::arc),
+    ("firefox", named::firefox),
+    ("zen", named::zen),
+    ("librewolf", named::librewolf),
+    ("opera", named::opera),
+    ("edge", named::edge),
+    ("chromium", named::chromium),
+    ("brave", named::brave),
+    ("vivaldi", named::vivaldi),
+    ("arc", named::arc),
   ];
   platform::extend_legacy_load_browsers(&mut browser_types);
   browser_types
@@ -257,7 +259,7 @@ mod tests {
     );
 
     assert_eq!(
-      crate::opera_gx(None).unwrap_err().to_string(),
+      named::opera_gx(None).unwrap_err().to_string(),
       format!("Opera GX is not supported on {}", std::env::consts::OS)
     );
   }

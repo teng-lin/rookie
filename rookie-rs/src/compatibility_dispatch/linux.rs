@@ -6,8 +6,8 @@ use super::LoadFn;
 use crate::{Cookie, Result};
 
 pub(super) fn extend_legacy_load_browsers(browser_types: &mut Vec<(&'static str, LoadFn)>) {
-  browser_types.push(("chrome", crate::chrome));
-  browser_types.push(("cachy", crate::cachy));
+  browser_types.push(("chrome", super::named::chrome));
+  browser_types.push(("cachy", super::named::cachy));
 }
 
 pub(super) fn opera_gx(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {

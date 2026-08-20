@@ -17,6 +17,12 @@ where
   }
 }
 
+/// Test-only: every production acquisition supplies its own runtime
+/// directly. The single implementor, `sqlite::BrowserDatabaseAcquire`,
+/// is reached only from the `#[cfg(test)]` `sqlite::connect` wrapper --
+/// an `#[allow(dead_code)]` on that wrapper had been masking the fact
+/// that this whole abstraction has no production caller.
+#[cfg(test)]
 pub(crate) trait Acquire<Id: ?Sized> {
   type Source: ReadOnlySource;
 
@@ -54,6 +60,7 @@ pub(crate) trait Decoder<Source: ReadOnlySource, Record> {
 /// capability. Cooperative adapters get an outer final checkpoint because an
 /// in-process syscall can outlive the last checkpoint inside the adapter;
 /// enforceable adapters are responsible for their own exact completion race.
+#[cfg(test)]
 pub(crate) fn acquire<Id: ?Sized, A: Acquire<Id>>(
   acquire: &A,
   id: &Id,
