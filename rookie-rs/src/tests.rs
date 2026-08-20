@@ -299,6 +299,212 @@ fn named_cookie(name: &str) -> Cookie {
   }
 }
 
+fn selected_success_report(termination: &str) -> report::ExtractionReport {
+  let opaque = "a".repeat(64);
+  serde_json::from_value(serde_json::json!({
+    "schema_version": 1,
+    "status": "complete",
+    "termination": termination,
+    "summary": {
+      "registered_browsers": 1,
+      "browsers_detected": 1,
+      "browsers_not_detected": 0,
+      "installations_discovered": 1,
+      "profiles_discovered": 1,
+      "sources_succeeded": 1,
+      "sources_failed": 0,
+      "rows_seen": 1,
+      "cookies_emitted": 1,
+      "rows_skipped": 0,
+      "rows_rejected": 0,
+      "provider_failures": 0,
+      "counters_saturated": false
+    },
+    "profiles": [{
+      "profile": {
+        "browser_id": "firefox",
+        "installation_id": opaque,
+        "profile_id": opaque,
+        "display_name": "Default",
+        "path": "display-only",
+        "path_lossy": false
+      },
+      "sources": [{
+        "source": {
+          "role": "persistent",
+          "format": "mozilla_sqlite",
+          "path": "display-only/cookies.sqlite",
+          "path_lossy": false,
+          "precedence": 10
+        },
+        "status": "succeeded",
+        "selected": true,
+        "acquisition_strategy": "live_read_only",
+        "cookies": [{
+          "domain": ".example.test",
+          "path": "/",
+          "secure": false,
+          "expires": null,
+          "name": "retained",
+          "value": "value",
+          "http_only": false,
+          "same_site": -1
+        }],
+        "stats": {
+          "rows_seen": 1,
+          "cookies_emitted": 1,
+          "rows_skipped": 0,
+          "rows_rejected": 0,
+          "provider_failures": 0,
+          "acquisition_attempts": 1,
+          "counters_saturated": false
+        },
+        "issues": []
+      }],
+      "stats": {
+        "rows_seen": 1,
+        "cookies_emitted": 1,
+        "rows_skipped": 0,
+        "rows_rejected": 0,
+        "provider_failures": 0,
+        "acquisition_attempts": 1,
+        "counters_saturated": false
+      },
+      "issues": []
+    }],
+    "issues": []
+  }))
+  .expect("valid stopped profile report fixture")
+}
+
+#[test]
+fn profile_scoped_flatten_returns_each_exact_typed_stop_despite_selected_cookies() {
+  for (termination, expected) in [
+    ("timed_out", StopReason::TimedOut),
+    ("cancelled", StopReason::Cancelled),
+    ("resource_exhausted", StopReason::ResourceExhausted),
+  ] {
+    let error = flatten_selected_report_cookies(selected_success_report(termination))
+      .expect_err("profile-scoped flat APIs must not turn a stop into success");
+    assert_eq!(stop_reason(&error), Some(expected));
+  }
+
+  let cookies = flatten_selected_report_cookies(selected_success_report("completed"))
+    .expect("a completed profile report still flattens selected cookies");
+  assert_eq!(cookies.len(), 1);
+  assert_eq!(cookies[0].name, "retained");
+}
+
+#[test]
+fn profile_resolution_and_extraction_share_one_absolute_manual_clock_budget() {
+  use common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+  use std::cell::Cell;
+  use std::time::Duration;
+
+  let clock = ManualClock::default();
+  let runtime = common::deadline::BoundaryRuntime::with_stop(
+    &clock,
+    Deadline::after(&clock, Duration::from_secs(10)),
+    CancellationToken::default(),
+  );
+  let resolutions = Cell::new(0);
+  let extractions = Cell::new(0);
+  let (profile_id, remaining) = resolve_then_extract_profile_with_runtime(
+    "firefox",
+    "Default",
+    &runtime,
+    |_browser_id, _query, _runtime| {
+      resolutions.set(resolutions.get() + 1);
+      clock.advance(Duration::from_secs(7));
+      Ok("a".repeat(64))
+    },
+    |_browser_id, _profile_id, extraction_runtime| {
+      extractions.set(extractions.get() + 1);
+      Ok(
+        extraction_runtime
+          .deadline
+          .remaining(extraction_runtime.clock),
+      )
+    },
+  )
+  .expect("profile resolution and extraction fit within one budget");
+
+  assert_eq!(profile_id, "a".repeat(64));
+  assert_eq!(remaining, Duration::from_secs(3));
+  assert_eq!(resolutions.get(), 1, "profile discovery runs exactly once");
+  assert_eq!(extractions.get(), 1);
+}
+
+#[test]
+fn profile_resolution_observes_stops_before_and_after_resolution() {
+  use common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
+  use std::cell::Cell;
+  use std::time::Duration;
+
+  for pre_stop in [StopReason::TimedOut, StopReason::Cancelled] {
+    let clock = ManualClock::default();
+    let token = CancellationToken::default();
+    let duration = match pre_stop {
+      StopReason::TimedOut => Duration::ZERO,
+      StopReason::Cancelled => {
+        assert!(token.cancel());
+        Duration::from_secs(10)
+      }
+      StopReason::ResourceExhausted => unreachable!(),
+    };
+    let runtime = common::deadline::BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, duration),
+      token,
+    );
+    let resolutions = Cell::new(0);
+    let extractions = Cell::new(0);
+    let error = resolve_then_extract_profile_with_runtime(
+      "firefox",
+      "Default",
+      &runtime,
+      |_browser_id, _query, _runtime| {
+        resolutions.set(resolutions.get() + 1);
+        Ok("a".repeat(64))
+      },
+      |_browser_id, _profile_id, _runtime| {
+        extractions.set(extractions.get() + 1);
+        Ok(())
+      },
+    )
+    .expect_err("a stop before resolution must win");
+    assert_eq!(stop_reason(&error), Some(pre_stop));
+    assert_eq!(resolutions.get(), 0);
+    assert_eq!(extractions.get(), 0);
+  }
+
+  let clock = ManualClock::default();
+  let token = CancellationToken::default();
+  let runtime = common::deadline::BoundaryRuntime::with_stop(
+    &clock,
+    Deadline::after(&clock, Duration::from_secs(10)),
+    token.clone(),
+  );
+  let extractions = Cell::new(0);
+  let error = resolve_then_extract_profile_with_runtime(
+    "firefox",
+    "Default",
+    &runtime,
+    |_browser_id, _query, _runtime| {
+      assert!(token.cancel());
+      Ok("a".repeat(64))
+    },
+    |_browser_id, _profile_id, extraction_runtime| {
+      extractions.set(extractions.get() + 1);
+      extraction_runtime.check()?;
+      Ok(())
+    },
+  )
+  .expect_err("cancellation after resolution must reach extraction");
+  assert_eq!(stop_reason(&error), Some(StopReason::Cancelled));
+  assert_eq!(extractions.get(), 1);
+}
+
 fn first_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   Ok(vec![named_cookie("first")])
 }
@@ -409,6 +615,26 @@ fn load_aggregation_preserves_source_order() {
   .expect("successful sources survive an intervening extraction error");
   let names: Vec<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
   assert_eq!(names, vec!["first", "second"]);
+}
+
+#[test]
+fn load_aggregation_keeps_cookies_from_an_in_flight_browser_after_the_shared_stop() {
+  let clock = common::deadline::SystemClock;
+  let token = common::deadline::CancellationToken::default();
+  assert!(token.cancel());
+  let runtime = common::deadline::BoundaryRuntime::with_stop(
+    &clock,
+    common::deadline::Deadline::standard(),
+    token,
+  );
+  let cookies = aggregate_load_results(
+    &["chrome"],
+    vec![Ok(vec![named_cookie("in-flight")])],
+    &runtime,
+  )
+  .expect("a completed in-flight browser remains successful for flat load");
+  assert_eq!(cookies.len(), 1);
+  assert_eq!(cookies[0].name, "in-flight");
 }
 
 #[test]

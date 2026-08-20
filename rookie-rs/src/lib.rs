@@ -358,17 +358,57 @@ pub fn extract(request: Request) -> Result<Vec<Cookie>> {
       browser::legacy::browser_cookies_with_runtime(&request.browser_id, request.domains, &runtime)
     }
     Some(query) => {
-      let profile_id =
-        browser::registry::resolve_profile_query(&request.browser_id, &query, &runtime)?;
-      let report = browser::report_build::browser_extraction_report_with_runtime(
+      let (_profile_id, report) = profile_extraction_report_with_runtime(
         &request.browser_id,
-        Some(&profile_id),
+        &query,
         request.domains,
         &runtime,
       )?;
       flatten_selected_report_cookies(report)
     }
   }
+}
+
+/// Resolves one public profile query and runs the selected extraction under
+/// the same absolute runtime. Returning the resolved ID lets `read()` expose
+/// it without repeating discovery.
+pub(crate) fn profile_extraction_report_with_runtime(
+  browser_id: &str,
+  query: &str,
+  domains: Option<Vec<String>>,
+  runtime: &common::deadline::BoundaryRuntime<'_>,
+) -> Result<(String, report::ExtractionReport)> {
+  resolve_then_extract_profile_with_runtime(
+    browser_id,
+    query,
+    runtime,
+    browser::registry::resolve_profile_query,
+    |resolved_browser_id, profile_id, runtime| {
+      browser::report_build::browser_extraction_report_with_runtime(
+        resolved_browser_id,
+        Some(profile_id),
+        domains,
+        runtime,
+      )
+    },
+  )
+}
+
+fn resolve_then_extract_profile_with_runtime<T, Resolve, Extract>(
+  browser_id: &str,
+  query: &str,
+  runtime: &common::deadline::BoundaryRuntime<'_>,
+  resolve: Resolve,
+  extract: Extract,
+) -> Result<(String, T)>
+where
+  Resolve: FnOnce(&str, &str, &common::deadline::BoundaryRuntime<'_>) -> Result<String>,
+  Extract: FnOnce(&str, &str, &common::deadline::BoundaryRuntime<'_>) -> Result<T>,
+{
+  runtime.check()?;
+  let profile_id = resolve(browser_id, query, runtime)?;
+  let result = extract(browser_id, &profile_id, runtime)?;
+  Ok((profile_id, result))
 }
 
 /// Labeled extract. No profile → today's [`browser_report`]`(id, None)`
@@ -402,6 +442,13 @@ pub fn extract_report(request: Request) -> Result<report::ExtractionReport> {
 pub(crate) fn flatten_selected_report_cookies(
   report: report::ExtractionReport,
 ) -> Result<Vec<Cookie>> {
+  match report.termination.as_str() {
+    "completed" => {}
+    "timed_out" => return Err(common::deadline::BoundaryStop::TimedOut.into()),
+    "cancelled" => return Err(common::deadline::BoundaryStop::Cancelled.into()),
+    "resource_exhausted" => return Err(common::deadline::BoundaryStop::ResourceExhausted.into()),
+    termination => anyhow::bail!("extraction stopped with termination {termination:?}"),
+  }
   let mut cookies = Vec::new();
   let mut any_selected_success = false;
   for profile in report.profiles {

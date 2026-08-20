@@ -7,6 +7,7 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   engine: &str,
   _domains: Option<Vec<String>>,
   _runtime: &BoundaryRuntime<'_>,
+  _stop_projection: super::super::StopProjection,
 ) -> Result<super::super::LegacySnapshot> {
   unsupported_engine(canonical_id, engine)
 }
@@ -23,8 +24,14 @@ mod tests {
       ("safari", "safari"),
       ("internet_explorer", "internet_explorer"),
     ] {
-      let error = remaining_engine_snapshot_with_runtime(canonical_id, engine, None, &runtime)
-        .expect_err("platform-only engine is unavailable");
+      let error = remaining_engine_snapshot_with_runtime(
+        canonical_id,
+        engine,
+        None,
+        &runtime,
+        crate::browser::legacy::StopProjection::ReturnError,
+      )
+      .expect_err("platform-only engine is unavailable");
       assert_eq!(
         error.to_string(),
         format!("browser {canonical_id:?} uses unsupported engine {engine:?}")

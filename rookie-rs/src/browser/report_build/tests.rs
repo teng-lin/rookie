@@ -199,7 +199,7 @@ fn cancellation_and_resource_exhaustion_reach_the_report_wire_without_source_err
 }
 
 #[test]
-fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection() {
+fn stopped_drafts_keep_atomic_sources_in_reports_but_single_browser_projection_returns_the_stop() {
   use crate::common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
   use std::time::Duration;
 
@@ -250,9 +250,27 @@ fn stopped_drafts_keep_atomic_completed_sources_for_report_and_legacy_projection
     assert_eq!(report.profiles[0].sources[0].cookies[0].name, "retained");
 
     let canonical = finalize_outcomes_with_runtime(1, vec![stopped()], Some(&runtime));
-    let cookies =
+    let error =
       super::super::legacy::project_canonical_outcome_with_runtime("firefox", canonical, &runtime)
-        .expect("completed legacy source survives a later typed stop");
+        .expect_err("single-browser projection must surface a later typed stop");
+    let expected_reason = match stop {
+      BoundaryStop::TimedOut => crate::StopReason::TimedOut,
+      BoundaryStop::Cancelled => crate::StopReason::Cancelled,
+      BoundaryStop::ResourceExhausted => crate::StopReason::ResourceExhausted,
+    };
+    assert_eq!(crate::stop_reason(&error), Some(expected_reason));
+    assert!(error
+      .chain()
+      .any(|cause| cause.downcast_ref::<BoundaryStop>() == Some(&stop)));
+
+    let canonical = finalize_outcomes_with_runtime(1, vec![stopped()], Some(&runtime));
+    let cookies = super::super::legacy::project_canonical_outcome_with_stop_projection(
+      "firefox",
+      canonical,
+      &runtime,
+      super::super::legacy::StopProjection::PreserveCommitted,
+    )
+    .expect("flat load keeps a completed in-flight source after the stop");
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "retained");
   }

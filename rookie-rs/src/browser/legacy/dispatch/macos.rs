@@ -8,12 +8,14 @@ pub(super) fn remaining_engine_snapshot_with_runtime(
   engine: &str,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
+  stop_projection: super::super::StopProjection,
 ) -> Result<super::super::LegacySnapshot> {
   match engine {
     "safari" => super::super::cookies_and_skipped_from_engine_extract(
       canonical_id,
       registry::legacy_safari_outcome_with_runtime(canonical_id, domains, runtime)?,
       runtime,
+      stop_projection,
     ),
     _ => unsupported_engine(canonical_id, engine),
   }
@@ -32,6 +34,7 @@ mod tests {
       "internet_explorer",
       None,
       &runtime,
+      crate::browser::legacy::StopProjection::ReturnError,
     )
     .expect_err("Internet Explorer is unsupported on macOS");
     assert_eq!(

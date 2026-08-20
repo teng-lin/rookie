@@ -14,6 +14,18 @@ use crate::common::enums::{Cookie, DetailedCookie};
 use anyhow::{bail, Result};
 use std::{error::Error, fmt};
 
+/// Whether a compatibility projection may retain committed records after the
+/// shared runtime stops.
+///
+/// Single-browser compatibility APIs promise a typed stop error. Flat
+/// `load()` is different: an already-claimed browser runs to completion and
+/// contributes any cookies it committed before observing the shared stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopProjection {
+  ReturnError,
+  PreserveCommitted,
+}
+
 /// The authoritative registry found no source eligible for a named wrapper.
 ///
 /// `load()` treats this typed outcome as ordinary absence while preserving all
@@ -97,18 +109,6 @@ pub(crate) fn project_engine_extract_outcome(
   )
 }
 
-fn project_engine_extract_with_runtime(
-  browser_id: &str,
-  extract: EngineExtract,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  project_canonical_outcome_with_runtime(
-    browser_id,
-    super::report_build::canonical_engine_extract_with_runtime(browser_id, extract, runtime)?,
-    runtime,
-  )
-}
-
 #[cfg(test)]
 pub(crate) fn project_chromium_outcome(
   browser_id: &str,
@@ -120,24 +120,12 @@ pub(crate) fn project_chromium_outcome(
   )
 }
 
-fn project_chromium_outcome_with_runtime(
-  browser_id: &str,
-  outcome: registry::ChromiumRegistryDraft,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  project_canonical_outcome_with_runtime(
-    browser_id,
-    super::report_build::canonical_chromium_extraction_with_runtime(browser_id, outcome, runtime)?,
-    runtime,
-  )
-}
-
 // Only reachable in production through the automatic multi-identity
 // Chromium selection, which is Linux/macOS-only; Windows exercises this via
 // `#[cfg(test)]`.
 #[allow(dead_code)]
 pub(crate) fn project_canonical_outcome(browser_id: &str, outcome: Outcome) -> Result<Vec<Cookie>> {
-  let selected = selected_records(browser_id, outcome, None)?;
+  let selected = selected_records(browser_id, outcome, None, StopProjection::ReturnError)?;
   Ok(
     selected
       .into_iter()
@@ -155,8 +143,22 @@ pub(crate) fn project_canonical_outcome_with_runtime(
   outcome: Outcome,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
+  project_canonical_outcome_with_stop_projection(
+    browser_id,
+    outcome,
+    runtime,
+    StopProjection::ReturnError,
+  )
+}
+
+pub(crate) fn project_canonical_outcome_with_stop_projection(
+  browser_id: &str,
+  outcome: Outcome,
+  runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
+) -> Result<Vec<Cookie>> {
   let completed = outcome.termination == Termination::Completed;
-  let selected = selected_records(browser_id, outcome, Some(runtime))?;
+  let selected = selected_records(browser_id, outcome, Some(runtime), stop_projection)?;
   if completed {
     runtime.check()?;
   }
@@ -176,6 +178,7 @@ fn selected_records(
   browser_id: &str,
   outcome: Outcome,
   runtime: Option<&BoundaryRuntime<'_>>,
+  stop_projection: StopProjection,
 ) -> Result<Vec<(LegacyProjectionSemantics, Vec<FinalizedCookieRecord>)>> {
   let boundary_stop = match outcome.termination {
     Termination::Completed => None,
@@ -198,6 +201,9 @@ fn selected_records(
     ));
   match disposition {
     CompatibilityDisposition::Emit { source_digests } => {
+      if let (Some(stop), StopProjection::ReturnError) = (boundary_stop, stop_projection) {
+        return Err(stop.into());
+      }
       let mut selected = Vec::new();
       for source in sources {
         if let Some(runtime) = runtime {
@@ -239,7 +245,7 @@ pub(crate) fn project_canonical_detailed_outcome(
   browser_id: &str,
   outcome: Outcome,
 ) -> Result<Vec<DetailedCookie>> {
-  let selected = selected_records(browser_id, outcome, None)?;
+  let selected = selected_records(browser_id, outcome, None, StopProjection::ReturnError)?;
   Ok(
     selected
       .into_iter()
@@ -258,7 +264,12 @@ pub(crate) fn project_canonical_detailed_outcome_with_runtime(
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
   let completed = outcome.termination == Termination::Completed;
-  let selected = selected_records(browser_id, outcome, Some(runtime))?;
+  let selected = selected_records(
+    browser_id,
+    outcome,
+    Some(runtime),
+    StopProjection::ReturnError,
+  )?;
   if completed {
     runtime.check()?;
   }
@@ -281,8 +292,30 @@ pub(crate) fn browser_cookies_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  browser_cookies_and_warnings_with_runtime(browser_id, domains, runtime)
-    .map(|(cookies, _warnings)| cookies)
+  browser_cookies_and_warnings_with_stop_projection(
+    browser_id,
+    domains,
+    runtime,
+    StopProjection::ReturnError,
+  )
+  .map(|(cookies, _warnings)| cookies)
+}
+
+/// Flat `load()` projection. Unlike single-browser compatibility surfaces,
+/// this keeps records committed by an in-flight browser before the shared
+/// runtime stopped.
+pub(crate) fn browser_cookies_for_load_with_runtime(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<Cookie>> {
+  browser_cookies_and_warnings_with_stop_projection(
+    browser_id,
+    domains,
+    runtime,
+    StopProjection::PreserveCommitted,
+  )
+  .map(|(cookies, _warnings)| cookies)
 }
 
 /// One LegacyFirst extract: compatibility cookies plus skip counts from the
@@ -292,6 +325,20 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<LegacySnapshot> {
+  browser_cookies_and_warnings_with_stop_projection(
+    browser_id,
+    domains,
+    runtime,
+    StopProjection::ReturnError,
+  )
+}
+
+fn browser_cookies_and_warnings_with_stop_projection(
+  browser_id: &str,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
+) -> Result<LegacySnapshot> {
   runtime.check()?;
   let browser = registry::resolve_registered_browser(browser_id)?;
   match browser.engine {
@@ -299,14 +346,34 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
       let draft =
         registry::legacy_chromium_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
       let decrypt = chromium_decrypt_skip_count(&draft);
-      let cookies = project_chromium_outcome_with_runtime(&browser.canonical_id, draft, runtime)?;
+      let outcome = super::report_build::canonical_chromium_extraction_with_runtime(
+        &browser.canonical_id,
+        draft,
+        runtime,
+      )?;
+      let cookies = project_canonical_outcome_with_stop_projection(
+        &browser.canonical_id,
+        outcome,
+        runtime,
+        stop_projection,
+      )?;
       Ok((cookies, skip_warnings(decrypt, 0)))
     }
     "gecko" => {
       let extract =
         registry::legacy_gecko_outcome_with_runtime(&browser.canonical_id, domains, runtime)?;
       let skipped = engine_extract_skipped_row_count(&extract);
-      let cookies = project_engine_extract_with_runtime(&browser.canonical_id, extract, runtime)?;
+      let outcome = super::report_build::canonical_engine_extract_with_runtime(
+        &browser.canonical_id,
+        extract,
+        runtime,
+      )?;
+      let cookies = project_canonical_outcome_with_stop_projection(
+        &browser.canonical_id,
+        outcome,
+        runtime,
+        stop_projection,
+      )?;
       Ok((cookies, skip_warnings(0, skipped)))
     }
     engine => dispatch::remaining_engine_snapshot_with_runtime(
@@ -314,6 +381,7 @@ pub(crate) fn browser_cookies_and_warnings_with_runtime(
       engine,
       domains,
       runtime,
+      stop_projection,
     ),
   }
 }
@@ -327,9 +395,17 @@ pub(super) fn cookies_and_skipped_from_engine_extract(
   canonical_id: &str,
   extract: EngineExtract,
   runtime: &BoundaryRuntime<'_>,
+  stop_projection: StopProjection,
 ) -> Result<LegacySnapshot> {
   let skipped = engine_extract_skipped_row_count(&extract);
-  let cookies = project_engine_extract_with_runtime(canonical_id, extract, runtime)?;
+  let outcome =
+    super::report_build::canonical_engine_extract_with_runtime(canonical_id, extract, runtime)?;
+  let cookies = project_canonical_outcome_with_stop_projection(
+    canonical_id,
+    outcome,
+    runtime,
+    stop_projection,
+  )?;
   Ok((cookies, skip_warnings(0, skipped)))
 }
 

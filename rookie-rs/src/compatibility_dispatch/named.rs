@@ -521,7 +521,11 @@ pub fn load(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
     common::concurrency::DEFAULT_FAN_OUT_WIDTH,
     &runtime,
     |browser_name| {
-      browser::legacy::browser_cookies_with_runtime(browser_name, domains.clone(), &runtime)
+      browser::legacy::browser_cookies_for_load_with_runtime(
+        browser_name,
+        domains.clone(),
+        &runtime,
+      )
     },
   );
   aggregate_load_results(&names, results, &runtime)

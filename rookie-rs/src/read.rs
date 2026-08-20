@@ -8,7 +8,7 @@ use crate::common::enums::Cookie;
 use crate::direct_path::{self, cookies_from_path, ChromiumCredentialSource, DirectPathRequest};
 use crate::header_filter::{sendable_octets, GetFilter};
 use crate::report::{self, ExtractionReport};
-use crate::{extract_report, CancellationHandle, Request, RequestError, Result};
+use crate::{CancellationHandle, RequestError, Result};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -173,15 +173,8 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
       (cookies, warnings, None)
     }
     Some(query) => {
-      let profile_id = registry::resolve_profile_query(&browser_id, &query, &runtime)?;
-      let mut store = Request::browser(&browser_id).profile(&profile_id);
-      if let Some(timeout) = request.timeout {
-        store = store.timeout(timeout);
-      }
-      if let Some(handle) = request.cancellation.clone() {
-        store = store.cancellation(handle);
-      }
-      let report = extract_report(store)?;
+      let (profile_id, report) =
+        crate::profile_extraction_report_with_runtime(&browser_id, &query, None, &runtime)?;
       let warnings = harvest_report_warnings(&report);
       let cookies = crate::flatten_selected_report_cookies(report)?;
       (cookies, warnings, Some(profile_id))

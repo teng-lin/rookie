@@ -2120,7 +2120,7 @@ mod tests {
   }
 
   #[test]
-  fn gecko_adapter_report_and_legacy_drop_interrupted_discovery_placeholders() {
+  fn gecko_adapter_report_retains_completed_work_while_legacy_returns_the_stop() {
     use crate::common::deadline::BoundaryStop;
 
     for (stop, expected_termination) in [
@@ -2146,13 +2146,14 @@ mod tests {
         .expect("serialize report")
         .contains("profile_extraction_failed"));
 
-      let cookies = crate::browser::legacy::project_engine_extract_outcome(
+      let error = crate::browser::legacy::project_engine_extract_outcome(
         "firefox",
         stopped_gecko_adapter_outcome(stop),
       )
-      .expect("legacy projection retains completed Gecko work");
-      assert_eq!(cookies.len(), 1);
-      assert_eq!(cookies[0].name, "retained");
+      .expect_err("single-browser legacy projection returns the typed stop");
+      assert!(error
+        .chain()
+        .any(|cause| cause.downcast_ref::<BoundaryStop>() == Some(&stop)));
     }
   }
 
