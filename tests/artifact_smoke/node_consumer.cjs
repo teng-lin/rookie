@@ -30,7 +30,9 @@ async function main() {
     const options = { domains: ["example.test"], localStatePath: keyPath };
     cookies = await rookieCookies.extractFromPath(database, options);
     const compatibility = await rookieCookies.chromiumCookiesFromPath(database, options);
-    const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(database, options);
+    const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(database, {
+      localStatePath: keyPath,
+    });
     const legacy = await rookieCookies.chromiumBased(keyPath, database, ["example.test"]);
     assert.deepEqual(compatibility, cookies);
     assert.deepEqual(legacy, cookies);
