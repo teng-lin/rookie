@@ -1,9 +1,7 @@
 #![allow(deprecated)]
 
 use rookie_cookies::direct_path::{
-  chromium_cookies_from_path, chromium_cookies_from_path_detailed, cookies_from_path,
-  ChromiumCredentialSource, ChromiumLockedDatabasePolicy, ChromiumPathRequest, CookieSourceKind,
-  DirectPathError, DirectPathRequest,
+  extract_from_path, ChromiumLockedDatabasePolicy, CookieSourceKind, PathExtractRequest,
 };
 use std::path::{Path, PathBuf};
 
@@ -43,10 +41,10 @@ fn mozilla_database(directory: &Path) -> PathBuf {
   path
 }
 
-fn assert_unsupported(error: rookie_cookies::anyhow::Error, source: CookieSourceKind) {
-  let typed = error
-    .downcast_ref::<DirectPathError>()
-    .expect("DirectPathError remains downcastable");
+fn assert_unsupported(error: rookie_cookies::Error, source: CookieSourceKind) {
+  let rookie_cookies::Error::Source(typed) = &error else {
+    panic!("an unsupported target is Error::Source, got {error:?}");
+  };
   assert_eq!(typed.kind(), "unsupported_target");
   assert_eq!(typed.code(), "unsupported_target");
   assert_eq!(typed.source_kind(), Some(source));
@@ -81,43 +79,45 @@ fn main() {
   .expect("write ESE signature");
 
   assert_unsupported(
-    cookies_from_path(
-      DirectPathRequest::new(&chromium).domains(vec!["example.test".to_owned()]),
+    extract_from_path(
+      PathExtractRequest::sniff(&chromium).domains(Some(vec!["example.test".to_owned()])),
     )
     .expect_err("Chromium is unsupported on FreeBSD"),
     CookieSourceKind::ChromiumSqlite,
   );
   assert_unsupported(
-    cookies_from_path(DirectPathRequest::new(&safari))
+    extract_from_path(PathExtractRequest::sniff(&safari))
       .expect_err("Safari is unsupported on FreeBSD"),
     CookieSourceKind::SafariBinaryCookies,
   );
   assert_unsupported(
-    cookies_from_path(DirectPathRequest::new(&internet_explorer))
+    extract_from_path(PathExtractRequest::sniff(&internet_explorer))
       .expect_err("Internet Explorer is unsupported on FreeBSD"),
     CookieSourceKind::InternetExplorerEse,
   );
 
-  let cookies = cookies_from_path(DirectPathRequest::new(&mozilla))
+  let cookies = extract_from_path(PathExtractRequest::sniff(&mozilla))
     .expect("Mozilla direct-path extraction is portable");
   assert_eq!(cookies.len(), 1);
   assert_eq!(cookies[0].name, "freebsd");
   assert_eq!(cookies[0].value, "portable");
 
-  let chromium_request = ChromiumPathRequest::new(&chromium)
-    .domains(vec!["example.test".to_owned()])
-    .credentials(ChromiumCredentialSource::LocalStateFile(
-      directory.join("Local State"),
-    ))
-    .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+  // Target support still wins before Chromium option validation. The
+  // credential-bearing constructors are platform-gated and cannot be named
+  // here at all, which is the point: on a target with no Chromium capability
+  // there is no valid credential strategy to ask for.
   assert_unsupported(
-    chromium_cookies_from_path(chromium_request)
-      .expect_err("target support wins before Chromium option validation"),
+    extract_from_path(
+      PathExtractRequest::plaintext(&chromium)
+        .domains(Some(vec!["example.test".to_owned()]))
+        .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
+    )
+    .expect_err("target support wins before Chromium option validation"),
     CookieSourceKind::ChromiumSqlite,
   );
   assert_unsupported(
-    chromium_cookies_from_path_detailed(ChromiumPathRequest::new(chromium))
-      .expect_err("detailed Chromium API is also all-target and typed"),
+    extract_from_path(PathExtractRequest::sniff(chromium))
+      .expect_err("a sniffed Chromium database is also all-target and typed"),
     CookieSourceKind::ChromiumSqlite,
   );
 }

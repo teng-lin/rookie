@@ -215,7 +215,10 @@ class CheckDocSnippetsTests(unittest.TestCase):
         self.assertIn("read", exports)
         self.assertIn("ReadRequest", exports)
         self.assertIn("browser", exports)
-        self.assertIn("cookies_from_path", exports)
+        # A `direct_path` re-export, to prove the loader walks the submodule
+        # and not just the crate root. `cookies_from_path` was this symbol
+        # until 0.6.0 collapsed the three path functions into one.
+        self.assertIn("extract_from_path", exports)
 
     def _seed_minimal_surfaces(self, root: Path) -> None:
         py = root / "bindings" / "python" / "rookie_cookies"

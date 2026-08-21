@@ -109,7 +109,7 @@ mod windows;
 ///
 /// Cloning a handle shares the same cancellation state: calling
 /// [`cancel`](Self::cancel) on any clone cancels the operation every clone
-/// (including the one an in-flight [`Request`] is holding) observes.
+/// (including the one an in-flight [`ExtractRequest`] is holding) observes.
 ///
 /// This only tracks whether cancellation was *requested* through this
 /// handle, not whether the operation is still running: calling
@@ -171,7 +171,7 @@ impl Eq for CancellationHandle {}
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-  /// The request's [`Request::timeout`] elapsed.
+  /// The request's timeout (e.g. [`ExtractRequest::timeout`]) elapsed.
   TimedOut,
   /// A [`CancellationHandle`] passed to the request was cancelled.
   Cancelled,
