@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Drive Safari/Internet Explorer without adding a Selenium client dependency.
+"""Drive Internet Explorer without adding a Selenium client dependency.
 
-Both hosted images already include the vendor WebDriver server. This module
-speaks the small W3C WebDriver subset the cookie canary needs and retries only
-driver/browser startup and navigation readiness. Extraction is never retried.
+The hosted Windows image includes IEDriver. This module speaks the small W3C
+WebDriver subset the cookie canary needs and retries only driver/browser startup
+and navigation readiness. Extraction is never retried. Safari deliberately uses
+its normal profile instead; Apple's WebDriver storage is isolated and ephemeral.
 """
 
 from __future__ import annotations
@@ -84,46 +85,54 @@ def wait_for_driver(
 
 
 def driver_command(engine: str, driver: str, port: int) -> list[str]:
-    if engine == "safari":
-        return [driver, "--port", str(port)]
     if engine == "internet_explorer":
         return [driver, f"--port={port}", "--log-level=TRACE"]
     raise WebDriverError(f"unsupported native WebDriver engine {engine!r}")
 
 
-def capabilities(engine: str) -> dict[str, Any]:
-    if engine == "safari":
-        always_match: dict[str, Any] = {"browserName": "safari"}
-    elif engine == "internet_explorer":
-        always_match = {
-            "browserName": "internet explorer",
-            "se:ieOptions": {
-                "ensureCleanSession": True,
-                "ignoreProtectedModeSettings": True,
-                "ignoreZoomSetting": True,
-                "initialBrowserUrl": "about:blank",
-            },
-        }
-    else:
+def capabilities(engine: str, edge_path: str | None = None) -> dict[str, Any]:
+    if engine != "internet_explorer":
         raise WebDriverError(f"unsupported native WebDriver engine {engine!r}")
+    if not edge_path:
+        raise WebDriverError(
+            "ROOKIE_E2E_EDGE_BINARY is required for Edge IE-mode WebDriver"
+        )
+    always_match: dict[str, Any] = {
+        "browserName": "internet explorer",
+        "se:ieOptions": {
+            # Microsoft requires these capabilities now that the IE11 desktop
+            # application is retired. IEDriver otherwise waits forever while
+            # looking for a standalone IE window.
+            "ie.edgechromium": True,
+            "ie.edgepath": edge_path,
+            "ensureCleanSession": True,
+            "ignoreProtectedModeSettings": True,
+            "ignoreZoomSetting": True,
+            "initialBrowserUrl": "about:blank",
+        },
+    }
     return {"capabilities": {"alwaysMatch": always_match}}
 
 
 def stop_browser(engine: str) -> None:
-    if engine == "safari":
-        subprocess.run(["pkill", "-x", "Safari"], check=False, capture_output=True)
-        subprocess.run(
-            ["pkill", "-x", "safaridriver"], check=False, capture_output=True
-        )
-    elif engine == "internet_explorer":
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "iexplore.exe"],
-            check=False,
-            capture_output=True,
-        )
+    if engine == "internet_explorer":
+        for image in ("iexplore.exe", "msedge.exe"):
+            subprocess.run(
+                ["taskkill", "/F", "/IM", image],
+                check=False,
+                capture_output=True,
+            )
+        return
+    raise WebDriverError(f"unsupported native WebDriver engine {engine!r}")
 
 
-def seed_once(engine: str, driver: str, url: str, log_path: Path) -> None:
+def seed_once(
+    engine: str,
+    driver: str,
+    url: str,
+    log_path: Path,
+    before: dict[Path, tuple[int, int]],
+) -> Path:
     port = free_port()
     command = driver_command(engine, driver, port)
     print("+", " ".join(command), flush=True)
@@ -133,7 +142,11 @@ def seed_once(engine: str, driver: str, url: str, log_path: Path) -> None:
     try:
         wait_for_driver(port, proc)
         response = request_json(
-            port, "POST", "/session", capabilities(engine), timeout=60
+            port,
+            "POST",
+            "/session",
+            capabilities(engine, os.environ.get("ROOKIE_E2E_EDGE_BINARY")),
+            timeout=60,
         )
         value = response.get("value", {})
         session_id = value.get("sessionId") or response.get("sessionId")
@@ -157,7 +170,9 @@ def seed_once(engine: str, driver: str, url: str, log_path: Path) -> None:
                 )
                 cookie = cookie_response.get("value")
                 if isinstance(cookie, dict) and cookie.get("value") == "bar":
-                    return
+                    # Capture the persistent store before deleting the
+                    # session. IE mode can checkpoint it after navigation.
+                    return wait_for_changed_cookie_file(engine, before, timeout=30)
             except WebDriverError:
                 pass
             time.sleep(0.5)
@@ -176,7 +191,14 @@ def seed_once(engine: str, driver: str, url: str, log_path: Path) -> None:
                 proc.kill()
 
 
-def seed_with_startup_retry(engine: str, driver: str, url: str) -> None:
+def seed_with_startup_retry(
+    engine: str,
+    driver: str,
+    url: str,
+    before: dict[Path, tuple[int, int]] | None = None,
+) -> Path:
+    if before is None:
+        before = file_snapshot(engine)
     failures: list[str] = []
     for attempt in range(1, 3):
         stop_browser(engine)
@@ -184,8 +206,7 @@ def seed_with_startup_retry(engine: str, driver: str, url: str) -> None:
             Path(tempfile.gettempdir()) / f"rookie-{engine}-webdriver-{attempt}.log"
         )
         try:
-            seed_once(engine, driver, url, log_path)
-            return
+            return seed_once(engine, driver, url, log_path, before)
         except WebDriverError as error:
             logs = (
                 log_path.read_text(encoding="utf-8", errors="replace")
@@ -270,4 +291,4 @@ def wait_for_changed_cookie_file(
 if __name__ == "__main__":
     if len(sys.argv) != 4:
         raise SystemExit("usage: webdriver_cookie.py ENGINE DRIVER URL")
-    seed_with_startup_retry(sys.argv[1], sys.argv[2], sys.argv[3])
+    print(seed_with_startup_retry(sys.argv[1], sys.argv[2], sys.argv[3]))

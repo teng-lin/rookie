@@ -239,8 +239,8 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Official `npx playwright install chromium` distribution, then native DevTools launch. |
 | Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Runner image Edge; official `npx playwright install msedge` fallback; native DevTools launch. |
 | Brave, Opera, Vivaldi, LibreWolf, Zen on each OS they support; Opera GX and Yandex on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. Chromium forks create the seed tab through their `DevToolsActivePort` endpoint instead of Playwright's persistent-context pipe. |
-| Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari + SafariDriver; `safaridriver --enable`; BinaryCookies extraction. |
-| Internet Explorer × Windows | `e2e-release.yml` `hosted-claimed` | `windows-2022` IE capability + image IEDriver; ESE WebCache extraction. Server 2025 is intentionally not used because it removed standalone IE. |
+| Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari normal application profile; BinaryCookies extraction. SafariDriver is deliberately not used because Apple isolates and destroys its automation-session storage. |
+| Internet Explorer × Windows | `e2e-release.yml` `hosted-claimed` | `windows-2022` IE capability + image IEDriver controlling an Edge IE-mode tab; ESE WebCache extraction. Server 2025 is intentionally not used because it removed standalone IE. |
 
 Chrome and Firefox stay outside that install catalog because `e2e.yml` owns
 them. Playwright remains a distribution mechanism for Chromium and a documented
@@ -284,8 +284,8 @@ That is registry/identity coverage, not crypto coverage.
 
 | Browser | Runner constraint |
 | --- | --- | --- |
-| Safari | SafariDriver has no headless mode. The macOS runner enables remote automation and must retain access to the runner user's `Cookies.binarycookies`. |
-| Internet Explorer | Pinned to `windows-2022`; the job enables the IE capability when needed and configures IEDriver's Protected Mode/zoom prerequisites. IE/ESE APIs remain deprecated in 0.6. |
+| Safari | The hosted canary opens the normal Safari app because SafariDriver uses private-like isolated storage and destroys it at session teardown; the runner must retain access to the user's `Cookies.binarycookies`. |
+| Internet Explorer | Pinned to `windows-2022`; the job enables the IE capability and Edge IE-mode policy, then supplies IEDriver's required `ie.edgechromium` / `ie.edgepath` capabilities plus its Protected Mode/zoom prerequisites. IE/ESE APIs remain deprecated in 0.6. |
 
 Neither native-engine job is an automatic pull-request check. Applying the
 `e2e-release` label opts a PR into the full matrix and later pushes keep running

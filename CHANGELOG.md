@@ -237,6 +237,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixtures remain for products we cannot install. Extra hosted browsers run on
   nightly and again on release. Claimed-browser fixtures run on
   `v*` tags, GitHub Releases, or `workflow_dispatch`.
+- The Safari hosted canary uses the normal application profile because Apple
+  intentionally destroys SafariDriver automation storage at session teardown.
+  The Internet Explorer canary now supplies IEDriver's Edge IE-mode
+  capabilities and policy instead of waiting for the retired desktop shell.
 - `docs/testing.md` lists every registry browser against hosted CI, release
   fixtures, or manual coverage.
 

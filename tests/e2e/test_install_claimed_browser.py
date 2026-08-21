@@ -52,14 +52,17 @@ class InstallCatalogTests(unittest.TestCase):
     def test_native_engine_cells_use_vendor_drivers(self) -> None:
         safari = INSTALL.HOSTS["safari"]["macos"]
         internet_explorer = INSTALL.HOSTS["internet_explorer"]["windows"]
-        self.assertEqual(safari["kind"], "safaridriver")
-        self.assertIn("/usr/bin/safaridriver", safari["exe"])
+        self.assertEqual(safari["kind"], "system_browser")
+        self.assertIn("/Applications/Safari.app/Contents/MacOS/Safari", safari["exe"])
         self.assertEqual(internet_explorer["kind"], "internet_explorer")
         self.assertEqual(internet_explorer["runner"], "windows-2022")
         self.assertTrue(
             any(
                 path.endswith("IEDriverServer.exe") for path in internet_explorer["exe"]
             )
+        )
+        self.assertTrue(
+            any(path.endswith("msedge.exe") for path in internet_explorer["edge_exe"])
         )
 
     def test_chromium_and_edge_have_official_playwright_install_fallbacks(self) -> None:

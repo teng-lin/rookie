@@ -5,7 +5,8 @@ Installed Chromium-family browsers are launched through their native headless
 CLI. Playwright explicitly does not guarantee arbitrary executablePath builds,
 and a branded browser can hang before its control pipe becomes ready even when
 the browser has successfully started. Gecko forks use their native CLI too.
-Safari and IE use their image-provided vendor WebDriver servers.
+Safari launches the normal system application so the seed reaches its
+persistent profile; IE uses the image-provided IEDriver server in Edge IE mode.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from webdriver_cookie import (
+    WebDriverError,
     file_snapshot,
     seed_with_startup_retry,
     wait_for_changed_cookie_file,
@@ -72,11 +74,14 @@ def wait_for_server(
     )
 
 
-def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path]:
+def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
     port = pick_cookie_port()
     env = os.environ.copy()
     env["ROOKIE_E2E_COOKIE_PORT"] = str(port)
     log_path = Path(tempfile.gettempdir()) / f"rookie-cookie-server-{port}.log"
+    request_log = Path(tempfile.gettempdir()) / f"rookie-cookie-requests-{port}.log"
+    request_log.write_text("", encoding="utf-8")
+    env["ROOKIE_E2E_REQUEST_LOG"] = str(request_log)
     with log_path.open("w", encoding="utf-8") as log_handle:
         proc = subprocess.Popen(
             [sys.executable, "-u", str(ROOT / "tests/e2e/cookie_server.py")],
@@ -87,7 +92,69 @@ def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path]:
             text=True,
         )
     wait_for_server(port, proc, log_path)
-    return proc, port, log_path
+    return proc, port, log_path, request_log
+
+
+def safari_open_command(browser: str, url: str) -> list[str]:
+    binary = Path(browser)
+    app = next((parent for parent in binary.parents if parent.suffix == ".app"), None)
+    if app is None:
+        raise SystemExit(f"Safari executable is not inside an app bundle: {browser}")
+    return ["/usr/bin/open", "-b", "com.apple.Safari", url]
+
+
+def stop_safari(*, graceful: bool) -> None:
+    # Ask Safari to checkpoint its normal persistent cookie store before the
+    # hard process cleanup used to keep hosted runs independent.
+    if graceful:
+        try:
+            subprocess.run(
+                ["/usr/bin/osascript", "-e", 'tell application "Safari" to quit'],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+    subprocess.run(["pkill", "-x", "Safari"], check=False, capture_output=True)
+
+
+def wait_for_request(request_log: Path, path: str, timeout: float = 30) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            requests = request_log.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            requests = []
+        if path in requests:
+            return
+        time.sleep(0.25)
+    raise SystemExit(f"Safari never requested {path}; observed requests: {requests!r}")
+
+
+def seed_safari_native(
+    browser: str,
+    url: str,
+    before: dict[Path, tuple[int, int]],
+    request_log: Path,
+) -> Path:
+    stop_safari(graceful=False)
+    command = safari_open_command(browser, url)
+    print("+", " ".join(command), flush=True)
+    subprocess.run(command, check=True, timeout=30)
+    try:
+        wait_for_request(request_log, "/set")
+        cookie_file = wait_for_changed_cookie_file("safari", before, timeout=45)
+    except WebDriverError:
+        # Some Safari releases checkpoint BinaryCookies only on a graceful
+        # application quit. Retry the same snapshot after asking it to quit.
+        stop_safari(graceful=True)
+        return wait_for_changed_cookie_file("safari", before, timeout=20)
+    else:
+        stop_safari(graceful=True)
+        return cookie_file
+    finally:
+        stop_safari(graceful=False)
 
 
 def venv_python() -> Path:
@@ -450,17 +517,22 @@ def run() -> int:
     )
     user_data.mkdir(parents=True, exist_ok=True)
 
-    server, port, _log_path = start_cookie_server()
+    server, port, _log_path, request_log = start_cookie_server()
     try:
         plant_keychain()
         url = f"http://127.0.0.1:{port}/set"
         if engine == "gecko":
             seed_gecko(exe, user_data, url)
             assert_gecko(user_data)
-        elif engine in ("safari", "internet_explorer"):
+        elif engine == "safari":
             before = file_snapshot(engine)
-            seed_with_startup_retry(engine, exe, url)
-            cookie_file = wait_for_changed_cookie_file(engine, before)
+            cookie_file = seed_safari_native(exe, url, before, request_log)
+            os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
+            print(f"native cookie store: {cookie_file}", flush=True)
+            assert_native(cookie_file, browser)
+        elif engine == "internet_explorer":
+            before = file_snapshot(engine)
+            cookie_file = seed_with_startup_retry(engine, exe, url, before)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
             assert_native(cookie_file, browser)

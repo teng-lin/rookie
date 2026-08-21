@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "lanes": {
-    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, SafariDriver, and IE/IEDriver on supported hosted images.",
+    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, normal-profile Safari, and IE/IEDriver in Edge IE mode on supported hosted images.",
     "release_fixture": "Engine fixture extracted with this browser_id in e2e-release.yml (tag, release, workflow_dispatch).",
     "manual": "Operator-owned fallback for a registry cell without a viable hosted runner. No current cells rely on it."
   },

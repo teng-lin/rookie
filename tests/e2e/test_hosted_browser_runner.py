@@ -36,22 +36,35 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         self.assertNotIn("--password-store=gnome-libsecret", command)
         self.assertIn("--remote-debugging-port=0", command)
 
-    def test_vendor_driver_commands_are_platform_native(self) -> None:
-        self.assertEqual(
-            webdriver.driver_command("safari", "/usr/bin/safaridriver", 4444),
-            ["/usr/bin/safaridriver", "--port", "4444"],
-        )
+    def test_ie_driver_command_is_platform_native(self) -> None:
         self.assertEqual(
             webdriver.driver_command("internet_explorer", "IEDriverServer.exe", 4444),
             ["IEDriverServer.exe", "--port=4444", "--log-level=TRACE"],
         )
 
+    def test_safari_uses_normal_app_bundle(self) -> None:
+        self.assertEqual(
+            hosted.safari_open_command(
+                "/Applications/Safari.app/Contents/MacOS/Safari",
+                "http://127.0.0.1:8765/set",
+            ),
+            [
+                "/usr/bin/open",
+                "-b",
+                "com.apple.Safari",
+                "http://127.0.0.1:8765/set",
+            ],
+        )
+
     def test_ie_capabilities_pin_clean_native_session(self) -> None:
-        options = webdriver.capabilities("internet_explorer")["capabilities"][
+        edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        options = webdriver.capabilities("internet_explorer", edge)["capabilities"][
             "alwaysMatch"
         ]
         self.assertEqual(options["browserName"], "internet explorer")
         self.assertTrue(options["se:ieOptions"]["ensureCleanSession"])
+        self.assertTrue(options["se:ieOptions"]["ie.edgechromium"])
+        self.assertEqual(options["se:ieOptions"]["ie.edgepath"], edge)
 
 
 if __name__ == "__main__":

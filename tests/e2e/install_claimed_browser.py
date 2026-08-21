@@ -250,10 +250,11 @@ HOSTS: dict[str, dict] = {
     "safari": {
         "engine": "safari",
         "macos": {
-            "kind": "safaridriver",
-            "configure": True,
-            "exe": ["/usr/bin/safaridriver"],
-            "browser_exe": ["/Applications/Safari.app/Contents/MacOS/Safari"],
+            # Safari is part of macOS. Launch the normal application profile:
+            # Apple documents that SafariDriver automation windows use isolated
+            # storage which is destroyed when the WebDriver session ends.
+            "kind": "system_browser",
+            "exe": ["/Applications/Safari.app/Contents/MacOS/Safari"],
         },
     },
     "internet_explorer": {
@@ -271,6 +272,10 @@ HOSTS: dict[str, dict] = {
             "browser_exe": [
                 r"%ProgramFiles%\Internet Explorer\iexplore.exe",
                 r"%ProgramFiles(x86)%\Internet Explorer\iexplore.exe",
+            ],
+            "edge_exe": [
+                r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+                r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
             ],
         },
     },
@@ -580,12 +585,6 @@ def install_playwright_product(product: str) -> None:
     )
 
 
-def configure_safaridriver() -> None:
-    # Apple documents `safaridriver --enable`; sudo is needed on a fresh
-    # hosted image and is passwordless on GitHub's macOS runners.
-    run(["sudo", "/usr/bin/safaridriver", "--enable"])
-
-
 def configure_internet_explorer(spec: dict) -> None:
     browser_candidates = [expand(path) for path in spec["browser_exe"]]
     script = r"""
@@ -634,6 +633,12 @@ $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Main'
 New-Item -Path $policy -Force | Out-Null
 New-ItemProperty -Path $policy -Name NotifyDisableIEOptions -PropertyType DWord -Value 0 -Force |
   Out-Null
+$edgePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+New-Item -Path $edgePolicy -Force | Out-Null
+# 1 = enable IE mode. IEDriver's ie.edgechromium capability then creates the
+# IE-mode tab without relying on the retired standalone IE desktop shell.
+New-ItemProperty -Path $edgePolicy -Name InternetExplorerIntegrationLevel `
+  -PropertyType DWord -Value 1 -Force | Out-Null
 Write-Host "Internet Explorer ready: $browser"
 """
     run(
@@ -672,8 +677,10 @@ def install_spec(spec: dict) -> None:
         install_winget(spec["id"])
     elif kind in ("playwright_browser", "playwright_channel"):
         install_playwright_product(spec["product"])
-    elif kind == "safaridriver":
-        configure_safaridriver()
+    elif kind == "system_browser":
+        # The executable-presence check is the installation check for browsers
+        # shipped as part of the hosted operating-system image.
+        return
     elif kind == "internet_explorer":
         configure_internet_explorer(spec)
     else:
@@ -736,6 +743,11 @@ def install_browser(browser: str, platform: str) -> str:
     browser_exe = find_exe(spec.get("browser_exe", []))
     if browser_exe:
         env["ROOKIE_E2E_BROWSER_BINARY"] = browser_exe
+    edge_exe = find_exe(spec.get("edge_exe", []))
+    if spec.get("edge_exe") and not edge_exe:
+        raise SystemExit("Internet Explorer canary could not find Microsoft Edge")
+    if edge_exe:
+        env["ROOKIE_E2E_EDGE_BINARY"] = edge_exe
     if meta.get("keychain_service"):
         env["ROOKIE_E2E_KEYCHAIN_SERVICE"] = meta["keychain_service"]
         env["ROOKIE_E2E_KEYCHAIN_ACCOUNT"] = meta["keychain_account"]
