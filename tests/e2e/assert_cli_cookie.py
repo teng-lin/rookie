@@ -60,12 +60,15 @@ def assert_cli_cookie(
 
     command = [str(cli_path)]
     if browser is not None:
-        command.extend(("--browser", browser))
+        # `read` is an unfiltered snapshot; domain filtering belongs to
+        # `report` and `from-path` in the subcommand-only CLI.
+        command.extend(("read", "--browser", browser, "--format", "json"))
     else:
-        command.extend(("--path", str(cookies_path)))
-    command.extend(("--domains", domain, "--format", "json"))
+        command.extend(
+            ("from-path", str(cookies_path), "--domains", domain, "--format", "json")
+        )
     if key_path is not None:
-        command.extend(("--key-path", str(key_path)))
+        command.extend(("--local-state-path", str(key_path)))
     if browser_id is not None:
         command.extend(("--browser-id", browser_id))
 
@@ -127,10 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--browser-id",
-        help="Chromium credential identity for --path (unix Keychain / libsecret)",
+        help="Chromium credential identity for from-path (unix Keychain / libsecret)",
     )
     parser.add_argument(
-        "--key-path",
+        "--local-state-path",
+        dest="key_path",
         type=Path,
         help="Chromium Local State/key file (required for Chromium on Windows)",
     )
@@ -170,10 +174,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    print(
-        f"rookie-cookies CLI: {expected_name}={expected_value} verified "
-        f"({count} cookies for {args.domain})"
+    scope = (
+        f"{count} cookies returned by unfiltered {args.browser} read"
+        if args.browser is not None
+        else f"{count} cookies for {args.domain}"
     )
+    print(f"rookie-cookies CLI: {expected_name}={expected_value} verified ({scope})")
     return 0
 
 

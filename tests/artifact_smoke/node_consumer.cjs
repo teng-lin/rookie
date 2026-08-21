@@ -28,17 +28,27 @@ async function main() {
   let cookies;
   if (keyPath) {
     const options = { domains: ["example.test"], localStatePath: keyPath };
-    cookies = await rookieCookies.chromiumCookiesFromPath(database, options);
+    cookies = await rookieCookies.extractFromPath(database, options);
+    const compatibility = await rookieCookies.chromiumCookiesFromPath(database, options);
     const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(database, options);
     const legacy = await rookieCookies.chromiumBased(keyPath, database, ["example.test"]);
+    assert.deepEqual(compatibility, cookies);
     assert.deepEqual(legacy, cookies);
     assert.deepEqual(detailed.map(({ cookie }) => cookie), cookies);
   } else {
-    cookies = await rookieCookies.cookiesFromPath(database, ["artifact.test"]);
+    cookies = await rookieCookies.extractFromPath(database, {
+      domains: ["artifact.test"],
+    });
+    assert.deepEqual(
+      await rookieCookies.cookiesFromPath(database, ["artifact.test"]),
+      cookies,
+    );
     assert.deepEqual(
       await rookieCookies.firefoxBased(database, ["artifact.test"]),
       cookies,
     );
+    assert.equal(typeof rookieCookies.extractFromPath, "function");
+    assert.equal(typeof rookieCookies.fromPath, "function");
     assert.equal(typeof rookieCookies.chromiumCookiesFromPath, "function");
     assert.equal(typeof rookieCookies.chromiumCookiesFromPathDetailed, "function");
   }

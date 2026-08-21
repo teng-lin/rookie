@@ -825,7 +825,7 @@ fn engine_outcome_counts_each_malformed_persistent_row() {
     .expect("insert malformed cookie");
   drop(conn);
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let persistent = &outcome.sources[0];
   assert_eq!(persistent.origin.role, CookieSourceRoleId::persistent());
   assert_eq!(persistent.stats.rows_seen, 2);
@@ -867,7 +867,7 @@ fn persistent_optional_metadata_type_errors_are_retained_without_guessing() {
     .expect("seed malformed metadata rows");
   drop(connection);
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let persistent = &outcome.sources[0];
   assert_eq!(persistent.stats.rows_seen, 7);
   assert_eq!(persistent.stats.rows_skipped, 1);
@@ -922,7 +922,7 @@ fn malformed_persistent_host_is_a_reported_total_row_failure() {
     .expect("seed malformed host");
   drop(connection);
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let persistent = &outcome.sources[0];
   assert_eq!(persistent.stats.rows_seen, 1);
   assert_eq!(persistent.stats.rows_skipped, 1);
@@ -943,7 +943,7 @@ fn engine_outcome_separates_total_failure_from_a_rejected_row() {
   std::fs::create_dir_all(&dir).expect("create profile dir");
   std::fs::write(&db, b"not a sqlite database").expect("write unreadable db");
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let persistent = &outcome.sources[0];
   assert!(persistent.failure.is_some());
   assert!(!persistent
@@ -962,7 +962,7 @@ fn persistent_failure_still_returns_selected_session_cookies() {
   let session = dir.join("sessionstore-backups/recovery.jsonlz4");
   write_session_jsonlz4(&session, serde_json::json!([session_cookie("recovered")]));
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   assert!(outcome.sources[0].failure.is_some());
   assert!(outcome.sources[1..]
     .iter()
@@ -1011,22 +1011,21 @@ fn completed_persistent_source_retains_a_stop_observed_after_the_final_session_p
     );
     let mut probes = 0;
 
-    let outcome =
-      query_cookies_engine_outcome_with_session_probe(&db, None, &runtime, |_, _, _, _| {
-        probes += 1;
-        if probes == SESSION_CANDIDATES.len() {
-          match stop {
-            BoundaryStop::TimedOut => clock.advance(Duration::from_secs(10)),
-            BoundaryStop::Cancelled => assert!(token.cancel()),
-            BoundaryStop::ResourceExhausted => assert!(token.exhaust_resources()),
-          }
+    let outcome = acquire_mozilla_profile_with_session_probe(&db, None, &runtime, |_, _, _, _| {
+      probes += 1;
+      if probes == SESSION_CANDIDATES.len() {
+        match stop {
+          BoundaryStop::TimedOut => clock.advance(Duration::from_secs(10)),
+          BoundaryStop::Cancelled => assert!(token.cancel()),
+          BoundaryStop::ResourceExhausted => assert!(token.exhaust_resources()),
         }
-        Err(SessionCandidateFailure {
-          error: std::io::Error::from(std::io::ErrorKind::NotFound).into(),
-          attempts: 1,
-          transient_errors: Vec::new(),
-        })
-      });
+      }
+      Err(SessionCandidateFailure {
+        error: std::io::Error::from(std::io::ErrorKind::NotFound).into(),
+        attempts: 1,
+        transient_errors: Vec::new(),
+      })
+    });
 
     assert_eq!(probes, SESSION_CANDIDATES.len());
     assert_eq!(outcome.boundary_stop, Some(stop));
@@ -1055,26 +1054,25 @@ fn a_successful_session_candidate_stops_the_walk_from_probing_later_ones() {
   let runtime = BoundaryRuntime::standard(&clock);
 
   let mut probed = Vec::new();
-  let outcome =
-    query_cookies_engine_outcome_with_session_probe(&db, None, &runtime, |path, _, _, _| {
-      probed.push(path.to_path_buf());
-      // The first candidate succeeds; a correct walk must not reach any other.
-      Ok(SessionCandidateSuccess {
-        parsed: SessionCookieParseDraft {
-          #[cfg(test)]
-          cookies: Vec::new(),
-          #[cfg(test)]
-          detailed_cookies: Vec::new(),
-          records: Vec::new(),
-          rows_seen: 0,
-          rows_skipped: 0,
-          rows_rejected: 0,
-          diagnostics: Vec::new(),
-        },
-        attempts: 1,
-        transient_errors: Vec::new(),
-      })
-    });
+  let outcome = acquire_mozilla_profile_with_session_probe(&db, None, &runtime, |path, _, _, _| {
+    probed.push(path.to_path_buf());
+    // The first candidate succeeds; a correct walk must not reach any other.
+    Ok(SessionCandidateSuccess {
+      parsed: SessionCookieParseDraft {
+        #[cfg(test)]
+        cookies: Vec::new(),
+        #[cfg(test)]
+        detailed_cookies: Vec::new(),
+        records: Vec::new(),
+        rows_seen: 0,
+        rows_skipped: 0,
+        rows_rejected: 0,
+        diagnostics: Vec::new(),
+      },
+      attempts: 1,
+      transient_errors: Vec::new(),
+    })
+  });
 
   let first = dir.join(SESSION_CANDIDATES[0].0);
   assert_eq!(
@@ -1103,7 +1101,7 @@ fn engine_outcome_retains_invalid_session_candidates_and_selects_first_valid_one
   let selected = dir.join("sessionstore-backups/recovery.baklz4");
   write_session_jsonlz4(&selected, serde_json::json!([session_cookie("recovered")]));
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let sessions = &outcome.sources[1..];
   assert_eq!(sessions.len(), 2);
   assert_eq!(sessions[0].origin.path, invalid);
@@ -1140,7 +1138,7 @@ fn engine_outcome_retains_every_existing_session_candidate_when_all_fail() {
     std::fs::write(path, b"invalid session candidate").expect("write invalid candidate");
   }
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let sessions = &outcome.sources[1..];
   assert_eq!(sessions.len(), SESSION_CANDIDATES.len());
   assert!(sessions.iter().all(|source| !source.selected));
@@ -1229,7 +1227,7 @@ fn ambiguous_session_expiry_is_retained_as_unknown_metadata() {
     ]),
   );
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let source = &outcome.sources[1];
   assert!(source.selected);
   assert_eq!(source.stats.rows_seen, 4);
@@ -1267,7 +1265,7 @@ fn engine_outcome_counts_and_bounds_malformed_session_cookies() {
     serde_json::Value::Array(malformed),
   );
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let source = &outcome.sources[1];
   assert!(source.selected);
   assert_eq!(source.stats.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
@@ -1296,7 +1294,7 @@ fn engine_outcome_labels_legacy_json_and_counts_malformed_rows() {
   )
   .expect("write legacy session store");
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let source = &outcome.sources[1];
   assert_eq!(source.origin.format.as_str(), "firefox_session_json");
   assert_eq!(source.stats.rows_seen, 2);
@@ -1321,7 +1319,7 @@ fn legacy_json_row_diagnostics_are_bounded_like_the_lz4_path() {
   )
   .expect("write legacy session store");
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let source = &outcome.sources[1];
   assert_eq!(source.origin.format.as_str(), SESSION_JSON_FORMAT_ID);
   assert_eq!(source.stats.rows_seen, MAX_SESSION_COOKIE_DIAGNOSTICS + 3);
@@ -1345,7 +1343,7 @@ fn failed_session_candidate_retains_its_retry_diagnostics() {
   )
   .expect("write invalid session candidate");
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let source = &outcome.sources[1];
   assert!(!source.selected);
   assert!(source.failure.is_some());
@@ -1398,7 +1396,7 @@ fn a_candidate_that_vanishes_after_a_transient_failure_stays_silent() {
   let db = dir.join("cookies.sqlite");
   seed_moz_cookies(&db, &[]);
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   assert_eq!(outcome.sources.len(), 1, "the persistent source only");
   assert_eq!(
     outcome.sources[0].origin.role,
@@ -1438,7 +1436,7 @@ fn engine_outcome_keeps_missing_session_candidates_silent() {
   let db = dir.join("cookies.sqlite");
   seed_moz_cookies(&db, &[]);
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   assert_eq!(outcome.sources.len(), 1, "the persistent source only");
   assert_eq!(
     outcome.sources[0].origin.role,
@@ -1785,7 +1783,7 @@ fn firefox_schema_version_and_rows_come_from_the_acquired_wal_snapshot() {
     .expect("checkpointed");
   assert_eq!(checkpointed.expires, Some(1_700_000_000));
 
-  let outcome = query_cookies_engine_outcome(&db, None);
+  let outcome = acquire_mozilla_profile(&db, None);
   let persistent = &outcome.sources[0];
   assert_eq!(
     persistent.acquisition,

@@ -134,7 +134,8 @@ jobs:
 
             COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
             [ -f "$COOKIES_DB" ] || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
-            .venv/bin/python tests/e2e/assert_cli_cookie.py "$COOKIES_DB"
+            .venv/bin/python tests/e2e/assert_cli_cookie.py \
+              "$COOKIES_DB" --browser-id chrome
           SH
 
   ubuntu-firefox:
@@ -421,7 +422,8 @@ jobs:
           COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
           [ -f "$COOKIES_DB" ] \
             || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
-          .venv/bin/python tests/e2e/assert_cli_cookie.py "$COOKIES_DB"
+          .venv/bin/python tests/e2e/assert_cli_cookie.py \
+            "$COOKIES_DB" --browser-id chrome
 
   windows-firefox:
     name: e2e windows × firefox
@@ -726,6 +728,48 @@ jobs:
       - name: Verify v20 and extract a live WAL cookie on all four surfaces
         run: tests/e2e/run_windows_appbound_canary.ps1
 
+  windows-locked-db-shadow-copy:
+    name: e2e windows × chrome (NonDisruptive shadow-copy recovery)
+    # The NonDisruptive default recovers a locked database with a raw NTFS copy,
+    # which needs administrator rights, so -- like the App-Bound canary -- it
+    # cannot run on an unprivileged PR host. Same trigger set: scheduled, a
+    # release/tag, a push to main, or an explicit maintainer dispatch.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'release') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Confirm the runner process is elevated
+        run: |
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+          $isAdmin = $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+          )
+          Write-Host "Administrator: $isAdmin"
+          if (-not $isAdmin) {
+            throw "NonDisruptive shadow-copy recovery requires an elevated runner"
+          }
+
+      - name: Recover a locked database via the NonDisruptive shadow copy
+        run: >-
+          cargo test -p rookie-cookies --lib --locked
+          recovers_a_locked_database_via_nondisruptive_shadow_copy
+          -- --ignored --nocapture
+
   windows-chrome:
     name: e2e windows × chrome (legacy DPAPI)
     if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
@@ -808,7 +852,7 @@ jobs:
           $cookiesDb = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Default\Network\Cookies"
           $localState = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Local State"
           & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-            "$cookiesDb" --key-path "$localState"
+            "$cookiesDb" --local-state-path "$localState"
 
       - name: Exercise row-level DPAPI across schema 23 and 24
         env:
@@ -850,7 +894,7 @@ jobs:
             $cookiesDb = Join-Path $root "Default\Network\Cookies"
             $localState = Join-Path $root "Local State"
             & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-              "$cookiesDb" --key-path "$localState"
+              "$cookiesDb" --local-state-path "$localState"
           }
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
@@ -922,7 +966,7 @@ jobs:
             & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
             node tests/e2e/assert_chrome_cookie.mjs
             & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-              "$cookiesDb" --key-path "$localState"
+              "$cookiesDb" --local-state-path "$localState"
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }

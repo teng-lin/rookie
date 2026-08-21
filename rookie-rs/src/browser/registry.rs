@@ -1176,7 +1176,7 @@ impl ExtractCompletion {
   }
 }
 
-/// The engine populate frame: the listing-to-extract envelope every engine
+/// The engine acquisition frame: the listing-to-extract envelope every engine
 /// repeats, with the per-profile acquisition and the stop policy passed in.
 ///
 /// `acquire_profile` is one engine's body. It gets the profile's identity and
@@ -1190,7 +1190,7 @@ impl ExtractCompletion {
 /// whose candidates produced nothing still appears with `sources: vec![]`, so
 /// the report layer can tell a source that vanished before extraction from a
 /// browser that was never installed.
-pub(crate) fn populate_engine_sources<A>(
+pub(crate) fn acquire_engine_sources<A>(
   listing: EngineListing,
   completion: ExtractCompletion,
   mut acquire_profile: A,

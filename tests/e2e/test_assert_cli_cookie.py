@@ -64,8 +64,10 @@ class AssertCliCookieTests(unittest.TestCase):
         self.assertEqual(count, 1)
         command = run.call_args.args[0]
         self.assertEqual(command[0], str(self.cli))
-        self.assertEqual(command[command.index("--path") + 1], str(self.cookies))
-        self.assertEqual(command[command.index("--key-path") + 1], str(self.key))
+        self.assertEqual(command[1:3], ["from-path", str(self.cookies)])
+        self.assertEqual(
+            command[command.index("--local-state-path") + 1], str(self.key)
+        )
         self.assertEqual(command[command.index("--domains") + 1], "example.test")
         self.assertEqual(run.call_args.kwargs["env"]["RUST_LOG"], "error")
 
@@ -82,7 +84,7 @@ class AssertCliCookieTests(unittest.TestCase):
             cli_path=self.cli,
         )
 
-        self.assertNotIn("--key-path", run.call_args.args[0])
+        self.assertNotIn("--local-state-path", run.call_args.args[0])
 
     @mock.patch.object(HARNESS.subprocess, "run")
     def test_browser_command_uses_profile_discovery(self, run: mock.Mock) -> None:
@@ -99,8 +101,10 @@ class AssertCliCookieTests(unittest.TestCase):
         )
 
         command = run.call_args.args[0]
+        self.assertEqual(command[1], "read")
         self.assertEqual(command[command.index("--browser") + 1], "chrome")
-        self.assertNotIn("--path", command)
+        self.assertNotIn("from-path", command)
+        self.assertNotIn("--domains", command)
 
     def test_rejects_path_and_browser_together(self) -> None:
         with self.assertRaisesRegex(HARNESS.HarnessError, "exactly one"):
@@ -111,6 +115,13 @@ class AssertCliCookieTests(unittest.TestCase):
                 cli_path=self.cli,
                 browser="chrome",
             )
+
+    def test_parser_accepts_local_state_path(self) -> None:
+        args = HARNESS.build_parser().parse_args(
+            [str(self.cookies), "--local-state-path", str(self.key)]
+        )
+
+        self.assertEqual(args.key_path, self.key)
 
     @mock.patch.object(HARNESS.subprocess, "run")
     def test_expected_cookie_can_be_selected_by_environment(

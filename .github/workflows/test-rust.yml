@@ -230,7 +230,7 @@ jobs:
             INSERT INTO moz_cookies VALUES
               ('.example.test', '/', 1, 0, 'freebsd_cli', 'portable', 1, 0);
             SQL
-            target/debug/rookie-cookies --path "$mozilla_db" --domains example.test \
+            target/debug/rookie-cookies from-path "$mozilla_db" --domains example.test \
               > "$fixture_dir/mozilla.json"
             grep '"name": "freebsd_cli"' "$fixture_dir/mozilla.json"
             grep '"value": "portable"' "$fixture_dir/mozilla.json"
@@ -238,7 +238,7 @@ jobs:
             chromium_db="$fixture_dir/Cookies"
             sqlite3 "$chromium_db" 'CREATE TABLE cookies (name TEXT);'
             status=0
-            target/debug/rookie-cookies --path "$chromium_db" \
+            target/debug/rookie-cookies from-path "$chromium_db" \
               > "$fixture_dir/chromium.out" 2> "$fixture_dir/chromium.err" \
               || status=$?
             test "$status" -eq 1

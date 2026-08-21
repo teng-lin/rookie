@@ -284,7 +284,7 @@ def smoke_cli(
         raise RuntimeError(f"unexpected CLI version output: {version}")
     command = [
         str(cli),
-        "--path",
+        "from-path",
         str(database),
         "--domains",
         domain,
@@ -292,7 +292,7 @@ def smoke_cli(
         "json",
     ]
     if key_path is not None:
-        command.extend(("--key-path", str(key_path)))
+        command.extend(("--local-state-path", str(key_path)))
     output = run(
         command,
         cwd=consumer,
@@ -334,13 +334,17 @@ prefix = Path(sys.prefix).resolve()
 if prefix not in module.parents:
     raise SystemExit(f"wheel module was not imported from the clean venv: {module}")
 database = os.environ["ROOKIE_ARTIFACT_DB"]
-cookies = rookie_cookies.cookies_from_path(database, ["artifact.test"])
+cookies = rookie_cookies.extract_from_path(database, domains=["artifact.test"])
+compat = rookie_cookies.cookies_from_path(database, ["artifact.test"])
 legacy = rookie_cookies.firefox_based(database, ["artifact.test"])
-if legacy != cookies:
-    raise SystemExit("legacy firefox_based disagrees with cookies_from_path")
-for name in ("chromium_cookies_from_path", "chromium_cookies_from_path_detailed"):
+if compat != cookies or legacy != cookies:
+    raise SystemExit("compatibility path exports disagree with extract_from_path")
+for name in ("extract_from_path", "from_path"):
     if not callable(getattr(rookie_cookies, name, None)):
         raise SystemExit(f"wheel is missing canonical export {name}")
+for name in ("chromium_cookies_from_path", "chromium_cookies_from_path_detailed"):
+    if not callable(getattr(rookie_cookies, name, None)):
+        raise SystemExit(f"wheel is missing compatibility export {name}")
 if len(cookies) != 1 or cookies[0]["name"] != "rookie_artifact" or cookies[0]["value"] != "installed-ok":
     raise SystemExit(f"wheel did not return the fixture: {json.dumps(cookies)}")
 print(f"wheel: loaded {module}; rookie_artifact=installed-ok")
@@ -368,10 +372,13 @@ import rookie_cookies
 database = os.environ["ROOKIE_ARTIFACT_DB"]
 key_path = os.environ["ROOKIE_ARTIFACT_KEY"]
 options = {"domains": ["example.test"], "local_state_path": key_path}
-cookies = rookie_cookies.chromium_cookies_from_path(database, options)
+cookies = rookie_cookies.extract_from_path(
+    database, domains=["example.test"], local_state_path=key_path
+)
+compat = rookie_cookies.chromium_cookies_from_path(database, options)
 detailed = rookie_cookies.chromium_cookies_from_path_detailed(database, options)
 legacy = rookie_cookies.chromium_based(key_path, database, ["example.test"])
-if legacy != cookies or [record["cookie"] for record in detailed] != cookies:
+if compat != cookies or legacy != cookies or [record["cookie"] for record in detailed] != cookies:
     raise SystemExit("canonical and legacy Chromium wheel exports disagree")
 if len(cookies) != 1 or cookies[0]["name"] != "rookie_ci" or cookies[0]["value"] != "bar":
     raise SystemExit(f"wheel did not decrypt the DPAPI fixture: {json.dumps(cookies)}")

@@ -370,7 +370,7 @@ fn query_prepared(
       )
     }
     PreparedCredentials::KeyOutcomes(outcomes) => {
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
+      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, force_kill, runtime,
       )
     }
@@ -385,12 +385,12 @@ fn query_prepared_without_platform_recovery(
 ) -> Result<Vec<DetailedCookie>> {
   match credentials {
     PreparedCredentials::PlaintextOnly => {
-      crate::browser::chromium::query_detailed_cookies_plaintext_without_platform_recovery(
+      crate::browser::chromium::extract_detailed_cookies_plaintext_without_platform_recovery(
         path, domains, runtime,
       )
     }
     PreparedCredentials::KeyOutcomes(outcomes) => {
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_without_platform_recovery(
+      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_without_platform_recovery(
         outcomes, path, domains, runtime,
       )
     }
@@ -582,6 +582,113 @@ Start-Sleep -Seconds 300
         .expect("poll invalid-request child")
         .is_none(),
       "an invalid request must not affect the process holding the database"
+    );
+  }
+
+  /// Fails unless the lock helper is still running, i.e. recovery left the
+  /// process holding the database untouched.
+  fn assert_holder_still_running(child: &mut ChildGuard, context: &str) {
+    assert!(
+      child.0.try_wait().expect("poll lock holder").is_none(),
+      "{context}",
+    );
+  }
+
+  /// The mirror of
+  /// `public_chromium_projections_honor_explicit_locked_database_policy`.
+  ///
+  /// That test proves `AllowProcessShutdown` terminates the process holding a
+  /// locked database. This one pins the property that *defines* the default
+  /// `NonDisruptive` policy: it never does. The database is genuinely locked --
+  /// the helper holds an exclusive `FileShare::None` handle -- so the default
+  /// path must either recover it out of band through a shadow copy or degrade
+  /// to an error, but in neither case may it shut the holder down.
+  ///
+  /// The shadow copy's own raw NTFS read is admin-gated, so its *success*
+  /// cannot be exercised on an unprivileged host; that half is asserted by the
+  /// elevated, `#[ignore]`d canary below. Holder survival, by contrast, holds
+  /// regardless of elevation, which is why this always-on test guards it -- and
+  /// on an unprivileged host it additionally proves the recovery degrades to an
+  /// error rather than silently returning no cookies.
+  #[test]
+  fn nondisruptive_default_never_terminates_a_locked_database_holder() {
+    let (_directory, path) = plaintext_database();
+    let ready = path.with_extension("nondisruptive-ready");
+    let mut child = spawn_lock_holder(&path, &ready);
+
+    // Default policy is NonDisruptive; plaintext credentials keep the read off
+    // the key path so the outcome turns only on database acquisition.
+    let request =
+      PathExtractRequest::with_credentials(&path, Some(ChromiumCredentialSource::PlaintextOnly));
+    let elevated = privilege::user::privileged();
+    let result = crate::direct_path::extract_from_path(request);
+
+    assert_holder_still_running(
+      &mut child,
+      "NonDisruptive recovery must never terminate the process holding the database",
+    );
+
+    if elevated {
+      // Where the raw NTFS copy can run, a successful recovery must return the
+      // seeded cookie rather than a silent empty read. The elevated canary
+      // asserts recovery unconditionally; here we only tighten the Ok case,
+      // since a raw copy can still be refused for environment reasons.
+      if let Ok(cookies) = &result {
+        assert_eq!(cookies.len(), 1, "recovery must return the seeded cookie");
+        assert_eq!(cookies[0].name, "plain");
+      }
+    } else {
+      // The raw copy is admin-gated, so an unprivileged host cannot recover a
+      // locked database and must report that rather than silently succeed.
+      assert!(
+        result.is_err(),
+        "NonDisruptive on a locked database without elevation must fail rather \
+         than silently return cookies (got {} cookies)",
+        result.as_ref().map(|cookies| cookies.len()).unwrap_or(0),
+      );
+    }
+  }
+
+  /// The real-mechanism companion to
+  /// `nondisruptive_default_never_terminates_a_locked_database_holder`.
+  ///
+  /// The always-on test above can only prove the holder survives, because the
+  /// shadow copy's raw NTFS read is refused without administrator rights and so
+  /// cannot run on an ordinary CI host. This asserts the half that needs
+  /// elevation: that the default `NonDisruptive` policy actually *recovers* a
+  /// locked database out of band -- reading the seeded cookie from a shadow
+  /// copy while the exclusive handle is still held -- and still leaves the
+  /// holder running. It is `#[ignore]`d so it runs only where a caller has
+  /// opted into an elevated lane (the Windows locked-database job in
+  /// `e2e.yml`); the privilege assertion turns a non-elevated invocation into a
+  /// clear failure rather than a false pass.
+  #[test]
+  #[ignore]
+  fn recovers_a_locked_database_via_nondisruptive_shadow_copy() {
+    assert!(
+      privilege::user::privileged(),
+      "this canary requires an elevated process; the shadow copy's raw NTFS \
+       read cannot run without administrator rights",
+    );
+
+    let (_directory, path) = plaintext_database();
+    let ready = path.with_extension("shadow-copy-ready");
+    let mut child = spawn_lock_holder(&path, &ready);
+
+    // Default policy is NonDisruptive: recovery must go through the shadow copy
+    // rather than terminating the holder.
+    let request =
+      PathExtractRequest::with_credentials(&path, Some(ChromiumCredentialSource::PlaintextOnly));
+    let cookies = crate::direct_path::extract_from_path(request)
+      .expect("NonDisruptive recovery reads the locked database via its shadow copy");
+
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "plain");
+
+    assert_holder_still_running(
+      &mut child,
+      "shadow-copy recovery must leave the holder running -- that is what makes \
+       it non-disruptive",
     );
   }
 }

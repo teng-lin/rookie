@@ -296,7 +296,7 @@ pub(crate) struct Source {
   /// no business naming a listing `selected`, `acquisition`, or `exists`.
   pub(crate) origin: SourceIdentity,
   /// Effective values, stated by whoever built this source rather than
-  /// inherited: Gecko selects its persistent source at populate, and Internet
+  /// inherited: Gecko selects its persistent source during acquisition, and Internet
   /// Explorer overlays `EseDatabase` once a query has been attempted. They are
   /// constructor arguments precisely so that an engine which forgets to state
   /// one gets a compile error instead of a silently wrong report field.

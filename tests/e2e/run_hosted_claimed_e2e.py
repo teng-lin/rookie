@@ -257,7 +257,7 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     db = find_chromium_db(user_data)
     cli = [str(py), str(ROOT / "tests/e2e/assert_cli_cookie.py"), str(db)]
     if sys.platform == "win32":
-        cli.extend(["--key-path", str(user_data / "Local State")])
+        cli.extend(["--local-state-path", str(user_data / "Local State")])
     else:
         cli.extend(["--browser-id", browser_id])
     subprocess.run(cli, check=True, env=env)

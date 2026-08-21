@@ -6,8 +6,8 @@ use super::super::source::SourceCandidate;
 #[cfg(test)]
 use super::DiscoveryCounters;
 use super::{
-  acquire_by_policy, browser_definition, canonical_installation_root, embedded_registry,
-  installation_id, installation_root_is_directory, normalized_path_bytes, populate_engine_sources,
+  acquire_by_policy, acquire_engine_sources, browser_definition, canonical_installation_root,
+  embedded_registry, installation_id, installation_root_is_directory, normalized_path_bytes,
   profile_id, push_bounded_discovery_issue, retain_engine_runtime_stop, select_listing_profiles,
   sort_discovered_profiles, AcquisitionPolicy, BrowserEngine, DiscoveredProfile, DiscoveryContext,
   DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing,
@@ -372,7 +372,7 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
           name: declared_profile.name,
         },
         // Candidates are planted by `gecko_profiles_with_context`, the seam
-        // both the listing report and the candidate-driven populate consume.
+        // both the listing report and the candidate-driven acquisition consume.
         candidates: Vec::new(),
       });
     }
@@ -391,7 +391,7 @@ pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
   domains: Option<&[String]>,
   session: crate::SessionPolicy,
 ) -> Result<EngineExtract> {
-  gecko_report_with_query(
+  gecko_report_with_acquisition(
     context,
     browser_id,
     selection,
@@ -406,24 +406,24 @@ pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
 /// survived into the report. Production takes the same path through
 /// [`gecko_report_with_context`], so the profile selection below is the one
 /// that ships.
-fn gecko_report_with_query<F: DiscoveryFs, Q>(
+fn gecko_report_with_acquisition<F: DiscoveryFs, A>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
   selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
   session: crate::SessionPolicy,
-  query: Q,
+  acquire: A,
 ) -> Result<EngineExtract>
 where
-  Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
+  A: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
 {
   let mut listing = gecko_profiles_with_context(context, browser_id)?;
   select_listing_profiles(&mut listing, browser_id, selection)?;
-  Ok(populate_gecko_sources(
+  Ok(acquire_gecko_sources(
     listing,
     domains,
     session,
-    query,
+    acquire,
     |path| context.fs.exists(path),
   ))
 }
@@ -458,7 +458,7 @@ fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandida
 /// The order is not incidental. The report sorts sources by role and
 /// precedence under a *stable* sort, so equal keys keep the order production
 /// emitted them in; persistent-then-sessions is the order the direct-path walk
-/// emits (`mozilla::query_cookies_engine_outcome_with_session_probe`) and the
+/// emits (`mozilla::acquire_mozilla_profile_with_session_probe`) and the
 /// order `gecko_report_with_race` relies on to fire its hook once per profile.
 /// Building the plan explicitly rather than executing the listing's `Vec`
 /// as-is keeps that pinned to one line here.
@@ -486,7 +486,7 @@ fn gecko_profile_plan(
 }
 
 /// Turns a post-select [`EngineListing`] into an [`EngineExtract`] by acquiring
-/// each profile's plan, the way the Safari/IE populates do.
+/// each profile's plan, the way the Safari/IE adapters do.
 ///
 /// Gecko no longer has a walk of its own. What was its bespoke body is now two
 /// halves that are both shared: [`gecko_profile_plan`] states the plan --
@@ -506,26 +506,26 @@ fn gecko_profile_plan(
 /// from a browser that was never installed.
 ///
 /// The envelope -- destructuring the listing, sizing the extract, pushing each
-/// profile, and honouring a stop -- is [`populate_engine_sources`].
-pub(super) fn populate_gecko_sources<Q, E>(
+/// profile, and honouring a stop -- is [`acquire_engine_sources`].
+pub(super) fn acquire_gecko_sources<A, E>(
   listing: EngineListing,
   domains: Option<&[String]>,
   session: crate::SessionPolicy,
-  mut query: Q,
+  mut acquire: A,
   mut persistent_exists: E,
 ) -> EngineExtract
 where
-  Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
+  A: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
   E: FnMut(&Path) -> bool,
 {
-  populate_engine_sources(
+  acquire_engine_sources(
     listing,
     ExtractCompletion::RetainAttempted,
     |identity, candidates| {
       acquire_by_policy(
         &gecko_profile_plan(identity, candidates, session),
         domains,
-        &mut query,
+        &mut acquire,
         &mut persistent_exists,
       )
     },
@@ -558,7 +558,7 @@ pub(crate) fn gecko_report_with_runtime(
   runtime.check()?;
   let context = DiscoveryContext::system()?;
   runtime.check()?;
-  let extract = gecko_report_with_query(
+  let extract = gecko_report_with_acquisition(
     &context,
     browser_id,
     selection,
@@ -628,7 +628,7 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
   // The legacy selector keeps only profiles with a persistent source, so the
   // chosen profile is unaffected by `session`. What `session` decides is
   // whether that profile's declared session store is also planned.
-  let extract = populate_gecko_sources(
+  let extract = acquire_gecko_sources(
     listing,
     domains.as_deref(),
     session,
@@ -1184,7 +1184,7 @@ mod tests {
     assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut created = false;
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1226,7 +1226,7 @@ mod tests {
     // Appears between discovery and query, but unreadable. Inferring existence
     // from query success alone would drop this failure entirely.
     let mut created = false;
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1263,7 +1263,7 @@ mod tests {
     .expect("write profiles.ini");
 
     let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1292,7 +1292,7 @@ mod tests {
     assert!(discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut removed = false;
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1358,7 +1358,7 @@ mod tests {
       "the vanishing candidate was planted at discovery time"
     );
 
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1385,8 +1385,8 @@ mod tests {
   /// order is ADR 0001 SS8. Every candidate here fails, so first-valid never
   /// short-circuits and the whole plan is observable.
   #[test]
-  fn populate_acquires_the_persistent_probe_before_sessions_in_declared_order() {
-    let temp = TempDir::new("gecko-populate-plan-order");
+  fn acquisition_runs_the_persistent_probe_before_sessions_in_declared_order() {
+    let temp = TempDir::new("gecko-acquire-plan-order");
     let context = current_context(temp.path().to_path_buf());
     let root = gecko_test_root(&context);
     let profile = root.join("Profiles/default");
@@ -1421,7 +1421,7 @@ mod tests {
     .collect();
 
     let mut read = Vec::new();
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1453,7 +1453,7 @@ mod tests {
   /// candidates would put a session read first.
   #[test]
   fn a_session_only_profile_still_probes_the_persistent_store_first() {
-    let temp = TempDir::new("gecko-populate-probe-first");
+    let temp = TempDir::new("gecko-acquire-probe-first");
     let context = current_context(temp.path().to_path_buf());
     let root = gecko_test_root(&context);
     let profile = root.join("Profiles/session-only");
@@ -1479,7 +1479,7 @@ mod tests {
     let profile_path = discovery.profiles[0].identity.path.clone();
 
     let mut read = Vec::new();
-    populate_gecko_sources(
+    acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1529,7 +1529,7 @@ mod tests {
       let mut listing = gecko_profiles_with_context(&context, "firefox").expect("discover");
       select_legacy_gecko_profile(&mut listing);
       let mut read = Vec::new();
-      populate_gecko_sources(
+      acquire_gecko_sources(
         listing,
         None,
         session,
@@ -1568,7 +1568,7 @@ mod tests {
   /// distinguishes the two.
   #[test]
   fn persistent_only_never_hands_a_session_candidate_to_acquisition() {
-    let temp = TempDir::new("gecko-populate-persistent-only");
+    let temp = TempDir::new("gecko-acquire-persistent-only");
     let context = current_context(temp.path().to_path_buf());
     let root = gecko_test_root(&context);
     let profile = root.join("Profiles/session-only");
@@ -1591,7 +1591,7 @@ mod tests {
     let profile_path = discovery.profiles[0].identity.path.clone();
 
     let mut read = Vec::new();
-    populate_gecko_sources(
+    acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::PersistentOnly,
@@ -1613,15 +1613,15 @@ mod tests {
     );
   }
 
-  /// The candidate-driven populate must inherit first-valid selection: once a
+  /// The candidate-driven acquisition must inherit first-valid selection: once a
   /// session candidate is read successfully, the later planted candidates must
   /// never be acquired. This counts the acquisitions rather than the emitted
-  /// sources -- a populate that eagerly collected its candidates, or a `select`
+  /// sources -- an acquisition that eagerly collected its candidates, or a `select`
   /// that kept pulling, would read every one while still emitting exactly one
   /// selected source and passing every content assertion.
   #[test]
-  fn populate_stops_acquiring_session_candidates_after_the_first_valid_one() {
-    let temp = TempDir::new("gecko-populate-first-valid");
+  fn acquisition_stops_after_the_first_valid_session_candidate() {
+    let temp = TempDir::new("gecko-acquire-first-valid");
     let context = current_context(temp.path().to_path_buf());
     let root = gecko_test_root(&context);
     let profile = root.join("Profiles/default");
@@ -1654,7 +1654,7 @@ mod tests {
     assert_eq!(session_candidates, 2, "both live candidates were planted");
 
     let mut session_reads = 0;
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -1845,7 +1845,7 @@ mod tests {
     let selected_source = all.profiles[1].identity.path.join(GECKO_PERSISTENT_SOURCE);
 
     let mut read = Vec::new();
-    let one = gecko_report_with_query(
+    let one = gecko_report_with_acquisition(
       &context,
       "firefox",
       ProfileSelection::ProfileId(selected.as_str()),
@@ -1908,7 +1908,7 @@ mod tests {
       .join(GECKO_PERSISTENT_SOURCE);
 
     let mut read = Vec::new();
-    let outcome = populate_gecko_sources(
+    let outcome = acquire_gecko_sources(
       outcome,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -2038,7 +2038,7 @@ mod tests {
     assert!(!discovery.profiles[0].identity.persistent_source_discovered);
 
     let mut created = false;
-    let report = populate_gecko_sources(
+    let report = acquire_gecko_sources(
       discovery,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -2167,7 +2167,7 @@ mod tests {
       boundary_stop: Some(BoundaryStop::TimedOut),
     };
 
-    let populated = populate_gecko_sources(
+    let populated = acquire_gecko_sources(
       discovered,
       None,
       crate::SessionPolicy::IncludeSession,
@@ -2255,7 +2255,7 @@ mod tests {
       boundary_stop: None,
     };
     let calls = std::cell::Cell::new(0);
-    let populated = populate_gecko_sources(
+    let populated = acquire_gecko_sources(
       discovered,
       None,
       crate::SessionPolicy::IncludeSession,

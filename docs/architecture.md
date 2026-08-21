@@ -208,8 +208,8 @@ There is no shared `Installation` / `Profile`. Chromium keeps its own inventory;
 | **Source vs SourceCandidate vs SourceDraft vs SourceOutcome vs SourceExtraction vs ReadOnlySource** | Six types, six jobs | Candidate = listing leaf. Source = post-unseal work. SourceDraft = private report hop. SourceOutcome = finalized canonical. SourceExtraction = wire. ReadOnlySource = opened capability |
 | **origin** | (1) `Source.origin: SourceIdentity`. (2) `CookieRecord.origin: SourceRef` (pending ordinal until `assign_provenance`) | Two levels. Never write `origin` unqualified where both are in scope |
 | **selected / acquisition** | Listing vs effective | Always qualify when both types are in scope |
-| **query** | SQL `WHERE`; historical `query_cookies_*`; ADR 0003 profile matcher; frozen wire `ExtractionStageCode::query()` | Internal verb is SQL or `select` / `resolve`. Do not use `query` for acquire |
-| **populate** | Historical `populate_*_sources` adapter loops | Verb is the adapter acquire loop. Keep the spellings until a deliberate rename |
+| **query** | SQL `WHERE`; ADR 0003 profile matcher; frozen wire `ExtractionStageCode::query()` | Internal verb is SQL or `select` / `resolve`. Do not use `query` for acquire |
+| **populate** | Deleted pre-0.6 adapter verb | Use `acquire` for listing-to-extract loops |
 | **Draft** | File-private parse scratch; private `SourceDraft` hop; leftover Chromium bag names (`ChromiumRegistryDraft`) | Scratch never crosses a module. `SourceDraft` stays in `report_build` |
 | **extract / acquire** | Public job vs internal source work | Public: `extract`. Internal: `acquire` |
 | **project** | Last pipeline step only | `Outcome` → `ExtractionReport` / `Cookie[]` / `ReadResult`. Not key-identity mapping |
@@ -245,7 +245,14 @@ There is no shared `Installation` / `Profile`. Chromium keeps its own inventory;
 
 Deleted as internal *vocabulary* (ADR 0005 Decision 3): `query` except SQL, `populate`, `canonical_*_extraction`, and `Draft` for anything that is already a result. Engine-private parse scratch may keep a local `Draft` name that never crosses a module boundary (`MozillaSessionDraft`, `ChromiumExtractionDraft`, `SessionCookieParseDraft`).
 
-Historical production identifiers that still spell the deleted words, and **keep those spellings** until a deliberate rename: `populate_gecko_sources`, `populate_safari_sources`, `populate_internet_explorer_sources`, `query_cookies_engine_outcome_with_runtime`, `query_cookies_from_connection`, `query_cookies_with_key_outcomes`. An ADR that `rg` disproves teaches contributors to skip ADRs.
+The deliberate mechanical rename authorized by ADR 0005 is complete. Adapter
+loops are `acquire_*_sources`; Chromium's candidate boundary is
+`acquire_chromium_source_with_runtime`; Mozilla's direct profile walk is
+`acquire_mozilla_profile_with_runtime`; and work on an already-open Chromium
+SQL connection is `decode_chromium_connection`. Compatibility orchestration
+helpers that run acquisition through projection use `extract_*`. No public API,
+wire identifier, issue code, registry key, or genuine SQL-stage vocabulary was
+renamed.
 
 #### Internal stages
 
@@ -485,7 +492,7 @@ No plugin trait. `report_build::collect_extraction` / `collect_listing` and `leg
 - Inventory: `ChromiumProfile` (candidates only) / `ChromiumExtractedProfile` (sources). `BrowserInstallation`, `ChromiumDiscovery`, `ChromiumListing`, `ChromiumRegistryDraft`.
 - Persistent precedence: `Network/Cookies` (10) then `Cookies` (20). Listing stats both, selects the first that `exists`, **omits `!exists` from the extract plan**. Policy `Fixed`. Listing `acquisition` stays `NotAttempted`; the strategy used lands on `Source::acquisition`.
 - Chrome-only listing `chrome_profiles()` prefers `Local State.profile.last_used` then `last_active_profiles`; generic `browser_profiles("chrome")` stays default-first.
-- Engine boundary: `query_cookies_engine_outcome_with_runtime(...) -> Source` via private `ChromiumExtractionDraft::into_source`.
+- Engine boundary: `acquire_chromium_source_with_runtime(...) -> Source` via private `ChromiumExtractionDraft::into_source`.
 - Acquire options collapsed to `ChromiumAcquireOptions { encrypted_value_policy, acquisition }` (`DirectRead` vs `WithForceKillRecovery`). `EncryptedValuePolicy::UseKeyOutcomes` vs `RejectMissingIdentity` (plaintext-only / missing identity).
 
 **Gecko** (`mozilla.rs`, `mozilla_persistent.rs`, `mozilla_session.rs`, `mozilla_profiles.rs`, `registry/gecko.rs`):
@@ -529,7 +536,7 @@ Policy:
 - Active rollback-journal writer must yield a coherent read or typed busy/locked. No raw-copy through it.
 - Private immutable path accepts only an already-acquired static **single-file** copy whose acquisition verified no nonempty WAL (or a complete checkpoint) across the copy window.
 - Whole-query reacquisition is bounded and restricted to classified snapshot-origin corruption or selected I/O failures. Schema, SQL, and decryption failures are not retried.
-- Windows: ordinary acquisition first; platform fallbacks (Restart Manager, optional shadow copy) only for classified sharing violations. Browser termination is opt-in on the **Rust direct-path builder only**: `PathExtractRequest::locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown)` (`direct_path/mod.rs`). Default is `NonDisruptive`. CLI, Python, and Node do **not** expose this (`cli/src/args.rs` has no such flag; `cli/tests/snapshot.rs::process_shutdown_is_not_a_cli_option` and the `no_destructive_acquisition` tests in `cli/` and `bindings/` pin that those surfaces never name `AllowProcessShutdown`). Generic/report extraction calls `query_cookies_engine_outcome_with_runtime(..., false, ...)` and never sets it. There is no `--allow-process-shutdown` CLI flag.
+- Windows: ordinary acquisition first; platform fallbacks (Restart Manager, optional shadow copy) only for classified sharing violations. Browser termination is opt-in on the **Rust direct-path builder only**: `PathExtractRequest::locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown)` (`direct_path/mod.rs`). Default is `NonDisruptive`. CLI, Python, and Node do **not** expose this (`cli/src/args.rs` has no such flag; `cli/tests/snapshot.rs::process_shutdown_is_not_a_cli_option` and the `no_destructive_acquisition` tests in `cli/` and `bindings/` pin that those surfaces never name `AllowProcessShutdown`). Generic/report extraction calls `acquire_chromium_source_with_runtime(..., false, ...)` and never sets it. There is no `--allow-process-shutdown` CLI flag.
 - RAII cleanup after owned readers drop. Cleanup failure → bounded warning naming the private directory. Process abort makes no cleanup attempt.
 
 `SqliteReader` declaration order is load-bearing: `connection` drops before `snapshot` so Windows can delete the temp dir.
@@ -1378,7 +1385,7 @@ sequenceDiagram
   participant Dec as chromium_decoder
   participant Un as unseal.rs
 
-  Note over Prov,ABE: retrieve_key_outcomes once per installation<br/>before query_cookies_engine_outcome_with_runtime
+  Note over Prov,ABE: retrieve_key_outcomes once per installation<br/>before acquire_chromium_source_with_runtime
   Prov->>Prov: Local State / Keychain / Secret Service
   opt Windows v20 and appbound feature
     alt AppBoundPolicy::Disabled
@@ -1437,7 +1444,7 @@ flowchart TD
   SESS --> EXT
 ```
 
-A session-only profile still attempts the persistent probe; `populate_gecko_sources` drops a failed persistent source when listing never discovered `cookies.sqlite` and it is still absent. Direct-path keeps every attempted source.
+A session-only profile still attempts the persistent probe; `acquire_gecko_sources` drops a failed persistent source when listing never discovered `cookies.sqlite` and it is still absent. Direct-path keeps every attempted source.
 
 #### Report projection
 
@@ -1673,7 +1680,7 @@ CI (`.github/workflows/test-rust.yml`): `check-cfg-locations`, `check-stage-boun
 Only decisions and deferred work already recorded in ADRs or code. Not product brainstorming.
 
 1. **Chromium inventory unification (ADR 0005 Decision 4).** Closed unless a fifth engine is added or a stage-boundary defect ships in the Chromium path. The tax is three Chromium-armed dispatch sites and a convention-enforced boundary on the largest engine.
-2. **Historical identifiers (ADR 0005 Decision 3).** `populate_*_sources` and `query_cookies_*` remain production names. A later, deliberate, mechanical rename is allowed; doing it casually would teach contributors to skip ADRs.
+2. **Historical identifiers (ADR 0005 Decision 3). Resolved.** The deliberate mechanical rename aligned live internal identifiers with the accepted stage vocabulary: adapter walks use `acquire_*`, Chromium database/connection work uses `decode_*`, and full compatibility wrappers use `extract_*`. Frozen wire and genuine SQL `query` identifiers are unchanged.
 3. **Compatibility family-fallback strings (after-the-type-program leftover 2).** Detection of all-rows-rejected is counters + issue codes. Substitution of frozen family fallback text still compares a diagnostic against `SourceIssue::generic_row_read_failed_message`. Policy-on-prose for product strings, not for the boolean.
 4. **`Error::Source` / `fault_kind` coarseness (`error.rs`). Resolved.** `SourceInspectionFailed` now maps by its typed reason to `Error::Engine` / deprecated `FaultKind::Engine` with stable code `source_inspection_failed`; caller-correctable direct-path reasons remain `Error::Source`, and `BoundaryStop` retains precedence.
 5. **ADR 0001 deferred surfaces.** Rich canonical cookie metadata on the public/binding snapshot, CookieEditor output, a non-terminating Windows locked-handle provider, and changing legacy functions to all-profile defaults remain deferred.
