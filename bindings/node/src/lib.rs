@@ -3,9 +3,13 @@
 #[macro_use]
 extern crate napi_derive;
 
-use napi::{bindgen_prelude::AsyncTask, Env, Result, Status, Task};
+use napi::{bindgen_prelude::AsyncTask, bindgen_prelude::Either, Env, Result, Status, Task};
+// Aliased: this module's own `extract_from_path` is the `extractFromPath`
+// napi export sharing the core function's name (Key Decision 15 -- bindings
+// share names with Rust), so the core function needs a different Rust-side
+// identifier to import alongside it.
 use rookie_cookies::direct_path::{
-  ChromiumCredentialSource, ChromiumPathRequest, DirectPathRequest,
+  extract_from_path as core_extract_from_path, ChromiumCredentialSource, PathExtractRequest,
 };
 use rookie_cookies::enums::{Cookie, DetailedCookie};
 use rookie_cookies::report::{
@@ -14,12 +18,14 @@ use rookie_cookies::report::{
   ProfileIdentity, ReportStats, SourceExtraction,
 };
 use rookie_cookies::{
-  CancellationHandle, FromPathRequest, MozillaProfile, ReadRequest, ReadResult, Request,
+  AppBoundPolicy, CancellationHandle, ExecutionControl, ExtractRequest, FromPathRequest,
+  LoadReportRequest, MethodClass, MozillaProfile, ProfileSelection, ReadRequest, ReadResult,
+  ReportRequest, ReportScope, RequestError, ResourceKind, SendContext,
 };
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const STRUCTURED_ERROR_PREFIX: &str = "__ROOKIE_ERROR_V1__";
 
@@ -34,6 +40,9 @@ struct BindingErrorDetails {
   source_kind: Option<String>,
   target_os: Option<String>,
   path_redacted: bool,
+  /// The `SendContext` selectors `RequestError::IncompleteSendContext` says
+  /// are missing. Empty for every other error.
+  required: Vec<String>,
 }
 
 fn stop_reason_name(reason: rookie_cookies::StopReason) -> &'static str {
@@ -45,49 +54,71 @@ fn stop_reason_name(reason: rookie_cookies::StopReason) -> &'static str {
   }
 }
 
-fn binding_error_details(error: &rookie_cookies::anyhow::Error) -> BindingErrorDetails {
-  let request = error.downcast_ref::<rookie_cookies::RequestError>();
-  let direct = error.downcast_ref::<rookie_cookies::direct_path::DirectPathError>();
-  let stop_reason = rookie_cookies::stop_reason(error).map(stop_reason_name);
-  let fault_kind = rookie_cookies::fault_kind(error);
+/// Single classification site for every `rookie_cookies::Error` this binding
+/// surfaces. The deprecated anyhow-returning bridge functions route through
+/// [`classify_anyhow_fault`], which converts via `Error::from` and then calls
+/// [`classify_fault`], so this is the only place that reads variant fields
+/// out of a classified error.
+fn binding_error_details(error: &rookie_cookies::Error) -> BindingErrorDetails {
+  let request = match error {
+    rookie_cookies::Error::Request(request) => Some(request),
+    _ => None,
+  };
+  let source = match error {
+    rookie_cookies::Error::Source(source) => Some(source),
+    _ => None,
+  };
 
   BindingErrorDetails {
-    message: format!("{error:?}"),
-    kind: match fault_kind {
-      rookie_cookies::FaultKind::Request => "request",
-      rookie_cookies::FaultKind::Engine => "engine",
+    message: error.to_string(),
+    kind: match error {
+      rookie_cookies::Error::Request(_) => "request",
+      rookie_cookies::Error::Stopped(_) => "stopped",
+      rookie_cookies::Error::Source(_) => "source",
+      rookie_cookies::Error::Engine(_) => "engine",
+      // `Error` is `#[non_exhaustive]`: a future core release can add a
+      // variant this binding doesn't know how to name yet. Fall back to the
+      // broadest bucket instead of failing to compile.
       _ => "engine",
     },
-    rookie_code: stop_reason
-      .or_else(|| request.map(rookie_cookies::RequestError::code))
-      .or_else(|| direct.map(rookie_cookies::direct_path::DirectPathError::code)),
-    stop_reason,
+    rookie_code: Some(error.code()),
+    stop_reason: error.stop_reason().map(stop_reason_name),
     profile_ids: request
       .map(rookie_cookies::RequestError::profile_ids)
       .unwrap_or_default()
       .to_vec(),
-    source_kind: direct
+    source_kind: source
       .and_then(rookie_cookies::direct_path::DirectPathError::source_kind)
       .map(|source| source.to_string()),
-    target_os: direct
+    target_os: source
       .and_then(rookie_cookies::direct_path::DirectPathError::target_os)
       .map(str::to_owned),
-    path_redacted: direct
+    path_redacted: source
       .and_then(rookie_cookies::direct_path::DirectPathError::path)
       .is_some(),
+    required: match request {
+      Some(RequestError::IncompleteSendContext { required, .. }) => required.clone(),
+      _ => Vec::new(),
+    },
   }
 }
 
-fn status_for_kind(kind: &str) -> Status {
-  if kind == "request" {
-    Status::InvalidArg
-  } else {
-    Status::GenericFailure
+/// Maps a classified error to the N-API status a binding consumer sees on
+/// `error.code`. Only a cancelled stop gets its own status: a timeout or
+/// resource-exhaustion stop is not caller input either, but napi has no
+/// dedicated status for those, so they fall through to `GenericFailure`
+/// alongside engine failures.
+fn status_for_error(error: &rookie_cookies::Error) -> Status {
+  match error {
+    rookie_cookies::Error::Stopped(rookie_cookies::StopReason::Cancelled) => Status::Cancelled,
+    rookie_cookies::Error::Request(_) | rookie_cookies::Error::Source(_) => Status::InvalidArg,
+    _ => Status::GenericFailure,
   }
 }
 
-fn structured_error_with_env(env: Env, details: BindingErrorDetails) -> napi::Error {
-  let status = status_for_kind(details.kind);
+fn structured_error_with_env(env: Env, error: &rookie_cookies::Error) -> napi::Error {
+  let status = status_for_error(error);
+  let details = binding_error_details(error);
   let mut js_error = match env.create_error(napi::Error::new(status, &details.message)) {
     Ok(error) => error,
     Err(error) => return error,
@@ -101,6 +132,7 @@ fn structured_error_with_env(env: Env, details: BindingErrorDetails) -> napi::Er
     js_error.set_named_property("sourceKind", details.source_kind)?;
     js_error.set_named_property("targetOs", details.target_os)?;
     js_error.set_named_property("pathRedacted", details.path_redacted)?;
+    js_error.set_named_property("required", details.required)?;
     Ok(())
   })();
   if let Err(error) = attributes {
@@ -109,17 +141,24 @@ fn structured_error_with_env(env: Env, details: BindingErrorDetails) -> napi::Er
   napi::Error::from(js_error.into_unknown())
 }
 
-/// Converts a `rookie_cookies` error into a `napi::Error`, picking the status
-/// code from [`rookie_cookies::fault_kind`] instead of collapsing every
-/// failure into `Status::Unknown`. `FaultKind` is `#[non_exhaustive]`, so the
-/// match keeps a wildcard arm for kinds this binding doesn't know about yet.
-fn classify_fault(error: rookie_cookies::anyhow::Error) -> napi::Error {
+/// Converts a typed `rookie_cookies::Error` into a `napi::Error` carrying the
+/// `__ROOKIE_ERROR_V1__` JSON payload the JS loader's `decorateNativeError`
+/// (in `index.js`) parses back into `kind`/`rookieCode`/`stopReason`/etc.
+fn classify_fault(error: rookie_cookies::Error) -> napi::Error {
+  let status = status_for_error(&error);
   let details = binding_error_details(&error);
-  let status = status_for_kind(details.kind);
   let payload = serde_json::to_string(&details).unwrap_or_else(|serialization| {
     format!(r#"{{"message":"error diagnostic serialization failed: {serialization}"}}"#)
   });
   napi::Error::new(status, format!("{STRUCTURED_ERROR_PREFIX}{payload}"))
+}
+
+/// Entry point for the deprecated v0.5.9 bridge functions, which still
+/// return `anyhow::Result` (see `rookie_cookies::Error::from(anyhow::Error)`).
+/// Converting first means [`classify_fault`] stays the only site that reads
+/// a classified error's fields, instead of a second copy of that match.
+fn classify_anyhow_fault(error: rookie_cookies::anyhow::Error) -> napi::Error {
+  classify_fault(rookie_cookies::Error::from(error))
 }
 
 /// A cross-thread cancellation token for an in-flight extraction.
@@ -197,13 +236,52 @@ pub struct DetailedCookieObject {
   pub context: CookieContextObject,
 }
 
+/// View input for `ReadResult.header`. A bare `url` string is sugar for
+/// `{ url }`; see `header`'s doc comment for why the rest matters.
+///
+/// Plain `#[napi(object)]`, not `use_nullable`: this is caller-constructed
+/// input (like `ReadOptions`), where every field but `url` should be
+/// omittable, not merely nullable -- unlike `CookieContextObject`, which this
+/// binding always populates in full and where `use_nullable` keeps every
+/// field present-but-`null`.
+#[napi(object)]
+pub struct SendContextObject {
+  pub url: String,
+  pub top_level_site: Option<String>,
+  /// `"navigation" | "subresource"`. Defaults to `"subresource"`, the
+  /// conservative choice: only a `SameSite=Lax` cross-site send depends on it.
+  pub resource: Option<String>,
+  /// `"safe" | "unsafe"`. Defaults to `"safe"`, same reasoning as `resource`.
+  pub method: Option<String>,
+  pub user_context_id: Option<u32>,
+  pub private_browsing_id: Option<u32>,
+  pub now_epoch_seconds: Option<i64>,
+}
+
 /// Cross-platform options for explicit Chromium cookie databases.
 #[napi(object)]
+#[derive(Default)]
 pub struct ChromiumPathOptions {
   pub domains: Option<Vec<String>>,
   pub browser_id: Option<String>,
   pub local_state_path: Option<String>,
   pub plaintext_only: Option<bool>,
+  pub app_bound: Option<String>,
+}
+
+/// Options for the canonical `extractFromPath`: `domains`; the mutually
+/// exclusive `plaintextOnly` / `browserId` / `localStatePath`; `timeoutMs`;
+/// `appBound`. A superset of the deprecated `ChromiumPathOptions`, which took
+/// `timeoutMs` as its own positional parameter instead of a field here.
+#[napi(object)]
+#[derive(Default)]
+pub struct ExtractFromPathOptions {
+  pub domains: Option<Vec<String>>,
+  pub browser_id: Option<String>,
+  pub local_state_path: Option<String>,
+  pub plaintext_only: Option<bool>,
+  pub timeout_ms: Option<u32>,
+  pub app_bound: Option<String>,
 }
 
 #[napi(object)]
@@ -666,6 +744,120 @@ fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
   }
 }
 
+/// Parses the JS-facing `AppBoundPolicy` string, rejecting an unrecognized
+/// value before any I/O runs -- the same before-any-I/O contract
+/// `chromium_credentials` already gives conflicting Chromium selectors.
+/// `None` (the option omitted) is the crate's own `Disabled` default.
+fn parse_app_bound(policy: Option<&str>) -> Result<AppBoundPolicy> {
+  match policy {
+    None => Ok(AppBoundPolicy::default()),
+    Some("disabled") => Ok(AppBoundPolicy::Disabled),
+    Some("injection_only") => Ok(AppBoundPolicy::InjectionOnly),
+    Some("allow_elevated_fallback") => Ok(AppBoundPolicy::AllowElevatedFallback),
+    Some(other) => Err(napi::Error::new(
+      Status::InvalidArg,
+      format!("unknown appBound policy: {other}"),
+    )),
+  }
+}
+
+/// Bindings cannot express `ReportScope` in the type system the way Rust
+/// does, so a `select`/`profile` combination Rust would rule out at compile
+/// time (an all-profiles report naming one profile, or `select: "all"` on a
+/// job that can only ever mean one profile) becomes this one structured
+/// `RequestError` instead, raised before any I/O runs.
+fn conflicting_profile_selection() -> napi::Error {
+  classify_fault(rookie_cookies::Error::Request(
+    RequestError::ConflictingProfileSelection,
+  ))
+}
+
+/// Validates `select` for a job that can only ever answer with one profile
+/// (`read`). Only `"legacy_first"` (or omitted) is representable;
+/// `"all"` -- which only report jobs can express -- and any other value
+/// reject before any I/O runs.
+fn validate_single_profile_select(select: Option<&str>) -> Result<()> {
+  match select {
+    None | Some("legacy_first") => Ok(()),
+    Some(_) => Err(conflicting_profile_selection()),
+  }
+}
+
+/// Validates a report job's `select`/`profile` combination. Naming a
+/// `profile` already narrows the report to it regardless of `select`, so the
+/// only real conflict is `select: "all"` paired with an explicit `profile`
+/// -- asking for one profile and every profile at once, which `ReportScope`
+/// cannot represent.
+fn validate_report_select(select: Option<&str>, has_profile: bool) -> Result<()> {
+  match select {
+    None | Some("legacy_first") | Some("all") => {}
+    Some(_) => return Err(conflicting_profile_selection()),
+  }
+  if has_profile && select == Some("all") {
+    return Err(conflicting_profile_selection());
+  }
+  Ok(())
+}
+
+fn parse_resource_kind(kind: Option<&str>) -> Result<ResourceKind> {
+  match kind {
+    None => Ok(ResourceKind::default()),
+    Some("navigation") => Ok(ResourceKind::Navigation),
+    Some("subresource") => Ok(ResourceKind::Subresource),
+    Some(other) => Err(napi::Error::new(
+      Status::InvalidArg,
+      format!("unknown resource kind: {other}"),
+    )),
+  }
+}
+
+fn parse_method_class(class: Option<&str>) -> Result<MethodClass> {
+  match class {
+    None => Ok(MethodClass::default()),
+    Some("safe") => Ok(MethodClass::Safe),
+    Some("unsafe") => Ok(MethodClass::Unsafe),
+    Some(other) => Err(napi::Error::new(
+      Status::InvalidArg,
+      format!("unknown method class: {other}"),
+    )),
+  }
+}
+
+/// Converts a caller-supplied `nowEpochSeconds` into a `SystemTime`. `None`
+/// on overflow (a caller-chosen second count so large `UNIX_EPOCH` can't
+/// represent it) leaves `SendContext::now` unset, which falls back to the
+/// real clock at header-build time -- this is a diagnostic override caller
+/// input, not a value this crate depends on for correctness, so a garbage
+/// magnitude is silently ignored rather than added as a new failure mode.
+fn system_time_from_epoch_seconds(seconds: i64) -> Option<SystemTime> {
+  if seconds >= 0 {
+    UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
+  } else {
+    UNIX_EPOCH.checked_sub(Duration::from_secs(seconds.unsigned_abs()))
+  }
+}
+
+fn send_context_from_object(object: SendContextObject) -> Result<SendContext> {
+  let mut context = SendContext::url(object.url)
+    .resource(parse_resource_kind(object.resource.as_deref())?)
+    .method(parse_method_class(object.method.as_deref())?);
+  if let Some(site) = object.top_level_site {
+    context = context.top_level_site(site);
+  }
+  if let Some(id) = object.user_context_id {
+    context = context.user_context_id(id);
+  }
+  if let Some(id) = object.private_browsing_id {
+    context = context.private_browsing_id(id);
+  }
+  if let Some(seconds) = object.now_epoch_seconds {
+    if let Some(now) = system_time_from_epoch_seconds(seconds) {
+      context = context.now(now);
+    }
+  }
+  Ok(context)
+}
+
 fn chromium_credentials(
   browser_id: Option<&str>,
   local_state_path: Option<&str>,
@@ -692,42 +884,72 @@ fn chromium_credentials(
   })
 }
 
-fn chromium_path_request(
+/// Builds the flat-list `PathExtractRequest` for `credentials`, choosing
+/// whichever constructor actually exists on this platform.
+/// `PathExtractRequest::unix_identity` / `::windows_local_state` are
+/// compile-time gated to their platform -- there is no portable constructor
+/// for a `BrowserId`/`LocalStateFile` selector the way the deleted
+/// `ChromiumPathRequest` had, by design (a request that cannot succeed on the
+/// target it was built for cannot be built at all). A selector for the wrong
+/// platform is therefore a plain pre-I/O `InvalidArg` here, the same as
+/// `chromium_credentials`'s mutual-exclusion check, rather than a classified
+/// `DirectPathError` this binding has no way to trigger from the new API.
+fn chromium_path_extract_request(
   path: String,
-  options: Option<ChromiumPathOptions>,
-) -> Result<ChromiumPathRequest> {
-  let mut request = ChromiumPathRequest::new(path);
-  let Some(options) = options else {
-    return Ok(request);
-  };
-  if let Some(domains) = options.domains {
-    request = request.domains(domains);
+  credentials: Option<ChromiumCredentialSource>,
+) -> Result<PathExtractRequest> {
+  match credentials {
+    None => Ok(PathExtractRequest::sniff(path)),
+    Some(ChromiumCredentialSource::PlaintextOnly) => Ok(PathExtractRequest::plaintext(path)),
+    Some(ChromiumCredentialSource::BrowserId(browser_id)) => {
+      #[cfg(unix)]
+      {
+        Ok(PathExtractRequest::unix_identity(path, browser_id))
+      }
+      #[cfg(not(unix))]
+      {
+        let _ = (path, browser_id);
+        Err(napi::Error::new(
+          Status::InvalidArg,
+          "Chromium path option browserId is only supported on Linux and macOS",
+        ))
+      }
+    }
+    Some(ChromiumCredentialSource::LocalStateFile(local_state_path)) => {
+      #[cfg(windows)]
+      {
+        Ok(PathExtractRequest::windows_local_state(
+          path,
+          local_state_path,
+        ))
+      }
+      #[cfg(not(windows))]
+      {
+        let _ = (path, local_state_path);
+        Err(napi::Error::new(
+          Status::InvalidArg,
+          "Chromium path option localStatePath is only supported on Windows",
+        ))
+      }
+    }
+    // `ChromiumCredentialSource` is `#[non_exhaustive]`.
+    Some(_) => Err(napi::Error::new(
+      Status::InvalidArg,
+      "unrecognized Chromium credential source",
+    )),
   }
-
-  let credentials = chromium_credentials(
-    options.browser_id.as_deref(),
-    options.local_state_path.as_deref(),
-    options.plaintext_only.unwrap_or(false),
-    "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
-  )?;
-  if let Some(credentials) = credentials {
-    request = request.credentials(credentials);
-  }
-  Ok(request)
 }
 
-pub struct CookiesFromPathTask {
-  request: DirectPathRequest,
+pub struct ExtractFromPathTask {
+  request: PathExtractRequest,
 }
 
-impl Task for CookiesFromPathTask {
+impl Task for ExtractFromPathTask {
   type Output = Vec<Cookie>;
   type JsValue = Vec<CookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::direct_path::cookies_from_path(self.request.clone()).map_err(classify_fault)
-    })
+    run_worker(|| core_extract_from_path(self.request.clone()).map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -735,65 +957,87 @@ impl Task for CookiesFromPathTask {
   }
 }
 
+/// Extracts cookies from one explicit cookie file as a flat, domain-filtered
+/// list. The canonical flat path-extract job (Rust `extract_from_path`,
+/// Python `extract_from_path`); `cookiesFromPath` / `chromiumCookiesFromPath`
+/// are deprecated aliases onto this.
+///
+/// Sniffs the source from its signature and schema with no credentials.
+/// Portable: on Unix a Chromium database found this way is plaintext-capable
+/// only (this used to probe every registered browser identity in turn); on
+/// Windows a plaintext Chromium database now succeeds instead of always
+/// rejecting with `missing_local_state_file`. An encrypted Chromium row
+/// without an explicit credential selector is `missing_chromium_credentials`.
+/// `options.appBound` defaults to `"disabled"`, same as `read`.
+#[napi(ts_return_type = "Promise<Array<CookieObject>>")]
+pub fn extract_from_path(
+  path: String,
+  options: Option<ExtractFromPathOptions>,
+  cancellation: Option<&JsCancellationHandle>,
+) -> Result<AsyncTask<ExtractFromPathTask>> {
+  let options = options.unwrap_or_default();
+  let credentials = chromium_credentials(
+    options.browser_id.as_deref(),
+    options.local_state_path.as_deref(),
+    options.plaintext_only.unwrap_or(false),
+    "extractFromPath options browserId, localStatePath, and plaintextOnly are mutually exclusive",
+  )?;
+  let mut request = chromium_path_extract_request(path, credentials)?
+    .domains(options.domains)
+    .app_bound(parse_app_bound(options.app_bound.as_deref())?);
+  if let Some(ms) = options.timeout_ms {
+    request = request.timeout(Duration::from_millis(u64::from(ms)));
+  }
+  if let Some(handle) = cancellation {
+    request = request.cancellation(handle.0.clone());
+  }
+  Ok(AsyncTask::new(ExtractFromPathTask { request }))
+}
+
+/// @deprecated Use `extractFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn cookies_from_path(
   path: String,
   domains: Option<Vec<String>>,
   timeout_ms: Option<u32>,
   cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<CookiesFromPathTask> {
-  let mut request = DirectPathRequest::new(path);
-  if let Some(domains) = domains {
-    request = request.domains(domains);
-  }
-  if let Some(ms) = timeout_ms {
-    request = request.timeout(Duration::from_millis(ms as u64));
-  }
-  if let Some(handle) = cancellation {
-    request = request.cancellation(handle.0.clone());
-  }
-  AsyncTask::new(CookiesFromPathTask { request })
+) -> Result<AsyncTask<ExtractFromPathTask>> {
+  extract_from_path(
+    path,
+    Some(ExtractFromPathOptions {
+      domains,
+      timeout_ms,
+      ..Default::default()
+    }),
+    cancellation,
+  )
 }
 
-pub struct ChromiumCookiesFromPathTask {
-  request: ChromiumPathRequest,
-}
-
-impl Task for ChromiumCookiesFromPathTask {
-  type Output = Vec<Cookie>;
-  type JsValue = Vec<CookieObject>;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| {
-      rookie_cookies::direct_path::chromium_cookies_from_path(self.request.clone())
-        .map_err(classify_fault)
-    })
-  }
-
-  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
-    cookies_to_js(output)
-  }
-}
-
+/// @deprecated Use `extractFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn chromium_cookies_from_path(
   path: String,
   options: Option<ChromiumPathOptions>,
   timeout_ms: Option<u32>,
   cancellation: Option<&JsCancellationHandle>,
-) -> Result<AsyncTask<ChromiumCookiesFromPathTask>> {
-  let mut request = chromium_path_request(path, options)?;
-  if let Some(ms) = timeout_ms {
-    request = request.timeout(Duration::from_millis(ms as u64));
-  }
-  if let Some(handle) = cancellation {
-    request = request.cancellation(handle.0.clone());
-  }
-  Ok(AsyncTask::new(ChromiumCookiesFromPathTask { request }))
+) -> Result<AsyncTask<ExtractFromPathTask>> {
+  let options = options.unwrap_or_default();
+  extract_from_path(
+    path,
+    Some(ExtractFromPathOptions {
+      domains: options.domains,
+      browser_id: options.browser_id,
+      local_state_path: options.local_state_path,
+      plaintext_only: options.plaintext_only,
+      timeout_ms,
+      app_bound: options.app_bound,
+    }),
+    cancellation,
+  )
 }
 
 pub struct ChromiumCookiesFromPathDetailedTask {
-  request: ChromiumPathRequest,
+  request: FromPathRequest,
 }
 
 impl Task for ChromiumCookiesFromPathDetailedTask {
@@ -801,8 +1045,15 @@ impl Task for ChromiumCookiesFromPathDetailedTask {
   type JsValue = Vec<DetailedCookieObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
+    // Detailed (isolation-carrying) path extraction has no flat-list core
+    // function of its own -- per `direct_path::extract_from_path`'s own doc
+    // comment, it comes from `from_path(..).detailed_cookies()`, the same
+    // seam the browser-discovery axis uses. `FromPathRequest` is portable
+    // (unlike `PathExtractRequest`'s platform-gated constructors), so this
+    // needs no `#[cfg(..)]` dispatch.
     run_worker(|| {
-      rookie_cookies::direct_path::chromium_cookies_from_path_detailed(self.request.clone())
+      rookie_cookies::from_path(self.request.clone())
+        .map(ReadResult::into_detailed_cookies)
         .map_err(classify_fault)
     })
   }
@@ -812,6 +1063,7 @@ impl Task for ChromiumCookiesFromPathDetailedTask {
   }
 }
 
+/// @deprecated Use `fromPath(...).detailedCookies`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
 pub fn chromium_cookies_from_path_detailed(
   path: String,
@@ -819,7 +1071,33 @@ pub fn chromium_cookies_from_path_detailed(
   timeout_ms: Option<u32>,
   cancellation: Option<&JsCancellationHandle>,
 ) -> Result<AsyncTask<ChromiumCookiesFromPathDetailedTask>> {
-  let mut request = chromium_path_request(path, options)?;
+  let options = options.unwrap_or_default();
+  // `FromPathRequest` (unlike the deleted `ChromiumPathRequest`) has no
+  // domain filter -- `from_path`, like `read`, never URL/domain-slices its
+  // snapshot. Rather than silently stop honoring a caller's `domains`, reject
+  // before any I/O runs.
+  if options
+    .domains
+    .as_ref()
+    .is_some_and(|domains| !domains.is_empty())
+  {
+    return Err(napi::Error::new(
+      Status::InvalidArg,
+      "chromiumCookiesFromPathDetailed no longer supports domain filtering; \
+       filter fromPath(...).detailedCookies yourself instead",
+    ));
+  }
+  let credentials = chromium_credentials(
+    options.browser_id.as_deref(),
+    options.local_state_path.as_deref(),
+    options.plaintext_only.unwrap_or(false),
+    "Chromium path options browserId, localStatePath, and plaintextOnly are mutually exclusive",
+  )?;
+  let mut request =
+    FromPathRequest::new(path).app_bound(parse_app_bound(options.app_bound.as_deref())?);
+  if let Some(credentials) = credentials {
+    request = request.chromium_credentials(credentials);
+  }
   if let Some(ms) = timeout_ms {
     request = request.timeout(Duration::from_millis(ms as u64));
   }
@@ -848,7 +1126,7 @@ impl Task for AnyBrowserTaskImpl {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::any_browser(&self.db_path, self.domains.take(), self.key_path.as_deref())
-        .map_err(classify_fault)
+        .map_err(classify_anyhow_fault)
     })
   }
 
@@ -857,7 +1135,7 @@ impl Task for AnyBrowserTaskImpl {
   }
 }
 
-/// @deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`. Earliest removal is 0.7.
+/// @deprecated Use `extractFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn any_browser(
   db_path: String,
@@ -885,7 +1163,7 @@ macro_rules! async_browser_fn {
       type JsValue = Vec<CookieObject>;
 
       fn compute(&mut self) -> Result<Self::Output> {
-        run_worker(|| $core_fn(self.domains.take()).map_err(classify_fault))
+        run_worker(|| $core_fn(self.domains.take()).map_err(classify_anyhow_fault))
       }
 
       fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -900,13 +1178,14 @@ macro_rules! async_browser_fn {
   };
 }
 
-// `load` scans every registered browser and has no `Request::browser` equivalent
-// to route a timeout/cancellation handle through, so it keeps the plain form.
+// `load` scans every registered browser and has no `ExtractRequest::browser`
+// equivalent to route a timeout/cancellation handle through, so it keeps the
+// plain form.
 async_browser_fn!(load, LoadTask, rookie_cookies::load);
 
 // ---------------------------------------------------------------------------
 // Macro for single-browser async functions that support `timeoutMs` and a
-// `JsCancellationHandle`, routed through `extract(Request::browser(id))`
+// `JsCancellationHandle`, routed through `extract(ExtractRequest::browser(id))`
 // exactly like the CLI's `--browser` mode (see `cli/src/browsers_map.rs`).
 // ---------------------------------------------------------------------------
 macro_rules! async_named_browser_fn {
@@ -923,7 +1202,7 @@ macro_rules! async_named_browser_fn {
 
       fn compute(&mut self) -> Result<Self::Output> {
         run_worker(|| {
-          let mut request = Request::browser($browser_id).domains(self.domains.take());
+          let mut request = ExtractRequest::browser($browser_id).domains(self.domains.take());
           if let Some(ms) = self.timeout_ms {
             request = request.timeout(Duration::from_millis(ms as u64));
           }
@@ -978,7 +1257,7 @@ impl Task for FirefoxProfilesTask {
   type JsValue = Vec<FirefoxProfileObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| rookie_cookies::firefox_profiles().map_err(classify_fault))
+    run_worker(|| rookie_cookies::firefox_profiles().map_err(classify_anyhow_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1002,7 +1281,8 @@ impl Task for FirefoxProfileTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
-      rookie_cookies::firefox_profile(&self.profile, self.domains.take()).map_err(classify_fault)
+      rookie_cookies::firefox_profile(&self.profile, self.domains.take())
+        .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1032,7 +1312,7 @@ impl Task for FirefoxBasedTask {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::firefox_based(PathBuf::from(&self.db_path), self.domains.take())
-        .map_err(classify_fault)
+        .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1041,7 +1321,7 @@ impl Task for FirefoxBasedTask {
   }
 }
 
-/// @deprecated Use `cookiesFromPath`. Earliest removal is 0.7.
+/// @deprecated Use `extractFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn firefox_based(db_path: String, domains: Option<Vec<String>>) -> AsyncTask<FirefoxBasedTask> {
   AsyncTask::new(FirefoxBasedTask { db_path, domains })
@@ -1059,7 +1339,7 @@ impl Task for FirefoxBasedDetailedTask {
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
       rookie_cookies::firefox_based_detailed(PathBuf::from(&self.db_path), self.domains.take())
-        .map_err(classify_fault)
+        .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1103,6 +1383,8 @@ impl Task for SupportedBrowsersTask {
 /// Lists the browsers registered for the running OS.
 ///
 /// Registration is not detection: a listed browser need not be installed.
+/// Takes no execution control: this is a static catalog lookup with no disk
+/// I/O, so there is nothing for a timeout, cancellation, or `appBound` to do.
 #[napi(ts_return_type = "Promise<Array<BrowserDescriptorObject>>")]
 pub fn supported_browsers() -> AsyncTask<SupportedBrowsersTask> {
   AsyncTask::new(SupportedBrowsersTask)
@@ -1110,6 +1392,7 @@ pub fn supported_browsers() -> AsyncTask<SupportedBrowsersTask> {
 
 pub struct BrowserProfilesTask {
   browser_id: String,
+  timeout_ms: Option<u32>,
 }
 
 impl Task for BrowserProfilesTask {
@@ -1117,7 +1400,13 @@ impl Task for BrowserProfilesTask {
   type JsValue = Vec<ProfileDescriptorObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| rookie_cookies::browser_profiles(&self.browser_id).map_err(classify_fault))
+    let mut control = ExecutionControl::default();
+    if let Some(ms) = self.timeout_ms {
+      control = control.timeout(Duration::from_millis(u64::from(ms)));
+    }
+    run_worker(|| {
+      rookie_cookies::browser_profiles_with(&self.browser_id, control).map_err(classify_fault)
+    })
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1129,10 +1418,16 @@ impl Task for BrowserProfilesTask {
 ///
 /// Rejects on an unknown `browserId`, or when every detected installation root
 /// failed enumeration. A known browser with nothing installed resolves to an
-/// empty array.
+/// empty array. No `appBound`: listing does no App-Bound work.
 #[napi(ts_return_type = "Promise<Array<ProfileDescriptorObject>>")]
-pub fn browser_profiles(browser_id: String) -> AsyncTask<BrowserProfilesTask> {
-  AsyncTask::new(BrowserProfilesTask { browser_id })
+pub fn browser_profiles(
+  browser_id: String,
+  options: Option<ProfilesOptions>,
+) -> AsyncTask<BrowserProfilesTask> {
+  AsyncTask::new(BrowserProfilesTask {
+    browser_id,
+    timeout_ms: options.and_then(|options| options.timeout_ms),
+  })
 }
 
 pub struct ChromeProfilesTask;
@@ -1170,7 +1465,8 @@ impl Task for ChromeProfileTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     run_worker(|| {
-      rookie_cookies::chrome_profile(&self.profile, self.domains.take()).map_err(classify_fault)
+      rookie_cookies::chrome_profile(&self.profile, self.domains.take())
+        .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1194,9 +1490,8 @@ pub fn chrome_profile(
 }
 
 pub struct BrowserReportTask {
-  browser_id: String,
-  profile_id: Option<String>,
-  domains: Option<Vec<String>>,
+  options: BrowserReportOptions,
+  app_bound: AppBoundPolicy,
 }
 
 impl Task for BrowserReportTask {
@@ -1204,13 +1499,24 @@ impl Task for BrowserReportTask {
   type JsValue = ExtractionReportObject;
 
   fn compute(&mut self) -> Result<Self::Output> {
+    let options = &self.options;
+    let app_bound = self.app_bound;
     run_worker(|| {
-      rookie_cookies::browser_report(
-        &self.browser_id,
-        self.profile_id.as_deref(),
-        self.domains.take(),
-      )
-      .map_err(classify_fault)
+      // Routed through `ReportRequest` + `extract_report` (not the core's
+      // `browser_report`, which has no execution-control twin) so timeout
+      // and App-Bound policy reach this job -- the same seam `report`/
+      // `extractReport` already uses. `ReportRequest::browser` defaults to
+      // every profile, exactly what a missing `profileId` has always meant.
+      let mut request = ReportRequest::browser(&options.browser_id)
+        .domains(options.domains.clone())
+        .app_bound(app_bound);
+      if let Some(profile) = options.profile_id.as_deref() {
+        request = request.profile(profile);
+      }
+      if let Some(ms) = options.timeout_ms {
+        request = request.timeout(Duration::from_millis(u64::from(ms)));
+      }
+      rookie_cookies::extract_report(request).map_err(classify_fault)
     })
   }
 
@@ -1223,22 +1529,18 @@ impl Task for BrowserReportTask {
 ///
 /// Only a bad request rejects: an unknown `browserId`, or a `profileId` this
 /// browser did not yield. Extraction problems resolve as a report whose
-/// `status` and `issues` describe them.
+/// `status` and `issues` describe them. `options.appBound` defaults to
+/// `"disabled"`, same as `read`.
 #[napi(ts_return_type = "Promise<ExtractionReportObject>")]
-pub fn browser_report(
-  browser_id: String,
-  profile_id: Option<String>,
-  domains: Option<Vec<String>>,
-) -> AsyncTask<BrowserReportTask> {
-  AsyncTask::new(BrowserReportTask {
-    browser_id,
-    profile_id,
-    domains,
-  })
+pub fn browser_report(options: BrowserReportOptions) -> Result<AsyncTask<BrowserReportTask>> {
+  let app_bound = parse_app_bound(options.app_bound.as_deref())?;
+  Ok(AsyncTask::new(BrowserReportTask { options, app_bound }))
 }
 
 pub struct LoadReportTask {
   domains: Option<Vec<String>>,
+  timeout_ms: Option<u32>,
+  app_bound: AppBoundPolicy,
 }
 
 impl Task for LoadReportTask {
@@ -1246,7 +1548,13 @@ impl Task for LoadReportTask {
   type JsValue = ExtractionReportObject;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| rookie_cookies::load_report(self.domains.take()).map_err(classify_fault))
+    let mut request = LoadReportRequest::default()
+      .domains(self.domains.take())
+      .app_bound(self.app_bound);
+    if let Some(ms) = self.timeout_ms {
+      request = request.timeout(Duration::from_millis(u64::from(ms)));
+    }
+    run_worker(|| rookie_cookies::load_report_with(request).map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1259,9 +1567,16 @@ impl Task for LoadReportTask {
 /// This is the report-shaped counterpart to `load`, not a replacement: `load`
 /// keeps its historical browser set and flat output. A browser that fails does
 /// not abort the others; it becomes an issue on the returned report.
+/// `options.appBound` defaults to `"disabled"`, same as `read`.
 #[napi(ts_return_type = "Promise<ExtractionReportObject>")]
-pub fn load_report(domains: Option<Vec<String>>) -> AsyncTask<LoadReportTask> {
-  AsyncTask::new(LoadReportTask { domains })
+pub fn load_report(options: Option<LoadReportOptions>) -> Result<AsyncTask<LoadReportTask>> {
+  let options = options.unwrap_or_default();
+  let app_bound = parse_app_bound(options.app_bound.as_deref())?;
+  Ok(AsyncTask::new(LoadReportTask {
+    domains: options.domains,
+    timeout_ms: options.timeout_ms,
+    app_bound,
+  }))
 }
 
 #[napi(object)]
@@ -1269,7 +1584,22 @@ pub struct ReadOptions {
   pub browser: String,
   pub profile: Option<String>,
   pub include_expired: Option<bool>,
+  /// Also includes the browser's declared session store (Gecko only; a
+  /// no-op elsewhere). Defaults to `false` -- **unlike 0.6-beta**, naming a
+  /// `profile` alone no longer imports session cookies. Omitting this on a
+  /// migrated 0.6-beta caller fails silently: a smaller snapshot, no error.
+  pub include_session: Option<bool>,
   pub timeout_ms: Option<u32>,
+  /// `"disabled" | "injection_only" | "allow_elevated_fallback"`. Omitted
+  /// means `"disabled"`: this job surface never recovers Chrome v20
+  /// App-Bound keys unless a caller opts in.
+  pub app_bound: Option<String>,
+  /// Only `"legacy_first"` (the default) is representable here: a snapshot
+  /// or flat extract returns one answer, so there is no "every profile" for
+  /// `select` to name. Passing `"all"` rejects with
+  /// `conflicting_profile_selection` before any I/O; use `report`/
+  /// `browserReport` for every profile.
+  pub select: Option<String>,
 }
 
 #[napi(object)]
@@ -1278,6 +1608,12 @@ pub struct ReportOptions {
   pub profile: Option<String>,
   pub domains: Option<Vec<String>>,
   pub timeout_ms: Option<u32>,
+  pub app_bound: Option<String>,
+  /// `"legacy_first" | "all"`. Defaults to `"all"`: naming a `profile`
+  /// already narrows to it regardless of `select`, but `select: "all"`
+  /// together with `profile` is a contradiction and rejects with
+  /// `conflicting_profile_selection` before any I/O.
+  pub select: Option<String>,
 }
 
 #[napi(object)]
@@ -1286,22 +1622,59 @@ pub struct FromPathOptions {
   pub include_expired: Option<bool>,
   pub timeout_ms: Option<u32>,
   pub browser_id: Option<String>,
-  pub key_path: Option<String>,
+  /// Renamed from `keyPath` in 0.6.0 (prerelease-only, so no alias kept).
+  pub local_state_path: Option<String>,
   pub plaintext_only: Option<bool>,
+  pub app_bound: Option<String>,
+}
+
+/// Options for `loadReport`. Every field is optional so the whole options
+/// object itself can be omitted, matching `loadReport()`'s no-argument form
+/// before this PR added execution control.
+#[napi(object)]
+#[derive(Default)]
+pub struct LoadReportOptions {
+  pub domains: Option<Vec<String>>,
+  pub timeout_ms: Option<u32>,
+  pub app_bound: Option<String>,
+}
+
+#[napi(object)]
+pub struct BrowserReportOptions {
+  pub browser_id: String,
+  pub profile_id: Option<String>,
+  pub domains: Option<Vec<String>>,
+  pub timeout_ms: Option<u32>,
+  pub app_bound: Option<String>,
+}
+
+/// Options for `profiles` / `browserProfiles`. No `appBound`: listing does no
+/// App-Bound work.
+#[napi(object)]
+#[derive(Default)]
+pub struct ProfilesOptions {
+  pub timeout_ms: Option<u32>,
 }
 
 #[napi(object)]
 pub struct ReadWarningObject {
   pub code: String,
-  pub count: u32,
-  pub saturated: bool,
+  /// IEEE-754; saturates at `Number.MAX_SAFE_INTEGER` rather than losing
+  /// precision on a Rust `u64` past that point.
+  pub count: f64,
+  pub counters_saturated: bool,
   pub message: String,
 }
 
-fn warning_count(count: u64) -> (u32, bool) {
-  match u32::try_from(count) {
-    Ok(count) => (count, false),
-    Err(_) => (u32::MAX, true),
+/// JavaScript's largest exactly representable integer (`2^53 - 1`). Matches
+/// `ExtractionStatsObject.countersSaturated`'s saturation point.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn warning_count(count: u64) -> (f64, bool) {
+  if count > MAX_SAFE_INTEGER {
+    (MAX_SAFE_INTEGER as f64, true)
+  } else {
+    (count as f64, false)
   }
 }
 
@@ -1341,6 +1714,15 @@ impl JsReadResult {
     cookies_to_js(clone_cookies(self.inner.cookies()))
   }
 
+  /// Isolation-aware projection: the eight `Cookie` fields plus a `context`
+  /// object carrying CHIPS partition and Firefox container identity. Use this
+  /// (not `cookies`) to inventory partitions/containers -- `cookies` discards
+  /// that context by design.
+  #[napi(getter, js_name = "detailedCookies")]
+  pub fn detailed_cookies(&self) -> Result<Vec<DetailedCookieObject>> {
+    detailed_cookies_to_js(self.inner.detailed_cookies().to_vec())
+  }
+
   #[napi(getter)]
   pub fn warnings(&self) -> Vec<ReadWarningObject> {
     self
@@ -1348,11 +1730,11 @@ impl JsReadResult {
       .warnings()
       .iter()
       .map(|warning| {
-        let (count, saturated) = warning_count(warning.count());
+        let (count, counters_saturated) = warning_count(warning.count());
         ReadWarningObject {
           code: warning.code().to_owned(),
           count,
-          saturated,
+          counters_saturated,
           message: warning.to_string(),
         }
       })
@@ -1360,8 +1742,8 @@ impl JsReadResult {
   }
 
   #[napi(getter, js_name = "browserId")]
-  pub fn browser_id(&self) -> String {
-    self.inner.browser_id().to_owned()
+  pub fn browser_id(&self) -> Option<String> {
+    self.inner.browser_id().map(str::to_owned)
   }
 
   #[napi(getter, js_name = "profileId")]
@@ -1369,17 +1751,32 @@ impl JsReadResult {
     self.inner.profile_id().map(str::to_owned)
   }
 
+  /// Derives a legacy `Cookie` request-header value for `context`. A bare
+  /// string is sugar for `{ url: context }`: the conservative
+  /// (`Subresource`/`Safe`) defaults, no top-level site, no container/
+  /// partition selector.
+  ///
+  /// A snapshot holding a CHIPS-partitioned or Firefox-container cookie
+  /// rejects with `incomplete_send_context` (its `required` selector names on
+  /// the error object) rather than silently merging isolated cookies into one
+  /// answer -- pass `topLevelSite` / `userContextId` / `privateBrowsingId`
+  /// to disambiguate.
   #[napi]
-  pub fn header(&self, env: Env, url: String) -> Result<String> {
-    self.inner.header(&url).map_err(|error| {
-      let details = binding_error_details(&error);
-      structured_error_with_env(env, details)
-    })
+  pub fn header(&self, env: Env, context: Either<String, SendContextObject>) -> Result<String> {
+    let context = match context {
+      Either::A(url) => SendContext::url(url),
+      Either::B(object) => send_context_from_object(object)?,
+    };
+    self
+      .inner
+      .header(&context)
+      .map_err(|error| structured_error_with_env(env, &error))
   }
 }
 
 pub struct ReadTask {
   options: ReadOptions,
+  app_bound: AppBoundPolicy,
   cancellation: Option<CancellationHandle>,
 }
 
@@ -1389,13 +1786,17 @@ impl Task for ReadTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     let options = &self.options;
+    let app_bound = self.app_bound;
     run_worker(|| {
-      let mut request = ReadRequest::browser(&options.browser);
+      let mut request = ReadRequest::browser(&options.browser).app_bound(app_bound);
       if let Some(profile) = options.profile.as_deref() {
         request = request.profile(profile);
       }
       if options.include_expired == Some(true) {
         request = request.include_expired(true);
+      }
+      if options.include_session == Some(true) {
+        request = request.include_session();
       }
       if let Some(ms) = options.timeout_ms {
         request = request.timeout(Duration::from_millis(u64::from(ms)));
@@ -1413,19 +1814,28 @@ impl Task for ReadTask {
 }
 
 /// Unfiltered snapshot of one browser profile. Never URL-pre-sliced.
+///
+/// `options.appBound` defaults to `"disabled"`: unlike the deprecated v0.5.9
+/// bridge (`chrome()`, ...), this job surface never injects, spawns a
+/// browser process, or impersonates SYSTEM to recover Chrome v20 App-Bound
+/// keys unless the caller opts in.
 #[napi(js_name = "read", ts_return_type = "Promise<ReadResult>")]
 pub fn read(
   options: ReadOptions,
   cancellation: Option<&JsCancellationHandle>,
-) -> AsyncTask<ReadTask> {
-  AsyncTask::new(ReadTask {
+) -> Result<AsyncTask<ReadTask>> {
+  validate_single_profile_select(options.select.as_deref())?;
+  let app_bound = parse_app_bound(options.app_bound.as_deref())?;
+  Ok(AsyncTask::new(ReadTask {
     options,
+    app_bound,
     cancellation: cancellation.map(|handle| handle.0.clone()),
-  })
+  }))
 }
 
 pub struct ProfilesTask {
   browser_id: String,
+  timeout_ms: Option<u32>,
 }
 
 impl Task for ProfilesTask {
@@ -1433,7 +1843,11 @@ impl Task for ProfilesTask {
   type JsValue = Vec<ProfileDescriptorObject>;
 
   fn compute(&mut self) -> Result<Self::Output> {
-    run_worker(|| rookie_cookies::profiles(&self.browser_id).map_err(classify_fault))
+    let mut control = ExecutionControl::default();
+    if let Some(ms) = self.timeout_ms {
+      control = control.timeout(Duration::from_millis(u64::from(ms)));
+    }
+    run_worker(|| rookie_cookies::profiles_with(&self.browser_id, control).map_err(classify_fault))
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -1441,17 +1855,21 @@ impl Task for ProfilesTask {
   }
 }
 
-/// Alias of `browserProfiles`. No decrypt.
+/// Alias of `browserProfiles`. No decrypt, no `appBound`.
 #[napi(
   js_name = "profiles",
   ts_return_type = "Promise<Array<ProfileDescriptorObject>>"
 )]
-pub fn profiles(browser_id: String) -> AsyncTask<ProfilesTask> {
-  AsyncTask::new(ProfilesTask { browser_id })
+pub fn profiles(browser_id: String, options: Option<ProfilesOptions>) -> AsyncTask<ProfilesTask> {
+  AsyncTask::new(ProfilesTask {
+    browser_id,
+    timeout_ms: options.and_then(|options| options.timeout_ms),
+  })
 }
 
 pub struct JobReportTask {
   options: ReportOptions,
+  app_bound: AppBoundPolicy,
 }
 
 impl Task for JobReportTask {
@@ -1460,10 +1878,21 @@ impl Task for JobReportTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     let options = &self.options;
+    let app_bound = self.app_bound;
     run_worker(|| {
-      let mut request = Request::browser(&options.browser).domains(options.domains.clone());
-      if let Some(profile) = options.profile.as_deref() {
-        request = request.profile(profile);
+      let mut request = ReportRequest::browser(&options.browser)
+        .domains(options.domains.clone())
+        .app_bound(app_bound);
+      match options.profile.as_deref() {
+        Some(profile) => request = request.profile(profile),
+        // No profile named: `select: "legacy_first"` narrows to one profile
+        // instead of the `ReportRequest::browser` default of every profile.
+        // `validate_report_select` already rejected every other `select`
+        // value, so nothing else reaches this arm.
+        None if options.select.as_deref() == Some("legacy_first") => {
+          request = request.scope(ReportScope::from(ProfileSelection::LegacyFirst));
+        }
+        None => {}
       }
       if let Some(ms) = options.timeout_ms {
         request = request.timeout(Duration::from_millis(u64::from(ms)));
@@ -1478,13 +1907,18 @@ impl Task for JobReportTask {
 }
 
 /// Bindings name for `extract_report` / `browserReport`.
+///
+/// `options.appBound` defaults to `"disabled"`, same as `read`.
 #[napi(js_name = "report", ts_return_type = "Promise<ExtractionReportObject>")]
-pub fn report(options: ReportOptions) -> AsyncTask<JobReportTask> {
-  AsyncTask::new(JobReportTask { options })
+pub fn report(options: ReportOptions) -> Result<AsyncTask<JobReportTask>> {
+  validate_report_select(options.select.as_deref(), options.profile.is_some())?;
+  let app_bound = parse_app_bound(options.app_bound.as_deref())?;
+  Ok(AsyncTask::new(JobReportTask { options, app_bound }))
 }
 
 pub struct FromPathTask {
   options: FromPathOptions,
+  app_bound: AppBoundPolicy,
   credentials: Option<ChromiumCredentialSource>,
   cancellation: Option<CancellationHandle>,
 }
@@ -1495,8 +1929,9 @@ impl Task for FromPathTask {
 
   fn compute(&mut self) -> Result<Self::Output> {
     let options = &self.options;
+    let app_bound = self.app_bound;
     run_worker(|| {
-      let mut request = FromPathRequest::new(&options.path);
+      let mut request = FromPathRequest::new(&options.path).app_bound(app_bound);
       if options.include_expired == Some(true) {
         request = request.include_expired(true);
       }
@@ -1519,6 +1954,8 @@ impl Task for FromPathTask {
 }
 
 /// Read cookies from an explicit cookie database path.
+///
+/// `options.appBound` defaults to `"disabled"`, same as `read`.
 #[napi(js_name = "fromPath", ts_return_type = "Promise<ReadResult>")]
 pub fn from_path(
   options: FromPathOptions,
@@ -1526,12 +1963,14 @@ pub fn from_path(
 ) -> Result<AsyncTask<FromPathTask>> {
   let credentials = chromium_credentials(
     options.browser_id.as_deref(),
-    options.key_path.as_deref(),
+    options.local_state_path.as_deref(),
     options.plaintext_only.unwrap_or(false),
-    "fromPath options browserId, keyPath, and plaintextOnly are mutually exclusive",
+    "fromPath options browserId, localStatePath, and plaintextOnly are mutually exclusive",
   )?;
+  let app_bound = parse_app_bound(options.app_bound.as_deref())?;
   Ok(AsyncTask::new(FromPathTask {
     options,
+    app_bound,
     credentials,
     cancellation: cancellation.map(|handle| handle.0.clone()),
   }))
@@ -1564,7 +2003,7 @@ impl Task for ChromiumBasedWinTask {
         self.domains.take(),
         false,
       )
-      .map_err(classify_fault)
+      .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1573,7 +2012,7 @@ impl Task for ChromiumBasedWinTask {
   }
 }
 
-/// @deprecated Use `chromiumCookiesFromPath`. Earliest removal is 0.7.
+/// @deprecated Use `extractFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn chromium_based(
@@ -1608,7 +2047,7 @@ impl Task for ChromiumBasedDetailedWinTask {
         self.domains.take(),
         false,
       )
-      .map_err(classify_fault)
+      .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1617,7 +2056,7 @@ impl Task for ChromiumBasedDetailedWinTask {
   }
 }
 
-/// @deprecated Use `chromiumCookiesFromPathDetailed`. Earliest removal is 0.7.
+/// @deprecated Use `fromPath(...).detailedCookies`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
 #[cfg(target_os = "windows")]
 pub fn chromium_based_detailed(
@@ -1659,7 +2098,7 @@ impl Task for ChromiumBasedUnixTask {
         self.domains.take(),
         false,
       )
-      .map_err(classify_fault)
+      .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1668,7 +2107,7 @@ impl Task for ChromiumBasedUnixTask {
   }
 }
 
-/// @deprecated Use `chromiumCookiesFromPath`. Earliest removal is 0.7.
+/// @deprecated Use `extractFromPath`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 #[cfg(unix)]
 pub fn chromium_based(
@@ -1703,7 +2142,7 @@ impl Task for ChromiumBasedDetailedUnixTask {
         self.domains.take(),
         false,
       )
-      .map_err(classify_fault)
+      .map_err(classify_anyhow_fault)
     })
   }
 
@@ -1712,7 +2151,7 @@ impl Task for ChromiumBasedDetailedUnixTask {
   }
 }
 
-/// @deprecated Use `chromiumCookiesFromPathDetailed`. Earliest removal is 0.7.
+/// @deprecated Use `fromPath(...).detailedCookies`. Earliest removal is 0.7.
 #[napi(ts_return_type = "Promise<Array<DetailedCookieObject>>")]
 #[cfg(unix)]
 pub fn chromium_based_detailed(
@@ -1809,10 +2248,16 @@ mod tests {
 
   #[test]
   fn warning_counts_report_saturation_instead_of_looking_exact() {
-    assert_eq!(warning_count(7), (7, false));
-    assert_eq!(warning_count(u64::from(u32::MAX)), (u32::MAX, false));
-    assert_eq!(warning_count(u64::from(u32::MAX) + 1), (u32::MAX, true));
-    assert_eq!(warning_count(u64::MAX), (u32::MAX, true));
+    assert_eq!(warning_count(7), (7.0, false));
+    assert_eq!(
+      warning_count(MAX_SAFE_INTEGER),
+      (MAX_SAFE_INTEGER as f64, false)
+    );
+    assert_eq!(
+      warning_count(MAX_SAFE_INTEGER + 1),
+      (MAX_SAFE_INTEGER as f64, true)
+    );
+    assert_eq!(warning_count(u64::MAX), (MAX_SAFE_INTEGER as f64, true));
   }
 
   /// Schema-parity check for the hand-written `#[napi(object)]` report DTOs.

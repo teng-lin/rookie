@@ -20,8 +20,8 @@ function collectKeys(value, keys = new Set()) {
 // One profile in the fixture has a corrupt cookie source, producing a
 // source-scoped issue; the uninstalled browser produces a request-scoped issue
 // carrying browser context.
-const firefox = await browserReport("firefox");
-const absent = await browserReport("chrome");
+const firefox = await browserReport({ browserId: "firefox" });
+const absent = await browserReport({ browserId: "chrome" });
 
 const sourceIssue = firefox.profiles
   .flatMap((profile) => profile.sources)

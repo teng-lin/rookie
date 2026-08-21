@@ -20,9 +20,11 @@ function leafTypes(value, types = new Set()) {
 
 const profiles = await browserProfiles("firefox");
 const work = profiles.find(({ profile }) => profile.displayName === "work");
-const report = await browserReport("firefox", work.profile.profileId, [
-  "example.test",
-]);
+const report = await browserReport({
+  browserId: "firefox",
+  profileId: work.profile.profileId,
+  domains: ["example.test"],
+});
 
 process.stdout.write(
   JSON.stringify({

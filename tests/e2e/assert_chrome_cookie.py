@@ -45,11 +45,20 @@ def main() -> int:
     db_override = os.environ.get("ROOKIE_E2E_COOKIE_DB")
     db_path = Path(db_override) if db_override else find_cookie_db(user_data_dir)
 
+    # chromium_cookies_from_path is the new job surface, where App-Bound (v20)
+    # recovery defaults to disabled; chromium_based is the deprecated bridge,
+    # which keeps its old allow_elevated_fallback behavior unconditionally
+    # and needs no change. Without this, the canonical calls below would stop
+    # decrypting v20 rows on Windows. See CHANGELOG.md.
     if sys.platform == "win32":
         key_path = user_data_dir / "Local State"
         canonical = rookie_cookies.chromium_cookies_from_path(
             str(db_path),
-            {"domains": [domain], "local_state_path": str(key_path)},
+            {
+                "domains": [domain],
+                "local_state_path": str(key_path),
+                "app_bound": "allow_elevated_fallback",
+            },
         )
         legacy = rookie_cookies.chromium_based(
             str(key_path), str(db_path), [domain]
@@ -60,11 +69,17 @@ def main() -> int:
         ]
     else:
         automatic = rookie_cookies.chromium_cookies_from_path(
-            str(db_path), {"domains": [domain]}
+            str(db_path),
+            {"domains": [domain], "app_bound": "allow_elevated_fallback"},
         )
         browser_id = os.environ.get("ROOKIE_E2E_BROWSER_ID", "chrome")
         canonical = rookie_cookies.chromium_cookies_from_path(
-            str(db_path), {"domains": [domain], "browser_id": browser_id}
+            str(db_path),
+            {
+                "domains": [domain],
+                "browser_id": browser_id,
+                "app_bound": "allow_elevated_fallback",
+            },
         )
         legacy = rookie_cookies.chromium_based(str(db_path), [domain], browser_id)
         results = [

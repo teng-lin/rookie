@@ -16,7 +16,7 @@ const timer = new Promise((resolve) => {
 });
 
 const started = performance.now();
-const pending = browserReport("firefox");
+const pending = browserReport({ browserId: "firefox" });
 const winner = await Promise.race([timer, pending.then(() => "report")]);
 const report = await pending;
 const durationMs = performance.now() - started;

@@ -31,6 +31,7 @@ const EXPECTED_EXPORTS = [
   "version",
   "toNetscape",
   "anyBrowser",
+  "extractFromPath",
   "cookiesFromPath",
   "chromiumCookiesFromPath",
   "chromiumCookiesFromPathDetailed",
@@ -325,9 +326,9 @@ test("cookiesFromPath rejects once its timeout budget expires", async (t) => {
       new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
     );
     const error = await t.throwsAsync(rookieCookies.cookiesFromPath(dbPath, null, 0), {
-      message: /operation deadline expired/,
+      message: /operation timed out/,
     });
-    t.is(error.kind, "engine");
+    t.is(error.kind, "stopped");
     t.is(error.code, "GenericFailure");
     t.is(error.rookieCode, "timed_out");
     t.is(error.stopReason, "timed_out");
@@ -349,10 +350,10 @@ test("cookiesFromPath rejects when handed an already-cancelled handle", async (t
     handle.cancel();
     const error = await t.throwsAsync(
       rookieCookies.cookiesFromPath(dbPath, null, undefined, handle),
-      { message: /operation cancelled/ },
+      { message: /operation was cancelled/ },
     );
-    t.is(error.kind, "engine");
-    t.is(error.code, "GenericFailure");
+    t.is(error.kind, "stopped");
+    t.is(error.code, "Cancelled");
     t.is(error.rookieCode, "cancelled");
     t.is(error.stopReason, "cancelled");
   } finally {
@@ -367,7 +368,7 @@ test("a migrated single-browser export honors timeoutMs like cookiesFromPath", a
   // the Rust level by zero_timeout_stops_extraction_before_any_browser_lookup
   // -- so this needs no installed-browser fixture to be deterministic.
   await t.throwsAsync(rookieCookies.firefox(null, 0), {
-    message: /operation deadline expired/,
+    message: /operation timed out/,
   });
 });
 
@@ -381,10 +382,25 @@ test("canonical Chromium paths support flat, detailed, and domain projections", 
     );
     const options = { domains: ["example.test"], plaintextOnly: true };
     const cookies = await rookieCookies.chromiumCookiesFromPath(dbPath, options);
-    const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(dbPath, options);
     t.deepEqual(cookies.map(({ name }) => name), ["plain"]);
-    t.deepEqual(detailed.map(({ cookie }) => cookie), cookies);
-    t.is(detailed[0].context.topFrameSiteKey, "https://top.example");
+
+    // chromiumCookiesFromPathDetailed no longer supports domain filtering:
+    // detailed path extraction routes through fromPath, which -- like read --
+    // never URL/domain-slices its snapshot. It rejects rather than silently
+    // ignoring `domains`.
+    await t.throwsAsync(rookieCookies.chromiumCookiesFromPathDetailed(dbPath, options), {
+      message: /no longer supports domain filtering/,
+    });
+
+    const detailed = await rookieCookies.chromiumCookiesFromPathDetailed(dbPath, {
+      plaintextOnly: true,
+    });
+    const plain = detailed.find(({ cookie }) => cookie.name === "plain");
+    t.truthy(
+      plain,
+      "the domain-filtered flat cookie must also appear in the unfiltered detailed list",
+    );
+    t.is(plain.context.topFrameSiteKey, "https://top.example");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -463,13 +479,13 @@ test("Chromium path option validation rejects asynchronously before database I/O
 test("fromPath rejects credential conflicts asynchronously before database I/O", async (t) => {
   const missing = join(tmpdir(), "rookie-node-missing-from-path-Cookies");
   const invalidOptions = [
-    { path: missing, browserId: "chrome", keyPath: "Local State" },
+    { path: missing, browserId: "chrome", localStatePath: "Local State" },
     { path: missing, browserId: "chrome", plaintextOnly: true },
-    { path: missing, keyPath: "Local State", plaintextOnly: true },
+    { path: missing, localStatePath: "Local State", plaintextOnly: true },
     {
       path: missing,
       browserId: "chrome",
-      keyPath: "Local State",
+      localStatePath: "Local State",
       plaintextOnly: true,
     },
   ];
@@ -639,7 +655,11 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     ["browserProfiles", () => rookieCookies.browserProfiles(42)],
     ["chromeProfile", () => rookieCookies.chromeProfile(42)],
     ["browserReport", () => rookieCookies.browserReport(42)],
-    ["loadReport", () => rookieCookies.loadReport(42)],
+    // Every `LoadReportOptions` field is optional, so a bare non-object
+    // primitive silently duck-types as "no options" instead of rejecting;
+    // an invalid field value is what actually triggers a napi conversion
+    // error here.
+    ["loadReport", () => rookieCookies.loadReport({ domains: 42 })],
   ];
 
   for (const [name, call] of invalidCalls) {
@@ -739,7 +759,12 @@ test("canonical direct-path declarations and compatibility deprecations are exac
   const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
   t.regex(
     types,
-    /export interface ChromiumPathOptions \{\n  domains\?: string\[\] \| null\n  browserId\?: string \| null\n  localStatePath\?: string \| null\n  plaintextOnly\?: boolean \| null\n\}/,
+    /export interface ChromiumPathOptions \{\n  domains\?: string\[\] \| null\n  browserId\?: string \| null\n  localStatePath\?: string \| null\n  plaintextOnly\?: boolean \| null\n  appBound\?: AppBoundPolicy \| null\n\}/,
+  );
+  t.true(
+    types.includes(
+      "export declare function extractFromPath(path: string, options?: ExtractFromPathOptions | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>",
+    ),
   );
   t.true(
     types.includes(
@@ -756,15 +781,44 @@ test("canonical direct-path declarations and compatibility deprecations are exac
       "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>",
     ),
   );
-  t.regex(types, /@deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`/);
-  t.regex(types, /@deprecated Use `cookiesFromPath`\. Earliest removal is 0\.7/);
+  // cookiesFromPath / chromiumCookiesFromPath / chromiumCookiesFromPathDetailed
+  // / anyBrowser / firefoxBased / chromiumBased / chromiumBasedDetailed are all
+  // deprecated onto the canonical extractFromPath or fromPath(...).detailedCookies
+  // -- never onto each other, so there is no deprecated-pointing-to-deprecated
+  // chain for a caller to follow twice.
+  t.is(
+    (types.match(/@deprecated Use `extractFromPath`\. Earliest removal is 0\.7\./g) || []).length,
+    4,
+    "cookiesFromPath, chromiumCookiesFromPath, anyBrowser, and firefoxBased all point at extractFromPath",
+  );
+  t.is(
+    (
+      types.match(/@deprecated Use `fromPath\(\.\.\.\)\.detailedCookies`\. Earliest removal is 0\.7\./g)
+      || []
+    ).length,
+    1,
+    "chromiumCookiesFromPathDetailed points at fromPath(...).detailedCookies",
+  );
+  t.is(
+    (types.match(/@deprecated Use extractFromPath\. Earliest removal is 0\.7\./g) || []).length,
+    2,
+    "both chromiumBased platform declarations point at extractFromPath",
+  );
+  t.is(
+    (
+      types.match(/@deprecated Use fromPath\(\.\.\.\)\.detailedCookies\. Earliest removal is 0\.7\./g)
+      || []
+    ).length,
+    2,
+    "both chromiumBasedDetailed platform declarations point at fromPath(...).detailedCookies",
+  );
   t.regex(types, /export interface RookieError extends Error/);
   t.regex(types, /code\?: string/);
   t.regex(types, /rookieCode: string \| null/);
   t.regex(types, /stopReason: string \| null/);
   t.regex(
     types,
-    /export interface ReadWarningObject \{[\s\S]*?saturated: boolean/,
+    /export interface ReadWarningObject \{[\s\S]*?countersSaturated: boolean/,
   );
   t.false(
     /@deprecated[^\n]*\nexport declare function firefoxBasedDetailed/.test(types),
@@ -803,7 +857,9 @@ test("supportedBrowsers describes registered browsers in camelCase", async (t) =
 
 test("unknown browser identifiers reject rather than resolving empty", async (t) => {
   const profiles = await t.throwsAsync(rookieCookies.browserProfiles("not_a_browser"));
-  const report = await t.throwsAsync(rookieCookies.browserReport("not_a_browser"));
+  const report = await t.throwsAsync(
+    rookieCookies.browserReport({ browserId: "not_a_browser" }),
+  );
   for (const error of [profiles, report]) {
     t.is(error.kind, "request");
     t.is(error.code, "InvalidArg");
@@ -813,11 +869,11 @@ test("unknown browser identifiers reject rather than resolving empty", async (t)
   }
 });
 
-test("direct-path request errors expose redacted structured metadata", async (t) => {
+test("direct-path source errors expose redacted structured metadata", async (t) => {
   const missing = join(tmpdir(), "rookie-node-structured-missing", "cookies.sqlite");
   const error = await t.throwsAsync(rookieCookies.cookiesFromPath(missing));
 
-  t.is(error.kind, "request");
+  t.is(error.kind, "source");
   t.is(error.code, "InvalidArg");
   t.is(error.rookieCode, "not_a_regular_file");
   t.is(error.stopReason, null);

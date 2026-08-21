@@ -43,6 +43,11 @@ if (!dbPath) {
   }
 }
 
+// chromiumCookiesFromPath is the new job surface, where App-Bound (v20)
+// recovery defaults to disabled; chromiumBased is the deprecated bridge,
+// which keeps its old allow_elevated_fallback behavior unconditionally and
+// needs no change. Without this, the canonical calls below would stop
+// decrypting v20 rows on Windows. See CHANGELOG.md.
 let results;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
@@ -52,6 +57,7 @@ if (process.platform === "win32") {
       await rookieCookies.chromiumCookiesFromPath(dbPath, {
         domains: [domain],
         localStatePath: keyPath,
+        appBound: "allow_elevated_fallback",
       }),
     ],
     ["chromiumBased", await rookieCookies.chromiumBased(keyPath, dbPath, [domain])],
@@ -60,13 +66,17 @@ if (process.platform === "win32") {
   results = [
     [
       "chromiumCookiesFromPath(Automatic)",
-      await rookieCookies.chromiumCookiesFromPath(dbPath, { domains: [domain] }),
+      await rookieCookies.chromiumCookiesFromPath(dbPath, {
+        domains: [domain],
+        appBound: "allow_elevated_fallback",
+      }),
     ],
     [
       "chromiumCookiesFromPath(BrowserId)",
       await rookieCookies.chromiumCookiesFromPath(dbPath, {
         domains: [domain],
         browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
+        appBound: "allow_elevated_fallback",
       }),
     ],
     [

@@ -134,7 +134,7 @@ if (!nativeBindingDestructurePattern.test(loader)) {
 }
 loader = loader.replace(
   nativeBindingDestructurePattern,
-  'const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding'
+  'const { CancellationHandle, version, toNetscape, anyBrowser, extractFromPath, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding'
 )
 
 // Every napi-generated raw export is a simple self-reexport
@@ -203,6 +203,7 @@ function decorateNativeError(error) {
   error.sourceKind = details?.sourceKind ?? null
   error.targetOs = details?.targetOs ?? null
   error.pathRedacted = details?.pathRedacted ?? false
+  error.required = Array.isArray(details?.required) ? details.required : []
   return error
 }
 
@@ -224,6 +225,7 @@ const chromiumPathOptionKeys = new Set([
   'browserId',
   'localStatePath',
   'plaintextOnly',
+  'appBound',
 ])
 
 function validateChromiumPathOptions(options) {
@@ -261,7 +263,7 @@ function validateChromiumPathOptions(options) {
     normalized.domains = options.domains.slice()
   }
 
-  for (const key of ['browserId', 'localStatePath']) {
+  for (const key of ['browserId', 'localStatePath', 'appBound']) {
     if (!hasOwn(key)) {
       continue
     }
@@ -305,6 +307,103 @@ function chromiumPathNative(nativeFunction, name) {
   )
 }
 
+// The canonical flat path-extract job. Its options bundle \`timeoutMs\` as a
+// field (unlike the deprecated \`chromiumPathNative\` family, where it is its
+// own positional parameter), so it needs its own key set and validator rather
+// than reusing \`validateChromiumPathOptions\`.
+const extractFromPathOptionKeys = new Set([
+  'domains',
+  'browserId',
+  'localStatePath',
+  'plaintextOnly',
+  'timeoutMs',
+  'appBound',
+])
+
+function validateExtractFromPathOptions(options) {
+  if (options === null || options === undefined) {
+    return undefined
+  }
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('extractFromPath options must be an object or null')
+  }
+  const prototype = Object.getPrototypeOf(options)
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null) {
+    throw new TypeError('extractFromPath options must be a plain object or null')
+  }
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== 'string' || !extractFromPathOptionKeys.has(key)) {
+      throw new TypeError(
+        'Unknown extractFromPath option: ' + (typeof key === 'symbol' ? key.toString() : key)
+      )
+    }
+  }
+
+  const normalized = {}
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(options, key)
+  if (hasOwn('domains') && options.domains !== null && options.domains !== undefined) {
+    if (!Array.isArray(options.domains)) {
+      throw new TypeError('extractFromPath option domains must be an array of strings or null')
+    }
+    for (const [index, domain] of options.domains.entries()) {
+      if (typeof domain !== 'string') {
+        throw new TypeError('extractFromPath option domains element ' + index + ' must be a string')
+      }
+    }
+    normalized.domains = options.domains.slice()
+  }
+
+  for (const key of ['browserId', 'localStatePath', 'appBound']) {
+    if (!hasOwn(key)) {
+      continue
+    }
+    const value = options[key]
+    if (value !== null && value !== undefined) {
+      if (typeof value !== 'string') {
+        throw new TypeError('extractFromPath option ' + key + ' must be a string or null')
+      }
+      normalized[key] = value
+    }
+  }
+
+  if (
+    hasOwn('plaintextOnly')
+    && options.plaintextOnly !== null
+    && options.plaintextOnly !== undefined
+  ) {
+    if (typeof options.plaintextOnly !== 'boolean') {
+      throw new TypeError('extractFromPath option plaintextOnly must be a boolean or null')
+    }
+    normalized.plaintextOnly = options.plaintextOnly
+  }
+
+  if (hasOwn('timeoutMs') && options.timeoutMs !== null && options.timeoutMs !== undefined) {
+    if (typeof options.timeoutMs !== 'number') {
+      throw new TypeError('extractFromPath option timeoutMs must be a number or null')
+    }
+    normalized.timeoutMs = options.timeoutMs
+  }
+
+  const selectorCount = Number(normalized.browserId !== undefined)
+    + Number(normalized.localStatePath !== undefined)
+    + Number(normalized.plaintextOnly === true)
+  if (selectorCount > 1) {
+    throw new TypeError(
+      'extractFromPath options browserId, localStatePath, and plaintextOnly are mutually exclusive'
+    )
+  }
+  return normalized
+}
+
+function extractFromPathNative(nativeFunction, name) {
+  const required = requiredNative(nativeFunction, name)
+  return asyncNative(
+    (path, options, cancellation) =>
+      required(path, validateExtractFromPathOptions(options), cancellation),
+    name
+  )
+}
+
 function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
     \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
@@ -324,6 +423,7 @@ module.exports.CancellationHandle = requiredNative(CancellationHandle, 'Cancella
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
+module.exports.extractFromPath = extractFromPathNative(extractFromPath, 'extractFromPath')
 module.exports.cookiesFromPath = asyncNative(cookiesFromPath, 'cookiesFromPath')
 module.exports.chromiumCookiesFromPath = chromiumPathNative(chromiumCookiesFromPath, 'chromiumCookiesFromPath')
 module.exports.chromiumCookiesFromPathDetailed = chromiumPathNative(chromiumCookiesFromPathDetailed, 'chromiumCookiesFromPathDetailed')
@@ -392,6 +492,7 @@ types = types.replace(
   browserId?: string | null
   localStatePath?: string | null
   plaintextOnly?: boolean | null
+  appBound?: AppBoundPolicy | null
 }`
 )
 
@@ -494,7 +595,7 @@ if (facadeIndex !== -1) {
 }
 
 types = types.replace(
-  /^\/\*\* @deprecated Use `chromiumCookiesFromPath(?:Detailed)?`\. Earliest removal is 0\.7\. \*\/\n(?=export declare function chromiumBased)/gm,
+  /^\/\*\* @deprecated Use `(?:extractFromPath|fromPath\(\.\.\.\)\.detailedCookies)`\. Earliest removal is 0\.7\. \*\/\n(?=export declare function chromiumBased)/gm,
   ''
 )
 types = types.replace(
@@ -506,12 +607,31 @@ types = types.replace(
   ''
 )
 
+// napi-rs sees every `appBound`/`resource`/`method` field as a plain
+// `Option<String>` and has no way to express our JS-facing string-literal
+// unions from the Rust side; retype every generated occurrence to the real
+// union below instead. `appBound` appears on both non-nullable
+// (`ReadOptions`, ...) and `use_nullable` (`ChromiumPathOptions`) structs, so
+// the trailing `| null` is optional and preserved when present.
+types = types.replace(
+  /^(\s*)appBound\?: string( \| null)?$/gm,
+  '$1appBound?: AppBoundPolicy$2',
+)
+types = types.replace(
+  /^(\s*)resource\?: string( \| null)?$/gm,
+  '$1resource?: ResourceKind$2',
+)
+types = types.replace(/^(\s*)method\?: string( \| null)?$/gm, '$1method?: MethodClass$2')
+
 types = types.trimEnd()
 types += `
 ${facadeMarker}
+export type AppBoundPolicy = 'disabled' | 'injection_only' | 'allow_elevated_fallback'
+export type ResourceKind = 'navigation' | 'subresource'
+export type MethodClass = 'safe' | 'unsafe'
 /** Structured diagnostics attached to errors rejected by facade operations. */
 export interface RookieError extends Error {
-  kind: 'request' | 'engine'
+  kind: 'request' | 'stopped' | 'source' | 'engine'
   code?: string
   rookieCode: string | null
   /** Current values are timed_out, cancelled, and resource_exhausted; open for future reasons. */
@@ -520,17 +640,19 @@ export interface RookieError extends Error {
   sourceKind: string | null
   targetOs: string | null
   pathRedacted: boolean
+  /** The SendContext selectors incomplete_send_context says are missing. Empty otherwise. */
+  required: string[]
 }
 ${legacyPlatformDeclarations()}
 /** Unix browsers */
-/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
+/** @deprecated Use extractFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>
-/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
+/** @deprecated Use fromPath(...).detailedCookies. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<DetailedCookieObject>>
 /** Windows browsers */
-/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
+/** @deprecated Use extractFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
+/** @deprecated Use fromPath(...).detailedCookies. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
 `
 

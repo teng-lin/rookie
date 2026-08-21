@@ -8,6 +8,9 @@ crate-type = ["cdylib"]
 
 [features]
 test-support = []
+# Windows App-Bound canary only; see the rookie-cookies feature of the same
+# name. Never enabled in a published addon.
+e2e-appbound-steering = ["rookie-cookies/e2e-appbound-steering"]
 
 [dependencies]
 # Default enable napi4 feature, see https://nodejs.org/api/n-api.html#node-api-version-matrix
