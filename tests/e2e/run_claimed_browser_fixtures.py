@@ -128,6 +128,31 @@ def run(platform: str) -> int:
             )
             assert_seeded(cookies)
 
+            octo_profile = (
+                Path(temp)
+                / "AppData"
+                / "Local"
+                / "Octo Browser"
+                / "tmp"
+                / "fixture-profile-uuid"
+            )
+            completed_octo = subprocess.run(
+                [sys.executable, str(fixture), str(octo_profile)],
+                check=False,
+            )
+            if completed_octo.returncode != 0:
+                raise SystemExit("failed to create Octo Browser DPAPI fixture")
+            octo_cookies_db = octo_profile / "Default" / "Network" / "Cookies"
+            octo_local_state = octo_profile / "Local State"
+            octo_cookies = rookie_cookies.chromium_cookies_from_path(
+                str(octo_cookies_db),
+                {
+                    "domains": ["example.test"],
+                    "local_state_path": str(octo_local_state),
+                },
+            )
+            assert_seeded(octo_cookies)
+
     print(f"claimed-browser fixtures ok on {platform} ({len(rows)} ids)")
     return 0
 
