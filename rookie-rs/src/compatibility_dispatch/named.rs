@@ -501,10 +501,14 @@ pub(crate) fn aggregate_load_failure(
 /// attempted, but a browser already in flight at that moment still runs to
 /// completion and its cookies are kept.
 ///
-/// Returns `Err` only when at least one installed browser is found, every
-/// attempted extraction fails, and none succeeds. The aggregate message lists
-/// only genuine extraction failures. If no supported browser is installed,
-/// returns an empty list.
+/// Returns `Err` when no browser succeeded and either of two things happened:
+/// at least one installed browser was found and every attempted extraction
+/// failed, or the deadline/cancellation tripped before every browser could be
+/// attempted. The second case is an `Err` even if every browser that *was*
+/// attempted turned out to be uninstalled, because a stop means the list of
+/// cookies is a prefix rather than an answer. The aggregate message lists only
+/// genuine extraction failures. If no supported browser is installed and
+/// nothing stopped the run, returns an empty list.
 ///
 /// # Arguments
 ///

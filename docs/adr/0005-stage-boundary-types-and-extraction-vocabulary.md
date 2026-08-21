@@ -215,7 +215,7 @@ the PR that moved it.
 
 ## Amendments
 
-This ADR was amended once, on 2026-08-19, from the follow-on program record
+This ADR was first amended on 2026-08-19, from the follow-on program record
 [after the type program](../design/after-the-type-program.md):
 
 - **Decision 1** now says `Source` embeds `origin: SourceIdentity`, not
@@ -297,7 +297,7 @@ now has two halves:
 - **Inline test bulk is not a reason for a module to be unreviewable.** A
   module whose production code is coherent may move its `#[cfg(test)] mod
   tests` body to a sibling file at any time. The module path is unchanged by
-  the move, so `cargo test --workspace --all-targets -- --list` is
+  the move, so `cargo test --workspace --all-targets -- --list | sort` is
   byte-identical across it; that diff is the proof, and it makes the change
   bulk-safe in a way a rewrite never is.
 

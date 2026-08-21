@@ -147,10 +147,22 @@ fn structured_error_with_env(env: Env, error: &rookie_cookies::Error) -> napi::E
 fn classify_fault(error: rookie_cookies::Error) -> napi::Error {
   let status = status_for_error(&error);
   let details = binding_error_details(&error);
-  let payload = serde_json::to_string(&details).unwrap_or_else(|serialization| {
-    format!(r#"{{"message":"error diagnostic serialization failed: {serialization}"}}"#)
-  });
+  let payload = serde_json::to_string(&details).unwrap_or_else(serialization_failure_payload);
   napi::Error::new(status, format!("{STRUCTURED_ERROR_PREFIX}{payload}"))
+}
+
+/// The payload used when the diagnostic itself will not serialize.
+///
+/// Serialized, not interpolated. A `serde_json` error's text can carry `"`,
+/// `\`, or a newline, so building this as a JSON string literal would emit
+/// invalid JSON exactly when a diagnostic is most needed: the JS loader's
+/// `decorateNativeError` would fail to parse it, keep the prefixed message,
+/// and hand the caller the raw `__ROOKIE_ERROR_V1__{...}` blob.
+fn serialization_failure_payload(serialization: serde_json::Error) -> String {
+  serde_json::json!({
+    "message": format!("error diagnostic serialization failed: {serialization}"),
+  })
+  .to_string()
 }
 
 /// Entry point for the deprecated v0.5.9 bridge functions, which still
@@ -2195,6 +2207,32 @@ pub fn test_worker_panic() -> AsyncTask<TestWorkerPanicTask> {
 mod tests {
   use super::*;
   use std::collections::BTreeSet;
+
+  /// The last-resort payload must still be parseable, or the caller loses the
+  /// diagnostic entirely: `decorateNativeError` parses this, and on failure
+  /// keeps the prefixed blob as the error message.
+  ///
+  /// A `serde_json` error's `Display` is not hostile today, so the guard is
+  /// the shape of the code rather than the current text -- the assertions
+  /// below feed it text that *would* break a JSON string literal.
+  #[test]
+  fn the_serialization_failure_payload_survives_quotes_and_newlines() {
+    let hostile: serde_json::Error =
+      serde_json::from_str::<serde_json::Value>("{\"a\": \"unterminated\n").unwrap_err();
+    let payload = serialization_failure_payload(hostile);
+
+    let parsed: serde_json::Value =
+      serde_json::from_str(&payload).expect("the fallback payload must be valid JSON");
+    let message = parsed["message"]
+      .as_str()
+      .expect("the fallback payload always carries a string message");
+    assert!(message.starts_with("error diagnostic serialization failed: "));
+
+    // The same text hand-interpolated into a literal is what this replaced.
+    // If that ever comes back, this proves it produces something unparseable.
+    let interpolated = format!(r#"{{"message":"a quote \" and a newline {}"}}"#, "\n");
+    assert!(serde_json::from_str::<serde_json::Value>(&interpolated).is_err());
+  }
 
   #[test]
   fn worker_panics_become_napi_errors() {

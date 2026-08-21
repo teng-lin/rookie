@@ -603,11 +603,7 @@ fn chromium_profile_outcome(
   installation_id: &str,
   extraction: registry::ChromiumExtractedProfile,
 ) -> Result<ProfileDraft> {
-  let registry::ChromiumExtractedProfile {
-    profile,
-    sources,
-    failure,
-  } = extraction;
+  let registry::ChromiumExtractedProfile { profile, sources } = extraction;
   let identity = profile_identity(
     browser_id,
     installation_id,
@@ -619,7 +615,7 @@ fn chromium_profile_outcome(
     identity,
     profile.is_default,
     sources,
-    NoSources::AbsentUnlessFailed(failure),
+    NoSources::Absent,
   ))
 }
 
@@ -643,10 +639,7 @@ fn extracted_profile_outcome(
   ))
 }
 
-fn chromium_profile(
-  sources: Vec<Source>,
-  failure: Option<String>,
-) -> registry::ChromiumExtractedProfile {
+fn chromium_profile(sources: Vec<Source>) -> registry::ChromiumExtractedProfile {
   let path = PathBuf::from("/chrome/Default");
   registry::ChromiumExtractedProfile {
     profile: registry::ChromiumProfile {
@@ -662,45 +655,57 @@ fn chromium_profile(
       persistent_candidates: vec![chromium_candidate()],
     },
     sources,
-    failure,
   }
 }
 
-/// The real Chromium adapter, not a hand-built outcome. A profile whose
-/// source discovery failed must not be reported as ordinary absence -- this
-/// is the path on which that bug shipped.
+/// A Chromium profile that could not be read still reports the source it
+/// tried, so the failure is never mistaken for absence.
+///
+/// This replaces a test that fed a profile-level `failure: Some(..)` to the
+/// mapper and asserted it became `profile_extraction_failed`. No production
+/// path ever built that value -- all three adapter sites set `failure: None`,
+/// and the failing one attaches the failure to a `Source` instead -- so the
+/// test pinned a state the engine could not reach, and the field it depended
+/// on is now gone. What actually keeps failure and absence apart is asserted
+/// here: the failing profile's source list is not empty.
 #[test]
-fn chromium_profile_that_failed_discovery_reaches_the_report_as_failed() {
+fn a_chromium_profile_that_could_not_be_read_reports_its_source_not_absence() {
   let browser = BrowserId::known("chrome");
-  let engine = chromium_profile_outcome(
-    &browser,
-    &"d".repeat(64),
-    chromium_profile(Vec::new(), Some("Local State is unreadable".to_owned())),
-  )
-  .expect("adapt the profile");
-  assert!(engine.sources.is_empty());
-  let issue = engine.issues.first().expect("an issue for the failure");
-  assert_eq!(issue.code.as_str(), "profile_extraction_failed");
-  assert!(issue.is_error());
-  assert_eq!(issue.message, "Local State is unreadable");
+  let mut source = {
+    let c = chromium_candidate();
+    Source::new(c.identity(), c.selected, c.acquisition)
+  };
+  source.fail(
+    registry::SourceFailureStage::Acquisition,
+    "Local State is unreadable".to_owned(),
+  );
+  let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(vec![source]))
+    .expect("adapt the profile");
+
+  assert_eq!(
+    engine.sources.len(),
+    1,
+    "a named database that failed is still a named database"
+  );
+  assert!(engine
+    .issues
+    .iter()
+    .all(|issue| issue.code.as_str() != "profile_has_no_cookie_source"));
   assert_eq!(
     status(outcome(vec![engine], false)),
     ReportStatusCode::failed()
   );
 }
 
-/// The same empty source list without a failure is ordinary absence. The two
-/// must not collapse: an installed browser with no cookie store would
-/// otherwise be indistinguishable from one that could not be read.
+/// An empty source list is ordinary absence, and nothing else. Chromium lists
+/// only databases that exist, and a database it failed to read is still listed
+/// (above), so an installed browser with no cookie store cannot be confused
+/// with one that could not be read.
 #[test]
-fn a_chromium_profile_with_no_source_and_no_failure_is_ordinary_absence() {
+fn a_chromium_profile_with_no_source_is_ordinary_absence() {
   let browser = BrowserId::known("chrome");
-  let engine = chromium_profile_outcome(
-    &browser,
-    &"d".repeat(64),
-    chromium_profile(Vec::new(), None),
-  )
-  .expect("adapt the profile");
+  let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(Vec::new()))
+    .expect("adapt the profile");
   assert!(engine.sources.is_empty());
   let issue = engine.issues.first().expect("an issue for the absence");
   assert_eq!(issue.code.as_str(), "profile_has_no_cookie_source");
@@ -715,12 +720,8 @@ fn chromium_adapter_projects_a_selected_candidate_as_a_succeeding_source() {
     Source::new(c.identity(), c.selected, c.acquisition)
   };
   source.acquisition_attempts = 1;
-  let engine = chromium_profile_outcome(
-    &browser,
-    &"d".repeat(64),
-    chromium_profile(vec![source], None),
-  )
-  .expect("adapt the profile");
+  let engine = chromium_profile_outcome(&browser, &"d".repeat(64), chromium_profile(vec![source]))
+    .expect("adapt the profile");
   let report = assemble(1, vec![outcome(vec![engine], false)]);
   assert_eq!(report.status, ReportStatusCode::complete());
   let source = &report.profiles[0].sources[0];
@@ -1402,7 +1403,7 @@ fn report_row_counters_reconcile_across_every_backend_adapter() {
   let chromium = chromium_profile_outcome(
     &BrowserId::known("chrome"),
     &"d".repeat(64),
-    chromium_profile(vec![chromium_source], None),
+    chromium_profile(vec![chromium_source]),
   )
   .expect("adapt Chromium counters");
 

@@ -787,22 +787,21 @@ fn discover_browser_with_context_and_selection<F: DiscoveryFs>(
 /// `persistent_candidates` cannot hold records; a `Source` here cannot be
 /// returned from listing. Sources are the profile's whole extraction result --
 /// stats, row issues, and any failure live on them, not beside them.
+///
+/// There is deliberately no profile-level `failure` field, because this engine
+/// cannot reach one: no selected database is ordinary absence (empty
+/// `sources`), and a failure reaching a named database lands on that
+/// [`Source::failure`] -- which is why the acquisition `Err` arm below still
+/// pushes a `Source`. An empty Chromium source list therefore means exactly
+/// one thing.
+///
+/// This is the opposite convention from the engine listing, where an empty
+/// `sources` is itself the failure. The two engines discover differently:
+/// Chromium lists only databases that exist, so having none is normal.
 #[derive(Debug)]
 pub(crate) struct ChromiumExtractedProfile {
   pub(crate) profile: ChromiumProfile,
   pub(crate) sources: Vec<Source>,
-  /// Extraction failed before any source could be named.
-  ///
-  /// Empty `sources` on its own means the profile declares no cookie database,
-  /// which is ordinary absence; this says the profile lost something instead,
-  /// so the report must not downgrade it to the same `info` signal. A failure
-  /// that happened *while reading* a named source lives on that
-  /// [`Source::failure`] rather than here.
-  ///
-  /// This is the opposite convention from the engine listing, where an empty
-  /// `sources` is itself the failure. The two engines discover differently:
-  /// Chromium lists only databases that exist, so having none is normal.
-  pub(crate) failure: Option<String>,
 }
 
 impl ChromiumExtractedProfile {
@@ -1058,7 +1057,6 @@ where
         profile_extractions.push(ChromiumExtractedProfile {
           profile,
           sources: Vec::new(),
-          failure: None,
         });
         continue;
       };
@@ -1084,7 +1082,6 @@ where
           profile_extractions.push(ChromiumExtractedProfile {
             profile,
             sources: vec![source],
-            failure: None,
           });
         }
         Err(error) => {
@@ -1123,7 +1120,6 @@ where
           profile_extractions.push(ChromiumExtractedProfile {
             profile,
             sources: vec![source],
-            failure: None,
           });
         }
       }

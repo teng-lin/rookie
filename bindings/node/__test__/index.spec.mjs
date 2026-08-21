@@ -1170,6 +1170,45 @@ Path=Profiles/work
   }
 });
 
+function loadErrorDecorator() {
+  const loader = readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  const start = loader.indexOf("const structuredErrorPrefix =");
+  const end = loader.indexOf("function asyncNative(");
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error("generated loader has no structured-error decorator");
+  }
+  const scope = { TypeError, Error, Set, Array, JSON, decorateNativeError: undefined };
+  runInNewContext(`${loader.slice(start, end)}\nthis.decorateNativeError = decorateNativeError`, scope);
+  return scope.decorateNativeError;
+}
+
+test("a structured payload without a message keeps the native text", (t) => {
+  const decorateNativeError = loadErrorDecorator();
+
+  // A payload this loader version does not fully understand must never cost
+  // the caller their diagnostic. Assigning `details.message` unguarded would
+  // let the Error setter coerce `undefined` into the string "undefined", and
+  // the parse succeeded so the catch branch cannot recover it.
+  const partial = new Error(`__ROOKIE_ERROR_V1__${JSON.stringify({ rookieCode: "timed_out" })}`);
+  decorateNativeError(partial);
+  t.is(partial.message, '__ROOKIE_ERROR_V1__{"rookieCode":"timed_out"}');
+  t.not(partial.message, "undefined");
+  t.is(partial.rookieCode, "timed_out", "the rest of the payload is still applied");
+
+  // A non-string `message` is the same hazard wearing a different type.
+  const wrongType = new Error(`__ROOKIE_ERROR_V1__${JSON.stringify({ message: 42 })}`);
+  decorateNativeError(wrongType);
+  t.is(wrongType.message, '__ROOKIE_ERROR_V1__{"message":42}');
+
+  // The ordinary case still replaces the prefixed blob with the real text.
+  const complete = new Error(
+    `__ROOKIE_ERROR_V1__${JSON.stringify({ message: "operation deadline expired", kind: "engine" })}`,
+  );
+  decorateNativeError(complete);
+  t.is(complete.message, "operation deadline expired");
+  t.is(complete.kind, "engine");
+});
+
 test("generated report exports and declarations survive patching", (t) => {
   const loader = readFileSync(new URL("../index.js", import.meta.url), "utf8");
   const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");

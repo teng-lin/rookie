@@ -128,9 +128,6 @@ pub(crate) fn root_path(
   resolved.base.join(resolved.suffix)
 }
 
-/// Resolves the highest-priority installation root for a browser on the
-/// running platform, so a fixture does not have to name a platform-specific
-/// root id.
 /// Every installation root a browser can resolve on the running platform, in
 /// registry order, so a fixture does not have to name platform-specific root
 /// ids.

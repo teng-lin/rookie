@@ -983,3 +983,56 @@ fn a_confidential_provider_failure_keeps_its_exact_report_code() {
   }
   assert_eq!(report.status, ReportStatusCode::partial());
 }
+
+/// A stop that discovery *recorded* rather than returned is still a stop.
+///
+/// The extract tower has somewhere to say so -- `BrowserDraft::termination` --
+/// but `browser_profiles` answers with a bare `Vec<ProfileDescriptor>`. Without
+/// this rejection the profiles found before the stop would be returned as a
+/// complete listing, which is the one thing an empty-or-complete list contract
+/// must never do. Chromium is excluded on purpose: its listing seam raises a
+/// stop as `Err` at each `runtime.check()?`, so it never reaches this field.
+#[test]
+fn a_recorded_stop_rejects_the_listing_it_truncated() {
+  use crate::common::deadline::BoundaryStop;
+
+  let temp = TempDir::new("gecko-listing-stop");
+  let context = test_seams::current_context(temp.path().to_path_buf());
+  let root = test_seams::primary_root_path(&context, "firefox");
+  test_seams::seed_gecko_profile(&root.join("Profiles/default"));
+  std::fs::write(
+    root.join("profiles.ini"),
+    "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+  )
+  .expect("write profiles.ini");
+  let browser = BrowserId::known("firefox");
+
+  // The same discovery twice: once as it stands, once with a stop planted on
+  // it. Only the stop differs, so the rejection cannot be blamed on the shape
+  // of the profiles.
+  let found = test_seams::gecko_profiles(&context, "firefox").expect("gecko listing");
+  assert_eq!(found.profiles.len(), 1, "the stop must truncate a find");
+  assert!(found.boundary_stop.is_none());
+  let completed = engine_listing_outcome(&browser, found).expect("adapt listing discovery");
+  assert_eq!(
+    profile_descriptors_from_outcome("firefox", completed)
+      .expect("no stop, so the profile is listed")
+      .len(),
+    1
+  );
+
+  let mut truncated = test_seams::gecko_profiles(&context, "firefox").expect("gecko listing");
+  truncated.boundary_stop = Some(BoundaryStop::TimedOut);
+  let stopped = engine_listing_outcome(&browser, truncated).expect("adapt listing discovery");
+  assert!(
+    !stopped.profiles.is_empty(),
+    "the partial list survives adaptation; the boundary is what rejects it"
+  );
+  let error = profile_descriptors_from_outcome("firefox", stopped)
+    .expect_err("a truncated listing must not be returned as a complete one");
+  assert_eq!(
+    error.downcast_ref::<BoundaryStop>(),
+    Some(&BoundaryStop::TimedOut),
+    "{error:#}"
+  );
+}

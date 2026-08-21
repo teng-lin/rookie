@@ -75,6 +75,7 @@ fn undetected_listing() -> BrowserListing {
     discovery_failed: false,
     profiles: Vec::new(),
     issues: Vec::new(),
+    boundary_stop: None,
   }
 }
 
