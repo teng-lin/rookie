@@ -295,7 +295,7 @@ mod tests {
   }
 
   #[test]
-  fn execution_control_without_app_bound_leaves_the_default_disabled_policy() {
+  fn execution_control_without_app_bound_leaves_the_default_injection_only_policy() {
     let control = execution_control_without_app_bound(None, None).expect("no timeout/cancellation");
     assert_eq!(control, rookie_core::ExecutionControl::default());
   }

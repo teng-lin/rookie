@@ -19,7 +19,7 @@ pip install rookie-cookies
 ```python
 import rookie_cookies as cookies
 
-# Gecko session import — select the profile AND opt into its session JSON
+# Gecko session import — profile selection and session policy are independent
 session_jar = cookies.jar(
     browser="firefox", profile="default-release", include_session=True
 )
@@ -212,8 +212,9 @@ until ≥ 0.7. `firefox_based_detailed()` stays for container context.
 
 ## Timeouts and cancellation
 
-`read` / `jar` / `extract_from_path` take `timeout` (seconds) and
-`cancellation`.
+`read`, `jar`, `from_path`, `extract_from_path`, report jobs, and profile-listing
+jobs accept `timeout` (seconds) and `cancellation`. The deprecated named
+browser helpers keep their old signatures and do not expose those controls.
 
 ```python
 import threading
@@ -243,8 +244,9 @@ finally:
 
 ## Windows App-Bound (v20) recovery
 
-`read`, `from_path`, `browser_report`, and `load_report` all take an
-`app_bound` keyword. It defaults to `"injection_only"`, because Chrome has
+`read`, `jar`, `from_path`, `extract_from_path`, `report`, `browser_report`,
+and `load_report` all take an `app_bound` keyword. It defaults to
+`"injection_only"`, because Chrome has
 written App-Bound (v20) cookies on Windows since Chrome 127 — on a current
 profile essentially every row is v20, so a policy that refused to recover them
 would return an **empty** list for the most common Windows case.
@@ -352,20 +354,22 @@ Wheels were `cp38-abi3` until the 0.6 break.
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
 | Recommended entry | `chrome()` / `to_cookiejar(...)` | `jar(browser=..., profile=...)` or `read(...).as_list()` |
-| Gecko session cookies | Not a first-class `profile=` | Pass `profile=` **and** `include_session=True` to `read` / `jar` for a Gecko browser |
+| Gecko session cookies | Not a first-class policy | Pass `include_session=True` to `read` / `jar`; `profile=` is optional and only selects which profile |
 | CPython | 3.8-era / `cp38-abi3` | **≥ 3.11**, `cp311-abi3` |
 | Path APIs | `firefox_based`, `chromium_based`, `any_browser` | `extract_from_path` (`cookies_from_path` / `chromium_cookies_from_path` are deprecated aliases onto it, kept until ≥ 0.7) |
 | Path request faults | Flat `RuntimeError` | `RookieRequestError` (`ValueError` subclass) |
 | Header view | Manual / `to_cookiejar` | `ReadResult.header(url)` or `header(context, ...)` — **no** module-level `header()` |
 | Isolation (CHIPS / containers) | Not in 0.5.6 | `ReadResult.detailed_cookies()` |
 | Reports | Not in 0.5.6 | `report(...)` / `browser_report(...)`, `profiles(...)` |
-| Windows App-Bound (v20) | Always `allow_elevated_fallback` (named helpers only) | Opt-in: `app_bound="injection_only"` / `"allow_elevated_fallback"` on `read` / `from_path` / `browser_report` / `load_report`; disabled by default |
+| Windows App-Bound (v20) | Always `allow_elevated_fallback` (named helpers only) | `app_bound="injection_only"` by default on jobs; pass `"disabled"` to opt out or `"allow_elevated_fallback"` to permit SYSTEM fallback |
 
 1. Bump to CPython 3.11+.
-2. For Gecko session import, use `jar(browser="firefox", profile="default-release", include_session=True)`.
+2. For Gecko session import, pass `include_session=True`; add `profile=` only
+   when you need a profile other than the legacy-first choice.
 3. Keep named helpers only for the frozen compatibility set.
 4. Move explicit DB paths off `*_based` / `any_browser` and onto `extract_from_path`.
-5. Catch `RookieRequestError` (and optionally `RookieEngineError`).
+5. Catch `RookieError` for every library failure, or catch the specific
+   request/source/stopped/engine subclass you intend to handle.
 6. Do not invent a top-level `header()`.
 7. Use `detailed_cookies()` where a CHIPS partition or Firefox container matters.
 

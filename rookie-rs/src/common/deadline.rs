@@ -179,8 +179,8 @@ pub(crate) enum DeadlineEnforcement {
 /// **not** to the public default. They back the deprecated v0.5.9 bridge,
 /// whose App-Bound capability shipped in 0.5.8 and must keep working through
 /// 0.6.x. Only [`runtime_for_control`] carries the request's own policy, whose
-/// default is `Disabled` -- so opting out is a property of the new job
-/// surface, not a silent capability loss on the old one.
+/// default is `InjectionOnly`; callers opt out explicitly with `Disabled`, or
+/// opt into this legacy elevated fallback explicitly.
 #[derive(Clone)]
 pub(crate) struct BoundaryRuntime<'a> {
   pub(crate) clock: &'a dyn Clock,

@@ -15,10 +15,12 @@ to read the item.
 
 ## Session cookies
 
-Pass `profile=` / `profile` / `.profile(...)` to `read` / `jar` when you need
-session cookies (see [ADR 0004](adr/0004-read-is-the-recommended-entry.md)).
-Omitting the profile keeps the legacy flat first-profile selection (persistent /
-legacy-eligible cookies only).
+Pass `include_session=True` / `includeSession: true` /
+`.include_session()` / `--include-session` to `read` or `jar` when you need a
+Gecko browser's declared session store (see
+[ADR 0004](adr/0004-read-is-the-recommended-entry.md)). Profile selection is
+independent: omit it for the legacy-first profile, or name a profile to select
+that profile. Naming a profile alone does not open the session store.
 
 Some Chromium setups historically restarted the browser to reach locked
 databases. Prefer non-disruptive extraction; do not assume a process restart is
@@ -38,11 +40,12 @@ Copy the cookie database off the device, then point the CLI at that file:
 
 ```console
 find /data/data -type f -name Cookies
-rookie-cookies --path <Cookies path>
+rookie-cookies from-path <Cookies path>
 ```
 
 On Windows Chromium paths, select credentials explicitly with exactly one of
-`--browser-id`, `--key-path` (a `Local State` file), or `--plaintext-only`.
+`--browser-id`, `--local-state-path` (a `Local State` file), or
+`--plaintext-only`.
 
 ## Manually import website cookies in a browser
 
@@ -76,7 +79,9 @@ def create_js_code(cookies):
 
 
 # Prefer read/jar for session import; named helpers remain for compatibility.
-rows = rookie_cookies.read(browser="brave", profile="Default").as_list()
+rows = rookie_cookies.read(
+    browser="firefox", profile="default-release", include_session=True
+).as_list()
 # Or domain-filter the compatibility flat list:
 # rows = rookie_cookies.brave(["github.com"])
 print(create_js_code(rows))

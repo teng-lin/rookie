@@ -205,7 +205,7 @@ where
           Retryability::NotRetryable,
         )
       }
-      // `Disabled` is the default, and it means exactly what it says: no
+      // `Disabled` means exactly what it says: no
       // injection, no browser process spawn, no process enumeration, no SYSTEM
       // impersonation. v20 rows stay unreadable, and saying so is not
       // retryable -- retrying cannot change a policy fixed for the job.

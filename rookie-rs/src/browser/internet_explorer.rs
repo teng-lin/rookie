@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// cookie database is read through an unmodified native C library with no
 /// process isolation, and this crate is not planning to keep investing in
 /// containing it. See [`crate::internet_explorer`] for the full rationale.
-/// `direct_path::cookies_from_path` with `DirectPathRequest` remains
+/// `direct_path::extract_from_path` with `PathExtractRequest` remains
 /// available for the rest of the deprecation window.
 #[deprecated(
   since = "0.6.0",

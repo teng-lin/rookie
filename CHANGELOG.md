@@ -83,7 +83,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Node and Python errors expose stable request/engine identity, library fault
   codes, stop reasons, ambiguous-profile IDs, and redacted direct-path
   metadata. Node read warnings also report when their count was saturated to
-  the binding's `u32` range.
+  JavaScript's `Number.MAX_SAFE_INTEGER` (`2^53 - 1`).
 - The generated report JSON Schema now enforces the same lexical constraints
   as Rust for open vocabulary identifiers and opaque installation/profile IDs.
 - Python `ReadResult` gains `detailed_cookies()`: isolation-intact records,
@@ -201,6 +201,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Node `fromPath` and the CLI `from-path` command reject every combination of
   conflicting Chromium credential selectors before source I/O. Python option
   shape failures consistently use `RookieRequestError`.
+- **Breaking (CLI):** the former top-level flag modes are replaced by required
+  job subcommands: `read`, `from-path`, `header`, `report`, `profiles`, and
+  `browsers`. Explicit paths are positional to `from-path`, and the Windows
+  Chromium credential option is now `--local-state-path`; top-level `--path`,
+  `--browser`, `--load`, `--report`, `--list-*`, and `--key-path` are not
+  accepted by the current CLI.
 - Stopped report work now carries a typed request issue and cannot be reported
   as ordinary `no_sources`; completed source data remains available with a
   partial status. Finalization issues preserve causes including decrypt,
@@ -224,8 +230,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Rust `load()` is superseded by `read(ReadRequest::browser(...))` for
   snapshots and `load_report()` for grouped diagnostics. `CookieToString` is
-  an unfiltered compatibility formatter; use `ReadResult::header(url)` for a
-  URL-scoped header view.
+  an unfiltered compatibility formatter; use
+  `ReadResult::header(&SendContext)` for a send-scoped header view.
 - The free `stop_reason` / `fault_kind` functions and `Error::fault_kind`.
   `FaultKind` is a two-way FFI split that collapses three of `Error`'s four
   variants; match on `Error`, or compare `Error::code()`.

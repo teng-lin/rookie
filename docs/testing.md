@@ -83,7 +83,7 @@ expands the language matrix.
 
 - Node: build+tests on the full 3 OS × 22/24/26 product.
 - Python build+tests on the full 3 OS × 3.11–3.14 product.
-- **FreeBSD VM:** Mozilla `--path` works; Chromium SQLite is unsupported there
+- **FreeBSD VM:** Mozilla `from-path` works; Chromium SQLite is unsupported there
   (typed error). No `--allow-process-shutdown`.
 - manylinux / Windows / macOS Intel wheel packaging jobs and the Python sdist.
 
@@ -111,20 +111,22 @@ through **Rust, Python, Node, and CLI**.
 
 These jobs never inspect the operator’s real default profile.
 
-CLI checker (same contract as CI):
+Current CLI job shapes to use when reproducing an E2E assertion:
 
 ```console
-python3 tests/e2e/assert_cli_cookie.py path/to/cookies.sqlite
-python3 tests/e2e/assert_cli_cookie.py path/to/Cookies \
-  --key-path 'path/to/Local State'
-python3 tests/e2e/assert_cli_cookie.py --browser chrome
+rookie-cookies from-path path/to/cookies.sqlite --domains 127.0.0.1
+rookie-cookies from-path path/to/Cookies \
+  --local-state-path 'path/to/Local State' --domains 127.0.0.1
+rookie-cookies read --browser chrome
 ```
 
-`--key-path`, `--browser-id`, and `--plaintext-only` require `--path` and are
-mutually exclusive. `--key-path` is always a Windows Chromium `Local State`
-file.
+`--local-state-path`, `--browser-id`, and `--plaintext-only` belong to the
+`from-path` subcommand and are mutually exclusive. `--local-state-path` is a
+Windows Chromium `Local State` file. The former top-level `--path` /
+`--browser` grammar and `--key-path` spelling are no longer public CLI syntax.
 
-`ROOKIE_E2E_CLI` points at a binary outside `target/release`.
+The cross-platform `tests/e2e/assert_cli_cookie.py` wrapper is the CI assertion
+driver. `ROOKIE_E2E_CLI` points it at a binary outside `target/release`.
 `ROOKIE_E2E_COOKIE_NAME` / `ROOKIE_E2E_COOKIE_VALUE` override the expected
 cookie.
 

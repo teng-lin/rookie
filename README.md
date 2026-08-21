@@ -121,11 +121,13 @@ no error. Chromium registrations declare no separate session source, so
 selecting a Chrome profile never recovered session state held only in browser
 memory.
 
-`read` never URL-filters the snapshot; `ReadResult.header` is a **view** that
-takes a send context, not a bare URL — a URL cannot say which browsing context
-a request comes from, so it could not tell a partitioned cookie from an
-unpartitioned one. There is no top-level binding `header()`, and no crate-root
-Rust `get` / `report`.
+`read` never URL-filters the snapshot; `ReadResult.header` is a **view** over a
+send context. Rust passes `&SendContext`; Python and Node also accept a bare URL
+as convenience syntax for the conservative default context. A bare URL is not
+enough once the snapshot contains a partitioned or container-scoped cookie, so
+those calls fail with the missing selectors instead of merging isolation
+boundaries. There is no top-level binding `header()`, and no crate-root Rust
+`get` / `report`.
 
 ### Python
 
