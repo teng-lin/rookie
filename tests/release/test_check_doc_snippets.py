@@ -52,7 +52,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "rookie-rs" / "README.md").write_text(
-                "# rust\n\n## Recommended 0.6.0 usage\n\n"
+                "# rust\n\n## Recommended usage (0.6 series)\n\n"
                 "## 0.5.6 API\n\n## Migrate 0.5.6 → 0.6.0\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
                 encoding="utf-8",
@@ -72,17 +72,17 @@ class CheckDocSnippetsTests(unittest.TestCase):
             self._seed_minimal_surfaces(root)
             (root / "README.md").write_text("# demo\n", encoding="utf-8")
             (root / "bindings" / "python" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```python\nfrom rookie_cookies import header\nheader('https://x')\n```\n",
                 encoding="utf-8",
             )
             (root / "bindings" / "node" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```js\nimport { chrome } from \"rookie-cookies\";\nawait chrome();\n```\n",
                 encoding="utf-8",
             )
             (root / "rookie-rs" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
                 encoding="utf-8",
             )
@@ -100,7 +100,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
             root = Path(temp)
             self._seed_minimal_surfaces(root)
             (root / "bindings" / "python" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```python\nfrom rookie_cookies import (\n    chrome,\n"
                 "    not_a_real_export,\n)\n```\n",
                 encoding="utf-8",
@@ -119,7 +119,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
             root = Path(temp)
             self._seed_minimal_surfaces(root)
             (root / "bindings" / "node" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```js\nimport { notARealExport } from \"rookie-cookies\";\n"
                 "await notARealExport();\n```\n",
                 encoding="utf-8",
@@ -138,7 +138,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
             root = Path(temp)
             self._seed_minimal_surfaces(root)
             (root / "rookie-rs" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::not_a_real_export(); }\n```\n",
                 encoding="utf-8",
             )
@@ -156,7 +156,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
             root = Path(temp)
             self._seed_minimal_surfaces(root)
             (root / "rookie-rs" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```rust\nuse rookie_cookies::report;\n"
                 "fn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
                 encoding="utf-8",
@@ -183,7 +183,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
             root = Path(temp)
             self._seed_minimal_surfaces(root)
             (root / "rookie-rs" / "README.md").write_text(
-                "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+                "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
                 "```rust\nfn main() { let _ = rookie_cookies::report(\"chrome\"); }\n```\n",
                 encoding="utf-8",
             )
@@ -272,17 +272,17 @@ class CheckDocSnippetsTests(unittest.TestCase):
         )
         (root / "docs").mkdir()
         (root / "rookie-rs" / "README.md").write_text(
-            "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+            "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
             "```rust\nfn main() { let _ = rookie_cookies::chrome(None); }\n```\n",
             encoding="utf-8",
         )
         (root / "bindings" / "python" / "README.md").write_text(
-            "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+            "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
             "```python\nimport rookie_cookies\nx = rookie_cookies.chrome()\n```\n",
             encoding="utf-8",
         )
         (root / "bindings" / "node" / "README.md").write_text(
-            "## Recommended 0.6.0 usage\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
+            "## Recommended usage (0.6 series)\n## 0.5.6 API\n## Migrate 0.5.6\n\n"
             "```js\nimport { chrome } from \"rookie-cookies\";\nawait chrome();\n```\n",
             encoding="utf-8",
         )

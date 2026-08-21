@@ -4,8 +4,9 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **JavaScript guide** (npm landing page and repo tutorial).
 Rust stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
-`read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+The recommended 0.6 entry is `read`
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+Package metadata and `version()` identify the installed build.
 
 **Node.js ≥ 22** (tested 22, 24, 26). Every extraction export returns a
 **Promise** — always `await`. `version()` is synchronous.
@@ -19,7 +20,7 @@ npm install rookie-cookies
 > Pass `appBound: "disabled"` to `read`, `fromPath`, or report jobs to perform
 > no App-Bound process work; `v20` rows will then be omitted with a warning.
 
-## Recommended 0.6.0 usage
+## Recommended usage (0.6 series)
 
 ```js
 import { read } from "rookie-cookies";
@@ -40,9 +41,9 @@ snapshot.
 - No-profile `await read({ browser: "chrome" })` matches legacy `chrome()`
   (persistent / legacy-eligible cookies).
 - `includeSession: true` also acquires a Gecko-family profile's separately
-  declared session JSON source. **Migration trap:** in 0.6-beta, naming a
-  Gecko `profile` alone imported session cookies; in 0.6.0 it does not — pass
-  `includeSession: true` explicitly. This fails *silently*: a smaller
+  declared session JSON source. **Migration trap:** in earlier 0.6 prereleases,
+  naming a Gecko `profile` alone imported session cookies; it no longer does —
+  pass `includeSession: true` explicitly. This fails *silently*: a smaller
   snapshot, no error. Chromium registrations declare no separate session
   source and cannot recover session state that exists only in browser memory,
   so `includeSession` is a no-op there.
@@ -215,9 +216,10 @@ Invalid option shapes reject with `TypeError` before I/O. Process shutdown is
 not exposed. With no selector at all, the source is sniffed from its
 signature and schema: a Chromium database found this way is plaintext-capable
 only (an encrypted row is `missing_chromium_credentials`) — on Unix this is a
-narrowing from 0.6-beta, which probed every registered browser identity in
-turn; on Windows it is a widening, since a fully plaintext database used to
-reject with `missing_local_state_file` before attempting extraction.
+narrowing from earlier 0.6 prereleases, which probed every registered browser
+identity in turn; on Windows it is a widening, since a fully plaintext
+database used to reject with `missing_local_state_file` before attempting
+extraction.
 
 For isolation-carrying (detailed) path extraction, use
 `fromPath(...).detailedCookies` instead — `fromPath`, like `read`, never

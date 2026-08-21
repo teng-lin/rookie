@@ -20,8 +20,8 @@ job API (`read` / Python `jar`). Later releases will break the old surface as we
 add capabilities and clean up the design. Plan on migrating; do not take the
 legacy helpers as frozen forever.
 
-The workspace is currently `0.6.0-beta.1`. The snippets below are the
-**0.6.0** recommended surface.
+The snippets below document the recommended API for the 0.6 release line.
+Package metadata and `version()` are authoritative for the installed build.
 
 ## What is different from upstream rookie
 
@@ -115,18 +115,18 @@ Set `AppBoundPolicy::Disabled` in Rust, `app_bound="disabled"` in Python,
 `appBound: "disabled"` in Node, or `--app-bound disabled` in the CLI to opt
 out; App-Bound rows will then be omitted and reported as unavailable.
 
-## Recommended 0.6 usage
+## Recommended usage (0.6 series)
 
 Pass a **profile** to select one discovered profile; omit it to match the old
 first-profile, legacy-compatible helpers.
 
-**Session cookies are a separate question in 0.6.0.** Ask for them with
-`include_session` (`includeSession` in Node, `--include-session` on the CLI).
-Naming a profile no longer implies them, and the change is quiet: a Gecko
-`jar(profile="Default")` returns a smaller jar than it did in 0.6-beta, with
-no error. Chromium registrations declare no separate session source, so
-selecting a Chrome profile never recovered session state held only in browser
-memory.
+**Session cookies are a separate question in the current API.** Ask for them
+with `include_session` (`includeSession` in Node, `--include-session` on the
+CLI). Naming a profile no longer implies them, and the change is quiet: a
+Gecko `jar(profile="Default")` returns a smaller jar than it did in earlier
+0.6 prereleases, with no error. Chromium registrations declare no separate
+session source, so selecting a Chrome profile never recovered session state
+held only in browser memory.
 
 `read` never URL-filters the snapshot; `ReadResult.header` is a **view** over a
 send context. Rust passes `&SendContext`; Python and Node also accept a bare URL
@@ -195,8 +195,8 @@ subcommands only: `header` takes `--url` rather than a positional, `report`
 takes an optional `--browser` (omitting it means the aggregate report), and
 the old top-level `--path` / `--browser` flags are gone.
 
-Coming from 0.5.6 named helpers? Each language guide has a **0.5.6 API**
-section and a **migrate 0.5.6 → 0.6.0** section:
+Coming from the legacy named helpers? Each language guide documents the
+compatibility surface and its migration to the recommended 0.6 API:
 [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md).
 
 ## Security
@@ -216,15 +216,16 @@ Platform quirks (Keychain prompts, Safari Full Disk Access):
 
 | | |
 | --- | --- |
+| Documentation index | [docs/README.md](docs/README.md) |
 | Language guides | [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md) |
 | Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
-| Security | [docs/security.md](docs/security.md) (corrections + SQLite inventory) |
+| Security | [reporting policy](SECURITY.md) · [engineering index](docs/security.md) |
 | Design | [architecture](docs/architecture.md) · [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
 | Examples | [python](examples/python) · [javascript](examples/javascript) · [rust](examples/rust) |
 
 ```console
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --locked
 python3 scripts/check-doc-snippets.py
 ```
 

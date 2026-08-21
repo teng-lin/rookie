@@ -10,9 +10,9 @@ and
 The monorepo front door is the root
 [`README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/README.md).
 
-The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
-`read(ReadRequest::…)`
+The recommended 0.6 entry is `read(ReadRequest::…)`
 ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+Crate metadata and `version()` identify the installed build.
 
 ```console
 cargo add rookie-cookies
@@ -24,7 +24,7 @@ cargo add rookie-cookies
 > `.app_bound(AppBoundPolicy::Disabled)` to perform no App-Bound process work;
 > `v20` rows will then be omitted with a warning.
 
-## Recommended 0.6.0 usage
+## Recommended usage (0.6 series)
 
 ```rust
 use rookie_cookies::{read, ReadRequest, SendContext};
@@ -255,7 +255,7 @@ did not survive decode is **omitted** from the snapshot and counted under the
 ## Send-safe headers
 
 `ReadResult::header` takes a `SendContext`, not a bare URL. A URL alone cannot
-say which browsing context a request is made from, so the 0.6-beta
+say which browsing context a request is made from, so the earlier prerelease
 `header(url)` had no way to tell a CHIPS-partitioned cookie from an
 unpartitioned one — it merged them.
 
@@ -307,8 +307,8 @@ browser-exact behavior needs a browser.
 use rookie_cookies::{read, ReadRequest};
 
 fn main() -> rookie_cookies::Result<()> {
-    // 0.6-beta reached session cookies only by naming a profile, and always
-    // did. Now the two are separate, and this is expressible:
+    // Earlier 0.6 prereleases reached session cookies only by naming a
+    // profile, and always did. Now the two are separate and expressible:
     let snapshot = read(ReadRequest::browser("firefox").include_session())?;
     println!("{}", snapshot.cookies().len());
     Ok(())
@@ -322,8 +322,8 @@ filter: without `include_session()` the crate never opens `sessionstore.js` or
 separate session source, so the policy is a no-op there.
 
 **Migration trap:** `read(...).profile("Default")` on a Gecko browser returned
-session cookies in 0.6-beta and does not in 0.6.0 without `include_session()`.
-It fails quietly — a smaller list, no error.
+session cookies in earlier 0.6 prereleases and no longer does without
+`include_session()`. It fails quietly — a smaller list, no error.
 
 ## Windows App-Bound (v20)
 

@@ -4,8 +4,9 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **Python guide** (PyPI landing page and repo tutorial). Rust
 stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
-`jar` / `read` ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+The recommended 0.6 entry is `jar` / `read`
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+Package metadata and `version()` identify the installed build.
 
 CPython **≥ 3.11**. Wheels are `cp311-abi3` (tested 3.11–3.14). CPython 3.8–3.10
 and PyPy are not supported in 0.6.
@@ -20,7 +21,7 @@ pip install rookie-cookies
 > perform no App-Bound process work; `v20` rows will then be omitted with a
 > warning.
 
-## Recommended 0.6.0 usage
+## Recommended usage (0.6 series)
 
 ```python
 import rookie_cookies as cookies
@@ -46,8 +47,9 @@ send-match. There is **no** module-level `header()` — call
 - **`include_session` defaults to `False`.** Naming a Gecko `profile` alone no
   longer also acquires its separately declared session JSON source — pass
   `include_session=True` to `read()` / `jar()` for that. **Breaking change
-  from 0.6-beta**, where naming a profile always included session cookies;
-  this fails quietly (a smaller result, no error) — see CHANGELOG.md.
+  from earlier 0.6 prereleases**, where naming a profile always included
+  session cookies; this fails quietly (a smaller result, no error) — see
+  CHANGELOG.md.
 - Chromium registrations have no separate session source; `include_session`
   is a no-op there regardless.
 
@@ -207,8 +209,8 @@ file failure—raise `RookieEngineError`/`RuntimeError` with
 
 `cookies_from_path` (positional `domains`, no credential selectors) and
 `chromium_cookies_from_path` (an options dict) are deprecated aliases onto
-`extract_from_path` — same behavior, kept for 0.6-beta callers, not removed
-outright since deleting them this late buys nothing.
+`extract_from_path` — same behavior, kept for earlier 0.6 prerelease callers,
+not removed outright since deleting them this late buys nothing.
 
 **`chromium_cookies_from_path_detailed` has no replacement of the same shape
 and no longer accepts a `domains` option.** Isolation-aware output now comes
