@@ -544,7 +544,7 @@ The following claims from the Grok report are confirmed as maintenance debt, not
 3. Gecko and Safari/IE retain two acquisition frames with slightly different stop sampling. Unify only if one typed outcome can preserve both policies; do not flatten behavior for aesthetic symmetry.
 4. Registry and direct-path Chromium extraction have two entry towers over the same decoder. Centralize key acquisition/unseal policy where practical, while retaining distinct discovery and explicit-path boundaries.
 5. `_with_runtime` is a naming convention rather than a type-level guarantee. Prefer making runtime-taking production seams the only non-test path and keep unsuffixed helpers under `#[cfg(test)]` where possible.
-6. Historical `populate_*`, `query_cookies_*`, and `*Draft` names conflict with the architecture vocabulary. Rename mechanically only in a dedicated change.
+6. **Resolved 2026-08-20:** the dedicated mechanical pass aligned adapter and engine functions with `acquire` / `decode` / `extract`. Engine-private parse scratch may still use `*Draft`, as ADR 0005 permits.
 7. Listing DTOs omit discovery-time `selected` and acquisition hints, so report goldens cannot detect their drift. Add characterization tests unless those fields are intentionally added to the wire.
 8. Discovery filesystem walks and the Chromium cursor contain cooperative-cancellation blind spots. Add checkpoints at bounded iteration intervals; do not claim hard cancellation around OS calls that cannot be interrupted.
 

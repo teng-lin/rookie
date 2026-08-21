@@ -91,7 +91,7 @@ fn chromium_detailed(
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
       let outcomes = browser_id_outcomes(&browser_id, runtime)?;
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
+      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, false, runtime,
       )
     }

@@ -94,13 +94,16 @@ Deleted as internal *vocabulary*: `query` for anything but SQL, `populate`,
 New code does not reach for these words, and prose in this repository does not
 use them for those meanings.
 
-This governs the words, not today's identifiers. `populate_gecko_sources`,
-`populate_safari_sources`, `populate_internet_explorer_sources`,
-`query_cookies_engine_outcome_with_runtime`, `query_cookies_from_connection`,
-and `query_cookies_with_key_outcomes` are live production functions and keep
-their spellings as historical identifiers until a later, deliberate, mechanical
-rename. An ADR that a single `rg` disproves teaches contributors to skip
-ADRs.
+*Amended 2026-08-20:* the authorized, dedicated mechanical rename is complete.
+The three engine adapter loops and their shared envelope now use
+`acquire_*_sources`; the Chromium candidate boundary is
+`acquire_chromium_source_with_runtime`; the Mozilla direct profile walk is
+`acquire_mozilla_profile_with_runtime`; and the already-open Chromium SQL
+connection seam is `decode_chromium_connection`. Compatibility orchestration
+helpers that span acquisition through projection use `extract_*`. The change
+renamed no public API, frozen wire value, issue code, registry key, or genuine
+SQL concept. A source-only `rg` therefore agrees with this vocabulary instead
+of relying on an exception list.
 Profile matching is `select` / `ProfileQuery` (ADR 0003). Engine work is
 `acquire`. Finalization is `Outcome::finalize`. Projection is the last stage
 only — `Outcome` to `ExtractionReport`, `Cookie[]`, or `ReadResult`; mapping

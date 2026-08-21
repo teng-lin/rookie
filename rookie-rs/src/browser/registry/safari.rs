@@ -1,13 +1,13 @@
 use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
 use super::super::source::{Source, SourceCandidate, SourceFailureStage, SourceStats};
 use super::{
-  acquire_each_candidate, boundary_stop_from_error, canonical_installation_root, embedded_registry,
-  engine_roots, installation_id, installation_root_is_directory, normalized_path_bytes,
-  populate_engine_sources, profile_id, retain_engine_runtime_stop, select_listing_profiles,
-  sort_discovered_profiles, AcquisitionPolicy, BrowserEngine, DiscoveredProfile, DiscoveryContext,
-  DiscoveryFs, DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing,
-  EngineProfileIdentity, ExtractCompletion, LegacyRank, ProfileLocator, ProfileSelection,
-  SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
+  acquire_each_candidate, acquire_engine_sources, boundary_stop_from_error,
+  canonical_installation_root, embedded_registry, engine_roots, installation_id,
+  installation_root_is_directory, normalized_path_bytes, profile_id, retain_engine_runtime_stop,
+  select_listing_profiles, sort_discovered_profiles, AcquisitionPolicy, BrowserEngine,
+  DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue, DiscoveryStrategy,
+  EngineExtract, EngineListing, EngineProfileIdentity, ExtractCompletion, LegacyRank,
+  ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{DiscoveryCounters, ExtractedProfile};
@@ -348,11 +348,11 @@ where
   runtime.check()?;
   select_listing_profiles(&mut listing, browser_id, selection)?;
   runtime.check()?;
-  let extract = populate_safari_sources_with_runtime(listing, domains, runtime, query);
+  let extract = acquire_safari_sources_with_runtime(listing, domains, runtime, query);
   Ok(retain_engine_runtime_stop(extract, runtime))
 }
 
-pub(super) fn populate_safari_sources<Q>(
+pub(super) fn acquire_safari_sources<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
   query: Q,
@@ -360,10 +360,10 @@ pub(super) fn populate_safari_sources<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  populate_safari_sources_impl(listing, domains, None, query)
+  acquire_safari_sources_impl(listing, domains, None, query)
 }
 
-fn populate_safari_sources_with_runtime<Q>(
+fn acquire_safari_sources_with_runtime<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
@@ -372,21 +372,21 @@ fn populate_safari_sources_with_runtime<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  populate_safari_sources_impl(listing, domains, Some(runtime), query)
+  acquire_safari_sources_impl(listing, domains, Some(runtime), query)
 }
 
-/// Candidate-driven populate (unlike Gecko's path/query walk): discovery plants
+/// Candidate-driven acquisition: discovery plants
 /// exactly the Safari candidates, and each is acquired in turn. Safari inherits
 /// the candidate's frozen `selected: true` + `StableFileImage` through
 /// [`Source::new`] from the candidate's own values; only records, attempts,
 /// and failure are overlaid.
 ///
-/// The envelope is [`populate_engine_sources`] and the per-candidate walk is
+/// The envelope is [`acquire_engine_sources`] and the per-candidate walk is
 /// [`acquire_each_candidate`], shared with Internet Explorer. All that is left
 /// here is how Safari writes a failed query onto the placeholder, and the
 /// completion policy: on a stop, keep everything committed and drop only a
 /// stopped profile that committed nothing.
-fn populate_safari_sources_impl<Q>(
+fn acquire_safari_sources_impl<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
   runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
@@ -395,7 +395,7 @@ fn populate_safari_sources_impl<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  populate_engine_sources(
+  acquire_engine_sources(
     listing,
     ExtractCompletion::DropStoppedProfileIfEmpty,
     |_identity, candidates| {
@@ -508,16 +508,12 @@ pub(crate) fn legacy_safari_outcome_with_runtime(
   runtime.check()?;
   select_legacy_safari_profile(&mut listing, browser_id)?;
   runtime.check()?;
-  let extract = populate_safari_sources_with_runtime(
-    listing,
-    domains.as_deref(),
-    runtime,
-    |origin, domains| {
+  let extract =
+    acquire_safari_sources_with_runtime(listing, domains.as_deref(), runtime, |origin, domains| {
       query_safari_file(origin, domains, |origin, domains| {
         crate::browser::safari::safari_based_outcome_with_runtime(origin, domains, runtime)
       })
-    },
-  );
+    });
   Ok(retain_engine_runtime_stop(extract, runtime))
 }
 
@@ -1098,7 +1094,7 @@ mod tests {
 
   #[test]
   fn source_population_preserves_rows_attempts_and_failure_stage() {
-    let success = populate_safari_sources(discovered_source(), None, |origin, _| {
+    let success = acquire_safari_sources(discovered_source(), None, |origin, _| {
       Ok(crate::browser::safari::safari_source(
         origin,
         Vec::new(),
@@ -1129,7 +1125,7 @@ mod tests {
       });
     let expected_parse_error = format!("{parse_error:#}");
     let mut parse_error = Some(parse_error);
-    let parse = populate_safari_sources(discovered_source(), None, |_origin, _| {
+    let parse = acquire_safari_sources(discovered_source(), None, |_origin, _| {
       Err(parse_error.take().expect("single parse query"))
     });
     let parse = &parse.profiles[0].sources[0];
@@ -1151,7 +1147,7 @@ mod tests {
     let acquisition_error = anyhow!("Safari source denied").context("acquire Safari cookie file");
     let expected_acquisition_error = format!("{acquisition_error:#}");
     let mut acquisition_error = Some(acquisition_error);
-    let acquisition = populate_safari_sources(discovered_source(), None, |_origin, _| {
+    let acquisition = acquire_safari_sources(discovered_source(), None, |_origin, _| {
       Err(acquisition_error.take().expect("single acquisition query"))
     });
     let acquisition = &acquisition.profiles[0].sources[0];
@@ -1195,7 +1191,7 @@ mod tests {
         )));
       let calls = Cell::new(0);
 
-      let populated = populate_safari_sources(discovered, None, |origin, _| {
+      let populated = acquire_safari_sources(discovered, None, |origin, _| {
         let call = calls.get();
         calls.set(call + 1);
         if call == 0 {
@@ -1247,7 +1243,7 @@ mod tests {
     discovered.profiles.push(unattempted);
     let calls = Cell::new(0);
 
-    let populated = populate_safari_sources(discovered, None, |origin, _| {
+    let populated = acquire_safari_sources(discovered, None, |origin, _| {
       let call = calls.get();
       calls.set(call + 1);
       if call == 0 {
@@ -1282,7 +1278,7 @@ mod tests {
       .candidates
       .push(discovered_source_draft(second_path));
     let calls = Cell::new(0);
-    let populated = populate_safari_sources(discovered, None, |origin, _| {
+    let populated = acquire_safari_sources(discovered, None, |origin, _| {
       let call = calls.get();
       calls.set(call + 1);
       if call == 0 {
@@ -1375,7 +1371,7 @@ mod tests {
         "/Users/rookie/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
       )));
     let calls = Cell::new(0);
-    let outcome = populate_safari_sources_with_runtime(discovered, None, &runtime, |origin, _| {
+    let outcome = acquire_safari_sources_with_runtime(discovered, None, &runtime, |origin, _| {
       calls.set(calls.get() + 1);
       let completed = crate::browser::safari::safari_source(
         origin,
@@ -1926,7 +1922,7 @@ mod tests {
     select_legacy_safari_profile(&mut outcome, "safari").expect("select legacy Safari profile");
     assert!(outcome.profiles.is_empty());
     let mut queries = 0;
-    let outcome = populate_safari_sources(outcome, None, |_, _| {
+    let outcome = acquire_safari_sources(outcome, None, |_, _| {
       queries += 1;
       bail!("named Safari profile must not be queried by the legacy selector")
     });

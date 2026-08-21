@@ -1,4 +1,4 @@
-use super::super::chromium::query_cookies_engine_outcome_with_runtime;
+use super::super::chromium::acquire_chromium_source_with_runtime;
 #[cfg(all(test, target_os = "macos"))]
 use super::super::chromium_crypto::ChromiumKeyOutcome;
 use super::super::chromium_crypto::{retrieve_key_outcomes, ChromiumKeyOutcomes, KeyProvider};
@@ -1062,7 +1062,7 @@ where
         });
         continue;
       };
-      match query_cookies_engine_outcome_with_runtime(
+      match acquire_chromium_source_with_runtime(
         &key_outcomes,
         candidate.clone(),
         domains.clone(),

@@ -370,7 +370,7 @@ fn query_prepared(
       )
     }
     PreparedCredentials::KeyOutcomes(outcomes) => {
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
+      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, force_kill, runtime,
       )
     }
@@ -385,12 +385,12 @@ fn query_prepared_without_platform_recovery(
 ) -> Result<Vec<DetailedCookie>> {
   match credentials {
     PreparedCredentials::PlaintextOnly => {
-      crate::browser::chromium::query_detailed_cookies_plaintext_without_platform_recovery(
+      crate::browser::chromium::extract_detailed_cookies_plaintext_without_platform_recovery(
         path, domains, runtime,
       )
     }
     PreparedCredentials::KeyOutcomes(outcomes) => {
-      crate::browser::chromium::query_detailed_cookies_with_key_outcomes_without_platform_recovery(
+      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_without_platform_recovery(
         outcomes, path, domains, runtime,
       )
     }

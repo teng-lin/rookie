@@ -17,6 +17,13 @@ Public freeze (do not lift — the DTO exception contemplated in Rev 9 was suspe
 > map](../architecture.md) for current types, ownership, job flows, and CI
 > fences; ADR 0005 remains the durable decision record.
 
+> **Post-program maintenance (2026-08-20).** Decision 16's optional dedicated
+> rename has now landed: live adapter loops use `acquire_*_sources`, the
+> Chromium candidate boundary uses `acquire_chromium_source_with_runtime`, and
+> the Mozilla profile walk uses `acquire_mozilla_profile_with_runtime`. Older
+> identifiers below remain only because this file preserves the completed
+> program's review record; they are not current-tree guidance.
+
 ---
 
 ## Overview
@@ -975,7 +982,11 @@ Locked. Implementation PRs do not reopen these.
 
 15. **Module layout stays `foo.rs` + `foo/child.rs`.** Dispose lives in a new sibling `browser/compatibility.rs` (same pattern as `source.rs`). It is not folded into `outcome.rs`. No parent becomes `mod.rs`.
 
-16. **`populate_*_sources` and `query_cookies_engine_outcome_with_runtime` are historical identifiers.** ADR 0005 deleted those words as internal *verbs*. This program does not rename the functions. A later mechanical rename is allowed and is not scheduled here.
+16. **Historical identifiers were outside this program.** ADR 0005 deleted
+    `populate` and non-SQL `query` as internal verbs, while this program
+    deliberately left the then-live identifiers unchanged. The separately
+    authorized mechanical rename completed on 2026-08-20; see ADR 0005
+    Decision 3 and the current architecture map.
 
 17. **`Source` embeds the candidate's *identity*, not the candidate.** The listing fields are live on `SourceCandidate` and dead on `Source.origin`; the fix is to narrow the position, not to delete the fields.
 

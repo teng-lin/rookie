@@ -588,7 +588,7 @@ mod tests {
           installation_path: PathBuf::from("/browser"),
           name: "default".to_owned(),
         },
-        // Post-populate fixture: these sources have already been queried.
+        // Post-acquisition fixture: these sources have already been acquired.
         sources: source.into_iter().collect(),
       }],
       counters: DiscoveryCounters {

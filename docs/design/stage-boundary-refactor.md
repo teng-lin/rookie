@@ -15,6 +15,12 @@
 > [ADR 0005](../adr/0005-stage-boundary-types-and-extraction-vocabulary.md)
 > for durable constraints.
 
+> **Post-program maintenance (2026-08-20).** The dedicated vocabulary cleanup
+> authorized by ADR 0005 is complete. Live listing-to-extract loops and engine
+> boundaries now use `acquire`, connection-level row work uses `decode`, and
+> full compatibility orchestration uses `extract`. Pre-cleanup identifiers
+> below are preserved only as part of this historical implementation plan.
+
 ---
 
 ## Revision 2 changes (2026-08-19)

@@ -3,8 +3,8 @@ use super::chromium::{
   BrowserInstallation,
 };
 use super::gecko::{
-  discover_gecko_with_context, gecko_profiles_with_context, gecko_report_with_context,
-  populate_gecko_sources,
+  acquire_gecko_sources, discover_gecko_with_context, gecko_profiles_with_context,
+  gecko_report_with_context,
 };
 use super::internet_explorer::{
   discover_internet_explorer_with_context, internet_explorer_report_with_context,
@@ -261,7 +261,7 @@ pub(crate) fn gecko_report(
 /// Like `gecko_report`, but calls `on_before_query` once per profile right
 /// before its database/session read, so a test can mutate the filesystem in
 /// between discovery and query to simulate a source that vanishes in the
-/// race window - the same seam `populate_gecko_sources`'s own unit tests use,
+/// race window - the same seam `acquire_gecko_sources`'s own unit tests use,
 /// exposed for tests that need the full discover-then-query pipeline.
 pub(crate) fn gecko_report_with_race<R>(
   context: &DiscoveryContext<RealDiscoveryFs>,
@@ -273,7 +273,7 @@ where
   R: FnMut(&Path),
 {
   let discovery = gecko_profiles_with_context(context, browser_id)?;
-  Ok(populate_gecko_sources(
+  Ok(acquire_gecko_sources(
     discovery,
     domains,
     crate::SessionPolicy::IncludeSession,
