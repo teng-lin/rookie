@@ -95,6 +95,9 @@ pub(crate) fn chromium_based_plaintext_only(
   chromium_based_plaintext_only_with_runtime(db_path, domains, force_kill, &runtime)
 }
 
+// Unix-only since the Windows direct-path seam stopped asking for a flat
+// projection: its one remaining caller is the `#[cfg(unix)]` wrapper above.
+#[cfg(unix)]
 pub(crate) fn chromium_based_plaintext_only_with_runtime(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -574,6 +577,9 @@ fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Resul
   )
 }
 
+// The flat projection is only reached on Unix now, but Windows still builds
+// it under `cfg(test)` through `query_cookies_with_key_outcomes_runtime`.
+#[cfg(any(unix, test))]
 fn project_legacy_draft_with_runtime(
   db_path: &Path,
   draft: ChromiumExtractionDraft,
@@ -664,7 +670,9 @@ pub(crate) fn query_cookies_with_key_outcomes(
   query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
+// `windows` dropped from this gate: Windows direct-path acquisition now goes
+// through the detailed seam, so nothing outside tests asks it for flat rows.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn query_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
