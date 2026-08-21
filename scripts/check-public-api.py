@@ -131,8 +131,21 @@ def render_rustdoc_json(repo: Path, feature_args: list[str]) -> dict[str, object
     ]
     try:
         subprocess.run(command, check=True, text=True, capture_output=True, cwd=repo)
-        return json.loads((repo / "target" / "doc" / "rookie_cookies.json").read_text())
-    except (OSError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
+        # rustdoc writes UTF-8. `read_text()` would decode with the locale
+        # default -- cp1252 on a Windows runner, and `PLATFORMS` includes
+        # windows -- and any non-ASCII byte in a doc comment would then raise
+        # `UnicodeDecodeError`, which is neither an `OSError` nor a
+        # `JSONDecodeError`, so the gate would abort with a traceback rather
+        # than the diagnostic below.
+        return json.loads(
+            (repo / "target" / "doc" / "rookie_cookies.json").read_text(encoding="utf-8")
+        )
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        subprocess.CalledProcessError,
+    ) as error:
         if isinstance(error, subprocess.CalledProcessError):
             diagnostic = (error.stderr or error.stdout or str(error)).strip()
         else:
@@ -196,7 +209,21 @@ def scoped_deprecations(
 def check_deprecation_contract(
     rustdoc: dict[str, object], expected: list[dict[str, str]], label: str
 ) -> bool:
-    """Require the complete scoped deprecated set and its exact metadata."""
+    """Require the complete scoped deprecated set of *module items* and its metadata.
+
+    `visit` walks module trees and re-exports, so the set it builds covers every
+    externally reachable module-level item: functions, types, traits, constants,
+    and the paths they are re-exported under. It does not descend into an item's
+    own children, so `#[deprecated]` on an associated function, inherent or trait
+    method, enum variant, or struct field is not recorded here.
+
+    That limit is deliberate, and the contract is scoped to match it: the
+    deprecation window this gate exists to police is spent on free functions at
+    the crate root (`rookie_cookies::chrome`, `::safari_based`, and the rest of
+    the v0.5.9 surface), all of which are module items. Deprecating an
+    associated item instead would need `visit` extended to walk `impls` and
+    trait items before this check could see it.
+    """
     index = rustdoc.get("index")
     root = rustdoc.get("root")
     if not isinstance(index, dict) or not isinstance(root, int):

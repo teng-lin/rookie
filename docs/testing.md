@@ -82,8 +82,8 @@ expands the language matrix.
   Windows.
 - **Authoritative discovery:** `config.json` and `common/paths.rs` must stay
   gone; packaged crate must contain `browser_registry.json`.
-- **cfg allowlist:** `cargo run -p xtask -- check-cfg-locations`.
-- **Stage boundary:** `cargo run -p xtask -- check-stage-boundary` — listing types
+- **cfg allowlist:** `cargo run -p xtask --locked -- check-cfg-locations`.
+- **Stage boundary:** `cargo run -p xtask --locked -- check-stage-boundary` — listing types
   must have nowhere to put an extraction result (ADR 0005).
 - **DTO schema + generated Python dataclasses** must match `report_core.rs`.
 - **Release metadata** (`check-release.py`, platform contract, consumer

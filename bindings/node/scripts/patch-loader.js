@@ -188,7 +188,13 @@ function decorateNativeError(error) {
   ) {
     try {
       details = JSON.parse(error.message.slice(structuredErrorPrefix.length))
-      error.message = details.message
+      // Only overwrite with a real string. A payload without a message would
+      // otherwise be coerced by the Error setter to the literal "undefined",
+      // destroying the native text -- and the catch below cannot recover it,
+      // because the parse succeeded.
+      if (typeof details?.message === 'string') {
+        error.message = details.message
+      }
     } catch (_) {
       // Preserve the native message if a future payload is not understood by
       // this loader version, then attach safe diagnostic defaults below.

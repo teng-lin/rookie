@@ -104,9 +104,31 @@ class RealContractTests(unittest.TestCase):
         self.assertIn("bootstrap_package:", workflow)
         self.assertIn("if: inputs.bootstrap_package != ''", workflow)
         self.assertIn("NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}", workflow)
-        self.assertIn("--emit-npm-publish-order", workflow)
+        self.assertIn("--emit-npm-bootstrap-allowed", workflow)
         self.assertIn("could not prove that $BOOTSTRAP_PACKAGE is absent", workflow)
         self.assertIn('NPM_CONFIG_USERCONFIG="$bootstrap_npmrc" npm publish', workflow)
+
+    def test_root_package_is_not_bootstrappable(self) -> None:
+        # Bootstrap publishes one package before the ordered loop runs, so the
+        # ordering guarantee that makes the root package safe to publish last
+        # does not apply to it. Rejecting it is the whole point of a separate
+        # allow-list.
+        contract = platform_contract.load_contract()
+        allowed = platform_contract.npm_bootstrap_packages(contract)
+        self.assertNotIn("rookie-cookies", allowed)
+        self.assertEqual(allowed, platform_contract.npm_native_packages(contract))
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY_ROOT / "scripts/platform_contract.py"),
+                "--emit-npm-bootstrap-allowed",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(completed.stdout.split(), list(allowed))
 
     def test_pack_script_outputs_exactly_the_contract_tarballs(self) -> None:
         contract = platform_contract.load_contract()

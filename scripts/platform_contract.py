@@ -151,6 +151,19 @@ def npm_publish_packages(contract: dict[str, Any]) -> tuple[str, ...]:
     return (*native, "rookie-cookies")
 
 
+def npm_bootstrap_packages(contract: dict[str, Any]) -> tuple[str, ...]:
+    """npm packages a first-publication bootstrap may target: natives only.
+
+    Bootstrap publishes exactly one package outside the ordered loop, so the
+    ordering guarantee `npm_publish_packages` documents does not hold for it.
+    The root loader is therefore not eligible: it declares every native package
+    as an optional dependency, and bootstrapping it would expose a root version
+    whose platform packages do not exist yet. A brand-new root package is a
+    repository-founding event, not a release step.
+    """
+    return npm_publish_packages(contract)[:-1]
+
+
 def npm_publish_tarballs(contract: dict[str, Any], version: str) -> tuple[str, ...]:
     """Expected immutable npm tarball basenames in publish order."""
     return tuple(f"{package}-{version}.tgz" for package in npm_publish_packages(contract))
@@ -590,6 +603,11 @@ def parse_args() -> argparse.Namespace:
         help="print published npm package names, one per line, with the root package last",
     )
     parser.add_argument(
+        "--emit-npm-bootstrap-allowed",
+        action="store_true",
+        help="print npm package names eligible for a first-publication bootstrap (natives only)",
+    )
+    parser.add_argument(
         "--emit-npm-tarballs",
         metavar="VERSION",
         help="print expected npm tarball basenames for VERSION, one per line, in publish order",
@@ -622,6 +640,12 @@ def main() -> int:
     if args.emit_npm_publish_order:
         contract = load_contract(args.contract)
         for package in npm_publish_packages(contract):
+            print(package)
+        return 0
+
+    if args.emit_npm_bootstrap_allowed:
+        contract = load_contract(args.contract)
+        for package in npm_bootstrap_packages(contract):
             print(package)
         return 0
 

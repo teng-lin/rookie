@@ -618,18 +618,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t publish_packages < <(
-            python3 ../../scripts/platform_contract.py --emit-npm-publish-order
+          # Natives only. This step runs before the ordered publish loop below,
+          # so the root loader -- which declares every native package as an
+          # optional dependency -- must not be bootstrapped here: it would
+          # reference platform packages this release has not published yet.
+          mapfile -t bootstrap_packages < <(
+            python3 ../../scripts/platform_contract.py --emit-npm-bootstrap-allowed
           )
           allowed=false
-          for package in "${publish_packages[@]}"; do
+          for package in "${bootstrap_packages[@]}"; do
             if test "$package" = "$BOOTSTRAP_PACKAGE"; then
               allowed=true
               break
             fi
           done
           if test "$allowed" != true; then
-            echo "::error::bootstrap_package '$BOOTSTRAP_PACKAGE' is not an npm package in release/platform-contract.json"
+            echo "::error::bootstrap_package '$BOOTSTRAP_PACKAGE' is not a bootstrappable native npm package in release/platform-contract.json"
             exit 1
           fi
 

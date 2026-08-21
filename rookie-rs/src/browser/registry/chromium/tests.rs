@@ -1925,8 +1925,8 @@ fn report_keeps_profiles_separate_continues_after_failure_and_fetches_keys_once(
   assert_eq!(good.cookies()[0].value, "profile-value");
   assert!(broken.cookies().is_empty());
   // The database was named and reached for, so the failure belongs to the
-  // source rather than to the profile.
-  assert!(broken.failure.is_none());
+  // source -- which is why the profile still reports one at all rather than
+  // an empty list.
   let [broken_source] = &broken.sources[..] else {
     panic!("the broken profile still reports the source it tried to read");
   };
@@ -2031,7 +2031,6 @@ fn report_preserves_partial_row_stats_and_issues() {
   assert_eq!(source.issues.len(), 1);
   assert_eq!(source.issues[0].occurrences, 1);
   assert!(source.failure.is_none());
-  assert!(extraction.failure.is_none());
 }
 
 #[test]
@@ -3370,7 +3369,6 @@ fn windows_batch_browsers_extract_plaintext_cookies_through_their_selectors() {
     assert_eq!(profiles[0].cookies().len(), 1);
     assert_eq!(profiles[0].cookies()[0].name, browser_id);
     assert_eq!(profiles[0].cookies()[0].value, "plaintext-value");
-    assert!(profiles[0].failure.is_none());
     let [source] = &profiles[0].sources[..] else {
       panic!("{browser_id} extracts its one selected source");
     };

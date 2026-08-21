@@ -228,8 +228,12 @@ fn malformed_optional_context_is_retained_without_projection_divergence() {
   assert_eq!(detailed[0].context, CookieContext::default());
 }
 
+/// Named for what the assertions below actually pin: `rows_skipped: 0`,
+/// `cookies_emitted: 3`, and the malformed row present in the emitted list.
+/// A malformed optional context is typed loss on an otherwise usable row, not
+/// a reason to drop the cookie.
 #[test]
-fn malformed_detailed_context_skips_only_its_row() {
+fn malformed_detailed_context_is_retained_without_skipping_its_row() {
   let dir = unique_tmpdir("chromium-mixed-detailed-context");
   let db = dir.join("Cookies");
   let connection = rusqlite::Connection::open(&db).expect("open fixture");

@@ -143,7 +143,7 @@ There is no shared `Installation` / `Profile`. Chromium keeps its own inventory;
 | **ChromiumRegistryDraft** | Chromium extract return to `report_build`. Optional rename leftover; not a leak. | `registry/chromium.rs` | Records beside the profile |
 | **SafariProfile** | Private Safari inventory row. | `registry/safari.rs` | BinaryCookies parse |
 | **MozillaProfile** | Public persistent-only Firefox profile projection (`firefox_profiles()`). | `mozilla.rs` | Session-only profiles; registry ids |
-| **ProfileSelection** | Policy applied **before** lookup/acquire: `AllProfiles`, `ProfileId`, `LegacyFirstProfile`. | `registry.rs` | Opened DBs |
+| **`registry.rs::ProfileSelection`** | Internal policy applied **before** lookup/acquire: `AllProfiles`, `ProfileId`, `LegacyFirstProfile`. Distinct from the public `selection.rs::ProfileSelection` below, which has a different set of variants; the two share only a name. | `registry.rs` | Opened DBs |
 | **ProfileMatchCandidate** | One row the ADR 0003 matcher compares. There is **no** Rust type named `ProfileQuery`. | `registry/profile_query.rs` | Extraction results |
 
 ##### Chromium keys
@@ -181,7 +181,7 @@ There is no shared `Installation` / `Profile`. Chromium keeps its own inventory;
 | --- | --- | --- | --- |
 | **ExecutionControl** | Timeout + `CancellationHandle` + `AppBoundPolicy`, composed into every 0.6 request type. `execution()` replaces it wholesale; the field setters (`timeout` / `cancellation` / `app_bound`) edit one field of the current value. | `execution.rs` | Discovery or engine state |
 | **AppBoundPolicy** | Per-request Windows v20 recovery choice: `InjectionOnly` (default), `Disabled`, or `AllowElevatedFallback`. `Disabled` performs no injection/spawn/enumeration/impersonation; `InjectionOnly` never falls back to SYSTEM. Enforced at the v20 key lookup. `ROOKIE_E2E_APPBOUND_MODE` is test/off-feature-only and can only narrow a permitted attempt. | `execution.rs` | Process-global state |
-| **ProfileSelection** | Public policy on `ExtractRequest` / `ReadRequest`: `LegacyFirst` (default) or `Query(String)`. No "every profile" arm — see `ReportScope`. Direct-path requests do not select registry profiles. | `selection.rs` | Opened DBs |
+| **`selection.rs::ProfileSelection`** | Public policy on `ExtractRequest` / `ReadRequest`: `LegacyFirst` (default) or `Query(String)`. No "every profile" arm — see `ReportScope`. Direct-path requests do not select registry profiles. Distinct from the internal `registry.rs::ProfileSelection` above; a request's `Query` is resolved into one of that type's variants below the engine boundary. | `selection.rs` | Opened DBs |
 | **ReportScope** | Public policy on `ReportRequest`: `AllProfiles` (default) or `One(ProfileSelection)`. Only a report may widen, because only a report has somewhere to put per-profile provenance and failures. | `selection.rs` | — |
 | **SessionPolicy** | Whether a job may acquire a browser's declared session store: `PersistentOnly` (default) or `IncludeSession`. An acquire-time candidate filter enforced in `registry/gecko.rs::gecko_profile_plan`, not a post-read cookie filter; Chromium declares no session source, so it is a no-op there. | `session.rs` | — |
 | **`BrowserTarget<S>`** | Crate-private `{ browser_id, selection: S, session }` shared by `ExtractRequest` / `ReportRequest` / `ReadRequest`. `S` is `ProfileSelection` or `ReportScope`; execution/App-Bound policy lives separately in `ExecutionControl`. | `target.rs` | Runtime control; direct-path state |
@@ -1559,7 +1559,7 @@ These are alternatives **already recorded** in ADRs, not new hypotheticals.
 
 ### 3. Opaque-id-only `browser_report` vs name/path `chrome_profile` / `firefox_profile`
 
-**Superseded by ADR 0003.** One crate-private resolver; `browser_report`’s middle argument is that query. In the rewritten CLI, `read --profile` already has a required browser and `report --profile` requires that command's optional `--browser`; other subcommands do not accept a profile selector. Callers who passed a non-id string to `browser_report` and depended on a request error must stop.
+**Superseded by ADR 0003.** One crate-private resolver; `browser_report`’s middle argument is that query. In the rewritten CLI, `read --profile` already has a required browser, and on `report` — where `--browser` is otherwise optional, and omitting it produces the aggregate report — `--profile` requires it; other subcommands do not accept a profile selector. Callers who passed a non-id string to `browser_report` and depended on a request error must stop.
 
 ### 4. URL-filtered snapshot / top-level `get` / crate-root `report`
 

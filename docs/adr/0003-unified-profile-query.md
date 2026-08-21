@@ -31,8 +31,10 @@ The query vocabulary above is unchanged. What changed is *who may decline to nam
 
 Decision 3's resolver rule survives, but its top-level CLI spelling does not.
 The rewritten CLI has no top-level `--browser`, `--profile`, or `--report`
-mode. `read --profile Q` already has a required `--browser ID`; `report
---profile Q` requires that command's optional `--browser ID`; other
+mode. `read --profile Q` already has a required `--browser ID`. On `report`,
+`--browser ID` is optional in general -- omitting it produces the aggregate
+report over every browser -- but `report --profile Q` requires it, because a
+profile query has no meaning without the browser it selects within. Other
 subcommands do not accept profile selection. `read` can express only
 `legacy-first`, while `report` can express `legacy-first` or `all`. Output
 format constraints are now owned by each subcommand rather than cross-mode

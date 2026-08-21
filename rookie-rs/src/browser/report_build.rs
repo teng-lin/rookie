@@ -267,9 +267,11 @@ enum NoSources {
   /// pruned before the mapper and never reach this.
   SourceVanished,
   /// Chromium lists only databases that exist, so a profile with none is
-  /// ordinary absence. A profile that failed before it could name one lost
-  /// something, and must not be downgraded to the same `info` signal.
-  AbsentUnlessFailed(Option<String>),
+  /// ordinary absence -- the `info` signal, not a failure. This engine has no
+  /// profile-level failure to distinguish it from: a failure reaching a named
+  /// database lands on that [`Source`], which is built even when acquisition
+  /// fails, so an empty Chromium source list means exactly one thing.
+  Absent,
 }
 
 /// Adapts one already-queried [`Source`] into the shared [`SourceDraft`].
@@ -434,13 +436,7 @@ fn profile_to_draft(
       IssueSeverityCode::error(),
       "a cookie source present at discovery could not be found by the time of extraction",
     ),
-    NoSources::AbsentUnlessFailed(Some(message)) => issue(
-      "profile_extraction_failed",
-      ExtractionStageCode::acquisition(),
-      IssueSeverityCode::error(),
-      message,
-    ),
-    NoSources::AbsentUnlessFailed(None) => issue(
+    NoSources::Absent => issue(
       "profile_has_no_cookie_source",
       ExtractionStageCode::discovery(),
       IssueSeverityCode::info(),
@@ -506,11 +502,7 @@ fn chromium_browser_outcome(
   }
   for installation in report.installations {
     for extracted in installation.profiles {
-      let ChromiumExtractedProfile {
-        profile,
-        sources,
-        failure,
-      } = extracted;
+      let ChromiumExtractedProfile { profile, sources } = extracted;
       let identity = profile_identity(
         browser_id,
         &installation.installation_id,
@@ -522,7 +514,7 @@ fn chromium_browser_outcome(
         identity,
         profile.is_default,
         sources,
-        NoSources::AbsentUnlessFailed(failure),
+        NoSources::Absent,
       ));
     }
   }
@@ -591,6 +583,13 @@ struct BrowserListing {
   discovery_failed: bool,
   profiles: Vec<ProfileDescriptor>,
   issues: Vec<ExtractionIssue>,
+  /// A typed stop the engine recorded rather than returned. Listing's public
+  /// seam answers with a bare `Vec<ProfileDescriptor>`, so unlike an extract
+  /// -- which has a `Termination` field to say "this is partial" -- there is
+  /// nowhere honest to put a truncated list. Carrying the stop here lets
+  /// [`profile_descriptors_from_outcome`] reject it instead of returning the
+  /// profiles found before the stop as if discovery had finished.
+  boundary_stop: Option<BoundaryStop>,
 }
 
 /// Adapts a Gecko/Safari/IE listing into a browser listing (`browser_profiles`).
@@ -607,6 +606,7 @@ fn engine_listing_outcome(
     discovery_failed: listing.all_detected_roots_failed(),
     profiles: Vec::new(),
     issues: Vec::new(),
+    boundary_stop: listing.boundary_stop,
   };
   for discovery in &listing.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -763,6 +763,9 @@ fn chromium_listing_outcome(
     discovery_failed: listing.all_detected_roots_failed,
     profiles: Vec::new(),
     issues: Vec::new(),
+    // Chromium listing never records a stop: `chromium_listing_with_runtime`
+    // returns `Err` at each checkpoint, so a stop arrives as an error here.
+    boundary_stop: None,
   };
   for discovery in &listing.discovery_issues {
     push_aggregated(&mut outcome.issues, discovery_issue(browser_id, discovery));
@@ -1829,6 +1832,13 @@ fn profile_descriptors_from_outcome(
   browser_id: &str,
   outcome: BrowserListing,
 ) -> Result<Vec<ProfileDescriptor>> {
+  // A stop the engine recorded rather than returned still ended discovery
+  // early. The profiles found before it are a prefix, not a result, and this
+  // seam returns a bare list with no room to say so -- so the stop is raised
+  // here, matching the `runtime.check()?` checkpoints that guard the same job.
+  if let Some(stop) = outcome.boundary_stop {
+    return Err(stop.into());
+  }
   // An empty list must mean "looked, found nothing". Roots that all failed to
   // enumerate are one way to lose everything; profiles that were all found and
   // then all failed is another, and both would otherwise be indistinguishable
