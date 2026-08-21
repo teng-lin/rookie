@@ -125,13 +125,75 @@ try {
   }
   const manifest = {
     schema_version: 1,
-    kind: "rookie-cookie-extraction-manifest",
+    corpus_schema_version: 1,
     engine,
-    tier: "stress",
-    mode,
-    round: mode === "mutate" ? round : null,
-    identity: ["domain", "path", "name"],
-    cookies: accepted,
+    platform: process.platform,
+    tiers: ["stress"],
+    browser: {
+      version: context.browser()?.version() ?? "unknown",
+      user_agent: await page.evaluate(() => navigator.userAgent),
+    },
+    domain_filter: hosts,
+    identities: {
+      filtered_flat: ["domain", "path", "name"],
+      unfiltered_flat: ["domain", "path", "name"],
+      detailed: [
+        "cookie.domain",
+        "cookie.path",
+        "cookie.name",
+        "context.top_frame_site_key",
+        "context.has_cross_site_ancestor",
+        "context.source_scheme",
+        "context.source_port",
+        "context.is_persistent",
+        "context.origin_attributes",
+        "context.user_context_id",
+        "context.partition_key",
+        "context.private_browsing_id",
+      ],
+    },
+    expected: {
+      filtered_flat: accepted,
+      unfiltered_flat: accepted,
+      detailed: accepted.map((cookie) => ({
+        cookie,
+        context:
+          engine === "chromium"
+            ? {
+                top_frame_site_key: null,
+                has_cross_site_ancestor: false,
+                source_scheme: 2,
+                source_port: port,
+                is_persistent: true,
+                origin_attributes: null,
+                user_context_id: null,
+                partition_key: null,
+                private_browsing_id: null,
+              }
+            : {
+                top_frame_site_key: null,
+                has_cross_site_ancestor: null,
+                source_scheme: null,
+                source_port: null,
+                is_persistent: null,
+                origin_attributes: "",
+                user_context_id: null,
+                partition_key: null,
+                private_browsing_id: null,
+              },
+      })),
+    },
+    excluded: [],
+    observations: [
+      {
+        scenario_id: "distributed_stress",
+        stored: true,
+        mode,
+        round: mode === "mutate" ? round : null,
+        domains: hosts.length,
+        cookies: accepted.length,
+      },
+    ],
   };
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
     encoding: "utf8",
