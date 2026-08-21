@@ -376,7 +376,9 @@ cookies = rookie_cookies.extract_from_path(
     database, domains=["example.test"], local_state_path=key_path
 )
 compat = rookie_cookies.chromium_cookies_from_path(database, options)
-detailed = rookie_cookies.chromium_cookies_from_path_detailed(database, options)
+detailed = rookie_cookies.chromium_cookies_from_path_detailed(
+    database, {"local_state_path": key_path}
+)
 legacy = rookie_cookies.chromium_based(key_path, database, ["example.test"])
 if compat != cookies or legacy != cookies or [record["cookie"] for record in detailed] != cookies:
     raise SystemExit("canonical and legacy Chromium wheel exports disagree")
