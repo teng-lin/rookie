@@ -3,6 +3,7 @@
 
 mod allowlist;
 mod cfg_scan;
+mod platform_check;
 mod stage_boundary;
 
 use allowlist::{Allowlist, Verdict};
@@ -11,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 const SCAN_ROOT: &str = "rookie-rs/src";
 const ALLOWLIST_FILE: &str = "cfg-location-allowlist.toml";
+const USAGE: &str = "usage: cargo run -p xtask -- \
+  <check-cfg-locations|list-cfg-locations|check-stage-boundary|check-platforms [--skip-host]>";
 
 fn repo_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -279,19 +282,37 @@ fn main() {
         std::process::exit(1);
       }
     }
+    Some("check-platforms") => {
+      let trailing: Vec<String> = args.collect();
+      if trailing == ["--help"] {
+        println!("{USAGE}");
+        return;
+      }
+      let options = match platform_check::Options::parse(&trailing) {
+        Ok(options) => options,
+        Err(error) => {
+          eprintln!("error: {error}");
+          eprintln!("{USAGE}");
+          std::process::exit(2);
+        }
+      };
+      if let Err(error) = platform_check::run(&repo_root(), options) {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+      }
+      if options.skip_host {
+        println!("Linux GNU and Windows GNU source checks passed.");
+      } else {
+        println!("Native, Linux GNU, and Windows GNU source checks passed.");
+      }
+    }
     Some(other) => {
       eprintln!("error: unknown xtask subcommand {other:?}");
-      eprintln!(
-        "usage: cargo run -p xtask -- \
-         <check-cfg-locations|list-cfg-locations|check-stage-boundary>"
-      );
+      eprintln!("{USAGE}");
       std::process::exit(2);
     }
     None => {
-      eprintln!(
-        "usage: cargo run -p xtask -- \
-         <check-cfg-locations|list-cfg-locations|check-stage-boundary>"
-      );
+      eprintln!("{USAGE}");
       std::process::exit(2);
     }
   }

@@ -158,6 +158,20 @@ jobs:
       - name: Run Clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Install cross-compilation Rust targets
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+        run: rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
+      - name: Install Zig 0.16.0
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Install cargo-zigbuild 0.23.0
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
+      - name: Check Linux and Windows Rust source surfaces from macOS
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+        run: cargo run -p xtask --locked -- check-platforms --skip-host
       - name: Test workspace
         if: ${{ !cancelled() }}
         run: cargo test --workspace --all-targets --locked
