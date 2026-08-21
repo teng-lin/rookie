@@ -16,7 +16,7 @@ CI has three lanes. A pull request is not the full product.
 | Lane | Trigger | What runs |
 | --- | --- | --- |
 | **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Real Ubuntu Chrome + Firefox gate every PR. Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
-| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
+| **Nightly** | Scheduled test/E2E workflows, plus manual dispatch | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. `security.yml` runs dependency, secret, and code scanning; `assurance.yml` runs measured coverage and sanitizer-backed fuzzing. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
 | **Release** | `v*` tag, GitHub Release, `workflow_dispatch` on `e2e-release.yml`, or a PR labeled `e2e-release` | The hosted installer matrix again, plus engine fixtures for every `release_fixture` cell. A labeled PR stays opted in across later `synchronize` events. App-Bound Edge+Brave is the `e2e.yml` nightly / `multi_browser` dispatch, not this workflow. macOS Intel artifact smoke (schedule/manual). |
 
 ## Local commands
@@ -78,14 +78,6 @@ expands the language matrix.
 - **fmt**, Clippy (`-D warnings`), workspace tests, **and**
   `--no-default-features` so the non-`appbound` Windows branch cannot rot.
 - **cargo-audit** against `security/audit-exceptions.toml` (blocking; Ubuntu).
-- **OSV-Scanner** recursively covers committed Cargo and npm lockfiles and
-  fails on a reported advisory; Gitleaks scans committed history/PR changes;
-  CodeQL analyzes Rust, Python, and JavaScript/TypeScript (`security.yml`).
-- **Measured coverage** uses nightly branch instrumentation and enforces the
-  checked-in floors in `coverage.toml` (`assurance.yml`).
-- **Parser fuzzing** runs the three targets documented in `fuzz/README.md`
-  under libFuzzer sanitizer instrumentation on every PR and for longer on the
-  daily schedule (`assurance.yml`).
 - **Public API snapshots** (`scripts/check-public-api.py`) on Linux, macOS, and
   Windows.
 - **Authoritative discovery:** `config.json` and `common/paths.rs` must stay
@@ -104,6 +96,13 @@ expands the language matrix.
 
 **Nightly only**
 
+- **OSV-Scanner** recursively covers committed manifests and lockfiles and
+  fails on a reported advisory; Gitleaks scans committed history; CodeQL
+  analyzes Rust, Python, and JavaScript/TypeScript (`security.yml`).
+- **Measured coverage** uses nightly branch instrumentation and enforces the
+  checked-in floors in `coverage.toml` (`assurance.yml`).
+- **Parser fuzzing** runs the three targets documented in `fuzz/README.md`
+  under bounded libFuzzer sanitizer instrumentation (`assurance.yml`).
 - Node: build+tests on the full 3 OS × 22/24/26 product.
 - Python build+tests on the full 3 OS × 3.11–3.14 product.
 - **FreeBSD VM:** Mozilla `from-path` works; Chromium SQLite is unsupported there

@@ -32,10 +32,11 @@ be reviewed again. Formatting, tests, and comments alone do not.
 
 ## Continuous evidence
 
-CI runs known-answer tests, independent arithmetic reference cases, coverage
-ratchets for security/error-policy code, and sanitizer-backed fuzz targets for
-the untrusted parser boundaries. Those controls can find regressions; they are
-not a substitute for the independent review above.
+CI runs known-answer tests and independent arithmetic reference cases. Nightly
+assurance adds coverage ratchets for security/error-policy code and
+sanitizer-backed fuzz targets for the untrusted parser boundaries. Those
+controls can find regressions; they are not a substitute for the independent
+review above.
 
 The deprecated Internet Explorer path remains a separate native-parser risk:
 `libesedb` executes in the caller's process on Windows. The portable ESE record

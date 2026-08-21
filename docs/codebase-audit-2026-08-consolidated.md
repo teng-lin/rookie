@@ -18,13 +18,13 @@ explicitly excluded from this remediation.
 | API design & documentation | 8 / 10 | Canonical jobs, typed errors, finite binding options, shared policy parsing, and extensive checked docs; the 0.6 compatibility bridge and incomplete workspace-wide documentation policy remain. |
 | Code quality | 8 / 10 | Formatting, strict Clippy, tests, public-API snapshots, and architecture fences pass; several very large modules and broad lint-policy debt remain. |
 | Security | 8 / 10 | Strong secret handling plus new vulnerability policy, dependency/secret/code scanning, fuzzing, and prominent injection warnings; the excluded unsafe-invariant gap and external crypto/native-parser review remain. |
-| Testing | 9 / 10 | Broad multi-language tests now include ratcheted branch coverage, sanitizer-backed fuzz jobs, and deterministic CDP lifecycle failure tests; real vendor/browser and platform-only paths remain scheduled rather than ordinary local tests. |
+| Testing | 9 / 10 | Broad multi-language tests now include nightly ratcheted branch coverage, sanitizer-backed fuzz jobs, and deterministic CDP lifecycle failure tests; real vendor/browser and platform-only paths remain scheduled rather than ordinary local tests. |
 | Release engineering | 8 / 10 | The npm blocker is fixed, artifact contracts are cross-validated, and CI proofs now fail closed for every channel; registry-side OIDC/state reconciliation still requires external setup. |
 | Architecture | 8 / 10 | Central policy construction, typed selected-source failure, and removal of the report/Chromium cycle improve dependency direction; large adapters and some manual cross-language projection remain. |
 | **Overall** | **8.2 / 10** | Equal-weight mean; final release authorization still depends on the normal protected CI and release checklist. |
 
-**Release decision: implementation-ready, subject to protected CI.** The
-deterministic npm publication blocker is resolved. This assessment does not
+**Release decision: implementation-ready, subject to protected CI and a recent
+successful nightly assurance run.** The deterministic npm publication blocker is resolved. This assessment does not
 claim that a live registry release, Windows App-Bound canary, or the full
 scheduled real-browser matrix was executed locally.
 
@@ -79,7 +79,7 @@ Implemented:
 
 - a standalone `cargo-fuzz` workspace with portable decoder, Mozilla session,
   and source-classifier targets;
-- sanitizer-backed pull-request and scheduled fuzz jobs with both per-input and
+- nightly/manual sanitizer-backed fuzz jobs with both per-input and
   whole-process deadlines;
 - ratcheted line and branch coverage for the workspace and critical parser,
   secret, and error-policy files; and
@@ -129,7 +129,7 @@ contract deliberately rather than leaking report internals through adapters.
 
 ### P1 — security governance was narrower than the threat surface
 
-Status: **implemented in the repository; one external enforcement step remains**.
+Status: **implemented as nightly/manual assurance**.
 
 The repository now has:
 
@@ -143,12 +143,12 @@ The repository now has:
   Rust, Python, Node, and root quick-start documentation.
 
 Local OSV and Gitleaks validation reported no known dependency issue or secret
-in the scanned tree/history. The workflows themselves fail closed. Repository
-administrators must add the new assurance/security job names to branch
-protection if policy requires them as named merge gates.
+in the scanned tree/history. The nightly/manual workflows fail closed but are
+intentionally not pull-request or branch-protection jobs.
 
-Recommendation: make those contexts required after their first successful
-protected run, and keep scanner exceptions owned, justified, and time-bounded.
+Recommendation: monitor nightly failures as release blockers, require a recent
+green run in the release checklist, and keep scanner exceptions owned,
+justified, and time-bounded.
 
 ### P2 — release proof was not load-bearing end to end
 
@@ -212,9 +212,9 @@ allowances as downward-only ratchets.
 
 Status: **resolved for the identified gap**.
 
-The assurance workflow measures workspace and critical-file line/branch
-coverage and rejects regressions below checked-in floors. It also runs three
-bounded sanitizer-backed fuzz targets.
+The nightly/manual assurance workflow measures workspace and critical-file
+line/branch coverage and rejects regressions below checked-in floors. It also
+runs three bounded sanitizer-backed fuzz targets.
 
 The raw Chromium DevTools lifecycle now has deterministic coverage for retry,
 malformed payload, missing target ID, close failure, timeout, process early
@@ -231,7 +231,7 @@ distinction between fixture coverage and live seed-and-extract evidence.
 | --- | --- | --- |
 | Excluded P1 | Document and isolate production `unsafe`. | Every production block has a specific safety argument and CI rejects new undocumented blocks. |
 | P1 external | Complete independent crypto review and decide the `libesedb` crash boundary. | Review evidence is recorded; native ESE parsing is removed or isolated. |
-| P1 operational | Add new security/assurance contexts to branch protection. | Protected branches require the successful scanner, coverage, and fuzz contexts. |
+| P1 operational | Monitor nightly security/assurance results as release inputs. | Release readiness requires a recent successful nightly run and failures are triaged promptly. |
 | P2 external | Configure crates.io OIDC and durable release lineage/reconciliation. | Every channel uses short-lived identity and reconciles published digests to reviewed inputs. |
 | P2 planned | Complete the 0.7 compatibility cleanup and lint ratchets. | Deprecated bridges are removed and documentation/lint coverage increases without suppressions. |
 | P2 ongoing | Reduce oversized binding and registry modules. | Module-size and cfg allowances trend downward while stage/API gates remain green. |
@@ -263,6 +263,6 @@ distinction between fixture coverage and live seed-and-extract evidence.
 Limitations: validation ran locally on macOS except where the isolated audit
 worktrees or workflow definitions explicitly target Ubuntu. It did not execute
 the real Windows/Linux browser matrix, App-Bound v20 canary, live registry
-publication, or branch-protection configuration. Platform-specific behavior is
+publication, or repository-side nightly alerting. Platform-specific behavior is
 therefore additionally subject to the protected hosted CI and scheduled release
 checks.
