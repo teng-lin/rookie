@@ -237,6 +237,21 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             ],
         )
 
+    def test_safari_store_access_checks_the_binarycookies_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_file = Path(tmp) / "Cookies.binarycookies"
+            cookie_file.write_bytes(b"cookfixture")
+            hosted.verify_safari_store_access(cookie_file)
+
+    def test_safari_tcc_denial_is_not_suppressed_as_an_absent_store(self) -> None:
+        path = mock.Mock(spec=Path)
+        path.stat.side_effect = PermissionError("operation not permitted")
+        with (
+            mock.patch.object(webdriver, "candidate_cookie_files", return_value=[path]),
+            self.assertRaisesRegex(webdriver.WebDriverError, "Full Disk Access"),
+        ):
+            webdriver.file_snapshot("safari")
+
     def test_ie_capabilities_pin_clean_native_session(self) -> None:
         edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
         initial_url = "http://127.0.0.1:8765/set"

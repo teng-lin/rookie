@@ -159,6 +159,22 @@ def seed_safari_native(
         stop_safari(graceful=False)
 
 
+def verify_safari_store_access(cookie_file: Path) -> None:
+    """Fail clearly if the runner image no longer grants Safari container access."""
+
+    try:
+        with cookie_file.open("rb") as source:
+            signature = source.read(4)
+    except PermissionError as error:
+        raise SystemExit(
+            "macOS TCC denied Safari cookie access; the runner image must "
+            "preapprove kTCCServiceSystemPolicyAllFiles for the job shell"
+        ) from error
+    if signature != b"cook":
+        raise SystemExit(f"Safari cookie store has an invalid signature: {signature!r}")
+    print("Safari cookie store readable through runner Full Disk Access", flush=True)
+
+
 def venv_python() -> Path:
     unix = ROOT / ".venv" / "bin" / "python"
     windows = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -800,6 +816,7 @@ def run() -> int:
         elif engine == "safari":
             before = file_snapshot(engine)
             cookie_file = seed_safari_native(exe, url, before, request_log)
+            verify_safari_store_access(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
             assert_native(cookie_file, browser)

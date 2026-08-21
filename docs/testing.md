@@ -287,7 +287,7 @@ That is registry/identity coverage, not crypto coverage.
 
 | Browser | Runner constraint |
 | --- | --- | --- |
-| Safari | The hosted canary opens the normal Safari app because SafariDriver uses private-like isolated storage and destroys it at session teardown; the runner must retain access to the user's `Cookies.binarycookies`. |
+| Safari | The hosted canary opens the normal Safari app because SafariDriver uses private-like isolated storage and destroys it at session teardown. GitHub's macOS image build preapproves `kTCCServiceSystemPolicyAllFiles` for `/bin/bash` and its runner launch scripts, plus AppleEvents from the job shell/agent to Safari ([runner image TCC configuration](https://github.com/actions/runner-images/blob/main/images/macos/scripts/build/configure-tccdb-macos.sh)). The harness verifies the `Cookies.binarycookies` signature and treats any TCC `PermissionError` as an immediate prerequisite failure. |
 
 The native-engine job is not an automatic pull-request check. Applying the
 `e2e-release` label opts a PR into the full matrix and later pushes keep running

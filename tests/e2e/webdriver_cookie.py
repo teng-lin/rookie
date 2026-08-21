@@ -26,6 +26,14 @@ class WebDriverError(RuntimeError):
     pass
 
 
+def tcc_permission_error(path: Path, error: PermissionError) -> WebDriverError:
+    return WebDriverError(
+        "macOS TCC denied access to Safari's cookie store "
+        f"at {path}; this runner needs Full Disk Access "
+        "(kTCCServiceSystemPolicyAllFiles)"
+    )
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -234,6 +242,8 @@ def candidate_cookie_files(engine: str) -> list[Path]:
         )
         try:
             candidates.extend(store.glob("*/WebsiteData/Cookies/Cookies.binarycookies"))
+        except PermissionError as error:
+            raise tcc_permission_error(store, error) from error
         except OSError:
             pass
         return candidates
@@ -254,6 +264,8 @@ def file_snapshot(engine: str) -> dict[Path, tuple[int, int]]:
     for path in candidate_cookie_files(engine):
         try:
             stat = path.stat()
+        except PermissionError as error:
+            raise tcc_permission_error(path, error) from error
         except OSError:
             continue
         snapshot[path] = (stat.st_mtime_ns, stat.st_size)
@@ -273,6 +285,8 @@ def wait_for_changed_cookie_file(
         for path in candidate_cookie_files(engine):
             try:
                 stat = path.stat()
+            except PermissionError as error:
+                raise tcc_permission_error(path, error) from error
             except OSError:
                 continue
             last_seen.append(path)
