@@ -67,7 +67,9 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.hosted-matrix.outputs.include) }}
     env:
-      ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/${{ matrix.browser }}
+      # Vivaldi explicitly warns on profiles nested under a Git worktree. Keep
+      # every real-browser profile in the runner's ephemeral temp directory.
+      ROOKIE_E2E_USER_DATA_DIR: ${{ runner.temp }}/rookie-ci/${{ matrix.browser }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

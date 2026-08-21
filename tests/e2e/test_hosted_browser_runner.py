@@ -71,13 +71,15 @@ class HostedBrowserRunnerTests(unittest.TestCase):
 
     def test_ie_capabilities_pin_clean_native_session(self) -> None:
         edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        options = webdriver.capabilities("internet_explorer", edge)["capabilities"][
-            "alwaysMatch"
-        ]
+        initial_url = "http://127.0.0.1:8765/set"
+        options = webdriver.capabilities("internet_explorer", edge, initial_url)[
+            "capabilities"
+        ]["alwaysMatch"]
         self.assertEqual(options["browserName"], "internet explorer")
         self.assertTrue(options["se:ieOptions"]["ensureCleanSession"])
         self.assertTrue(options["se:ieOptions"]["ie.edgechromium"])
         self.assertEqual(options["se:ieOptions"]["ie.edgepath"], edge)
+        self.assertEqual(options["se:ieOptions"]["initialBrowserUrl"], initial_url)
 
 
 if __name__ == "__main__":

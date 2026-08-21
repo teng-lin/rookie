@@ -90,7 +90,9 @@ def driver_command(engine: str, driver: str, port: int) -> list[str]:
     raise WebDriverError(f"unsupported native WebDriver engine {engine!r}")
 
 
-def capabilities(engine: str, edge_path: str | None = None) -> dict[str, Any]:
+def capabilities(
+    engine: str, edge_path: str | None, initial_browser_url: str
+) -> dict[str, Any]:
     if engine != "internet_explorer":
         raise WebDriverError(f"unsupported native WebDriver engine {engine!r}")
     if not edge_path:
@@ -108,7 +110,10 @@ def capabilities(engine: str, edge_path: str | None = None) -> dict[str, Any]:
             "ensureCleanSession": True,
             "ignoreProtectedModeSettings": True,
             "ignoreZoomSetting": True,
-            "initialBrowserUrl": "about:blank",
+            # IEDriver attaches to the Trident child window. Starting on
+            # about:blank leaves Edge without an IE-mode renderer and the
+            # driver waits forever while looking for Internet Explorer_Server.
+            "initialBrowserUrl": initial_browser_url,
         },
     }
     return {"capabilities": {"alwaysMatch": always_match}}
@@ -145,20 +150,13 @@ def seed_once(
             port,
             "POST",
             "/session",
-            capabilities(engine, os.environ.get("ROOKIE_E2E_EDGE_BINARY")),
+            capabilities(engine, os.environ.get("ROOKIE_E2E_EDGE_BINARY"), url),
             timeout=60,
         )
         value = response.get("value", {})
         session_id = value.get("sessionId") or response.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             raise WebDriverError(f"WebDriver did not return a session id: {response!r}")
-        request_json(
-            port,
-            "POST",
-            f"/session/{session_id}/url",
-            {"url": url},
-            timeout=60,
-        )
         deadline = time.time() + 30
         while time.time() < deadline:
             try:
