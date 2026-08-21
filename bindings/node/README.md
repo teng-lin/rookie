@@ -188,37 +188,54 @@ activity-hint order and a grouped report; lossy `pathLossy` selectors need
 
 ## Explicit paths
 
-```js
-import { chromiumCookiesFromPath, cookiesFromPath } from "rookie-cookies";
+`extractFromPath` is the canonical flat, domain-filtered path-extract job
+(matching Rust/Python `extract_from_path`):
 
-const firefox = await cookiesFromPath("/path/to/cookies.sqlite", ["example.com"]);
-const chrome = await chromiumCookiesFromPath(
-  "/path/to/Chrome/Default/Network/Cookies",
-  { browserId: "chrome", domains: ["example.com"] },
-);
+```js
+import { extractFromPath } from "rookie-cookies";
+
+const firefox = await extractFromPath("/path/to/cookies.sqlite", {
+  domains: ["example.com"],
+});
+const chrome = await extractFromPath("/path/to/Chrome/Default/Network/Cookies", {
+  browserId: "chrome",
+  domains: ["example.com"],
+});
 ```
 
-At most one of `browserId`, `localStatePath`, `plaintextOnly: true`. Invalid
-option shapes reject with `TypeError` before I/O. Process shutdown is not
-exposed. With no selector at all, the source is sniffed from its signature
-and schema: a Chromium database found this way is plaintext-capable only
-(an encrypted row is `missing_chromium_credentials`) — on Unix this is a
+`options` bundles `domains`; at most one of `browserId`, `localStatePath`,
+`plaintextOnly: true`; `timeoutMs`; `appBound` (same three values, same
+`"disabled"` default — see [App-Bound recovery](#app-bound-v20-recovery)).
+Invalid option shapes reject with `TypeError` before I/O. Process shutdown is
+not exposed. With no selector at all, the source is sniffed from its
+signature and schema: a Chromium database found this way is plaintext-capable
+only (an encrypted row is `missing_chromium_credentials`) — on Unix this is a
 narrowing from 0.6-beta, which probed every registered browser identity in
 turn; on Windows it is a widening, since a fully plaintext database used to
 reject with `missing_local_state_file` before attempting extraction.
-`chromiumCookiesFromPath` / `chromiumCookiesFromPathDetailed` also take
-`appBound` — same three values, same `"disabled"` default (see
-[App-Bound recovery](#app-bound-v20-recovery)).
 
-**`chromiumCookiesFromPathDetailed` no longer supports `domains`.** Detailed
-(isolation-carrying) path extraction is now `fromPath(...).detailedCookies`
-under the hood, and `fromPath`, like `read`, never URL/domain-slices its
-snapshot; passing a non-empty `domains` rejects rather than silently ignoring
-it. Filter the returned array yourself, or call
-`fromPath({ path, ...credentials }).then((r) => r.detailedCookies)` directly.
+For isolation-carrying (detailed) path extraction, use
+`fromPath(...).detailedCookies` instead — `fromPath`, like `read`, never
+URL/domain-slices its snapshot:
 
-`anyBrowser()`, `chromiumBased*`, and flat `firefoxBased()` are deprecated
-until ≥ 0.7. `firefoxBasedDetailed()` stays for container context.
+```js
+import { fromPath } from "rookie-cookies";
+
+const snapshot = await fromPath({ path: "/path/to/Chrome/Default/Network/Cookies" });
+for (const { cookie, context } of snapshot.detailedCookies) {
+  console.log(cookie.name, context.topFrameSiteKey);
+}
+```
+
+**`cookiesFromPath`, `chromiumCookiesFromPath`, and
+`chromiumCookiesFromPathDetailed` are deprecated aliases** onto
+`extractFromPath` (the first two) and `fromPath(...).detailedCookies` (the
+third), kept until ≥ 0.7. `chromiumCookiesFromPathDetailed` additionally no
+longer supports `domains`: passing a non-empty `domains` to it rejects rather
+than silently ignoring it, since the seam it now routes through can't filter.
+`anyBrowser()`, `chromiumBased*`, and flat `firefoxBased()` are likewise
+deprecated onto `extractFromPath` until ≥ 0.7. `firefoxBasedDetailed()` stays
+for container context.
 
 ```js
 import { chromiumBasedDetailed } from "rookie-cookies";
@@ -235,9 +252,10 @@ for (const { cookie, context } of records) {
 
 ## Timeouts and cancellation
 
-`cookiesFromPath`, `chromiumCookiesFromPath` /
-`chromiumCookiesFromPathDetailed`, every single-browser export, and `read` /
-`fromPath` accept `timeoutMs` and/or a `CancellationHandle`. `report` /
+`extractFromPath` (and its deprecated aliases `cookiesFromPath` /
+`chromiumCookiesFromPath` / `chromiumCookiesFromPathDetailed`), every
+single-browser export, and `read` / `fromPath` accept `timeoutMs` and/or a
+`CancellationHandle`. `report` /
 `browserReport` / `loadReport` accept `timeoutMs` (no `CancellationHandle` yet);
 `profiles` / `browserProfiles` accept `timeoutMs` only. `supportedBrowsers()`
 takes neither — it does no disk I/O.
@@ -294,11 +312,11 @@ N-API, their `code` is absent and `rookieCode` is `null`.
 
 ## App-Bound (v20) recovery
 
-`read`, `fromPath`, `report`, `browserReport`, `loadReport`,
-`chromiumCookiesFromPath`, and `chromiumCookiesFromPathDetailed` all take an
-`appBound` option: `"disabled"` (the default), `"injection_only"`, or
-`"allow_elevated_fallback"`. It is a no-op outside Windows. An unrecognized
-string rejects with `kind === "request"` before any I/O runs.
+`read`, `fromPath`, `report`, `browserReport`, `loadReport`, and
+`extractFromPath` all take an `appBound` option: `"disabled"` (the default),
+`"injection_only"`, or `"allow_elevated_fallback"`. It is a no-op outside
+Windows. An unrecognized string rejects with `kind === "request"` before any
+I/O runs.
 
 **`appBound` defaults to `"disabled"`.** Unlike the deprecated v0.5.9 bridge
 (`chrome()`, `chromiumBased()`, ...), which keeps its old
@@ -358,7 +376,7 @@ const all = load();
 | Async contract | Sync return values | **Every** extraction export is a Promise (since 0.5.8) |
 | Node.js | 18 / 20 accepted | **≥ 22** (tested 22 / 24 / 26) |
 | Gecko session cookies | Not a first-class `profile` | `read({ browser: geckoId, profile, includeSession: true })` — `profile` alone no longer imports session cookies (see the migration trap above) |
-| Path APIs | `firefoxBased`, `chromiumBased`, `anyBrowser` | `cookiesFromPath` / `chromiumCookiesFromPath` (legacy deprecated until ≥ 0.7) |
+| Path APIs | `firefoxBased`, `chromiumBased`, `anyBrowser` | `extractFromPath` (`cookiesFromPath` / `chromiumCookiesFromPath` / `chromiumCookiesFromPathDetailed` are deprecated aliases until ≥ 0.7) |
 | Errors | Flat `Unknown` | `kind` is `request`/`stopped`/`source`/`engine`; `code` is `InvalidArg` for request/source, `Cancelled` for a stopped cancellation, else `GenericFailure` |
 | Header view | Manual | `snapshot.header(url \| SendContext)` — **no** top-level `header()`; a partitioned/container snapshot needs a `SendContext`, not a bare URL |
 | Cookie identity | Flat only | `snapshot.detailedCookies` adds CHIPS partition / Firefox container `context`; `snapshot.browserId` is now `string \| null` |
