@@ -241,6 +241,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   intentionally destroys SafariDriver automation storage at session teardown.
   The Internet Explorer canary now supplies IEDriver's Edge IE-mode
   capabilities and policy instead of waiting for the retired desktop shell.
+- macOS Chromium now reads its vendor-defined `Chromium Safe Storage` /
+  `Chromium` Keychain identity rather than mixing the Chrome service with the
+  Chromium account.
 - `docs/testing.md` lists every registry browser against hosted CI, release
   fixtures, or manual coverage.
 

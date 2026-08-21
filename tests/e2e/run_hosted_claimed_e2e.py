@@ -166,21 +166,16 @@ def venv_python() -> Path:
     raise SystemExit("expected a .venv from the workflow's maturin develop step")
 
 
-def keychain_accounts(service: str) -> list[str]:
+def keychain_accounts() -> list[str]:
     raw = os.environ.get("ROOKIE_E2E_KEYCHAIN_ACCOUNT", "Chrome")
-    accounts = [part.strip() for part in raw.split(",") if part.strip()]
-    if service == "Chrome Safe Storage":
-        for extra in ("Chrome", "Chromium"):
-            if extra not in accounts:
-                accounts.append(extra)
-    return accounts
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def plant_keychain() -> None:
     service = os.environ.get("ROOKIE_E2E_KEYCHAIN_SERVICE")
     if not service or sys.platform != "darwin":
         return
-    for account in keychain_accounts(service):
+    for account in keychain_accounts():
         subprocess.run(
             [
                 "/usr/bin/security",

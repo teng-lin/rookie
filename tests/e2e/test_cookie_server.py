@@ -35,11 +35,11 @@ class CookieServerTests(unittest.TestCase):
 
 
 class ClaimedE2eHelperTests(unittest.TestCase):
-    def test_chrome_safe_storage_plants_chromium_account(self) -> None:
-        with mock.patch.dict(CLAIMED.os.environ, {"ROOKIE_E2E_KEYCHAIN_ACCOUNT": "Chrome"}):
-            accounts = CLAIMED.keychain_accounts("Chrome Safe Storage")
-        self.assertIn("Chromium", accounts)
-        self.assertIn("Chrome", accounts)
+    def test_keychain_accounts_preserve_configured_vendor_identity(self) -> None:
+        with mock.patch.dict(
+            CLAIMED.os.environ, {"ROOKIE_E2E_KEYCHAIN_ACCOUNT": "Chromium"}
+        ):
+            self.assertEqual(CLAIMED.keychain_accounts(), ["Chromium"])
 
     def test_pick_cookie_port_honors_env(self) -> None:
         with mock.patch.dict(CLAIMED.os.environ, {"ROOKIE_E2E_COOKIE_PORT": "9333"}):

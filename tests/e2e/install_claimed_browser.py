@@ -43,7 +43,7 @@ def expand(path: str) -> str:
 HOSTS: dict[str, dict] = {
     "chromium": {
         "engine": "chromium",
-        "keychain_service": "Chrome Safe Storage",
+        "keychain_service": "Chromium Safe Storage",
         "keychain_account": "Chromium",
         "linux": {
             "kind": "playwright_browser",

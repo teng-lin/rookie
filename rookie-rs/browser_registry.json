@@ -1059,7 +1059,7 @@
         },
         "key_credentials": {
           "macos_keychain": {
-            "service": "Chrome Safe Storage",
+            "service": "Chromium Safe Storage",
             "account": "Chromium"
           }
         }

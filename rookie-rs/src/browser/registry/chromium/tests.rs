@@ -47,6 +47,14 @@ fn registry_credentials_map_onto_the_platform_provider_input() {
       Some("Chrome")
     );
     assert_eq!(chrome.linux_crypt_name, None);
+    let chromium = chromium_key_credentials("chromium")
+      .expect("resolve Chromium")
+      .expect("Chromium credentials");
+    assert_eq!(
+      chromium.osx_key_service.as_deref(),
+      Some("Chromium Safe Storage")
+    );
+    assert_eq!(chromium.osx_key_user.as_deref(), Some("Chromium"));
     let brave = chromium_key_credentials("brave")
       .expect("resolve Brave")
       .expect("Brave credentials");
