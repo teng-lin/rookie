@@ -47,16 +47,6 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 hosted.find_chromium_db(user_data, name="rookie_ci"), database
             )
 
-    def test_windows_yandex_uses_its_native_profile_root(self) -> None:
-        with mock.patch.dict(hosted.os.environ, {"LOCALAPPDATA": r"C:\Users\runner"}):
-            actual = hosted.native_chromium_user_data(
-                "yandex", Path(r"D:\temp\custom"), platform="win32"
-            )
-        self.assertEqual(
-            actual,
-            Path(r"C:\Users\runner") / "Yandex/YandexBrowser/User Data",
-        )
-
     def test_wininet_cookie_seed_is_persistent_and_gmt(self) -> None:
         seeded = hosted.wininet_cookie_data(
             datetime(2026, 8, 21, 12, 30, 0, tzinfo=timezone.utc)
@@ -76,6 +66,30 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 proc, 9222, Path("/tmp/profile")
             )
         self.assertFalse(has_devtools)
+
+    def test_chromium_cookie_checkpoint_is_retried_after_launcher_exit(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        profile = Path("/tmp/profile")
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
+            mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(
+                hosted, "wait_for_chromium_cookie", side_effect=[False, True]
+            ) as wait_for_cookie,
+        ):
+            hosted.seed_chromium_native(
+                r"C:\Browser\browser.exe",
+                profile,
+                "http://127.0.0.1:8765/set",
+            )
+
+        self.assertEqual(
+            wait_for_cookie.call_args_list,
+            [mock.call(profile, 30), mock.call(profile, 15)],
+        )
 
     def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:
         command = hosted.chromium_native_command(
@@ -103,6 +117,18 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             remote_debugging_port=9222,
         )
         self.assertIn("--headless=new", command)
+
+    def test_linux_edge_gets_extended_startup_budget(self) -> None:
+        self.assertEqual(
+            hosted.chromium_startup_timeout(
+                "/usr/bin/microsoft-edge", platform="linux"
+            ),
+            90,
+        )
+        self.assertEqual(
+            hosted.chromium_startup_timeout("/usr/bin/chromium", platform="linux"),
+            45,
+        )
 
     def test_ie_snapshot_uses_windows_esent_copy_mode(self) -> None:
         source = Path(r"C:\WebCache\WebCacheV01.dat")

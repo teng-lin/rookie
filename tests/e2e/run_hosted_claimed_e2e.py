@@ -247,20 +247,6 @@ def chromium_cookie_dbs(user_data: Path) -> list[Path]:
     return candidates
 
 
-def native_chromium_user_data(
-    browser: str, requested: Path, *, platform: str | None = None
-) -> Path:
-    """Use a product-owned profile where a fork does not persist custom roots."""
-
-    platform = platform or sys.platform
-    if browser == "yandex" and platform == "win32":
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if not local_app_data:
-            raise SystemExit("Windows Yandex canary requires LOCALAPPDATA")
-        return Path(local_app_data) / "Yandex/YandexBrowser/User Data"
-    return requested
-
-
 def cookie_db_has_name(db: Path, name: str = "rookie_ci") -> bool:
     try:
         connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
@@ -277,6 +263,15 @@ def cookie_db_has_name(db: Path, name: str = "rookie_ci") -> bool:
 
 def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
     return any(cookie_db_has_name(db, name) for db in chromium_cookie_dbs(user_data))
+
+
+def wait_for_chromium_cookie(user_data: Path, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cookies_db_has_name(user_data):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def chromium_native_command(
@@ -323,6 +318,15 @@ def pick_devtools_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def chromium_startup_timeout(exe: str, *, platform: str | None = None) -> float:
+    """Allow Edge's Linux wrapper enough time to finish first-run startup."""
+
+    platform = platform or sys.platform
+    if platform.startswith("linux") and "microsoft-edge" in Path(exe).name:
+        return 90
+    return 45
 
 
 def wait_for_devtools_or_cookie(
@@ -385,21 +389,17 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
     saw_cookie = False
     try:
-        has_devtools = wait_for_devtools_or_cookie(proc, devtools_port, user_data)
+        has_devtools = wait_for_devtools_or_cookie(
+            proc,
+            devtools_port,
+            user_data,
+            timeout=chromium_startup_timeout(exe),
+        )
         if has_devtools:
             navigate_chromium_cdp(devtools_port, url)
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            if cookies_db_has_name(user_data):
-                saw_cookie = True
-                time.sleep(1)
-                break
-            time.sleep(0.5)
-        if not saw_cookie:
-            raise SystemExit(
-                "native Chromium navigation requested rookie_ci but the "
-                "profile did not persist it"
-            )
+        saw_cookie = wait_for_chromium_cookie(user_data, 30)
+        if saw_cookie:
+            time.sleep(1)
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -407,8 +407,15 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-    if not cookies_db_has_name(user_data):
-        raise SystemExit("native chromium seed did not persist rookie_ci")
+    # Windows launchers can outlive the browser process addressed by
+    # Browser.close. Do not reject a delayed cookie checkpoint until the
+    # launcher has also stopped and released the SQLite store.
+    if not saw_cookie and not wait_for_chromium_cookie(user_data, 15):
+        candidates = ", ".join(str(path) for path in chromium_cookie_dbs(user_data))
+        raise SystemExit(
+            "native Chromium navigation requested rookie_ci but the profile "
+            f"did not persist it (cookie databases: {candidates or '<none>'})"
+        )
 
 
 def seed_gecko(exe: str, profile: Path, url: str) -> None:
@@ -800,10 +807,12 @@ def run() -> int:
             "ROOKIE_E2E_BROWSER_ID and ROOKIE_E2E_BROWSER_PATH must be set"
         )
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", ROOT))
-    requested_user_data = Path(
+    user_data = Path(
         os.environ.get("ROOKIE_E2E_USER_DATA_DIR", workspace / ".rookie-ci" / browser)
     )
-    user_data = native_chromium_user_data(browser, requested_user_data)
+    # Chromium 136+ ignores remote-debugging switches for the product's
+    # default data directory. A non-default profile is therefore required for
+    # browser automation, including branded forks such as Windows Yandex.
     user_data.mkdir(parents=True, exist_ok=True)
 
     server, port, _log_path, request_log = start_cookie_server()
