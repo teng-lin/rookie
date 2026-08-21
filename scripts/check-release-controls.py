@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime
 from typing import Any
 
 
@@ -239,6 +240,34 @@ def fetch_all_check_runs(
     return collected
 
 
+def select_latest_check_run(name: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select the newest real execution, rejecting runs that cannot be ordered."""
+    executed = [run for run in runs if run.get("conclusion") != "skipped"]
+    candidates = executed or runs
+    ordered: list[tuple[datetime, dict[str, Any]]] = []
+    for run in candidates:
+        started_at = run.get("started_at")
+        if not isinstance(started_at, str) or not started_at:
+            raise ControlFailure(
+                f"required check {name!r}: cannot order check run {run.get('id')!r}; "
+                "started_at is missing"
+            )
+        try:
+            timestamp = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ControlFailure(
+                f"required check {name!r}: cannot order check run {run.get('id')!r}; "
+                f"started_at is invalid: {started_at!r}"
+            ) from error
+        if timestamp.tzinfo is None:
+            raise ControlFailure(
+                f"required check {name!r}: cannot order check run {run.get('id')!r}; "
+                f"started_at has no timezone: {started_at!r}"
+            )
+        ordered.append((timestamp, run))
+    return max(ordered, key=lambda entry: entry[0])[1]
+
+
 def check_required_checks(repo: str, commit_sha: str) -> list[str]:
     failures: list[str] = []
     by_name: dict[str, list[dict[str, Any]]] = {}
@@ -255,9 +284,11 @@ def check_required_checks(repo: str, commit_sha: str) -> list[str]:
         # gate; that non-execution must not mask the successful manual gate.
         # Among runs that actually execute, the newest still governs so a later
         # pending or failed rerun keeps publication fail-closed.
-        executed = [run for run in runs if run.get("conclusion") != "skipped"]
-        candidates = executed or runs
-        latest = max(candidates, key=lambda run: run.get("started_at") or "")
+        try:
+            latest = select_latest_check_run(name, runs)
+        except ControlFailure as error:
+            failures.append(str(error))
+            continue
         if latest.get("status") != "completed":
             failures.append(f"required check {name!r}: not completed (status={latest.get('status')!r})")
         elif latest.get("conclusion") != "success":

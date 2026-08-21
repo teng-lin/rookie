@@ -73,6 +73,7 @@ ControlFailure = check_release_controls.ControlFailure
 COMMIT_PATTERN = check_release_controls.COMMIT_PATTERN
 REQUIRED_CHECK_RUNS = check_release_controls.REQUIRED_CHECK_RUNS
 fetch_all_check_runs = check_release_controls.fetch_all_check_runs
+select_latest_check_run = check_release_controls.select_latest_check_run
 _ARTIFACT_SMOKE_SUB_JOBS = check_release_controls._ARTIFACT_SMOKE_SUB_JOBS
 _ARTIFACT_SMOKE_PLATFORMS = check_release_controls._ARTIFACT_SMOKE_PLATFORMS
 
@@ -148,10 +149,11 @@ def verify_required_checks(repo: str, commit_sha: str) -> tuple[list[dict[str, A
         if not runs:
             failures.append(f"required check {name!r}: no check run found for {commit_sha}")
             continue
-        # A commit can carry more than one run of the same name (reruns);
-        # the most recently started run is the one that governs -- same
-        # policy as check-release-controls.py.
-        latest = max(runs, key=lambda run: run.get("started_at") or "")
+        try:
+            latest = select_latest_check_run(name, runs)
+        except ControlFailure as error:
+            failures.append(str(error))
+            continue
         if latest.get("status") != "completed":
             failures.append(f"required check {name!r}: not completed (status={latest.get('status')!r})")
             continue

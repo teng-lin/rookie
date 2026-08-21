@@ -252,6 +252,45 @@ class VerifyRequiredChecksTests(unittest.TestCase):
 
         self.assertTrue(any("conclusion is" in failure for failure in failures))
 
+    def test_newer_skipped_duplicate_does_not_mask_success(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        check_runs["check_runs"].append(
+            {
+                "id": 999,
+                "name": write_ci_proof.REQUIRED_CHECK_RUNS[0],
+                "status": "completed",
+                "conclusion": "skipped",
+                "started_at": "2026-01-02T00:00:00Z",
+            }
+        )
+        with mock.patch.object(
+            write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
+        ):
+            verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(verified), len(write_ci_proof.REQUIRED_CHECK_RUNS))
+
+    def test_unorderable_non_skipped_rerun_fails_closed(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        name = write_ci_proof.REQUIRED_CHECK_RUNS[0]
+        check_runs["check_runs"].append(
+            {
+                "id": 999,
+                "name": name,
+                "status": "queued",
+                "conclusion": None,
+                "started_at": None,
+            }
+        )
+        with mock.patch.object(
+            write_ci_proof, "gh_api", fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA)
+        ):
+            verified, failures = write_ci_proof.verify_required_checks(REPO, COMMIT_SHA)
+
+        self.assertTrue(any("cannot order check run 999" in failure for failure in failures))
+        self.assertNotIn(name, {check["name"] for check in verified})
+
 
 class MainTests(unittest.TestCase):
     def test_a_genuine_pass_writes_a_digest_bound_proof(self) -> None:
