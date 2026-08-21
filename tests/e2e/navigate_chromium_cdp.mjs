@@ -87,8 +87,28 @@ try {
     background: false,
   });
   await send("Target.activateTarget", { targetId });
-  await new Promise((resolve) => setTimeout(resolve, 10_000));
-  console.log(`native CDP foreground target requested ${url}`);
+  await send("Storage.setCookies", {
+    cookies: [
+      {
+        name: "rookie_ci",
+        value: "bar",
+        url,
+        expires: Math.floor(Date.now() / 1000) + 3600,
+        sameSite: "Lax",
+      },
+    ],
+  });
+  const { cookies } = await send("Storage.getCookies");
+  const seeded = cookies?.find(
+    ({ name, value }) => name === "rookie_ci" && value === "bar",
+  );
+  if (!seeded) {
+    throw new Error("native CDP storage did not retain rookie_ci=bar");
+  }
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  console.log(
+    `native CDP foreground target and persistent cookie seeded for ${url}`,
+  );
 } finally {
   // A protocol-level close gives the native process a chance to checkpoint
   // its persistent cookie database before the extractor opens it.
