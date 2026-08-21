@@ -14,9 +14,10 @@ test-support = []
 e2e-appbound-steering = ["rookie-cookies/e2e-appbound-steering"]
 
 [dependencies]
-# Default enable napi4 feature, see https://nodejs.org/api/n-api.html#node-api-version-matrix
-napi = { version = "2.12.2", default-features = false, features = ["napi4", "async"] }
-napi-derive = "2.12.2"
+# Keep the Node-API v4 compatibility baseline; dyn-symbols also lets Rust-side
+# unit tests link without a Node executable supplying N-API symbols.
+napi = { version = "3.12.2", default-features = false, features = ["napi4", "async", "dyn-symbols"] }
+napi-derive = "3.6.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -31,7 +32,7 @@ rookie-cookies = { workspace = true, features = [
 rookie-cookies.workspace = true
 
 [build-dependencies]
-napi-build = "2.0.1"
+napi-build = "2.4.1"
 
 [lints]
 workspace = true

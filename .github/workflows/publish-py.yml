@@ -36,11 +36,11 @@ jobs:
     name: Verify release metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - name: Verify release tag and metadata
@@ -67,7 +67,7 @@ jobs:
       windows_matrix: ${{ steps.matrix.outputs.windows_matrix }}
       macos_matrix: ${{ steps.matrix.outputs.macos_matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - id: matrix
@@ -87,10 +87,10 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.load-contract.outputs.linux_matrix) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - name: Build wheel
@@ -102,7 +102,7 @@ jobs:
           manylinux: auto
           working-directory: bindings/python
       - name: Upload wheel
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-linux-${{ matrix.target }}
           path: bindings/python/dist
@@ -118,10 +118,10 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.load-contract.outputs.windows_matrix) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           architecture: ${{ matrix.target }}
@@ -133,7 +133,7 @@ jobs:
           working-directory: bindings/python
           sccache: true
       - name: Upload wheel
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-windows-${{ matrix.target }}
           path: bindings/python/dist
@@ -149,10 +149,10 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.load-contract.outputs.macos_matrix) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
       - name: Build wheel
@@ -163,7 +163,7 @@ jobs:
           working-directory: bindings/python
           sccache: true
       - name: Upload wheel
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-macos-${{ matrix.target }}
           path: bindings/python/dist
@@ -176,10 +176,10 @@ jobs:
     needs: preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
       - name: Install maturin
@@ -188,7 +188,7 @@ jobs:
         working-directory: bindings/python
         run: python -m maturin sdist --out dist
       - name: Upload source distribution
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-sdist
           path: bindings/python/dist
@@ -210,7 +210,7 @@ jobs:
       # the "Verify non-spoofable CI proof" step below.
       actions: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       # run-consumer-harness.py's exercise_python_wheel installs the cp311-abi3
@@ -218,10 +218,10 @@ jobs:
       # every other job in this workflow uses, rather than trusting whatever
       # python3 the runner image happens to ship, which could be older than
       # 3.11 and make pip reject the wheel on ABI/version grounds.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: python-*
           path: dist
@@ -244,7 +244,7 @@ jobs:
             --output "$GITHUB_WORKSPACE/release-scan-manifest.json" \
             "${distributions[@]}"
       - name: Upload scan manifest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-scan-manifest
           path: release-scan-manifest.json
@@ -271,7 +271,7 @@ jobs:
       # ci-proof.json is written by the step just before this one, after
       # that upload already ran.
       - name: Upload CI proof
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-ci-proof
           path: ci-proof.json
@@ -313,10 +313,10 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -354,7 +354,7 @@ jobs:
           fi
 
       - name: Download original Linux wheels
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: python-linux-*
           path: dist
@@ -362,7 +362,7 @@ jobs:
           run-id: ${{ inputs.recovery_run_id }}
           github-token: ${{ github.token }}
       - name: Download original Windows wheels
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: python-windows-*
           path: dist
@@ -370,7 +370,7 @@ jobs:
           run-id: ${{ inputs.recovery_run_id }}
           github-token: ${{ github.token }}
       - name: Download original macOS wheels
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: python-macos-*
           path: dist
@@ -378,14 +378,14 @@ jobs:
           run-id: ${{ inputs.recovery_run_id }}
           github-token: ${{ github.token }}
       - name: Download original source distribution
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: python-sdist
           path: dist
           run-id: ${{ inputs.recovery_run_id }}
           github-token: ${{ github.token }}
       - name: Download original release manifest
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: python-scan-manifest
           path: recovery
@@ -426,7 +426,7 @@ jobs:
           fi
 
       - name: Upload recovery proof
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-recovery-proof-${{ inputs.recovery_run_id }}
           path: recovery/

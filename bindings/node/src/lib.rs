@@ -3,7 +3,10 @@
 #[macro_use]
 extern crate napi_derive;
 
-use napi::{bindgen_prelude::AsyncTask, bindgen_prelude::Either, Env, Result, Status, Task};
+use napi::{
+  bindgen_prelude::{AsyncTask, Either, JsObjectValue, ToNapiValue},
+  Env, Result, Status, Task,
+};
 // Aliased: this module's own `extract_from_path` is the `extractFromPath`
 // napi export sharing the core function's name (Key Decision 15 -- bindings
 // share names with Rust), so the core function needs a different Rust-side
@@ -138,7 +141,10 @@ fn structured_error_with_env(env: Env, error: &rookie_cookies::Error) -> napi::E
   if let Err(error) = attributes {
     return error;
   }
-  napi::Error::from(js_error.into_unknown())
+  match js_error.into_unknown(&env) {
+    Ok(error) => napi::Error::from(error),
+    Err(error) => error,
+  }
 }
 
 /// Converts a typed `rookie_cookies::Error` into a `napi::Error` carrying the

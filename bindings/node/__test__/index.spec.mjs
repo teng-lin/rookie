@@ -1249,6 +1249,8 @@ test("generated report exports and declarations survive patching", (t) => {
 
   // Counters are declared u32 precisely so no report field becomes a BigInt.
   t.false(types.includes("bigint"), "no declaration may use BigInt");
+  t.regex(types, /export type JsCancellationHandle = CancellationHandle/);
+  t.regex(types, /export type JsReadResult = ReadResult/);
 });
 
 // Executes the real scripts/patch-loader.js against a disposable copy of the
@@ -1328,8 +1330,8 @@ test("patch-loader rejects generated declarations that arrive incomplete", (t) =
 
 test("patch-loader rejects the historical slice-at-load regression", (t) => {
   // Slicing the generated types at a common declaration such as `load`
-  // discarded every API generated after it, which is where firefoxProfiles and
-  // now all four report functions live.
+  // discarded every API generated after it. napi-rs v3 sorts declarations by
+  // name, so supportedBrowsers is a stable post-load sentinel for that loss.
   const result = runPatchLoader(({ loader, types }) => {
     const load = types.indexOf("export declare function load(");
     return { loader, types: types.slice(0, types.indexOf("\n", load) + 1) };
@@ -1337,7 +1339,7 @@ test("patch-loader rejects the historical slice-at-load regression", (t) => {
 
   t.not(result.status, 0);
   t.regex(result.stderr, /Generated declarations were truncated/);
-  t.regex(result.stderr, /\bfirefoxProfiles\b/);
+  t.regex(result.stderr, /\bsupportedBrowsers\b/);
 });
 
 test("patch-loader rejects patching that would drop a declaration", (t) => {

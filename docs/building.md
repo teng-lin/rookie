@@ -90,7 +90,7 @@ addon you just compiled (those older tarballs may not export `read` /
 ```console
 cd bindings/node
 npm ci --omit=optional
-npm run build -- --cargo-flags=--locked
+npm run build -- -- --locked
 node -e "const m=require('./index.js'); console.log(m.version(), typeof m.read)"
 ```
 

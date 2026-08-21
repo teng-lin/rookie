@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -95,24 +96,46 @@ def main() -> int:
     # staging it to match that flow and avoid overwriting a root-owned file
     # produced by the pinned Linux build container.
     built_binding.unlink()
-    # `napi artifacts` joins --dir to its cwd instead of resolving an absolute
-    # path. Match the relative directory shape used after release downloads so
-    # a clean runner actually discovers and moves the native binding.
+    # `napi artifacts` joins --output-dir to its cwd instead of resolving an
+    # absolute path. Match the relative directory shape used after release
+    # downloads so a clean runner actually discovers and moves the binding.
     napi_source_dir = os.path.relpath(napi_artifacts, start=node_root)
-    subprocess.run(
-        [
-            npm_command(),
-            "run",
-            "artifacts",
-            "--",
-            "--dir",
-            napi_source_dir,
-            "--dist",
-            "npm",
-        ],
-        cwd=node_root,
-        check=True,
-    )
+    # napi-rs v3 requires an artifact for every configured target. This smoke
+    # job deliberately builds one target at a time, so give the artifacts
+    # command a narrowed copy of the package config; the release job still
+    # uses the real five-target config and therefore keeps the all-target
+    # completeness check.
+    smoke_package_metadata = json.loads((node_root / "package.json").read_text())
+    smoke_package_metadata["napi"]["targets"] = [args.target]
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=node_root,
+        prefix=".napi-artifact-smoke-",
+        suffix=".json",
+        delete=False,
+    ) as smoke_package:
+        json.dump(smoke_package_metadata, smoke_package)
+    smoke_package_json = Path(smoke_package.name)
+    try:
+        subprocess.run(
+            [
+                npm_command(),
+                "run",
+                "artifacts",
+                "--",
+                "--package-json-path",
+                smoke_package_json.name,
+                "--output-dir",
+                napi_source_dir,
+                "--npm-dir",
+                "npm",
+            ],
+            cwd=node_root,
+            check=True,
+        )
+    finally:
+        smoke_package_json.unlink(missing_ok=True)
     subprocess.run(
         [
             sys.executable,

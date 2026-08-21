@@ -79,7 +79,7 @@ def npm_native_matrix(contract: dict[str, Any]) -> dict[str, Any]:
         entry = {
             "host": cell["runner"],
             "target": cell["target_triple"],
-            "build": f"npm run build -- --target {cell['target_triple']} --cargo-flags=--locked",
+            "build": f"npm run build -- --target {cell['target_triple']} -- --locked",
         }
         if "docker_image" in cell:
             entry["docker"] = cell["docker_image"]
