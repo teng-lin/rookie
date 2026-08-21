@@ -18,6 +18,12 @@ The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
 cargo add rookie-cookies
 ```
 
+> **Windows App-Bound security note:** jobs default to
+> `AppBoundPolicy::InjectionOnly`, which reflectively injects into a spawned
+> browser process and may be flagged by endpoint security. Chain
+> `.app_bound(AppBoundPolicy::Disabled)` to perform no App-Bound process work;
+> `v20` rows will then be omitted with a warning.
+
 ## Recommended 0.6.0 usage
 
 ```rust

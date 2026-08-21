@@ -14,6 +14,11 @@ The workspace is currently `0.6.0-beta.1`. The recommended 0.6 entry is
 npm install rookie-cookies
 ```
 
+> **Windows App-Bound security note:** jobs default to unprivileged reflective
+> injection into a spawned browser process, which endpoint security can flag.
+> Pass `appBound: "disabled"` to `read`, `fromPath`, or report jobs to perform
+> no App-Bound process work; `v20` rows will then be omitted with a warning.
+
 ## Recommended 0.6.0 usage
 
 ```js
