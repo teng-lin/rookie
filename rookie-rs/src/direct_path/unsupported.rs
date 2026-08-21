@@ -1,7 +1,22 @@
+#[cfg(unix)]
+use super::ChromiumCredentialSource;
 use super::{shared, unsupported_target, CookieSourceKind, PathExtractRequest};
 use crate::enums::DetailedCookie;
 use anyhow::Result;
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+
+#[cfg(unix)]
+pub(super) fn unix_identity(
+  path: impl Into<PathBuf>,
+  browser_id: impl Into<String>,
+) -> PathExtractRequest {
+  PathExtractRequest::with_credentials(
+    path,
+    Some(ChromiumCredentialSource::BrowserId(browser_id.into())),
+  )
+}
 
 pub(super) fn classify_cookie_source(
   path: &Path,
@@ -24,5 +39,19 @@ pub(super) fn detailed_from_path(
       )
     }
     _ => Err(unsupported_target(source)),
+  }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn unix_identity_constructor_remains_available_on_unsupported_unix_targets() {
+    let request = unix_identity("Cookies", "chrome");
+    assert!(matches!(
+      request.target.credentials,
+      Some(ChromiumCredentialSource::BrowserId(ref browser_id)) if browser_id == "chrome"
+    ));
   }
 }

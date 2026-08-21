@@ -899,6 +899,11 @@ jobs:
           }
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
+        env:
+          # Chrome 151 on windows-2025 can exceed Playwright's 30s default on
+          # a cold launch. The Ubuntu canary uses the same bounded allowance;
+          # extraction assertions remain non-retried and fail immediately.
+          ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS: '120000'
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force -Path "$env:ROOKIE_E2E_USER_DATA_DIR" | Out-Null
@@ -971,3 +976,39 @@ jobs:
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
+
+  release-gate:
+    name: "release gate: real browsers"
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.multi_browser && !inputs.appbound_only }}
+    needs:
+      - ubuntu-chrome
+      - ubuntu-firefox
+      - macos-firefox
+      - macos-chrome
+      - windows-firefox
+      - windows-chrome-appbound
+      - windows-locked-db-shadow-copy
+      - windows-chrome
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every real-browser lane
+        env:
+          UBUNTU_CHROME: ${{ needs.ubuntu-chrome.result }}
+          UBUNTU_FIREFOX: ${{ needs.ubuntu-firefox.result }}
+          MACOS_FIREFOX: ${{ needs.macos-firefox.result }}
+          MACOS_CHROME: ${{ needs.macos-chrome.result }}
+          WINDOWS_FIREFOX: ${{ needs.windows-firefox.result }}
+          WINDOWS_APPBOUND: ${{ needs.windows-chrome-appbound.result }}
+          WINDOWS_SHADOW_COPY: ${{ needs.windows-locked-db-shadow-copy.result }}
+          WINDOWS_DPAPI: ${{ needs.windows-chrome.result }}
+        run: |
+          set -euo pipefail
+          for result in \
+            "$UBUNTU_CHROME" "$UBUNTU_FIREFOX" \
+            "$MACOS_FIREFOX" "$MACOS_CHROME" \
+            "$WINDOWS_FIREFOX" "$WINDOWS_APPBOUND" \
+            "$WINDOWS_SHADOW_COPY" "$WINDOWS_DPAPI"
+          do
+            test "$result" = success
+          done

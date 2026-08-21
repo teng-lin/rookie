@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-beta.2] - 2026-08-21
+
 ### Added
 
 - Rust and Node now expose `jar` alongside Python. It is projection sugar for
@@ -241,6 +243,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixtures remain for products we cannot install. Extra hosted browsers run on
   nightly and again on release. Claimed-browser fixtures run on
   `v*` tags, GitHub Releases, or `workflow_dispatch`.
+- Releases now fail closed unless the exact tagged commit passes the full
+  language/OS, artifact, assurance, security, real-browser, and claimed-browser
+  suites. A guarded workflow-only npm bootstrap can create a new contract
+  package with the release environment token before its trusted publisher can
+  be configured; established packages remain OIDC-only.
 - The Safari hosted canary uses the normal application profile because Apple
   intentionally destroys SafariDriver automation storage at session teardown.
   Internet Explorer remains fixture-only because current hosted images expose
@@ -282,6 +289,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Artifact smoke on Ubuntu ARM64: maturin-action's manylinux container left
   `RUSTC_WRAPPER=sccache` in the host job environment, so the native Node
   binding build failed looking for a host `sccache`.
+- The Windows legacy-DPAPI real-browser canary now gives system Chrome the
+  same bounded 120-second cold-start allowance as the Ubuntu canary. Chrome
+  151 could exceed Playwright's 30-second default before extraction began;
+  cookie extraction and validation assertions are still never retried.
+- FreeBSD and other unsupported Unix targets again compile the Unix
+  direct-path identity constructor. It preserves the request value so the
+  platform leaf can return the typed `unsupported_target` result at execution.
 
 ## [0.6.0-beta.1] - 2026-08-18
 

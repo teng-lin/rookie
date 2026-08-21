@@ -64,6 +64,14 @@ _ARTIFACT_SMOKE_SUB_JOBS = (
     "Install and exercise downloaded packages (Node.js 26)",
 )
 _ARTIFACT_SMOKE_PLATFORMS = ("Ubuntu x64 packages", "Windows x64 packages", "macOS ARM64 packages")
+_FULL_RELEASE_GATES = (
+    "release gate: full test suite",
+    "release gate: real browsers",
+    "release gate: claimed browsers",
+    "release gate: installed artifacts",
+    "release gate: assurance",
+    "release gate: security",
+)
 
 REQUIRED_CHECK_RUNS = (
     "e2e ubuntu × chrome (libsecret)",
@@ -75,6 +83,7 @@ REQUIRED_CHECK_RUNS = (
     "e2e windows × chrome (legacy DPAPI)",
     *(f"{platform} / {sub_job}" for platform in _ARTIFACT_SMOKE_PLATFORMS for sub_job in _ARTIFACT_SMOKE_SUB_JOBS),
     "check (ubuntu-latest)",
+    *_FULL_RELEASE_GATES,
 )
 
 

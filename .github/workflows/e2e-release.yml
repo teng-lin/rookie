@@ -162,3 +162,26 @@ jobs:
             py=.venv/Scripts/python
           fi
           "$py" tests/e2e/run_claimed_browser_fixtures.py
+
+  release-gate:
+    name: "release gate: claimed browsers"
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    needs:
+      - coverage
+      - hosted-matrix
+      - hosted-claimed
+      - fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the complete claimed-browser matrix and fixtures
+        env:
+          COVERAGE: ${{ needs.coverage.result }}
+          HOSTED_MATRIX: ${{ needs.hosted-matrix.result }}
+          HOSTED_CLAIMED: ${{ needs.hosted-claimed.result }}
+          FIXTURES: ${{ needs.fixtures.result }}
+        run: |
+          set -euo pipefail
+          for result in "$COVERAGE" "$HOSTED_MATRIX" "$HOSTED_CLAIMED" "$FIXTURES"; do
+            test "$result" = success
+          done
