@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 [target.'cfg(windows)'.dependencies]
 rookie-cookies = { workspace = true, features = [
   "appbound",
+  "internet-explorer",
 ] }
 
 [target.'cfg(unix)'.dependencies]
@@ -34,4 +35,3 @@ napi-build = "2.0.1"
 
 [lints]
 workspace = true
-

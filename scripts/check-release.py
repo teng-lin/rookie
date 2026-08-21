@@ -120,6 +120,17 @@ def inherited_dependency(
     return sorted(features) == sorted(expected_features or [])
 
 
+def contract_cell(
+    contract: dict[str, Any], artifact_id: str, os_name: str | None
+) -> dict[str, Any] | None:
+    matches = [
+        cell
+        for cell in platform_contract.cells(contract, artifact_id=artifact_id)
+        if cell.get("os") == os_name
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def cargo_lock_versions(lockfile: dict[str, Any], package_name: str) -> list[str]:
     return [
         package["version"]
@@ -153,6 +164,7 @@ def main() -> int:
     node_package = load_json("bindings/node/package.json")
     node_lock = load_json("bindings/node/package-lock.json")
     javascript_lock = load_json("examples/javascript/package-lock.json")
+    contract = platform_contract.load_contract()
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     metadata: list[tuple[str, Any, Any]] = [
@@ -220,6 +232,51 @@ def main() -> int:
             False,
         ),
         (
+            "rookie-rs/Cargo.toml default features",
+            core["features"].get("default"),
+            ["appbound", "internet-explorer"],
+        ),
+        (
+            "rookie-rs/Cargo.toml internet-explorer feature",
+            core["features"].get("internet-explorer"),
+            ["dep:libesedb"],
+        ),
+        (
+            "rookie-rs/Cargo.toml Windows libesedb optional",
+            core["target"]["cfg(windows)"]["dependencies"]["libesedb"].get("optional"),
+            True,
+        ),
+        (
+            "cli/Cargo.toml default features",
+            cli["features"].get("default"),
+            ["appbound", "internet-explorer"],
+        ),
+        (
+            "cli/Cargo.toml internet-explorer forwarding feature",
+            cli["features"].get("internet-explorer"),
+            ["rookie-cookies/internet-explorer"],
+        ),
+        (
+            "crate platform-contract features",
+            (contract_cell(contract, "crate", None) or {}).get("features"),
+            ["appbound", "internet-explorer"],
+        ),
+        (
+            "Windows npm platform-contract features",
+            (contract_cell(contract, "npm-native", "win32") or {}).get("features"),
+            ["appbound", "internet-explorer"],
+        ),
+        (
+            "Windows CLI platform-contract features",
+            (contract_cell(contract, "cli", "win32") or {}).get("features"),
+            ["appbound", "internet-explorer"],
+        ),
+        (
+            "Windows wheel platform-contract features",
+            (contract_cell(contract, "wheel", "win32") or {}).get("features"),
+            ["dpapi", "internet-explorer"],
+        ),
+        (
             "bindings/node/package.json Node.js engine",
             node_package["engines"]["node"],
             NODE_ENGINE_RANGE,
@@ -251,7 +308,7 @@ def main() -> int:
     ]
 
     failures: list[str] = []
-    failures.extend(platform_contract.validate_npm_repository(platform_contract.load_contract()))
+    failures.extend(platform_contract.validate_npm_repository(contract))
 
     previous = latest_published_version(ROOT, excluding=expected)
     if previous is not None and semver_precedence_key(expected) <= semver_precedence_key(previous):
@@ -282,7 +339,7 @@ def main() -> int:
         (
             "bindings/python/Cargo.toml Windows rookie-cookies dependency",
             python["target"]["cfg(windows)"]["dependencies"]["rookie-cookies"],
-            ["appbound"],
+            ["appbound", "internet-explorer"],
         ),
         (
             "bindings/node/Cargo.toml Unix rookie-cookies dependency",
@@ -292,7 +349,7 @@ def main() -> int:
         (
             "bindings/node/Cargo.toml Windows rookie-cookies dependency",
             node["target"]["cfg(windows)"]["dependencies"]["rookie-cookies"],
-            ["appbound"],
+            ["appbound", "internet-explorer"],
         ),
     )
     for label, specification, features in dependency_specs:

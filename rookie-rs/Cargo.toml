@@ -54,8 +54,9 @@ path = "src/bin/generate-dto-schema.rs"
 required-features = ["dto-schema"]
 
 [features]
-default = ["appbound"]
+default = ["appbound", "internet-explorer"]
 appbound = []
+internet-explorer = ["dep:libesedb"]
 # JsonSchema derives for the report_core.rs DTO types, used only by the
 # generate-dto-schema binary (issue #241). Optional so every other consumer
 # of this crate -- the CLI, and the Python/Node bindings -- doesn't pull in
@@ -95,7 +96,7 @@ sha1 = "0.10"
 aes-gcm = "0.10"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
-libesedb = "0.2"
+libesedb = { version = "0.2", optional = true }
 rawcopy-rs-next = "0.1.3"
 privilege = "0.3.0"
 windows = { version = "0.51", features = [

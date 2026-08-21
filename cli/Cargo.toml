@@ -16,8 +16,9 @@ serde_json = "1.0.107"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "fallible_uint"] }
 
 [features]
-default = ["appbound"]
+default = ["appbound", "internet-explorer"]
 appbound = ["rookie-cookies/appbound"]
+internet-explorer = ["rookie-cookies/internet-explorer"]
 # Windows App-Bound canary only; see the rookie-cookies feature of the same name.
 e2e-appbound-steering = ["rookie-cookies/e2e-appbound-steering"]
 
@@ -27,4 +28,3 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
-

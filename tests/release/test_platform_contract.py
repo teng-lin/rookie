@@ -88,6 +88,25 @@ class RealContractTests(unittest.TestCase):
         contract = platform_contract.load_contract()
         self.assertEqual(platform_contract.validate_npm_repository(contract), [])
 
+    def test_windows_artifacts_record_the_internet_explorer_capability(self) -> None:
+        contract = platform_contract.load_contract()
+        windows_cells = [
+            cell
+            for cell in platform_contract.cells(contract)
+            if cell.get("os") == "win32"
+        ]
+        self.assertGreaterEqual(len(windows_cells), 3)
+        for cell in windows_cells:
+            self.assertIn(
+                "internet-explorer",
+                cell["features"],
+                f"{cell['artifact_id']} must record its shipped IE capability",
+            )
+
+        crate = platform_contract.cells(contract, artifact_id="crate")
+        self.assertEqual(len(crate), 1)
+        self.assertIn("internet-explorer", crate[0]["features"])
+
     def test_npm_workflow_consumes_contract_publish_inputs_and_order(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/publish-npm.yml").read_text(
             encoding="utf-8"

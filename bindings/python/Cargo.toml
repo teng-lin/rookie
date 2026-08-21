@@ -19,11 +19,10 @@ pyo3 = { version = "0.29", features = ["abi3-py311", "anyhow"] }
 pyo3-log = "0.13"
 
 [target.'cfg(windows)'.dependencies]
-rookie-cookies = { workspace = true, features = ["appbound"] }
+rookie-cookies = { workspace = true, features = ["appbound", "internet-explorer"] }
 
 [target.'cfg(unix)'.dependencies]
 rookie-cookies.workspace = true
 
 [lints]
 workspace = true
-
