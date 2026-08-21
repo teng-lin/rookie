@@ -53,14 +53,20 @@ fn registry_credentials_map_onto_the_platform_provider_input() {
     assert_eq!(brave.osx_key_service.as_deref(), Some("Brave Safe Storage"));
     assert_eq!(brave.osx_key_user.as_deref(), Some("Brave"));
 
-    for browser_id in ["coccoc", "yandex"] {
-      assert!(
-        chromium_key_credentials(browser_id)
-          .expect("resolve registered plaintext-only Chromium browser")
-          .is_none(),
-        "{browser_id} must resolve without inventing Keychain credentials"
-      );
-    }
+    assert!(
+      chromium_key_credentials("coccoc")
+        .expect("resolve registered plaintext-only Chromium browser")
+        .is_none(),
+      "Cốc Cốc must resolve without inventing Keychain credentials"
+    );
+    let yandex = chromium_key_credentials("yandex")
+      .expect("resolve Yandex")
+      .expect("Yandex credentials");
+    assert_eq!(
+      yandex.osx_key_service.as_deref(),
+      Some("Yandex Safe Storage")
+    );
+    assert_eq!(yandex.osx_key_user.as_deref(), Some("Yandex"));
   }
 
   // An unknown browser is an error rather than silently credential-less.
@@ -329,10 +335,7 @@ fn registry_contains_every_supported_chromium_family_browser() {
     ),
     (
       PlatformId::Linux,
-      [
-        "arc", "brave", "chrome", "chromium", "edge", "opera", "vivaldi",
-      ]
-      .as_slice(),
+      ["brave", "chrome", "chromium", "edge", "opera", "vivaldi"].as_slice(),
       [].as_slice(),
     ),
   ];
@@ -559,7 +562,7 @@ fn macos_chromium_browsers_without_a_keychain_identity_declare_no_decryption_tie
   }
   assert_eq!(
     without_identity,
-    ["coccoc", "yandex"].into_iter().collect::<BTreeSet<_>>(),
+    ["coccoc"].into_iter().collect::<BTreeSet<_>>(),
     "a new keychain-less macOS browser must decide its tier claim deliberately"
   );
 }
@@ -727,7 +730,7 @@ fn macos_packaging_variants_discover_flat_and_marked_profiles() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_browsers_without_keychain_credentials_fail_typed_per_tier() {
-  for browser_id in ["coccoc", "yandex"] {
+  for browser_id in ["coccoc"] {
     let installation = BrowserInstallation {
       installation_id: format!("{browser_id}-installation"),
       browser_id: browser_id.to_owned(),
@@ -767,12 +770,9 @@ fn macos_missing_key_configuration_surfaces_as_row_issue_not_silent_empty() {
   let home = temp.path().join("home");
   let context = context_for(PlatformId::Macos, home, []);
 
-  for (browser_id, root_id, profile) in [
-    ("coccoc", "coccoc-stable", None),
-    ("yandex", "yandex-stable", Some("Default")),
-  ] {
+  for (browser_id, root_id) in [("coccoc", "coccoc-stable")] {
     let root = browser_root(&context, browser_id, root_id);
-    let profile_path = profile.map_or_else(|| root.clone(), |name| root.join(name));
+    let profile_path = root.clone();
     let db = seed_cookie(&profile_path, true, browser_id, "");
     let connection = rusqlite::Connection::open(&db).expect("open cookie db");
     let mut encrypted = b"v10".to_vec();
@@ -2333,7 +2333,6 @@ fn legacy_opera_wrappers_use_flat_roots_on_macos_and_windows() {
 #[test]
 fn legacy_linux_package_order_is_registry_metadata_not_generic_priority() {
   for (index, (browser_id, earlier_root, later_root)) in [
-    ("arc", "arc-snap", "arc-native"),
     ("brave", "brave-snap", "brave-stable-native"),
     ("chromium", "chromium-snap", "chromium-native"),
     ("opera", "opera-stable-snap", "opera-stable-native"),
@@ -2566,7 +2565,6 @@ fn windows_legacy_flat_opera_uses_local_state_beside_selected_database() {
 #[test]
 fn legacy_linux_snap_roots_admit_only_default_profiles() {
   for (index, (browser_id, snap_root_id, native_root_id)) in [
-    ("arc", "arc-snap", "arc-native"),
     ("brave", "brave-snap", "brave-stable-native"),
     ("chromium", "chromium-snap", "chromium-native"),
   ]

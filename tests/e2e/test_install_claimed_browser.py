@@ -7,6 +7,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import test_browser_coverage as coverage
 
@@ -72,6 +73,18 @@ class InstallCatalogTests(unittest.TestCase):
                 "playwright_channel",
             )
 
+    def test_playwright_installer_uses_resolved_npx_shim(self) -> None:
+        npx = r"C:\Program Files\nodejs\npx.CMD"
+        with (
+            mock.patch.object(INSTALL.shutil, "which", return_value=npx),
+            mock.patch.object(INSTALL, "run") as run,
+        ):
+            INSTALL.install_playwright_product("chromium")
+        run.assert_called_once_with(
+            [npx, "playwright", "install", "chromium"],
+            cwd=INSTALL.ROOT / "tests/e2e",
+        )
+
     def test_find_exe_resolves_globs_and_app_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -114,16 +127,18 @@ class InstallCatalogTests(unittest.TestCase):
             for path in meta.get("windows", {}).get("exe", []):
                 self.assertNotIn("WindowsApps", path, browser)
 
-    def test_untestable_products_are_not_in_the_install_catalog(self) -> None:
+    def test_package_activated_products_are_not_in_the_install_catalog(self) -> None:
         catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
         self.assertNotIn(("macos", "arc"), catalog)
         self.assertNotIn(("windows", "arc"), catalog)
         self.assertNotIn(("windows", "duckduckgo"), catalog)
-        self.assertNotIn(("macos", "yandex"), catalog)
-        self.assertNotIn(("linux", "vivaldi"), catalog)
-        self.assertNotIn(("macos", "vivaldi"), catalog)
-        self.assertNotIn(("windows", "vivaldi"), catalog)
-        self.assertNotIn(("windows", "yandex"), catalog)
+
+    def test_vivaldi_and_yandex_are_real_hosted_cells(self) -> None:
+        catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
+        for platform in INSTALL.RUNNERS:
+            self.assertIn((platform, "vivaldi"), catalog)
+        self.assertIn(("macos", "yandex"), catalog)
+        self.assertIn(("windows", "yandex"), catalog)
 
 
 if __name__ == "__main__":

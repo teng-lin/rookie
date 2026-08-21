@@ -109,6 +109,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- The Linux Arc registry entry. Arc's vendor does not ship or support Arc on
+  Linux; the macOS and Windows registrations remain.
 - PyPI wheels for linux i686, armv7, s390x, and ppc64le. Those arches have
   no desktop browser cookie store this project can honestly support.
 
@@ -228,14 +230,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plus Python build+tests (3.12/3.13/3.14)
   across Ubuntu/macOS/Windows. The full Node and Python version product,
   FreeBSD, packaging wheels/sdist, Chrome/Firefox e2e, and artifact smoke
-  move to nightly / `main`. Extra hosted browsers (Edge, Chromium, Windows
-  Brave, Opera, Opera GX, LibreWolf, Zen)
+  move to nightly / `main`. A small real Chrome/Firefox gate now also runs on
+  pull requests. Extra hosted browsers (Edge, Chromium, Brave, Opera, Opera GX,
+  Vivaldi, Yandex, LibreWolf, Zen, Safari, Internet Explorer)
   are installed on the runner when a silent installer exists. Claimed-browser
   fixtures remain for products we cannot install. Extra hosted browsers run on
   nightly and again on release. Claimed-browser fixtures run on
   `v*` tags, GitHub Releases, or `workflow_dispatch`.
 - `docs/testing.md` lists every registry browser against hosted CI, release
-  fixtures, or manual (Safari / Internet Explorer).
+  fixtures, or manual coverage.
 
 ### Deprecated
 
@@ -258,6 +261,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it stays working for the whole 0.6.x line.
 
 ### Fixed
+
+- macOS Yandex now declares its `Yandex Safe Storage` / `Yandex` Keychain
+  identity and encrypted `v10` tier. Claimed Chromium forks create the seed
+  tab through their native DevTools endpoint, avoiding Playwright persistent
+  context hangs and vendor startup pages that ignore a positional URL.
 
 - Artifact smoke on Ubuntu ARM64: maturin-action's manylinux container left
   `RUSTC_WRAPPER=sccache` in the host job environment, so the native Node

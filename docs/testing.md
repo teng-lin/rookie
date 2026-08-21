@@ -15,7 +15,7 @@ CI has three lanes. A pull request is not the full product.
 | Lane | Trigger | What runs |
 | --- | --- | --- |
 | **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Real Ubuntu Chrome + Firefox gate every PR. Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
-| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, LibreWolf, Zen, Safari, and Internet Explorer on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
+| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, Safari, and Internet Explorer on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
 | **Release** | `v*` tag, GitHub Release, `workflow_dispatch` on `e2e-release.yml`, or a PR labeled `e2e-release` | The hosted installer matrix again, plus engine fixtures for every `release_fixture` cell. A labeled PR stays opted in across later `synchronize` events. App-Bound Edge+Brave is the `e2e.yml` nightly / `multi_browser` dispatch, not this workflow. macOS Intel artifact smoke (schedule/manual). |
 
 ## Local commands
@@ -204,7 +204,7 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 
 | Browser | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Arc | fixture | fixture | fixture |
+| Arc | — | fixture | fixture |
 | Avast Secure Browser | — | — | fixture |
 | Brave | hosted | hosted | hosted |
 | Browser from Vought | — | — | fixture |
@@ -226,8 +226,8 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | Sogou Explorer | — | — | fixture |
 | 360 Browser | — | — | fixture |
 | 360X Browser | — | — | fixture |
-| Vivaldi | fixture | fixture | fixture |
-| Yandex Browser | — | fixture | fixture |
+| Vivaldi | hosted | hosted | hosted |
+| Yandex Browser | — | hosted | hosted |
 | Zen Browser | hosted | hosted | hosted |
 
 ### How hosted cells actually run
@@ -236,9 +236,9 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | --- | --- | --- |
 | Chrome × Linux / macOS / Windows | `e2e.yml` | Image Chrome, custom profile. Crypto: Ubuntu libsecret, macOS real Keychain, Windows legacy DPAPI `v10`. |
 | Firefox × Linux / macOS / Windows | `e2e.yml` | Playwright-bundled Firefox. |
-| Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Official `npx playwright install chromium` distribution, then native headless launch. |
-| Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Runner image Edge; official `npx playwright install msedge` fallback; native headless launch. |
-| Brave, Opera, LibreWolf, Zen on each OS they support; Opera GX on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. |
+| Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Official `npx playwright install chromium` distribution, then native DevTools launch. |
+| Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Runner image Edge; official `npx playwright install msedge` fallback; native DevTools launch. |
+| Brave, Opera, Vivaldi, LibreWolf, Zen on each OS they support; Opera GX and Yandex on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. Chromium forks create the seed tab through their `DevToolsActivePort` endpoint instead of Playwright's persistent-context pipe. |
 | Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari + SafariDriver; `safaridriver --enable`; BinaryCookies extraction. |
 | Internet Explorer × Windows | `e2e-release.yml` `hosted-claimed` | `windows-2022` IE capability + image IEDriver; ESE WebCache extraction. Server 2025 is intentionally not used because it removed standalone IE. |
 
@@ -249,11 +249,24 @@ Playwright. The native launcher polls the cookie database, so a browser that
 crashes after persisting the seed can still prove extraction without hiding a
 failed extraction assertion.
 
-These products have (or had) an installer story but stay on **fixture**
-because hosted runners cannot seed or decrypt them: Arc (all three OSes),
-Vivaldi (all three), Windows DuckDuckGo, macOS Yandex. Cachy is a deprecated
-Gecko fork. Everything else on fixture has no silent installer for GitHub
-runners (Cốc Cốc, Avast, QQ, Sogou, 360, 360X, Octo, Vought, DC Browser).
+Arc on macOS/Windows and Windows DuckDuckGo stay on **fixture** because their
+packaged/custom application startup does not expose an unattended profile +
+DevTools path on hosted runners. Cachy is a deprecated Gecko fork. Everything
+else on fixture has no maintained silent installer for GitHub runners (Cốc Cốc,
+Avast, QQ, Sogou, 360, 360X, Octo, Vought, DC Browser).
+
+The fixture exceptions are deliberate and machine-checked in
+`browser_coverage.json`:
+
+| Browser cells | Why a real hosted browser is not claimed |
+| --- | --- |
+| Arc on macOS | Its custom application startup has no stable unattended profile + DevTools contract. |
+| Arc on Windows | The MSIX package is application-activated, not a flag-controllable browser executable. |
+| DuckDuckGo on Windows | The MSIX app owns an embedded WebView profile and exposes no custom-user-data browser CLI. |
+| Cachy on Linux | The browser is deprecated and has no maintained release channel. |
+| Cốc Cốc on macOS/Windows; Avast on Windows | No maintained silent package-manager installer is available on the hosted images. |
+| Octo on Windows | Commercial account and anti-detect profile provisioning are operator-owned. |
+| QQ, Sogou, 360, 360X, Vought, DC on Windows | No stable unattended vendor or package-manager installer is available to the runner. |
 
 ### Fixtures
 

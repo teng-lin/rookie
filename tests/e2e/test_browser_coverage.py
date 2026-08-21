@@ -36,6 +36,7 @@ NIGHTLY_HOSTED = frozenset(
         ("linux", "firefox"),
         ("linux", "librewolf"),
         ("linux", "opera"),
+        ("linux", "vivaldi"),
         ("linux", "zen"),
         ("macos", "brave"),
         ("macos", "chrome"),
@@ -46,6 +47,8 @@ NIGHTLY_HOSTED = frozenset(
         ("macos", "opera"),
         ("macos", "opera_gx"),
         ("macos", "safari"),
+        ("macos", "vivaldi"),
+        ("macos", "yandex"),
         ("macos", "zen"),
         ("windows", "brave"),
         ("windows", "chrome"),
@@ -56,6 +59,8 @@ NIGHTLY_HOSTED = frozenset(
         ("windows", "librewolf"),
         ("windows", "opera"),
         ("windows", "opera_gx"),
+        ("windows", "vivaldi"),
+        ("windows", "yandex"),
         ("windows", "zen"),
     }
 )
@@ -90,7 +95,9 @@ def _parse_testing_md_matrix(text: str) -> dict[str, dict[str, str | None]]:
             raise AssertionError(f"unexpected matrix row: {line!r}")
         title, *platforms = cells
         parsed: dict[str, str | None] = {}
-        for platform, cell in zip(("linux", "macos", "windows"), platforms, strict=True):
+        for platform, cell in zip(
+            ("linux", "macos", "windows"), platforms, strict=True
+        ):
             if cell not in DOC_LANE_CELLS:
                 raise AssertionError(f"unknown lane cell {cell!r} for {title}")
             parsed[platform] = DOC_LANE_CELLS[cell]
@@ -144,6 +151,18 @@ class BrowserCoverageTests(unittest.TestCase):
         }
         self.assertEqual(hosted, NIGHTLY_HOSTED)
 
+    def test_every_fixture_cell_has_a_concrete_limitation(self) -> None:
+        fixtures = {
+            f"{row['platform']}/{row['browser']}"
+            for row in self.coverage_doc["coverage"]
+            if row["lane"] == "release_fixture"
+        }
+        limitations = self.coverage_doc["fixture_limitations"]
+        self.assertEqual(set(limitations), fixtures)
+        for cell, reason in limitations.items():
+            self.assertIsInstance(reason, str, cell)
+            self.assertGreaterEqual(len(reason.split()), 6, cell)
+
     def test_testing_md_matrix_matches_coverage(self) -> None:
         titles: dict[str, str] = {}
         for browsers in self.registry["platforms"].values():
@@ -153,7 +172,8 @@ class BrowserCoverageTests(unittest.TestCase):
                 )
 
         expected: dict[str, dict[str, str | None]] = {
-            title: {"linux": None, "macos": None, "windows": None} for title in titles.values()
+            title: {"linux": None, "macos": None, "windows": None}
+            for title in titles.values()
         }
         for row in self.coverage_doc["coverage"]:
             expected[titles[row["browser"]]][row["platform"]] = row["lane"]

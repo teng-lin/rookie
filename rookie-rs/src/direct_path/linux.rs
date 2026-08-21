@@ -10,9 +10,8 @@ use crate::enums::{Cookie, DetailedCookie};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-pub(super) const AUTOMATIC_BROWSER_IDS: &[&str] = &[
-  "chrome", "brave", "chromium", "edge", "opera", "vivaldi", "arc",
-];
+pub(super) const AUTOMATIC_BROWSER_IDS: &[&str] =
+  &["chrome", "brave", "chromium", "edge", "opera", "vivaldi"];
 
 /// Reads an encrypted Chromium database using one registry browser identity.
 ///

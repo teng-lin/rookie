@@ -10,7 +10,7 @@ import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
-    def test_linux_chromium_uses_native_headless_and_libsecret(self) -> None:
+    def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:
         command = hosted.chromium_native_command(
             "/opt/browser",
             Path("/tmp/profile"),
@@ -19,8 +19,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             has_xvfb=True,
         )
         self.assertEqual(command[:3], ["xvfb-run", "-a", "/opt/browser"])
-        self.assertIn("--headless=new", command)
+        self.assertNotIn("--headless=new", command)
         self.assertIn("--password-store=gnome-libsecret", command)
+        self.assertIn("--remote-debugging-port=0", command)
         self.assertNotIn("--remote-debugging-pipe", command)
 
     def test_non_linux_chromium_needs_neither_xvfb_nor_libsecret(self) -> None:
@@ -33,6 +34,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertEqual(command[0], "/Applications/Browser")
         self.assertNotIn("--password-store=gnome-libsecret", command)
+        self.assertIn("--remote-debugging-port=0", command)
 
     def test_vendor_driver_commands_are_platform_native(self) -> None:
         self.assertEqual(

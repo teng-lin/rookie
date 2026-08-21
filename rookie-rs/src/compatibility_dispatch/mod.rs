@@ -42,7 +42,6 @@ pub(super) fn legacy_load_browsers() -> Vec<(&'static str, LoadFn)> {
     ("chromium", named::chromium),
     ("brave", named::brave),
     ("vivaldi", named::vivaldi),
-    ("arc", named::arc),
   ];
   platform::extend_legacy_load_browsers(&mut browser_types);
   browser_types
@@ -105,7 +104,6 @@ mod tests {
         "chromium",
         "brave",
         "vivaldi",
-        "arc",
         "chrome",
         "cachy",
       ]
@@ -162,7 +160,6 @@ mod tests {
         "chromium",
         "brave",
         "vivaldi",
-        "arc",
       ]
     );
   }

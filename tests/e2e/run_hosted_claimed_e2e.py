@@ -10,6 +10,7 @@ Safari and IE use their image-provided vendor WebDriver servers.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -20,6 +21,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 from webdriver_cookie import (
     file_snapshot,
@@ -142,11 +145,8 @@ def plant_keychain() -> None:
 
 def stage_chromium_user_data(user_data: Path) -> None:
     user_data.mkdir(parents=True, exist_ok=True)
-    # Some Chromium forks read these first-run files before writing cookies.
-    for name in ("search_engines.json", "search_engines_prompt.json"):
-        path = user_data / name
-        if not path.exists():
-            path.write_text("{}\n", encoding="utf-8")
+    # Do not synthesize vendor first-run JSON here. Vivaldi verifies signed
+    # search-engine data and crashes after deleting an unsigned `{}` stub.
 
 
 def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
@@ -170,33 +170,82 @@ def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
 def chromium_native_command(
     exe: str,
     user_data: Path,
-    url: str,
+    _url: str,
     *,
     platform: str | None = None,
     has_xvfb: bool | None = None,
 ) -> list[str]:
     platform = platform or sys.platform
     has_xvfb = shutil.which("xvfb-run") is not None if has_xvfb is None else has_xvfb
-    screenshot = Path(tempfile.gettempdir()) / "rookie-claimed-seed.png"
     cmd = [
         exe,
-        "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--disable-default-apps",
         f"--user-data-dir={user_data}",
-        f"--screenshot={screenshot}",
-        "--virtual-time-budget=8000",
-        "--dump-dom",
-        url,
+        "--remote-debugging-port=0",
+        "about:blank",
     ]
     if platform.startswith("linux"):
-        cmd.insert(-1, "--password-store=gnome-libsecret")
+        cmd.insert(-2, "--password-store=gnome-libsecret")
         if has_xvfb:
             cmd = ["xvfb-run", "-a", *cmd]
     return cmd
+
+
+def wait_for_devtools_port(
+    proc: subprocess.Popen[bytes] | subprocess.Popen[str],
+    user_data: Path,
+    timeout: float = 45,
+) -> int:
+    active_port = user_data / "DevToolsActivePort"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if active_port.is_file():
+            try:
+                port = int(active_port.read_text(encoding="utf-8").splitlines()[0])
+            except (IndexError, OSError, ValueError):
+                pass
+            else:
+                if 0 < port < 65536:
+                    return port
+        status = proc.poll()
+        if status is not None:
+            raise SystemExit(
+                f"native chromium exited {status} before publishing {active_port}"
+            )
+        time.sleep(0.25)
+    raise SystemExit(f"native chromium did not publish {active_port} within {timeout}s")
+
+
+def open_devtools_target(port: int, url: str, timeout: float = 15) -> str:
+    endpoint = f"http://127.0.0.1:{port}/json/new?{quote(url, safe='')}"
+    request = Request(endpoint, method="PUT")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            with urlopen(request, timeout=2) as response:
+                payload = json.load(response)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.25)
+    target_id = payload.get("id")
+    if not isinstance(target_id, str) or not target_id:
+        raise SystemExit(f"DevTools did not return a target id: {payload!r}")
+    return target_id
+
+
+def close_devtools_target(port: int, target_id: str) -> None:
+    endpoint = f"http://127.0.0.1:{port}/json/close/{quote(target_id, safe='')}"
+    try:
+        with urlopen(endpoint, timeout=10):
+            pass
+    except OSError as error:
+        print(f"DevTools target close failed after cookie persistence: {error}")
 
 
 def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
@@ -204,7 +253,11 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
     saw_cookie = False
+    devtools_port: int | None = None
+    target_id: str | None = None
     try:
+        devtools_port = wait_for_devtools_port(proc, user_data)
+        target_id = open_devtools_target(devtools_port, url)
         deadline = time.time() + 90
         while time.time() < deadline:
             if cookies_db_has_name(user_data):
@@ -222,6 +275,9 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
                 )
             raise SystemExit("native chromium seed timed out without writing rookie_ci")
     finally:
+        if devtools_port is not None and target_id is not None:
+            close_devtools_target(devtools_port, target_id)
+            time.sleep(1)
         if proc.poll() is None:
             proc.terminate()
             try:

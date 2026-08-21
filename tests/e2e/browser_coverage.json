@@ -1,17 +1,27 @@
 {
   "schema_version": 1,
   "lanes": {
-    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, LibreWolf, Zen, SafariDriver, and IE/IEDriver on supported hosted images.",
+    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, SafariDriver, and IE/IEDriver on supported hosted images.",
     "release_fixture": "Engine fixture extracted with this browser_id in e2e-release.yml (tag, release, workflow_dispatch).",
     "manual": "Operator-owned fallback for a registry cell without a viable hosted runner. No current cells rely on it."
   },
+  "fixture_limitations": {
+    "linux/cachy": "Deprecated browser with no maintained release channel.",
+    "macos/arc": "The custom application startup has no stable unattended profile and DevTools contract for a hosted runner.",
+    "macos/coccoc": "No maintained silent package-manager installer is available on the hosted image.",
+    "windows/arc": "The packaged application is activated through MSIX rather than a flag-controllable browser executable.",
+    "windows/avast": "No maintained silent package-manager installer is available on the hosted image.",
+    "windows/browser_from_vought": "No maintained vendor or package-manager installer is available.",
+    "windows/coccoc": "No maintained silent package-manager installer is available on the hosted image.",
+    "windows/dc_browser": "No maintained vendor or package-manager installer is available.",
+    "windows/duckduckgo": "The MSIX application owns an embedded WebView profile and exposes no custom-user-data browser CLI.",
+    "windows/octo_browser": "The commercial anti-detect browser requires operator-owned account and profile provisioning.",
+    "windows/qq_browser": "No stable unattended vendor or package-manager installer is available to the runner.",
+    "windows/sogou": "No stable unattended vendor or package-manager installer is available to the runner.",
+    "windows/speed_360": "No stable unattended vendor or package-manager installer is available to the runner.",
+    "windows/speed_360x": "No stable unattended vendor or package-manager installer is available to the runner."
+  },
   "coverage": [
-    {
-      "platform": "linux",
-      "browser": "arc",
-      "engine": "chromium",
-      "lane": "release_fixture"
-    },
     {
       "platform": "linux",
       "browser": "brave",
@@ -64,7 +74,7 @@
       "platform": "linux",
       "browser": "vivaldi",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "nightly_hosted"
     },
     {
       "platform": "linux",
@@ -142,13 +152,13 @@
       "platform": "macos",
       "browser": "vivaldi",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "nightly_hosted"
     },
     {
       "platform": "macos",
       "browser": "yandex",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "nightly_hosted"
     },
     {
       "platform": "macos",
@@ -280,13 +290,13 @@
       "platform": "windows",
       "browser": "vivaldi",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "nightly_hosted"
     },
     {
       "platform": "windows",
       "browser": "yandex",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "nightly_hosted"
     },
     {
       "platform": "windows",

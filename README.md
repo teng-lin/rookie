@@ -42,7 +42,7 @@ the documented default.
 
 | Browser | Linux | macOS | Windows |
 | --- | :---: | :---: | :---: |
-| Arc | ✓ | ✓ | ✓ |
+| Arc | — | ✓ | ✓ |
 | Brave | ✓ | ✓ | ✓ |
 | Cachy | ✓ | — | — |
 | Chrome | ✓ | ✓ | ✓ |
@@ -95,8 +95,8 @@ Device Bound Session Credentials (DBSC). Coverage details:
 [docs/testing.md](docs/testing.md).
 
 Linux Chromium is `v10` + `v11` (libsecret / KWallet). Most macOS Chromium
-registrations declare Keychain-backed `v10`; macOS Cốc Cốc and Yandex declare
-no encrypted tier and can emit only plaintext rows. Gecko uses the same
+registrations declare Keychain-backed `v10`; macOS Cốc Cốc declares no
+encrypted tier and can emit only plaintext rows. Gecko uses the same
 sqlite/session layout on all three OSes.
 
 ## Install
