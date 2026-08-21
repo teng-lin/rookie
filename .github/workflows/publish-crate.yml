@@ -28,6 +28,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -108,8 +109,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Authenticate to crates.io with trusted publishing
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
       - name: Publish crate
         run: cargo publish --locked -p rookie-cookies --features appbound
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
           ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}
