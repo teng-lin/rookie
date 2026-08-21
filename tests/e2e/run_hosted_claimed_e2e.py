@@ -22,8 +22,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from webdriver_cookie import (
     WebDriverError,
@@ -239,6 +238,7 @@ def chromium_native_command(
     user_data: Path,
     _url: str,
     *,
+    remote_debugging_port: int = 0,
     platform: str | None = None,
     has_xvfb: bool | None = None,
 ) -> list[str]:
@@ -252,99 +252,92 @@ def chromium_native_command(
         "--no-first-run",
         "--disable-default-apps",
         f"--user-data-dir={user_data}",
-        "--remote-debugging-port=0",
+        f"--remote-debugging-port={remote_debugging_port}",
         "about:blank",
     ]
     if platform.startswith("linux"):
         cmd.insert(-2, "--password-store=gnome-libsecret")
         if has_xvfb:
             cmd = ["xvfb-run", "-a", *cmd]
+    elif platform == "win32":
+        # Hosted Windows runners execute as a service without an interactive
+        # desktop. Native browsers need their own modern headless mode there.
+        cmd.insert(-2, "--headless=new")
     return cmd
 
 
-def wait_for_devtools_port(
+def pick_devtools_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_for_devtools_endpoint(
     proc: subprocess.Popen[bytes] | subprocess.Popen[str],
-    user_data: Path,
+    port: int,
     timeout: float = 45,
-) -> int:
-    active_port = user_data / "DevToolsActivePort"
+) -> None:
+    endpoint = f"http://127.0.0.1:{port}/json/version"
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if active_port.is_file():
-            try:
-                port = int(active_port.read_text(encoding="utf-8").splitlines()[0])
-            except (IndexError, OSError, ValueError):
-                pass
-            else:
-                if 0 < port < 65536:
-                    return port
+        try:
+            with urlopen(endpoint, timeout=2) as response:
+                payload = json.load(response)
+            if payload.get("webSocketDebuggerUrl"):
+                return
+        except (OSError, ValueError):
+            pass
         status = proc.poll()
-        if status is not None:
+        if status not in (None, 0):
             raise SystemExit(
-                f"native chromium exited {status} before publishing {active_port}"
+                f"native chromium exited {status} before exposing {endpoint}"
             )
         time.sleep(0.25)
-    raise SystemExit(f"native chromium did not publish {active_port} within {timeout}s")
+    status = proc.poll()
+    raise SystemExit(
+        f"native chromium did not expose {endpoint} within {timeout}s "
+        f"(launcher status: {status})"
+    )
 
 
-def open_devtools_target(port: int, url: str, timeout: float = 15) -> str:
-    endpoint = f"http://127.0.0.1:{port}/json/new?{quote(url, safe='')}"
-    request = Request(endpoint, method="PUT")
-    deadline = time.time() + timeout
-    while True:
-        try:
-            with urlopen(request, timeout=2) as response:
-                payload = json.load(response)
-            break
-        except OSError:
-            if time.time() >= deadline:
-                raise
-            time.sleep(0.25)
-    target_id = payload.get("id")
-    if not isinstance(target_id, str) or not target_id:
-        raise SystemExit(f"DevTools did not return a target id: {payload!r}")
-    return target_id
-
-
-def close_devtools_target(port: int, target_id: str) -> None:
-    endpoint = f"http://127.0.0.1:{port}/json/close/{quote(target_id, safe='')}"
-    try:
-        with urlopen(endpoint, timeout=10):
-            pass
-    except OSError as error:
-        print(f"DevTools target close failed after cookie persistence: {error}")
+def navigate_chromium_cdp(port: int, url: str) -> None:
+    subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests/e2e/navigate_chromium_cdp.mjs"),
+            str(port),
+            url,
+        ],
+        check=True,
+        cwd=str(ROOT / "tests/e2e"),
+        timeout=45,
+    )
 
 
 def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
-    cmd = chromium_native_command(exe, user_data, url)
+    devtools_port = pick_devtools_port()
+    cmd = chromium_native_command(
+        exe, user_data, url, remote_debugging_port=devtools_port
+    )
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
     saw_cookie = False
-    devtools_port: int | None = None
-    target_id: str | None = None
     try:
-        devtools_port = wait_for_devtools_port(proc, user_data)
-        target_id = open_devtools_target(devtools_port, url)
-        deadline = time.time() + 90
+        wait_for_devtools_endpoint(proc, devtools_port)
+        navigate_chromium_cdp(devtools_port, url)
+        deadline = time.time() + 30
         while time.time() < deadline:
             if cookies_db_has_name(user_data):
                 saw_cookie = True
                 time.sleep(1)
                 break
-            if proc.poll() is not None:
-                break
             time.sleep(0.5)
         if not saw_cookie:
-            status = proc.poll()
-            if status is not None:
-                raise SystemExit(
-                    f"native chromium seed exited {status} without writing rookie_ci"
-                )
-            raise SystemExit("native chromium seed timed out without writing rookie_ci")
+            raise SystemExit(
+                "native Chromium CDP navigation accepted rookie_ci but the "
+                "profile did not persist it"
+            )
     finally:
-        if devtools_port is not None and target_id is not None:
-            close_devtools_target(devtools_port, target_id)
-            time.sleep(1)
         if proc.poll() is None:
             proc.terminate()
             try:

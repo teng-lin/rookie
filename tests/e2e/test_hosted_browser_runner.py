@@ -17,11 +17,12 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             "http://127.0.0.1:8765/set",
             platform="linux",
             has_xvfb=True,
+            remote_debugging_port=9222,
         )
         self.assertEqual(command[:3], ["xvfb-run", "-a", "/opt/browser"])
         self.assertNotIn("--headless=new", command)
         self.assertIn("--password-store=gnome-libsecret", command)
-        self.assertIn("--remote-debugging-port=0", command)
+        self.assertIn("--remote-debugging-port=9222", command)
         self.assertNotIn("--remote-debugging-pipe", command)
 
     def test_non_linux_chromium_needs_neither_xvfb_nor_libsecret(self) -> None:
@@ -31,10 +32,22 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             "http://127.0.0.1:8765/set",
             platform="darwin",
             has_xvfb=True,
+            remote_debugging_port=9223,
         )
         self.assertEqual(command[0], "/Applications/Browser")
         self.assertNotIn("--password-store=gnome-libsecret", command)
-        self.assertIn("--remote-debugging-port=0", command)
+        self.assertIn("--remote-debugging-port=9223", command)
+
+    def test_windows_chromium_uses_native_headless_mode(self) -> None:
+        command = hosted.chromium_native_command(
+            r"C:\Browser\browser.exe",
+            Path(r"C:\profile"),
+            "http://127.0.0.1:8765/set",
+            platform="win32",
+            remote_debugging_port=9224,
+        )
+        self.assertIn("--headless=new", command)
+        self.assertIn("--remote-debugging-port=9224", command)
 
     def test_ie_driver_command_is_platform_native(self) -> None:
         self.assertEqual(

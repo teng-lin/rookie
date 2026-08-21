@@ -238,7 +238,7 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | Firefox × Linux / macOS / Windows | `e2e.yml` | Playwright-bundled Firefox. |
 | Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Official `npx playwright install chromium` distribution, then native DevTools launch. |
 | Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Runner image Edge; official `npx playwright install msedge` fallback; native DevTools launch. |
-| Brave, Opera, Vivaldi, LibreWolf, Zen on each OS they support; Opera GX and Yandex on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. Chromium forks create the seed tab through their `DevToolsActivePort` endpoint instead of Playwright's persistent-context pipe. |
+| Brave, Opera, Vivaldi, LibreWolf, Zen on each OS they support; Opera GX and Yandex on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. Chromium forks publish an explicit DevTools port, then a post-launch CDP client seeds the persistent default context instead of using Playwright's persistent-context launch pipe. |
 | Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari normal application profile; BinaryCookies extraction. SafariDriver is deliberately not used because Apple isolates and destroys its automation-session storage. |
 | Internet Explorer × Windows | `e2e-release.yml` `hosted-claimed` | `windows-2022` IE capability + image IEDriver controlling an Edge IE-mode tab; ESE WebCache extraction. Server 2025 is intentionally not used because it removed standalone IE. |
 
