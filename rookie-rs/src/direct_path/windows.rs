@@ -554,11 +554,22 @@ Start-Sleep -Seconds 300
     let (_directory, path) = plaintext_database();
     let ready = path.with_extension("invalid-ready");
     let mut child = spawn_lock_holder(&path, &ready);
+    // A *sniffed* request is no longer invalid on Windows -- as of 0.6.0 a
+    // plaintext database reads without credentials there, same as on Unix --
+    // so proving this needs a request that is genuinely malformed. An
+    // explicitly empty Local State path is: the caller named a credential
+    // source and left it blank. `chromium_from_path` classifies before it
+    // validates credentials, so this pins the ordering its own comment
+    // claims: caller-directed credential I/O must finish before an authorized
+    // recovery policy is allowed to touch another process.
     let error = crate::direct_path::extract_from_path(
-      PathExtractRequest::sniff(&path)
-        .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
+      PathExtractRequest::with_credentials(
+        &path,
+        Some(ChromiumCredentialSource::LocalStateFile(PathBuf::new())),
+      )
+      .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
     )
-    .expect_err("Windows automatic credentials require an explicit Local State file");
+    .expect_err("an empty Local State selector is a request fault");
     // `extract_from_path` returns the typed `Error` now, so the fault is a
     // variant to match rather than an `anyhow` payload to downcast.
     let crate::Error::Source(typed) = &error else {
@@ -566,7 +577,8 @@ Start-Sleep -Seconds 300
     };
     assert_eq!(
       typed.invalid_options_reason(),
-      Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
+      Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile),
+      "credential validation must run before recovery, got {error:#}"
     );
     assert!(
       child
