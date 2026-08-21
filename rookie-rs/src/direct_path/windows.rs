@@ -225,12 +225,12 @@ pub(super) fn windows_local_state(
 
 pub(super) fn detailed_from_path(
   request: PathExtractRequest,
-  source: CookieSourceKind,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
   if request.target.credentials.is_some() {
     return chromium_from_path_detailed(request, runtime);
   }
+  let source = super::classify_request_source(&request, runtime)?;
   let PathExtractRequest {
     target, domains, ..
   } = request;
@@ -264,7 +264,7 @@ pub(super) fn detailed_from_path(
   }
 }
 
-pub(super) fn chromium_from_path_detailed(
+fn chromium_from_path_detailed(
   request: PathExtractRequest,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {

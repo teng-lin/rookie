@@ -27,9 +27,9 @@ pub(super) fn classify_cookie_source(
 
 pub(super) fn detailed_from_path(
   request: PathExtractRequest,
-  source: CookieSourceKind,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
+  let source = super::classify_request_source(&request, runtime)?;
   match source {
     CookieSourceKind::MozillaSqlite => {
       crate::browser::mozilla::firefox_based_detailed_with_runtime(

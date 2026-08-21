@@ -94,7 +94,7 @@ paths = [
 # Named in #218's own problem statement as the four original hot spots;
 # no rollout PR claims to have fully contained these.
 "rookie-rs/src/browser/chromium.rs" = { max_cfg = 6, reason = "original #218 hot spot; ratcheted 33 -> 6 when compatibility/direct-path projection and its platform-gated shims moved to chromium_projection.rs, leaving the registry-facing acquire engine independent of report_build" }
-"rookie-rs/src/browser/chromium_projection.rs" = { max_cfg = 25, reason = "platform-gated compatibility and direct-path projection carved from chromium.rs to break report_build -> registry/chromium -> chromium -> report_build; exact moved ceiling, with the combined Chromium cfg budget reduced by 2" }
+"rookie-rs/src/browser/chromium_projection.rs" = { max_cfg = 14, reason = "ratcheted 25 -> 14 by routing legacy Unix key lookup through one target-selected chromium_platform_keys adapter; the selected adapter has a compile-time signature contract and provider-only helpers are now test-only" }
 "rookie-rs/src/browser/registry.rs" = { max_cfg = 8, reason = "original #218 hot spot at 27; now shared-core only after the chromium/gecko split (PR #251) moved its engine-specific cfg out, plus 2 new cfg-gated re-export lines needed so chromium.rs's platform-gated symbols aren't unconditionally re-exported" }
 "rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 9, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target; ratcheted 20 -> 9 when the inline test module moved to browser/registry/chromium/tests.rs and took 11 cfg with it" }
 "rookie-rs/src/browser/registry/gecko.rs" = { max_cfg = 1, reason = "Gecko-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }
@@ -114,7 +114,7 @@ paths = [
 # largest cfg concentrations. Ceilinged like any other core file instead;
 # splitting the genuinely selection-only gates from the rest into a
 # smaller leaf file is a reasonable follow-up, not required here.
-"rookie-rs/src/direct_path/mod.rs" = { max_cfg = 40, reason = "PR 5a (#224); mixes selection gates with substantial non-gate production cfg. Raised to 38 in PR #249: one added macOS-only test, split into its own function for failure-attribution clarity. Raised to 40 for the 0.6.0 path request model: two one-line selection gates re-exporting PathExtractRequest::unix_identity / ::windows_local_state from the already-allowlisted leaves (the bodies are in the leaves; only the re-export can live here), plus one gate letting Windows Chromium acquisition classify a locked database after recovering it rather than before." }
+"rookie-rs/src/direct_path/mod.rs" = { max_cfg = 18, reason = "ratcheted 40 -> 19 when its inline tests moved verbatim to direct_path/tests.rs, then 19 -> 18 by making every selected platform leaf own direct-path classification/execution behind one compile-time-checked facade signature" }
 "rookie-rs/src/browser/chromium_crypto/mod.rs" = { max_cfg = 16, reason = "PR 3 (#221); mixes selection gates with substantial non-gate production cfg" }
 
 # Portable parsers/models with some internal native-acquisition gating,
@@ -138,6 +138,7 @@ paths = [
 # ceiling above was ratcheted down by the same amount in the same PR, so the
 # crate-wide #218 budget is unchanged by the move.
 "rookie-rs/src/browser/chromium/tests.rs" = { max_cfg = 16, reason = "relocated verbatim from browser/chromium.rs's inline test module; ratcheted 26 -> 16 when the unseal decrypt/decode tests moved to browser/unseal.rs and took 12 cfg with them, less 2 added for fixture imports the remaining tests need under one platform only -- the Windows GCM encoder and, after the unseal tests left, the now-unix-only host_bound_plaintext" }
+"rookie-rs/src/direct_path/tests.rs" = { max_cfg = 21, reason = "relocated without behavior changes from direct_path/mod.rs's inline test module; the production parent's ceiling dropped by the same 21 attributes" }
 
 # Tests that moved to the module whose code they pin, rather than the module
 # that happened to import it. Same grandfathered tier and the same rule: the
