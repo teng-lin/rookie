@@ -47,20 +47,34 @@ fn registry_credentials_map_onto_the_platform_provider_input() {
       Some("Chrome")
     );
     assert_eq!(chrome.linux_crypt_name, None);
+    let chromium = chromium_key_credentials("chromium")
+      .expect("resolve Chromium")
+      .expect("Chromium credentials");
+    assert_eq!(
+      chromium.osx_key_service.as_deref(),
+      Some("Chromium Safe Storage")
+    );
+    assert_eq!(chromium.osx_key_user.as_deref(), Some("Chromium"));
     let brave = chromium_key_credentials("brave")
       .expect("resolve Brave")
       .expect("Brave credentials");
     assert_eq!(brave.osx_key_service.as_deref(), Some("Brave Safe Storage"));
     assert_eq!(brave.osx_key_user.as_deref(), Some("Brave"));
 
-    for browser_id in ["coccoc", "yandex"] {
-      assert!(
-        chromium_key_credentials(browser_id)
-          .expect("resolve registered plaintext-only Chromium browser")
-          .is_none(),
-        "{browser_id} must resolve without inventing Keychain credentials"
-      );
-    }
+    assert!(
+      chromium_key_credentials("coccoc")
+        .expect("resolve registered plaintext-only Chromium browser")
+        .is_none(),
+      "Cốc Cốc must resolve without inventing Keychain credentials"
+    );
+    let yandex = chromium_key_credentials("yandex")
+      .expect("resolve Yandex")
+      .expect("Yandex credentials");
+    assert_eq!(
+      yandex.osx_key_service.as_deref(),
+      Some("Yandex Safe Storage")
+    );
+    assert_eq!(yandex.osx_key_user.as_deref(), Some("Yandex"));
   }
 
   // An unknown browser is an error rather than silently credential-less.
@@ -329,10 +343,7 @@ fn registry_contains_every_supported_chromium_family_browser() {
     ),
     (
       PlatformId::Linux,
-      [
-        "arc", "brave", "chrome", "chromium", "edge", "opera", "vivaldi",
-      ]
-      .as_slice(),
+      ["brave", "chrome", "chromium", "edge", "opera", "vivaldi"].as_slice(),
       [].as_slice(),
     ),
   ];
@@ -559,7 +570,7 @@ fn macos_chromium_browsers_without_a_keychain_identity_declare_no_decryption_tie
   }
   assert_eq!(
     without_identity,
-    ["coccoc", "yandex"].into_iter().collect::<BTreeSet<_>>(),
+    ["coccoc"].into_iter().collect::<BTreeSet<_>>(),
     "a new keychain-less macOS browser must decide its tier claim deliberately"
   );
 }
@@ -727,37 +738,36 @@ fn macos_packaging_variants_discover_flat_and_marked_profiles() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_browsers_without_keychain_credentials_fail_typed_per_tier() {
-  for browser_id in ["coccoc", "yandex"] {
-    let installation = BrowserInstallation {
-      installation_id: format!("{browser_id}-installation"),
-      browser_id: browser_id.to_owned(),
-      root_id: format!("{browser_id}-stable"),
-      channel: "stable".to_owned(),
-      path: PathBuf::from("/nonexistent"),
-      local_state_path: PathBuf::from("/nonexistent/Local State"),
-      legacy_local_state: None,
-      key_credentials: ChromiumKeyIdentity::default(),
-      priority: 10,
-      legacy_priority: 0,
-      legacy_profile_layout: LegacyChromiumProfileLayout::DefaultAndProfiles,
-      profiles: Vec::new(),
-    };
+  let browser_id = "coccoc";
+  let installation = BrowserInstallation {
+    installation_id: format!("{browser_id}-installation"),
+    browser_id: browser_id.to_owned(),
+    root_id: format!("{browser_id}-stable"),
+    channel: "stable".to_owned(),
+    path: PathBuf::from("/nonexistent"),
+    local_state_path: PathBuf::from("/nonexistent/Local State"),
+    legacy_local_state: None,
+    key_credentials: ChromiumKeyIdentity::default(),
+    priority: 10,
+    legacy_priority: 0,
+    legacy_profile_layout: LegacyChromiumProfileLayout::DefaultAndProfiles,
+    profiles: Vec::new(),
+  };
 
-    let clock = crate::common::deadline::SystemClock;
-    let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-    let outcomes = SystemKeyProvider.keys(&installation, &runtime);
-    let ChromiumKeyOutcome::Failure(failure) = &outcomes.v10 else {
-      panic!("{browser_id} v10 must fail typed, got {:?}", outcomes.v10);
-    };
-    assert!(
-      failure.message().contains(browser_id),
-      "{browser_id} v10 failure must name the browser, got {:?}",
-      failure.message()
-    );
-    assert!(failure.message().contains("no macOS keychain identity"));
-    assert_eq!(outcomes.v11, ChromiumKeyOutcome::NotApplicable);
-    assert_eq!(outcomes.v20, ChromiumKeyOutcome::NotApplicable);
-  }
+  let clock = crate::common::deadline::SystemClock;
+  let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
+  let outcomes = SystemKeyProvider.keys(&installation, &runtime);
+  let ChromiumKeyOutcome::Failure(failure) = &outcomes.v10 else {
+    panic!("{browser_id} v10 must fail typed, got {:?}", outcomes.v10);
+  };
+  assert!(
+    failure.message().contains(browser_id),
+    "{browser_id} v10 failure must name the browser, got {:?}",
+    failure.message()
+  );
+  assert!(failure.message().contains("no macOS keychain identity"));
+  assert_eq!(outcomes.v11, ChromiumKeyOutcome::NotApplicable);
+  assert_eq!(outcomes.v20, ChromiumKeyOutcome::NotApplicable);
 }
 
 #[cfg(target_os = "macos")]
@@ -767,84 +777,80 @@ fn macos_missing_key_configuration_surfaces_as_row_issue_not_silent_empty() {
   let home = temp.path().join("home");
   let context = context_for(PlatformId::Macos, home, []);
 
-  for (browser_id, root_id, profile) in [
-    ("coccoc", "coccoc-stable", None),
-    ("yandex", "yandex-stable", Some("Default")),
-  ] {
-    let root = browser_root(&context, browser_id, root_id);
-    let profile_path = profile.map_or_else(|| root.clone(), |name| root.join(name));
-    let db = seed_cookie(&profile_path, true, browser_id, "");
-    let connection = rusqlite::Connection::open(&db).expect("open cookie db");
-    let mut encrypted = b"v10".to_vec();
-    encrypted.extend_from_slice(&[0u8; 28]);
-    connection
-      .execute(
-        "UPDATE cookies SET encrypted_value = ?1 WHERE name = ?2",
-        params![encrypted, browser_id],
-      )
-      .expect("store an encrypted cookie value");
-    drop(connection);
-
-    let report = extract_chromium_with_provider(
-      &context,
-      browser_id,
-      ProfileSelection::AllProfiles,
-      None,
-      &SystemKeyProvider,
+  let (browser_id, root_id) = ("coccoc", "coccoc-stable");
+  let root = browser_root(&context, browser_id, root_id);
+  let profile_path = root.clone();
+  let db = seed_cookie(&profile_path, true, browser_id, "");
+  let connection = rusqlite::Connection::open(&db).expect("open cookie db");
+  let mut encrypted = b"v10".to_vec();
+  encrypted.extend_from_slice(&[0u8; 28]);
+  connection
+    .execute(
+      "UPDATE cookies SET encrypted_value = ?1 WHERE name = ?2",
+      params![encrypted, browser_id],
     )
-    .expect("a missing keychain identity is a per-profile error, not a discovery failure");
+    .expect("store an encrypted cookie value");
+  drop(connection);
 
-    let profiles = report
-      .installations
-      .iter()
-      .flat_map(|installation| &installation.profiles)
-      .collect::<Vec<_>>();
-    assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
-    let [source] = &profiles[0].sources[..] else {
-      panic!("{browser_id} extracts its one selected source");
-    };
-    assert!(
-      source.cookies().is_empty(),
-      "{browser_id} must not report undecryptable rows as cookies"
-    );
-    assert_eq!(
-      source.stats,
-      crate::browser::source::SourceStats {
-        rows_seen: 1,
-        cookies_emitted: 0,
-        rows_skipped: 1,
-        rows_rejected: 0,
-        provider_failures: 1,
-      },
-      "{browser_id} must count the row unavailable through the failed provider"
-    );
-    assert!(
-      source.failure.is_none(),
-      "an unavailable row does not make the successfully queried source fail"
-    );
-    // Every row was rejected, so the source also carries the compatibility
-    // evidence issue. That one never reaches the report; the row issue does.
-    let row_issues = source
+  let report = extract_chromium_with_provider(
+    &context,
+    browser_id,
+    ProfileSelection::AllProfiles,
+    None,
+    &SystemKeyProvider,
+  )
+  .expect("a missing keychain identity is a per-profile error, not a discovery failure");
+
+  let profiles = report
+    .installations
+    .iter()
+    .flat_map(|installation| &installation.profiles)
+    .collect::<Vec<_>>();
+  assert_eq!(profiles.len(), 1, "{browser_id} discovers its one profile");
+  let [source] = &profiles[0].sources[..] else {
+    panic!("{browser_id} extracts its one selected source");
+  };
+  assert!(
+    source.cookies().is_empty(),
+    "{browser_id} must not report undecryptable rows as cookies"
+  );
+  assert_eq!(
+    source.stats,
+    crate::browser::source::SourceStats {
+      rows_seen: 1,
+      cookies_emitted: 0,
+      rows_skipped: 1,
+      rows_rejected: 0,
+      provider_failures: 1,
+    },
+    "{browser_id} must count the row unavailable through the failed provider"
+  );
+  assert!(
+    source.failure.is_none(),
+    "an unavailable row does not make the successfully queried source fail"
+  );
+  // Every row was rejected, so the source also carries the compatibility
+  // evidence issue. That one never reaches the report; the row issue does.
+  let row_issues = source
+    .issues
+    .iter()
+    .filter(|issue| issue.code != SourceIssue::ALL_ROWS_REJECTED)
+    .collect::<Vec<_>>();
+  assert_eq!(
+    row_issues.len(),
+    1,
+    "{browser_id} must surface the unavailable row instead of silently returning empty output"
+  );
+  assert_eq!(row_issues[0].code, "provider_failed");
+  assert_eq!(row_issues[0].occurrences, 1);
+  assert_eq!(row_issues[0].samples, vec!["row 1".to_owned()]);
+  assert!(
+    source
       .issues
       .iter()
-      .filter(|issue| issue.code != SourceIssue::ALL_ROWS_REJECTED)
-      .collect::<Vec<_>>();
-    assert_eq!(
-      row_issues.len(),
-      1,
-      "{browser_id} must surface the unavailable row instead of silently returning empty output"
-    );
-    assert_eq!(row_issues[0].code, "provider_failed");
-    assert_eq!(row_issues[0].occurrences, 1);
-    assert_eq!(row_issues[0].samples, vec!["row 1".to_owned()]);
-    assert!(
-      source
-        .issues
-        .iter()
-        .any(|issue| issue.code == SourceIssue::ALL_ROWS_REJECTED),
-      "{browser_id} rejected every row, which the compatibility projection reports as an error"
-    );
-  }
+      .any(|issue| issue.code == SourceIssue::ALL_ROWS_REJECTED),
+    "{browser_id} rejected every row, which the compatibility projection reports as an error"
+  );
 }
 
 #[test]
@@ -2333,7 +2339,6 @@ fn legacy_opera_wrappers_use_flat_roots_on_macos_and_windows() {
 #[test]
 fn legacy_linux_package_order_is_registry_metadata_not_generic_priority() {
   for (index, (browser_id, earlier_root, later_root)) in [
-    ("arc", "arc-snap", "arc-native"),
     ("brave", "brave-snap", "brave-stable-native"),
     ("chromium", "chromium-snap", "chromium-native"),
     ("opera", "opera-stable-snap", "opera-stable-native"),
@@ -2566,7 +2571,6 @@ fn windows_legacy_flat_opera_uses_local_state_beside_selected_database() {
 #[test]
 fn legacy_linux_snap_roots_admit_only_default_profiles() {
   for (index, (browser_id, snap_root_id, native_root_id)) in [
-    ("arc", "arc-snap", "arc-native"),
     ("brave", "brave-snap", "brave-stable-native"),
     ("chromium", "chromium-snap", "chromium-native"),
   ]

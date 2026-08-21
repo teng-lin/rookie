@@ -14,9 +14,9 @@ CI has three lanes. A pull request is not the full product.
 
 | Lane | Trigger | What runs |
 | --- | --- | --- |
-| **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
-| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. Real Chrome/Firefox (`e2e.yml`). Extra hosted browsers in `e2e-release.yml` (Edge, Chromium, plus Brave/Opera/Opera GX/LibreWolf/Zen when a silent installer yields a launchable binary). App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
-| **Release** | `v*` tag, GitHub Release, `workflow_dispatch` on `e2e-release.yml`, or a PR labeled `e2e-release` | Extra hosted browsers again, plus engine fixtures for every `release_fixture` cell. App-Bound Edge+Brave is the `e2e.yml` nightly / `multi_browser` dispatch, not this workflow. macOS Intel artifact smoke (schedule/manual). Safari and Internet Explorer stay **manual** (FDA / ESE). |
+| **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Real Ubuntu Chrome + Firefox gate every PR. Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
+| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
+| **Release** | `v*` tag, GitHub Release, `workflow_dispatch` on `e2e-release.yml`, or a PR labeled `e2e-release` | The hosted installer matrix again, plus engine fixtures for every `release_fixture` cell. A labeled PR stays opted in across later `synchronize` events. App-Bound Edge+Brave is the `e2e.yml` nightly / `multi_browser` dispatch, not this workflow. macOS Intel artifact smoke (schedule/manual). |
 
 ## Local commands
 
@@ -93,12 +93,14 @@ On Windows, `cargo test` also generates a current-user **DPAPI `v10`** Cookies
 CLI snapshot tests use a generated Firefox database (JSON/Netscape, stderr
 logs, errors, help/version, profiles, spaces/Unicode paths).
 
-## Real-browser E2E (nightly / main)
+## Real-browser E2E (PR subset / nightly / main)
 
-`.github/workflows/e2e.yml` is **not** a pull-request job. It runs on push to
-`main`, the nightly schedule, and `workflow_dispatch`. It starts a loopback
-cookie server, seeds a disposable profile, then asserts the same cookie
-through **Rust, Python, Node, and CLI**.
+`.github/workflows/e2e.yml` gates pull requests with real Ubuntu Chrome and
+Firefox. Pushes to `main`, the nightly schedule, and `workflow_dispatch` also
+run the macOS and Windows jobs. Every job starts a loopback cookie server,
+seeds a disposable profile, then asserts the same cookie through **Rust,
+Python, Node, and CLI**. The elevated Windows App-Bound and shadow-copy jobs
+remain trusted-ref-only.
 
 | Runner | Browser and crypto | Surfaces |
 | --- | --- | --- |
@@ -193,8 +195,8 @@ exactly one lane.
 | Lane | What it proves | When it runs |
 | --- | --- | --- |
 | **hosted** (`nightly_hosted`) | Real browser, seed `rookie_ci`, extract on Rust / Python / Node / CLI | Chrome/Firefox in `e2e.yml` (push to `main`, nightly, `workflow_dispatch`). Extra products in `e2e-release.yml` (nightly, `v*` tags, GitHub Releases, `workflow_dispatch`, or a PR labeled `e2e-release`). |
-| **fixture** (`release_fixture`) | Engine fixture + `supported_browsers()`. **Does not launch a browser.** | `e2e-release.yml` `fixtures` job on `v*` tags, GitHub Releases, `workflow_dispatch`, or a labeled PR. **Skipped on the nightly schedule.** |
-| **manual** | Operator-owned host | Never GitHub-hosted. |
+| **fixture** (`release_fixture`) | Deterministic engine checks + `supported_browsers()` identity coverage. **Does not launch a browser.** | `e2e-release.yml` `fixtures` job on `v*` tags, GitHub Releases, `workflow_dispatch`, or a labeled PR. **Skipped on the nightly schedule.** |
+| **manual** | Operator-owned fallback | No current registry cell uses this lane. |
 
 `—` means the browser is not registered on that OS. This table is the live
 registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
@@ -202,7 +204,7 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 
 | Browser | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Arc | fixture | fixture | fixture |
+| Arc | — | fixture | fixture |
 | Avast Secure Browser | — | — | fixture |
 | Brave | hosted | hosted | hosted |
 | Browser from Vought | — | — | fixture |
@@ -214,18 +216,18 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | DuckDuckGo | — | — | fixture |
 | Edge | hosted | hosted | hosted |
 | Firefox | hosted | hosted | hosted |
-| Internet Explorer | — | — | **manual** |
+| Internet Explorer | — | — | fixture |
 | LibreWolf | hosted | hosted | hosted |
 | Octo Browser | — | — | fixture |
 | Opera | hosted | hosted | hosted |
 | Opera GX | — | hosted | hosted |
 | QQ Browser | — | — | fixture |
-| Safari | — | **manual** | — |
+| Safari | — | hosted | — |
 | Sogou Explorer | — | — | fixture |
 | 360 Browser | — | — | fixture |
 | 360X Browser | — | — | fixture |
-| Vivaldi | fixture | fixture | fixture |
-| Yandex Browser | — | fixture | fixture |
+| Vivaldi | hosted | hosted | hosted |
+| Yandex Browser | — | hosted | hosted |
 | Zen Browser | hosted | hosted | hosted |
 
 ### How hosted cells actually run
@@ -234,19 +236,40 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | --- | --- | --- |
 | Chrome × Linux / macOS / Windows | `e2e.yml` | Image Chrome, custom profile. Crypto: Ubuntu libsecret, macOS real Keychain, Windows legacy DPAPI `v10`. |
 | Firefox × Linux / macOS / Windows | `e2e.yml` | Playwright-bundled Firefox. |
-| Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted` | Playwright Chromium. |
-| Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted` | Image / Playwright `msedge`. |
-| Windows Brave | `e2e-release.yml` `hosted` | Machine-wide winget install, Playwright seed (not the App-Bound canary). |
-| Brave, Opera, LibreWolf, Zen on each OS they support; Opera GX on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`. |
+| Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Official `npx playwright install chromium` distribution, then native DevTools launch. |
+| Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Runner image Edge; official `npx playwright install msedge` fallback; native DevTools launch. |
+| Brave, Opera, Vivaldi, LibreWolf, Zen on each OS they support; Opera GX and Yandex on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. Chromium forks publish an explicit DevTools port, then a post-launch CDP client seeds the persistent default context instead of using Playwright's persistent-context launch pipe. |
+| Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari normal application profile; BinaryCookies extraction. SafariDriver is deliberately not used because Apple isolates and destroys its automation-session storage. |
 
-Chrome/Firefox/Edge/Chromium are **not** in that install catalog — they
-already come from the runner image or Playwright (`tests/e2e/test_install_claimed_browser.py`).
+Chrome and Firefox stay outside that install catalog because `e2e.yml` owns
+them. Playwright remains a distribution mechanism for Chromium and a documented
+Edge-install fallback; arbitrary branded executables are not controlled through
+Playwright. The native launcher polls the cookie database, so a browser that
+crashes after persisting the seed can still prove extraction without hiding a
+failed extraction assertion.
 
-These products have (or had) an installer story but stay on **fixture**
-because hosted runners cannot seed or decrypt them: Arc (all three OSes),
-Vivaldi (all three), Windows DuckDuckGo, macOS Yandex. Cachy is a deprecated
-Gecko fork. Everything else on fixture has no silent installer for GitHub
-runners (Cốc Cốc, Avast, QQ, Sogou, 360, 360X, Octo, Vought, DC Browser).
+Arc on macOS/Windows and Windows DuckDuckGo stay on **fixture** because their
+packaged/custom application startup does not expose an unattended profile +
+DevTools path on hosted runners. Cachy is a deprecated Gecko fork. Everything
+else on fixture has no maintained silent installer for GitHub runners (Cốc Cốc,
+Avast, QQ, Sogou, 360, 360X, Octo, Vought, DC Browser). Internet Explorer is a
+storage-format constraint: current hosted images expose only Edge IE mode, and
+that mode does not persist the legacy `CookieEntryEx` ESE format supported by
+the deprecated decoder.
+
+The fixture exceptions are deliberate and machine-checked in
+`browser_coverage.json`:
+
+| Browser cells | Why a real hosted browser is not claimed |
+| --- | --- |
+| Arc on macOS | Its custom application startup has no stable unattended profile + DevTools contract. |
+| Arc on Windows | The MSIX package is application-activated, not a flag-controllable browser executable. |
+| DuckDuckGo on Windows | The MSIX app owns an embedded WebView profile and exposes no custom-user-data browser CLI. |
+| Internet Explorer on Windows | Current hosted images expose only Edge IE mode, which cannot produce the supported legacy `CookieEntryEx` ESE store. |
+| Cachy on Linux | The browser is deprecated and has no maintained release channel. |
+| Cốc Cốc on macOS/Windows; Avast on Windows | No maintained silent package-manager installer is available on the hosted images. |
+| Octo on Windows | Commercial account and anti-detect profile provisioning are operator-owned. |
+| QQ, Sogou, 360, 360X, Vought, DC on Windows | No stable unattended vendor or package-manager installer is available to the runner. |
 
 ### Fixtures
 
@@ -260,15 +283,16 @@ runners (Cốc Cốc, Avast, QQ, Sogou, 360, 360X, Octo, Vought, DC Browser).
 
 That is registry/identity coverage, not crypto coverage.
 
-### Manual (operator host)
+### Native hosted constraints
 
-| Browser | OS | Why CI cannot do it |
+| Browser | Runner constraint |
 | --- | --- | --- |
-| Safari | macOS | `Cookies.binarycookies` needs Full Disk Access. |
-| Internet Explorer | Windows | ESE WebCache. Functions exist in 0.6 and are deprecated. |
+| Safari | The hosted canary opens the normal Safari app because SafariDriver uses private-like isolated storage and destroys it at session teardown. GitHub's macOS image build preapproves `kTCCServiceSystemPolicyAllFiles` for `/bin/bash` and its runner launch scripts, plus AppleEvents from the job shell/agent to Safari ([runner image TCC configuration](https://github.com/actions/runner-images/blob/main/images/macos/scripts/build/configure-tccdb-macos.sh)). The harness verifies the `Cookies.binarycookies` signature and treats any TCC `PermissionError` as an immediate prerequisite failure. |
 
-Never a required pull-request check. `e2e-release.yml` is also not a required
-PR check unless someone labels the PR `e2e-release`.
+The native-engine job is not an automatic pull-request check. Applying the
+`e2e-release` label opts a PR into the full matrix and later pushes keep running
+it. The `manual` coverage lane remains available for future registry additions,
+but currently has no cells.
 
 ## Installed artifact smoke
 

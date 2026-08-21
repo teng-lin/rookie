@@ -1059,7 +1059,7 @@
         },
         "key_credentials": {
           "macos_keychain": {
-            "service": "Chrome Safe Storage",
+            "service": "Chromium Safe Storage",
             "account": "Chromium"
           }
         }
@@ -1270,7 +1270,15 @@
             "chromium_sqlite"
           ],
           "declared_session_formats": [],
-          "declared_decryption_tiers": []
+          "declared_decryption_tiers": [
+            "v10"
+          ]
+        },
+        "key_credentials": {
+          "macos_keychain": {
+            "service": "Yandex Safe Storage",
+            "account": "Yandex"
+          }
         }
       },
       {
@@ -1372,52 +1380,6 @@
       }
     ],
     "linux": [
-      {
-        "canonical_id": "arc",
-        "aliases": [],
-        "display_name": "Arc",
-        "engine": "chromium",
-        "roots": [
-          {
-            "root_id": "arc-native",
-            "template": "{xdg_config_home}/arc",
-            "channel": "stable",
-            "discovery": "chromium_user_data",
-            "priority": 10,
-            "legacy_priority": 1
-          },
-          {
-            "root_id": "arc-snap",
-            "template": "{home}/snap/arc/common/arc",
-            "channel": "stable",
-            "discovery": "chromium_user_data",
-            "priority": 20,
-            "legacy_priority": 0,
-            "legacy_profile_layout": "default_only"
-          },
-          {
-            "root_id": "arc-flatpak",
-            "template": "{home}/.var/app/org.arc.Arc/config/arc",
-            "channel": "stable",
-            "discovery": "chromium_user_data",
-            "priority": 30,
-            "legacy_priority": 2
-          }
-        ],
-        "capabilities": {
-          "declared_persistent_formats": [
-            "chromium_sqlite"
-          ],
-          "declared_session_formats": [],
-          "declared_decryption_tiers": [
-            "v10",
-            "v11"
-          ]
-        },
-        "key_credentials": {
-          "linux_crypt_name": "arc"
-        }
-      },
       {
         "canonical_id": "brave",
         "aliases": [],

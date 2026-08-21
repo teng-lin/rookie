@@ -1,6 +1,7 @@
 name: E2E real-browser
 
 on:
+  pull_request:
   push:
     branches:
       - main
@@ -262,7 +263,7 @@ jobs:
 
   macos-firefox:
     name: e2e macos × firefox
-    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: macos-15
     timeout-minutes: 20
     env:
@@ -334,7 +335,7 @@ jobs:
 
   macos-chrome:
     name: e2e macos × chrome (real Keychain lookup)
-    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: macos-15
     timeout-minutes: 25
     # Playwright keeps Chromium's --use-mock-keychain default on macOS, whose
@@ -427,7 +428,7 @@ jobs:
 
   windows-firefox:
     name: e2e windows × firefox
-    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: windows-2025
     timeout-minutes: 25
     defaults:
@@ -772,7 +773,7 @@ jobs:
 
   windows-chrome:
     name: e2e windows × chrome (legacy DPAPI)
-    if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: windows-2025
     timeout-minutes: 25
     # Hosted CI uses a workspace-scoped user-data-dir, so Chromium's AppBound

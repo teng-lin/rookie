@@ -51,8 +51,9 @@ if (!dbPath) {
 // bridge and keeps allow_elevated_fallback unconditionally.
 //
 // Consequence worth knowing: because this pins a policy, nothing here
-// exercises the default. That is covered by a Rust unit test, since this
-// workflow does not run on pull requests. See CHANGELOG.md.
+// exercises the default. That is covered by a Rust unit test. This Windows
+// branch remains trusted-ref-only even though Linux Chrome now gates pull
+// requests. See CHANGELOG.md.
 let results;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
@@ -65,7 +66,10 @@ if (process.platform === "win32") {
         appBound: "allow_elevated_fallback",
       }),
     ],
-    ["chromiumBased", await rookieCookies.chromiumBased(keyPath, dbPath, [domain])],
+    [
+      "chromiumBased",
+      await rookieCookies.chromiumBased(keyPath, dbPath, [domain]),
+    ],
   ];
 } else {
   results = [
@@ -88,9 +92,16 @@ if (process.platform === "win32") {
   ];
 }
 
-results = results.map(([surface, cookies]) => [surface, cookies, expectedName, expectedValue]);
+results = results.map(([surface, cookies]) => [
+  surface,
+  cookies,
+  expectedName,
+  expectedValue,
+]);
 if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
-  const browserName = (process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome").toLowerCase();
+  const browserName = (
+    process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome"
+  ).toLowerCase();
   const browserFns = {
     chrome: rookieCookies.chrome,
     "google-chrome": rookieCookies.chrome,

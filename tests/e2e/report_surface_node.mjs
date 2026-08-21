@@ -7,7 +7,10 @@ let value;
 if (args.length === 2 && args[0] === "profiles") {
   value = await rookieCookies.browserProfiles(args[1]);
 } else if ((args.length === 2 || args.length === 3) && args[0] === "report") {
-  value = await rookieCookies.browserReport(args[1], args[2]);
+  value = await rookieCookies.browserReport({
+    browserId: args[1],
+    ...(args[2] === undefined ? {} : { profileId: args[2] }),
+  });
 } else if (args.length === 1 && args[0] === "load-report") {
   value = await rookieCookies.loadReport();
 } else {

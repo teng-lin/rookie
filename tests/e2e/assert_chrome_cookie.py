@@ -55,8 +55,9 @@ def main() -> int:
     # Consequence worth knowing: because this pins a policy, nothing here
     # exercises the default. That is covered by
     # `chromium_platform_keys::windows::tests::
-    # the_policy_decides_whether_v20_metadata_is_even_attempted`, since this
-    # workflow does not run on pull requests. See CHANGELOG.md.
+    # the_policy_decides_whether_v20_metadata_is_even_attempted`. This Windows
+    # branch remains trusted-ref-only even though Linux Chrome now gates pull
+    # requests. See CHANGELOG.md.
     if sys.platform == "win32":
         key_path = user_data_dir / "Local State"
         canonical = rookie_cookies.extract_from_path(

@@ -1130,7 +1130,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     assert_eq!(
       platform::AUTOMATIC_BROWSER_IDS,
-      ["chrome", "brave", "chromium", "edge", "opera", "vivaldi", "arc"]
+      ["chrome", "brave", "chromium", "edge", "opera", "vivaldi"]
     );
     #[cfg(target_os = "macos")]
     assert_eq!(

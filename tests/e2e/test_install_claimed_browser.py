@@ -7,6 +7,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import test_browser_coverage as coverage
 
@@ -17,21 +18,16 @@ assert SPEC is not None and SPEC.loader is not None
 INSTALL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(INSTALL)
 
-# Seeded by e2e.yml without this installer (image-provided Chrome/Firefox/Edge
-# or Playwright Chromium).
+# Seeded by e2e.yml without this installer. The claimed-browser workflow now
+# owns every other real-browser cell, including Playwright-distributed
+# Chromium, image/Playwright Edge, and normal-profile Safari.
 PREINSTALLED = frozenset(
     {
         ("linux", "chrome"),
-        ("linux", "chromium"),
-        ("linux", "edge"),
         ("linux", "firefox"),
         ("macos", "chrome"),
-        ("macos", "chromium"),
-        ("macos", "edge"),
         ("macos", "firefox"),
         ("windows", "chrome"),
-        ("windows", "chromium"),
-        ("windows", "edge"),
         ("windows", "firefox"),
     }
 )
@@ -39,9 +35,7 @@ PREINSTALLED = frozenset(
 
 class InstallCatalogTests(unittest.TestCase):
     def test_every_catalog_cell_is_nightly_hosted(self) -> None:
-        catalog = {
-            (row["platform"], row["browser"]) for row in INSTALL.matrix()
-        }
+        catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
         extra = coverage.NIGHTLY_HOSTED - PREINSTALLED
         self.assertEqual(catalog, extra)
 
@@ -55,6 +49,47 @@ class InstallCatalogTests(unittest.TestCase):
         exe = INSTALL.HOSTS["opera_gx"]["macos"]["exe"]
         self.assertTrue(any(path.endswith("/Opera") for path in exe))
 
+    def test_native_engine_cells_use_vendor_drivers(self) -> None:
+        safari = INSTALL.HOSTS["safari"]["macos"]
+        internet_explorer = INSTALL.HOSTS["internet_explorer"]["windows"]
+        self.assertEqual(safari["kind"], "system_browser")
+        self.assertIn("/Applications/Safari.app/Contents/MacOS/Safari", safari["exe"])
+        self.assertEqual(internet_explorer["kind"], "internet_explorer")
+        self.assertFalse(INSTALL.HOSTS["internet_explorer"]["hosted"])
+        self.assertEqual(internet_explorer["runner"], "windows-2022")
+        self.assertIn("iedriver-win32", internet_explorer["exe"][0])
+        self.assertTrue(
+            any(
+                path.endswith("IEDriverServer.exe") for path in internet_explorer["exe"]
+            )
+        )
+        self.assertTrue(
+            any(path.endswith("msedge.exe") for path in internet_explorer["edge_exe"])
+        )
+
+    def test_chromium_and_edge_have_official_playwright_install_fallbacks(self) -> None:
+        for platform in INSTALL.RUNNERS:
+            self.assertEqual(
+                INSTALL.HOSTS["chromium"][platform]["kind"],
+                "playwright_browser",
+            )
+            self.assertEqual(
+                INSTALL.HOSTS["edge"][platform]["kind"],
+                "playwright_channel",
+            )
+
+    def test_playwright_installer_uses_resolved_npx_shim(self) -> None:
+        npx = r"C:\Program Files\nodejs\npx.CMD"
+        with (
+            mock.patch.object(INSTALL.shutil, "which", return_value=npx),
+            mock.patch.object(INSTALL, "run") as run,
+        ):
+            INSTALL.install_playwright_product("chromium")
+        run.assert_called_once_with(
+            [npx, "playwright", "install", "chromium"],
+            cwd=INSTALL.ROOT / "tests/e2e",
+        )
+
     def test_find_exe_resolves_globs_and_app_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -64,7 +99,10 @@ class InstallCatalogTests(unittest.TestCase):
             binary.write_bytes(b"fake-browser\n")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             found = INSTALL.find_exe(
-                [str(app_macos / "Opera GX"), str(root / "*.app" / "Contents" / "MacOS" / "Opera")]
+                [
+                    str(app_macos / "Opera GX"),
+                    str(root / "*.app" / "Contents" / "MacOS" / "Opera"),
+                ]
             )
             self.assertEqual(Path(found).resolve(), binary.resolve())
 
@@ -94,16 +132,18 @@ class InstallCatalogTests(unittest.TestCase):
             for path in meta.get("windows", {}).get("exe", []):
                 self.assertNotIn("WindowsApps", path, browser)
 
-    def test_untestable_products_are_not_in_the_install_catalog(self) -> None:
+    def test_package_activated_products_are_not_in_the_install_catalog(self) -> None:
         catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
         self.assertNotIn(("macos", "arc"), catalog)
         self.assertNotIn(("windows", "arc"), catalog)
         self.assertNotIn(("windows", "duckduckgo"), catalog)
-        self.assertNotIn(("macos", "yandex"), catalog)
-        self.assertNotIn(("linux", "vivaldi"), catalog)
-        self.assertNotIn(("macos", "vivaldi"), catalog)
-        self.assertNotIn(("windows", "vivaldi"), catalog)
-        self.assertNotIn(("windows", "yandex"), catalog)
+
+    def test_vivaldi_and_yandex_are_real_hosted_cells(self) -> None:
+        catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
+        for platform in INSTALL.RUNNERS:
+            self.assertIn((platform, "vivaldi"), catalog)
+        self.assertIn(("macos", "yandex"), catalog)
+        self.assertIn(("windows", "yandex"), catalog)
 
 
 if __name__ == "__main__":

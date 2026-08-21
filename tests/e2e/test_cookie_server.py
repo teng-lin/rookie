@@ -35,11 +35,26 @@ class CookieServerTests(unittest.TestCase):
 
 
 class ClaimedE2eHelperTests(unittest.TestCase):
-    def test_chrome_safe_storage_plants_chromium_account(self) -> None:
-        with mock.patch.dict(CLAIMED.os.environ, {"ROOKIE_E2E_KEYCHAIN_ACCOUNT": "Chrome"}):
-            accounts = CLAIMED.keychain_accounts("Chrome Safe Storage")
-        self.assertIn("Chromium", accounts)
-        self.assertIn("Chrome", accounts)
+    def test_keychain_accounts_preserve_configured_vendor_identity(self) -> None:
+        with mock.patch.dict(
+            CLAIMED.os.environ, {"ROOKIE_E2E_KEYCHAIN_ACCOUNT": "Chromium"}
+        ):
+            self.assertEqual(CLAIMED.keychain_accounts(), ["Chromium"])
+
+    def test_planted_keychain_item_is_noninteractive_for_hosted_browser(self) -> None:
+        env = {
+            "ROOKIE_E2E_KEYCHAIN_SERVICE": "Vivaldi Safe Storage",
+            "ROOKIE_E2E_KEYCHAIN_ACCOUNT": "Vivaldi",
+        }
+        with (
+            mock.patch.dict(CLAIMED.os.environ, env),
+            mock.patch.object(CLAIMED.sys, "platform", "darwin"),
+            mock.patch.object(CLAIMED.subprocess, "run") as run,
+        ):
+            CLAIMED.plant_keychain()
+        add_command = run.call_args_list[1].args[0]
+        self.assertIn("-A", add_command)
+        self.assertIn("Vivaldi Safe Storage", add_command)
 
     def test_pick_cookie_port_honors_env(self) -> None:
         with mock.patch.dict(CLAIMED.os.environ, {"ROOKIE_E2E_COOKIE_PORT": "9333"}):
