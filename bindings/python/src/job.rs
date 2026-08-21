@@ -386,18 +386,11 @@ pub fn read(
   cancellation: Option<PyCancellationHandle>,
   app_bound: String,
 ) -> PyResult<PyReadResult> {
-  // `ReadRequest`'s `ProfileSelection` has no "every profile" arm -- a
-  // snapshot has one `profile_id` and could not describe more -- so any
-  // `select` other than the one value it can express is the same structured
-  // conflict `browser_report` raises for `profile=` + `select="all"`.
-  if select != "legacy_first" {
-    return Err(crate::conflicting_profile_selection_error());
-  }
+  let selection =
+    rookie_core::ProfileSelection::from_binding_options(profile.as_deref(), Some(&select))
+      .map_err(|_| crate::conflicting_profile_selection_error())?;
   let control = crate::execution_control(timeout, cancellation, &app_bound)?;
-  let mut request = rookie_core::ReadRequest::browser(browser);
-  if let Some(profile) = profile {
-    request = request.profile(profile);
-  }
+  let mut request = rookie_core::ReadRequest::browser(browser).selection(selection);
   if include_session {
     request = request.include_session();
   }
@@ -464,23 +457,17 @@ pub fn from_path(
   // Same mutual-exclusivity contract `chromium_cookies_from_path`'s options
   // dict already enforces, upgraded here to the typed
   // `conflicting_credential_selectors` code instead of an untyped message.
-  let selector_count = usize::from(plaintext_only)
-    + usize::from(browser_id.is_some())
-    + usize::from(local_state_path.is_some());
-  if selector_count > 1 {
-    return Err(crate::conflicting_credential_selectors_error());
-  }
+  let credentials = rookie_core::direct_path::ChromiumCredentialSource::from_selectors(
+    browser_id,
+    local_state_path.map(Into::into),
+    plaintext_only,
+  )
+  .map_err(|_| crate::conflicting_credential_selectors_error())?;
   let control = crate::execution_control(timeout, cancellation, &app_bound)?;
   let mut request = rookie_core::FromPathRequest::new(path).include_expired(include_expired);
-  request = if plaintext_only {
-    request.chromium_plaintext()
-  } else if let Some(browser_id) = browser_id {
-    request.chromium_browser_id(browser_id)
-  } else if let Some(local_state_path) = local_state_path {
-    request.chromium_local_state(local_state_path)
-  } else {
-    request
-  };
+  if let Some(credentials) = credentials {
+    request = request.chromium_credentials(credentials);
+  }
   request = request.execution(control);
   let result = py
     .detach(|| rookie_core::from_path(request))

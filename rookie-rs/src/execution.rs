@@ -1,7 +1,37 @@
 //! Shared execution control for public I/O jobs.
 
 use crate::CancellationHandle;
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
+
+/// Error returned when a string is not a recognized [`AppBoundPolicy`].
+///
+/// The accepted vocabulary is the same stable snake-case vocabulary emitted
+/// by [`AppBoundPolicy::as_str`] and [`fmt::Display`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParseAppBoundPolicyError {
+  value: String,
+}
+
+impl ParseAppBoundPolicyError {
+  /// The unrecognized caller-supplied value.
+  pub fn value(&self) -> &str {
+    &self.value
+  }
+}
+
+impl fmt::Display for ParseAppBoundPolicyError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      formatter,
+      "unknown App-Bound policy {:?}; expected disabled, injection_only, or allow_elevated_fallback",
+      self.value
+    )
+  }
+}
+
+impl std::error::Error for ParseAppBoundPolicyError {}
 
 /// Per-job Windows App-Bound (v20) recovery policy.
 ///
@@ -44,11 +74,34 @@ pub enum AppBoundPolicy {
 }
 
 impl AppBoundPolicy {
-  pub(crate) fn as_str(self) -> &'static str {
+  /// Returns the stable snake-case spelling used by Rust and language
+  /// bindings.
+  pub const fn as_str(self) -> &'static str {
     match self {
       Self::Disabled => "disabled",
       Self::InjectionOnly => "injection_only",
       Self::AllowElevatedFallback => "allow_elevated_fallback",
+    }
+  }
+}
+
+impl fmt::Display for AppBoundPolicy {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(self.as_str())
+  }
+}
+
+impl FromStr for AppBoundPolicy {
+  type Err = ParseAppBoundPolicyError;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    match value {
+      "disabled" => Ok(Self::Disabled),
+      "injection_only" => Ok(Self::InjectionOnly),
+      "allow_elevated_fallback" => Ok(Self::AllowElevatedFallback),
+      _ => Err(ParseAppBoundPolicyError {
+        value: value.to_owned(),
+      }),
     }
   }
 }
@@ -111,6 +164,23 @@ mod tests {
       ExecutionControl::default().app_bound,
       AppBoundPolicy::InjectionOnly
     );
+  }
+
+  #[test]
+  fn stable_policy_vocabulary_round_trips() {
+    for policy in [
+      AppBoundPolicy::Disabled,
+      AppBoundPolicy::InjectionOnly,
+      AppBoundPolicy::AllowElevatedFallback,
+    ] {
+      assert_eq!(policy.to_string(), policy.as_str());
+      assert_eq!(policy.as_str().parse(), Ok(policy));
+    }
+
+    let error = "injection-only"
+      .parse::<AppBoundPolicy>()
+      .expect_err("only the stable snake-case vocabulary is accepted");
+    assert_eq!(error.value(), "injection-only");
   }
 
   #[test]

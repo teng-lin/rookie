@@ -600,11 +600,48 @@ if (isFreshNapiOutput) {
   }
 }
 
+// napi-rs sees every `appBound`/`resource`/`method` field as a plain
+// `Option<String>` and has no way to express our JS-facing string-literal
+// unions from the Rust side; retype every generated occurrence to the real
+// union below instead. `appBound` appears on both non-nullable
+// (`ReadOptions`, ...) and `use_nullable` (`ChromiumPathOptions`) structs, so
+// the trailing `| null` is optional and preserved when present.
+types = types.replace(
+  /^(\s*)appBound\?: string( \| null)?$/gm,
+  '$1appBound?: AppBoundPolicy$2',
+)
+types = types.replace(
+  /^(\s*)resource\?: string( \| null)?$/gm,
+  '$1resource?: ResourceKind$2',
+)
+types = types.replace(/^(\s*)method\?: string( \| null)?$/gm, '$1method?: MethodClass$2')
+
+function retypeSelect(interfaceName, literalType) {
+  const start = types.indexOf(`export interface ${interfaceName} {`)
+  if (start === -1) {
+    throw new Error(`patch-loader.js: generated declarations are missing ${interfaceName}`)
+  }
+  const end = types.indexOf('\n}', start)
+  const original = types.slice(start, end)
+  const plain = '  select?: string'
+  const typed = `  select?: ${literalType}`
+  if (!original.includes(plain) && !original.includes(typed)) {
+    throw new Error(`patch-loader.js: ${interfaceName}.select has an unexpected generated type`)
+  }
+  const replacement = original.replace(plain, typed)
+  types = types.slice(0, start) + replacement + types.slice(end)
+}
+
+retypeSelect('ReadOptions', "'legacy_first'")
+retypeSelect('ReportOptions', "'legacy_first' | 'all'")
+
 // NAPI-RS emits declarations for the platform doing the build. Remove only
 // those platform-specific functions and append the cross-platform facade.
 // Keeping the rest of the generated file intact is load-bearing: slicing at a
 // common declaration such as `load` silently discarded APIs generated after
-// it, including firefoxProfiles and firefoxProfile.
+// it, including firefoxProfiles and firefoxProfile. Retype generated
+// interfaces before this cut so the declaration-loss check below, rather than
+// an unrelated type rewrite, diagnoses an accidentally early marker.
 const facadeMarker = '/** rookie-cookies cross-platform facade */'
 const facadeIndex = types.indexOf(facadeMarker)
 if (facadeIndex !== -1) {
@@ -623,22 +660,6 @@ types = types.replace(
   /^\/\*\* (?:Windows-only browsers|macOS-only browsers|Unix browsers|Windows browsers) \*\/\n?/gm,
   ''
 )
-
-// napi-rs sees every `appBound`/`resource`/`method` field as a plain
-// `Option<String>` and has no way to express our JS-facing string-literal
-// unions from the Rust side; retype every generated occurrence to the real
-// union below instead. `appBound` appears on both non-nullable
-// (`ReadOptions`, ...) and `use_nullable` (`ChromiumPathOptions`) structs, so
-// the trailing `| null` is optional and preserved when present.
-types = types.replace(
-  /^(\s*)appBound\?: string( \| null)?$/gm,
-  '$1appBound?: AppBoundPolicy$2',
-)
-types = types.replace(
-  /^(\s*)resource\?: string( \| null)?$/gm,
-  '$1resource?: ResourceKind$2',
-)
-types = types.replace(/^(\s*)method\?: string( \| null)?$/gm, '$1method?: MethodClass$2')
 
 types = types.trimEnd()
 types += `

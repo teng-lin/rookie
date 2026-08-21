@@ -26,6 +26,7 @@ use windows as platform;
 
 use crate::enums::{Cookie, DetailedCookie};
 use crate::execution::{AppBoundPolicy, ExecutionControl};
+use crate::RequestError;
 use anyhow::Result;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -430,6 +431,37 @@ pub enum ChromiumCredentialSource {
   LocalStateFile(PathBuf),
 }
 
+impl ChromiumCredentialSource {
+  /// Builds the one portable credential value represented by flattened
+  /// binding/CLI options.
+  ///
+  /// The three selectors are mutually exclusive. Keeping the count and
+  /// construction here prevents adapters from silently developing different
+  /// priority orders when more than one is present.
+  pub fn from_selectors(
+    browser_id: Option<String>,
+    local_state_path: Option<PathBuf>,
+    plaintext_only: bool,
+  ) -> Result<Option<Self>, RequestError> {
+    let selector_count = usize::from(browser_id.is_some())
+      + usize::from(local_state_path.is_some())
+      + usize::from(plaintext_only);
+    if selector_count > 1 {
+      return Err(RequestError::ConflictingCredentialSelectors);
+    }
+
+    Ok(if let Some(browser_id) = browser_id {
+      Some(Self::BrowserId(browser_id))
+    } else if let Some(local_state_path) = local_state_path {
+      Some(Self::LocalStateFile(local_state_path))
+    } else if plaintext_only {
+      Some(Self::PlaintextOnly)
+    } else {
+      None
+    })
+  }
+}
+
 /// Whether a Windows Chromium request may shut down processes holding its DB.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -610,7 +642,7 @@ fn automatic_chromium_cookies(
         crate::browser::chromium_platform_keys::ChromiumKeyRequest::direct(credentials),
         runtime,
       );
-      crate::browser::chromium::chromium_based_probe_with_key_outcomes(
+      crate::browser::chromium_projection::chromium_based_probe_with_key_outcomes(
         outcomes, db_path, domains, false, runtime,
       )
     },
@@ -854,6 +886,36 @@ mod tests {
       crate::Error::Source(source) => source,
       other => panic!("expected Error::Source, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn flattened_credential_selectors_have_one_core_precedence_rule() {
+    assert_eq!(
+      ChromiumCredentialSource::from_selectors(Some("chrome".into()), None, false),
+      Ok(Some(ChromiumCredentialSource::BrowserId("chrome".into())))
+    );
+    assert_eq!(
+      ChromiumCredentialSource::from_selectors(None, Some(PathBuf::from("Local State")), false,),
+      Ok(Some(ChromiumCredentialSource::LocalStateFile(
+        PathBuf::from("Local State")
+      )))
+    );
+    assert_eq!(
+      ChromiumCredentialSource::from_selectors(None, None, true),
+      Ok(Some(ChromiumCredentialSource::PlaintextOnly))
+    );
+    assert_eq!(
+      ChromiumCredentialSource::from_selectors(None, None, false),
+      Ok(None)
+    );
+    assert_eq!(
+      ChromiumCredentialSource::from_selectors(
+        Some("chrome".into()),
+        Some(PathBuf::from("Local State")),
+        true,
+      ),
+      Err(RequestError::ConflictingCredentialSelectors)
+    );
   }
 
   #[test]

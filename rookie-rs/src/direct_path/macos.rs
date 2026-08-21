@@ -58,7 +58,7 @@ pub(super) fn detailed_from_path(
     // wrote the file, and 0.6.0 does not guess.
     None => match source {
       CookieSourceKind::ChromiumSqlite => {
-        crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+        crate::browser::chromium_projection::chromium_based_detailed_plaintext_only_with_runtime(
           target.path,
           domains,
           false,
@@ -85,13 +85,13 @@ fn chromium_detailed(
 ) -> Result<Vec<DetailedCookie>> {
   match credentials {
     ChromiumCredentialSource::PlaintextOnly => {
-      crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+      crate::browser::chromium_projection::chromium_based_detailed_plaintext_only_with_runtime(
         path, domains, false, runtime,
       )
     }
     ChromiumCredentialSource::BrowserId(browser_id) => {
       let outcomes = browser_id_outcomes(&browser_id, runtime)?;
-      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_runtime(
+      crate::browser::chromium_projection::extract_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, false, runtime,
       )
     }

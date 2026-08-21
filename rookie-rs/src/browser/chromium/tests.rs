@@ -1,3 +1,7 @@
+use super::super::chromium_projection::{
+  extract_cookies_with_provider, extract_detailed_cookies_with_provider, project_detailed_draft,
+  project_legacy_draft,
+};
 use super::*;
 use crate::browser::chromium_crypto::LegacySharedKeyProvider;
 #[cfg(target_os = "windows")]
@@ -1067,8 +1071,9 @@ fn dual_populated_v20_provider_failure_is_reportable_but_legacy_errors() {
   assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::ProviderFailed);
   assert!(outcome.legacy_error.is_some());
 
-  let error = extract_cookies_with_key_outcomes(outcomes, db, None, false)
-    .expect_err("legacy projection must fail when every row is unavailable");
+  let error =
+    super::super::chromium_projection::extract_cookies_with_key_outcomes(outcomes, db, None, false)
+      .expect_err("legacy projection must fail when every row is unavailable");
   assert!(!format!("{error:#}").contains("plaintext sentinel must not escape"));
   assert!(format!("{error:#}").contains("App-Bound provider failure"));
 }

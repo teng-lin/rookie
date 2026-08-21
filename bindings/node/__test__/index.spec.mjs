@@ -817,6 +817,18 @@ test("generated Firefox profile exports and declarations survive patching", (t) 
   t.false(types.includes("testWorkerPanic"));
 });
 
+test("finite profile selections stay finite in generated declarations", (t) => {
+  const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
+  const readOptions = types.match(/export interface ReadOptions \{[\s\S]*?\n\}/)?.[0];
+  const reportOptions = types.match(/export interface ReportOptions \{[\s\S]*?\n\}/)?.[0];
+  t.truthy(readOptions);
+  t.truthy(reportOptions);
+  t.true(readOptions.includes("select?: 'legacy_first'"));
+  t.true(reportOptions.includes("select?: 'legacy_first' | 'all'"));
+  t.false(readOptions.includes("select?: string"));
+  t.false(reportOptions.includes("select?: string"));
+});
+
 test("canonical direct-path declarations and compatibility deprecations are exact", (t) => {
   const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
   t.regex(

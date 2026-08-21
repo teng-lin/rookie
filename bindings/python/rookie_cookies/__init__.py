@@ -1,6 +1,6 @@
 import http.cookiejar
 from sys import platform
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from . import dto as dto
 from .rookie_cookies import (
@@ -50,6 +50,9 @@ __all__ = [
     "MAX_ISSUE_SAMPLES",
     "CancellationHandle",
     "ChromiumPathOptions",
+    "AppBoundPolicy",
+    "ReportProfileSelection",
+    "SingleProfileSelection",
     "ReadResult",
     "ReadWarning",
     "RookieEngineError",
@@ -85,17 +88,25 @@ __all__ = [
     "librewolf",
     "load",
     "load_report",
+    "load_report_dto",
     "opera",
     "profiles",
+    "profiles_dto",
     "read",
     "report",
+    "report_dto",
     "supported_browsers",
+    "supported_browsers_dto",
     "to_cookiejar",
     "to_netscape",
     "version",
     "vivaldi",
     "zen",
 ]
+
+AppBoundPolicy = Literal["disabled", "injection_only", "allow_elevated_fallback"]
+SingleProfileSelection = Literal["legacy_first"]
+ReportProfileSelection = Literal["legacy_first", "all"]
 
 
 class ChromiumPathOptions(TypedDict, total=False):
@@ -105,7 +116,7 @@ class ChromiumPathOptions(TypedDict, total=False):
     plaintext_only: bool
     timeout: float
     cancellation: CancellationHandle
-    app_bound: str
+    app_bound: AppBoundPolicy
 
 
 CookieList = List[Dict[str, Any]]
@@ -203,10 +214,10 @@ def jar(
     profile: Optional[str] = None,
     include_expired: bool = False,
     include_session: bool = False,
-    select: str = "legacy_first",
+    select: SingleProfileSelection = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> http.cookiejar.CookieJar:
     """
     Sugar: ``read(...).as_jar()``. Warnings are discarded; use ``read()`` if you need them.
@@ -251,10 +262,10 @@ def report(
     *,
     profile: Optional[str] = None,
     domains: Optional[List[str]] = None,
-    select: Optional[str] = None,
+    select: Optional[ReportProfileSelection] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> ExtractionReport:
     """Bindings name for :func:`browser_report` / Rust ``extract_report``.
 
@@ -273,6 +284,66 @@ def report(
         timeout=timeout,
         cancellation=cancellation,
         app_bound=app_bound,
+    )
+
+
+def supported_browsers_dto() -> List[dto.BrowserDescriptor]:
+    """Typed dataclass view of :func:`supported_browsers`."""
+    return [dto.BrowserDescriptor.from_dict(item) for item in supported_browsers()]
+
+
+def profiles_dto(
+    browser_id: str,
+    *,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> List[dto.ProfileDescriptor]:
+    """Typed dataclass view of :func:`profiles`."""
+    return [
+        dto.ProfileDescriptor.from_dict(item)
+        for item in profiles(browser_id, timeout=timeout, cancellation=cancellation)
+    ]
+
+
+def report_dto(
+    browser: str,
+    *,
+    profile: Optional[str] = None,
+    domains: Optional[List[str]] = None,
+    select: Optional[ReportProfileSelection] = None,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+    app_bound: AppBoundPolicy = "injection_only",
+) -> dto.ExtractionReport:
+    """Typed dataclass view of :func:`report`."""
+    return dto.ExtractionReport.from_dict(
+        report(
+            browser,
+            profile=profile,
+            domains=domains,
+            select=select,
+            timeout=timeout,
+            cancellation=cancellation,
+            app_bound=app_bound,
+        )
+    )
+
+
+def load_report_dto(
+    domains: Optional[List[str]] = None,
+    *,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+    app_bound: AppBoundPolicy = "injection_only",
+) -> dto.ExtractionReport:
+    """Typed dataclass view of :func:`load_report`."""
+    return dto.ExtractionReport.from_dict(
+        load_report(
+            domains,
+            timeout=timeout,
+            cancellation=cancellation,
+            app_bound=app_bound,
+        )
     )
 
 

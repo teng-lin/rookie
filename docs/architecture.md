@@ -447,7 +447,7 @@ The CLI is a thin process: it builds `ExtractRequest` / `ReportRequest` / `ReadR
 
 #### Platform layers
 
-Platform `cfg` is contained behind capability modules (issue #218), enforced by `xtask check-cfg-locations` against `cfg-location-allowlist.toml`. Pattern: `mod.rs` selects `linux` / `macos` / `windows` / `unsupported` and `use x as platform`.
+Platform `cfg` is constrained to an explicit allowlist (issue #218), enforced by `xtask check-cfg-locations` against `cfg-location-allowlist.toml`. Most capabilities use the `mod.rs`-selects-`linux` / `macos` / `windows` / `unsupported` pattern, but the registry is a documented exception: its root and per-engine leaves contain allowlisted target gates for path encoding, native acquisition entry points, and platform-only engines.
 
 | Capability | Leaves |
 | --- | --- |
@@ -461,7 +461,7 @@ Platform `cfg` is contained behind capability modules (issue #218), enforced by 
 | App-Bound | `windows/appbound/` + `browser/appbound_host.rs` |
 | Safari / IE native acquisition | `registry/safari.rs`, `registry/internet_explorer.rs`; parsers remain cross-host testable |
 
-`registry.rs` itself stays target-agnostic (#218 ceiling). Safari/IE `acquire_each_candidate` is `#[allow(dead_code)]` on Linux rather than `cfg`-gated in that file.
+The registry's data model and cross-host parsers stay portable; the registry files themselves are **not** target-agnostic. In particular, `registry.rs` contains Unix/Windows path-byte gates and platform dispatch, while `registry/{chromium,safari,internet_explorer,profile_query}.rs` contain allowlisted target gates. New gates still require an allowlist entry and rationale; “target-agnostic registry” is not an architectural invariant.
 
 Default extraction budget: 30 seconds (`common/deadline.rs` `DEFAULT_EXTRACTION_BUDGET`). One absolute monotonic `Deadline` is created at the operation boundary and copied through every fallback; no boundary turns remaining duration into a fresh budget. `load_report` fans out registered browsers on a pool of `DEFAULT_FAN_OUT_WIDTH = 4` (`common/concurrency.rs`) sharing that one runtime, returning results in registry order.
 
@@ -487,12 +487,13 @@ Discovery strategies: `chromium_user_data`, `mozilla_profiles_ini`, `safari_defa
 
 No plugin trait. `report_build::collect_extraction` / `collect_listing` and `legacy::browser_cookies_and_warnings_with_runtime` `match browser.engine`. Chromium and Gecko are portable and stay inline; Safari/IE go through `report_build/dispatch` and `legacy/dispatch` platform leaves.
 
-**Chromium** (`browser/chromium.rs` + `registry/chromium.rs`):
+**Chromium** (`browser/chromium.rs` + `browser/chromium_projection.rs` + `registry/chromium.rs`):
 
 - Inventory: `ChromiumProfile` (candidates only) / `ChromiumExtractedProfile` (sources). `BrowserInstallation`, `ChromiumDiscovery`, `ChromiumListing`, `ChromiumRegistryDraft`.
 - Persistent precedence: `Network/Cookies` (10) then `Cookies` (20). Listing stats both, selects the first that `exists`, **omits `!exists` from the extract plan**. Policy `Fixed`. Listing `acquisition` stays `NotAttempted`; the strategy used lands on `Source::acquisition`.
 - Chrome-only listing `chrome_profiles()` prefers `Local State.profile.last_used` then `last_active_profiles`; generic `browser_profiles("chrome")` stays default-first.
 - Engine boundary: `acquire_chromium_source_with_runtime(...) -> Source` via private `ChromiumExtractionDraft::into_source`.
+- `chromium.rs` is the registry-facing acquire/decode engine. `chromium_projection.rs` owns compatibility/direct-path projection and may depend on report finalization. Consequently report assembly reaches the acquire engine without the former `report_build -> registry/chromium -> chromium -> report_build` cycle.
 - Acquire options collapsed to `ChromiumAcquireOptions { encrypted_value_policy, acquisition }` (`DirectRead` vs `WithForceKillRecovery`). `EncryptedValuePolicy::UseKeyOutcomes` vs `RejectMissingIdentity` (plaintext-only / missing identity).
 
 **Gecko** (`mozilla.rs`, `mozilla_persistent.rs`, `mozilla_session.rs`, `mozilla_profiles.rs`, `registry/gecko.rs`):
@@ -546,6 +547,8 @@ Non-SQLite: Safari `StableFileImage`; IE `EseDatabase`.
 #### Report pipeline
 
 `report_build.rs` is cross-engine assembly. Entry points: `supported_browser_descriptors`, `browser_profile_descriptors`, `chrome_profile_descriptors`, `browser_extraction_report_with_runtime`, `load_extraction_report`.
+
+Direct-path Chromium compatibility projection enters through `chromium_projection.rs`; `report_build` itself depends only on `registry/chromium` and the lower `chromium.rs` acquire engine.
 
 Flow:
 
@@ -601,7 +604,7 @@ Python `jar(...)` is `read(...).as_jar()` and **discards warnings**. `ReadResult
 - `profiles` — positional browser, `--timeout-secs` only.
 - `browsers` — no arguments; wraps `supported_browsers()`.
 
-`--profile` with `--select all` is `RequestError::ConflictingProfileSelection`, raised (`reject_conflicting_profile_selection`) before any I/O — the same conflict a binding hits constructing the request directly. A browser id is validated at runtime by the registry (`RequestError::UnknownBrowser`); clap no longer restricts it to a historical name list. There is no `--allow-process-shutdown` flag.
+`--profile` with `--select all` is `RequestError::ConflictingProfileSelection`, raised by the core `ReportScope::from_binding_options` constructor before any I/O. Node and Python use the same constructor; single-profile jobs share `ProfileSelection::from_binding_options`. A browser id is validated at runtime by the registry (`RequestError::UnknownBrowser`); clap no longer restricts it to a historical name list. There is no `--allow-process-shutdown` flag.
 
 #### xtask fences
 
@@ -636,8 +639,9 @@ Public API snapshots: `rookie-rs/public-api/{linux,macos,windows}-{all-features,
 | `browser/compatibility.rs` | which browser families exist, which source-set rule each takes, which product string each emits | extraction `status`, assembly |
 | `browser/report_core.rs` | the wire DTO and its ordering and aggregation helpers | engine types |
 | `browser/report_build.rs` | dispatch arms, orchestration, finalize hand-off, wire projection, the single direct-path finalize seam | per-engine bag mappers, per-engine direct-path identity construction, compatibility disposition and its product strings |
+| `browser/chromium_projection.rs` | Chromium compatibility/direct-path request projection and synthetic direct-source construction | registry acquisition, Chromium decode |
 | `browser/legacy.rs` | `LegacyFirstProfile` application and `Cookie` projection | paths, credentials, discovery |
-| engine modules | path plus keys to `Source`; format decode; public `MozillaProfile` as an ADR 0002 projection | report identity, profile listing types |
+| engine modules | path plus keys to `Source`; format decode; public `MozillaProfile` as an ADR 0002 projection | report identity, profile listing types, report finalization |
 | `browser/cookie_record.rs` | `CookieRecord`, `FinalizedCookieRecord` | — |
 
 `common/sqlite.rs` is deliberately absent from the table.

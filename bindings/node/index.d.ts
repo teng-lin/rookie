@@ -364,7 +364,7 @@ export interface ReadOptions {
    * `conflicting_profile_selection` before any I/O; use `report`/
    * `browserReport` for every profile.
    */
-  select?: string
+  select?: 'legacy_first'
 }
 export interface ReportOptions {
   browser: string
@@ -378,7 +378,7 @@ export interface ReportOptions {
    * together with `profile` is a contradiction and rejects with
    * `conflicting_profile_selection` before any I/O.
    */
-  select?: string
+  select?: 'legacy_first' | 'all'
 }
 export interface FromPathOptions {
   path: string

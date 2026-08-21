@@ -4,6 +4,9 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 from . import dto as dto
 
 CookieList = List[Dict[str, Any]]
+AppBoundPolicy = Literal["disabled", "injection_only", "allow_elevated_fallback"]
+SingleProfileSelection = Literal["legacy_first"]
+ReportProfileSelection = Literal["legacy_first", "all"]
 
 class CookieObject(TypedDict):
     domain: str
@@ -48,7 +51,7 @@ class ChromiumPathOptions(TypedDict, total=False):
     plaintext_only: bool
     timeout: float
     cancellation: "CancellationHandle"
-    app_bound: str
+    app_bound: AppBoundPolicy
 
 class CancellationHandle:
     """
@@ -140,7 +143,7 @@ def extract_from_path(
     local_state_path: Optional[str] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> CookieList:
     """
     Extract cookies from an explicit cookie file.
@@ -528,10 +531,10 @@ def browser_report(
     profile_id: Optional[str] = None,
     domains: Optional[List[str]] = None,
     *,
-    select: Literal["legacy_first", "all"] = "all",
+    select: ReportProfileSelection = "all",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> ExtractionReport:
     """
     Extract cookies from one browser as a grouped report.
@@ -576,7 +579,7 @@ def load_report(
     *,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> ExtractionReport:
     """
     Extract cookies from every registered browser as one grouped report.
@@ -675,10 +678,10 @@ def read(
     profile: Optional[str] = None,
     include_expired: bool = False,
     include_session: bool = False,
-    select: Literal["legacy_first"] = "legacy_first",
+    select: SingleProfileSelection = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> ReadResult:
     """
     Read an unfiltered snapshot of one browser profile.
@@ -723,7 +726,7 @@ def from_path(
     local_state_path: Optional[str] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> ReadResult:
     """
     Read cookies from an explicit cookie database path.
@@ -757,10 +760,10 @@ def jar(
     profile: Optional[str] = None,
     include_expired: bool = False,
     include_session: bool = False,
-    select: str = "legacy_first",
+    select: SingleProfileSelection = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> "http.cookiejar.CookieJar":
     """
     Sugar: ``read(...).as_jar()``. Warnings are discarded.
@@ -787,13 +790,41 @@ def report(
     *,
     profile: Optional[str] = None,
     domains: Optional[List[str]] = None,
-    select: Literal["legacy_first", "all"] = "all",
+    select: ReportProfileSelection | None = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "injection_only",
+    app_bound: AppBoundPolicy = "injection_only",
 ) -> ExtractionReport:
     """Bindings name for ``browser_report`` / Rust ``extract_report``."""
     ...
+
+def supported_browsers_dto() -> List[dto.BrowserDescriptor]: ...
+
+def profiles_dto(
+    browser_id: str,
+    *,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> List[dto.ProfileDescriptor]: ...
+
+def report_dto(
+    browser: str,
+    *,
+    profile: Optional[str] = None,
+    domains: Optional[List[str]] = None,
+    select: ReportProfileSelection | None = None,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+    app_bound: AppBoundPolicy = "injection_only",
+) -> dto.ExtractionReport: ...
+
+def load_report_dto(
+    domains: Optional[List[str]] = None,
+    *,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+    app_bound: AppBoundPolicy = "injection_only",
+) -> dto.ExtractionReport: ...
 
 # Windows
 if platform == "win32":

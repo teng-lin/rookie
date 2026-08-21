@@ -146,46 +146,23 @@ pub fn browser_report(
   cancellation: Option<PyCancellationHandle>,
   app_bound: String,
 ) -> PyResult<Py<PyAny>> {
-  // `select`'s *effective* default is "all", but the conflict check must not
-  // fire just because a caller left it at that default while also passing
-  // `profile_id` -- that describes every pre-`select` call site, and denying
-  // it would be a hard regression, not a validation. So `select` stays
-  // `Option<String>` with a `None` default here (unlike `read`'s `select`,
-  // whose only valid value already coincides with its default and has no
-  // such ambiguity): only an *explicit* `select="all"` is the documented
-  // conflict with `profile_id`.
-  // Validate the vocabulary before anything branches on `profile_id`. The
-  // scope match below only runs when no profile was named, so a typo like
-  // "legacy_frst" passed alongside a profile used to be dropped silently and
-  // extraction started anyway -- the same value that is a request error on the
-  // profile-less call shape.
-  match select.as_deref() {
-    None | Some("all") | Some("legacy_first") => {}
-    Some(other) => {
-      return Err(request_error(format!(
-        "unknown select value {other:?}; expected \"legacy_first\" or \"all\""
-      )))
-    }
+  // Preserve the binding's useful offending-value diagnostic while the core
+  // constructor below remains the single source of truth for conflicts.
+  if let Some(other) = select
+    .as_deref()
+    .filter(|value| !matches!(*value, "all" | "legacy_first"))
+  {
+    return Err(request_error(format!(
+      "unknown select value {other:?}; expected \"legacy_first\" or \"all\""
+    )));
   }
-  if profile_id.is_some() && select.as_deref() == Some("all") {
-    return Err(crate::conflicting_profile_selection_error());
-  }
+  let scope =
+    rookie_core::ReportScope::from_binding_options(profile_id.as_deref(), select.as_deref())
+      .map_err(|_| crate::conflicting_profile_selection_error())?;
   let control = crate::execution_control(timeout, cancellation, &app_bound)?;
-  let mut request = rookie_core::ReportRequest::browser(browser_id).domains(domains);
-  request = match profile_id {
-    Some(profile_id) => request.profile(profile_id),
-    // No named profile: `select` chooses between the two scopes a report can
-    // widen to. `None`/"all" is `ReportRequest::browser`'s own default, so
-    // it is a no-op here rather than an explicit `.scope(..)` call.
-    None => match select.as_deref() {
-      Some("legacy_first") => request.scope(rookie_core::ReportScope::One(
-        rookie_core::ProfileSelection::LegacyFirst,
-      )),
-      // Validated above, so only absent/"all" reach here, and both mean
-      // `ReportRequest::browser`'s own default scope.
-      _ => request,
-    },
-  };
+  let mut request = rookie_core::ReportRequest::browser(browser_id)
+    .domains(domains)
+    .scope(scope);
   request = request.execution(control);
   // Builds a `ReportRequest` and calls `extract_report` directly rather than
   // the free `browser_report` function: that convenience wrapper predates

@@ -171,6 +171,7 @@ impl From<anyhow::Error> for Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EngineCause {
   NoSelectedSource,
+  SourceExtractionFailed,
   NoDiscoveredSource,
   DiscoveryFailed,
   SourceInspectionFailed,
@@ -180,6 +181,7 @@ impl EngineCause {
   fn code(self) -> &'static str {
     match self {
       Self::NoSelectedSource => "no_selected_source",
+      Self::SourceExtractionFailed => "source_extraction_failed",
       Self::NoDiscoveredSource => "no_discovered_source",
       Self::DiscoveryFailed => "discovery_failed",
       Self::SourceInspectionFailed => "source_inspection_failed",
@@ -296,6 +298,10 @@ mod tests {
   fn every_engine_cause_reaches_its_own_stable_code() {
     for (cause, code) in [
       (EngineCause::NoSelectedSource, "no_selected_source"),
+      (
+        EngineCause::SourceExtractionFailed,
+        "source_extraction_failed",
+      ),
       (EngineCause::NoDiscoveredSource, "no_discovered_source"),
       (EngineCause::DiscoveryFailed, "discovery_failed"),
       (

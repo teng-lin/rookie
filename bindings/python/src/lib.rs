@@ -61,20 +61,15 @@ pub(crate) fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duratio
 /// Parses one of the three stable `app_bound` policy strings this binding
 /// promises.
 ///
-/// `rookie_core::AppBoundPolicy::as_str`'s values are crate-private, so this
-/// hand-written inverse is the one place that must be kept in sync with them
-/// by hand. An unrecognized string is a request fault raised before any I/O
-/// runs, never silently downgraded to `"disabled"`.
+/// Parsing is owned by the core enum so every binding accepts the same stable
+/// vocabulary. An unrecognized string is a request fault raised before any
+/// I/O runs, never silently downgraded to `"disabled"`.
 pub(crate) fn app_bound_policy(value: &str) -> PyResult<rookie_core::AppBoundPolicy> {
-  match value {
-    "disabled" => Ok(rookie_core::AppBoundPolicy::Disabled),
-    "injection_only" => Ok(rookie_core::AppBoundPolicy::InjectionOnly),
-    "allow_elevated_fallback" => Ok(rookie_core::AppBoundPolicy::AllowElevatedFallback),
-    other => Err(errors::request_error(format!(
-      "unknown app_bound policy {other:?}; expected \"disabled\", \"injection_only\", \
-       or \"allow_elevated_fallback\""
-    ))),
-  }
+  value
+    .parse()
+    .map_err(|error: rookie_core::ParseAppBoundPolicyError| {
+      errors::request_error(error.to_string())
+    })
 }
 
 /// Builds the timeout/cancellation knobs every I/O job takes, without

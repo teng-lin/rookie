@@ -241,7 +241,7 @@ pub(super) fn detailed_from_path(
     // database failed. Under the 0.6.0 rule a plaintext one succeeds, and an
     // encrypted one is `missing_chromium_credentials`.
     CookieSourceKind::ChromiumSqlite => {
-      crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+      crate::browser::chromium_projection::chromium_based_detailed_plaintext_only_with_runtime(
         target.path,
         domains,
         false,
@@ -365,12 +365,12 @@ fn query_prepared(
 ) -> Result<Vec<DetailedCookie>> {
   match credentials {
     PreparedCredentials::PlaintextOnly => {
-      crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+      crate::browser::chromium_projection::chromium_based_detailed_plaintext_only_with_runtime(
         path, domains, force_kill, runtime,
       )
     }
     PreparedCredentials::KeyOutcomes(outcomes) => {
-      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_runtime(
+      crate::browser::chromium_projection::extract_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, force_kill, runtime,
       )
     }
@@ -385,12 +385,12 @@ fn query_prepared_without_platform_recovery(
 ) -> Result<Vec<DetailedCookie>> {
   match credentials {
     PreparedCredentials::PlaintextOnly => {
-      crate::browser::chromium::extract_detailed_cookies_plaintext_without_platform_recovery(
+      crate::browser::chromium_projection::extract_detailed_cookies_plaintext_without_platform_recovery(
         path, domains, runtime,
       )
     }
     PreparedCredentials::KeyOutcomes(outcomes) => {
-      crate::browser::chromium::extract_detailed_cookies_with_key_outcomes_without_platform_recovery(
+      crate::browser::chromium_projection::extract_detailed_cookies_with_key_outcomes_without_platform_recovery(
         outcomes, path, domains, runtime,
       )
     }

@@ -36,7 +36,7 @@ pub use browser::internet_explorer::internet_explorer_based;
 #[cfg(target_os = "macos")]
 pub use browser::safari::safari_based;
 pub use browser::{
-  chromium::{chromium_based, chromium_based_detailed},
+  chromium_projection::{chromium_based, chromium_based_detailed},
   mozilla::{firefox_based, firefox_based_detailed, MozillaProfile},
 };
 
@@ -77,7 +77,7 @@ mod target;
 pub use anyhow;
 use enums::Cookie;
 pub use error::{EngineError, Error};
-pub use execution::{AppBoundPolicy, ExecutionControl};
+pub use execution::{AppBoundPolicy, ExecutionControl, ParseAppBoundPolicyError};
 pub use read::{
   from_path, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning,
 };
@@ -688,10 +688,15 @@ pub(crate) fn flatten_selected_report_cookies(
     }
   }
   let mut cookies = Vec::new();
+  let mut any_selected = false;
   let mut any_selected_success = false;
   for profile in report.profiles {
     for source in profile.sources {
-      if source.selected && source.status.as_str() == "succeeded" {
+      if !source.selected {
+        continue;
+      }
+      any_selected = true;
+      if source.status.as_str() == "succeeded" {
         any_selected_success = true;
         cookies.extend(source.cookies);
       }
@@ -700,8 +705,20 @@ pub(crate) fn flatten_selected_report_cookies(
   if !any_selected_success {
     return Err(
       error::EngineFailure::new(
-        error::EngineCause::NoSelectedSource,
-        "no selected cookie source succeeded",
+        if any_selected {
+          // `source_extraction_failed` is the report source's own stable
+          // failure code. Replacing it with `no_selected_source` used to lose
+          // the difference between "nothing selected" and "selected, then
+          // failed" at this compatibility projection.
+          error::EngineCause::SourceExtractionFailed
+        } else {
+          error::EngineCause::NoSelectedSource
+        },
+        if any_selected {
+          "every selected cookie source failed"
+        } else {
+          "no cookie source was selected"
+        },
       )
       .into(),
     );
@@ -784,7 +801,9 @@ pub fn chromium_based_with_browser_id(
     .flatten()
   {
     Some(config) => chromium_based(&config, db_path, domains, force_kill),
-    None => browser::chromium::chromium_based_plaintext_only(db_path, domains, force_kill),
+    None => {
+      browser::chromium_projection::chromium_based_plaintext_only(db_path, domains, force_kill)
+    }
   }
 }
 
@@ -806,7 +825,9 @@ pub fn chromium_based_detailed_with_browser_id(
     .flatten()
   {
     Some(config) => chromium_based_detailed(&config, db_path, domains, force_kill),
-    None => browser::chromium::chromium_based_detailed_plaintext_only(db_path, domains, force_kill),
+    None => browser::chromium_projection::chromium_based_detailed_plaintext_only(
+      db_path, domains, force_kill,
+    ),
   }
 }
 

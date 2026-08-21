@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import dataclasses
 import unittest
+from unittest import mock
 
+import rookie_cookies
 from rookie_cookies import dto
 
 _COOKIE = {
@@ -148,6 +150,22 @@ class DtoRoundTripTest(unittest.TestCase):
         cookie = dto.Cookie.from_dict(_COOKIE)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             cookie.value = "mutated"
+
+    def test_report_dto_is_a_first_class_typed_view(self) -> None:
+        with mock.patch.object(rookie_cookies, "report", return_value=_REPORT) as report:
+            result = rookie_cookies.report_dto("chrome", select="legacy_first")
+
+        self.assertIsInstance(result, dto.ExtractionReport)
+        self.assertIsInstance(result.profiles[0], dto.ProfileExtraction)
+        report.assert_called_once_with(
+            "chrome",
+            profile=None,
+            domains=None,
+            select="legacy_first",
+            timeout=None,
+            cancellation=None,
+            app_bound="injection_only",
+        )
 
 
 if __name__ == "__main__":
