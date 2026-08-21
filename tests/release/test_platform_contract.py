@@ -141,6 +141,22 @@ class RealContractTests(unittest.TestCase):
         self.assertLess(rename, harness)
         self.assertLess(harness, upload)
 
+    def test_publish_cli_matrix_cells_execute_exact_artifacts_natively(self) -> None:
+        contract = platform_contract.load_contract()
+        matrix_targets = {
+            entry["target"]
+            for entry in platform_contract.emit_matrix(contract, "cli")["include"]
+        }
+        cli_cells = {
+            cell["target_triple"]: cell
+            for cell in platform_contract.cells(contract, artifact_id="cli")
+        }
+        self.assertEqual(set(cli_cells), matrix_targets)
+        for target in sorted(matrix_targets):
+            cell = cli_cells[target]
+            self.assertEqual(cell.get("execute"), "native", cell)
+            self.assertIsNone(cell.get("accepted_risk"), cell)
+
     def test_publish_npm_tests_the_downloaded_intel_addon(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/publish-npm.yml").read_text(
             encoding="utf-8"

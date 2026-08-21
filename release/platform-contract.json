@@ -250,16 +250,12 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "untested",
+      "execute": "native",
       "helper_roles": [
         "keyring"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Built natively on ubuntu-22.04 (matching architecture, no emulation), but publish-cli.yml only builds and uploads the CLI binary \u2014 it never runs it before attaching it to the release.",
-        "expires": "2026-12-31"
-      },
-      "notes": "e2e.yml's ubuntu-chrome job does exercise a separately pre-built CLI binary via 'Pre-build the rookie-cookies CLI', but that is a dev build from source, not this exact release artifact.",
+      "accepted_risk": null,
+      "notes": "Built natively on ubuntu-22.04. publish-cli.yml records the renamed binary in a digest-bound manifest and runs that exact binary's --version outside the checkout before upload.",
       "target_triple": "x86_64-unknown-linux-gnu",
       "runner": "ubuntu-22.04"
     },
@@ -279,7 +275,7 @@
         "keyring"
       ],
       "accepted_risk": null,
-      "notes": "Built on ubuntu-24.04-arm. artifact-smoke.yml linux-arm64 consume runs the arm64 CLI (a separately built but same-triple binary); publish-cli.yml still does not execute the GitHub-release asset before attach.",
+      "notes": "Built natively on ubuntu-24.04-arm. publish-cli.yml records the renamed binary in a digest-bound manifest and runs that exact binary's --version outside the checkout before upload.",
       "target_triple": "aarch64-unknown-linux-gnu",
       "runner": "ubuntu-24.04-arm"
     },
