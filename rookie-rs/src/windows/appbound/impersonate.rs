@@ -41,6 +41,7 @@ impl DebugPrivilegeGuard {
     use windows::Wdk::System::SystemServices::SE_DEBUG_PRIVILEGE;
 
     let mut previous_value = BOOL(0);
+    // SAFETY: Enabling SE_DEBUG_PRIVILEGE on the current process token; previous state is captured in `previous_value`.
     let status =
       unsafe { RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, BOOL(1), BOOL(0), &mut previous_value) };
     if status.0 != 0 {
@@ -59,6 +60,7 @@ impl DebugPrivilegeGuard {
     };
 
     let mut ignored_previous_value = BOOL(0);
+    // SAFETY: Restoring SE_DEBUG_PRIVILEGE to its previous value captured at acquisition time.
     let status = unsafe {
       RtlAdjustPrivilege(
         SE_DEBUG_PRIVILEGE,
@@ -111,6 +113,8 @@ fn get_process_pids(runtime: &crate::common::deadline::BoundaryRuntime<'_>) -> R
     let mut a_processes: Vec<u32> = vec![0; capacity as usize];
     let mut cb_needed: u32 = 0;
 
+    // SAFETY: `a_processes` is allocated with `capacity` u32 elements (capacity * 4 bytes),
+    // and `cb_needed` receives the byte count written by EnumProcesses.
     unsafe {
       EnumProcesses(a_processes.as_mut_ptr(), capacity * 4, &mut cb_needed)?;
     }
@@ -135,6 +139,8 @@ fn get_process_pids(runtime: &crate::common::deadline::BoundaryRuntime<'_>) -> R
 }
 
 fn get_process_name(pid: u32) -> Result<String> {
+  // SAFETY: `pid` is an active PID; OpenProcess and K32GetProcessImageFileNameW query the
+  // executable name into the preallocated `buffer`.
   unsafe {
     // Open the process with permissions to query information and read VM
     let process_handle = HandleGuard(OpenProcess(
@@ -183,6 +189,7 @@ fn get_system_process_pid(runtime: &crate::common::deadline::BoundaryRuntime<'_>
 }
 
 fn get_process_handle(pid: u32) -> Result<HANDLE> {
+  // SAFETY: `pid` is an existing process ID to open with query rights.
   unsafe {
     // Open the process with PROCESS_QUERY_INFORMATION permission
     let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid)?;
@@ -209,6 +216,7 @@ impl HandleGuard {
 impl Drop for HandleGuard {
   fn drop(&mut self) {
     if !self.0.is_invalid() {
+      // SAFETY: `self.0` is a valid, owned non-invalid Windows handle that must be closed.
       unsafe {
         if let Err(error) = CloseHandle(self.0) {
           log::warn!("Failed to close Windows handle: {error}");
@@ -220,6 +228,7 @@ impl Drop for HandleGuard {
 
 fn get_system_token(lsass_handle: HANDLE) -> Result<HANDLE> {
   let mut token_handle = HandleGuard(HANDLE::default());
+  // SAFETY: `lsass_handle` is a valid open process handle and `token_handle.0` receives the opened token.
   unsafe {
     OpenProcessToken(
       lsass_handle,
@@ -229,6 +238,7 @@ fn get_system_token(lsass_handle: HANDLE) -> Result<HANDLE> {
   }
 
   let mut duplicate_token = HandleGuard(HANDLE::default());
+  // SAFETY: `token_handle.0` is a valid token handle and `duplicate_token.0` receives the duplicated token.
   unsafe {
     DuplicateToken(
       token_handle.0,
@@ -262,6 +272,8 @@ impl Drop for ImpersonationGuard {
 fn restore_thread_identity(
   previous_thread_token: Option<&HandleGuard>,
 ) -> windows::core::Result<()> {
+  // SAFETY: `SetThreadToken` and `RevertToSelf` restore the caller's previous impersonation
+  // token or revert the thread to the process identity.
   unsafe {
     match previous_thread_token {
       Some(token) => SetThreadToken(None, token.0),
@@ -272,6 +284,7 @@ fn restore_thread_identity(
 
 fn capture_thread_token() -> Result<Option<HandleGuard>> {
   let mut token = HandleGuard(HANDLE::default());
+  // SAFETY: `GetCurrentThread()` returns the current thread pseudo-handle and `token.0` receives the token if present.
   let result = unsafe {
     OpenThreadToken(
       GetCurrentThread(),
@@ -299,6 +312,7 @@ impl SuspendedThreadIdentity {
   fn suspend() -> Result<Self> {
     let previous_thread_token = capture_thread_token()?;
     if previous_thread_token.is_some() {
+      // SAFETY: Reverting current thread impersonation to use the process token during elevation.
       unsafe {
         RevertToSelf()?;
       }
@@ -332,6 +346,7 @@ fn impersonate_with_suspended_identity(
   duplicated_token: HandleGuard,
   suspended_identity: SuspendedThreadIdentity,
 ) -> Result<ImpersonationGuard> {
+  // SAFETY: `duplicated_token.0` is a valid duplicated token handle with impersonation rights.
   unsafe {
     ImpersonateLoggedOnUser(duplicated_token.0)?;
   }
@@ -406,6 +421,7 @@ mod tests {
 
   impl Drop for ThreadIdentityCleanup {
     fn drop(&mut self) {
+      // SAFETY: Reverting thread impersonation in test cleanup to restore test runner identity.
       unsafe {
         RevertToSelf().expect("restore process identity after nested impersonation test");
       }
@@ -414,6 +430,7 @@ mod tests {
 
   fn duplicate_current_process_token() -> HandleGuard {
     let mut process_token = HandleGuard(HANDLE::default());
+    // SAFETY: `GetCurrentProcess()` returns the current process pseudo-handle and `process_token.0` receives the token.
     unsafe {
       OpenProcessToken(
         GetCurrentProcess(),
@@ -423,6 +440,7 @@ mod tests {
       .expect("open current process token");
     }
     let mut duplicate = HandleGuard(HANDLE::default());
+    // SAFETY: `process_token.0` is a valid open token handle and `duplicate.0` receives the duplicated token.
     unsafe {
       DuplicateToken(
         process_token.0,
@@ -437,6 +455,7 @@ mod tests {
   fn token_id(token: HANDLE) -> LUID {
     let mut statistics = TOKEN_STATISTICS::default();
     let mut returned = 0;
+    // SAFETY: `token` is a valid open token handle, `statistics` is sized to `TOKEN_STATISTICS`, and `returned` receives the byte count.
     unsafe {
       GetTokenInformation(
         token,
@@ -470,6 +489,7 @@ mod tests {
     let replacement_id = token_id(replacement.0);
     assert_ne!(original_id, replacement_id, "fixtures need distinct tokens");
 
+    // SAFETY: `original.0` is a valid duplicated token with SecurityImpersonation level.
     unsafe {
       ImpersonateLoggedOnUser(original.0).expect("impersonate token A");
     }
@@ -492,6 +512,7 @@ mod tests {
     let original = duplicate_current_process_token();
     let original_id = token_id(original.0);
 
+    // SAFETY: `original.0` is a valid duplicated token with SecurityImpersonation level.
     unsafe {
       ImpersonateLoggedOnUser(original.0).expect("impersonate caller token");
     }

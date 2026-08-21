@@ -107,6 +107,7 @@ fn query_retries_share_one_decreasing_budget_without_wall_clock_sleep() {
 fn bundled_sqlite_matches_the_security_inventory() {
   assert_eq!(rusqlite::version(), "3.53.2");
   assert_eq!(rusqlite::version_number(), 3_053_002);
+  // SAFETY: `sqlite3_sourceid()` returns a static, null-terminated C string embedded in the SQLite library.
   let source_id = unsafe { CStr::from_ptr(rusqlite::ffi::sqlite3_sourceid()) }
     .to_str()
     .expect("SQLite source ID is UTF-8");

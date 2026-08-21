@@ -23,3 +23,7 @@ rookie-cookies = { workspace = true, features = ["appbound"] }
 
 [target.'cfg(unix)'.dependencies]
 rookie-cookies.workspace = true
+
+[lints]
+workspace = true
+

@@ -31,3 +31,7 @@ rookie-cookies.workspace = true
 
 [build-dependencies]
 napi-build = "2.0.1"
+
+[lints]
+workspace = true
+

@@ -9,6 +9,7 @@ struct NcryptObject(Cryptography::NCRYPT_HANDLE);
 impl Drop for NcryptObject {
   fn drop(&mut self) {
     if self.0 .0 != 0 {
+      // SAFETY: `self.0` is a non-zero, valid open CNG object handle owned by this guard.
       unsafe {
         let _ = Cryptography::NCryptFreeObject(self.0);
       }
@@ -21,6 +22,7 @@ impl Drop for NcryptObject {
 /// Chrome 133+.
 pub(crate) fn decrypt(keydpapi: &[u8]) -> Result<SecretBytes> {
   let mut provider_handle = Cryptography::NCRYPT_PROV_HANDLE::default();
+  // SAFETY: `provider_handle` is an out-pointer and the provider name is a valid null-terminated wide string literal.
   unsafe {
     Cryptography::NCryptOpenStorageProvider(
       &mut provider_handle,
@@ -32,6 +34,8 @@ pub(crate) fn decrypt(keydpapi: &[u8]) -> Result<SecretBytes> {
   let _provider_guard = NcryptObject(provider_handle.into());
 
   let mut key_handle = Cryptography::NCRYPT_KEY_HANDLE::default();
+  // SAFETY: `provider_handle` is a valid open provider and `key_handle` is an out-pointer.
+  // The key name is a valid null-terminated wide string literal.
   unsafe {
     Cryptography::NCryptOpenKey(
       provider_handle,
@@ -46,6 +50,8 @@ pub(crate) fn decrypt(keydpapi: &[u8]) -> Result<SecretBytes> {
 
   let mut output_buffer = SecretBytes::zeroed(keydpapi.len());
   let mut output_length = 0u32;
+  // SAFETY: `key_handle` is a valid open key handle, `keydpapi` is an initialized input slice,
+  // and `output_buffer` is an allocated mutable slice of equal length.
   unsafe {
     Cryptography::NCryptDecrypt(
       key_handle,
