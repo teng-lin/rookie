@@ -325,6 +325,26 @@ test("extractFromPath is the canonical flat path-extract job", async (t) => {
       }),
       { message: /mutually exclusive/ },
     );
+
+    // N-API would coerce each of these into the native u32 deadline rather
+    // than reject it, turning -1 into roughly 49 days and NaN into 0. A
+    // silently different deadline is worse than a rejected request.
+    for (const timeoutMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 4294967296]) {
+      await t.throwsAsync(
+        rookieCookies.extractFromPath(chromiumPath, { timeoutMs }),
+        { message: /timeoutMs must be an integer/ },
+        `timeoutMs ${timeoutMs} must be rejected, not coerced`,
+      );
+    }
+    // 0 is a legal integer and reaches the job, where it means an already
+    // expired deadline -- a timeout, not a malformed request. Pinning the
+    // distinction keeps the validator from tightening into a range check that
+    // rejects a value the deadline layer defines.
+    await t.throwsAsync(
+      rookieCookies.extractFromPath(chromiumPath, { timeoutMs: 0 }),
+      { message: /timed out/ },
+      "timeoutMs 0 is a deadline, not a validation error",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

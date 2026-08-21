@@ -399,6 +399,32 @@ class BrowserReportTest(unittest.TestCase):
         self.assertEqual(len(report["profiles"]), 1)
         self.assertEqual(report["profiles"][0]["profile"]["profile_id"], selected)
 
+    def test_report_wrapper_with_a_profile_does_not_self_conflict(self) -> None:
+        # The wrapper used to materialize select="all", so the documented
+        # convenience form collided with its own default and raised
+        # conflicting_profile_selection. An omitted select must stay omitted.
+        with _synthetic_home() as home:
+            _seed_chrome(home)
+            profiles = rookie_cookies.browser_profiles("chrome")
+            selected = next(
+                profile for profile in profiles if profile["is_default"]
+            )["profile"]["profile_id"]
+            report = rookie_cookies.report(browser="chrome", profile=selected)
+
+        self.assertEqual(len(report["profiles"]), 1)
+        self.assertEqual(
+            report["profiles"][0]["profile"]["profile_id"], selected
+        )
+
+    def test_report_wrapper_still_rejects_an_explicit_select_all(self) -> None:
+        # The conflict itself is unchanged: only an *explicit* "all" alongside
+        # a profile is contradictory.
+        with self.assertRaises(ValueError) as caught:
+            rookie_cookies.report(
+                browser="chrome", profile="Default", select="all"
+            )
+        self.assertEqual(caught.exception.code, "conflicting_profile_selection")
+
     def test_rejected_rows_surface_as_error_issues_and_degrade_the_status(
         self,
     ) -> None:

@@ -1037,14 +1037,31 @@ fn project_canonical_report_with_runtime(
         malformed.occurrences = u32::try_from(malformed_hosts).unwrap_or(u32::MAX);
         push_aggregated(&mut source_issues, malformed);
       }
-      stats.add(&source.stats);
+      // The engine counted these rows as emitted -- `cookies_emitted` is the
+      // record count, set where the records were built -- and A7 removes them
+      // afterwards, at projection time. Leaving the counters alone would break
+      // the invariant the wire schema promises, `rows_seen - rows_skipped ==
+      // cookies_emitted`, in the source, profile, and summary totals alike.
+      // This reconciles by the exact number omitted rather than recomputing
+      // from the cookie list, which the counters are deliberately never
+      // derived from.
+      let mut source_stats = source.stats;
+      if malformed_hosts > 0 {
+        let dropped = u32::try_from(malformed_hosts).unwrap_or(u32::MAX);
+        source_stats.cookies_emitted = source_stats.cookies_emitted.saturating_sub(dropped);
+        source_stats.rows_skipped = source_stats.rows_skipped.saturating_add(dropped);
+        // A host that did not survive decode is a malformed stored field, so
+        // it belongs to the `rows_rejected` subset of `rows_skipped` too.
+        source_stats.rows_rejected = source_stats.rows_rejected.saturating_add(dropped);
+      }
+      stats.add(&source_stats);
       public_sources.push(SourceExtraction {
         source: source.source,
         status: source_status(source.failed),
         selected: source.selected,
         acquisition_strategy: source.acquisition_strategy,
         cookies,
-        stats: source.stats,
+        stats: source_stats,
         issues: source_issues,
       });
       if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {

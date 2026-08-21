@@ -154,6 +154,19 @@ pub fn browser_report(
   // whose only valid value already coincides with its default and has no
   // such ambiguity): only an *explicit* `select="all"` is the documented
   // conflict with `profile_id`.
+  // Validate the vocabulary before anything branches on `profile_id`. The
+  // scope match below only runs when no profile was named, so a typo like
+  // "legacy_frst" passed alongside a profile used to be dropped silently and
+  // extraction started anyway -- the same value that is a request error on the
+  // profile-less call shape.
+  match select.as_deref() {
+    None | Some("all") | Some("legacy_first") => {}
+    Some(other) => {
+      return Err(request_error(format!(
+        "unknown select value {other:?}; expected \"legacy_first\" or \"all\""
+      )))
+    }
+  }
   if profile_id.is_some() && select.as_deref() == Some("all") {
     return Err(crate::conflicting_profile_selection_error());
   }
@@ -165,15 +178,12 @@ pub fn browser_report(
     // widen to. `None`/"all" is `ReportRequest::browser`'s own default, so
     // it is a no-op here rather than an explicit `.scope(..)` call.
     None => match select.as_deref() {
-      None | Some("all") => request,
       Some("legacy_first") => request.scope(rookie_core::ReportScope::One(
         rookie_core::ProfileSelection::LegacyFirst,
       )),
-      Some(other) => {
-        return Err(request_error(format!(
-          "unknown select value {other:?}; expected \"legacy_first\" or \"all\""
-        )))
-      }
+      // Validated above, so only absent/"all" reach here, and both mean
+      // `ReportRequest::browser`'s own default scope.
+      _ => request,
     },
   };
   request = request.execution(control);
@@ -413,6 +423,33 @@ fn issue_dict(py: Python<'_>, issue: ExtractionIssue) -> PyResult<Py<PyAny>> {
 mod tests {
   use super::*;
   use crate::errors::RookieRequestError;
+
+  #[test]
+  fn browser_report_rejects_an_unknown_select_even_alongside_a_profile() {
+    Python::initialize();
+    Python::attach(|py| {
+      // The scope match only runs when no profile is named, so a typo passed
+      // with a profile used to be dropped and extraction started anyway. The
+      // browser id is deliberately nonexistent: this must be caught before
+      // browser resolution.
+      let error = browser_report(
+        py,
+        "not-a-real-browser".to_owned(),
+        Some("Default".to_owned()),
+        None,
+        Some("legacy_frst".to_owned()),
+        None,
+        None,
+        "disabled".to_owned(),
+      )
+      .expect_err("an unknown select value must be rejected on every call shape");
+      assert!(error.is_instance_of::<RookieRequestError>(py));
+      assert!(
+        error.value(py).to_string().contains("legacy_frst"),
+        "the message names the offending value: {error}"
+      );
+    });
+  }
 
   #[test]
   fn browser_report_rejects_a_profile_id_with_select_all_before_any_io() {

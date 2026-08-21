@@ -463,6 +463,16 @@ pub(crate) fn extract_from_path_inner(request: PathExtractRequest) -> Result<Vec
   Ok(
     detailed_from_path_inner(request)?
       .into_iter()
+      // A7 applies here for the same reason it applies to `extract`: a row
+      // whose host did not survive decode would otherwise be handed back as
+      // `Cookie { domain: "", .. }`, which matches nothing and belongs to no
+      // site. The filter lives here rather than in `detailed_from_path_inner`
+      // because `from_path` calls that seam and does its own omission *with*
+      // a warning count; a bare `Vec<Cookie>` has no channel to report the
+      // count through, which is the stated cost of this shape.
+      .filter(|detailed| {
+        crate::browser::cookie_record::host_identity_survives(&detailed.cookie.domain)
+      })
       .map(DetailedCookie::into_cookie)
       .collect(),
   )
@@ -495,6 +505,26 @@ fn classify_cookie_source(
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<CookieSourceKind> {
   platform::classify_cookie_source(path, runtime).map_err(|error| invalid_source_error(path, error))
+}
+
+/// Relabel a credential-less Chromium failure as `missing_chromium_credentials`
+/// only when that is genuinely the cause.
+///
+/// A sniffed Chromium database is attempted plaintext-only. Wrapping *every*
+/// failure from that attempt told a caller to supply credentials even when the
+/// database was corrupt, a column was absent, or the query itself failed --
+/// advice that cannot help, on an error that is an engine fault rather than a
+/// caller-fixable one. Shared by all three platform leaves, which each had
+/// their own copy of the unconditional wrapper.
+fn sniffed_chromium_error(error: anyhow::Error) -> anyhow::Error {
+  if crate::browser::chromium::is_missing_browser_key_identity(&error) {
+    error.context(DirectPathError::InvalidOptions {
+      source: CookieSourceKind::ChromiumSqlite,
+      reason: InvalidDirectPathOptionsReason::MissingChromiumCredentials,
+    })
+  } else {
+    error
+  }
 }
 
 fn invalid_source_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
@@ -1224,6 +1254,37 @@ mod tests {
         Some(&expected)
       );
     }
+  }
+
+  // Deliberately not platform-gated: all three leaves share
+  // `sniffed_chromium_error`, so all three must agree that a failure
+  // credentials cannot fix keeps its own cause.
+  #[test]
+  fn a_sniffed_chromium_failure_credentials_cannot_fix_is_not_missing_credentials() {
+    // A sniffed Chromium database is attempted plaintext-only, and every
+    // failure of that attempt used to be relabelled `missing_chromium_
+    // credentials`. This database classifies as Chromium and then fails for a
+    // reason no credential can repair, so the relabel would be wrong advice.
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("Cookies");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+      .execute_batch(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); \
+         INSERT INTO meta (key, value) VALUES ('version', '23'); \
+         CREATE TABLE cookies (host_key TEXT);",
+      )
+      .unwrap();
+    drop(connection);
+
+    let error = extract_from_path(PathExtractRequest::sniff(&path)).unwrap_err();
+    let mislabelled = matches!(&error, crate::Error::Source(source)
+      if source.invalid_options_reason()
+        == Some(&InvalidDirectPathOptionsReason::MissingChromiumCredentials));
+    assert!(
+      !mislabelled,
+      "a schema failure is an engine fault, not a missing credential: {error:#}"
+    );
   }
 
   #[cfg(any(target_os = "linux", target_os = "macos"))]

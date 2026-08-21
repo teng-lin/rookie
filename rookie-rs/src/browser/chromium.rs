@@ -15,6 +15,18 @@ use super::chromium_decoder::{
   ChromiumBoundaryDecoder, ChromiumDecodeEvent, ChromiumDecodeIssueCode, ChromiumDecodeSummary,
   ChromiumReadOnlySource, EncryptedValuePolicy, MissingBrowserKeyIdentity,
 };
+/// Whether a failure is specifically "this encrypted Chromium database has no
+/// browser key identity".
+///
+/// That is the one cause a caller can fix by naming a credential source, so it
+/// is the only one a credential-less path extract may relabel as
+/// `missing_chromium_credentials`. Lives here because
+/// [`MissingBrowserKeyIdentity`] is `pub(super)` to `browser`, and telling
+/// `direct_path` the answer is cheaper than widening the type's visibility.
+pub(crate) fn is_missing_browser_key_identity(error: &anyhow::Error) -> bool {
+  error.downcast_ref::<MissingBrowserKeyIdentity>().is_some()
+}
+
 /// Names the public compatibility shape a test expects after the unified
 /// decoder has completed. It is deliberately never visible to the decoder
 /// itself, and never steers acquisition: production code picks a projection by

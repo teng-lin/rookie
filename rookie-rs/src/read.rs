@@ -830,7 +830,7 @@ fn filter_snapshot_at(
       // inventory no send-match rule can ever act on -- and the count is how a
       // caller learns it happened. Unknown *optional* isolation fields stay
       // `None` and never drop a row.
-      if cookie.domain.is_empty() {
+      if !crate::browser::cookie_record::host_identity_survives(&cookie.domain) {
         omitted.malformed_host_identity += 1;
         return false;
       }

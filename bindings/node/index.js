@@ -493,6 +493,26 @@ const extractFromPathOptionKeys = new Set([
   'appBound',
 ])
 
+const MAX_TIMEOUT_MS = 4294967295
+
+// N-API coerces whatever JS number it is given into the native `u32` field, so
+// -1, NaN, Infinity, and fractional values do not fail -- they silently become
+// some other deadline than the one that was asked for. A rejected request is
+// the honest answer; a 4294967295 ms timeout from `timeoutMs: -1` is not.
+function validateTimeoutMs(value, functionName) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 0
+    || value > MAX_TIMEOUT_MS
+  ) {
+    throw new TypeError(
+      `${functionName} option timeoutMs must be an integer between 0 and ${MAX_TIMEOUT_MS}, or null`
+    )
+  }
+  return value
+}
+
 function validateExtractFromPathOptions(options) {
   if (options === null || options === undefined) {
     return undefined
@@ -551,10 +571,7 @@ function validateExtractFromPathOptions(options) {
   }
 
   if (hasOwn('timeoutMs') && options.timeoutMs !== null && options.timeoutMs !== undefined) {
-    if (typeof options.timeoutMs !== 'number') {
-      throw new TypeError('extractFromPath option timeoutMs must be a number or null')
-    }
-    normalized.timeoutMs = options.timeoutMs
+    normalized.timeoutMs = validateTimeoutMs(options.timeoutMs, 'extractFromPath')
   }
 
   const selectorCount = Number(normalized.browserId !== undefined)

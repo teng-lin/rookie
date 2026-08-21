@@ -64,12 +64,7 @@ pub(super) fn detailed_from_path(
           false,
           runtime,
         )
-        .map_err(|error| {
-          error.context(super::DirectPathError::InvalidOptions {
-            source: CookieSourceKind::ChromiumSqlite,
-            reason: InvalidDirectPathOptionsReason::MissingChromiumCredentials,
-          })
-        })
+        .map_err(super::sniffed_chromium_error)
       }
       CookieSourceKind::MozillaSqlite => {
         crate::browser::mozilla::firefox_based_detailed_with_runtime(target.path, domains, runtime)

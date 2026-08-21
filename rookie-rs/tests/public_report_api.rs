@@ -1150,6 +1150,43 @@ fn a_report_omits_an_empty_host_row_and_records_it_as_a_source_issue() {
     .expect("the omission is recorded, not silent");
   assert_eq!(issue.occurrences, 1);
 
+  // A7 omits the row at projection time, after the engine already counted it
+  // as emitted, so the counters have to be reconciled or the invariant the
+  // schema promises silently breaks on exactly the sources this feature
+  // touches.
+  assert_eq!(
+    source.stats.cookies_emitted as usize,
+    source.cookies.len(),
+    "cookies_emitted must match the rows that survived the omission"
+  );
+  assert!(source.stats.rows_seen >= source.stats.rows_skipped);
+  assert_eq!(
+    source.stats.rows_seen - source.stats.rows_skipped,
+    source.stats.cookies_emitted,
+    "rows_seen - rows_skipped == cookies_emitted"
+  );
+  assert!(
+    source.stats.rows_rejected >= 1,
+    "a host that did not survive decode is a rejected row"
+  );
+
+  let profile = report
+    .profiles
+    .iter()
+    .find(|profile| {
+      profile
+        .sources
+        .iter()
+        .any(|source| source.cookies.iter().any(|cookie| cookie.name == "kept"))
+    })
+    .expect("the seeded profile");
+  assert!(profile.stats.rows_seen >= profile.stats.rows_skipped);
+  assert_eq!(
+    profile.stats.rows_seen - profile.stats.rows_skipped,
+    profile.stats.cookies_emitted,
+    "the profile aggregate inherits the reconciled source counters"
+  );
+
   // `extract` flattens the same projection: same omission, no channel to
   // report the count through.
   let flat = rookie_cookies::extract(rookie_cookies::ExtractRequest::browser("chrome"))

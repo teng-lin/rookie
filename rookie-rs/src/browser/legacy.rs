@@ -484,7 +484,7 @@ pub(crate) fn drop_malformed_hosts(
   let before = cookies.len();
   let kept: Vec<DetailedCookie> = cookies
     .into_iter()
-    .filter(|detailed| !detailed.cookie.domain.trim_matches('.').is_empty())
+    .filter(|detailed| super::cookie_record::host_identity_survives(&detailed.cookie.domain))
     .collect();
   let dropped = before.saturating_sub(kept.len()) as u64;
   if dropped > 0 {

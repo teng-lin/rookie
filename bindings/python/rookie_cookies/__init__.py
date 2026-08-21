@@ -251,12 +251,20 @@ def report(
     *,
     profile: Optional[str] = None,
     domains: Optional[List[str]] = None,
-    select: str = "all",
+    select: Optional[str] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
     app_bound: str = "disabled",
 ) -> ExtractionReport:
-    """Bindings name for :func:`browser_report` / Rust ``extract_report``."""
+    """Bindings name for :func:`browser_report` / Rust ``extract_report``.
+
+    ``select`` defaults to ``None``, not ``"all"``. Its *effective* default is
+    ``"all"``, but ``browser_report`` has to tell an omitted selection apart
+    from an explicit ``select="all"`` -- the latter contradicts ``profile`` and
+    raises ``conflicting_profile_selection``. Materializing the default here
+    would make the ordinary ``report(browser=..., profile=...)`` call look like
+    that contradiction.
+    """
     return browser_report(
         browser,
         profile,

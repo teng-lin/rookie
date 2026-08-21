@@ -188,6 +188,45 @@ fn from_path_omits_ctl_name_with_invalid_octets_warning() {
 }
 
 #[test]
+fn from_path_omits_a_dot_only_host_with_malformed_host_identity_warning() {
+  // `"."` is not an empty string, so a bare `is_empty()` check kept it while
+  // the report path -- which normalizes with `trim_matches('.')` -- omitted
+  // it. Both now share one predicate, and this pins the case that told them
+  // apart.
+  let dir = crate::utils::TempDir::new().expect("temp dir");
+  let db = dir.path().join("cookies.sqlite");
+  let connection = rusqlite::Connection::open(&db).expect("open firefox fixture");
+  connection
+    .execute_batch(
+      "CREATE TABLE moz_cookies (
+        host TEXT NOT NULL,
+        path TEXT NOT NULL,
+        isSecure INTEGER NOT NULL,
+        expiry INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        isHttpOnly INTEGER NOT NULL,
+        sameSite INTEGER NOT NULL
+      );
+      INSERT INTO moz_cookies VALUES ('.', '/', 0, 4102444800, 'dotted', 'v', 0, 0);
+      INSERT INTO moz_cookies VALUES ('..', '/', 0, 4102444800, 'dottier', 'v', 0, 0);
+      INSERT INTO moz_cookies VALUES ('.example.test', '/', 0, 4102444800, 'kept', 'v', 0, 0);",
+    )
+    .expect("seed moz_cookies");
+  drop(connection);
+
+  let result = from_path(FromPathRequest::new(&db).include_expired(true)).expect("from_path");
+  let warning = result
+    .warnings()
+    .iter()
+    .find(|warning| warning.code() == "malformed_host_identity")
+    .expect("malformed_host_identity");
+  assert_eq!(warning.count(), 2);
+  assert_eq!(result.cookies().len(), 1);
+  assert_eq!(result.cookies()[0].name, "kept");
+}
+
+#[test]
 fn from_path_credentials_observes_cancellation() {
   let dir = crate::utils::TempDir::new().expect("temp dir");
   let db = dir.path().join("Cookies");
