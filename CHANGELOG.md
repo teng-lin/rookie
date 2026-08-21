@@ -293,6 +293,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same bounded 120-second cold-start allowance as the Ubuntu canary. Chrome
   151 could exceed Playwright's 30-second default before extraction began;
   cookie extraction and validation assertions are still never retried.
+- FreeBSD and other unsupported Unix targets again compile the Unix
+  direct-path identity constructor. It preserves the request value so the
+  platform leaf can return the typed `unsupported_target` result at execution.
 
 ## [0.6.0-beta.1] - 2026-08-18
 
