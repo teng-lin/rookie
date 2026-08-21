@@ -1,8 +1,31 @@
 # Cross-compile hardening plan
 
-Status: proposed  
+Status: implemented except for the upstream-release-dependent Phase 4 follow-up
 Branch: `codex/cross-compile-hardening`  
 Baseline: `d360e0be455cb87c119c9a9682fa94b037d835be`
+
+## Implementation record
+
+As of 2026-08-21, the repository-side work is implemented and validated in
+the integration branch:
+
+- #315 adds the optional, default-on Internet Explorer capability boundary and
+  preserves the disabled-feature API surface.
+- #314 adds the reusable macOS-hosted Linux and Windows source gate.
+- #316 contains platform cfgs behind shared facades and lowers the cfg-location
+  ceilings.
+- #313 hardens native release artifacts and corrects the architecture, build,
+  test, release, and troubleshooting documentation.
+- sunsetkookaburra/rust-libesedb#30 fixes target selection in
+  `libesedb-sys`, tests the selector from the packaged sys crate, and has been
+  validated with a full `cargo-xwin` MSVC build.
+
+The upstream fix is not yet released. Consequently, this branch deliberately
+does not commit a root-only `[patch.crates-io]` or claim that published
+consumers can resolve the fix. After a consumable upstream release exists,
+finish Phase 4 by updating the normal dependency graph and adding the pinned
+full-feature `cargo-xwin` lane. The new macOS Intel publish lanes are tag-only
+release workflows and still require their first controlled release rehearsal.
 
 ## Problem statement
 
