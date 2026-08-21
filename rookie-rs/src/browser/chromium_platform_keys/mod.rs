@@ -10,18 +10,32 @@ mod unsupported;
 mod windows;
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{HostKeySession, LinuxPlatformKeyProvider};
+pub(crate) use linux::{legacy_key_outcomes, HostKeySession};
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{HostKeySession, MacosPlatformKeyProvider};
+pub(crate) use macos::{legacy_key_outcomes, HostKeySession};
 #[cfg(any(target_os = "linux", target_os = "macos", all(test, unix)))]
 pub(crate) use shared::create_pbkdf2_key;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(crate) use unsupported::HostKeySession;
+pub(crate) use unsupported::{legacy_key_outcomes, HostKeySession};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::HostKeySession;
 
 use serde::Deserialize;
 use std::path::Path;
+
+#[cfg(unix)]
+type LegacyKeyOutcomesFn = for<'config, 'runtime, 'clock> fn(
+  &'config crate::config::Browser,
+  &'runtime crate::common::deadline::BoundaryRuntime<'clock>,
+) -> anyhow::Result<
+  super::chromium_crypto::ChromiumKeyOutcomes,
+>;
+
+// Linux, macOS, and other Unix leaves expose one compatibility-key adapter.
+// Cross-target compilation checks the selected implementation against this
+// exact facade contract.
+#[cfg(unix)]
+const _: LegacyKeyOutcomesFn = legacy_key_outcomes;
 
 /// Registry-resolved lookup identities, never key material.
 ///

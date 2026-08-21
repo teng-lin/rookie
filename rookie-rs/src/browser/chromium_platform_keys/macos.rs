@@ -119,6 +119,14 @@ impl KeyProvider<()> for MacosPlatformKeyProvider<'_> {
   }
 }
 
+pub(crate) fn legacy_key_outcomes(
+  config: &Browser,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<ChromiumKeyOutcomes> {
+  let provider = MacosPlatformKeyProvider::new(config);
+  super::super::chromium_crypto::retrieve_key_outcomes(&provider, &(), runtime)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

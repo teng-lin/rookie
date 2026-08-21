@@ -1,5 +1,8 @@
 use super::ChromiumKeyRequest;
 use crate::browser::chromium_crypto::ChromiumKeyOutcomes;
+use crate::common::deadline::BoundaryRuntime;
+use crate::config::Browser;
+use anyhow::Result;
 
 pub(crate) struct HostKeySession;
 
@@ -17,4 +20,12 @@ impl HostKeySession {
     let _ = runtime;
     ChromiumKeyOutcomes::default()
   }
+}
+
+pub(crate) fn legacy_key_outcomes(
+  config: &Browser,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<ChromiumKeyOutcomes> {
+  let _ = (config, runtime);
+  anyhow::bail!("Chromium cookie extraction is unsupported on this Unix platform")
 }

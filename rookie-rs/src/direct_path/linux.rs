@@ -40,9 +40,9 @@ pub(super) fn classify_cookie_source(
 
 pub(super) fn detailed_from_path(
   request: PathExtractRequest,
-  source: CookieSourceKind,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
+  let source = super::classify_request_source(&request, runtime)?;
   let PathExtractRequest {
     target, domains, ..
   } = request;

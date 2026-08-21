@@ -8,7 +8,7 @@ use super::chromium::{
   acquire_chromium_draft_with_runtime, ChromiumAcquireOptions, ChromiumAcquisition,
   ChromiumExtractionDraft,
 };
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(test)]
 use super::chromium_crypto::retrieve_key_outcomes;
 use super::chromium_crypto::ChromiumKeyOutcomes;
 use super::chromium_decoder::EncryptedValuePolicy;
@@ -19,11 +19,6 @@ use crate::common::enums::{Cookie, DetailedCookie};
 use crate::config::Browser;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-
-#[cfg(target_os = "linux")]
-use super::chromium_platform_keys::LinuxPlatformKeyProvider;
-#[cfg(target_os = "macos")]
-use super::chromium_platform_keys::MacosPlatformKeyProvider;
 
 /// Returns cookies from chromium based browser.
 #[cfg(target_os = "windows")]
@@ -140,23 +135,14 @@ pub fn chromium_based(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
-  #[cfg(target_os = "linux")]
-  {
-    let provider = LinuxPlatformKeyProvider::new(config);
-    extract_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
-  }
-
-  #[cfg(target_os = "macos")]
-  {
-    let provider = MacosPlatformKeyProvider::new(config);
-    extract_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
-  }
-
-  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-  {
-    let _ = (config, db_path, domains, force_kill);
-    anyhow::bail!("Chromium cookie extraction is unsupported on this Unix platform")
-  }
+  let clock = crate::common::deadline::SystemClock;
+  let deadline = crate::common::deadline::Deadline::after(
+    &clock,
+    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+  );
+  let runtime = BoundaryRuntime::new(&clock, deadline);
+  let outcomes = super::chromium_platform_keys::legacy_key_outcomes(config, &runtime)?;
+  extract_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
 /// Returns Chromium cookies with partition and source context preserved.
@@ -171,23 +157,16 @@ pub fn chromium_based_detailed(
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<DetailedCookie>> {
-  #[cfg(target_os = "linux")]
-  {
-    let provider = LinuxPlatformKeyProvider::new(config);
-    extract_detailed_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
-  }
-
-  #[cfg(target_os = "macos")]
-  {
-    let provider = MacosPlatformKeyProvider::new(config);
-    extract_detailed_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
-  }
-
-  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-  {
-    let _ = (config, db_path, domains, force_kill);
-    anyhow::bail!("Chromium cookie extraction is unsupported on this Unix platform")
-  }
+  let clock = crate::common::deadline::SystemClock;
+  let deadline = crate::common::deadline::Deadline::after(
+    &clock,
+    crate::common::deadline::DEFAULT_EXTRACTION_BUDGET,
+  );
+  let runtime = BoundaryRuntime::new(&clock, deadline);
+  let outcomes = super::chromium_platform_keys::legacy_key_outcomes(config, &runtime)?;
+  extract_detailed_cookies_with_key_outcomes_runtime(
+    outcomes, db_path, domains, force_kill, &runtime,
+  )
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -284,7 +263,7 @@ pub(super) fn project_detailed_draft(
   )
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(test)]
 pub(super) fn extract_cookies_with_provider<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
@@ -305,7 +284,7 @@ where
   extract_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(test)]
 pub(super) fn extract_detailed_cookies_with_provider<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
@@ -340,7 +319,7 @@ pub(crate) fn extract_cookies_with_key_outcomes(
   extract_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(unix, test))]
 pub(crate) fn extract_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -361,7 +340,7 @@ pub(crate) fn extract_cookies_with_key_outcomes_runtime(
   project_legacy_draft_with_runtime(&db_path, draft, runtime)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
+#[cfg(any(unix, target_os = "windows", test))]
 pub(crate) fn extract_detailed_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
