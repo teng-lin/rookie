@@ -115,7 +115,7 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "cookies.sqlite"
             _seed_firefox_database(db_path, [(".example.test", "wanted", "value")])
-            with self.assertRaisesRegex(RuntimeError, "operation deadline expired"):
+            with self.assertRaisesRegex(RuntimeError, "operation timed out"):
                 rookie_cookies.cookies_from_path(str(db_path), timeout=0.0)
 
     def test_cookies_from_path_rejects_an_already_cancelled_handle(self) -> None:
@@ -124,7 +124,7 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             _seed_firefox_database(db_path, [(".example.test", "wanted", "value")])
             handle = rookie_cookies.CancellationHandle()
             handle.cancel()
-            with self.assertRaisesRegex(RuntimeError, "operation cancelled"):
+            with self.assertRaisesRegex(RuntimeError, "operation was cancelled"):
                 rookie_cookies.cookies_from_path(str(db_path), cancellation=handle)
 
     def test_fault_classification_distinguishes_request_from_engine_errors(self) -> None:
@@ -133,17 +133,27 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         # call sites keep working unchanged.
         self.assertTrue(issubclass(rookie_cookies.RookieRequestError, ValueError))
         self.assertTrue(issubclass(rookie_cookies.RookieEngineError, RuntimeError))
+        self.assertTrue(issubclass(rookie_cookies.RookieStoppedError, RuntimeError))
+        self.assertTrue(issubclass(rookie_cookies.RookieRequestError, rookie_cookies.RookieError))
+        self.assertTrue(issubclass(rookie_cookies.RookieEngineError, rookie_cookies.RookieError))
+        self.assertTrue(issubclass(rookie_cookies.RookieStoppedError, rookie_cookies.RookieError))
 
         missing = str(
             Path(tempfile.gettempdir()) / "no such parent directory" / "missing"
         )
+        # An invalid explicit source is RookieSourceError/kind "source", not
+        # plain RookieRequestError/kind "request" -- but RookieSourceError
+        # subclasses RookieRequestError (and ValueError) precisely so this
+        # `except RookieRequestError` written before that class existed keeps
+        # catching it.
         with self.assertRaises(rookie_cookies.RookieRequestError):
             rookie_cookies.cookies_from_path(missing)
 
         try:
             rookie_cookies.cookies_from_path(missing)
         except rookie_cookies.RookieRequestError as error:
-            self.assertEqual(error.kind, "request")
+            self.assertIsInstance(error, rookie_cookies.RookieSourceError)
+            self.assertEqual(error.kind, "source")
             self.assertEqual(error.code, "not_a_regular_file")
             self.assertIsNone(error.stop_reason)
             self.assertTrue(error.path_redacted)
@@ -155,12 +165,14 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "cookies.sqlite"
             _seed_firefox_database(db_path, [(".example.test", "wanted", "value")])
-            # A timeout is an engine-side operational stop, not a caller
-            # input mistake, even though it is checked mid inspection of an
-            # explicit source (which otherwise raises RookieRequestError).
-            with self.assertRaises(rookie_cookies.RookieEngineError) as raised:
+            # A timeout is a cooperative stop, not a caller input mistake,
+            # even though it is checked mid inspection of an explicit source
+            # (which otherwise raises RookieRequestError). It gets its own
+            # RookieStoppedError/RuntimeError class, distinct from
+            # RookieEngineError -- see CHANGELOG.md.
+            with self.assertRaises(rookie_cookies.RookieStoppedError) as raised:
                 rookie_cookies.cookies_from_path(str(db_path), timeout=0.0)
-            self.assertEqual(raised.exception.kind, "engine")
+            self.assertEqual(raised.exception.kind, "stopped")
             self.assertEqual(raised.exception.code, "timed_out")
             self.assertEqual(raised.exception.stop_reason, "timed_out")
             self.assertEqual(raised.exception.profile_ids, [])
@@ -252,6 +264,15 @@ class RookieCookiesHelpersTest(unittest.TestCase):
         "Chromium direct paths are supported on desktop targets",
     )
     def test_canonical_chromium_plaintext_flat_detailed_and_domains(self) -> None:
+        """Domains reduce the flat list; detailed output is unfiltered.
+
+        0.6.0 removed the domain-filtered *detailed* path list: detailed
+        output now comes from the snapshot job, which is never URL- or
+        domain-reduced, because a reduced snapshot makes ``header()`` silently
+        wrong. Asking for both is a request error rather than a silent
+        widening, and the message names the two things a caller can do
+        instead.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "Cookies"
             _seed_chromium_database(
@@ -261,16 +282,30 @@ class RookieCookiesHelpersTest(unittest.TestCase):
                     ("other.test", "ignored", "plain", b""),
                 ],
             )
-            options = {"domains": ["example.test"], "plaintext_only": True}
             cookies = rookie_cookies.chromium_cookies_from_path(
-                str(db_path), options
+                str(db_path), {"domains": ["example.test"], "plaintext_only": True}
             )
             detailed = rookie_cookies.chromium_cookies_from_path_detailed(
-                str(db_path), options
+                str(db_path), {"plaintext_only": True}
             )
+            with self.assertRaises(rookie_cookies.RookieRequestError) as combined:
+                rookie_cookies.chromium_cookies_from_path_detailed(
+                    str(db_path),
+                    {"domains": ["example.test"], "plaintext_only": True},
+                )
 
         self.assertEqual([cookie["name"] for cookie in cookies], ["wanted"])
-        self.assertEqual(detailed[0]["cookie"], cookies[0])
+        self.assertIn("domains", str(combined.exception))
+        # The detailed list keeps every row, and its projection of the one the
+        # flat list kept is identical.
+        self.assertEqual(
+            sorted(record["cookie"]["name"] for record in detailed),
+            ["ignored", "wanted"],
+        )
+        wanted = next(
+            record for record in detailed if record["cookie"]["name"] == "wanted"
+        )
+        self.assertEqual(wanted["cookie"], cookies[0])
 
     @unittest.skipUnless(
         sys.platform.startswith("linux") or sys.platform in {"darwin", "win32"},
@@ -321,22 +356,18 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             _seed_chromium_database(
                 db_path, [(".example.test", "wanted", "plain", b"")]
             )
+            # Every desktop target agrees here as of 0.6.0. Windows used to
+            # reject a credential-less Chromium path with
+            # MissingLocalStateFile *before* attempting extraction, so a fully
+            # plaintext database failed there while succeeding on Unix. Only a
+            # genuinely encrypted row demands credentials now, so this branch
+            # is deliberately no longer platform-split.
             for options in (None, {}, {"plaintext_only": False}):
                 with self.subTest(options=options):
-                    if sys.platform == "win32":
-                        # Missing an explicit Local State file is a request
-                        # fault on Windows (rookie_cookies.RookieRequestError,
-                        # a ValueError subclass) -- see DirectPathError's
-                        # InvalidOptions/MissingLocalStateFile reason.
-                        with self.assertRaises(ValueError):
-                            rookie_cookies.chromium_cookies_from_path(
-                                str(db_path), options
-                            )
-                    else:
-                        cookies = rookie_cookies.chromium_cookies_from_path(
-                            str(db_path), options
-                        )
-                        self.assertEqual(cookies[0]["name"], "wanted")
+                    cookies = rookie_cookies.chromium_cookies_from_path(
+                        str(db_path), options
+                    )
+                    self.assertEqual(cookies[0]["name"], "wanted")
 
             plaintext = rookie_cookies.chromium_cookies_from_path(
                 str(db_path), {"plaintext_only": True}

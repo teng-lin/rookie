@@ -9,7 +9,10 @@ from .rookie_cookies import (
     ReadResult,
     ReadWarning,
     RookieEngineError,
+    RookieError,
     RookieRequestError,
+    RookieSourceError,
+    RookieStoppedError,
     any_browser,
     arc,
     brave,
@@ -25,6 +28,7 @@ from .rookie_cookies import (
     chromium_cookies_from_path_detailed,
     cookies_from_path,
     edge,
+    extract_from_path,
     firefox,
     firefox_based,
     firefox_based_detailed,
@@ -49,7 +53,10 @@ __all__ = [
     "ReadResult",
     "ReadWarning",
     "RookieEngineError",
+    "RookieError",
     "RookieRequestError",
+    "RookieSourceError",
+    "RookieStoppedError",
     "dto",
     "any_browser",
     "arc",
@@ -67,6 +74,7 @@ __all__ = [
     "cookies_from_path",
     "create_cookie",
     "edge",
+    "extract_from_path",
     "firefox",
     "firefox_based",
     "firefox_based_detailed",
@@ -97,6 +105,7 @@ class ChromiumPathOptions(TypedDict, total=False):
     plaintext_only: bool
     timeout: float
     cancellation: CancellationHandle
+    app_bound: str
 
 
 CookieList = List[Dict[str, Any]]
@@ -193,22 +202,48 @@ def jar(
     browser: str,
     profile: Optional[str] = None,
     include_expired: bool = False,
+    include_session: bool = False,
+    select: str = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
+    app_bound: str = "injection_only",
 ) -> http.cookiejar.CookieJar:
-    """Sugar: ``read(...).as_jar()``. Warnings are discarded; use ``read()`` if you need them."""
+    """
+    Sugar: ``read(...).as_jar()``. Warnings are discarded; use ``read()`` if you need them.
+
+    **Migration trap:** ``include_session`` defaults to ``False``. In 0.6-beta,
+    ``jar(profile="Default")`` imported that profile's session cookies too;
+    it does not in 0.6.0 unless ``include_session=True`` is also passed. This
+    fails quietly -- a smaller jar, no error -- so code relying on session
+    cookies riding along with a Gecko ``profile=`` selector needs this flag
+    added explicitly::
+
+        session_jar = jar(
+            browser="firefox", profile="default-release", include_session=True
+        )
+
+    See CHANGELOG.md.
+    """
     return read(
         browser=browser,
         profile=profile,
         include_expired=include_expired,
+        include_session=include_session,
+        select=select,
         timeout=timeout,
         cancellation=cancellation,
+        app_bound=app_bound,
     ).as_jar()
 
 
-def profiles(browser_id: str) -> ProfileDescriptorList:
+def profiles(
+    browser_id: str,
+    *,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+) -> ProfileDescriptorList:
     """Alias of :func:`browser_profiles`."""
-    return browser_profiles(browser_id)
+    return browser_profiles(browser_id, timeout=timeout, cancellation=cancellation)
 
 
 def report(
@@ -216,9 +251,29 @@ def report(
     *,
     profile: Optional[str] = None,
     domains: Optional[List[str]] = None,
+    select: Optional[str] = None,
+    timeout: Optional[float] = None,
+    cancellation: Optional[CancellationHandle] = None,
+    app_bound: str = "injection_only",
 ) -> ExtractionReport:
-    """Bindings name for :func:`browser_report` / Rust ``extract_report``."""
-    return browser_report(browser, profile, domains)
+    """Bindings name for :func:`browser_report` / Rust ``extract_report``.
+
+    ``select`` defaults to ``None``, not ``"all"``. Its *effective* default is
+    ``"all"``, but ``browser_report`` has to tell an omitted selection apart
+    from an explicit ``select="all"`` -- the latter contradicts ``profile`` and
+    raises ``conflicting_profile_selection``. Materializing the default here
+    would make the ordinary ``report(browser=..., profile=...)`` call look like
+    that contradiction.
+    """
+    return browser_report(
+        browser,
+        profile,
+        domains,
+        select=select,
+        timeout=timeout,
+        cancellation=cancellation,
+        app_bound=app_bound,
+    )
 
 
 def to_cookiejar(cookies: CookieList) -> http.cookiejar.CookieJar:

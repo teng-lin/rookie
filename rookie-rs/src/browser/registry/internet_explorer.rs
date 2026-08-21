@@ -174,7 +174,7 @@ fn discover_internet_explorer_with_runtime<F: DiscoveryFs>(
 pub(super) fn internet_explorer_report_with_context<F, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
   query: Q,
 ) -> Result<EngineExtract>
@@ -183,7 +183,7 @@ where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   internet_explorer_report_with_context_using_runtime(
-    context, browser_id, profile_id, domains, None, query,
+    context, browser_id, selection, domains, None, query,
   )
 }
 
@@ -193,7 +193,7 @@ where
 fn internet_explorer_report_with_context_using_runtime<F, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
   runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
   query: Q,
@@ -203,11 +203,7 @@ where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
   let mut listing = discover_internet_explorer_with_context(context, browser_id)?;
-  select_listing_profiles(
-    &mut listing,
-    browser_id,
-    ProfileSelection::from_profile_id(profile_id),
-  )?;
+  select_listing_profiles(&mut listing, browser_id, selection)?;
   Ok(populate_internet_explorer_sources_impl(
     listing, domains, runtime, query,
   ))
@@ -306,18 +302,18 @@ pub(crate) fn internet_explorer_profiles_with_runtime(
 #[cfg(target_os = "windows")]
 pub(crate) fn internet_explorer_report(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  internet_explorer_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  internet_explorer_report_with_runtime(browser_id, selection, domains, &runtime)
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn internet_explorer_report_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<EngineExtract> {
@@ -327,7 +323,7 @@ pub(crate) fn internet_explorer_report_with_runtime(
   let outcome = internet_explorer_report_with_context_using_runtime(
     &context,
     browser_id,
-    profile_id,
+    selection,
     domains.as_deref(),
     Some(runtime),
     |origin, domains| {
@@ -869,9 +865,14 @@ mod tests {
       ))
     };
 
-    let all =
-      internet_explorer_report_with_context(&context, "internet_explorer", None, None, rows)
-        .expect("full report");
+    let all = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      ProfileSelection::AllProfiles,
+      None,
+      rows,
+    )
+    .expect("full report");
     assert_eq!(all.profiles.len(), 2);
     assert_eq!(all.counters.installations_detected, 2);
     assert_eq!(all.counters.installations_discovered, 2);
@@ -905,7 +906,7 @@ mod tests {
     let one = internet_explorer_report_with_context(
       &context,
       "internet_explorer",
-      Some(selected.as_str()),
+      ProfileSelection::ProfileId(selected.as_str()),
       None,
       |origin, domains| {
         read.push(origin.path.clone());
@@ -925,7 +926,7 @@ mod tests {
     let unknown = internet_explorer_report_with_context(
       &context,
       "internet_explorer",
-      Some("not-a-profile"),
+      ProfileSelection::ProfileId("not-a-profile"),
       None,
       rows,
     )
@@ -1046,7 +1047,7 @@ mod tests {
     let outcome = internet_explorer_report_with_context(
       &context,
       "internet_explorer",
-      None,
+      ProfileSelection::AllProfiles,
       None,
       |origin, _| {
         Ok(extracted_internet_explorer_source(
@@ -1090,11 +1091,14 @@ mod tests {
     std::fs::write(root.join(INTERNET_EXPLORER_COOKIE_FILE), b"ese")
       .expect("seed WebCache database");
 
-    let outcome =
-      internet_explorer_report_with_context(&context, "internet_explorer", None, None, |_, _| {
-        bail!("injected WebCache query failure")
-      })
-      .expect("query failures remain report data");
+    let outcome = internet_explorer_report_with_context(
+      &context,
+      "internet_explorer",
+      ProfileSelection::AllProfiles,
+      None,
+      |_, _| bail!("injected WebCache query failure"),
+    )
+    .expect("query failures remain report data");
 
     let source = &outcome.profiles[0].sources[0];
     let failure = source.failure.as_ref().expect("query failure recorded");

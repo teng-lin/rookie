@@ -8,6 +8,11 @@ edition = "2021"
 name = "rookie_cookies"
 crate-type = ["cdylib"]
 
+[features]
+# Windows App-Bound canary only; see the rookie-cookies feature of the same
+# name. Never enabled in a published wheel.
+e2e-appbound-steering = ["rookie-cookies/e2e-appbound-steering"]
+
 [dependencies]
 log = "0.4"
 pyo3 = { version = "0.29", features = ["abi3-py311", "anyhow"] }

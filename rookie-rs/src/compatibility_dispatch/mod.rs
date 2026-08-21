@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::{Cookie, Result};
+use crate::Cookie;
+use anyhow::Result;
 
 #[cfg(target_os = "linux")]
 mod linux;

@@ -52,7 +52,7 @@ const MAX_LOGGED_RECORD_ERRORS_PER_PAGE: usize = 8;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::cookies_from_path with DirectPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest"
 )]
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let clock = SystemClock;
@@ -68,6 +68,33 @@ pub(crate) fn safari_based_with_runtime(
   let source =
     safari_based_outcome_with_runtime(direct_path_candidate(&db_path), domains, runtime)?;
   super::legacy::project_canonical_outcome_with_runtime(
+    "safari",
+    super::report_build::finalize_singleton_source(
+      "safari",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      vec![source],
+      None,
+      Some(runtime),
+    )?,
+    runtime,
+  )
+}
+
+/// Detailed twin of [`safari_based_with_runtime`].
+///
+/// `binarycookies` carries no partition or container columns, so every record
+/// projects an empty [`crate::enums::CookieContext`]. That is the honest
+/// answer, not a placeholder: the format cannot express isolation, and the
+/// context contract already states that a missing field means the source did
+/// not expose it.
+pub(crate) fn safari_based_detailed_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<crate::enums::DetailedCookie>> {
+  let source =
+    safari_based_outcome_with_runtime(direct_path_candidate(&db_path), domains, runtime)?;
+  super::legacy::project_canonical_detailed_outcome_with_runtime(
     "safari",
     super::report_build::finalize_singleton_source(
       "safari",

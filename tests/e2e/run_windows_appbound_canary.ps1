@@ -227,9 +227,14 @@ try {
   }
 
   Write-Host "=== PASS 1: Test COM Injection ONLY (no elevation fallback) ==="
+  # ROOKIE_E2E_APPBOUND_MODE no longer steers a published build: it is compiled
+  # in only under cfg(test) or the off-by-default `e2e-appbound-steering`
+  # feature, and even then it can only narrow the request's own AppBoundPolicy.
+  # The Rust pass therefore needs the feature; the Python/Node/CLI passes ask
+  # for the policy through their public surface instead.
   $env:ROOKIE_E2E_APPBOUND_MODE = "injection_only"
 
-  cargo test --test e2e_chrome -- extracts_seeded_cookie_via_injection_only --ignored --nocapture
+  cargo test --features e2e-appbound-steering --test e2e_chrome -- extracts_seeded_cookie_via_injection_only --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw "Rust App-Bound COM injection (injection_only) failed" }
   Assert-BrowserAlive
 
@@ -247,9 +252,12 @@ try {
   Assert-BrowserAlive
 
   Write-Host "=== PASS 2: Test Elevated DPAPI Fallback ONLY (no COM injection) ==="
+  # "Skip the unprivileged attempt" is deliberately not a public policy value,
+  # so this pass is the one place the steering feature is required rather than
+  # merely convenient.
   $env:ROOKIE_E2E_APPBOUND_MODE = "elevated_only"
 
-  cargo test --test e2e_chrome -- extracts_seeded_cookie_via_elevated_fallback_only --ignored --nocapture
+  cargo test --features e2e-appbound-steering --test e2e_chrome -- extracts_seeded_cookie_via_elevated_fallback_only --ignored --nocapture
   if ($LASTEXITCODE -ne 0) { throw "Rust App-Bound elevated fallback (elevated_only) failed" }
   Assert-BrowserAlive
 

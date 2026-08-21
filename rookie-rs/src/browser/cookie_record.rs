@@ -665,6 +665,18 @@ impl FinalizedCookieRecord {
     &self.0.name
   }
 
+  /// Whether this record still has the host identity every send-match rule
+  /// keys on.
+  ///
+  /// A7: a row whose domain did not survive decode matches nothing and belongs
+  /// to no site, so emitting it as `domain: ""` puts a value in the output
+  /// that no caller can act on. Every projection omits it and counts it
+  /// instead; this is the one predicate they share, so they cannot disagree
+  /// about what "malformed" means.
+  pub(crate) fn has_host_identity(&self) -> bool {
+    host_identity_survives(self.0.domain_raw())
+  }
+
   pub(crate) fn into_cookie_with_semantics(self, semantics: LegacyProjectionSemantics) -> Cookie {
     // Construction proved this is Plain, so this match is exhaustive over the
     // sealed invariant and cannot silently discard a record.
@@ -690,6 +702,18 @@ impl FinalizedCookieRecord {
       .into_detailed_cookie_with_semantics(semantics)
       .expect("finalized cookie record must contain a plain value")
   }
+}
+
+/// The A7 host-identity rule, in one place.
+///
+/// A domain that is empty, or only dots, names no host: it matches nothing and
+/// belongs to no site, so every projection omits such a row and counts it
+/// instead. This existed as three separate spellings of the same expression,
+/// and the `read` one had already drifted to a bare `is_empty()` -- which kept
+/// a `"."` domain that the report path omitted. One function so they cannot
+/// disagree again about what "malformed" means.
+pub(crate) fn host_identity_survives(domain: &str) -> bool {
+  !domain.trim_matches('.').is_empty()
 }
 
 #[cfg(test)]

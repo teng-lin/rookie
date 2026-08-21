@@ -212,6 +212,14 @@ impl SourceIssue {
   /// A source saw one or more rows it could not project into cookies.
   pub(crate) const ROW_READ_FAILED: &'static str = "row_read_failed";
 
+  /// A row's required host identity did not survive decode (A7).
+  ///
+  /// Distinct from [`ROW_READ_FAILED`](Self::ROW_READ_FAILED): the row was
+  /// read and decoded successfully, and it is the *result* that cannot be
+  /// used. Folding the two together would tell a caller to retry something
+  /// retrying cannot fix.
+  pub(crate) const MALFORMED_HOST_IDENTITY: &'static str = "malformed_host_identity";
+
   /// Carries the legacy "every row was rejected" error without giving `Source`
   /// a sibling field for it.
   ///

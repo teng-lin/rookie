@@ -4,7 +4,7 @@ import { loadReport } from "../index.js";
 // background thread. Without it this call enumerates and decrypts whatever
 // browsers are really installed on the host, which on macOS reaches the login
 // keychain and can block on a GUI prompt.
-const report = await loadReport(["example.invalid"]);
+const report = await loadReport({ domains: ["example.invalid"] });
 
 process.stdout.write(
   JSON.stringify({

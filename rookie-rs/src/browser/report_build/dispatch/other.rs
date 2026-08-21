@@ -7,7 +7,7 @@ pub(super) fn remaining_engine_extraction(
   browser_id: &BrowserId,
   _canonical_id: &str,
   _engine: &str,
-  _profile_id: Option<&str>,
+  _selection: crate::browser::registry::ProfileSelection<'_>,
   _domains: Option<Vec<String>>,
   _runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
@@ -26,6 +26,7 @@ pub(super) fn remaining_engine_listing(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::browser::registry::ProfileSelection;
 
   #[test]
   fn other_leaf_reports_platform_only_engines_as_undetected() {
@@ -36,9 +37,15 @@ mod tests {
       ("internet_explorer", "internet_explorer"),
     ] {
       let browser_id = BrowserId::known(canonical_id);
-      let draft =
-        remaining_engine_extraction(&browser_id, canonical_id, engine, None, None, &runtime)
-          .expect("undetected, not an error");
+      let draft = remaining_engine_extraction(
+        &browser_id,
+        canonical_id,
+        engine,
+        ProfileSelection::AllProfiles,
+        None,
+        &runtime,
+      )
+      .expect("undetected, not an error");
       assert!(!draft.detected);
 
       let listing = remaining_engine_listing(&browser_id, canonical_id, engine, &runtime)

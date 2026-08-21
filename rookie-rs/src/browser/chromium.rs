@@ -15,6 +15,18 @@ use super::chromium_decoder::{
   ChromiumBoundaryDecoder, ChromiumDecodeEvent, ChromiumDecodeIssueCode, ChromiumDecodeSummary,
   ChromiumReadOnlySource, EncryptedValuePolicy, MissingBrowserKeyIdentity,
 };
+/// Whether a failure is specifically "this encrypted Chromium database has no
+/// browser key identity".
+///
+/// That is the one cause a caller can fix by naming a credential source, so it
+/// is the only one a credential-less path extract may relabel as
+/// `missing_chromium_credentials`. Lives here because
+/// [`MissingBrowserKeyIdentity`] is `pub(super)` to `browser`, and telling
+/// `direct_path` the answer is cheaper than widening the type's visibility.
+pub(crate) fn is_missing_browser_key_identity(error: &anyhow::Error) -> bool {
+  error.downcast_ref::<MissingBrowserKeyIdentity>().is_some()
+}
+
 /// Names the public compatibility shape a test expects after the unified
 /// decoder has completed. It is deliberately never visible to the decoder
 /// itself, and never steers acquisition: production code picks a projection by
@@ -45,7 +57,7 @@ use super::chromium_database_acquisition;
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state"
 )]
 pub fn chromium_based(
   key: PathBuf,
@@ -65,7 +77,7 @@ pub fn chromium_based(
 #[cfg(target_os = "windows")]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+  note = "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()"
 )]
 pub fn chromium_based_detailed(
   key: PathBuf,
@@ -95,6 +107,9 @@ pub(crate) fn chromium_based_plaintext_only(
   chromium_based_plaintext_only_with_runtime(db_path, domains, force_kill, &runtime)
 }
 
+// Unix-only since the Windows direct-path seam stopped asking for a flat
+// projection: its one remaining caller is the `#[cfg(unix)]` wrapper above.
+#[cfg(unix)]
 pub(crate) fn chromium_based_plaintext_only_with_runtime(
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -149,7 +164,7 @@ pub(crate) fn chromium_based_detailed_plaintext_only_with_runtime(
 #[cfg(unix)]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path with ChromiumPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest::plaintext / unix_identity / windows_local_state"
 )]
 pub fn chromium_based(
   config: &Browser,
@@ -180,7 +195,7 @@ pub fn chromium_based(
 #[cfg(unix)]
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::chromium_cookies_from_path_detailed with ChromiumPathRequest"
+  note = "use from_path(FromPathRequest::new(path).chromium_*()).detailed_cookies()"
 )]
 pub fn chromium_based_detailed(
   config: &Browser,
@@ -282,25 +297,6 @@ impl ChromiumProbeResult {
 
   pub(crate) fn project_committed(self) -> Result<Vec<Cookie>> {
     project_legacy_draft(&self.db_path, self.draft)
-  }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug)]
-pub(crate) struct ChromiumDetailedProbeResult {
-  db_path: PathBuf,
-  draft: ChromiumExtractionDraft,
-  pub(crate) rows_skipped: usize,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl ChromiumDetailedProbeResult {
-  pub(crate) fn cookie_count(&self) -> usize {
-    self.draft.records.len()
-  }
-
-  pub(crate) fn project_committed(self) -> Result<Vec<DetailedCookie>> {
-    project_detailed_draft(&self.db_path, self.draft)
   }
 }
 
@@ -593,6 +589,9 @@ fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Resul
   )
 }
 
+// The flat projection is only reached on Unix now, but Windows still builds
+// it under `cfg(test)` through `query_cookies_with_key_outcomes_runtime`.
+#[cfg(any(unix, test))]
 fn project_legacy_draft_with_runtime(
   db_path: &Path,
   draft: ChromiumExtractionDraft,
@@ -683,7 +682,9 @@ pub(crate) fn query_cookies_with_key_outcomes(
   query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
+// `windows` dropped from this gate: Windows direct-path acquisition now goes
+// through the detailed seam, so nothing outside tests asks it for flat rows.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn query_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -726,26 +727,6 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn query_cookies_with_key_outcomes_without_platform_recovery(
-  outcomes: &ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<&[String]>,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  let draft = acquire_chromium_source(
-    outcomes,
-    db_path.clone(),
-    domains,
-    ChromiumAcquireOptions {
-      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
-      acquisition: ChromiumAcquisition::DirectRead,
-    },
-    runtime,
-  )?;
-  project_legacy_draft_with_runtime(&db_path, draft, runtime)
-}
-
-#[cfg(target_os = "windows")]
 pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -766,25 +747,6 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn query_cookies_plaintext_without_platform_recovery(
-  db_path: PathBuf,
-  domains: Option<&[String]>,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  let draft = acquire_chromium_source(
-    &ChromiumKeyOutcomes::default(),
-    db_path.clone(),
-    domains,
-    ChromiumAcquireOptions {
-      encrypted_value_policy: EncryptedValuePolicy::RejectMissingIdentity,
-      acquisition: ChromiumAcquisition::DirectRead,
-    },
-    runtime,
-  )?;
-  project_legacy_draft_with_runtime(&db_path, draft, runtime)
-}
-
-#[cfg(target_os = "windows")]
 pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
   db_path: PathBuf,
   domains: Option<&[String]>,
@@ -801,32 +763,6 @@ pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn chromium_based_detailed_probe_with_key_outcomes(
-  outcomes: ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<Vec<String>>,
-  force_kill: bool,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumDetailedProbeResult> {
-  let draft = acquire_chromium_source(
-    &outcomes,
-    db_path.clone(),
-    domains.as_deref(),
-    ChromiumAcquireOptions {
-      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
-      acquisition: ChromiumAcquisition::WithForceKillRecovery { force_kill },
-    },
-    runtime,
-  )?;
-  let rows_skipped = draft.stats.rows_skipped;
-  Ok(ChromiumDetailedProbeResult {
-    db_path,
-    draft,
-    rows_skipped,
-  })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

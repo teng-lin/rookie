@@ -4,7 +4,7 @@ const registered = new Set((await supportedBrowsers()).map(({ id }) => id));
 const results = {};
 for (const browser of ["coccoc", "duckduckgo", "yandex"]) {
   if (registered.has(browser)) {
-    results[browser] = (await browserReport(browser)).status;
+    results[browser] = (await browserReport({ browserId: browser })).status;
   }
 }
 process.stdout.write(JSON.stringify(results));

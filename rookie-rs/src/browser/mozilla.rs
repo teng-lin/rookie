@@ -69,7 +69,7 @@ pub(crate) const MAX_PLAUSIBLE_SESSION_EXPIRY_MILLISECONDS: u64 =
 /// Returns cookies from mozilla based browsers
 #[deprecated(
   since = "0.6.0",
-  note = "use direct_path::cookies_from_path with DirectPathRequest"
+  note = "use direct_path::extract_from_path with PathExtractRequest"
 )]
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
   let clock = SystemClock;

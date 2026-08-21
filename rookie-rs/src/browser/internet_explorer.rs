@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 /// available for the rest of the deprecation window.
 #[deprecated(
   since = "0.6.0",
-  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::cookies_from_path with DirectPathRequest for the rest of the deprecation window"
+  note = "Internet Explorer support is deprecated for removal; the Internet Explorer browser app was discontinued in 2022. Use direct_path::extract_from_path with PathExtractRequest for the rest of the deprecation window"
 )]
 pub fn internet_explorer_based(
   db_path: PathBuf,
@@ -51,6 +51,35 @@ pub(crate) fn internet_explorer_based_with_runtime(
     runtime,
   )?;
   crate::browser::legacy::project_canonical_outcome_with_runtime(
+    "internet_explorer",
+    crate::browser::report_build::finalize_singleton_source(
+      "internet_explorer",
+      db_path.parent().unwrap_or(&db_path).to_path_buf(),
+      vec![source],
+      None,
+      Some(runtime),
+    )?,
+    runtime,
+  )
+}
+
+/// Detailed twin of [`internet_explorer_based_with_runtime`].
+///
+/// The WebCache ESE store has no partition or container columns, so every
+/// record projects an empty [`crate::enums::CookieContext`].
+pub(crate) fn internet_explorer_based_detailed_with_runtime(
+  db_path: PathBuf,
+  domains: Option<Vec<String>>,
+  force_kill: bool,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<crate::enums::DetailedCookie>> {
+  let source = internet_explorer_outcome_with_runtime(
+    direct_path_candidate(&db_path),
+    domains,
+    force_kill,
+    runtime,
+  )?;
+  crate::browser::legacy::project_canonical_detailed_outcome_with_runtime(
     "internet_explorer",
     crate::browser::report_build::finalize_singleton_source(
       "internet_explorer",

@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { CancellationHandle, version, toNetscape, anyBrowser, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding
+const { CancellationHandle, version, toNetscape, anyBrowser, extractFromPath, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -376,6 +376,7 @@ function decorateNativeError(error) {
   error.sourceKind = details?.sourceKind ?? null
   error.targetOs = details?.targetOs ?? null
   error.pathRedacted = details?.pathRedacted ?? false
+  error.required = Array.isArray(details?.required) ? details.required : []
   return error
 }
 
@@ -397,6 +398,7 @@ const chromiumPathOptionKeys = new Set([
   'browserId',
   'localStatePath',
   'plaintextOnly',
+  'appBound',
 ])
 
 function validateChromiumPathOptions(options) {
@@ -434,7 +436,7 @@ function validateChromiumPathOptions(options) {
     normalized.domains = options.domains.slice()
   }
 
-  for (const key of ['browserId', 'localStatePath']) {
+  for (const key of ['browserId', 'localStatePath', 'appBound']) {
     if (!hasOwn(key)) {
       continue
     }
@@ -478,6 +480,120 @@ function chromiumPathNative(nativeFunction, name) {
   )
 }
 
+// The canonical flat path-extract job. Its options bundle `timeoutMs` as a
+// field (unlike the deprecated `chromiumPathNative` family, where it is its
+// own positional parameter), so it needs its own key set and validator rather
+// than reusing `validateChromiumPathOptions`.
+const extractFromPathOptionKeys = new Set([
+  'domains',
+  'browserId',
+  'localStatePath',
+  'plaintextOnly',
+  'timeoutMs',
+  'appBound',
+])
+
+const MAX_TIMEOUT_MS = 4294967295
+
+// N-API coerces whatever JS number it is given into the native `u32` field, so
+// -1, NaN, Infinity, and fractional values do not fail -- they silently become
+// some other deadline than the one that was asked for. A rejected request is
+// the honest answer; a 4294967295 ms timeout from `timeoutMs: -1` is not.
+function validateTimeoutMs(value, functionName) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 0
+    || value > MAX_TIMEOUT_MS
+  ) {
+    throw new TypeError(
+      `${functionName} option timeoutMs must be an integer between 0 and ${MAX_TIMEOUT_MS}, or null`
+    )
+  }
+  return value
+}
+
+function validateExtractFromPathOptions(options) {
+  if (options === null || options === undefined) {
+    return undefined
+  }
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('extractFromPath options must be an object or null')
+  }
+  const prototype = Object.getPrototypeOf(options)
+  if (prototype !== null && Object.getPrototypeOf(prototype) !== null) {
+    throw new TypeError('extractFromPath options must be a plain object or null')
+  }
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== 'string' || !extractFromPathOptionKeys.has(key)) {
+      throw new TypeError(
+        'Unknown extractFromPath option: ' + (typeof key === 'symbol' ? key.toString() : key)
+      )
+    }
+  }
+
+  const normalized = {}
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(options, key)
+  if (hasOwn('domains') && options.domains !== null && options.domains !== undefined) {
+    if (!Array.isArray(options.domains)) {
+      throw new TypeError('extractFromPath option domains must be an array of strings or null')
+    }
+    for (const [index, domain] of options.domains.entries()) {
+      if (typeof domain !== 'string') {
+        throw new TypeError('extractFromPath option domains element ' + index + ' must be a string')
+      }
+    }
+    normalized.domains = options.domains.slice()
+  }
+
+  for (const key of ['browserId', 'localStatePath', 'appBound']) {
+    if (!hasOwn(key)) {
+      continue
+    }
+    const value = options[key]
+    if (value !== null && value !== undefined) {
+      if (typeof value !== 'string') {
+        throw new TypeError('extractFromPath option ' + key + ' must be a string or null')
+      }
+      normalized[key] = value
+    }
+  }
+
+  if (
+    hasOwn('plaintextOnly')
+    && options.plaintextOnly !== null
+    && options.plaintextOnly !== undefined
+  ) {
+    if (typeof options.plaintextOnly !== 'boolean') {
+      throw new TypeError('extractFromPath option plaintextOnly must be a boolean or null')
+    }
+    normalized.plaintextOnly = options.plaintextOnly
+  }
+
+  if (hasOwn('timeoutMs') && options.timeoutMs !== null && options.timeoutMs !== undefined) {
+    normalized.timeoutMs = validateTimeoutMs(options.timeoutMs, 'extractFromPath')
+  }
+
+  const selectorCount = Number(normalized.browserId !== undefined)
+    + Number(normalized.localStatePath !== undefined)
+    + Number(normalized.plaintextOnly === true)
+  if (selectorCount > 1) {
+    throw new TypeError(
+      'extractFromPath options browserId, localStatePath, and plaintextOnly are mutually exclusive'
+    )
+  }
+  return normalized
+}
+
+function extractFromPathNative(nativeFunction, name) {
+  const required = requiredNative(nativeFunction, name)
+  return asyncNative(
+    (path, options, cancellation) =>
+      required(path, validateExtractFromPathOptions(options), cancellation),
+    name
+  )
+}
+
 function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
     `${name} is only available on ${supportedPlatform}; current platform is ${platform}`
@@ -497,6 +613,7 @@ module.exports.CancellationHandle = requiredNative(CancellationHandle, 'Cancella
 module.exports.version = requiredNative(version, 'version')
 module.exports.toNetscape = requiredNative(toNetscape, 'toNetscape')
 module.exports.anyBrowser = asyncNative(anyBrowser, 'anyBrowser')
+module.exports.extractFromPath = extractFromPathNative(extractFromPath, 'extractFromPath')
 module.exports.cookiesFromPath = asyncNative(cookiesFromPath, 'cookiesFromPath')
 module.exports.chromiumCookiesFromPath = chromiumPathNative(chromiumCookiesFromPath, 'chromiumCookiesFromPath')
 module.exports.chromiumCookiesFromPathDetailed = chromiumPathNative(chromiumCookiesFromPathDetailed, 'chromiumCookiesFromPathDetailed')

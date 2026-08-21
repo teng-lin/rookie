@@ -22,7 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       "User-Agent",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
     )
-    .header("Cookie", snapshot.header("https://github.com/")?)
+    .header(
+      "Cookie",
+      snapshot.header(&rookie_cookies::SendContext::url("https://github.com/"))?,
+    )
     .send()?;
 
   let content = response.text()?;

@@ -205,7 +205,6 @@ mod tests {
   use super::*;
   use crate::browser::registry::resolve_registered_browser;
   use crate::common::deadline::{BoundaryRuntime, SystemClock};
-  use crate::fault_kind;
   use crate::FaultKind;
 
   fn cand(
@@ -431,7 +430,7 @@ mod tests {
     let runtime = BoundaryRuntime::standard(&clock);
     let error = resolve_profile_query("not-a-browser", "Default", &runtime).unwrap_err();
     assert!(error.downcast_ref::<RequestError>().is_some());
-    assert_eq!(fault_kind(&error), FaultKind::Request);
+    assert_eq!(crate::anyhow_fault_kind(&error), FaultKind::Request);
   }
 
   #[test]

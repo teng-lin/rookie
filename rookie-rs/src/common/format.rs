@@ -1,7 +1,18 @@
-use crate::enums::Cookie;
+use crate::enums::{Cookie, DetailedCookie};
 
 pub fn json(cookies: Vec<Cookie>) -> String {
   serde_json::to_string_pretty(&cookies).expect("cannot convert cookies to json")
+}
+
+/// Serializes cookies with their partition/container context.
+///
+/// Without this, isolation would exist on the CLI only as an invisible side
+/// effect of `header` matching, and an operator could not inventory CHIPS
+/// partitions or Firefox containers from the surface most likely to be used
+/// for exactly that. [`json`] and [`netscape`] stay eight-field projections
+/// because neither format can represent a partition.
+pub fn detailed_json(cookies: Vec<DetailedCookie>) -> String {
+  serde_json::to_string_pretty(&cookies).expect("cannot convert detailed cookies to json")
 }
 
 /// Serialize cookies in the seven-column Netscape cookie-file format.
@@ -55,6 +66,33 @@ fn escape_netscape_domain(domain: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn detailed_json_carries_the_context_beside_the_eight_fields() {
+    let rendered = detailed_json(vec![DetailedCookie {
+      cookie: Cookie {
+        domain: ".example.com".to_owned(),
+        path: "/".to_owned(),
+        secure: true,
+        expires: None,
+        name: "chips".to_owned(),
+        value: "value".to_owned(),
+        http_only: false,
+        same_site: 0,
+      },
+      context: crate::enums::CookieContext {
+        top_frame_site_key: Some("https://top.example".to_owned()),
+        ..crate::enums::CookieContext::default()
+      },
+    }]);
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+    assert_eq!(parsed[0]["cookie"]["name"], "chips");
+    assert_eq!(
+      parsed[0]["context"]["top_frame_site_key"],
+      "https://top.example"
+    );
+    assert!(parsed[0]["context"]["partition_key"].is_null());
+  }
 
   #[test]
   fn test_netscape_formatting() {

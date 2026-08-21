@@ -6,6 +6,7 @@
 //! [`crate::browser_report`], and [`crate::load_report`].
 
 mod dispatch;
+pub(crate) mod snapshot;
 
 use super::compatibility::{
   compatibility_decision, engine_compatibility_family, CompatibilityFamily,
@@ -44,9 +45,11 @@ use super::source::{
 #[cfg(test)]
 use super::source::{SourceCandidate, SourceStats};
 use crate::common::concurrency::{fan_out, DEFAULT_FAN_OUT_WIDTH};
-use crate::common::deadline::{BoundaryRuntime, BoundaryStop, SystemClock};
+use crate::common::deadline::{runtime_for_control, BoundaryRuntime, BoundaryStop, SystemClock};
 use crate::common::enums::Cookie;
 use crate::common::sqlite::DatabaseAcquisitionStrategy;
+use crate::error::{EngineCause, EngineFailure};
+use crate::execution::ExecutionControl;
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 
@@ -683,10 +686,17 @@ pub(crate) fn supported_browser_descriptors() -> Result<Vec<BrowserDescriptor>> 
     .collect()
 }
 
+/// Acquires one browser's cookies.
+///
+/// `session` is an **acquire-time** filter, not a post-projection one: under
+/// `PersistentOnly` the Gecko plan never plants its session candidates, so no
+/// session store is opened. The other engines declare no separate session
+/// source, so the parameter is a no-op for them.
 fn collect_extraction(
   browser: &RegisteredBrowser,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
   runtime.check()?;
@@ -695,22 +705,27 @@ fn collect_extraction(
     "chromium" => {
       let report = registry::chromium_registry_report_with_runtime(
         &browser.canonical_id,
-        profile_id,
+        selection,
         domains,
         runtime,
       )?;
       chromium_browser_outcome(&browser_id, report)
     }
     "gecko" => {
-      let engine =
-        registry::gecko_report_with_runtime(&browser.canonical_id, profile_id, domains, runtime)?;
+      let engine = registry::gecko_report_with_runtime(
+        &browser.canonical_id,
+        selection,
+        domains,
+        session,
+        runtime,
+      )?;
       engine_extract_outcome(&browser_id, engine)
     }
     engine => dispatch::remaining_engine_extraction(
       &browser_id,
       &browser.canonical_id,
       engine,
-      profile_id,
+      selection,
       domains,
       runtime,
     ),
@@ -917,13 +932,20 @@ fn increment_counter(counter: &mut u32, saturated: &mut bool) {
 
 #[cfg(test)]
 fn project_canonical_report(outcome: Outcome) -> ExtractionReport {
-  project_canonical_report_with_runtime(outcome, None)
+  project_canonical_report_with_runtime(outcome, None).0
 }
 
+/// Projects the canonical outcome and returns the DTO beside the *typed*
+/// termination it was built from.
+///
+/// `ExtractionReport::termination` is a [`TerminationCode`] -- an open string
+/// vocabulary for the wire. Callers inside the crate that must classify a stop
+/// (the flatten seam behind `extract`) take the enum returned here instead, so
+/// no internal decision is ever made by parsing a string.
 fn project_canonical_report_with_runtime(
   mut outcome: Outcome,
   runtime: Option<&BoundaryRuntime<'_>>,
-) -> ExtractionReport {
+) -> (ExtractionReport, Termination) {
   debug_assert_eq!(outcome.counters.sources_discovered, outcome.sources.len());
   // An extraction stop belongs to work that attempted to start after these
   // sources completed. Projecting the immutable completed sources must not
@@ -988,19 +1010,58 @@ fn project_canonical_report_with_runtime(
         }
       }
       failures = retained_failures;
+      // A7: a row whose required host identity did not survive decode is
+      // omitted rather than emitted as `domain: ""`, and the loss becomes a
+      // source issue so the report still accounts for it. `extract` flattens
+      // this same projection and inherits the omission; it has no channel for
+      // the count, which is the stated cost of returning a bare list.
+      let malformed_hosts = finalized_records
+        .iter()
+        .filter(|record| !record.has_host_identity())
+        .count();
       let mut cookies = finalized_records
         .into_iter()
+        .filter(super::cookie_record::FinalizedCookieRecord::has_host_identity)
         .map(|record| record.into_cookie_with_semantics(semantics))
         .collect::<Vec<_>>();
       sort_cookies(&mut cookies);
-      stats.add(&source.stats);
+      if malformed_hosts > 0 {
+        let mut malformed = issue(
+          SourceIssue::MALFORMED_HOST_IDENTITY,
+          // `decode` is the stage that produced the unusable value: the row
+          // was read and parsed, and it is the decoded host that is missing.
+          ExtractionStageCode::decode(),
+          IssueSeverityCode::warning(),
+          "cookie row has no host identity after decode",
+        );
+        malformed.occurrences = u32::try_from(malformed_hosts).unwrap_or(u32::MAX);
+        push_aggregated(&mut source_issues, malformed);
+      }
+      // The engine counted these rows as emitted -- `cookies_emitted` is the
+      // record count, set where the records were built -- and A7 removes them
+      // afterwards, at projection time. Leaving the counters alone would break
+      // the invariant the wire schema promises, `rows_seen - rows_skipped ==
+      // cookies_emitted`, in the source, profile, and summary totals alike.
+      // This reconciles by the exact number omitted rather than recomputing
+      // from the cookie list, which the counters are deliberately never
+      // derived from.
+      let mut source_stats = source.stats;
+      if malformed_hosts > 0 {
+        let dropped = u32::try_from(malformed_hosts).unwrap_or(u32::MAX);
+        source_stats.cookies_emitted = source_stats.cookies_emitted.saturating_sub(dropped);
+        source_stats.rows_skipped = source_stats.rows_skipped.saturating_add(dropped);
+        // A host that did not survive decode is a malformed stored field, so
+        // it belongs to the `rows_rejected` subset of `rows_skipped` too.
+        source_stats.rows_rejected = source_stats.rows_rejected.saturating_add(dropped);
+      }
+      stats.add(&source_stats);
       public_sources.push(SourceExtraction {
         source: source.source,
         status: source_status(source.failed),
         selected: source.selected,
         acquisition_strategy: source.acquisition_strategy,
         cookies,
-        stats: source.stats,
+        stats: source_stats,
         issues: source_issues,
       });
       if let Some(stop) = projection_runtime.and_then(|runtime| runtime.check().err()) {
@@ -1131,19 +1192,22 @@ fn project_canonical_report_with_runtime(
     ResultStatus::Failed => ReportStatusCode::failed(),
     ResultStatus::NoSources => ReportStatusCode::no_sources(),
   };
-  ExtractionReport {
-    schema_version: super::report_core::EXTRACTION_REPORT_SCHEMA_VERSION,
-    status,
-    termination: match outcome.termination {
-      Termination::Completed => TerminationCode::completed(),
-      Termination::Cancelled => TerminationCode::cancelled(),
-      Termination::TimedOut => TerminationCode::timed_out(),
-      Termination::ResourceExhausted => TerminationCode::resource_exhausted(),
+  (
+    ExtractionReport {
+      schema_version: super::report_core::EXTRACTION_REPORT_SCHEMA_VERSION,
+      status,
+      termination: match outcome.termination {
+        Termination::Completed => TerminationCode::completed(),
+        Termination::Cancelled => TerminationCode::cancelled(),
+        Termination::TimedOut => TerminationCode::timed_out(),
+        Termination::ResourceExhausted => TerminationCode::resource_exhausted(),
+      },
+      summary,
+      profiles,
+      issues,
     },
-    summary,
-    profiles,
-    issues,
-  }
+    outcome.termination,
+  )
 }
 
 /// Schema-v1-compatible representation of work that stopped before the report
@@ -1326,7 +1390,7 @@ fn assemble_with_runtime(
   registered_browsers: usize,
   outcomes: Vec<BrowserDraft>,
   runtime: &BoundaryRuntime<'_>,
-) -> ExtractionReport {
+) -> (ExtractionReport, Termination) {
   let outcome = finalize_outcomes_with_runtime(registered_browsers, outcomes, Some(runtime));
   project_canonical_report_with_runtime(outcome, Some(runtime))
 }
@@ -1474,23 +1538,51 @@ fn direct_engine_extract(
 #[cfg(test)]
 pub(crate) fn browser_extraction_report(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
 ) -> Result<ExtractionReport> {
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  browser_extraction_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  browser_extraction_report_with_runtime(
+    browser_id,
+    selection,
+    domains,
+    crate::SessionPolicy::IncludeSession,
+    &runtime,
+  )
 }
 
+/// Report-shaped seam. Report jobs return a stop as an `Ok` report whose
+/// `termination` is not `completed`, so they never need the typed value.
 pub(crate) fn browser_extraction_report_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ExtractionReport> {
+  browser_extraction_outcome_with_runtime(browser_id, selection, domains, session, runtime)
+    .map(|(report, _termination)| report)
+}
+
+/// Flatten-shaped seam: the same work, plus the typed [`Termination`] the DTO
+/// string was projected from. `extract` and profile-scoped `read` must turn a
+/// stop into `Error::Stopped`, and they classify it from this enum rather than
+/// re-parsing `ExtractionReport::termination`.
+pub(crate) fn browser_extraction_outcome_with_runtime(
+  browser_id: &str,
+  selection: registry::ProfileSelection<'_>,
+  domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<(ExtractionReport, Termination)> {
   let browser = registry::resolve_registered_browser(browser_id)?;
   let canonical_id = &browser.canonical_id;
-  let mut outcome = match collect_extraction(&browser, profile_id, domains, runtime) {
+  // Report-shaped callers pass `IncludeSession`: a report's whole point is to
+  // describe every source the profile declares. `extract` is the one caller
+  // that passes the request's own policy, because it produces a flat list and
+  // must honor a caller who asked not to touch the session store.
+  let mut outcome = match collect_extraction(&browser, selection, domains, session, runtime) {
     Ok(outcome) => outcome,
     Err(error) => match stop_from_error(&error) {
       Some(stop) => stopped_browser_draft(&browser, stop)?,
@@ -1503,7 +1595,10 @@ pub(crate) fn browser_extraction_report_with_runtime(
   // whose engine has no adapter compiled into this build reports no profiles at
   // all, and an unknown profile id must still be a request error there.
   if outcome.termination == Termination::Completed {
-    if let Some(profile_id) = profile_id {
+    // Only an explicit profile id needs this: `LegacyFirstProfile` and
+    // `AllProfiles` are both narrowed by the engine itself, and neither can
+    // name a profile that does not exist.
+    if let registry::ProfileSelection::ProfileId(profile_id) = selection {
       if !outcome
         .profiles
         .iter()
@@ -1538,9 +1633,12 @@ pub(crate) fn browser_extraction_report_with_runtime(
 
 /// Private `load_report` seam. Uninstalled registered browsers are summarized
 /// in counters instead of emitting a per-browser warning.
-pub(crate) fn load_extraction_report(domains: Option<Vec<String>>) -> Result<ExtractionReport> {
+pub(crate) fn load_extraction_report(
+  domains: Option<Vec<String>>,
+  control: &ExecutionControl,
+) -> Result<ExtractionReport> {
   let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
+  let runtime = runtime_for_control(&clock, control);
   load_extraction_report_with_runtime(domains, &runtime)
 }
 
@@ -1558,7 +1656,13 @@ fn load_extraction_report_with_runtime(
   // browser's collection finished first, matching the ordering contract the
   // rest of this module already relies on.
   let attempts = fan_out(&browsers, DEFAULT_FAN_OUT_WIDTH, runtime, |browser| {
-    collect_extraction(browser, None, domains.clone(), runtime)
+    collect_extraction(
+      browser,
+      registry::ProfileSelection::AllProfiles,
+      domains.clone(),
+      crate::SessionPolicy::IncludeSession,
+      runtime,
+    )
   });
   // `fan_out` silently stops claiming further browsers once the runtime
   // trips, so a shorter-than-`browsers` result set is itself evidence of a
@@ -1610,16 +1714,19 @@ fn load_extraction_report_with_runtime(
       outcomes.push(stopped_browser_draft(&browsers[claimed], stop)?);
     }
   }
-  Ok(assemble_with_runtime(browsers.len(), outcomes, runtime))
+  Ok(assemble_with_runtime(browsers.len(), outcomes, runtime).0)
 }
 
 /// Private `browser_profiles` seam. An unknown ID fails; a known browser with
 /// no detected installation returns an empty list; a browser whose every
 /// detected root failed enumeration fails rather than returning an
 /// indistinguishable empty list.
-pub(crate) fn browser_profile_descriptors(browser_id: &str) -> Result<Vec<ProfileDescriptor>> {
+pub(crate) fn browser_profile_descriptors(
+  browser_id: &str,
+  control: &ExecutionControl,
+) -> Result<Vec<ProfileDescriptor>> {
   let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
+  let runtime = runtime_for_control(&clock, control);
   let browser = registry::resolve_registered_browser(browser_id)?;
   let outcome = collect_listing(&browser, &runtime)?;
   profile_descriptors_from_outcome(browser_id, outcome)
@@ -1647,9 +1754,11 @@ fn stopped_browser_draft(browser: &RegisteredBrowser, stop: BoundaryStop) -> Res
 /// Chrome-specific listing whose first entry follows the advisory `Local
 /// State` activity hints. The generic `browser_profiles("chrome")` path keeps
 /// its frozen default-first order.
-pub(crate) fn chrome_profile_descriptors() -> Result<Vec<ProfileDescriptor>> {
+pub(crate) fn chrome_profile_descriptors(
+  control: &ExecutionControl,
+) -> Result<Vec<ProfileDescriptor>> {
   let clock = SystemClock;
-  let runtime = BoundaryRuntime::standard(&clock);
+  let runtime = runtime_for_control(&clock, control);
   let browser_id = BrowserId::known("chrome");
   registry::chrome_profiles_with_runtime(&runtime)?
     .into_iter()
@@ -1669,7 +1778,13 @@ pub(crate) fn chrome_profile_report(
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
   let profile_id = registry::resolve_profile_query("chrome", profile, &runtime)?;
-  browser_extraction_report_with_runtime("chrome", Some(profile_id.as_str()), domains, &runtime)
+  browser_extraction_report_with_runtime(
+    "chrome",
+    registry::ProfileSelection::ProfileId(profile_id.as_str()),
+    domains,
+    crate::SessionPolicy::IncludeSession,
+    &runtime,
+  )
 }
 
 fn chromium_profile_descriptor(
@@ -1736,17 +1851,29 @@ fn profile_descriptors_from_outcome(
       .collect::<Vec<_>>()
   };
   if outcome.discovery_failed {
-    bail!(
-      "every detected {browser_id} installation failed profile enumeration: {}",
-      errors(&outcome.issues, false).join("; ")
-    )
+    return Err(
+      EngineFailure::new(
+        EngineCause::DiscoveryFailed,
+        format!(
+          "every detected {browser_id} installation failed profile enumeration: {}",
+          errors(&outcome.issues, false).join("; ")
+        ),
+      )
+      .into(),
+    );
   }
   let lost_profiles = errors(&outcome.issues, true);
   if outcome.profiles.is_empty() && !lost_profiles.is_empty() {
-    bail!(
-      "every discovered {browser_id} profile failed discovery: {}",
-      lost_profiles.join("; ")
-    )
+    return Err(
+      EngineFailure::new(
+        EngineCause::DiscoveryFailed,
+        format!(
+          "every discovered {browser_id} profile failed discovery: {}",
+          lost_profiles.join("; ")
+        ),
+      )
+      .into(),
+    );
   }
   // Every engine already builds the wire `ProfileDescriptor` (sources sorted)
   // as it lists, so there is nothing left to adapt here.

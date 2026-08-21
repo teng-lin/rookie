@@ -37,12 +37,51 @@ export interface DetailedCookieObject {
   cookie: CookieObject
   context: CookieContextObject
 }
+/**
+ * View input for `ReadResult.header`. A bare `url` string is sugar for
+ * `{ url }`; see `header`'s doc comment for why the rest matters.
+ *
+ * Plain `#[napi(object)]`, not `use_nullable`: this is caller-constructed
+ * input (like `ReadOptions`), where every field but `url` should be
+ * omittable, not merely nullable -- unlike `CookieContextObject`, which this
+ * binding always populates in full and where `use_nullable` keeps every
+ * field present-but-`null`.
+ */
+export interface SendContextObject {
+  url: string
+  topLevelSite?: string
+  /**
+   * `"navigation" | "subresource"`. Defaults to `"subresource"`, the
+   * conservative choice: only a `SameSite=Lax` cross-site send depends on it.
+   */
+  resource?: ResourceKind
+  /** `"safe" | "unsafe"`. Defaults to `"safe"`, same reasoning as `resource`. */
+  method?: MethodClass
+  userContextId?: number
+  privateBrowsingId?: number
+  nowEpochSeconds?: number
+}
 /** Cross-platform options for explicit Chromium cookie databases. */
 export interface ChromiumPathOptions {
   domains?: string[] | null
   browserId?: string | null
   localStatePath?: string | null
   plaintextOnly?: boolean | null
+  appBound?: AppBoundPolicy | null
+}
+/**
+ * Options for the canonical `extractFromPath`: `domains`; the mutually
+ * exclusive `plaintextOnly` / `browserId` / `localStatePath`; `timeoutMs`;
+ * `appBound`. A superset of the deprecated `ChromiumPathOptions`, which took
+ * `timeoutMs` as its own positional parameter instead of a field here.
+ */
+export interface ExtractFromPathOptions {
+  domains?: Array<string>
+  browserId?: string
+  localStatePath?: string
+  plaintextOnly?: boolean
+  timeoutMs?: number
+  appBound?: AppBoundPolicy
 }
 export interface FirefoxProfileObject {
   name: string
@@ -210,10 +249,28 @@ export declare function version(): string
  * encoded as `%09`, `%0D`, and `%0A`, matching the Rust, CLI, and Python APIs.
  */
 export declare function toNetscape(cookies: Array<CookieObject>): string
+/**
+ * Extracts cookies from one explicit cookie file as a flat, domain-filtered
+ * list. The canonical flat path-extract job (Rust `extract_from_path`,
+ * Python `extract_from_path`); `cookiesFromPath` / `chromiumCookiesFromPath`
+ * are deprecated aliases onto this.
+ *
+ * Sniffs the source from its signature and schema with no credentials.
+ * Portable: on Unix a Chromium database found this way is plaintext-capable
+ * only (this used to probe every registered browser identity in turn); on
+ * Windows a plaintext Chromium database now succeeds instead of always
+ * rejecting with `missing_local_state_file`. An encrypted Chromium row
+ * without an explicit credential selector is `missing_chromium_credentials`.
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
+ */
+export declare function extractFromPath(path: string, options?: ExtractFromPathOptions | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+/** @deprecated Use `extractFromPath`. Earliest removal is 0.7. */
 export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>
+/** @deprecated Use `extractFromPath`. Earliest removal is 0.7. */
 export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>
+/** @deprecated Use `fromPath(...).detailedCookies`. Earliest removal is 0.7. */
 export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<DetailedCookieObject[]>
-/** @deprecated Use `cookiesFromPath` or `chromiumCookiesFromPath`. Earliest removal is 0.7. */
+/** @deprecated Use `extractFromPath`. Earliest removal is 0.7. */
 export declare function anyBrowser(dbPath: string, domains?: Array<string> | undefined | null, keyPath?: string | undefined | null): Promise<Array<CookieObject>>
 export declare function load(domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 export declare function firefox(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
@@ -228,7 +285,7 @@ export declare function chromium(domains?: Array<string> | undefined | null, tim
 export declare function vivaldi(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 export declare function firefoxProfiles(): Promise<Array<FirefoxProfileObject>>
 export declare function firefoxProfile(profile: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** @deprecated Use `cookiesFromPath`. Earliest removal is 0.7. */
+/** @deprecated Use `extractFromPath`. Earliest removal is 0.7. */
 export declare function firefoxBased(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
 /** Extracts cookies with Firefox container and origin context preserved. */
 export declare function firefoxBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>
@@ -236,6 +293,8 @@ export declare function firefoxBasedDetailed(dbPath: string, domains?: Array<str
  * Lists the browsers registered for the running OS.
  *
  * Registration is not detection: a listed browser need not be installed.
+ * Takes no execution control: this is a static catalog lookup with no disk
+ * I/O, so there is nothing for a timeout, cancellation, or `appBound` to do.
  */
 export declare function supportedBrowsers(): Promise<Array<BrowserDescriptorObject>>
 /**
@@ -243,9 +302,9 @@ export declare function supportedBrowsers(): Promise<Array<BrowserDescriptorObje
  *
  * Rejects on an unknown `browserId`, or when every detected installation root
  * failed enumeration. A known browser with nothing installed resolves to an
- * empty array.
+ * empty array. No `appBound`: listing does no App-Bound work.
  */
-export declare function browserProfiles(browserId: string): Promise<Array<ProfileDescriptorObject>>
+export declare function browserProfiles(browserId: string, options?: ProfilesOptions | undefined | null): Promise<Array<ProfileDescriptorObject>>
 /**
  * Lists Google Chrome profiles with the preferred active profile first.
  *
@@ -267,50 +326,128 @@ export declare function chromeProfile(profile: string, domains?: Array<string> |
  *
  * Only a bad request rejects: an unknown `browserId`, or a `profileId` this
  * browser did not yield. Extraction problems resolve as a report whose
- * `status` and `issues` describe them.
+ * `status` and `issues` describe them. `options.appBound` defaults to
+ * `"injection_only"`, same as `read`.
  */
-export declare function browserReport(browserId: string, profileId?: string | undefined | null, domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
+export declare function browserReport(options: BrowserReportOptions): Promise<ExtractionReportObject>
 /**
  * Extracts cookies from every registered browser as one grouped report.
  *
  * This is the report-shaped counterpart to `load`, not a replacement: `load`
  * keeps its historical browser set and flat output. A browser that fails does
  * not abort the others; it becomes an issue on the returned report.
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
  */
-export declare function loadReport(domains?: Array<string> | undefined | null): Promise<ExtractionReportObject>
+export declare function loadReport(options?: LoadReportOptions | undefined | null): Promise<ExtractionReportObject>
 export interface ReadOptions {
   browser: string
   profile?: string
   includeExpired?: boolean
+  /**
+   * Also includes the browser's declared session store (Gecko only; a
+   * no-op elsewhere). Defaults to `false` -- **unlike 0.6-beta**, naming a
+   * `profile` alone no longer imports session cookies. Omitting this on a
+   * migrated 0.6-beta caller fails silently: a smaller snapshot, no error.
+   */
+  includeSession?: boolean
   timeoutMs?: number
+  /**
+   * `"disabled" | "injection_only" | "allow_elevated_fallback"`. Omitted
+   * means `"injection_only"`, which recovers Chrome v20 App-Bound keys
+   * without elevation. Pass `"disabled"` to skip v20 rows instead.
+   */
+  appBound?: AppBoundPolicy
+  /**
+   * Only `"legacy_first"` (the default) is representable here: a snapshot
+   * or flat extract returns one answer, so there is no "every profile" for
+   * `select` to name. Passing `"all"` rejects with
+   * `conflicting_profile_selection` before any I/O; use `report`/
+   * `browserReport` for every profile.
+   */
+  select?: string
 }
 export interface ReportOptions {
   browser: string
   profile?: string
   domains?: Array<string>
   timeoutMs?: number
+  appBound?: AppBoundPolicy
+  /**
+   * `"legacy_first" | "all"`. Defaults to `"all"`: naming a `profile`
+   * already narrows to it regardless of `select`, but `select: "all"`
+   * together with `profile` is a contradiction and rejects with
+   * `conflicting_profile_selection` before any I/O.
+   */
+  select?: string
 }
 export interface FromPathOptions {
   path: string
   includeExpired?: boolean
   timeoutMs?: number
   browserId?: string
-  keyPath?: string
+  /** Renamed from `keyPath` in 0.6.0 (prerelease-only, so no alias kept). */
+  localStatePath?: string
   plaintextOnly?: boolean
+  appBound?: AppBoundPolicy
+}
+/**
+ * Options for `loadReport`. Every field is optional so the whole options
+ * object itself can be omitted, matching `loadReport()`'s no-argument form
+ * before this PR added execution control.
+ */
+export interface LoadReportOptions {
+  domains?: Array<string>
+  timeoutMs?: number
+  appBound?: AppBoundPolicy
+}
+export interface BrowserReportOptions {
+  browserId: string
+  profileId?: string
+  domains?: Array<string>
+  timeoutMs?: number
+  appBound?: AppBoundPolicy
+}
+/**
+ * Options for `profiles` / `browserProfiles`. No `appBound`: listing does no
+ * App-Bound work.
+ */
+export interface ProfilesOptions {
+  timeoutMs?: number
 }
 export interface ReadWarningObject {
   code: string
+  /**
+   * IEEE-754; saturates at `Number.MAX_SAFE_INTEGER` rather than losing
+   * precision on a Rust `u64` past that point.
+   */
   count: number
-  saturated: boolean
+  countersSaturated: boolean
   message: string
 }
-/** Unfiltered snapshot of one browser profile. Never URL-pre-sliced. */
+/**
+ * Unfiltered snapshot of one browser profile. Never URL-pre-sliced.
+ *
+ * `options.appBound` defaults to `"injection_only"`: Chrome has written
+ * App-Bound (v20) cookies on Windows since Chrome 127, so refusing to
+ * recover them would return an empty list for the common case. Injection is
+ * unprivileged but spawns a browser process, which endpoint security can
+ * flag -- pass `"disabled"` to skip v20 rows instead. Elevated SYSTEM
+ * impersonation stays opt-in via `"allow_elevated_fallback"`.
+ */
 export declare function read(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
-/** Alias of `browserProfiles`. No decrypt. */
-export declare function profiles(browserId: string): Promise<Array<ProfileDescriptorObject>>
-/** Bindings name for `extract_report` / `browserReport`. */
+/** Alias of `browserProfiles`. No decrypt, no `appBound`. */
+export declare function profiles(browserId: string, options?: ProfilesOptions | undefined | null): Promise<Array<ProfileDescriptorObject>>
+/**
+ * Bindings name for `extract_report` / `browserReport`.
+ *
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
+ */
 export declare function report(options: ReportOptions): Promise<ExtractionReportObject>
-/** Read cookies from an explicit cookie database path. */
+/**
+ * Read cookies from an explicit cookie database path.
+ *
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
+ */
 export declare function fromPath(options: FromPathOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
 export type JsCancellationHandle = CancellationHandle
 /**
@@ -336,15 +473,37 @@ export declare class ReadResult {
   /** Not constructible from JavaScript. Use `read()` or `fromPath()`. */
   constructor()
   get cookies(): Array<CookieObject>
+  /**
+   * Isolation-aware projection: the eight `Cookie` fields plus a `context`
+   * object carrying CHIPS partition and Firefox container identity. Use this
+   * (not `cookies`) to inventory partitions/containers -- `cookies` discards
+   * that context by design.
+   */
+  get detailedCookies(): Array<DetailedCookieObject>
   get warnings(): Array<ReadWarningObject>
-  get browserId(): string
+  get browserId(): string | null
   get profileId(): string | null
-  header(url: string): string
+  /**
+   * Derives a legacy `Cookie` request-header value for `context`. A bare
+   * string is sugar for `{ url: context }`: the conservative
+   * (`Subresource`/`Safe`) defaults, no top-level site, no container/
+   * partition selector.
+   *
+   * A snapshot holding a CHIPS-partitioned or Firefox-container cookie
+   * rejects with `incomplete_send_context` (its `required` selector names on
+   * the error object) rather than silently merging isolated cookies into one
+   * answer -- pass `topLevelSite` / `userContextId` / `privateBrowsingId`
+   * to disambiguate.
+   */
+  header(context: string | SendContextObject): string
 }
 /** rookie-cookies cross-platform facade */
+export type AppBoundPolicy = 'disabled' | 'injection_only' | 'allow_elevated_fallback'
+export type ResourceKind = 'navigation' | 'subresource'
+export type MethodClass = 'safe' | 'unsafe'
 /** Structured diagnostics attached to errors rejected by facade operations. */
 export interface RookieError extends Error {
-  kind: 'request' | 'engine'
+  kind: 'request' | 'stopped' | 'source' | 'engine'
   code?: string
   rookieCode: string | null
   /** Current values are timed_out, cancelled, and resource_exhausted; open for future reasons. */
@@ -353,6 +512,8 @@ export interface RookieError extends Error {
   sourceKind: string | null
   targetOs: string | null
   pathRedacted: boolean
+  /** The SendContext selectors incomplete_send_context says are missing. Empty otherwise. */
+  required: string[]
 }
 /** Linux-only browsers */
 export declare function cachy(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
@@ -364,12 +525,12 @@ export declare function internetExplorer(domains?: Array<string> | undefined | n
 /** macOS-only browsers */
 export declare function safari(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** Unix browsers */
-/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
+/** @deprecated Use extractFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<CookieObject>>
-/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
+/** @deprecated Use fromPath(...).detailedCookies. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(dbPath: string, domains?: Array<string> | undefined | null, browserId?: string | undefined | null): Promise<Array<DetailedCookieObject>>
 /** Windows browsers */
-/** @deprecated Use chromiumCookiesFromPath. Earliest removal is 0.7. */
+/** @deprecated Use extractFromPath. Earliest removal is 0.7. */
 export declare function chromiumBased(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<CookieObject>>
-/** @deprecated Use chromiumCookiesFromPathDetailed. Earliest removal is 0.7. */
+/** @deprecated Use fromPath(...).detailedCookies. Earliest removal is 0.7. */
 export declare function chromiumBasedDetailed(keyPath: string, dbPath: string, domains?: Array<string> | undefined | null): Promise<Array<DetailedCookieObject>>

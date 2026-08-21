@@ -1,9 +1,15 @@
-//! CLI contract tests for the Section 5.8 list/report grammar.
+//! CLI contract tests for the structured-output job subcommands
+//! (`browsers`, `profiles`, `report`) plus cross-subcommand usage-error
+//! shape checks (`read`/`from-path`/`header`'s own required-flag and
+//! conflicting-selector grammar). Flat/detailed extraction output is pinned
+//! in `snapshot.rs`.
 //!
-//! These cover only the additive `--list-browsers`, `--list-profiles`,
-//! `--report`, and `--profile` modes plus the post-parse `--browser`
-//! validation that replaced clap's closed `PossibleValuesParser`. The legacy
-//! flat-output surface is pinned in `snapshot.rs`.
+//! The CLI used to also expose this grammar through a parallel top-level
+//! flag surface (`--list-browsers`, `--list-profiles`, `--report`,
+//! `--browser`, `--load`, `--path`, ...); that surface, and the legacy
+//! `--browser` map it depended on, were removed once every job became a
+//! subcommand (0.6.0 design PR 6/7). There is no longer a no-subcommand
+//! default action.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,70 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROOKIE_BIN: &str = env!("CARGO_BIN_EXE_rookie-cookies");
 
-/// Clap's exit code for a usage error. Post-parse mode validation must keep
-/// using it now that `--browser` is no longer validated by clap itself.
+/// Clap's exit code for a usage error.
 const USAGE_ERROR_EXIT_CODE: i32 = 2;
-
-/// The historical `BROWSERS_MAP` keys, in the `BTreeMap` order the invalid
-/// `--browser` diagnostic renders them in.
-#[cfg(target_os = "linux")]
-const LEGACY_BROWSERS: &[&str] = &[
-  "arc",
-  "brave",
-  "cachy",
-  "chrome",
-  "chromium",
-  "edge",
-  "firefox",
-  "librewolf",
-  "opera",
-  "vivaldi",
-  "zen",
-];
-#[cfg(target_os = "macos")]
-const LEGACY_BROWSERS: &[&str] = &[
-  "arc",
-  "brave",
-  "chrome",
-  "chromium",
-  "edge",
-  "firefox",
-  "librewolf",
-  "opera",
-  "opera_gx",
-  "safari",
-  "vivaldi",
-  "zen",
-];
-#[cfg(target_os = "windows")]
-const LEGACY_BROWSERS: &[&str] = &[
-  "arc",
-  "brave",
-  "chrome",
-  "chromium",
-  "edge",
-  "firefox",
-  "internet_explorer",
-  "librewolf",
-  "octo_browser",
-  "opera",
-  "opera_gx",
-  "vivaldi",
-  "zen",
-];
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-const LEGACY_BROWSERS: &[&str] = &[
-  "arc",
-  "brave",
-  "chrome",
-  "chromium",
-  "edge",
-  "firefox",
-  "librewolf",
-  "opera",
-  "vivaldi",
-  "zen",
-];
 
 struct TestDir(PathBuf);
 
@@ -244,28 +188,15 @@ fn seed_multi_profile_firefox(root: &Path) {
 }
 
 fn registered_browsers() -> Vec<serde_json::Value> {
-  let out = run_rookie(&["--list-browsers"]);
+  let out = run_rookie(&["browsers"]);
   parsed_json(&out)
     .as_array()
-    .expect("--list-browsers must emit an array")
+    .expect("browsers must emit an array")
     .clone()
 }
 
-/// Every accepted `--browser` token in list/report mode: canonical IDs plus
-/// their aliases.
-fn registered_tokens() -> Vec<String> {
-  let mut tokens = Vec::new();
-  for browser in registered_browsers() {
-    tokens.push(browser["id"].as_str().expect("browser id").to_string());
-    for alias in browser["aliases"].as_array().expect("aliases") {
-      tokens.push(alias.as_str().expect("alias").to_string());
-    }
-  }
-  tokens
-}
-
 #[test]
-fn list_browsers_emits_registered_descriptors_as_json() {
+fn browsers_subcommand_emits_registered_descriptors_as_json() {
   let browsers = registered_browsers();
   assert!(
     !browsers.is_empty(),
@@ -304,9 +235,9 @@ fn list_browsers_emits_registered_descriptors_as_json() {
 }
 
 #[test]
-fn list_browsers_needs_no_installed_browser_and_touches_no_profile() {
+fn browsers_subcommand_needs_no_installed_browser_and_touches_no_profile() {
   let root = unique_tmpdir("list-browsers-empty-home");
-  let out = run_isolated(root.path(), &["--list-browsers"]);
+  let out = run_isolated(root.path(), &["browsers"]);
   let browsers = parsed_json(&out);
   assert!(
     !browsers.as_array().expect("array").is_empty(),
@@ -315,11 +246,11 @@ fn list_browsers_needs_no_installed_browser_and_touches_no_profile() {
 }
 
 #[test]
-fn list_profiles_emits_every_discovered_profile() {
+fn profiles_subcommand_emits_every_discovered_profile() {
   let root = unique_tmpdir("list-profiles");
   seed_multi_profile_firefox(root.path());
 
-  let out = run_isolated(root.path(), &["--list-profiles", "--browser", "firefox"]);
+  let out = run_isolated(root.path(), &["profiles", "firefox"]);
   let profiles = parsed_json(&out);
   let profiles = profiles.as_array().expect("profile array");
   assert_eq!(profiles.len(), 2, "{profiles:?}");
@@ -349,10 +280,19 @@ fn list_profiles_emits_every_discovered_profile() {
 }
 
 #[test]
-fn list_profiles_of_an_absent_browser_is_an_empty_array() {
+fn profiles_subcommand_of_an_absent_browser_is_an_empty_array() {
   let root = unique_tmpdir("list-profiles-absent");
-  let out = run_isolated(root.path(), &["--list-profiles", "--browser", "firefox"]);
+  let out = run_isolated(root.path(), &["profiles", "firefox"]);
   assert_eq!(parsed_json(&out), serde_json::json!([]));
+}
+
+#[test]
+fn profiles_subcommand_requires_a_browser() {
+  let stderr = assert_usage_error(&run_rookie(&["profiles"]), "profiles without a browser");
+  assert!(
+    stderr.contains("BROWSER") || stderr.contains("required"),
+    "{stderr}"
+  );
 }
 
 #[test]
@@ -360,7 +300,7 @@ fn report_with_browser_covers_every_profile() {
   let root = unique_tmpdir("report-browser");
   seed_multi_profile_firefox(root.path());
 
-  let out = run_isolated(root.path(), &["--report", "--browser", "firefox"]);
+  let out = run_isolated(root.path(), &["report", "--browser", "firefox"]);
   let report = parsed_json(&out);
   assert_eq!(report["status"], "complete", "{report}");
   assert_eq!(report["summary"]["profiles_discovered"], 2, "{report}");
@@ -391,10 +331,7 @@ fn report_with_profile_selects_only_that_profile() {
   let root = unique_tmpdir("report-profile");
   seed_multi_profile_firefox(root.path());
 
-  let listed = parsed_json(&run_isolated(
-    root.path(),
-    &["--list-profiles", "--browser", "firefox"],
-  ));
+  let listed = parsed_json(&run_isolated(root.path(), &["profiles", "firefox"]));
   let wanted = listed
     .as_array()
     .expect("profiles")
@@ -408,7 +345,7 @@ fn report_with_profile_selects_only_that_profile() {
 
   let out = run_isolated(
     root.path(),
-    &["--report", "--browser", "firefox", "--profile", &profile_id],
+    &["report", "--browser", "firefox", "--profile", &profile_id],
   );
   let report = parsed_json(&out);
   let profiles = report["profiles"].as_array().expect("profiles");
@@ -432,7 +369,7 @@ fn report_with_an_unknown_profile_id_fails_without_machine_output() {
 
   let out = run_isolated(
     root.path(),
-    &["--report", "--browser", "firefox", "--profile", "nope"],
+    &["report", "--browser", "firefox", "--profile", "nope"],
   );
   assert!(!out.status.success(), "unknown profile ID succeeded");
   assert!(
@@ -447,7 +384,7 @@ fn report_without_browser_uses_load_report() {
   let root = unique_tmpdir("report-load");
   seed_multi_profile_firefox(root.path());
 
-  let out = run_isolated(root.path(), &["--report"]);
+  let out = run_isolated(root.path(), &["report"]);
   let report = parsed_json(&out);
 
   let registered = registered_browsers().len() as u64;
@@ -467,306 +404,52 @@ fn report_domain_filter_narrows_the_emitted_cookies() {
 
   let matching = parsed_json(&run_isolated(
     root.path(),
-    &[
-      "--report",
-      "--browser",
-      "firefox",
-      "--domains",
-      "example.com",
-    ],
+    &["report", "--browser", "firefox", "--domains", "example.com"],
   ));
   assert_eq!(matching["summary"]["cookies_emitted"], 2, "{matching}");
 
   let missing = parsed_json(&run_isolated(
     root.path(),
-    &[
-      "--report",
-      "--browser",
-      "firefox",
-      "--domains",
-      "absent.test",
-    ],
+    &["report", "--browser", "firefox", "--domains", "absent.test"],
   ));
   assert_eq!(missing["summary"]["cookies_emitted"], 0, "{missing}");
 }
 
 #[test]
-fn report_and_list_modes_reject_netscape_format() {
-  for args in [
-    &["--list-browsers", "--format", "netscape"][..],
-    &[
-      "--list-profiles",
-      "--browser",
-      "firefox",
-      "--format",
-      "netscape",
-    ][..],
-    &["--report", "--format", "netscape"][..],
-    &["--report", "--browser", "firefox", "--format", "netscape"][..],
-  ] {
-    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-    assert!(
-      stderr.contains("--format netscape"),
-      "{args:?}: unhelpful diagnostic: {stderr}"
-    );
-  }
-}
-
-#[test]
-fn report_and_list_modes_accept_an_explicit_json_format() {
-  for args in [
-    &["--list-browsers", "--format", "json"][..],
-    &[
-      "--list-profiles",
-      "--browser",
-      "firefox",
-      "--format",
-      "json",
-    ][..],
-    &["--report", "--browser", "firefox", "--format", "json"][..],
-  ] {
-    let root = unique_tmpdir("explicit-json");
-    let out = run_isolated(root.path(), args);
-    assert!(
-      out.status.success(),
-      "{args:?} failed: {}",
-      String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice::<serde_json::Value>(&out.stdout)
-      .unwrap_or_else(|err| panic!("{args:?} emitted invalid JSON: {err}"));
-  }
-}
-
-/// Clap evaluates conflicts before `requires`, so each declared pair can be
-/// provoked on its own. Asserting that the diagnostic names *both* halves keeps
-/// these honest: dropping one flag from a `conflicts_with_all` list fails here
-/// rather than silently widening the grammar.
-#[test]
-fn profile_conflicts_with_each_list_mode_individually() {
-  for (args, other) in [
-    (
-      &["--profile", "x", "--list-browsers"][..],
-      "--list-browsers",
-    ),
-    (
-      &["--profile", "x", "--list-profiles", "--browser", "firefox"][..],
-      "--list-profiles",
-    ),
-  ] {
-    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-    assert!(
-      stderr.contains(&format!(
-        "the argument '--profile <PROFILE>' cannot be used with '{other}'"
-      )),
-      "{args:?}: expected the --profile/{other} conflict: {stderr}"
-    );
-  }
-}
-
-#[test]
-fn credential_selectors_conflict_with_each_new_mode_individually() {
-  for (flag, value) in [
-    ("--key-path", Some("ks")),
-    ("--browser-id", Some("chrome")),
-    ("--plaintext-only", None),
-  ] {
-    for other in ["--list-browsers", "--list-profiles", "--report"] {
-      let mut args = vec![flag];
-      if let Some(value) = value {
-        args.push(value);
-      }
-      args.push(other);
-      let stderr = assert_usage_error(&run_rookie(&args), &format!("{args:?}"));
-      assert!(
-        stderr.contains(other),
-        "{args:?}: expected the {flag}/{other} conflict: {stderr}"
-      );
-    }
-  }
-}
-
-#[test]
-fn new_modes_conflict_with_the_legacy_source_selectors() {
-  for args in [
-    &["--report", "--load"][..],
-    &["--report", "--path", "cookies.sqlite"][..],
-    &[
-      "--report",
-      "--path",
-      "cookies.sqlite",
-      "--key-path",
-      "Local State",
-    ][..],
-    &["--list-browsers", "--load"][..],
-    &["--list-browsers", "--path", "cookies.sqlite"][..],
-    &["--list-profiles", "--browser", "firefox", "--load"][..],
-    &[
-      "--list-profiles",
-      "--browser",
-      "firefox",
-      "--path",
-      "cookies.sqlite",
-    ][..],
-  ] {
-    assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-  }
-}
-
-#[test]
-fn list_modes_conflict_with_domain_filters_and_each_other() {
-  for args in [
-    &["--list-browsers", "--domains", "example.com"][..],
-    &[
-      "--list-profiles",
-      "--browser",
-      "firefox",
-      "--domains",
-      "example.com",
-    ][..],
-    &["--list-browsers", "--browser", "firefox"][..],
-    &["--list-browsers", "--list-profiles", "--browser", "firefox"][..],
-    &["--list-browsers", "--report"][..],
-    &["--list-profiles", "--browser", "firefox", "--report"][..],
-  ] {
-    assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-  }
-}
-
-#[test]
-fn list_profiles_requires_a_browser() {
-  let stderr = assert_usage_error(&run_rookie(&["--list-profiles"]), "--list-profiles");
-  assert!(stderr.contains("--browser"), "{stderr}");
-}
-
-#[test]
-fn profile_requires_browser_but_not_report() {
-  for args in [
-    &["--profile", "any"][..],
-    &["--profile", "any", "--report"][..],
-    &[
-      "--profile",
-      "any",
-      "--list-profiles",
-      "--browser",
-      "firefox",
-    ][..],
-  ] {
-    assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-  }
-  let mixed = run_rookie(&["--browser", "firefox", "--profile", "any"]);
-  let mixed_stderr = String::from_utf8_lossy(&mixed.stderr);
-  assert!(
-    mixed.status.code() != Some(2) || !mixed_stderr.contains("required arguments"),
-    "flat --browser --profile must not be a clap usage error: {:?}",
-    mixed
+fn report_with_unregistered_browser_fails_with_a_core_error() {
+  // Unlike the removed top-level `--browser` flag, no CLI-side registry
+  // pre-check exists for subcommands: an unknown ID reaches
+  // `rookie_cookies::Error::Request(RequestError::UnknownBrowser)` and fails
+  // at runtime (exit 1), not clap usage validation (exit 2).
+  let root = unique_tmpdir("report-unregistered");
+  let out = run_isolated(
+    root.path(),
+    &["report", "--browser", "definitely-not-a-real-browser"],
   );
-}
-
-#[test]
-fn invalid_legacy_browser_stays_a_usage_error_listing_the_legacy_set() {
-  let stderr = assert_usage_error(&run_rookie(&["--browser", "nope"]), "--browser nope");
   assert!(
-    stderr.contains("invalid value 'nope' for '--browser <BROWSER>'"),
-    "{stderr}"
+    !out.status.success(),
+    "unregistered browser id unexpectedly succeeded"
   );
-
-  let rendered: Vec<String> = LEGACY_BROWSERS
-    .iter()
-    .map(|browser| {
-      if browser.contains(char::is_whitespace) {
-        format!("\"{browser}\"")
-      } else {
-        (*browser).to_string()
-      }
-    })
-    .collect();
   assert!(
-    stderr.contains(&format!("[possible values: {}]", rendered.join(", "))),
-    "legacy browser values are not in deterministic order: {stderr}"
+    out.stdout.is_empty(),
+    "failed report wrote partial machine output: {}",
+    String::from_utf8_lossy(&out.stdout)
   );
-}
-
-#[test]
-fn every_legacy_browser_key_is_still_accepted_without_a_new_mode() {
-  let root = unique_tmpdir("legacy-keys-accepted");
-  for browser in LEGACY_BROWSERS {
-    let out = run_isolated(root.path(), &["--browser", browser]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-      !stderr.contains("invalid value") && !stderr.contains("only reachable through the registry"),
-      "legacy key {browser} was rejected: {stderr}"
-    );
-  }
-}
-
-#[test]
-fn a_registry_only_browser_without_report_points_at_report() {
-  let legacy: Vec<&str> = LEGACY_BROWSERS.to_vec();
-  let registry_only: Vec<String> = registered_tokens()
-    .into_iter()
-    .filter(|token| {
-      !(legacy.contains(&token.as_str())
-        || (legacy.contains(&"opera_gx") && matches!(token.as_str(), "opera gx" | "opera-gx")))
-    })
-    .collect();
-  if registry_only.is_empty() {
-    // Every registered ID on this platform is also a legacy key, so the
-    // registry-only rejection has nothing to reject here.
-    return;
-  }
-
-  for token in &registry_only {
-    let stderr = assert_usage_error(&run_rookie(&["--browser", token]), token);
-    assert!(
-      stderr.contains("--report"),
-      "{token}: diagnostic must point at --report: {stderr}"
-    );
-
-    // The same ID is accepted once a report mode is requested.
-    let root = unique_tmpdir("registry-only-report");
-    let out = run_isolated(root.path(), &["--report", "--browser", token]);
-    assert!(
-      out.status.success(),
-      "{token} was rejected in report mode: {}",
-      String::from_utf8_lossy(&out.stderr)
-    );
-  }
-}
-
-#[test]
-fn report_mode_rejects_ids_that_are_not_registered() {
-  let registered = registered_tokens();
-  let legacy_only: Vec<&&str> = LEGACY_BROWSERS
-    .iter()
-    .filter(|browser| !registered.iter().any(|token| token == *browser))
-    .collect();
-
-  let mut rejected: Vec<String> = vec!["nope".to_string()];
-  rejected.extend(legacy_only.iter().map(|browser| (**browser).to_string()));
-
-  for token in &rejected {
-    for args in [
-      &["--report", "--browser", token][..],
-      &["--list-profiles", "--browser", token][..],
-    ] {
-      let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
-      assert!(
-        stderr.contains("--list-browsers"),
-        "{args:?}: diagnostic must point at --list-browsers: {stderr}"
-      );
-    }
-  }
 }
 
 #[test]
 fn registry_only_browser_batch_is_reachable_when_registered() {
-  let registered = registered_tokens();
+  let registered = registered_browsers();
+  let ids: Vec<&str> = registered
+    .iter()
+    .map(|browser| browser["id"].as_str().expect("browser id"))
+    .collect();
   let root = unique_tmpdir("registry-only-batch");
   for browser in ["coccoc", "duckduckgo", "yandex"] {
-    if registered.iter().any(|token| token == browser) {
+    if ids.contains(&browser) {
       let report = parsed_json(&run_isolated(
         root.path(),
-        &["--report", "--browser", browser],
+        &["report", "--browser", browser],
       ));
       assert_eq!(report["status"], "no_sources", "{browser}");
     }
@@ -774,14 +457,14 @@ fn registry_only_browser_batch_is_reachable_when_registered() {
 }
 
 #[test]
-fn report_modes_keep_stdout_machine_readable_under_info_logging() {
+fn structured_subcommands_keep_stdout_machine_readable_under_info_logging() {
   let root = unique_tmpdir("report-logging");
   seed_multi_profile_firefox(root.path());
 
   for args in [
-    &["--list-browsers"][..],
-    &["--list-profiles", "--browser", "firefox"][..],
-    &["--report", "--browser", "firefox"][..],
+    &["browsers"][..],
+    &["profiles", "firefox"][..],
+    &["report", "--browser", "firefox"][..],
   ] {
     let out = isolated_command(root.path())
       .args(args)
@@ -803,17 +486,8 @@ fn report_modes_keep_stdout_machine_readable_under_info_logging() {
   }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
-fn legacy_opera_gx_aliases_remain_accepted() {
-  for selector in ["opera_gx", "opera-gx", "opera gx"] {
-    let out = run_rookie(&["--browser", selector]);
-    assert_ne!(out.status.code(), Some(USAGE_ERROR_EXIT_CODE), "{selector}");
-  }
-}
-
-#[test]
-fn version_still_wins_over_the_new_modes() {
+fn version_stays_exclusive_of_subcommands() {
   for args in [&["--version"][..], &["-v"][..]] {
     let out = run_rookie(args);
     assert!(out.status.success(), "{args:?}");
@@ -821,11 +495,16 @@ fn version_still_wins_over_the_new_modes() {
     assert!(stdout.contains("CLI: "), "{stdout}");
   }
 
-  // `--version` is exclusive, so pairing it with a new mode stays a usage error.
   assert_usage_error(
-    &run_rookie(&["--version", "--list-browsers"]),
-    "--version --list-browsers",
+    &run_rookie(&["--version", "browsers"]),
+    "--version browsers",
   );
+}
+
+#[test]
+fn no_arguments_is_a_usage_error_naming_the_subcommands() {
+  let stderr = assert_usage_error(&run_rookie(&[]), "no arguments");
+  assert!(stderr.contains("subcommand"), "{stderr}");
 }
 
 #[test]
@@ -846,31 +525,12 @@ fn profiles_subcommand_lists_json() {
 }
 
 #[test]
-fn report_subcommand_matches_flat_report_shape() {
-  let root = unique_tmpdir("job-report");
-  let via_sub = parsed_json(&run_isolated(root.path(), &["report", "chrome"]));
-  let via_flat = parsed_json(&run_isolated(
-    root.path(),
-    &["--report", "--browser", "chrome"],
-  ));
-  assert_eq!(via_sub["status"], via_flat["status"]);
-}
-
-#[test]
-fn subcommand_conflicts_with_top_level_report_flag() {
-  assert_usage_error(
-    &run_rookie(&["report", "chrome", "--report"]),
-    "report chrome --report",
-  );
-}
-
-#[test]
 fn from_path_subcommand_rejects_every_credential_selector_conflict() {
   for args in [
     &[
       "from-path",
       "missing.sqlite",
-      "--key-path",
+      "--local-state-path",
       "Local State",
       "--browser-id",
       "chrome",
@@ -878,7 +538,7 @@ fn from_path_subcommand_rejects_every_credential_selector_conflict() {
     &[
       "from-path",
       "missing.sqlite",
-      "--key-path",
+      "--local-state-path",
       "Local State",
       "--plaintext-only",
     ][..],
@@ -892,7 +552,7 @@ fn from_path_subcommand_rejects_every_credential_selector_conflict() {
     &[
       "from-path",
       "missing.sqlite",
-      "--key-path",
+      "--local-state-path",
       "Local State",
       "--browser-id",
       "chrome",
@@ -908,13 +568,134 @@ fn from_path_subcommand_rejects_every_credential_selector_conflict() {
 }
 
 #[test]
+fn from_path_detailed_format_rejects_domains() {
+  // This is a CLI-level dispatch rejection (a plain `io::Error`, printed and
+  // exited like every other typed error -- exit 1), not a clap declarative
+  // conflict: `--format`'s allowed values don't depend on `--domains`, so it
+  // can't be expressed with `conflicts_with`.
+  let out = run_rookie(&[
+    "from-path",
+    "missing.sqlite",
+    "--format",
+    "detailed",
+    "--domains",
+    "example.com",
+  ]);
+  assert_eq!(
+    out.status.code(),
+    Some(1),
+    "stdout={} stderr={}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  );
+  assert!(out.stdout.is_empty(), "rejected request wrote stdout");
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("detailed") && stderr.contains("--domains"),
+    "{stderr}"
+  );
+}
+
+#[test]
 fn header_subcommand_requires_browser() {
   let stderr = assert_usage_error(
-    &run_rookie(&["header", "https://example.com/"]),
+    &run_rookie(&["header", "--url", "https://example.com/"]),
     "header without -b",
   );
   assert!(
     stderr.contains("--browser") || stderr.contains("-b"),
     "{stderr}"
   );
+}
+
+#[test]
+fn read_select_all_is_a_request_error_not_a_usage_error() {
+  // `read`'s `ProfileSelection` has no "every profile" arm at all -- unlike
+  // `report`, `--select all` is rejected outright here, not only when
+  // combined with `--profile`.
+  let root = unique_tmpdir("read-select-all");
+  seed_multi_profile_firefox(root.path());
+
+  let out = run_isolated(
+    root.path(),
+    &["read", "--browser", "firefox", "--select", "all"],
+  );
+  assert_eq!(
+    out.status.code(),
+    Some(1),
+    "must be a typed core error (exit 1), not a clap usage error (exit 2): stderr={}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+  assert!(out.stdout.is_empty(), "rejected request wrote stdout");
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("profile and select"),
+    "missing conflicting_profile_selection diagnostic: {stderr}"
+  );
+}
+
+#[test]
+fn report_profile_and_select_all_conflict_is_a_request_error() {
+  let root = unique_tmpdir("report-select-all-conflict");
+  seed_multi_profile_firefox(root.path());
+
+  let out = run_isolated(
+    root.path(),
+    &[
+      "report",
+      "--browser",
+      "firefox",
+      "--profile",
+      "rookie-a",
+      "--select",
+      "all",
+    ],
+  );
+  assert_eq!(
+    out.status.code(),
+    Some(1),
+    "must be a typed core error (exit 1), not a clap usage error (exit 2): stderr={}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("profile and select"),
+    "missing conflicting_profile_selection diagnostic: {stderr}"
+  );
+}
+
+#[test]
+fn report_select_all_alone_stays_the_default_all_profiles_scope() {
+  // Unlike `read`, `--select all` alone (no `--profile`) is `report`'s
+  // default -- it must succeed exactly like omitting `--select` entirely.
+  let root = unique_tmpdir("report-select-all-ok");
+  seed_multi_profile_firefox(root.path());
+
+  let with_select = parsed_json(&run_isolated(
+    root.path(),
+    &["report", "--browser", "firefox", "--select", "all"],
+  ));
+  let without_select = parsed_json(&run_isolated(
+    root.path(),
+    &["report", "--browser", "firefox"],
+  ));
+  assert_eq!(
+    with_select["summary"]["profiles_discovered"],
+    without_select["summary"]["profiles_discovered"]
+  );
+  assert_eq!(
+    with_select["summary"]["profiles_discovered"], 2,
+    "{with_select}"
+  );
+}
+
+#[test]
+fn report_profile_and_select_require_browser() {
+  for args in [
+    &["report", "--profile", "x"][..],
+    &["report", "--select", "all"][..],
+  ] {
+    let stderr = assert_usage_error(&run_rookie(args), &format!("{args:?}"));
+    assert!(stderr.contains("--browser"), "{args:?}: {stderr}");
+  }
 }

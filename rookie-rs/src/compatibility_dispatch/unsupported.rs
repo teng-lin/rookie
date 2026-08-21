@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::bail;
 
 use super::LoadFn;
-use crate::{common::deadline::BoundaryRuntime, Cookie, Result};
+use crate::{common::deadline::BoundaryRuntime, Cookie};
+use anyhow::Result;
 
 pub(super) fn extend_legacy_load_browsers(_browser_types: &mut Vec<(&'static str, LoadFn)>) {}
 

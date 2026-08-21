@@ -2,15 +2,15 @@ use super::*;
 use crate::common::enums::SAME_SITE_UNSPECIFIED;
 use crate::compatibility_dispatch::named::{aggregate_load_failure, aggregate_load_results};
 
-fn not_installed(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+fn not_installed(_domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
   Err(browser::legacy::BrowserNotInstalled::CookieDatabase.into())
 }
 
-fn extraction_fails(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+fn extraction_fails(_domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
   Err(anyhow::anyhow!("cookie database is corrupt"))
 }
 
-fn always_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+fn always_ok(_domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
   Ok(vec![])
 }
 
@@ -20,9 +20,9 @@ fn zero_timeout_stops_extraction_before_any_browser_lookup() {
   // observing TimedOut instead of that error proves the deadline check
   // runs before browser resolution, matching browser_cookies_with_runtime's
   // own ordering.
-  let request = Request::browser("unknown-browser-id").timeout(std::time::Duration::ZERO);
+  let request = ExtractRequest::browser("unknown-browser-id").timeout(std::time::Duration::ZERO);
   let error = extract(request).expect_err("a zero timeout must stop before doing any work");
-  assert_eq!(stop_reason(&error), Some(StopReason::TimedOut));
+  assert_eq!(error.stop_reason(), Some(StopReason::TimedOut));
 }
 
 #[test]
@@ -31,9 +31,9 @@ fn a_cancelled_handle_stops_extraction_before_any_browser_lookup() {
   assert!(handle.cancel());
   assert!(handle.is_cancelled());
 
-  let request = Request::browser("unknown-browser-id").cancellation(handle);
+  let request = ExtractRequest::browser("unknown-browser-id").cancellation(handle);
   let error = extract(request).expect_err("a pre-cancelled handle must stop before doing any work");
-  assert_eq!(stop_reason(&error), Some(StopReason::Cancelled));
+  assert_eq!(error.stop_reason(), Some(StopReason::Cancelled));
 }
 
 #[test]
@@ -117,11 +117,11 @@ fn cancel_after_an_unrelated_timeout_still_records_and_returns_true() {
   // never touches the handle's own state, so a cancel() afterward is not
   // rejected as "too late", it just has nothing left to affect.
   let handle = CancellationHandle::new();
-  let request = Request::browser("unknown-browser-id")
+  let request = ExtractRequest::browser("unknown-browser-id")
     .timeout(std::time::Duration::ZERO)
     .cancellation(handle.clone());
   let error = extract(request).expect_err("a zero timeout must stop the request");
-  assert_eq!(stop_reason(&error), Some(StopReason::TimedOut));
+  assert_eq!(error.stop_reason(), Some(StopReason::TimedOut));
 
   assert!(
     handle.cancel(),
@@ -132,9 +132,11 @@ fn cancel_after_an_unrelated_timeout_still_records_and_returns_true() {
 
 #[test]
 fn stop_reason_is_none_for_an_ordinary_request_error() {
-  let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
-    .expect_err("an unknown browser id is a request error");
-  assert_eq!(stop_reason(&error), None);
+  let error = extract(ExtractRequest::browser(
+    "definitely-not-a-registered-browser-id",
+  ))
+  .expect_err("an unknown browser id is a request error");
+  assert_eq!(error.stop_reason(), None);
 }
 
 #[test]
@@ -144,17 +146,19 @@ fn fault_kind_classifies_a_typed_direct_path_error_as_a_request_fault() {
     .path()
     .join("no such parent directory")
     .join("missing");
-  let error = direct_path::cookies_from_path(direct_path::DirectPathRequest::new(&missing))
+  let error = direct_path::extract_from_path(direct_path::PathExtractRequest::sniff(&missing))
     .expect_err("a missing explicit source is a typed DirectPathError");
-  assert_eq!(fault_kind(&error), FaultKind::Request);
+  assert_eq!(error.fault_kind(), FaultKind::Request);
 }
 
 #[test]
 fn fault_kind_classifies_unknown_browser_on_extract_as_request() {
-  let error = extract(Request::browser("definitely-not-a-registered-browser-id"))
-    .expect_err("an unknown browser id is a request error");
-  assert_eq!(fault_kind(&error), FaultKind::Request);
-  assert!(error.downcast_ref::<RequestError>().is_some());
+  let error = extract(ExtractRequest::browser(
+    "definitely-not-a-registered-browser-id",
+  ))
+  .expect_err("an unknown browser id is a request error");
+  assert_eq!(error.fault_kind(), FaultKind::Request);
+  assert!(matches!(error, Error::Request(_)));
 }
 
 #[cfg(unix)]
@@ -217,14 +221,14 @@ fn registered_chromium_without_keychain_identity_is_plaintext_only() {
 
 /// `coccoc`/`yandex` are registered Chromium forks with no dedicated named
 /// function — unlike `chrome`, `brave`, and the rest, whose one hardcoded
-/// string can never name them. `browser`/`extract(Request::browser(..))`
+/// string can never name them. `browser`/`extract(ExtractRequest::browser(..))`
 /// must resolve them through the registry instead of reporting them as an
 /// unrecognized ID, the one failure mode a named function's fixed string
 /// structurally cannot produce.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
 fn public_browser_and_extract_reach_registry_only_browsers_no_named_function_can_name() {
-  fn assert_resolved_through_registry(browser_id: &str, error: &anyhow::Error) {
+  fn assert_resolved_through_registry(browser_id: &str, error: &dyn std::fmt::Display) {
     assert!(
       !error.to_string().contains("unknown browser id"),
       "{browser_id} must resolve through the registry rather than being unrecognized: {error}"
@@ -235,7 +239,7 @@ fn public_browser_and_extract_reach_registry_only_browsers_no_named_function_can
     if let Err(error) = browser(browser_id, None) {
       assert_resolved_through_registry(browser_id, &error);
     }
-    if let Err(error) = extract(Request::browser(browser_id)) {
+    if let Err(error) = extract(ExtractRequest::browser(browser_id)) {
       assert_resolved_through_registry(browser_id, &error);
     }
   }
@@ -379,20 +383,46 @@ fn selected_success_report(termination: &str) -> report::ExtractionReport {
 
 #[test]
 fn profile_scoped_flatten_returns_each_exact_typed_stop_despite_selected_cookies() {
-  for (termination, expected) in [
-    ("timed_out", StopReason::TimedOut),
-    ("cancelled", StopReason::Cancelled),
-    ("resource_exhausted", StopReason::ResourceExhausted),
+  use browser::outcome::Termination;
+  // The DTO string and the typed value are supplied separately on purpose: the
+  // fixture builds the wire report, and the flatten seam classifies from the
+  // enum. A mismatch here would be a bug in this test, not in the seam.
+  for (wire, termination, expected) in [
+    ("timed_out", Termination::TimedOut, StopReason::TimedOut),
+    ("cancelled", Termination::Cancelled, StopReason::Cancelled),
+    (
+      "resource_exhausted",
+      Termination::ResourceExhausted,
+      StopReason::ResourceExhausted,
+    ),
   ] {
-    let error = flatten_selected_report_cookies(selected_success_report(termination))
+    let error = flatten_selected_report_cookies(selected_success_report(wire), termination)
       .expect_err("profile-scoped flat APIs must not turn a stop into success");
-    assert_eq!(stop_reason(&error), Some(expected));
+    assert_eq!(anyhow_stop_reason(&error), Some(expected));
   }
 
-  let cookies = flatten_selected_report_cookies(selected_success_report("completed"))
-    .expect("a completed profile report still flattens selected cookies");
+  let cookies = flatten_selected_report_cookies(
+    selected_success_report("completed"),
+    browser::outcome::Termination::Completed,
+  )
+  .expect("a completed profile report still flattens selected cookies");
   assert_eq!(cookies.len(), 1);
   assert_eq!(cookies[0].name, "retained");
+}
+
+#[test]
+fn a_report_with_no_selected_success_is_the_typed_no_selected_source_code() {
+  // The flatten seam is the only producer of this code, and it used to be a
+  // bare `bail!` -- unrecoverable at the job edge without parsing prose.
+  let mut report = selected_success_report("completed");
+  for profile in &mut report.profiles {
+    for source in &mut profile.sources {
+      source.selected = false;
+    }
+  }
+  let error = flatten_selected_report_cookies(report, browser::outcome::Termination::Completed)
+    .expect_err("a report with nothing selected cannot flatten");
+  assert_eq!(Error::from(error).code(), "no_selected_source");
 }
 
 #[test]
@@ -473,7 +503,7 @@ fn profile_resolution_observes_stops_before_and_after_resolution() {
       },
     )
     .expect_err("a stop before resolution must win");
-    assert_eq!(stop_reason(&error), Some(pre_stop));
+    assert_eq!(anyhow_stop_reason(&error), Some(pre_stop));
     assert_eq!(resolutions.get(), 0);
     assert_eq!(extractions.get(), 0);
   }
@@ -501,15 +531,15 @@ fn profile_resolution_observes_stops_before_and_after_resolution() {
     },
   )
   .expect_err("cancellation after resolution must reach extraction");
-  assert_eq!(stop_reason(&error), Some(StopReason::Cancelled));
+  assert_eq!(anyhow_stop_reason(&error), Some(StopReason::Cancelled));
   assert_eq!(extractions.get(), 1);
 }
 
-fn first_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+fn first_ok(_domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
   Ok(vec![named_cookie("first")])
 }
 
-fn second_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
+fn second_ok(_domains: Option<Vec<String>>) -> anyhow::Result<Vec<Cookie>> {
   Ok(vec![named_cookie("second")])
 }
 
@@ -519,7 +549,7 @@ fn second_ok(_domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// `fan_out` leaves behind when nothing stops it -- so these drive exactly the
 /// rules the old `load_from_browsers` twin restated, but through the code
 /// `load` actually runs.
-fn aggregated(entries: Vec<(&str, Result<Vec<Cookie>>)>) -> Result<Vec<Cookie>> {
+fn aggregated(entries: Vec<(&str, anyhow::Result<Vec<Cookie>>)>) -> anyhow::Result<Vec<Cookie>> {
   let clock = common::deadline::SystemClock;
   let runtime = common::deadline::BoundaryRuntime::standard(&clock);
   let names: Vec<&str> = entries.iter().map(|(name, _)| *name).collect();
@@ -641,7 +671,7 @@ fn load_aggregation_keeps_cookies_from_an_in_flight_browser_after_the_shared_sto
 fn a_browser_error_carrying_a_stop_makes_it_typed_on_the_aggregate() {
   // Previously unreachable from a test: the twin never modelled a browser
   // whose own failure carries a `BoundaryStop`.
-  let stopped: Result<Vec<Cookie>> =
+  let stopped: anyhow::Result<Vec<Cookie>> =
     Err(anyhow::Error::new(common::deadline::BoundaryStop::TimedOut).context("chrome gave up"));
   let error = aggregated(vec![("chrome", stopped)]).expect_err("a stopped browser is a failure");
   assert_eq!(
@@ -841,7 +871,7 @@ fn test_chrome_resolves_network_cookies_on_unix() {
 
 /// Complements `public_browser_and_extract_reach_registry_only_browsers_no_named_function_can_name`
 /// (which only asserts on the error path) with a positive case: `browser`/
-/// `extract(Request::browser(..))` actually resolve and read cookies from
+/// `extract(ExtractRequest::browser(..))` actually resolve and read cookies from
 /// CocCoc, a registered Chromium fork with no dedicated named function.
 #[cfg(target_os = "macos")]
 #[test]
@@ -866,8 +896,8 @@ fn browser_and_extract_read_real_cookies_from_a_registry_only_browser() {
   assert_eq!(cookies[0].name, "coccoc_cookie");
   assert_eq!(cookies[0].value, "coccoc_val");
 
-  let cookies = extract(Request::browser("coccoc"))
-    .expect("extract(Request::browser(\"coccoc\")) should find and parse cookies");
+  let cookies = extract(ExtractRequest::browser("coccoc"))
+    .expect("extract(ExtractRequest::browser(\"coccoc\")) should find and parse cookies");
   assert_eq!(cookies.len(), 1, "expected 1 cookie, got {cookies:?}");
   assert_eq!(cookies[0].name, "coccoc_cookie");
   assert_eq!(cookies[0].value, "coccoc_val");

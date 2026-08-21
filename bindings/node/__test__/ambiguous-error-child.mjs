@@ -1,7 +1,7 @@
 import { browserReport } from "../index.js";
 
 try {
-  await browserReport("firefox", "shared");
+  await browserReport({ browserId: "firefox", profileId: "shared" });
   throw new Error("ambiguous profile unexpectedly succeeded");
 } catch (error) {
   process.stdout.write(JSON.stringify({

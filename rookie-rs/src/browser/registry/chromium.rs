@@ -850,7 +850,7 @@ pub(crate) struct ChromiumRegistryDraft {
 pub(super) fn extract_chromium_with_provider<F, P>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   provider: &P,
 ) -> Result<ChromiumRegistryDraft>
@@ -861,14 +861,14 @@ where
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
   extract_chromium_with_provider_runtime(
-    context, browser_id, profile_id, domains, provider, &runtime,
+    context, browser_id, selection, domains, provider, &runtime,
   )
 }
 
 fn extract_chromium_with_provider_runtime<F, P>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   provider: &P,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
@@ -878,12 +878,7 @@ where
   P: KeyProvider<BrowserInstallation, Keys = ChromiumKeyOutcomes>,
 {
   extract_chromium_with_provider_and_selection_runtime(
-    context,
-    browser_id,
-    ProfileSelection::from_profile_id(profile_id),
-    domains,
-    provider,
-    runtime,
+    context, browser_id, selection, domains, provider, runtime,
   )
 }
 
@@ -1394,17 +1389,17 @@ pub(crate) fn chromium_listing_with_runtime(
 /// Chromium-family browser.
 fn chromium_registry_report(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
 ) -> Result<ChromiumRegistryDraft> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  chromium_registry_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  chromium_registry_report_with_runtime(browser_id, selection, domains, &runtime)
 }
 
 pub(crate) fn chromium_registry_report_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<ChromiumRegistryDraft> {
@@ -1414,7 +1409,7 @@ pub(crate) fn chromium_registry_report_with_runtime(
   extract_chromium_with_provider_runtime(
     &context,
     browser_id,
-    profile_id,
+    selection,
     domains,
     &SystemKeyProvider,
     runtime,
@@ -1458,7 +1453,7 @@ fn chrome_profile(profile_id: &str, domains: Option<Vec<String>>) -> Result<Chro
   extract_chromium_with_provider(
     &context,
     "chrome",
-    Some(profile_id),
+    ProfileSelection::ProfileId(profile_id),
     domains,
     &SystemKeyProvider,
   )

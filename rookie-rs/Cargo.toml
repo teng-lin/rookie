@@ -61,6 +61,15 @@ appbound = []
 # of this crate -- the CLI, and the Python/Node bindings -- doesn't pull in
 # schemars and its transitive deps for a capability they never call.
 dto-schema = ["dep:schemars"]
+# End-to-end steering of the Windows App-Bound attempt order, used only by
+# `tests/e2e/run_windows_appbound_canary.ps1`. The canary must exercise the
+# elevated-DPAPI fallback in isolation, which no public `AppBoundPolicy` value
+# expresses (and should not: "skip the unprivileged attempt" is not something
+# a caller should be able to ask for). Off by default and never enabled in a
+# published build, so `ROOKIE_E2E_APPBOUND_MODE` cannot steer production. Even
+# when compiled in, it can only *narrow* what the request policy already
+# permits -- see `windows::appbound::narrow_for_tests`.
+e2e-appbound-steering = []
 
 [target.'cfg(unix)'.dependencies]
 aes = { version = "0.8", features = ["zeroize"] }

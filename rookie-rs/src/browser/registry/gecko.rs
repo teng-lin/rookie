@@ -387,14 +387,16 @@ pub(super) fn discover_gecko_with_context<F: DiscoveryFs>(
 pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
+  session: crate::SessionPolicy,
 ) -> Result<EngineExtract> {
   gecko_report_with_query(
     context,
     browser_id,
-    profile_id,
+    selection,
     domains,
+    session,
     mozilla::acquire_candidate_source,
   )
 }
@@ -407,22 +409,23 @@ pub(super) fn gecko_report_with_context<F: DiscoveryFs>(
 fn gecko_report_with_query<F: DiscoveryFs, Q>(
   context: &DiscoveryContext<F>,
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<&[String]>,
+  session: crate::SessionPolicy,
   query: Q,
 ) -> Result<EngineExtract>
 where
   Q: FnMut(&SourceCandidate, Option<&[String]>) -> mozilla::MozillaCandidateOutcome,
 {
   let mut listing = gecko_profiles_with_context(context, browser_id)?;
-  select_listing_profiles(
-    &mut listing,
-    browser_id,
-    ProfileSelection::from_profile_id(profile_id),
-  )?;
-  Ok(populate_gecko_sources(listing, domains, query, |path| {
-    context.fs.exists(path)
-  }))
+  select_listing_profiles(&mut listing, browser_id, selection)?;
+  Ok(populate_gecko_sources(
+    listing,
+    domains,
+    session,
+    query,
+    |path| context.fs.exists(path),
+  ))
 }
 
 /// The persistent probe for a profile whose listing planted no persistent
@@ -459,21 +462,26 @@ fn persistent_probe_candidate(identity: &EngineProfileIdentity) -> SourceCandida
 /// order `gecko_report_with_race` relies on to fire its hook once per profile.
 /// Building the plan explicitly rather than executing the listing's `Vec`
 /// as-is keeps that pinned to one line here.
+/// `session` is enforced **here**, in the plan, rather than on the results:
+/// under `PersistentOnly` the session alternation is simply not planned, so
+/// `acquire_by_policy` never opens `sessionstore.js` or `recovery.jsonlz4`.
+/// Filtering session cookies out afterwards would return the same list having
+/// already read the files the caller excluded.
 fn gecko_profile_plan(
   identity: &EngineProfileIdentity,
   candidates: Vec<SourceCandidate>,
+  session: crate::SessionPolicy,
 ) -> Vec<SourceCandidate> {
   let probe = candidates
     .iter()
     .find(|candidate| candidate.policy == AcquisitionPolicy::Probe)
     .cloned()
     .unwrap_or_else(|| persistent_probe_candidate(identity));
+  let include_session = session == crate::SessionPolicy::IncludeSession;
   std::iter::once(probe)
-    .chain(
-      candidates
-        .into_iter()
-        .filter(|candidate| candidate.policy == AcquisitionPolicy::FirstValid),
-    )
+    .chain(candidates.into_iter().filter(move |candidate| {
+      include_session && candidate.policy == AcquisitionPolicy::FirstValid
+    }))
     .collect()
 }
 
@@ -502,6 +510,7 @@ fn gecko_profile_plan(
 pub(super) fn populate_gecko_sources<Q, E>(
   listing: EngineListing,
   domains: Option<&[String]>,
+  session: crate::SessionPolicy,
   mut query: Q,
   mut persistent_exists: E,
 ) -> EngineExtract
@@ -514,7 +523,7 @@ where
     ExtractCompletion::RetainAttempted,
     |identity, candidates| {
       acquire_by_policy(
-        &gecko_profile_plan(identity, candidates),
+        &gecko_profile_plan(identity, candidates, session),
         domains,
         &mut query,
         &mut persistent_exists,
@@ -525,18 +534,25 @@ where
 
 fn gecko_report(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
 ) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  gecko_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  gecko_report_with_runtime(
+    browser_id,
+    selection,
+    domains,
+    crate::SessionPolicy::IncludeSession,
+    &runtime,
+  )
 }
 
 pub(crate) fn gecko_report_with_runtime(
   browser_id: &str,
-  profile_id: Option<&str>,
+  selection: ProfileSelection<'_>,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<EngineExtract> {
   runtime.check()?;
@@ -545,8 +561,9 @@ pub(crate) fn gecko_report_with_runtime(
   let extract = gecko_report_with_query(
     &context,
     browser_id,
-    profile_id,
+    selection,
     domains.as_deref(),
+    session,
     |candidate, domains| {
       mozilla::acquire_candidate_source_with_runtime(candidate, domains, runtime)
     },
@@ -589,12 +606,18 @@ fn select_legacy_gecko_profile(listing: &mut EngineListing) {
 fn legacy_gecko_outcome(browser_id: &str, domains: Option<Vec<String>>) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  legacy_gecko_outcome_with_runtime(browser_id, domains, &runtime)
+  legacy_gecko_outcome_with_runtime(
+    browser_id,
+    domains,
+    crate::SessionPolicy::PersistentOnly,
+    &runtime,
+  )
 }
 
 pub(crate) fn legacy_gecko_outcome_with_runtime(
   browser_id: &str,
   domains: Option<Vec<String>>,
+  session: crate::SessionPolicy,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<EngineExtract> {
   runtime.check()?;
@@ -602,9 +625,13 @@ pub(crate) fn legacy_gecko_outcome_with_runtime(
   runtime.check()?;
   let mut listing = gecko_profiles_with_context(&context, browser_id)?;
   select_legacy_gecko_profile(&mut listing);
+  // The legacy selector keeps only profiles with a persistent source, so the
+  // chosen profile is unaffected by `session`. What `session` decides is
+  // whether that profile's declared session store is also planned.
   let extract = populate_gecko_sources(
     listing,
     domains.as_deref(),
+    session,
     |candidate, domains| {
       mozilla::acquire_candidate_source_with_runtime(candidate, domains, runtime)
     },
@@ -1160,6 +1187,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         if !created {
           created = true;
@@ -1201,6 +1229,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         if !created {
           created = true;
@@ -1234,10 +1263,13 @@ mod tests {
     .expect("write profiles.ini");
 
     let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
-    let report =
-      populate_gecko_sources(discovery, None, mozilla::acquire_candidate_source, |path| {
-        path.exists()
-      });
+    let report = populate_gecko_sources(
+      discovery,
+      None,
+      crate::SessionPolicy::IncludeSession,
+      mozilla::acquire_candidate_source,
+      |path| path.exists(),
+    );
     assert!(!report.profiles[0]
       .sources
       .iter()
@@ -1263,6 +1295,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         if !removed {
           removed = true;
@@ -1328,6 +1361,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         // The persistent DB never existed; the race is on the session file,
         // which we remove right before the engine would read it.
@@ -1390,6 +1424,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         read.push(candidate.path.clone());
         mozilla::acquire_candidate_source(candidate, domains)
@@ -1447,6 +1482,7 @@ mod tests {
     populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         read.push(candidate.path.clone());
         mozilla::acquire_candidate_source(candidate, domains)
@@ -1460,6 +1496,120 @@ mod tests {
         profile_path.join(GECKO_PERSISTENT_SOURCE),
         profile_path.join("sessionstore-backups/recovery.jsonlz4"),
       ]
+    );
+  }
+
+  /// The legacy-first route reaches the session store too, when asked.
+  ///
+  /// This is the capability 0.6-beta could not express: session cookies were
+  /// reachable only by naming a profile, and naming one always took them. The
+  /// *profile* selector is unchanged -- legacy-first still requires a
+  /// persistent source -- so what `IncludeSession` adds is that profile's
+  /// declared session store, and nothing else.
+  #[test]
+  fn the_legacy_first_profile_can_include_its_session_store() {
+    let temp = TempDir::new("gecko-legacy-first-session");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/default");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    seed_empty_gecko_database(&profile);
+    let session_store = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(&session_store, b"present").expect("write session candidate");
+    // Discovery publishes canonicalized paths (`/private/var/...` on macOS),
+    // so compare by suffix rather than against the fixture path.
+    let session_suffix = std::path::Path::new("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=default\nPath=Profiles/default\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let read_paths = |session| -> Vec<std::path::PathBuf> {
+      let mut listing = gecko_profiles_with_context(&context, "firefox").expect("discover");
+      select_legacy_gecko_profile(&mut listing);
+      let mut read = Vec::new();
+      populate_gecko_sources(
+        listing,
+        None,
+        session,
+        |candidate, domains| {
+          read.push(candidate.path.clone());
+          mozilla::acquire_candidate_source(candidate, domains)
+        },
+        |path| context.fs.exists(path),
+      );
+      read
+    };
+
+    let opened_session = |session| {
+      read_paths(session)
+        .iter()
+        .any(|path| path.ends_with(session_suffix))
+    };
+    assert!(
+      !opened_session(crate::SessionPolicy::PersistentOnly),
+      "the default policy must not open the session store"
+    );
+    assert!(
+      opened_session(crate::SessionPolicy::IncludeSession),
+      "include_session must reach the legacy-first profile's session store"
+    );
+  }
+
+  /// `SessionPolicy::PersistentOnly` is enforced in the **plan**, so the
+  /// session store is never opened at all.
+  ///
+  /// This is the load-bearing assertion for the policy. A test that only
+  /// checked "no session cookies came back" would pass against a
+  /// project-then-drop implementation, which would still have read
+  /// `recovery.jsonlz4` -- a file the caller explicitly asked the crate not to
+  /// touch. Recording every path the acquisition callback is handed is what
+  /// distinguishes the two.
+  #[test]
+  fn persistent_only_never_hands_a_session_candidate_to_acquisition() {
+    let temp = TempDir::new("gecko-populate-persistent-only");
+    let context = current_context(temp.path().to_path_buf());
+    let root = gecko_test_root(&context);
+    let profile = root.join("Profiles/session-only");
+    std::fs::create_dir_all(profile.join("sessionstore-backups")).expect("create profile");
+    let session_store = profile.join("sessionstore-backups/recovery.jsonlz4");
+    std::fs::write(&session_store, b"present but must not be read")
+      .expect("write session candidate");
+    std::fs::write(
+      root.join("profiles.ini"),
+      "[Profile0]\nName=session\nPath=Profiles/session-only\nDefault=1\n",
+    )
+    .expect("write profiles.ini");
+
+    let discovery = gecko_profiles_with_context(&context, "firefox").expect("discover profile");
+    assert_eq!(
+      discovery.profiles[0].candidates.len(),
+      1,
+      "the fixture must actually plant a session candidate, or this proves nothing"
+    );
+    let profile_path = discovery.profiles[0].identity.path.clone();
+
+    let mut read = Vec::new();
+    populate_gecko_sources(
+      discovery,
+      None,
+      crate::SessionPolicy::PersistentOnly,
+      |candidate, domains| {
+        read.push(candidate.path.clone());
+        mozilla::acquire_candidate_source(candidate, domains)
+      },
+      |path| path.exists(),
+    );
+
+    assert_eq!(
+      read,
+      [profile_path.join(GECKO_PERSISTENT_SOURCE)],
+      "the session store must never reach acquisition under PersistentOnly"
+    );
+    assert!(
+      !read.contains(&session_store),
+      "sessionstore-backups/recovery.jsonlz4 was opened despite PersistentOnly"
     );
   }
 
@@ -1507,6 +1657,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         if candidate.role == CookieSourceRoleId::session() {
           session_reads += 1;
@@ -1619,7 +1770,14 @@ mod tests {
     )
     .expect("write valid session candidate");
 
-    let report = gecko_report_with_context(&context, "firefox", None, None).expect("report");
+    let report = gecko_report_with_context(
+      &context,
+      "firefox",
+      ProfileSelection::AllProfiles,
+      None,
+      crate::SessionPolicy::IncludeSession,
+    )
+    .expect("report");
     assert!(report.discovery_issues.is_empty());
     assert_eq!(report.profiles.len(), 1);
     let sources = &report.profiles[0].sources;
@@ -1672,7 +1830,14 @@ mod tests {
     )
     .expect("write profiles.ini");
 
-    let all = gecko_report_with_context(&context, "firefox", None, None).expect("full report");
+    let all = gecko_report_with_context(
+      &context,
+      "firefox",
+      ProfileSelection::AllProfiles,
+      None,
+      crate::SessionPolicy::IncludeSession,
+    )
+    .expect("full report");
     assert_eq!(all.profiles.len(), 2);
     // Deliberately not the first profile: reading only the first one would
     // otherwise pass for the wrong reason.
@@ -1683,8 +1848,9 @@ mod tests {
     let one = gecko_report_with_query(
       &context,
       "firefox",
-      Some(selected.as_str()),
+      ProfileSelection::ProfileId(selected.as_str()),
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         read.push(candidate.path.clone());
         mozilla::acquire_candidate_source(candidate, domains)
@@ -1702,8 +1868,14 @@ mod tests {
       all.counters.installations_discovered
     );
 
-    let unknown = gecko_report_with_context(&context, "firefox", Some("not-a-profile"), None)
-      .expect_err("an unknown profile id is a request error");
+    let unknown = gecko_report_with_context(
+      &context,
+      "firefox",
+      ProfileSelection::ProfileId("not-a-profile"),
+      None,
+      crate::SessionPolicy::IncludeSession,
+    )
+    .expect_err("an unknown profile id is a request error");
     assert!(unknown.to_string().contains("unknown firefox profile id"));
   }
 
@@ -1739,6 +1911,7 @@ mod tests {
     let outcome = populate_gecko_sources(
       outcome,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         read.push(candidate.path.clone());
         mozilla::acquire_candidate_source(candidate, domains)
@@ -1868,6 +2041,7 @@ mod tests {
     let report = populate_gecko_sources(
       discovery,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, domains| {
         if !created {
           created = true;
@@ -1996,6 +2170,7 @@ mod tests {
     let populated = populate_gecko_sources(
       discovered,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, _| {
         // A source the walk committed without spending an attempt: exactly
         // what `retain_completed_engine_extract` exists to drop. Emitting it
@@ -2083,6 +2258,7 @@ mod tests {
     let populated = populate_gecko_sources(
       discovered,
       None,
+      crate::SessionPolicy::IncludeSession,
       |candidate, _| {
         let call = calls.get();
         calls.set(call + 1);
@@ -2322,8 +2498,14 @@ mod tests {
     )
     .expect("write session candidate");
 
-    let report =
-      gecko_report_with_context(&context, "firefox", None, None).expect("session-only report");
+    let report = gecko_report_with_context(
+      &context,
+      "firefox",
+      ProfileSelection::AllProfiles,
+      None,
+      crate::SessionPolicy::IncludeSession,
+    )
+    .expect("session-only report");
     assert_eq!(report.profiles.len(), 1);
     let sources = &report.profiles[0].sources;
     // A profile with no cookies.sqlite must not fabricate a failed persistent

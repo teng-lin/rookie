@@ -6,6 +6,7 @@
 
 use super::{engine_compatibility_family, BrowserDraft, BrowserListing};
 use crate::browser::outcome::Termination;
+use crate::browser::registry;
 use crate::browser::report_core::BrowserId;
 use crate::common::deadline::BoundaryRuntime;
 use anyhow::Result;
@@ -29,7 +30,7 @@ pub(super) fn remaining_engine_extraction(
   browser_id: &BrowserId,
   canonical_id: &str,
   engine: &str,
-  profile_id: Option<&str>,
+  selection: registry::ProfileSelection<'_>,
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<BrowserDraft> {
@@ -37,7 +38,7 @@ pub(super) fn remaining_engine_extraction(
     browser_id,
     canonical_id,
     engine,
-    profile_id,
+    selection,
     domains,
     runtime,
   )

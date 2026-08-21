@@ -318,9 +318,7 @@ fn unknown_profile_ids_are_request_errors() {
     error.to_string().contains("no chrome profile matches"),
     "unexpected message: {error:#}"
   );
-  assert!(error
-    .downcast_ref::<rookie_cookies::RequestError>()
-    .is_some());
+  assert!(matches!(error, rookie_cookies::Error::Request(_)));
 
   // Listing stores canonicalized paths (`/private/var/...` on macOS). Query
   // with the path the listing itself published — that is the Path-eq key.
@@ -356,8 +354,9 @@ fn unknown_profile_ids_are_request_errors() {
 fn extract_report_without_profile_matches_browser_report() {
   let _home = seeded_chrome("extract-report-eq");
   let via_report = rookie_cookies::browser_report("chrome", None, None).expect("report");
-  let via_extract = rookie_cookies::extract_report(rookie_cookies::Request::browser("chrome"))
-    .expect("extract_report");
+  let via_extract =
+    rookie_cookies::extract_report(rookie_cookies::ReportRequest::browser("chrome"))
+      .expect("extract_report");
   assert_eq!(via_report.status, via_extract.status);
   assert_eq!(via_report.profiles.len(), via_extract.profiles.len());
   assert_eq!(
@@ -380,7 +379,7 @@ fn no_profile_extract_matches_chrome() {
   let _home = seeded_chrome("extract-eq-chrome");
   let via_chrome = rookie_cookies::chrome(None).expect("chrome");
   let via_extract =
-    rookie_cookies::extract(rookie_cookies::Request::browser("chrome")).expect("extract");
+    rookie_cookies::extract(rookie_cookies::ExtractRequest::browser("chrome")).expect("extract");
   let mut chrome_keys: Vec<_> = via_chrome.iter().map(cookie_key).collect();
   let mut extract_keys: Vec<_> = via_extract.iter().map(cookie_key).collect();
   chrome_keys.sort();
@@ -808,4 +807,390 @@ fn a_detected_installation_whose_roots_all_fail_reports_failed() {
     !error_issues(&report).is_empty(),
     "a failed report must say why"
   );
+}
+
+/// Seeds a Chromium profile whose one cookie is CHIPS-partitioned.
+///
+/// The `top_frame_site_key` column is optional in the Chromium schema, so a
+/// fixture that omits it cannot tell a snapshot that preserves isolation from
+/// one that discards it.
+fn seed_partitioned_chromium_profile(root: &Path, profile: &str, partition: &str) {
+  let database = root.join(profile).join("Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '24');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL,
+        path TEXT NOT NULL,
+        is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL,
+        is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL,
+        top_frame_site_key TEXT NOT NULL,
+        has_cross_site_ancestor INTEGER NOT NULL
+      );",
+    )
+    .expect("create cookies table");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'chips', 'partitioned', ?1, 0, 0, ?2, 1)",
+      rusqlite::params![Vec::<u8>::new(), partition],
+    )
+    .expect("insert partitioned cookie");
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+}
+
+/// The load-bearing snapshot-seam test.
+///
+/// A profile-scoped `read` used to route through the report builder, whose DTO
+/// carries the eight-field `Cookie` — so isolation was already gone before the
+/// job could return it. A test that only covered the no-profile path passes
+/// against that broken implementation, because the legacy route never went
+/// through the report at all. This one asserts the `Query` path.
+#[test]
+fn a_profile_scoped_snapshot_keeps_the_partition_key() {
+  let home = SyntheticHome::new("snapshot-isolation");
+  seed_partitioned_chromium_profile(&home.chrome_root(), "Default", "https://top.example");
+
+  let profiles = rookie_cookies::browser_profiles("chrome").expect("listed seeded chrome");
+  let profile_id = profiles
+    .iter()
+    .find(|profile| profile.profile.path.ends_with("Default"))
+    .expect("seeded Default profile")
+    .profile
+    .profile_id
+    .to_string();
+
+  let snapshot = rookie_cookies::read(
+    rookie_cookies::ReadRequest::browser("chrome")
+      .profile(&profile_id)
+      .include_expired(true),
+  )
+  .expect("profile-scoped snapshot");
+
+  assert_eq!(snapshot.profile_id(), Some(profile_id.as_str()));
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|detailed| detailed.cookie.name == "chips")
+    .expect("the seeded partitioned cookie");
+  assert_eq!(
+    detailed.context.top_frame_site_key.as_deref(),
+    Some("https://top.example"),
+    "a profile-scoped snapshot must not lose the CHIPS partition key"
+  );
+  assert_eq!(detailed.context.has_cross_site_ancestor, Some(true));
+  assert_ne!(
+    detailed.context,
+    rookie_cookies::enums::CookieContext::default(),
+    "a default context is exactly what the report route produced"
+  );
+
+  // The eight-field projection is still there, and still discards isolation.
+  assert!(snapshot
+    .cookies()
+    .iter()
+    .any(|cookie| cookie.name == "chips"));
+}
+
+#[test]
+fn a_legacy_first_snapshot_keeps_the_partition_key_too() {
+  let home = SyntheticHome::new("snapshot-isolation-legacy");
+  seed_partitioned_chromium_profile(&home.chrome_root(), "Default", "https://top.example");
+
+  let snapshot =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("legacy-first snapshot");
+  assert_eq!(snapshot.browser_id(), Some("chrome"));
+  assert_eq!(snapshot.profile_id(), None);
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|detailed| detailed.cookie.name == "chips")
+    .expect("the seeded partitioned cookie");
+  assert_eq!(
+    detailed.context.top_frame_site_key.as_deref(),
+    Some("https://top.example")
+  );
+}
+
+#[test]
+fn a_direct_path_snapshot_keeps_isolation_and_has_no_browser_id() {
+  let home = SyntheticHome::new("snapshot-isolation-path");
+  let root = home.chrome_root();
+  seed_partitioned_chromium_profile(&root, "Default", "https://top.example");
+
+  let snapshot = rookie_cookies::from_path(
+    rookie_cookies::FromPathRequest::new(root.join("Default/Network/Cookies"))
+      .chromium_credentials(rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly)
+      .include_expired(true),
+  )
+  .expect("direct-path snapshot");
+
+  assert_eq!(
+    snapshot.browser_id(),
+    None,
+    "from_path does not pass through browser discovery"
+  );
+  assert_eq!(snapshot.profile_id(), None);
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|detailed| detailed.cookie.name == "chips")
+    .expect("the seeded partitioned cookie");
+  assert_eq!(
+    detailed.context.top_frame_site_key.as_deref(),
+    Some("https://top.example")
+  );
+}
+
+/// A7: a row whose required host identity did not survive decode is omitted
+/// from the inventory and counted, rather than emitted as `domain: ""`.
+#[test]
+fn a_row_with_an_empty_host_is_omitted_with_its_own_warning() {
+  let home = SyntheticHome::new("snapshot-malformed-host");
+  let root = home.chrome_root();
+  let database = root.join("Default/Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '23');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL
+      );",
+    )
+    .expect("create cookies table");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('', '/', 0, 0, 'hostless', 'value', ?1, 0, 0)",
+      rusqlite::params![Vec::<u8>::new()],
+    )
+    .expect("insert hostless cookie");
+  connection
+    .execute(
+      "INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'kept', 'value', ?1, 0, 0)",
+      rusqlite::params![Vec::<u8>::new()],
+    )
+    .expect("insert well-formed cookie");
+  drop(connection);
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+
+  let snapshot =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("snapshot");
+  assert!(
+    snapshot
+      .cookies()
+      .iter()
+      .all(|cookie| !cookie.domain.is_empty()),
+    "a malformed host must never reach the inventory as an empty domain"
+  );
+  assert!(snapshot
+    .cookies()
+    .iter()
+    .any(|cookie| cookie.name == "kept"));
+  let warning = snapshot
+    .warnings()
+    .iter()
+    .find(|warning| warning.code() == "malformed_host_identity")
+    .expect("the omission is counted, not silent");
+  assert_eq!(warning.count(), 1);
+}
+
+/// PR 5's agreement test: one target, two shapes, the same profile.
+///
+/// 0.6-beta could not state this. One `Request` value meant "the first
+/// legacy-eligible profile" to `extract` and "every profile" to
+/// `extract_report`, so the two calls below would have described different
+/// profile sets while looking identical.
+#[test]
+fn an_extract_request_narrows_to_a_report_of_the_same_profile() {
+  let _home = seeded_chrome("extract-to-report");
+
+  let extract_request = rookie_cookies::ExtractRequest::browser("chrome");
+  let report =
+    rookie_cookies::extract_report(rookie_cookies::ReportRequest::from(extract_request.clone()))
+      .expect("narrowed report");
+  assert_eq!(
+    report.profiles.len(),
+    1,
+    "converting an extract request narrows to its one profile, never widens to all"
+  );
+
+  // ...and the report of the same browser without a conversion is still all
+  // profiles, which is what `browser_report(id, None, ..)` has always meant.
+  let all = rookie_cookies::extract_report(rookie_cookies::ReportRequest::browser("chrome"))
+    .expect("all-profiles report");
+  assert_eq!(all.profiles.len(), 2);
+
+  let flat = rookie_cookies::extract(extract_request).expect("flat extract");
+  assert!(!flat.is_empty());
+}
+
+#[test]
+fn an_empty_browser_id_is_missing_browser_on_every_browser_job() {
+  for code in [
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser(""))
+      .expect_err("read")
+      .code(),
+    rookie_cookies::extract(rookie_cookies::ExtractRequest::browser(""))
+      .expect_err("extract")
+      .code(),
+    rookie_cookies::extract_report(rookie_cookies::ReportRequest::browser(""))
+      .expect_err("extract_report")
+      .code(),
+  ] {
+    assert_eq!(code, "missing_browser");
+  }
+}
+
+/// A snapshot has nowhere to put "every source failed", so it must not answer
+/// that with an empty list.
+///
+/// The route this replaced (`flatten_selected_report_cookies`) made the same
+/// distinction; losing it here would turn a total failure into a silent
+/// success on the path the migration guide recommends.
+#[test]
+fn a_profile_whose_only_source_fails_is_an_error_not_an_empty_snapshot() {
+  let home = SyntheticHome::new("snapshot-total-failure");
+  let root = home.chrome_root();
+  seed_chromium_profile(&root, "Default", "session", "value");
+
+  // Corrupt the database after discovery has a valid file to find, so the
+  // profile is discovered and its one selected source then fails to read.
+  let database = root.join("Default/Network/Cookies");
+  let profiles = rookie_cookies::browser_profiles("chrome").expect("listed seeded chrome");
+  let profile_id = profiles
+    .iter()
+    .find(|profile| profile.profile.path.ends_with("Default"))
+    .expect("seeded Default profile")
+    .profile
+    .profile_id
+    .to_string();
+  std::fs::write(&database, b"SQLite format 3\0definitely not a database")
+    .expect("corrupt the seeded database");
+
+  let error =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser("chrome").profile(&profile_id))
+      .expect_err("a snapshot cannot report a total failure as an empty list");
+  assert!(
+    matches!(error, rookie_cookies::Error::Engine(_)),
+    "expected an engine failure, got {error:?}"
+  );
+  assert!(
+    matches!(error.code(), "no_selected_source" | "no_discovered_source"),
+    "unexpected code {}",
+    error.code()
+  );
+}
+
+/// A7 reaches the report too, as a source issue rather than a warning.
+///
+/// A report has a channel for the loss; `extract` inherits the omission and
+/// not the count, because a bare `Vec<Cookie>` has nowhere to put it. Both are
+/// better than emitting `domain: ""`, which matches nothing and belongs to no
+/// site.
+#[test]
+fn a_report_omits_an_empty_host_row_and_records_it_as_a_source_issue() {
+  let home = SyntheticHome::new("report-malformed-host");
+  let root = home.chrome_root();
+  let database = root.join("Default/Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '23');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL
+      );
+      INSERT INTO cookies VALUES ('', '/', 0, 0, 'hostless', 'v', X'', 0, 0);
+      INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'kept', 'v', X'', 0, 0);",
+    )
+    .expect("seed cookies");
+  drop(connection);
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+
+  let report =
+    rookie_cookies::browser_report("chrome", None, None).expect("report the seeded profile");
+  let source = report
+    .profiles
+    .iter()
+    .flat_map(|profile| profile.sources.iter())
+    .find(|source| source.cookies.iter().any(|cookie| cookie.name == "kept"))
+    .expect("the seeded source");
+  assert!(
+    source
+      .cookies
+      .iter()
+      .all(|cookie| !cookie.domain.is_empty()),
+    "a malformed host must never reach the report as an empty domain"
+  );
+  let issue = source
+    .issues
+    .iter()
+    .find(|issue| issue.code.as_str() == "malformed_host_identity")
+    .expect("the omission is recorded, not silent");
+  assert_eq!(issue.occurrences, 1);
+
+  // A7 omits the row at projection time, after the engine already counted it
+  // as emitted, so the counters have to be reconciled or the invariant the
+  // schema promises silently breaks on exactly the sources this feature
+  // touches.
+  assert_eq!(
+    source.stats.cookies_emitted as usize,
+    source.cookies.len(),
+    "cookies_emitted must match the rows that survived the omission"
+  );
+  assert!(source.stats.rows_seen >= source.stats.rows_skipped);
+  assert_eq!(
+    source.stats.rows_seen - source.stats.rows_skipped,
+    source.stats.cookies_emitted,
+    "rows_seen - rows_skipped == cookies_emitted"
+  );
+  assert!(
+    source.stats.rows_rejected >= 1,
+    "a host that did not survive decode is a rejected row"
+  );
+
+  let profile = report
+    .profiles
+    .iter()
+    .find(|profile| {
+      profile
+        .sources
+        .iter()
+        .any(|source| source.cookies.iter().any(|cookie| cookie.name == "kept"))
+    })
+    .expect("the seeded profile");
+  assert!(profile.stats.rows_seen >= profile.stats.rows_skipped);
+  assert_eq!(
+    profile.stats.rows_seen - profile.stats.rows_skipped,
+    profile.stats.cookies_emitted,
+    "the profile aggregate inherits the reconciled source counters"
+  );
+
+  // `extract` flattens the same projection: same omission, no channel to
+  // report the count through.
+  let flat = rookie_cookies::extract(rookie_cookies::ExtractRequest::browser("chrome"))
+    .expect("flat extract");
+  assert!(flat.iter().all(|cookie| !cookie.domain.is_empty()));
+  assert!(flat.iter().any(|cookie| cookie.name == "kept"));
 }

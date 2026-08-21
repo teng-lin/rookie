@@ -252,9 +252,15 @@ fn provider_consuming_the_request_budget_prevents_profile_acquisition() {
     clock: &clock,
     calls: Cell::new(0),
   };
-  let report =
-    extract_chromium_with_provider_runtime(&context, "chrome", None, None, &provider, &runtime)
-      .expect("typed stop is retained in the draft");
+  let report = extract_chromium_with_provider_runtime(
+    &context,
+    "chrome",
+    ProfileSelection::AllProfiles,
+    None,
+    &provider,
+    &runtime,
+  )
+  .expect("typed stop is retained in the draft");
 
   assert_eq!(provider.calls.get(), 1);
   assert_eq!(report.boundary_stop, Some(BoundaryStop::TimedOut));
@@ -571,7 +577,7 @@ fn packaging_variants_extract_plaintext_cookies_on_each_claimed_os() {
     let report = extract_chromium_with_provider(
       context,
       browser_id,
-      None,
+      ProfileSelection::AllProfiles,
       None,
       &CountingProvider::default(),
     )
@@ -779,9 +785,14 @@ fn macos_missing_key_configuration_surfaces_as_row_issue_not_silent_empty() {
       .expect("store an encrypted cookie value");
     drop(connection);
 
-    let report =
-      extract_chromium_with_provider(&context, browser_id, None, None, &SystemKeyProvider)
-        .expect("a missing keychain identity is a per-profile error, not a discovery failure");
+    let report = extract_chromium_with_provider(
+      &context,
+      browser_id,
+      ProfileSelection::AllProfiles,
+      None,
+      &SystemKeyProvider,
+    )
+    .expect("a missing keychain identity is a per-profile error, not a discovery failure");
 
     let profiles = report
       .installations
@@ -1414,7 +1425,7 @@ fn failed_wildcard_only_root_makes_listing_fail_but_report_keeps_issue() {
   let report = extract_chromium_with_provider(
     &context,
     "octo_browser",
-    None,
+    ProfileSelection::AllProfiles,
     None,
     &CountingProvider::default(),
   )
@@ -1826,8 +1837,14 @@ fn report_keeps_profiles_separate_continues_after_failure_and_fetches_keys_once(
   );
   let provider = CountingProvider::default();
 
-  let report = extract_chromium_with_provider(&context, "chrome", None, None, &provider)
-    .expect("extract report");
+  let report = extract_chromium_with_provider(
+    &context,
+    "chrome",
+    ProfileSelection::AllProfiles,
+    None,
+    &provider,
+  )
+  .expect("extract report");
   assert_eq!(report.installations.len(), 1);
   let profiles = &report.installations[0].profiles;
   assert_eq!(profiles.len(), 3);
@@ -1909,8 +1926,14 @@ fn generic_extraction_fetches_keys_once_for_each_selected_installation() {
   }
   let provider = CountingProvider::default();
 
-  let report = extract_chromium_with_provider(&context, "chrome", None, None, &provider)
-    .expect("extract both Chrome installations");
+  let report = extract_chromium_with_provider(
+    &context,
+    "chrome",
+    ProfileSelection::AllProfiles,
+    None,
+    &provider,
+  )
+  .expect("extract both Chrome installations");
   assert_eq!(report.installations.len(), 2);
   let calls = provider.calls.borrow();
   assert_eq!(calls.len(), 2);
@@ -1938,9 +1961,14 @@ fn report_preserves_partial_row_stats_and_issues() {
     .expect("insert undecryptable row");
   write_local_state(&root, serde_json::json!({}));
 
-  let report =
-    extract_chromium_with_provider(&context, "chrome", None, None, &CountingProvider::default())
-      .expect("partial report");
+  let report = extract_chromium_with_provider(
+    &context,
+    "chrome",
+    ProfileSelection::AllProfiles,
+    None,
+    &CountingProvider::default(),
+  )
+  .expect("partial report");
   let extraction = &report.installations[0].profiles[0];
   assert_eq!(extraction.cookies().len(), 1);
   assert_eq!(extraction.cookies()[0].name, "readable");
@@ -1976,7 +2004,7 @@ fn profile_selector_uses_opaque_id_and_limits_key_retrieval() {
   let report = extract_chromium_with_provider(
     &context,
     "chrome",
-    Some(profile_id.as_str()),
+    ProfileSelection::ProfileId(profile_id.as_str()),
     Some(vec!["example.com".to_owned()]),
     &provider,
   )
@@ -2004,7 +2032,7 @@ fn profile_selector_uses_opaque_id_and_limits_key_retrieval() {
   let error = extract_chromium_with_provider(
     &context,
     "chrome",
-    Some("not-a-profile-id"),
+    ProfileSelection::ProfileId("not-a-profile-id"),
     None,
     &provider,
   )
@@ -2382,8 +2410,14 @@ fn windows_legacy_chromium_requires_readable_valid_local_state_before_query() {
   seed_cookie(&root.join("Default"), true, "plaintext", "value");
 
   let generic_provider = CountingProvider::default();
-  let generic = extract_chromium_with_provider(&context, "chrome", None, None, &generic_provider)
-    .expect("generic reports tolerate missing Local State for plaintext rows");
+  let generic = extract_chromium_with_provider(
+    &context,
+    "chrome",
+    ProfileSelection::AllProfiles,
+    None,
+    &generic_provider,
+  )
+  .expect("generic reports tolerate missing Local State for plaintext rows");
   assert_eq!(generic.installations[0].profiles[0].cookies().len(), 1);
   assert_eq!(
     generic_provider
@@ -2632,8 +2666,14 @@ fn report_retains_total_enumeration_failures_while_listing_errors() {
     .contains("every detected chrome installation failed"));
 
   let provider = CountingProvider::default();
-  let report = extract_chromium_with_provider(&context, "chrome", None, None, &provider)
-    .expect("failed report outcome");
+  let report = extract_chromium_with_provider(
+    &context,
+    "chrome",
+    ProfileSelection::AllProfiles,
+    None,
+    &provider,
+  )
+  .expect("failed report outcome");
   assert_eq!(report.installations.len(), 1);
   assert!(report.installations[0].profiles.is_empty());
   assert!(report
@@ -3268,8 +3308,14 @@ fn windows_batch_browsers_extract_plaintext_cookies_through_their_selectors() {
     seed_cookie(&profile, !flat, browser_id, "plaintext-value");
 
     let provider = CountingProvider::default();
-    let report = extract_chromium_with_provider(&context, selector, None, None, &provider)
-      .expect("plaintext report");
+    let report = extract_chromium_with_provider(
+      &context,
+      selector,
+      ProfileSelection::AllProfiles,
+      None,
+      &provider,
+    )
+    .expect("plaintext report");
     assert_eq!(report.installations.len(), 1, "{browser_id} installations");
     let profiles = &report.installations[0].profiles;
     assert_eq!(profiles.len(), 1, "{browser_id} profiles");

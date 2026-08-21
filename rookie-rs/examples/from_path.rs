@@ -16,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .ok_or("usage: from_path <cookies.sqlite>")?
     .into();
 
-  let cookies = rookie_cookies::direct_path::cookies_from_path(
-    rookie_cookies::direct_path::DirectPathRequest::new(db_path),
+  let cookies = rookie_cookies::direct_path::extract_from_path(
+    rookie_cookies::direct_path::PathExtractRequest::sniff(db_path),
   )?;
   for cookie in cookies {
     // Cookie's `Debug` output intentionally redacts values. This example is

@@ -18,6 +18,8 @@ rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled
 [features]
 default = ["appbound"]
 appbound = ["rookie-cookies/appbound"]
+# Windows App-Bound canary only; see the rookie-cookies feature of the same name.
+e2e-appbound-steering = ["rookie-cookies/e2e-appbound-steering"]
 
 [[bin]]
 name = "rookie-cookies"

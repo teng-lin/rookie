@@ -43,6 +43,16 @@ if (!dbPath) {
   }
 }
 
+// The explicit allow_elevated_fallback is deliberate and is NOT what the
+// default does. The 0.6 default is injection_only, so these calls would
+// decrypt v20 without it; pinning the most permissive policy is what keeps
+// this canary a test of *elevated* recovery specifically, on a runner where
+// unprivileged injection may not be enough. chromiumBased is the deprecated
+// bridge and keeps allow_elevated_fallback unconditionally.
+//
+// Consequence worth knowing: because this pins a policy, nothing here
+// exercises the default. That is covered by a Rust unit test, since this
+// workflow does not run on pull requests. See CHANGELOG.md.
 let results;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
@@ -52,6 +62,7 @@ if (process.platform === "win32") {
       await rookieCookies.chromiumCookiesFromPath(dbPath, {
         domains: [domain],
         localStatePath: keyPath,
+        appBound: "allow_elevated_fallback",
       }),
     ],
     ["chromiumBased", await rookieCookies.chromiumBased(keyPath, dbPath, [domain])],
@@ -60,13 +71,17 @@ if (process.platform === "win32") {
   results = [
     [
       "chromiumCookiesFromPath(Automatic)",
-      await rookieCookies.chromiumCookiesFromPath(dbPath, { domains: [domain] }),
+      await rookieCookies.chromiumCookiesFromPath(dbPath, {
+        domains: [domain],
+        appBound: "allow_elevated_fallback",
+      }),
     ],
     [
       "chromiumCookiesFromPath(BrowserId)",
       await rookieCookies.chromiumCookiesFromPath(dbPath, {
         domains: [domain],
         browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
+        appBound: "allow_elevated_fallback",
       }),
     ],
     [

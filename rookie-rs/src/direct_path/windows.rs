@@ -1,14 +1,14 @@
 use super::{
   invalid_options, shared, unsupported_target, ChromiumCredentialSource,
-  ChromiumLockedDatabasePolicy, ChromiumPathRequest, CookieSourceKind, DirectPathRequest,
-  InvalidDirectPathOptionsReason,
+  ChromiumLockedDatabasePolicy, CookieSourceKind, InvalidDirectPathOptionsReason,
+  PathExtractRequest,
 };
 use crate::browser::chromium_crypto::ChromiumKeyOutcomes;
 use crate::browser::chromium_platform_keys::{
   ChromiumKeyIdentity, ChromiumKeyRequest, HostKeySession,
 };
 use crate::common::deadline::BoundaryRuntime;
-use crate::enums::{Cookie, DetailedCookie};
+use crate::enums::DetailedCookie;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -206,23 +206,57 @@ mod tests {
   }
 }
 
-pub(super) fn cookies_from_path(
-  request: DirectPathRequest,
+/// Reads an encrypted Chromium database using a caller-supplied `Local State`
+/// file.
+///
+/// This constructor is Windows-only, and it lives in this platform leaf
+/// because `check-cfg-locations` pins `direct_path/mod.rs` to its current
+/// platform-`cfg` count. It is also the honest home for a value that means
+/// nothing on Unix.
+pub(super) fn windows_local_state(
+  path: impl Into<PathBuf>,
+  local_state: impl Into<PathBuf>,
+) -> PathExtractRequest {
+  PathExtractRequest::with_credentials(
+    path,
+    Some(ChromiumCredentialSource::LocalStateFile(local_state.into())),
+  )
+}
+
+pub(super) fn detailed_from_path(
+  request: PathExtractRequest,
   source: CookieSourceKind,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
+) -> Result<Vec<DetailedCookie>> {
+  if request.target.credentials.is_some() {
+    return chromium_from_path_detailed(request, runtime);
+  }
+  let PathExtractRequest {
+    target, domains, ..
+  } = request;
   match source {
-    CookieSourceKind::ChromiumSqlite => Err(invalid_options(
-      InvalidDirectPathOptionsReason::MissingLocalStateFile,
-    )),
+    // A sniffed Chromium database on Windows is now attempted rather than
+    // rejected outright: `cookies_from_path` used to return
+    // `missing_local_state_file` before extraction, so even a fully plaintext
+    // database failed. Under the 0.6.0 rule a plaintext one succeeds, and an
+    // encrypted one is `missing_chromium_credentials`.
+    CookieSourceKind::ChromiumSqlite => {
+      crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
+        target.path,
+        domains,
+        false,
+        runtime,
+      )
+      .map_err(super::sniffed_chromium_error)
+    }
     CookieSourceKind::MozillaSqlite => {
-      crate::browser::mozilla::firefox_based_with_runtime(request.path, request.domains, runtime)
+      crate::browser::mozilla::firefox_based_detailed_with_runtime(target.path, domains, runtime)
     }
     CookieSourceKind::SafariBinaryCookies => Err(unsupported_target(source)),
     CookieSourceKind::InternetExplorerEse => {
-      crate::browser::internet_explorer::internet_explorer_based_with_runtime(
-        request.path,
-        request.domains,
+      crate::browser::internet_explorer::internet_explorer_based_detailed_with_runtime(
+        target.path,
+        domains,
         false,
         runtime,
       )
@@ -230,39 +264,11 @@ pub(super) fn cookies_from_path(
   }
 }
 
-pub(super) fn chromium_cookies_from_path(
-  request: ChromiumPathRequest,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  match chromium_from_path(request, ChromiumProjection::Legacy, runtime)? {
-    ChromiumProjectionResult::Legacy(cookies) => Ok(cookies),
-    ChromiumProjectionResult::Detailed(_) => {
-      unreachable!("legacy request returned detailed cookies")
-    }
-  }
-}
-
-pub(super) fn chromium_cookies_from_path_detailed(
-  request: ChromiumPathRequest,
+pub(super) fn chromium_from_path_detailed(
+  request: PathExtractRequest,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  match chromium_from_path(request, ChromiumProjection::Detailed, runtime)? {
-    ChromiumProjectionResult::Detailed(cookies) => Ok(cookies),
-    ChromiumProjectionResult::Legacy(_) => {
-      unreachable!("detailed request returned legacy cookies")
-    }
-  }
-}
-
-#[derive(Clone, Copy)]
-enum ChromiumProjection {
-  Legacy,
-  Detailed,
-}
-
-enum ChromiumProjectionResult {
-  Legacy(Vec<Cookie>),
-  Detailed(Vec<DetailedCookie>),
+  chromium_from_path(request, runtime)
 }
 
 enum PreparedCredentials {
@@ -271,10 +277,17 @@ enum PreparedCredentials {
 }
 
 fn chromium_from_path(
-  request: ChromiumPathRequest,
-  projection: ChromiumProjection,
+  request: PathExtractRequest,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumProjectionResult> {
+) -> Result<Vec<DetailedCookie>> {
+  let PathExtractRequest {
+    target: request,
+    domains,
+    ..
+  } = request;
+  let credentials = request
+    .credentials
+    .ok_or_else(|| invalid_options(InvalidDirectPathOptionsReason::MissingChromiumCredentials))?;
   let shutdown_allowed =
     request.locked_database_policy == ChromiumLockedDatabasePolicy::AllowProcessShutdown;
   let classification_was_locked = match super::classify_cookie_source(&request.path, runtime)
@@ -294,20 +307,18 @@ fn chromium_from_path(
 
   // Caller-directed credential I/O must finish before the explicitly
   // authorized recovery policy is allowed to affect another process.
-  let credentials = prepare_credentials(request.credentials, runtime)?;
+  let credentials = prepare_credentials(credentials, runtime)?;
   if !classification_was_locked {
     return query_prepared(
       credentials,
       request.path,
-      request.domains,
-      projection,
+      domains,
       shutdown_allowed,
       runtime,
     );
   }
 
   let original_path = request.path;
-  let domains = request.domains;
   crate::browser::chromium_database_acquisition::with_force_kill_recovery(
     &original_path,
     true,
@@ -320,7 +331,6 @@ fn chromium_from_path(
         &credentials,
         acquired_path.to_path_buf(),
         domains.as_deref(),
-        projection,
         runtime,
       )
     },
@@ -333,9 +343,6 @@ fn prepare_credentials(
 ) -> Result<PreparedCredentials> {
   runtime.check()?;
   match source {
-    ChromiumCredentialSource::Automatic => Err(invalid_options(
-      InvalidDirectPathOptionsReason::MissingLocalStateFile,
-    )),
     ChromiumCredentialSource::PlaintextOnly => Ok(PreparedCredentials::PlaintextOnly),
     ChromiumCredentialSource::BrowserId(browser_id) if browser_id.is_empty() => Err(
       invalid_options(InvalidDirectPathOptionsReason::EmptyBrowserId),
@@ -353,34 +360,19 @@ fn query_prepared(
   credentials: PreparedCredentials,
   path: PathBuf,
   domains: Option<Vec<String>>,
-  projection: ChromiumProjection,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumProjectionResult> {
-  match (credentials, projection) {
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Legacy) => {
-      crate::browser::chromium::chromium_based_plaintext_only_with_runtime(
-        path, domains, force_kill, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Detailed) => {
+) -> Result<Vec<DetailedCookie>> {
+  match credentials {
+    PreparedCredentials::PlaintextOnly => {
       crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
         path, domains, force_kill, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_with_key_outcomes_runtime(
-        outcomes, path, domains, force_kill, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Detailed) => {
+    PreparedCredentials::KeyOutcomes(outcomes) => {
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, force_kill, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
   }
 }
@@ -389,33 +381,18 @@ fn query_prepared_without_platform_recovery(
   credentials: &PreparedCredentials,
   path: PathBuf,
   domains: Option<&[String]>,
-  projection: ChromiumProjection,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumProjectionResult> {
-  match (credentials, projection) {
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_plaintext_without_platform_recovery(
-        path, domains, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Detailed) => {
+) -> Result<Vec<DetailedCookie>> {
+  match credentials {
+    PreparedCredentials::PlaintextOnly => {
       crate::browser::chromium::query_detailed_cookies_plaintext_without_platform_recovery(
         path, domains, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_with_key_outcomes_without_platform_recovery(
-        outcomes, path, domains, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Detailed) => {
+    PreparedCredentials::KeyOutcomes(outcomes) => {
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_without_platform_recovery(
         outcomes, path, domains, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
   }
 }
@@ -549,16 +526,16 @@ Start-Sleep -Seconds 300
         "legacy-ready"
       });
       let mut child = spawn_lock_holder(&path, &ready);
-      let request = ChromiumPathRequest::new(&path)
-        .credentials(ChromiumCredentialSource::PlaintextOnly)
-        .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
+      let request =
+        PathExtractRequest::with_credentials(&path, Some(ChromiumCredentialSource::PlaintextOnly))
+          .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
       if detailed {
-        let cookies = crate::direct_path::chromium_cookies_from_path_detailed(request)
+        let cookies = crate::direct_path::detailed_from_path_inner(request)
           .expect("detailed request recovers the explicitly authorized database");
         assert_eq!(cookies.len(), 1);
         assert_eq!(cookies[0].cookie.name, "plain");
       } else {
-        let cookies = crate::direct_path::chromium_cookies_from_path(request)
+        let cookies = crate::direct_path::extract_from_path(request)
           .expect("legacy request recovers the explicitly authorized database");
         assert_eq!(cookies.len(), 1);
         assert_eq!(cookies[0].name, "plain");
@@ -572,16 +549,31 @@ Start-Sleep -Seconds 300
     let (_directory, path) = plaintext_database();
     let ready = path.with_extension("invalid-ready");
     let mut child = spawn_lock_holder(&path, &ready);
-    let error = crate::direct_path::chromium_cookies_from_path(
-      ChromiumPathRequest::new(&path)
-        .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
+    // A *sniffed* request is no longer invalid on Windows -- as of 0.6.0 a
+    // plaintext database reads without credentials there, same as on Unix --
+    // so proving this needs a request that is genuinely malformed. An
+    // explicitly empty Local State path is: the caller named a credential
+    // source and left it blank. `chromium_from_path` classifies before it
+    // validates credentials, so this pins the ordering its own comment
+    // claims: caller-directed credential I/O must finish before an authorized
+    // recovery policy is allowed to touch another process.
+    let error = crate::direct_path::extract_from_path(
+      PathExtractRequest::with_credentials(
+        &path,
+        Some(ChromiumCredentialSource::LocalStateFile(PathBuf::new())),
+      )
+      .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
     )
-    .expect_err("Windows automatic credentials require an explicit Local State file");
+    .expect_err("an empty Local State selector is a request fault");
+    // `extract_from_path` returns the typed `Error` now, so the fault is a
+    // variant to match rather than an `anyhow` payload to downcast.
+    let crate::Error::Source(typed) = &error else {
+      panic!("an invalid path request is Error::Source, got {error:?}");
+    };
     assert_eq!(
-      error
-        .downcast_ref::<crate::direct_path::DirectPathError>()
-        .and_then(crate::direct_path::DirectPathError::invalid_options_reason),
-      Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
+      typed.invalid_options_reason(),
+      Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile),
+      "credential validation must run before recovery, got {error:#}"
     );
     assert!(
       child
