@@ -1,6 +1,6 @@
-//! The CLI builds every `ChromiumPathRequest` from `--path`/`--key-path`/
-//! `--browser-id`/`--plaintext-only` alone and never calls
-//! `.locked_database_policy(..)`, so its requests stay at the crate's
+//! The CLI builds every `PathExtractRequest` from the `from-path` credential
+//! options (`--local-state-path`, `--browser-id`, or `--plaintext-only`) and
+//! never calls `.locked_database_policy(..)`, so its requests stay at the crate's
 //! non-disruptive default: no CLI flag can construct a destructive
 //! (process-terminating) database acquisition. This scans every `.rs` file
 //! actually present under `src/` at test time (not a hardcoded file list),

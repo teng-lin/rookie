@@ -2,11 +2,18 @@
 
 - **Author:** maintainers
 - **Date:** 2026-08-18 (Rev 1) · revised 2026-08-19 (Rev 2 — review feedback + internal constraint lifts; consistency pass)
-- **Status:** Draft (Rev 2)
+- **Status:** Historical program record (completed; Rev 2 progress preserved)
 - **Crate:** `rookie-rs` (workspace root `/Users/blackmyth/src/rookie-cookies`, crate path `rookie-rs/`)
 - **Release context:** 0.6.0-beta.1 just shipped. This is an internal structure-and-domain-language refactor, not a product feature.
 - **Does not revive:** GitHub #260 ("Modularize oversized browser, registry, and report modules"), closed `NOT_PLANNED`. Its design doc was dropped from PR #262. This document is not that epic.
 - **Durable decisions live in [ADR 0005](../adr/0005-stage-boundary-types-and-extraction-vocabulary.md).** The stage-boundary invariant, the fence, the internal vocabulary, module ownership, and the rejected alternatives were extracted there because they outlive this program. This document remains the program record: motivation in full, the PR plan, progress, and the trade-off analysis behind each decision. Where the two disagree about a rule, the ADR wins; where the ADR is silent about *how* a PR gets there, this document is the reference.
+
+> **Historical record.** The refactor described here has landed. PR status,
+> line numbers, intermediate type shapes, and future-tense instructions below
+> are intentionally preserved as the review record, not maintained as current
+> guidance. Use [the architecture map](../architecture.md) for the live tree and
+> [ADR 0005](../adr/0005-stage-boundary-types-and-extraction-vocabulary.md)
+> for durable constraints.
 
 ---
 

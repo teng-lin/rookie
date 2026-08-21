@@ -74,14 +74,14 @@
     {
       "path": "rookie_cookies::common::enums::CookieToString",
       "since": "0.6.0",
-      "note": "unfiltered compatibility formatter; use ReadResult::header(url) for a URL-scoped header view",
+      "note": "unfiltered compatibility formatter; use ReadResult::header(&SendContext) for a send-scoped header view",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },
     {
       "path": "rookie_cookies::enums::CookieToString",
       "since": "0.6.0",
-      "note": "unfiltered compatibility formatter; use ReadResult::header(url) for a URL-scoped header view",
+      "note": "unfiltered compatibility formatter; use ReadResult::header(&SendContext) for a send-scoped header view",
       "platforms": ["linux", "macos", "windows"],
       "feature_sets": ["all-features", "no-default-features"]
     },

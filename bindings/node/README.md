@@ -383,7 +383,7 @@ const all = load();
 | Recommended entry | `chrome()` / `brave()` (sync) | `await read({ browser, profile })` |
 | Async contract | Sync return values | **Every** extraction export is a Promise (since 0.5.8) |
 | Node.js | 18 / 20 accepted | **≥ 22** (tested 22 / 24 / 26) |
-| Gecko session cookies | Not a first-class `profile` | `read({ browser: geckoId, profile, includeSession: true })` — `profile` alone no longer imports session cookies (see the migration trap above) |
+| Gecko session cookies | Not a first-class policy | `read({ browser: geckoId, includeSession: true })`; add `profile` only to choose a non-default profile, and note that `profile` alone does not import session cookies |
 | Path APIs | `firefoxBased`, `chromiumBased`, `anyBrowser` | `extractFromPath` (`cookiesFromPath` / `chromiumCookiesFromPath` / `chromiumCookiesFromPathDetailed` are deprecated aliases until ≥ 0.7) |
 | Errors | Flat `Unknown` | `kind` is `request`/`stopped`/`source`/`engine`; `code` is `InvalidArg` for request/source, `Cancelled` for a stopped cancellation, else `GenericFailure` |
 | Header view | Manual | `snapshot.header(url \| SendContext)` — **no** top-level `header()`; a partitioned/container snapshot needs a `SendContext`, not a bare URL |

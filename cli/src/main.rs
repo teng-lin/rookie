@@ -13,8 +13,8 @@ use std::io::Write;
 
 /// Writes `line` plus a trailing newline to stdout.
 ///
-/// A closed downstream pipe (e.g. `rookie-cookies --load | head -1`) is
-/// ordinary, expected shutdown, not a program error: Rust's `println!`
+/// A closed downstream pipe (for example, piping `read --browser chrome` to
+/// `head`) is ordinary, expected shutdown, not a program error: Rust's `println!`
 /// panics on it (exit code 101), which looks like a crash to a script
 /// checking the exit code. This exits cleanly (matching how a traditional
 /// Unix tool terminates on `SIGPIPE`) instead.

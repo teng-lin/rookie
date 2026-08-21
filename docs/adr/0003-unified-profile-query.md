@@ -27,9 +27,20 @@ Those rules produced three disagreeing selectors (`browser_report` opaque-id-onl
 
 The query vocabulary above is unchanged. What changed is *who may decline to name a profile*: `ProfileSelection` (snapshot and flat extract) has `LegacyFirst` and `Query(String)` and no "every profile" arm, while `ReportScope` adds `AllProfiles`. Before 0.6.0 one request value carried both meanings, and which one applied depended on the function it was passed to — `extract` read the first legacy-eligible profile and `extract_report` read every profile from the same value.
 
+### Amendment (0.6.0): CLI job subcommands supersede the flag grammar
+
+Decision 3's resolver rule survives, but its top-level CLI spelling does not.
+The rewritten CLI has no top-level `--browser`, `--profile`, or `--report`
+mode. `read --profile Q` already has a required `--browser ID`; `report
+--profile Q` requires that command's optional `--browser ID`; other
+subcommands do not accept profile selection. `read` can express only
+`legacy-first`, while `report` can express `legacy-first` or `all`. Output
+format constraints are now owned by each subcommand rather than cross-mode
+flag conflicts.
+
 ## Consequences
 
-Callers who passed a non-id string to `browser_report` and depended on a request error must stop; that path can now succeed. Downstream that already passed opaque ids needs no change. Implementers treat this file, not ADR 0001 §3/§9 as originally written, as the selector/CLI contract.
+Callers who passed a non-id string to `browser_report` and depended on a request error must stop; that path can now succeed. Downstream that already passed opaque ids needs no change. Implementers treat this file, including the amendments above, not ADR 0001 §3/§9 as originally written, as the selector/CLI contract.
 
 ## References
 

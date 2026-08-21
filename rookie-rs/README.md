@@ -26,7 +26,11 @@ use rookie_cookies::{read, ReadRequest, SendContext};
 fn main() -> rookie_cookies::Result<()> {
     // Selecting a profile no longer implies session cookies; ask for them with
     // `.include_session()`.
-    let snapshot = read(ReadRequest::browser("firefox").profile("default-release"))?;
+    let snapshot = read(
+        ReadRequest::browser("firefox")
+            .profile("default-release")
+            .include_session(),
+    )?;
     for cookie in snapshot.cookies() {
         println!("{} {}", cookie.domain, cookie.name);
     }
@@ -45,23 +49,27 @@ function. Bindings-facing `profiles(browser_id)` exists as an alias of
 - No-profile `read(ReadRequest::browser("chrome"))` matches the compatibility
   flatten used by `chrome()` / `extract` when `include_expired` is set
   appropriately (persistent / legacy-eligible cookies).
-- A profile query selects exactly one profile. For Gecko-family browsers, it
-  also includes that profile's separately declared session JSON source.
+- A profile query selects exactly one profile. Session inclusion is a separate
+  policy: `.include_session()` acquires the selected Gecko profile's declared
+  session JSON source, and it works with either a named profile or the default
+  legacy-first selection.
 - Chromium registrations declare no separate session source, so a Chrome
   profile query cannot recover session state that exists only in memory.
 
-Named helpers (`chrome`, `firefox`, `brave`, `load`, …) are `#[deprecated]` since 0.6.0
-in favor of `browser` / `extract` / `read` and remain supported through the
-deprecation window. They are the compatibility bridge from
+Named helpers (`chrome`, `firefox`, `brave`, `load`, …) and the two-argument
+`browser` wrapper are `#[deprecated]` since 0.6.0 in favor of `extract` /
+`read` and remain supported through the deprecation window. They are the
+compatibility bridge from
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) and will break
 in a later major version.
 
 ## One operation, any registered browser
 
-`browser(id, domains)` and `extract(ExtractRequest::browser(id))` remain the
-compatibility / multi-id store verbs. Prefer them when you need a domain filter
-on the frozen flat list; prefer `read` for profile-scoped inventory and Gecko
-session import.
+`extract(ExtractRequest::browser(id))` is the current flat, domain-filterable
+job for any registered browser. The old `browser(id, domains)` function is a
+deprecated wrapper over it. Prefer `read` for an unfiltered, isolation-aware
+snapshot; both `read` and `extract` accept `.include_session()` independently
+of profile selection.
 
 ```rust
 fn main() -> rookie_cookies::Result<()> {
@@ -382,16 +390,16 @@ fn main() {
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
 | Recommended entry | `chrome(None)` / `brave(Some(domains))` | `read(ReadRequest::browser(...).profile(...))` |
-| Multi-id store verb | Named helpers only | Prefer `browser(id, domains)` / `extract(ExtractRequest::…)` |
-| Gecko session cookies | Not a first-class `profile()` | `ReadRequest::browser(gecko_id).profile(query)` includes the declared session source |
+| Multi-id store verb | Named helpers only | `extract(ExtractRequest::…)`; `browser(id, domains)` is deprecated |
+| Gecko session cookies | Not a first-class policy | Add `.include_session()` to `ReadRequest` or `ExtractRequest`; `.profile(query)` is optional and only selects which profile |
 | Path APIs | `*_based`, `any_browser` | `direct_path::{extract_from_path, PathExtractRequest}` (legacy deprecated until 0.7) |
 | Errors | Flat `anyhow::Error` | Typed `rookie_cookies::Error` (`Request` / `Stopped` / `Source` / `Engine`) with a stable `code()`. **`rookie_cookies::Result` is no longer `anyhow::Result`**; bridge functions keep `anyhow::Result` and `rookie_cookies::anyhow::Result` still resolves |
-| Header / get | Not a job view | `ReadResult::header(url)` — **no** crate-root `get` or `report` |
+| Header / get | Not a job view | `ReadResult::header(&SendContext)` — **no** crate-root `get` or `report` |
 | IE helpers | `internet_explorer` / `internet_explorer_based` | Deprecated (ESE native C library; IE discontinued) |
 
-1. For Gecko session import, select the exact profile, for example
-   `read(ReadRequest::browser("firefox").profile("default-release"))`.
-2. Prefer `browser` / `extract` for flat domain-filtered lists.
+1. For Gecko session import, add `.include_session()`. Add `.profile(...)`
+   only when the legacy-first profile is not the one you want.
+2. Prefer `extract` for flat domain-filtered lists.
 3. Move explicit DB paths onto `direct_path` builders.
 4. Classify failures by matching `rookie_cookies::Error` (or comparing `error.code()`).
 5. Do not add crate-root `get` / `report`.

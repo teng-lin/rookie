@@ -1,4 +1,4 @@
-//! Recommended 0.6 entry: `read(ReadRequest::…)` with a profile for session cookies.
+//! Recommended 0.6 entry: `read(ReadRequest::…)`; session cookies are an explicit policy.
 
 fn main() -> rookie_cookies::Result<()> {
   tracing_subscriber::fmt::init();
