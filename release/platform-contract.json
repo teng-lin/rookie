@@ -23,7 +23,8 @@
       "cpu": null,
       "libc": null,
       "features": [
-        "appbound"
+        "appbound",
+        "internet-explorer"
       ],
       "runtime_floor": {},
       "build": true,
@@ -182,7 +183,8 @@
       "cpu": "x64",
       "libc": "msvc",
       "features": [
-        "appbound"
+        "appbound",
+        "internet-explorer"
       ],
       "runtime_floor": {
         "node": "22"
@@ -296,7 +298,8 @@
       "cpu": "x64",
       "libc": "msvc",
       "features": [
-        "appbound"
+        "appbound",
+        "internet-explorer"
       ],
       "runtime_floor": {},
       "build": true,
@@ -369,7 +372,8 @@
       "cpu": "x64",
       "libc": "msvc",
       "features": [
-        "dpapi"
+        "dpapi",
+        "internet-explorer"
       ],
       "runtime_floor": {
         "python": "3.11"

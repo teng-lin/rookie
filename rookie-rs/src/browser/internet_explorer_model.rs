@@ -1,4 +1,7 @@
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#![cfg_attr(
+  any(not(target_os = "windows"), not(feature = "internet-explorer")),
+  allow(dead_code)
+)]
 
 #[cfg(test)]
 use crate::common::enums::Cookie;

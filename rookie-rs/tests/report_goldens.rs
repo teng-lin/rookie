@@ -15,10 +15,11 @@
 //! Goldens are per-target-OS because root-relative paths differ per platform,
 //! the same way `public-api/*.txt` is already split.
 //!
-//! Regenerate with `UPDATE_GOLDENS=1 cargo test -p rookie-cookies --test
-//! report_goldens`, then read the diff before committing it. A golden that
-//! changes without an intended behavior change is a bug in the change, not in
-//! the snapshot.
+//! Regenerate default-feature goldens with `UPDATE_GOLDENS=1 cargo test -p
+//! rookie-cookies --test report_goldens`, and feature-off goldens with the same
+//! command plus `--no-default-features`. Then read the diff before committing
+//! it. A golden that changes without an intended behavior change is a bug in
+//! the change, not in the snapshot.
 
 #![allow(deprecated)]
 
@@ -441,18 +442,32 @@ fn firefox_reports_match_the_golden() {
 
 /// Internet Explorer's cookie store is a real ESE database, which is far too
 /// involved to synthesize here. The seed is deliberately not a valid one, so
-/// this golden pins the *attempted and failed* path: discovery finds the
-/// candidate, populate queries it, the `EseDatabase` acquisition is overlaid,
-/// and the parse failure is reported.
+/// this golden pins the enabled backend's *attempted and failed* path:
+/// discovery finds the candidate, populate queries it, the `EseDatabase`
+/// acquisition is overlaid, and the parse failure is reported.
 ///
 /// That is precisely the shape the push-after-query populate rewrite touches,
 /// and IE is the one engine with no other report-level coverage.
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "internet-explorer"))]
 #[test]
 fn internet_explorer_reports_match_the_golden() {
   let home = SyntheticHome::new("internet-explorer");
   seed_internet_explorer(&home);
   assert_golden("internet_explorer", &capture("internet_explorer", &home));
+}
+
+/// The disabled backend keeps discovery and report shapes stable, but rejects
+/// the selected source with its explicit capability error before native ESE
+/// acquisition. Keep that contract separate from the enabled ESE golden.
+#[cfg(all(target_os = "windows", not(feature = "internet-explorer")))]
+#[test]
+fn disabled_internet_explorer_reports_match_the_golden() {
+  let home = SyntheticHome::new("internet-explorer-disabled");
+  seed_internet_explorer(&home);
+  assert_golden(
+    "internet_explorer_disabled",
+    &capture("internet_explorer", &home),
+  );
 }
 
 #[cfg(target_os = "macos")]
