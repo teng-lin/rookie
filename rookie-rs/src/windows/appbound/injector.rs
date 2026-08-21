@@ -206,16 +206,26 @@ fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>> {
 
   // SAFETY: Loading standard Windows DLLs `kernel32.dll` and `ntdll.dll` by module name.
   let kernel32 = unsafe { GetModuleHandleA(PCSTR(c"kernel32.dll".as_ptr().cast())) }?;
+  // SAFETY: `ntdll.dll` is a standard loaded Windows module and the name is a
+  // static, NUL-terminated C string.
   let ntdll = unsafe { GetModuleHandleA(PCSTR(c"ntdll.dll".as_ptr().cast())) }?;
 
   // SAFETY: Resolving standard export symbols from loaded DLLs kernel32 and ntdll.
   let p_load_library_a =
     unsafe { GetProcAddress(kernel32, PCSTR(c"LoadLibraryA".as_ptr().cast())) };
+  // SAFETY: `kernel32` is a valid loaded-module handle and the export name is
+  // a static, NUL-terminated C string.
   let p_get_proc_address =
     unsafe { GetProcAddress(kernel32, PCSTR(c"GetProcAddress".as_ptr().cast())) };
+  // SAFETY: `kernel32` is a valid loaded-module handle and the export name is
+  // a static, NUL-terminated C string.
   let p_virtual_alloc = unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualAlloc".as_ptr().cast())) };
+  // SAFETY: `kernel32` is a valid loaded-module handle and the export name is
+  // a static, NUL-terminated C string.
   let p_virtual_protect =
     unsafe { GetProcAddress(kernel32, PCSTR(c"VirtualProtect".as_ptr().cast())) };
+  // SAFETY: `ntdll` is a valid loaded-module handle and the export name is a
+  // static, NUL-terminated C string.
   let p_nt_flush_ic =
     unsafe { GetProcAddress(ntdll, PCSTR(c"NtFlushInstructionCache".as_ptr().cast())) };
 

@@ -11,8 +11,6 @@ use super::chromium::{
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use super::chromium_crypto::retrieve_key_outcomes;
 use super::chromium_crypto::ChromiumKeyOutcomes;
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
-use super::chromium_crypto::KeyProvider;
 use super::chromium_decoder::EncryptedValuePolicy;
 use super::source::{AcquisitionPolicy, SourceAcquisition, SourceCandidate};
 use crate::common::deadline::BoundaryRuntime;
@@ -295,7 +293,7 @@ pub(super) fn extract_cookies_with_provider<Context: ?Sized, Provider>(
   force_kill: bool,
 ) -> Result<Vec<Cookie>>
 where
-  Provider: KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
+  Provider: super::chromium_crypto::KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
 {
   let clock = crate::common::deadline::SystemClock;
   let deadline = crate::common::deadline::Deadline::after(
@@ -316,7 +314,7 @@ pub(super) fn extract_detailed_cookies_with_provider<Context: ?Sized, Provider>(
   force_kill: bool,
 ) -> Result<Vec<DetailedCookie>>
 where
-  Provider: KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
+  Provider: super::chromium_crypto::KeyProvider<Context, Keys = ChromiumKeyOutcomes>,
 {
   let clock = crate::common::deadline::SystemClock;
   let deadline = crate::common::deadline::Deadline::after(

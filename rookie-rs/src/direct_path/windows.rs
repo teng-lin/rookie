@@ -480,29 +480,6 @@ Start-Sleep -Seconds 300
     child
   }
 
-  fn wait_for_recovery(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-      // Restart Manager's contract is that the registered resource is
-      // released. A helper process may outlive the handle it owned, so process
-      // exit is a stronger postcondition than production requires and is
-      // observably racy on hosted Windows runners.
-      if std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .is_ok()
-      {
-        return;
-      }
-      assert!(
-        Instant::now() < deadline,
-        "authorized recovery did not release the database handle"
-      );
-      std::thread::sleep(Duration::from_millis(25));
-    }
-  }
-
   fn plaintext_database() -> (crate::utils::TempDir, PathBuf) {
     let directory = crate::utils::TempDir::new().expect("temporary database directory");
     let path = directory.path().join("Cookies");
@@ -538,7 +515,7 @@ Start-Sleep -Seconds 300
   }
 
   #[test]
-  fn public_chromium_projections_honor_explicit_locked_database_policy() {
+  fn public_chromium_projections_recover_locked_database_with_explicit_policy() {
     let (_directory, path) = plaintext_database();
     for detailed in [false, true] {
       let ready = path.with_extension(if detailed {
@@ -561,7 +538,11 @@ Start-Sleep -Seconds 300
         assert_eq!(cookies.len(), 1);
         assert_eq!(cookies[0].name, "plain");
       }
-      wait_for_recovery(&path);
+      // `AllowProcessShutdown` permits a disruptive fallback; it does not
+      // require one. On privileged hosts the preferred shadow-copy recovery
+      // can succeed while the helper intentionally keeps its handle. The
+      // extracted cookie is therefore the public postcondition, while
+      // `_child` remains a cleanup guard for either recovery strategy.
     }
   }
 
@@ -616,10 +597,11 @@ Start-Sleep -Seconds 300
   }
 
   /// The mirror of
-  /// `public_chromium_projections_honor_explicit_locked_database_policy`.
+  /// `public_chromium_projections_recover_locked_database_with_explicit_policy`.
   ///
-  /// That test proves `AllowProcessShutdown` releases a process-owned database
-  /// handle. This one pins the property that *defines* the default
+  /// That test proves `AllowProcessShutdown` lets both public projections
+  /// recover, whether the host uses the preferred shadow copy or the disruptive
+  /// fallback. This one pins the property that *defines* the default
   /// `NonDisruptive` policy: it never requests shutdown. The database is genuinely locked --
   /// the helper holds an exclusive `FileShare::None` handle -- so the default
   /// path must either recover it out of band through a shadow copy or degrade

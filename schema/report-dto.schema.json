@@ -45,6 +45,7 @@
   },
   "definitions": {
     "Cookie": {
+      "description": "The frozen eight-field compatibility cookie projection.\n\nExisting flat Rust functions, language bindings, JSON output, and format helpers preserve this exact shape through the 0.6 series. Browser-specific partition/container identity is intentionally not added here; use [`DetailedCookie`] when that context matters. Adding or reinterpreting a field on this type is a compatibility change, not an ordinary DTO cleanup.",
       "type": "object",
       "required": [
         "domain",

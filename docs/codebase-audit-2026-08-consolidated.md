@@ -6,10 +6,10 @@ This document consolidates and revalidates the findings from:
 - `docs/codebase-audit-2026-08-codex.md`, originally reviewed at `899cb28`.
 
 The source audits remain unchanged. Remediation was implemented and validation
-was repeated on 2026-08-21 on branch `fix/audit-remediation-2026-08`, based on
-`c98dc88` and including changes through `e2aca13`. This report distinguishes
-fixed findings, partial mitigations, accepted/deferred work, and the one finding
-explicitly excluded from this remediation.
+was repeated on 2026-08-21 on branch `fix/audit-remediation-2026-08`, then
+rebased onto `e62aa1f`. This report distinguishes fixed findings, partial
+mitigations, accepted/deferred work, and work that landed separately after the
+audit.
 
 ## Current assessment
 
@@ -17,7 +17,7 @@ explicitly excluded from this remediation.
 | --- | ---: | --- |
 | API design & documentation | 8 / 10 | Canonical jobs, typed errors, finite binding options, shared policy parsing, and extensive checked docs; the 0.6 compatibility bridge and incomplete workspace-wide documentation policy remain. |
 | Code quality | 8 / 10 | Formatting, strict Clippy, tests, public-API snapshots, and architecture fences pass; several very large modules and broad lint-policy debt remain. |
-| Security | 8 / 10 | Strong secret handling plus new vulnerability policy, dependency/secret/code scanning, fuzzing, and prominent injection warnings; the excluded unsafe-invariant gap and external crypto/native-parser review remain. |
+| Security | 8 / 10 | Strong secret handling plus vulnerability policy, dependency/secret/code scanning, fuzzing, prominent injection warnings, and enforced unsafe-block documentation; external crypto/native-parser review remains. |
 | Testing | 9 / 10 | Broad multi-language tests now include nightly ratcheted branch coverage, sanitizer-backed fuzz jobs, and deterministic CDP lifecycle failure tests; real vendor/browser and platform-only paths remain scheduled rather than ordinary local tests. |
 | Release engineering | 8 / 10 | The npm blocker is fixed, artifact contracts are cross-validated, and CI proofs now fail closed for every channel; registry-side OIDC/state reconciliation still requires external setup. |
 | Architecture | 8 / 10 | Central policy construction, typed selected-source failure, and removal of the report/Chromium cycle improve dependency direction; large adapters and some manual cross-language projection remain. |
@@ -58,18 +58,20 @@ release-tool suite for every workflow change.
 
 ### P1 — high-risk `unsafe` invariants are undocumented
 
-Status: **confirmed, explicitly excluded from this remediation**.
+Status: **resolved separately after the audit**.
 
 Both source audits found that the most privileged Windows App-Bound injection,
-impersonation, DPAPI, NCrypt, and secret-memory paths contain many production
-`unsafe` blocks without local `SAFETY:` arguments. The risk and recommendation
-remain unchanged: document each invariant, minimize raw FFI wrappers, and only
-then enforce `clippy::undocumented_unsafe_blocks` as a workspace lint. Where
-feasible, remote memory should transition from writable to executable rather
-than remain RWX.
+impersonation, DPAPI, NCrypt, and secret-memory paths contained production
+`unsafe` blocks without local `SAFETY:` arguments. This finding was explicitly
+excluded from the original remediation scope, then resolved independently by
+PR #307 before this branch was merged: the invariants were documented, remote
+memory allocation changed to write-then-execute, and
+`clippy::undocumented_unsafe_blocks` became a denied workspace lint.
 
-No file was changed to address or suppress this finding in the remediation
-branch, by explicit scope decision.
+After rebasing, Windows Clippy identified five adjacent FFI calls that shared a
+single preceding comment but each required its own block-local argument. This
+branch completed those five comments so the new lint is effective and green on
+Windows. Continue minimizing raw FFI wrappers and keep the lint fail-closed.
 
 ### P1 — adversarial parsers and custom cryptography lacked independent assurance
 
@@ -229,7 +231,7 @@ distinction between fixture coverage and live seed-and-extract evidence.
 
 | Priority | Action | Exit criterion |
 | --- | --- | --- |
-| Excluded P1 | Document and isolate production `unsafe`. | Every production block has a specific safety argument and CI rejects new undocumented blocks. |
+| P1 ongoing | Continue isolating production `unsafe`. | CI rejects undocumented blocks and raw FFI surfaces trend downward. |
 | P1 external | Complete independent crypto review and decide the `libesedb` crash boundary. | Review evidence is recorded; native ESE parsing is removed or isolated. |
 | P1 operational | Monitor nightly security/assurance results as release inputs. | Release readiness requires a recent successful nightly run and failures are triaged promptly. |
 | P2 external | Configure crates.io OIDC and durable release lineage/reconciliation. | Every channel uses short-lived identity and reconciles published digests to reviewed inputs. |

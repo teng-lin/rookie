@@ -3,8 +3,6 @@ use super::super::chromium_projection::{
   project_legacy_draft,
 };
 use super::*;
-#[cfg(target_os = "linux")]
-use crate::browser::chromium_crypto::KeyProvider;
 use crate::browser::chromium_crypto::LegacySharedKeyProvider;
 #[cfg(target_os = "windows")]
 use crate::browser::chromium_database_acquisition::{WindowsDatabaseLocked, WindowsLockedFile};
@@ -490,7 +488,7 @@ struct SyntheticTierProvider {
 }
 
 #[cfg(target_os = "linux")]
-impl KeyProvider<str> for SyntheticTierProvider {
+impl crate::browser::chromium_crypto::KeyProvider<str> for SyntheticTierProvider {
   type Keys = ChromiumKeyOutcomes;
 
   fn keys(
