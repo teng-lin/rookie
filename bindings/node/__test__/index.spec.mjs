@@ -289,6 +289,47 @@ test("cookiesFromPath classifies Firefox and applies domain filters", async (t) 
   }
 });
 
+test("extractFromPath is the canonical flat path-extract job", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-extract-from-path-"));
+  try {
+    // No credential selector at all: sniffed from signature/schema, same as
+    // the deprecated cookiesFromPath's default behavior.
+    const firefoxPath = join(dir, "firefox-cookies.sqlite");
+    installDatabaseFixture(
+      firefoxPath,
+      new URL("fixtures/firefox-selected.sqlite.base64", import.meta.url),
+    );
+    const sniffed = await rookieCookies.extractFromPath(firefoxPath, {
+      domains: ["example.test"],
+    });
+    t.deepEqual(sniffed.map(({ name }) => name), ["selected"]);
+
+    // Chromium credential selectors and appBound compose the same way
+    // chromiumCookiesFromPath's options did.
+    const chromiumPath = join(dir, "Cookies");
+    installDatabaseFixture(
+      chromiumPath,
+      new URL("fixtures/chromium-plaintext.sqlite.base64", import.meta.url),
+    );
+    const plaintext = await rookieCookies.extractFromPath(chromiumPath, {
+      domains: ["example.test"],
+      plaintextOnly: true,
+      appBound: "disabled",
+    });
+    t.deepEqual(plaintext.map(({ name }) => name), ["plain"]);
+
+    await t.throwsAsync(
+      rookieCookies.extractFromPath(chromiumPath, {
+        browserId: "chrome",
+        plaintextOnly: true,
+      }),
+      { message: /mutually exclusive/ },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ReadResult.header exposes structured synchronous request errors", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rookie-node-header-error-"));
   const dbPath = join(dir, "cookies.sqlite");
@@ -625,6 +666,7 @@ test("explicit Chromium browser IDs are registry identities, not profile selecto
 test("bad async API arguments reject instead of throwing synchronously", async (t) => {
   const invalidCalls = [
     ["anyBrowser", () => rookieCookies.anyBrowser(42)],
+    ["extractFromPath", () => rookieCookies.extractFromPath(42)],
     ["cookiesFromPath", () => rookieCookies.cookiesFromPath(42)],
     ["chromiumCookiesFromPath", () => rookieCookies.chromiumCookiesFromPath(42)],
     [
@@ -760,6 +802,10 @@ test("canonical direct-path declarations and compatibility deprecations are exac
   t.regex(
     types,
     /export interface ChromiumPathOptions \{\n  domains\?: string\[\] \| null\n  browserId\?: string \| null\n  localStatePath\?: string \| null\n  plaintextOnly\?: boolean \| null\n  appBound\?: AppBoundPolicy \| null\n\}/,
+  );
+  t.regex(
+    types,
+    /export interface ExtractFromPathOptions \{\n  domains\?: Array<string>\n  browserId\?: string\n  localStatePath\?: string\n  plaintextOnly\?: boolean\n  timeoutMs\?: number\n  appBound\?: AppBoundPolicy\n\}/,
   );
   t.true(
     types.includes(
@@ -1099,7 +1145,7 @@ test("generated report exports and declarations survive patching", (t) => {
   const facadeIndex = types.indexOf("/** rookie-cookies cross-platform facade */");
   t.not(facadeIndex, -1, "the types facade marker must survive patching");
   t.false(
-    types.slice(0, facadeIndex).endsWith("@deprecated Use `chromiumCookiesFromPathDetailed`. Earliest removal is 0.7. */\n"),
+    types.slice(0, facadeIndex).endsWith("@deprecated Use `fromPath(...).detailedCookies`. Earliest removal is 0.7. */\n"),
     "stripped platform declarations must not leave orphaned JSDoc",
   );
 
@@ -1446,6 +1492,7 @@ test("public JavaScript examples await async extraction APIs", (t) => {
   ];
   const asyncApis = [
     "anyBrowser",
+    "extractFromPath",
     "cookiesFromPath",
     "chromiumCookiesFromPath",
     "chromiumCookiesFromPathDetailed",
