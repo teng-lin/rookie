@@ -232,15 +232,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   FreeBSD, packaging wheels/sdist, Chrome/Firefox e2e, and artifact smoke
   move to nightly / `main`. A small real Chrome/Firefox gate now also runs on
   pull requests. Extra hosted browsers (Edge, Chromium, Brave, Opera, Opera GX,
-  Vivaldi, Yandex, LibreWolf, Zen, Safari, Internet Explorer)
+  Vivaldi, Yandex, LibreWolf, Zen, Safari)
   are installed on the runner when a silent installer exists. Claimed-browser
   fixtures remain for products we cannot install. Extra hosted browsers run on
   nightly and again on release. Claimed-browser fixtures run on
   `v*` tags, GitHub Releases, or `workflow_dispatch`.
 - The Safari hosted canary uses the normal application profile because Apple
   intentionally destroys SafariDriver automation storage at session teardown.
-  The Internet Explorer canary now supplies IEDriver's Edge IE-mode
-  capabilities and policy instead of waiting for the retired desktop shell.
+  Internet Explorer remains fixture-only because current hosted images expose
+  only Edge IE mode, which cannot produce the legacy `CookieEntryEx` ESE store
+  supported by the deprecated decoder.
 - macOS Chromium now reads its vendor-defined `Chromium Safe Storage` /
   `Chromium` Keychain identity rather than mixing the Chrome service with the
   Chromium account.

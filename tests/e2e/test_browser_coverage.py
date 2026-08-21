@@ -55,7 +55,6 @@ NIGHTLY_HOSTED = frozenset(
         ("windows", "chromium"),
         ("windows", "edge"),
         ("windows", "firefox"),
-        ("windows", "internet_explorer"),
         ("windows", "librewolf"),
         ("windows", "opera"),
         ("windows", "opera_gx"),

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "lanes": {
-    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, normal-profile Safari, and IE/IEDriver in Edge IE mode on supported hosted images.",
-    "release_fixture": "Engine fixture extracted with this browser_id in e2e-release.yml (tag, release, workflow_dispatch).",
+    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and normal-profile Safari on supported hosted images.",
+    "release_fixture": "Deterministic engine checks plus browser-id coverage in e2e-release.yml (tag, release, workflow_dispatch); no browser is launched.",
     "manual": "Operator-owned fallback for a registry cell without a viable hosted runner. No current cells rely on it."
   },
   "fixture_limitations": {
@@ -15,6 +15,7 @@
     "windows/coccoc": "No maintained silent package-manager installer is available on the hosted image.",
     "windows/dc_browser": "No maintained vendor or package-manager installer is available.",
     "windows/duckduckgo": "The MSIX application owns an embedded WebView profile and exposes no custom-user-data browser CLI.",
+    "windows/internet_explorer": "Current hosted images expose only Edge IE mode, which does not persist the legacy CookieEntryEx ESE format supported by this deprecated decoder.",
     "windows/octo_browser": "The commercial anti-detect browser requires operator-owned account and profile provisioning.",
     "windows/qq_browser": "No stable unattended vendor or package-manager installer is available to the runner.",
     "windows/sogou": "No stable unattended vendor or package-manager installer is available to the runner.",
@@ -236,7 +237,7 @@
       "platform": "windows",
       "browser": "internet_explorer",
       "engine": "internet_explorer",
-      "lane": "nightly_hosted"
+      "lane": "release_fixture"
     },
     {
       "platform": "windows",

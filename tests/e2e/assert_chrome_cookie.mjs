@@ -66,7 +66,10 @@ if (process.platform === "win32") {
         appBound: "allow_elevated_fallback",
       }),
     ],
-    ["chromiumBased", await rookieCookies.chromiumBased(keyPath, dbPath, [domain])],
+    [
+      "chromiumBased",
+      await rookieCookies.chromiumBased(keyPath, dbPath, [domain]),
+    ],
   ];
 } else {
   results = [
@@ -89,9 +92,16 @@ if (process.platform === "win32") {
   ];
 }
 
-results = results.map(([surface, cookies]) => [surface, cookies, expectedName, expectedValue]);
+results = results.map(([surface, cookies]) => [
+  surface,
+  cookies,
+  expectedName,
+  expectedValue,
+]);
 if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
-  const browserName = (process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome").toLowerCase();
+  const browserName = (
+    process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome"
+  ).toLowerCase();
   const browserFns = {
     chrome: rookieCookies.chrome,
     "google-chrome": rookieCookies.chrome,

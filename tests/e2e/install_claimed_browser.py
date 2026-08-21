@@ -262,6 +262,11 @@ HOSTS: dict[str, dict] = {
     },
     "internet_explorer": {
         "engine": "internet_explorer",
+        # Current hosted images can open an Edge IE-mode tab, but that browser
+        # does not persist the CookieEntryEx ESE format this deprecated decoder
+        # supports. Retain the recipe for operator diagnostics without claiming
+        # a real seed+extract cell in the generated hosted matrix.
+        "hosted": False,
         "windows": {
             "kind": "internet_explorer",
             "configure": True,
@@ -722,6 +727,8 @@ def install_spec(spec: dict) -> None:
 def matrix() -> list[dict[str, str]]:
     rows = []
     for browser, meta in HOSTS.items():
+        if not meta.get("hosted", True):
+            continue
         for platform in RUNNERS:
             if platform not in meta:
                 continue

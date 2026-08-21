@@ -218,11 +218,31 @@ def stage_chromium_user_data(user_data: Path) -> None:
 
 
 def chromium_cookie_dbs(user_data: Path) -> list[Path]:
-    candidates = [
+    preferred = [
         user_data / "Default/Network/Cookies",
         user_data / "Default/Cookies",
     ]
-    return [candidate for candidate in candidates if candidate.is_file()]
+    discovered = sorted(user_data.glob("*/Network/Cookies"))
+    discovered.extend(sorted(user_data.glob("*/Cookies")))
+    candidates = []
+    for candidate in [*preferred, *discovered]:
+        if candidate.is_file() and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def native_chromium_user_data(
+    browser: str, requested: Path, *, platform: str | None = None
+) -> Path:
+    """Use a product-owned profile where a fork does not persist custom roots."""
+
+    platform = platform or sys.platform
+    if browser == "yandex" and platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if not local_app_data:
+            raise SystemExit("Windows Yandex canary requires LOCALAPPDATA")
+        return Path(local_app_data) / "Yandex/YandexBrowser/User Data"
+    return requested
 
 
 def cookie_db_has_name(db: Path, name: str = "rookie_ci") -> bool:
@@ -764,9 +784,10 @@ def run() -> int:
             "ROOKIE_E2E_BROWSER_ID and ROOKIE_E2E_BROWSER_PATH must be set"
         )
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", ROOT))
-    user_data = Path(
+    requested_user_data = Path(
         os.environ.get("ROOKIE_E2E_USER_DATA_DIR", workspace / ".rookie-ci" / browser)
     )
+    user_data = native_chromium_user_data(browser, requested_user_data)
     user_data.mkdir(parents=True, exist_ok=True)
 
     server, port, _log_path, request_log = start_cookie_server()

@@ -32,6 +32,31 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 hosted.find_chromium_db(user_data, name="rookie_ci"), legacy
             )
 
+    def test_profile_number_cookie_db_is_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            user_data = Path(tmp)
+            database = user_data / "Profile 1/Network/Cookies"
+            database.parent.mkdir(parents=True)
+            connection = hosted.sqlite3.connect(database)
+            connection.execute("create table cookies (name text)")
+            connection.execute("insert into cookies values ('rookie_ci')")
+            connection.commit()
+            connection.close()
+
+            self.assertEqual(
+                hosted.find_chromium_db(user_data, name="rookie_ci"), database
+            )
+
+    def test_windows_yandex_uses_its_native_profile_root(self) -> None:
+        with mock.patch.dict(hosted.os.environ, {"LOCALAPPDATA": r"C:\Users\runner"}):
+            actual = hosted.native_chromium_user_data(
+                "yandex", Path(r"D:\temp\custom"), platform="win32"
+            )
+        self.assertEqual(
+            actual,
+            Path(r"C:\Users\runner") / "Yandex/YandexBrowser/User Data",
+        )
+
     def test_wininet_cookie_seed_is_persistent_and_gmt(self) -> None:
         seeded = hosted.wininet_cookie_data(
             datetime(2026, 8, 21, 12, 30, 0, tzinfo=timezone.utc)

@@ -20,7 +20,7 @@ SPEC.loader.exec_module(INSTALL)
 
 # Seeded by e2e.yml without this installer. The claimed-browser workflow now
 # owns every other real-browser cell, including Playwright-distributed
-# Chromium, image/Playwright Edge, SafariDriver, and Server 2022 IE Driver.
+# Chromium, image/Playwright Edge, and normal-profile Safari.
 PREINSTALLED = frozenset(
     {
         ("linux", "chrome"),
@@ -55,6 +55,7 @@ class InstallCatalogTests(unittest.TestCase):
         self.assertEqual(safari["kind"], "system_browser")
         self.assertIn("/Applications/Safari.app/Contents/MacOS/Safari", safari["exe"])
         self.assertEqual(internet_explorer["kind"], "internet_explorer")
+        self.assertFalse(INSTALL.HOSTS["internet_explorer"]["hosted"])
         self.assertEqual(internet_explorer["runner"], "windows-2022")
         self.assertIn("iedriver-win32", internet_explorer["exe"][0])
         self.assertTrue(
