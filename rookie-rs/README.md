@@ -314,19 +314,27 @@ Chrome 127+ App-Bound key:
 
 | Policy | Behavior |
 | --- | --- |
-| `Disabled` (default) | No injection, no browser process spawn, no process enumeration, no SYSTEM impersonation. v20 rows stay unreadable. |
-| `InjectionOnly` | Unprivileged reflective COM injection only. |
-| `AllowElevatedFallback` | Injection, then elevated SYSTEM impersonation. |
+| `InjectionOnly` (default) | Unprivileged reflective COM injection into a spawned browser process (Chrome 127+). |
+| `Disabled` | No injection, no browser process spawn, no process enumeration, no SYSTEM impersonation. v20 rows are skipped and counted as `decrypt_failed` warnings. |
+| `AllowElevatedFallback` | Injection, then elevated SYSTEM impersonation (Chrome 133+). Never a default. |
 
-**The default changed the reachable rows, on purpose.** A Windows caller who
-needs v20 cookies must now ask: `ReadRequest::browser("chrome").app_bound(
-AppBoundPolicy::InjectionOnly)`. The deprecated v0.5.9 bridge (`chrome`,
-`browser`, `chromium_based`, …) keeps `AllowElevatedFallback`, so its 0.5.8
-capability is unchanged.
+**Elevation is what changed, not v20 access.** 0.5.9 went straight to
+elevated SYSTEM impersonation when injection could not recover the key; the
+0.6 job surface stops at unprivileged injection unless a caller writes
+`.app_bound(AppBoundPolicy::AllowElevatedFallback)`. The default is
+`InjectionOnly` rather than `Disabled` because Chrome has written v20 cookies
+on Windows since Chrome 127, so a `Disabled` default would return an empty
+list for the common case.
+
+**Injection is not free of consequence.** It spawns a browser process and
+writes into it, which endpoint security products can flag. Where that
+matters, set `Disabled` explicitly and expect v20 rows to be omitted. The
+deprecated v0.5.9 bridge (`chrome`, `browser`, `chromium_based`, …) keeps
+`AllowElevatedFallback`, so its 0.5.8 capability is unchanged.
 
 The policy is request-local and immutable once the job starts; it is never
 read from the process environment. On non-Windows targets it is a no-op, and
-on a build without the `appbound` feature a non-`Disabled` policy is reported
+on a build without the `appbound` feature a policy that permits recovery is reported
 at the v20 lookup — not at the job edge, so a Firefox read or a profile
 listing on that build is unaffected.
 

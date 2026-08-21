@@ -329,13 +329,13 @@ fn system_time_from_epoch_seconds(seconds: f64) -> PyResult<std::time::SystemTim
 
 /// Read an unfiltered snapshot of one browser profile.
 ///
-/// **Windows App-Bound (v20) recovery is opt-in.** ``app_bound`` defaults to
-/// ``"disabled"``, so a Chrome v20 profile's cookies are simply not recovered
-/// unless the caller passes ``"injection_only"`` or
-/// ``"allow_elevated_fallback"``. This is a behavior change from the
-/// deprecated v0.5.9 bridge functions (``chrome()`` and friends), which still
-/// default to the old ``allow_elevated_fallback`` recovery -- see
-/// CHANGELOG.md.
+/// **Windows App-Bound (v20):** ``app_bound`` defaults to
+/// ``"injection_only"``, which recovers a Chrome v20 profile without
+/// elevation by spawning a browser process and injecting into it. Endpoint
+/// security products can flag that, so pass ``"disabled"`` if it is
+/// unwanted -- v20 rows are then skipped and reported as ``decrypt_failed``
+/// warnings. ``"allow_elevated_fallback"`` additionally permits SYSTEM
+/// impersonation and is never the default. See CHANGELOG.md.
 ///
 /// **Migration trap:** ``include_session`` defaults to ``False``. In 0.6-beta,
 /// naming a Gecko ``profile`` always imported its session cookies too;
@@ -354,8 +354,8 @@ fn system_time_from_epoch_seconds(seconds: f64) -> PyResult<std::time::SystemTim
 ///     profile in a single snapshot; see ``browser_report`` for that.
 /// :param timeout: Optional timeout in seconds
 /// :param cancellation: Optional CancellationHandle
-/// :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-///     (default), "injection_only", or "allow_elevated_fallback". A no-op
+/// :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+///     (default), "disabled", or "allow_elevated_fallback". A no-op
 ///     off Windows.
 /// :return: A ReadResult snapshot (never URL-filtered)
 /// :raises TypeError: ``browser`` was omitted
@@ -372,7 +372,7 @@ fn system_time_from_epoch_seconds(seconds: f64) -> PyResult<std::time::SystemTim
   select="legacy_first".to_string(),
   timeout=None,
   cancellation=None,
-  app_bound="disabled".to_string(),
+  app_bound="injection_only".to_string(),
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read(
@@ -410,7 +410,7 @@ pub fn read(
 
 /// Read cookies from an explicit cookie database path.
 ///
-/// **Windows App-Bound (v20) recovery is opt-in** -- see ``read``'s docstring
+/// **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see ``read``'s docstring
 /// and CHANGELOG.md; the same default and the same values apply here.
 ///
 /// By default the source is identified automatically (`FromPathRequest::new`'s
@@ -429,8 +429,8 @@ pub fn read(
 ///     encrypted Chromium database. Windows only.
 /// :param timeout: Optional timeout in seconds
 /// :param cancellation: Optional CancellationHandle
-/// :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-///     (default), "injection_only", or "allow_elevated_fallback". A no-op
+/// :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+///     (default), "disabled", or "allow_elevated_fallback". A no-op
 ///     off Windows.
 /// :return: A ReadResult snapshot
 /// :raises RookieRequestError: More than one of `plaintext_only`,
@@ -447,7 +447,7 @@ pub fn read(
   local_state_path=None,
   timeout=None,
   cancellation=None,
-  app_bound="disabled".to_string(),
+  app_bound="injection_only".to_string(),
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn from_path(

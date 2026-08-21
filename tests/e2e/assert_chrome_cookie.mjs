@@ -43,11 +43,16 @@ if (!dbPath) {
   }
 }
 
-// chromiumCookiesFromPath is the new job surface, where App-Bound (v20)
-// recovery defaults to disabled; chromiumBased is the deprecated bridge,
-// which keeps its old allow_elevated_fallback behavior unconditionally and
-// needs no change. Without this, the canonical calls below would stop
-// decrypting v20 rows on Windows. See CHANGELOG.md.
+// The explicit allow_elevated_fallback is deliberate and is NOT what the
+// default does. The 0.6 default is injection_only, so these calls would
+// decrypt v20 without it; pinning the most permissive policy is what keeps
+// this canary a test of *elevated* recovery specifically, on a runner where
+// unprivileged injection may not be enough. chromiumBased is the deprecated
+// bridge and keeps allow_elevated_fallback unconditionally.
+//
+// Consequence worth knowing: because this pins a policy, nothing here
+// exercises the default. That is covered by a Rust unit test, since this
+// workflow does not run on pull requests. See CHANGELOG.md.
 let results;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");

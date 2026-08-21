@@ -205,7 +205,7 @@ const chrome = await extractFromPath("/path/to/Chrome/Default/Network/Cookies", 
 
 `options` bundles `domains`; at most one of `browserId`, `localStatePath`,
 `plaintextOnly: true`; `timeoutMs`; `appBound` (same three values, same
-`"disabled"` default — see [App-Bound recovery](#app-bound-v20-recovery)).
+`"injection_only"` default — see [App-Bound recovery](#app-bound-v20-recovery)).
 Invalid option shapes reject with `TypeError` before I/O. Process shutdown is
 not exposed. With no selector at all, the source is sniffed from its
 signature and schema: a Chromium database found this way is plaintext-capable
@@ -313,21 +313,26 @@ N-API, their `code` is absent and `rookieCode` is `null`.
 ## App-Bound (v20) recovery
 
 `read`, `fromPath`, `report`, `browserReport`, `loadReport`, and
-`extractFromPath` all take an `appBound` option: `"disabled"` (the default),
-`"injection_only"`, or `"allow_elevated_fallback"`. It is a no-op outside
-Windows. An unrecognized string rejects with `kind === "request"` before any
-I/O runs.
+`extractFromPath` all take an `appBound` option. It is a no-op outside
+Windows — macOS and Linux Chrome use the Keychain and Secret Service, which
+this policy has nothing to do with. An unrecognized string rejects with
+`kind === "request"` before any I/O runs.
 
-**`appBound` defaults to `"disabled"`.** Unlike the deprecated v0.5.9 bridge
-(`chrome()`, `chromiumBased()`, ...), which keeps its old
-`allow_elevated_fallback`-equivalent behavior unconditionally, this job
-surface never injects, spawns a browser process, enumerates processes, or
-impersonates SYSTEM unless a caller opts in. On Windows this means `read` /
-`report` / etc. no longer recover Chrome v20 App-Bound cookies out of the
-box — pass `appBound: "injection_only"` (unprivileged reflective COM
-injection, Chrome 127+) or `appBound: "allow_elevated_fallback"` (adds
-elevated SYSTEM impersonation fallback for Chrome 133+ when injection alone
-cannot recover the key) to restore it:
+| Value | What it does |
+| --- | --- |
+| `"injection_only"` (default) | Unprivileged reflective COM injection into a spawned browser process (Chrome 127+). |
+| `"disabled"` | No injection, no spawned process, no process enumeration, no SYSTEM impersonation. v20 rows are skipped and counted as `decrypt_failed` warnings. |
+| `"allow_elevated_fallback"` | Injection, then permits elevated SYSTEM impersonation as a fallback (Chrome 133+). Never a default. |
+
+The default is `"injection_only"` because Chrome has written App-Bound (v20)
+cookies on Windows since Chrome 127: on a current profile essentially every
+row is v20, so a policy that refused to recover them would return an **empty**
+list for the most common Windows case.
+
+**It is not free of consequence.** Injection spawns a browser process and
+writes into it, which endpoint security products can flag. On a managed
+machine where that matters, pass `"disabled"` explicitly and expect v20 rows
+to be omitted:
 
 ```js
 import { read } from "rookie-cookies";
@@ -335,9 +340,12 @@ import { read } from "rookie-cookies";
 const snapshot = await read({
   browser: "chrome",
   profile: "Default",
-  appBound: "allow_elevated_fallback",
+  appBound: "disabled",
 });
 ```
+
+The deprecated v0.5.9 bridge (`chrome()`, `chromiumBased()`, ...) keeps its
+`allow_elevated_fallback`-equivalent behavior unchanged.
 
 `profiles` / `browserProfiles` / `supportedBrowsers` take no `appBound`:
 listing does no App-Bound work.
@@ -381,7 +389,7 @@ const all = load();
 | Header view | Manual | `snapshot.header(url \| SendContext)` — **no** top-level `header()`; a partitioned/container snapshot needs a `SendContext`, not a bare URL |
 | Cookie identity | Flat only | `snapshot.detailedCookies` adds CHIPS partition / Firefox container `context`; `snapshot.browserId` is now `string \| null` |
 | Reports | Not in 0.5.6 | `report({ browser, profile, select })` / `browserReport({ browserId, profileId })` |
-| App-Bound (v20) recovery | Always attempted (bridge behavior) | `appBound` defaults to `"disabled"` on `read`/`report`/`browserReport`/`loadReport`/`fromPath` — pass `"injection_only"` or `"allow_elevated_fallback"` to restore it; the deprecated bridge is unaffected |
+| App-Bound (v20) recovery | Always attempted, with elevated fallback | `appBound` defaults to `"injection_only"` on `read`/`report`/`browserReport`/`loadReport`/`fromPath` — unprivileged injection, no SYSTEM impersonation unless you pass `"allow_elevated_fallback"`; the deprecated bridge is unaffected |
 
 1. Bump Node.js to 22+.
 2. Add `await` (or `.then`) to every extraction call.

@@ -157,20 +157,30 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and not the count, because a bare `Vec<Cookie>` has nowhere to put it — use
   `read` or `extract_report` when the count matters. Unknown *optional*
   isolation fields stay `None` and never drop a row.
-- **Windows App-Bound (v20) is now opt-in on the 0.6 job surface.**
-  `AppBoundPolicy` defaults to `Disabled`, so `read` / `extract` /
-  `extract_report` / `from_path` no longer inject into a browser process, spawn
-  one, enumerate processes, or impersonate SYSTEM unless asked. A caller who
-  needs v20 rows passes `.app_bound(AppBoundPolicy::InjectionOnly)` (or
-  `AllowElevatedFallback`), or `--app-bound` on the CLI. The deprecated v0.5.9
-  bridge keeps `AllowElevatedFallback`, so its 0.5.8 capability is unchanged.
-  Python's `read`, `from_path`, `browser_report`, and `load_report` gain an
-  `app_bound: str = "disabled"` keyword (`"disabled"` / `"injection_only"` /
-  `"allow_elevated_fallback"`); an unrecognized string raises
-  `RookieRequestError` before any I/O. `browser_profiles` and
-  `chrome_profiles` also gain `timeout` / `cancellation` but no `app_bound`
-  parameter, since listing does no App-Bound work. Python's deprecated
-  v0.5.9 bridge functions are unaffected, same as Rust's.
+- **Windows App-Bound (v20) recovery is now an explicit per-request policy.**
+  `AppBoundPolicy` defaults to `InjectionOnly`: unprivileged reflective COM
+  injection (Chrome 127+), but **never** the elevated SYSTEM impersonation
+  that `AllowElevatedFallback` permits — that now has to be asked for out
+  loud. `Disabled` performs no injection, no browser spawn, no process
+  enumeration and no impersonation at all; v20 rows are then skipped and
+  surface as `decrypt_failed` read warnings with a `provider_failed` report
+  issue naming the policy as the cause.
+  The default is `InjectionOnly` rather than `Disabled` because Chrome has
+  written v20 cookies on Windows since Chrome 127, so on a current profile
+  essentially every row is v20 — a `Disabled` default would return an empty
+  list for the most common Windows case, and would leave the deprecated
+  v0.5.9 bridge *more* capable than the recommended API. Injection is still
+  not free of consequence: it spawns a browser process and writes into it,
+  which endpoint security products can flag, so pass `Disabled` where that
+  matters.
+  The deprecated v0.5.9 bridge keeps `AllowElevatedFallback`, so its 0.5.8
+  capability is unchanged. Python's `read`, `from_path`, `browser_report`, and
+  `load_report` take `app_bound: str = "injection_only"` (`"disabled"` /
+  `"injection_only"` / `"allow_elevated_fallback"`); an unrecognized string
+  raises `RookieRequestError` before any I/O. Node's `appBound` and the CLI's
+  `--app-bound` follow the same default. `browser_profiles` and
+  `chrome_profiles` take no `app_bound` parameter, since listing does no
+  App-Bound work.
 - `ROOKIE_E2E_APPBOUND_MODE` no longer steers a published build. It is compiled
   in only under `cfg(test)` or the off-by-default `e2e-appbound-steering`
   feature, and even there it can only narrow what the request policy already

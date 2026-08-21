@@ -45,11 +45,18 @@ def main() -> int:
     db_override = os.environ.get("ROOKIE_E2E_COOKIE_DB")
     db_path = Path(db_override) if db_override else find_cookie_db(user_data_dir)
 
-    # chromium_cookies_from_path is the new job surface, where App-Bound (v20)
-    # recovery defaults to disabled; chromium_based is the deprecated bridge,
-    # which keeps its old allow_elevated_fallback behavior unconditionally
-    # and needs no change. Without this, the canonical calls below would stop
-    # decrypting v20 rows on Windows. See CHANGELOG.md.
+    # The explicit allow_elevated_fallback is deliberate and is NOT what the
+    # default does. The 0.6 default is injection_only, so these calls would
+    # decrypt v20 without it; pinning the most permissive policy is what keeps
+    # this canary a test of *elevated* recovery specifically, on a runner
+    # where unprivileged injection may not be enough. chromium_based is the
+    # deprecated bridge and keeps allow_elevated_fallback unconditionally.
+    #
+    # Consequence worth knowing: because this pins a policy, nothing here
+    # exercises the default. That is covered by
+    # `chromium_platform_keys::windows::tests::
+    # the_policy_decides_whether_v20_metadata_is_even_attempted`, since this
+    # workflow does not run on pull requests. See CHANGELOG.md.
     if sys.platform == "win32":
         key_path = user_data_dir / "Local State"
         canonical = rookie_cookies.chromium_cookies_from_path(

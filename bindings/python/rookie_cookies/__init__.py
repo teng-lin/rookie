@@ -206,7 +206,7 @@ def jar(
     select: str = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> http.cookiejar.CookieJar:
     """
     Sugar: ``read(...).as_jar()``. Warnings are discarded; use ``read()`` if you need them.
@@ -254,7 +254,7 @@ def report(
     select: Optional[str] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> ExtractionReport:
     """Bindings name for :func:`browser_report` / Rust ``extract_report``.
 

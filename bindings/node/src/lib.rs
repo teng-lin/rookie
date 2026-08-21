@@ -747,7 +747,7 @@ fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
 /// Parses the JS-facing `AppBoundPolicy` string, rejecting an unrecognized
 /// value before any I/O runs -- the same before-any-I/O contract
 /// `chromium_credentials` already gives conflicting Chromium selectors.
-/// `None` (the option omitted) is the crate's own `Disabled` default.
+/// `None` (the option omitted) takes the crate's own default, `InjectionOnly`.
 fn parse_app_bound(policy: Option<&str>) -> Result<AppBoundPolicy> {
   match policy {
     None => Ok(AppBoundPolicy::default()),
@@ -968,7 +968,7 @@ impl Task for ExtractFromPathTask {
 /// Windows a plaintext Chromium database now succeeds instead of always
 /// rejecting with `missing_local_state_file`. An encrypted Chromium row
 /// without an explicit credential selector is `missing_chromium_credentials`.
-/// `options.appBound` defaults to `"disabled"`, same as `read`.
+/// `options.appBound` defaults to `"injection_only"`, same as `read`.
 #[napi(ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn extract_from_path(
   path: String,
@@ -1530,7 +1530,7 @@ impl Task for BrowserReportTask {
 /// Only a bad request rejects: an unknown `browserId`, or a `profileId` this
 /// browser did not yield. Extraction problems resolve as a report whose
 /// `status` and `issues` describe them. `options.appBound` defaults to
-/// `"disabled"`, same as `read`.
+/// `"injection_only"`, same as `read`.
 #[napi(ts_return_type = "Promise<ExtractionReportObject>")]
 pub fn browser_report(options: BrowserReportOptions) -> Result<AsyncTask<BrowserReportTask>> {
   let app_bound = parse_app_bound(options.app_bound.as_deref())?;
@@ -1567,7 +1567,7 @@ impl Task for LoadReportTask {
 /// This is the report-shaped counterpart to `load`, not a replacement: `load`
 /// keeps its historical browser set and flat output. A browser that fails does
 /// not abort the others; it becomes an issue on the returned report.
-/// `options.appBound` defaults to `"disabled"`, same as `read`.
+/// `options.appBound` defaults to `"injection_only"`, same as `read`.
 #[napi(ts_return_type = "Promise<ExtractionReportObject>")]
 pub fn load_report(options: Option<LoadReportOptions>) -> Result<AsyncTask<LoadReportTask>> {
   let options = options.unwrap_or_default();
@@ -1591,8 +1591,8 @@ pub struct ReadOptions {
   pub include_session: Option<bool>,
   pub timeout_ms: Option<u32>,
   /// `"disabled" | "injection_only" | "allow_elevated_fallback"`. Omitted
-  /// means `"disabled"`: this job surface never recovers Chrome v20
-  /// App-Bound keys unless a caller opts in.
+  /// means `"injection_only"`, which recovers Chrome v20 App-Bound keys
+  /// without elevation. Pass `"disabled"` to skip v20 rows instead.
   pub app_bound: Option<String>,
   /// Only `"legacy_first"` (the default) is representable here: a snapshot
   /// or flat extract returns one answer, so there is no "every profile" for
@@ -1815,10 +1815,12 @@ impl Task for ReadTask {
 
 /// Unfiltered snapshot of one browser profile. Never URL-pre-sliced.
 ///
-/// `options.appBound` defaults to `"disabled"`: unlike the deprecated v0.5.9
-/// bridge (`chrome()`, ...), this job surface never injects, spawns a
-/// browser process, or impersonates SYSTEM to recover Chrome v20 App-Bound
-/// keys unless the caller opts in.
+/// `options.appBound` defaults to `"injection_only"`: Chrome has written
+/// App-Bound (v20) cookies on Windows since Chrome 127, so refusing to
+/// recover them would return an empty list for the common case. Injection is
+/// unprivileged but spawns a browser process, which endpoint security can
+/// flag -- pass `"disabled"` to skip v20 rows instead. Elevated SYSTEM
+/// impersonation stays opt-in via `"allow_elevated_fallback"`.
 #[napi(js_name = "read", ts_return_type = "Promise<ReadResult>")]
 pub fn read(
   options: ReadOptions,
@@ -1908,7 +1910,7 @@ impl Task for JobReportTask {
 
 /// Bindings name for `extract_report` / `browserReport`.
 ///
-/// `options.appBound` defaults to `"disabled"`, same as `read`.
+/// `options.appBound` defaults to `"injection_only"`, same as `read`.
 #[napi(js_name = "report", ts_return_type = "Promise<ExtractionReportObject>")]
 pub fn report(options: ReportOptions) -> Result<AsyncTask<JobReportTask>> {
   validate_report_select(options.select.as_deref(), options.profile.is_some())?;
@@ -1955,7 +1957,7 @@ impl Task for FromPathTask {
 
 /// Read cookies from an explicit cookie database path.
 ///
-/// `options.appBound` defaults to `"disabled"`, same as `read`.
+/// `options.appBound` defaults to `"injection_only"`, same as `read`.
 #[napi(js_name = "fromPath", ts_return_type = "Promise<ReadResult>")]
 pub fn from_path(
   options: FromPathOptions,

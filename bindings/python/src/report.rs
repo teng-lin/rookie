@@ -102,7 +102,7 @@ pub fn chrome_profile(
 
 /// Extract cookies from one browser as a grouped report
 ///
-/// **Windows App-Bound (v20) recovery is opt-in** -- see `read`'s docstring
+/// **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see `read`'s docstring
 /// and CHANGELOG.md; the same default and the same values apply here.
 ///
 /// :param browser_id: A canonical browser ID or alias from supported_browsers
@@ -115,8 +115,8 @@ pub fn chrome_profile(
 ///     profile, same as the named v0.5.9 helpers.
 /// :param timeout: Optional timeout in seconds
 /// :param cancellation: Optional CancellationHandle
-/// :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-///     (default), "injection_only", or "allow_elevated_fallback". A no-op
+/// :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+///     (default), "disabled", or "allow_elevated_fallback". A no-op
 ///     off Windows.
 /// :return: An extraction report dictionary
 /// :raises RookieRequestError: `profile_id` was given together with an
@@ -133,7 +133,7 @@ pub fn chrome_profile(
   select=None,
   timeout=None,
   cancellation=None,
-  app_bound="disabled".to_string(),
+  app_bound="injection_only".to_string(),
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn browser_report(
@@ -198,15 +198,15 @@ pub fn browser_report(
 
 /// Extract cookies from every registered browser as one grouped report
 ///
-/// **Windows App-Bound (v20) recovery is opt-in** -- see `read`'s docstring
+/// **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see `read`'s docstring
 /// and CHANGELOG.md; the same default and the same values apply here, for
 /// every browser in the fan-out.
 ///
 /// :param domains: Optional list of domains to extract only from them
 /// :param timeout: Optional timeout in seconds, shared by the whole fan-out
 /// :param cancellation: Optional CancellationHandle, shared by the whole fan-out
-/// :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-///     (default), "injection_only", or "allow_elevated_fallback". A no-op
+/// :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+///     (default), "disabled", or "allow_elevated_fallback". A no-op
 ///     off Windows.
 /// :return: An extraction report dictionary
 #[pyfunction]
@@ -215,7 +215,7 @@ pub fn browser_report(
   *,
   timeout=None,
   cancellation=None,
-  app_bound="disabled".to_string(),
+  app_bound="injection_only".to_string(),
 ))]
 pub fn load_report(
   py: Python<'_>,

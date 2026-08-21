@@ -6,16 +6,37 @@ use std::time::Duration;
 /// Per-job Windows App-Bound (v20) recovery policy.
 ///
 /// The policy is request-local and immutable after a job starts. On
-/// non-Windows targets it is a no-op. [`AllowElevatedFallback`](Self::AllowElevatedFallback)
-/// may fall back to SYSTEM impersonation after unprivileged injection fails.
+/// non-Windows targets it is a no-op: macOS and Linux Chrome use the Keychain
+/// and Secret Service, which this policy has nothing to do with.
+///
+/// # Why the default is [`InjectionOnly`](Self::InjectionOnly)
+///
+/// Chrome has written App-Bound (v20) cookies on Windows since Chrome 127, so
+/// on a current Windows profile essentially every row is v20.
+/// [`Disabled`](Self::Disabled) leaves those unreadable, which means the
+/// default would return an **empty** cookie list for the most common Windows
+/// case -- and 0.5.9 read them, so that would be a silent capability
+/// regression on upgrade, with the deprecated bridge ending up *more* capable
+/// than the recommended API.
+///
+/// [`InjectionOnly`](Self::InjectionOnly) is the middle setting: unprivileged,
+/// and it still refuses the elevated SYSTEM impersonation that
+/// [`AllowElevatedFallback`](Self::AllowElevatedFallback) permits. It is not
+/// free of consequence -- it spawns a browser process and reflectively injects
+/// into it, which endpoint security products can flag -- so a caller who needs
+/// none of that should set [`Disabled`](Self::Disabled) explicitly and expect
+/// v20 rows to be omitted with a `app_bound_disabled` warning.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppBoundPolicy {
   /// Never injects, spawns a browser process, enumerates processes, or
-  /// impersonates SYSTEM. App-Bound v20 rows remain unreadable.
-  #[default]
+  /// impersonates SYSTEM. App-Bound v20 rows remain unreadable, and are
+  /// omitted with a `app_bound_disabled` read warning rather than silently.
   Disabled,
   /// Attempts unprivileged reflective COM injection only (Chrome 127+).
+  ///
+  /// The default. See the type-level note for why.
+  #[default]
   InjectionOnly,
   /// Attempts injection, then permits elevated SYSTEM impersonation fallback
   /// for Chrome 133+ when injection cannot recover the key.
@@ -81,10 +102,14 @@ mod tests {
   use super::*;
 
   #[test]
-  fn the_default_policy_performs_no_native_recovery() {
+  fn the_default_policy_is_unprivileged_but_not_inert() {
+    // Not `Disabled`: on a current Windows profile every row is v20, so a
+    // `Disabled` default returns an empty list for the common case and is a
+    // capability regression from 0.5.9. Not `AllowElevatedFallback` either:
+    // elevation stays something a caller asks for out loud.
     assert_eq!(
       ExecutionControl::default().app_bound,
-      AppBoundPolicy::Disabled
+      AppBoundPolicy::InjectionOnly
     );
   }
 

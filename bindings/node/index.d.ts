@@ -261,7 +261,7 @@ export declare function toNetscape(cookies: Array<CookieObject>): string
  * Windows a plaintext Chromium database now succeeds instead of always
  * rejecting with `missing_local_state_file`. An encrypted Chromium row
  * without an explicit credential selector is `missing_chromium_credentials`.
- * `options.appBound` defaults to `"disabled"`, same as `read`.
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
  */
 export declare function extractFromPath(path: string, options?: ExtractFromPathOptions | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** @deprecated Use `extractFromPath`. Earliest removal is 0.7. */
@@ -327,7 +327,7 @@ export declare function chromeProfile(profile: string, domains?: Array<string> |
  * Only a bad request rejects: an unknown `browserId`, or a `profileId` this
  * browser did not yield. Extraction problems resolve as a report whose
  * `status` and `issues` describe them. `options.appBound` defaults to
- * `"disabled"`, same as `read`.
+ * `"injection_only"`, same as `read`.
  */
 export declare function browserReport(options: BrowserReportOptions): Promise<ExtractionReportObject>
 /**
@@ -336,7 +336,7 @@ export declare function browserReport(options: BrowserReportOptions): Promise<Ex
  * This is the report-shaped counterpart to `load`, not a replacement: `load`
  * keeps its historical browser set and flat output. A browser that fails does
  * not abort the others; it becomes an issue on the returned report.
- * `options.appBound` defaults to `"disabled"`, same as `read`.
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
  */
 export declare function loadReport(options?: LoadReportOptions | undefined | null): Promise<ExtractionReportObject>
 export interface ReadOptions {
@@ -353,8 +353,8 @@ export interface ReadOptions {
   timeoutMs?: number
   /**
    * `"disabled" | "injection_only" | "allow_elevated_fallback"`. Omitted
-   * means `"disabled"`: this job surface never recovers Chrome v20
-   * App-Bound keys unless a caller opts in.
+   * means `"injection_only"`, which recovers Chrome v20 App-Bound keys
+   * without elevation. Pass `"disabled"` to skip v20 rows instead.
    */
   appBound?: AppBoundPolicy
   /**
@@ -427,10 +427,12 @@ export interface ReadWarningObject {
 /**
  * Unfiltered snapshot of one browser profile. Never URL-pre-sliced.
  *
- * `options.appBound` defaults to `"disabled"`: unlike the deprecated v0.5.9
- * bridge (`chrome()`, ...), this job surface never injects, spawns a
- * browser process, or impersonates SYSTEM to recover Chrome v20 App-Bound
- * keys unless the caller opts in.
+ * `options.appBound` defaults to `"injection_only"`: Chrome has written
+ * App-Bound (v20) cookies on Windows since Chrome 127, so refusing to
+ * recover them would return an empty list for the common case. Injection is
+ * unprivileged but spawns a browser process, which endpoint security can
+ * flag -- pass `"disabled"` to skip v20 rows instead. Elevated SYSTEM
+ * impersonation stays opt-in via `"allow_elevated_fallback"`.
  */
 export declare function read(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
 /** Alias of `browserProfiles`. No decrypt, no `appBound`. */
@@ -438,13 +440,13 @@ export declare function profiles(browserId: string, options?: ProfilesOptions | 
 /**
  * Bindings name for `extract_report` / `browserReport`.
  *
- * `options.appBound` defaults to `"disabled"`, same as `read`.
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
  */
 export declare function report(options: ReportOptions): Promise<ExtractionReportObject>
 /**
  * Read cookies from an explicit cookie database path.
  *
- * `options.appBound` defaults to `"disabled"`, same as `read`.
+ * `options.appBound` defaults to `"injection_only"`, same as `read`.
  */
 export declare function fromPath(options: FromPathOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
 export type JsCancellationHandle = CancellationHandle

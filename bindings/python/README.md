@@ -243,35 +243,48 @@ finally:
 
 ## Windows App-Bound (v20) recovery
 
-**Windows App-Bound (v20) recovery is opt-in on the 0.6 job surface.**
 `read`, `from_path`, `browser_report`, and `load_report` all take an
-`app_bound` keyword defaulting to `"disabled"`, so on Windows a Chrome v20
-profile's cookies are simply **not** recovered — no injection, no spawned
-browser process, no process enumeration, no SYSTEM impersonation — unless the
-caller opts in:
+`app_bound` keyword. It defaults to `"injection_only"`, because Chrome has
+written App-Bound (v20) cookies on Windows since Chrome 127 — on a current
+profile essentially every row is v20, so a policy that refused to recover them
+would return an **empty** list for the most common Windows case.
 
 ```python
 import rookie_cookies
 
+# The default already recovers v20 on Windows.
+rows = rookie_cookies.read(browser="chrome", profile="Default").as_list()
+
+# Opt out if injection is unwanted; v20 rows are then skipped.
 rows = rookie_cookies.read(
     browser="chrome",
     profile="Default",
-    app_bound="injection_only",
+    app_bound="disabled",
 ).as_list()
 ```
 
-`app_bound` accepts `"disabled"` (default), `"injection_only"` (unprivileged
-reflective COM injection, Chrome 127+), or `"allow_elevated_fallback"`
-(injection, then permits elevated SYSTEM impersonation as a fallback for
-Chrome 133+). It is a no-op off Windows, and an unrecognized string is a
+`app_bound` accepts:
+
+| Value | What it does |
+| --- | --- |
+| `"injection_only"` (default) | Unprivileged reflective COM injection into a spawned browser process (Chrome 127+). |
+| `"disabled"` | No injection, no spawned process, no process enumeration, no SYSTEM impersonation. v20 rows are skipped and counted as `decrypt_failed` warnings. |
+| `"allow_elevated_fallback"` | Injection, then permits elevated SYSTEM impersonation as a fallback (Chrome 133+). Never a default. |
+
+**`"injection_only"` is not free of consequence.** It spawns a browser process
+and reflectively injects into it, which endpoint security products can flag.
+On a managed machine where that matters, pass `"disabled"` explicitly and
+expect v20 rows to be omitted.
+
+It is a no-op off Windows — macOS and Linux Chrome use the Keychain and Secret
+Service, which this policy has nothing to do with. An unrecognized string is a
 `RookieRequestError` raised before any I/O. `browser_profiles` /
 `chrome_profiles` do no App-Bound work and take no `app_bound` parameter at
 all.
 
-**This is a breaking behavior change** from the deprecated v0.5.9 bridge
-functions (`chrome()`, `chromium_based()`, and friends), which keep their old
-`allow_elevated_fallback` recovery unchanged — only the new job surface
-above defaults to `"disabled"`. See CHANGELOG.md.
+The deprecated v0.5.9 bridge functions (`chrome()`, `chromium_based()`, and
+friends) keep `allow_elevated_fallback`, unchanged from 0.5.8. See
+CHANGELOG.md.
 
 ## Errors
 

@@ -140,7 +140,7 @@ def extract_from_path(
     local_state_path: Optional[str] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> CookieList:
     """
     Extract cookies from an explicit cookie file.
@@ -156,7 +156,7 @@ def extract_from_path(
     browser wrote it. At most one of ``plaintext_only``, ``browser_id``,
     ``local_state_path`` may be given.
 
-    **Windows App-Bound (v20) recovery is opt-in** -- see ``read``'s
+    **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see ``read``'s
     docstring; the same default and the same values apply here.
 
     :param domains: Optional list of domains to extract only from them
@@ -168,8 +168,8 @@ def extract_from_path(
         encrypted Chromium database. Windows only.
     :param timeout: Optional extraction budget in seconds
     :param cancellation: Optional handle whose ``cancel()`` stops extraction early
-    :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-        (default), "injection_only", or "allow_elevated_fallback". A no-op
+    :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+        (default), "disabled", or "allow_elevated_fallback". A no-op
         off Windows.
     :raises RookieRequestError: More than one credential selector was given
         (``conflicting_credential_selectors``), a platform-incompatible one,
@@ -527,7 +527,7 @@ def browser_report(
     select: Literal["legacy_first", "all"] = "all",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> ExtractionReport:
     """
     Extract cookies from one browser as a grouped report.
@@ -538,7 +538,7 @@ def browser_report(
     ``issues``. An absent browser is a report with status ``no_sources``, and a
     failure during extraction is an issue rather than an exception.
 
-    **Windows App-Bound (v20) recovery is opt-in** -- see ``read``'s
+    **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see ``read``'s
     docstring; the same default and the same values apply here.
 
     :param browser_id: A canonical browser ID or alias from supported_browsers
@@ -553,8 +553,8 @@ def browser_report(
         is given, since a named profile already narrows to one.
     :param timeout: Optional timeout in seconds
     :param cancellation: Optional CancellationHandle
-    :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-        (default), "injection_only", or "allow_elevated_fallback". A no-op
+    :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+        (default), "disabled", or "allow_elevated_fallback". A no-op
         off Windows.
     :return: An extraction report dictionary
     :raises RookieRequestError: The request itself is bad -- an unknown
@@ -572,20 +572,20 @@ def load_report(
     *,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> ExtractionReport:
     """
     Extract cookies from every registered browser as one grouped report.
 
-    **Windows App-Bound (v20) recovery is opt-in** -- see ``read``'s
+    **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see ``read``'s
     docstring; the same default and the same values apply here, for every
     browser in the fan-out.
 
     :param domains: Optional list of domains to extract only from them
     :param timeout: Optional timeout in seconds, shared by the whole fan-out
     :param cancellation: Optional CancellationHandle, shared by the whole fan-out
-    :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-        (default), "injection_only", or "allow_elevated_fallback". A no-op
+    :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+        (default), "disabled", or "allow_elevated_fallback". A no-op
         off Windows.
     :return: An extraction report dictionary
     """
@@ -674,18 +674,18 @@ def read(
     select: Literal["legacy_first"] = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> ReadResult:
     """
     Read an unfiltered snapshot of one browser profile.
 
-    **Windows App-Bound (v20) recovery is opt-in.** ``app_bound`` defaults to
-    ``"disabled"``, so a Chrome v20 profile's cookies are simply not
-    recovered unless the caller passes ``"injection_only"`` or
-    ``"allow_elevated_fallback"``. This is a behavior change from the
-    deprecated v0.5.9 bridge functions (``chrome()`` and friends), which
-    still default to the old ``allow_elevated_fallback`` recovery -- see
-    CHANGELOG.md.
+    **Windows App-Bound (v20):** ``app_bound`` defaults to
+    ``"injection_only"``, which recovers a Chrome v20 profile without
+    elevation by spawning a browser process and injecting into it. Endpoint
+    security products can flag that, so pass ``"disabled"`` if it is
+    unwanted -- v20 rows are then skipped and reported as ``decrypt_failed``
+    warnings. ``"allow_elevated_fallback"`` additionally permits SYSTEM
+    impersonation and is never the default. See CHANGELOG.md.
 
     **Migration trap:** ``include_session`` defaults to ``False``. In
     0.6-beta, naming a Gecko ``profile`` always imported its session cookies
@@ -700,8 +700,8 @@ def read(
     :param select: Profile selection strategy. Only ``"legacy_first"`` (the
         default) is valid here -- ``"all"`` has nowhere to put more than one
         profile in a single snapshot; see ``browser_report`` for that.
-    :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-        (default), "injection_only", or "allow_elevated_fallback". A no-op
+    :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+        (default), "disabled", or "allow_elevated_fallback". A no-op
         off Windows.
     :raises TypeError: ``browser`` was omitted
     :raises RookieRequestError: Unknown browser, profile selector, or
@@ -719,12 +719,12 @@ def from_path(
     local_state_path: Optional[str] = None,
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> ReadResult:
     """
     Read cookies from an explicit cookie database path.
 
-    **Windows App-Bound (v20) recovery is opt-in** -- see ``read``'s
+    **Windows App-Bound (v20):** ``app_bound`` defaults to ``"injection_only"`` -- see ``read``'s
     docstring; the same default and the same values apply here.
 
     By default the source is identified automatically: a Mozilla / Safari /
@@ -753,7 +753,7 @@ def jar(
     select: str = "legacy_first",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> "http.cookiejar.CookieJar":
     """
     Sugar: ``read(...).as_jar()``. Warnings are discarded.
@@ -783,7 +783,7 @@ def report(
     select: Literal["legacy_first", "all"] = "all",
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
-    app_bound: str = "disabled",
+    app_bound: str = "injection_only",
 ) -> ExtractionReport:
     """Bindings name for ``browser_report`` / Rust ``extract_report``."""
     ...

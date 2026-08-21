@@ -61,9 +61,9 @@ mod tests {
         );
       }
 
-      // Absent key stays `None` (default `AppBoundPolicy::Disabled` applies
-      // further up, in `chromium_path_request`), and an unrecognized string
-      // is a request fault, not a silent fallback to `"disabled"`.
+      // Absent key stays `None` (the crate's own `AppBoundPolicy` default
+      // applies further up, in `chromium_path_request`), and an unrecognized
+      // string is a request fault, not a silent fallback to any policy.
       let options = PyDict::new(py);
       assert_eq!(app_bound_option(&options).expect("absent key"), None);
 
@@ -247,7 +247,7 @@ fn plaintext_only_option(options: &Bound<'_, PyDict>) -> PyResult<bool> {
 
 /// Parses the optional `app_bound` Chromium path option, defaulting to
 /// `AppBoundPolicy::Disabled` (`None` here) the same way `read` / `from_path`
-/// do -- App-Bound recovery is opt-in on every job that can request it.
+/// do -- every job that can request App-Bound recovery takes the same policy.
 fn app_bound_option(options: &Bound<'_, PyDict>) -> PyResult<Option<rookie_core::AppBoundPolicy>> {
   let Some(value) = string_option(options, "app_bound")? else {
     return Ok(None);
@@ -521,7 +521,7 @@ fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
 /// browser wrote it. At most one of `plaintext_only`, `browser_id`,
 /// `local_state_path` may be given.
 ///
-/// ``app_bound`` defaults to ``"disabled"``, same as `read` -- see
+/// ``app_bound`` defaults to ``"injection_only"``, same as `read` -- see
 /// CHANGELOG.md.
 ///
 /// :param path: Path to a cookie database or cookies file
@@ -534,8 +534,8 @@ fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
 ///     encrypted Chromium database. Windows only.
 /// :param timeout: Optional timeout in seconds
 /// :param cancellation: Optional CancellationHandle
-/// :param app_bound: Windows App-Bound (v20) recovery policy: "disabled"
-///     (default), "injection_only", or "allow_elevated_fallback". A no-op
+/// :param app_bound: Windows App-Bound (v20) recovery policy: "injection_only"
+///     (default), "disabled", or "allow_elevated_fallback". A no-op
 ///     off Windows.
 /// :return: A list of dictionaries of cookies
 /// :raises RookieRequestError: More than one credential selector was given
@@ -551,7 +551,7 @@ fn duration_from_seconds(seconds: f64) -> PyResult<std::time::Duration> {
   local_state_path=None,
   timeout=None,
   cancellation=None,
-  app_bound="disabled".to_string(),
+  app_bound="injection_only".to_string(),
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn extract_from_path(
@@ -620,7 +620,7 @@ pub fn cookies_from_path(
 /// **Deprecated: use [`extract_from_path`] instead**, which takes the same
 /// options as flat keyword arguments rather than a dict.
 ///
-/// ``options["app_bound"]`` defaults to ``"disabled"``, same as `read` --
+/// ``options["app_bound"]`` defaults to ``"injection_only"``, same as `read` --
 /// see CHANGELOG.md.
 #[pyfunction]
 #[pyo3(signature = (path, options=None))]

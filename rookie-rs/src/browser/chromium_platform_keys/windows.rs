@@ -955,4 +955,67 @@ mod tests {
       ChromiumKeyRoute::Failure { .. }
     ));
   }
+
+  /// The policy's *effect*, which nothing covered before.
+  ///
+  /// Every other `AppBoundPolicy` test asserts plumbing -- that a default is
+  /// what it says, that the value reaches a runtime, that a string parses.
+  /// None asserted that `Disabled` actually leaves v20 unreadable while a
+  /// permissive policy does not, so the one behaviour the policy exists to
+  /// control was the one thing untested. A real v20 profile appears only in
+  /// the e2e job, which does not run on pull requests and pins
+  /// `allow_elevated_fallback` when it does run.
+  #[test]
+  fn the_policy_decides_whether_v20_metadata_is_even_attempted() {
+    let clock = SystemClock;
+    let state = windows_local_state(serde_json::json!("legacy"), serde_json::json!("appbound"));
+
+    let backend = windows_backend(Ok(vec![vec![0x10; 32]]), Ok(vec![vec![0x20; 32]]));
+    let disabled =
+      BoundaryRuntime::new(&clock, Deadline::standard()).with_app_bound(AppBoundPolicy::Disabled);
+    let outcomes =
+      retrieve_windows_key_outcomes_with_runtime(&state, Some("chrome"), None, &backend, &disabled);
+    assert!(
+      matches!(
+        outcomes.route(ChromiumCipherVersion::V20),
+        ChromiumKeyRoute::Failure { .. }
+      ),
+      "Disabled must leave v20 unreadable even when the provider would succeed"
+    );
+    assert_eq!(
+      backend.v20_calls.get(),
+      0,
+      "Disabled must not reach the v20 provider at all"
+    );
+    // The legacy tier is untouched by the policy, which is why a mixed profile
+    // degrades rather than failing outright.
+    assert!(matches!(
+      outcomes.route(ChromiumCipherVersion::V10),
+      ChromiumKeyRoute::Candidates { .. }
+    ));
+
+    let permissive = windows_backend(Ok(vec![vec![0x10; 32]]), Ok(vec![vec![0x20; 32]]));
+    let allowed = BoundaryRuntime::new(&clock, Deadline::standard())
+      .with_app_bound(AppBoundPolicy::InjectionOnly);
+    let outcomes = retrieve_windows_key_outcomes_with_runtime(
+      &state,
+      Some("chrome"),
+      None,
+      &permissive,
+      &allowed,
+    );
+    assert_eq!(
+      permissive.v20_calls.get(),
+      1,
+      "a permitted policy reaches the provider"
+    );
+    assert!(
+      matches!(
+        outcomes.route(ChromiumCipherVersion::V20),
+        ChromiumKeyRoute::Candidates { .. }
+      ),
+      "the same profile and provider succeed once the policy permits it, so \
+       the failure above is the policy's doing and not the fixture's"
+    );
+  }
 }
