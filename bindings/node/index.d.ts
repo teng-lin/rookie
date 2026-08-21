@@ -123,8 +123,6 @@ export declare function chromeProfiles(): Promise<Array<ProfileDescriptorObject>
 
 export declare function chromium(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 
-
-
 /** @deprecated Use `extractFromPath`. Earliest removal is 0.7. */
 export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null): Promise<CookieObject[]>
 
@@ -364,7 +362,6 @@ export interface LoadReportOptions {
 
 export declare function opera(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 
-
 /** One discovered profile and its cookie sources. */
 export interface ProfileDescriptorObject {
   profile: ProfileIdentityObject
@@ -496,7 +493,6 @@ export interface ReportStatsObject {
   countersSaturated: boolean
 }
 
-
 /**
  * View input for `ReadResult.header`. A bare `url` string is sugar for
  * `{ url }`; see `header`'s doc comment for why the rest matters.
@@ -548,7 +544,6 @@ export interface SourceExtractionObject {
  * I/O, so there is nothing for a timeout, cancellation, or `appBound` to do.
  */
 export declare function supportedBrowsers(): Promise<Array<BrowserDescriptorObject>>
-
 
 /**
  * Serialize cookies in Netscape cookie-file format.

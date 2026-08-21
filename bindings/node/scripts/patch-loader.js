@@ -690,6 +690,10 @@ types = types.replace(
   /^\/\*\* (?:Windows-only browsers|macOS-only browsers|Unix browsers|Windows browsers) \*\/\n?/gm,
   ''
 )
+// napi-rs v3 leaves a different number of blank lines where target-gated
+// declarations were omitted or removed. Collapse those gaps so Linux, macOS,
+// and Windows regenerate the same committed declaration file byte-for-byte.
+types = types.replace(/\n{3,}/g, '\n\n')
 
 types = types.trimEnd()
 types += `

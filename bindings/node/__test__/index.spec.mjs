@@ -1315,6 +1315,23 @@ test("patch-loader reproduces the committed artifacts exactly", (t) => {
   );
 });
 
+test("patch-loader normalizes target-dependent declaration spacing", (t) => {
+  const result = runPatchLoader(({ loader, types }) => {
+    const chrome = types.match(/^export declare function chrome\([^\n]*$/m)?.[0];
+    if (!chrome) throw new Error("generated declarations have no chrome export");
+    return {
+      loader,
+      types: types.replace(`${chrome}\n\n`, `${chrome}\n\n\n\n`),
+    };
+  });
+
+  t.is(result.status, 0, result.stderr);
+  t.is(
+    result.types,
+    readFileSync(new URL("../index.d.ts", import.meta.url), "utf8"),
+  );
+});
+
 test("patch-loader rejects generated declarations that arrive incomplete", (t) => {
   const result = runPatchLoader(({ loader, types }) => ({
     loader,
