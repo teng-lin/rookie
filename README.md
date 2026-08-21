@@ -105,7 +105,7 @@ sqlite/session layout on all three OSes.
 | --- | --- | --- |
 | Python | CPython ≥ 3.11 | `pip install rookie-cookies` |
 | Node.js | Node ≥ 22 | `npm install rookie-cookies` |
-| Rust | edition 2021 crate | `cargo add rookie-cookies` |
+| Rust | Rust ≥ 1.88, edition 2021 | `cargo add rookie-cookies` |
 | CLI | same repo / release binaries | `rookie-cookies --help` |
 
 **Windows App-Bound security note:** the recommended job APIs default to

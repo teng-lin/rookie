@@ -60,6 +60,29 @@ jobs:
             echo 'python_matrix=[{"os":"ubuntu-latest","python":"3.12"},{"os":"macos-latest","python":"3.13"},{"os":"windows-latest","python":"3.14"}]' >> "$GITHUB_OUTPUT"
           fi
 
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libdbus-1-dev dbus at-spi2-core libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: .
+          shared-key: msrv-1.88
+      - name: Check the complete workspace on the declared MSRV
+        run: cargo check --workspace --all-targets --all-features --locked
+
   check:
     # One job per OS: rustfmt/package/metadata/audit on Ubuntu only;
     # Clippy, cargo test, and public-API snapshots on all three.
@@ -477,6 +500,7 @@ jobs:
     if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly' }}
     needs:
       - decide
+      - msrv
       - check
       - freebsd-native
       - node-tests
@@ -491,6 +515,7 @@ jobs:
       - name: Require every full-suite test and package lane
         env:
           DECIDE: ${{ needs.decide.result }}
+          MSRV: ${{ needs.msrv.result }}
           CHECK: ${{ needs.check.result }}
           FREEBSD: ${{ needs.freebsd-native.result }}
           NODE: ${{ needs.node-tests.result }}
@@ -502,7 +527,7 @@ jobs:
         run: |
           set -euo pipefail
           for result in \
-            "$DECIDE" "$CHECK" "$FREEBSD" "$NODE" "$PYTHON" \
+            "$DECIDE" "$MSRV" "$CHECK" "$FREEBSD" "$NODE" "$PYTHON" \
             "$LINUX_WHEEL" "$WINDOWS_WHEEL" "$MACOS_WHEEL" "$SDIST"
           do
             test "$result" = success

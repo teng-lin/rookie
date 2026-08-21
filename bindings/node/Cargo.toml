@@ -2,6 +2,7 @@
 edition = "2021"
 name = "rookie-cookies-node"
 version.workspace = true
+rust-version.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
@@ -34,4 +35,3 @@ napi-build = "2.0.1"
 
 [lints]
 workspace = true
-

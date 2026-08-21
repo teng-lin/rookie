@@ -13,6 +13,7 @@ The monorepo front door is the root
 The recommended 0.6 entry is `read(ReadRequest::…)`
 ([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
 Crate metadata and `version()` identify the installed build.
+The minimum supported Rust version (MSRV) is 1.88.
 
 ```console
 cargo add rookie-cookies

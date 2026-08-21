@@ -270,11 +270,29 @@ def _resolve_manifest_digest(args: argparse.Namespace) -> tuple[str | None, str 
         return args.manifest_digest, None
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        digest = manifest["release"]["manifest_digest"]
+        release = manifest["release"]
     except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        return None, f"could not read release.manifest_digest from {args.manifest}: {error}"
+    if not isinstance(release, dict):
+        return None, f"{args.manifest}: release is not an object (got {release!r})"
+    try:
+        digest = release["manifest_digest"]
+    except KeyError as error:
         return None, f"could not read release.manifest_digest from {args.manifest}: {error}"
     if not isinstance(digest, str):
         return None, f"{args.manifest}: release.manifest_digest is not a string (got {digest!r})"
+    actual_digest = jcs.digest(
+        {
+            "release": {key: value for key, value in release.items() if key != "manifest_digest"},
+            "artifacts": manifest.get("artifacts", []),
+        }
+    )
+    if digest != actual_digest:
+        return (
+            None,
+            f"{args.manifest}: release.manifest_digest {digest!r} does not match "
+            f"the manifest's actual content (recomputed {actual_digest!r})",
+        )
     return digest, None
 
 

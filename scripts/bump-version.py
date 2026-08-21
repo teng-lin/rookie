@@ -251,6 +251,10 @@ def update_changelog(
     if releases:
         raise ReleaseError(f"{path}: release heading for {new_version} already exists")
     heading = unreleased[0]
+    if not unreleased_body(changelog, heading.end()).strip():
+        raise ReleaseError(
+            f"{path}: Unreleased must contain release-note prose before preparing {new_version}"
+        )
     replacement = f"## [Unreleased]\n\n## [{new_version}] - {release_date}"
     updated = changelog[: heading.start()] + replacement + changelog[heading.end() :]
     path.write_text(updated, encoding="utf-8")

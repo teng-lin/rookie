@@ -474,40 +474,33 @@ def main() -> int:
 
     release = manifest.get("release")
     manifest_digest = release.get("manifest_digest") if isinstance(release, dict) else None
-    if args.output is not None and not (
+    if not (
         isinstance(manifest_digest, str) and _MANIFEST_DIGEST_PATTERN.fullmatch(manifest_digest)
     ):
         print(
-            f"{args.manifest}: --output was given but release.manifest_digest is missing or "
-            f"not a valid SHA-256 hex digest (got {manifest_digest!r}; schema_version 4+ "
+            f"{args.manifest}: release.manifest_digest is missing or not a valid SHA-256 "
+            f"hex digest (got {manifest_digest!r}; schema_version 4+ "
             "required; see write-release-scan-manifest.py)",
             file=sys.stderr,
         )
         return 1
 
-    if args.output is not None:
-        # The digest is otherwise write-only: copied verbatim from the
-        # manifest into the evidence record without ever being checked
-        # against the document it claims to bind. Recompute it the same way
-        # write-release-scan-manifest.py does (see that script for why the
-        # comparison excludes the manifest_digest field itself) so evidence
-        # can't attest to bytes that were never actually verified -- a
-        # manifest whose release/artifacts drifted from each other (a
-        # partial edit, a bad merge) would otherwise carry a stale digest
-        # straight through into "evidence."
-        expected_digest = jcs.digest(
-            {
-                "release": {key: value for key, value in release.items() if key != "manifest_digest"},
-                "artifacts": manifest.get("artifacts", []),
-            }
+    # Every verification mode, including publish workflows that do not write
+    # a separate evidence file, must prove that the stored binding represents
+    # this document's actual release/artifact content.
+    expected_digest = jcs.digest(
+        {
+            "release": {key: value for key, value in release.items() if key != "manifest_digest"},
+            "artifacts": manifest.get("artifacts", []),
+        }
+    )
+    if expected_digest != manifest_digest:
+        print(
+            f"{args.manifest}: release.manifest_digest {manifest_digest!r} does not match "
+            f"the manifest's actual content (recomputed {expected_digest!r})",
+            file=sys.stderr,
         )
-        if expected_digest != manifest_digest:
-            print(
-                f"{args.manifest}: release.manifest_digest {manifest_digest!r} does not match "
-                f"the manifest's actual content (recomputed {expected_digest!r})",
-                file=sys.stderr,
-            )
-            return 1
+        return 1
 
     try:
         verified = verify_artifacts(manifest, args.artifacts_root, contract)

@@ -8,7 +8,7 @@ the Node-API addon.
 
 | You want | Need |
 | --- | --- |
-| Rust crate / CLI | Stable Rust ([rustup](https://www.rust-lang.org/tools/install)) |
+| Rust crate / CLI | Rust 1.88 or newer ([rustup](https://www.rust-lang.org/tools/install)) |
 | Python binding | CPython **≥ 3.11**, [maturin](https://www.maturin.rs/) (CI pins **1.14.1**) |
 | Node binding | Node.js **≥ 22** (build the native module on **22** to match CI) |
 | Linux | `python3-dev`, `libdbus-1-dev`, `dbus` (zbus / Secret Service). E2E also wants `gnome-keyring`, `libsecret-tools`, `xvfb`. |
