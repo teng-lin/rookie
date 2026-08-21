@@ -1,6 +1,6 @@
 // Launches a real Chromium-family browser via Playwright, navigates to the
-// cookie-seeding URL, and closes — leaving a persistent profile that
-// rookie-cookies' tests extract from.
+// declarative cookie-corpus routes, writes an independent expected manifest,
+// and closes — leaving a persistent profile that rookie-cookies extracts.
 //
 // Usage:
 //   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url>
@@ -19,6 +19,7 @@
 // falling back to older default keys.
 
 import { chromium } from "playwright";
+import { seedCookieCorpus } from "./seed_cookie_corpus.mjs";
 
 const [channelArg, userDataDir, url] = process.argv.slice(2);
 
@@ -60,15 +61,17 @@ const context = await chromium.launchPersistentContext(userDataDir, {
 
 try {
   const page = await context.newPage();
-  await page.goto(url, { waitUntil: "networkidle" });
-  const userAgent = await page.evaluate(() => navigator.userAgent);
-  const seeded = (await context.cookies(url)).find(
-    (cookie) => cookie.name === "rookie_ci",
+  const { manifest, manifestPath, userAgent } = await seedCookieCorpus({
+    context,
+    page,
+    engine: "chromium",
+    profileDir: userDataDir,
+    baseUrl: url,
+  });
+  console.log(
+    `seeded ${manifest.expected.unfiltered_flat.length} Chromium corpus cookies; ` +
+      `manifest: ${manifestPath}; user agent: ${userAgent}`,
   );
-  if (!seeded || seeded.value !== "bar") {
-    throw new Error("Chrome did not accept the expected rookie_ci=bar cookie");
-  }
-  console.log(`seeded Chrome cookie; user agent: ${userAgent}`);
 } finally {
   await context.close();
 }

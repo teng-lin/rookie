@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Assert that the rookie-cookies CLI can read the seeded E2E cookie.
+"""Assert that the rookie-cookies CLI exactly reads the seeded E2E corpus.
 
 Unlike the old shell helper, this runner works on Windows, macOS, and Linux and
 does not require bash or jq. It deliberately parses stdout as JSON while
 capturing stderr separately, which also guards the CLI's machine-readable
-output contract.
+output contract. Focused canaries without a corpus manifest retain their
+single-cookie assertion.
 """
 
 from __future__ import annotations
@@ -16,6 +17,13 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Optional, Sequence
+
+from cookie_manifest import (
+    ManifestError,
+    find_manifest,
+    load_manifest,
+    verify_records,
+)
 
 
 COOKIE_NAME = "rookie_ci"
@@ -74,35 +82,57 @@ def assert_cli_cookie(
 
     environment = os.environ.copy()
     environment["RUST_LOG"] = "error"
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=environment,
-        )
-    except OSError as error:
-        raise HarnessError(f"failed to launch {cli_path}: {error}") from error
+    completed = run_cli(command, cli_path=cli_path, environment=environment)
 
-    if completed.returncode != 0:
-        details = completed.stderr.strip() or completed.stdout.strip() or "<no output>"
-        raise HarnessError(
-            f"rookie-cookies exited with status {completed.returncode}: {details}"
-        )
+    cookies = parse_cookie_json(completed)
 
-    try:
-        cookies = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise HarnessError(
-            f"rookie-cookies stdout was not valid JSON: {completed.stdout!r}; "
-            f"stderr: {completed.stderr.strip()!r}"
-        ) from error
-    if not isinstance(cookies, list):
-        raise HarnessError(
-            f"rookie-cookies JSON must be an array, got {type(cookies).__name__}"
+    manifest_source: Path | str | None = cookies_path
+    if manifest_source is None:
+        manifest_source = os.environ.get("ROOKIE_E2E_USER_DATA_DIR") or os.environ.get(
+            "ROOKIE_E2E_FIREFOX_PROFILE"
         )
+    manifest_path = find_manifest(manifest_source, expected_name=expected_name)
+    if manifest_path is not None:
+        try:
+            manifest = load_manifest(manifest_path)
+            flat_projection = "unfiltered_flat" if browser is not None else "filtered_flat"
+            verify_records(
+                manifest,
+                flat_projection,
+                cookies,
+                surface="CLI read" if browser is not None else "CLI from-path json",
+            )
+            detailed_command = [str(cli_path)]
+            if browser is not None:
+                detailed_command.extend(
+                    ("read", "--browser", browser, "--format", "detailed")
+                )
+            else:
+                detailed_command.extend(
+                    ("from-path", str(cookies_path), "--format", "detailed")
+                )
+                if key_path is not None:
+                    detailed_command.extend(("--local-state-path", str(key_path)))
+                if browser_id is not None:
+                    detailed_command.extend(("--browser-id", browser_id))
+            detailed = parse_cookie_json(
+                run_cli(
+                    detailed_command,
+                    cli_path=cli_path,
+                    environment=environment,
+                )
+            )
+            verify_records(
+                manifest,
+                "detailed",
+                detailed,
+                surface="CLI read detailed"
+                if browser is not None
+                else "CLI from-path detailed",
+            )
+        except ManifestError as error:
+            raise HarnessError(str(error)) from error
+        return len(cookies)
 
     if not any(
         isinstance(cookie, dict)
@@ -115,6 +145,46 @@ def assert_cli_cookie(
             f"{completed.stdout.strip()}"
         )
     return len(cookies)
+
+
+def run_cli(
+    command: list[str],
+    *,
+    cli_path: Path,
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=environment,
+        )
+    except OSError as error:
+        raise HarnessError(f"failed to launch {cli_path}: {error}") from error
+    if completed.returncode != 0:
+        details = completed.stderr.strip() or completed.stdout.strip() or "<no output>"
+        raise HarnessError(
+            f"rookie-cookies exited with status {completed.returncode}: {details}"
+        )
+    return completed
+
+
+def parse_cookie_json(completed: subprocess.CompletedProcess[str]) -> list[object]:
+    try:
+        cookies = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise HarnessError(
+            f"rookie-cookies stdout was not valid JSON: {completed.stdout!r}; "
+            f"stderr: {completed.stderr.strip()!r}"
+        ) from error
+    if not isinstance(cookies, list):
+        raise HarnessError(
+            f"rookie-cookies JSON must be an array, got {type(cookies).__name__}"
+        )
+    return cookies
 
 
 def build_parser() -> argparse.ArgumentParser:

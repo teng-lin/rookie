@@ -1,8 +1,8 @@
 #![allow(deprecated)]
 
 //! End-to-end test: extracts cookies from a real Firefox profile seeded
-//! by `tests/e2e/seed_firefox_cookie.mjs` and asserts the seeded
-//! `rookie_ci=bar` cookie is recovered.
+//! by `tests/e2e/seed_firefox_cookie.mjs` and asserts its exact flat and
+//! detailed cookie corpus against an independent browser-observed manifest.
 //!
 //! Firefox stores cookies unencrypted in `<profile>/cookies.sqlite`, so this
 //! is the simplest possible e2e path — no keyring/Keychain/DPAPI needed.
@@ -22,7 +22,9 @@
 #[ignore]
 fn extracts_seeded_cookie_from_firefox_profile() {
   use std::env;
+  use std::io::Write;
   use std::path::PathBuf;
+  use std::process::{Command, Stdio};
   use std::time::{SystemTime, UNIX_EPOCH};
 
   let profile_dir =
@@ -31,6 +33,13 @@ fn extracts_seeded_cookie_from_firefox_profile() {
   let expected_name =
     env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
   let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_string());
+  let manifest_path = env::var_os("ROOKIE_E2E_COOKIE_MANIFEST")
+    .map(PathBuf::from)
+    .or_else(|| {
+      (expected_name == "rookie_ci")
+        .then(|| PathBuf::from(&profile_dir).join("rookie-e2e-cookie-manifest.json"))
+        .filter(|path| path.is_file())
+    });
 
   let db_path = PathBuf::from(&profile_dir).join("cookies.sqlite");
   assert!(db_path.exists(), "no cookies.sqlite under {}", profile_dir);
@@ -42,6 +51,70 @@ fn extracts_seeded_cookie_from_firefox_profile() {
         db_path.display()
       )
     });
+
+  if let Some(manifest) = manifest_path {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .expect("rookie-rs has workspace parent")
+      .to_path_buf();
+    #[cfg(target_os = "windows")]
+    let venv_python = workspace.join(".venv/Scripts/python.exe");
+    #[cfg(not(target_os = "windows"))]
+    let venv_python = workspace.join(".venv/bin/python");
+    let python = env::var_os("ROOKIE_E2E_PYTHON")
+      .map(PathBuf::from)
+      .unwrap_or_else(|| {
+        if venv_python.is_file() {
+          venv_python
+        } else if cfg!(target_os = "windows") {
+          PathBuf::from("python")
+        } else {
+          PathBuf::from("python3")
+        }
+      });
+    let verify = |projection: &str, surface: &str, serialized: Vec<u8>| {
+      let mut child = Command::new(&python)
+        .arg(workspace.join("tests/e2e/verify_cookie_manifest.py"))
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--projection")
+        .arg(projection)
+        .arg("--surface")
+        .arg(surface)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch cookie manifest verifier");
+      child
+        .stdin
+        .take()
+        .expect("verifier stdin")
+        .write_all(&serialized)
+        .expect("write verifier input");
+      let output = child.wait_with_output().expect("wait for cookie verifier");
+      assert!(
+        output.status.success(),
+        "{surface} failed exact cookie manifest verification: {}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+      );
+      eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    };
+    verify(
+      "filtered_flat",
+      "Rust firefox_based",
+      serde_json::to_vec(&cookies).expect("serialize Firefox cookies"),
+    );
+    let detailed = rookie_cookies::firefox_based_detailed(db_path, None)
+      .unwrap_or_else(|error| panic!("firefox_based_detailed failed: {error}"));
+    verify(
+      "detailed",
+      "Rust firefox_based_detailed",
+      serde_json::to_vec(&detailed).expect("serialize detailed Firefox cookies"),
+    );
+    return;
+  }
 
   let seeded = cookies
     .iter()

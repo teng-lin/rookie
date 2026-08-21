@@ -1,5 +1,7 @@
-"""Assert that rookie_cookies can extract the `rookie_ci=bar` cookie from the
-Chrome profile seeded earlier in the same CI job.
+"""Assert exact rookie_cookies output for the seeded Chromium profile.
+
+Ordinary hosted lanes consume the corpus manifest. Focused canaries that set a
+non-default expected cookie retain the legacy name/value assertion.
 
 Driven by env vars:
   ROOKIE_E2E_USER_DATA_DIR  required — same path passed to the seed step
@@ -20,6 +22,8 @@ import sys
 from pathlib import Path
 
 import rookie_cookies
+
+from cookie_manifest import find_manifest, load_manifest, verify_records
 
 
 def find_cookie_db(user_data_dir: Path) -> Path:
@@ -44,6 +48,11 @@ def main() -> int:
     domain = os.environ.get("ROOKIE_E2E_DOMAIN", "127.0.0.1")
     db_override = os.environ.get("ROOKIE_E2E_COOKIE_DB")
     db_path = Path(db_override) if db_override else find_cookie_db(user_data_dir)
+    expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
+    expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
+    manifest_path = find_manifest(user_data_dir, expected_name=expected_name)
+    manifest = load_manifest(manifest_path) if manifest_path else None
+    detailed = None
 
     # The explicit allow_elevated_fallback is deliberate and is NOT what the
     # default does. The 0.6 default is injection_only, so these calls would
@@ -69,6 +78,10 @@ def main() -> int:
         legacy = rookie_cookies.chromium_based(
             str(key_path), str(db_path), [domain]
         )
+        if manifest is not None:
+            detailed = rookie_cookies.chromium_based_detailed(
+                str(key_path), str(db_path), None
+            )
         results = [
             ("extract_from_path(LocalStateFile)", canonical),
             ("chromium_based", legacy),
@@ -82,13 +95,15 @@ def main() -> int:
             app_bound="allow_elevated_fallback",
         )
         legacy = rookie_cookies.chromium_based(str(db_path), [domain], browser_id)
+        if manifest is not None:
+            detailed = rookie_cookies.chromium_based_detailed(
+                str(db_path), None, browser_id
+            )
         results = [
             ("extract_from_path(BrowserId)", canonical),
             ("chromium_based", legacy),
         ]
 
-    expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
-    expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
     results = [
         (surface, cookies, expected_name, expected_value)
         for surface, cookies in results
@@ -120,6 +135,14 @@ def main() -> int:
         )
 
     for surface, result, surface_name, surface_value in results:
+        if manifest is not None:
+            verify_records(
+                manifest,
+                "filtered_flat",
+                result,
+                surface=f"Python {surface}",
+            )
+            continue
         seeded = next((c for c in result if c["name"] == surface_name), None)
         if seeded is None:
             print(
@@ -136,9 +159,18 @@ def main() -> int:
             )
             return 1
 
+    if manifest is not None:
+        assert detailed is not None
+        verify_records(
+            manifest,
+            "detailed",
+            detailed,
+            surface="Python chromium_based_detailed",
+        )
+
     print(
         f"rookie_cookies ({sys.platform}): "
-        f"{expected_name}={expected_value} verified "
+        f"{'exact cookie corpus' if manifest is not None else f'{expected_name}={expected_value}'} verified "
         f"({len(results[0][1])} cookies for {domain}; "
         f"surfaces: {', '.join(surface for surface, *_ in results)})"
     )

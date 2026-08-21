@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "default_tiers": [
+    "portable_smoke"
+  ],
+  "tiers": {
+    "portable_smoke": {
+      "description": "Portable semantic correctness corpus run in the ordinary browser matrix."
+    },
+    "deep": {
+      "description": "Engine-specific or lifecycle-sensitive cases for representative deep lanes."
+    },
+    "stress": {
+      "description": "Volume and repetition cases for nightly soak lanes."
+    }
+  },
+  "phase_order": [
+    "initial",
+    "mutate"
+  ],
+  "origins": {
+    "primary": {
+      "hostname": "127.0.0.1",
+      "included_by_domain_filter": true
+    },
+    "decoy": {
+      "hostname": "localhost",
+      "included_by_domain_filter": false
+    }
+  },
+  "identities": {
+    "filtered_flat": [
+      "domain",
+      "path",
+      "name"
+    ],
+    "unfiltered_flat": [
+      "domain",
+      "path",
+      "name"
+    ],
+    "detailed": [
+      "cookie.domain",
+      "cookie.path",
+      "cookie.name",
+      "context.top_frame_site_key",
+      "context.has_cross_site_ancestor",
+      "context.source_scheme",
+      "context.source_port",
+      "context.is_persistent",
+      "context.origin_attributes",
+      "context.user_context_id",
+      "context.partition_key",
+      "context.private_browsing_id"
+    ]
+  },
+  "context_expectations": {
+    "chromium": {
+      "top_frame_site_key": null,
+      "has_cross_site_ancestor": false,
+      "source_scheme": "@source_scheme",
+      "source_port": "@source_port",
+      "is_persistent": "@is_persistent",
+      "origin_attributes": null,
+      "user_context_id": null,
+      "partition_key": null,
+      "private_browsing_id": null
+    },
+    "firefox": {
+      "top_frame_site_key": null,
+      "has_cross_site_ancestor": null,
+      "source_scheme": null,
+      "source_port": null,
+      "is_persistent": null,
+      "origin_attributes": "",
+      "user_context_id": null,
+      "partition_key": null,
+      "private_browsing_id": null
+    }
+  },
+  "scenarios": [
+    {
+      "id": "baseline",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_ci", "value": "bar", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "secure",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_secure", "value": "secure", "path": "/", "max_age": 3600, "secure": true, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "http_only",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_http_only", "value": "server-only", "path": "/", "max_age": 3600, "http_only": true, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "same_site_unspecified",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_ss_unspecified", "value": "unspecified", "path": "/", "max_age": 3600}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": -1, "firefox": 0}}
+    },
+    {
+      "id": "same_site_none",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_ss_none", "value": "none", "path": "/", "max_age": 3600, "secure": true, "same_site": "None"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 0, "firefox": 0}}
+    },
+    {
+      "id": "same_site_lax",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_ss_lax", "value": "lax", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "same_site_strict",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_ss_strict", "value": "strict", "path": "/", "max_age": 3600, "same_site": "Strict"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 2, "firefox": 2}}
+    },
+    {
+      "id": "domain_attribute",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_domain", "value": "domain", "path": "/", "domain": "127.0.0.1", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "path_collision_root",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_path_collision", "value": "root", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "path_collision_nested",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_path_collision", "value": "nested", "path": "/a/b/c", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "empty_value",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_empty", "value": "", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "equals_in_value",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_equals", "value": "a=b==", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "percent_encoded_utf8",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_utf8", "value": "%E7%8C%AB%F0%9F%8D%AA", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "large_portable_value",
+      "tiers": ["portable_smoke", "stress"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_large", "value_repeat": {"text": "x", "count": 3584}, "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "expiry_subject_to_400_day_clamp",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_far_future", "value": "future", "path": "/", "max_age": 43200000, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "firefox_expiry_beyond_2038",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_post_2038", "value": "future", "path": "/", "expires": "Thu, 19 Jan 2040 03:14:07 GMT", "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"firefox": 1}}
+    },
+    {
+      "id": "past_expiry_rejected",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_expired", "value": "must-not-survive", "path": "/", "expires": "Thu, 01 Jan 1970 00:00:01 GMT", "same_site": "Lax"}
+      ],
+      "expected": {"stored": false, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "host_prefix",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "__Host-rookie", "value": "host", "path": "/", "max_age": 3600, "secure": true, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "secure_prefix",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "__Secure-rookie", "value": "prefix", "path": "/", "max_age": 3600, "secure": true, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "updated_cookie",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_updated", "value": "old", "path": "/", "max_age": 3600, "same_site": "Lax"},
+        {"phase": "mutate", "name": "rookie_updated", "value": "final", "path": "/", "max_age": 7200, "http_only": true, "same_site": "Strict"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 2, "firefox": 2}}
+    },
+    {
+      "id": "deleted_cookie",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_deleted", "value": "stale", "path": "/", "max_age": 3600, "same_site": "Lax"},
+        {"phase": "mutate", "name": "rookie_deleted", "value": "", "path": "/", "max_age": 0, "same_site": "Lax"}
+      ],
+      "expected": {"stored": false, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "wrong_host_decoy",
+      "tiers": ["portable_smoke"],
+      "applicability": {"engines": ["chromium", "firefox"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "decoy",
+      "operations": [
+        {"phase": "initial", "name": "rookie_decoy", "value": "must-not-pass-filter", "path": "/", "max_age": 3600, "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1, "firefox": 1}}
+    },
+    {
+      "id": "session_cookie",
+      "tiers": ["deep"],
+      "applicability": {"engines": ["chromium"], "platforms": ["linux", "macos", "windows"]},
+      "origin": "primary",
+      "operations": [
+        {"phase": "initial", "name": "rookie_session", "value": "session", "path": "/", "same_site": "Lax"}
+      ],
+      "expected": {"stored": true, "same_site": {"chromium": 1}}
+    }
+  ]
+}

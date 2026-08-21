@@ -1,5 +1,5 @@
-// Launches Firefox via Playwright, navigates to the cookie-seeding URL,
-// and closes — leaving a persistent profile that rookie-cookies' tests extract from.
+// Launches Firefox via Playwright, seeds the declarative cookie corpus, writes
+// an independent expected manifest, and closes the persistent profile.
 //
 // Usage:
 //   node tests/e2e/seed_firefox_cookie.mjs <user-data-dir> <url>
@@ -9,6 +9,7 @@
 // the SQLite directly.
 
 import { firefox } from "playwright";
+import { seedCookieCorpus } from "./seed_cookie_corpus.mjs";
 
 const [userDataDir, url] = process.argv.slice(2);
 
@@ -23,15 +24,17 @@ const context = await firefox.launchPersistentContext(userDataDir, {
 
 try {
   const page = await context.newPage();
-  await page.goto(url, { waitUntil: "networkidle" });
-  const userAgent = await page.evaluate(() => navigator.userAgent);
-  const seeded = (await context.cookies(url)).find(
-    (cookie) => cookie.name === "rookie_ci",
+  const { manifest, manifestPath, userAgent } = await seedCookieCorpus({
+    context,
+    page,
+    engine: "firefox",
+    profileDir: userDataDir,
+    baseUrl: url,
+  });
+  console.log(
+    `seeded ${manifest.expected.unfiltered_flat.length} Firefox corpus cookies; ` +
+      `manifest: ${manifestPath}; user agent: ${userAgent}`,
   );
-  if (!seeded || seeded.value !== "bar") {
-    throw new Error("Firefox did not accept the expected rookie_ci=bar cookie");
-  }
-  console.log(`seeded Firefox cookie; user agent: ${userAgent}`);
 } finally {
   await context.close();
 }

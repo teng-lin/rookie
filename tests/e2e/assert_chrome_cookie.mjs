@@ -17,6 +17,7 @@ import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
 
 const userDataDir = process.env.ROOKIE_E2E_USER_DATA_DIR;
 if (!userDataDir) {
@@ -26,6 +27,7 @@ if (!userDataDir) {
 const domain = process.env.ROOKIE_E2E_DOMAIN ?? "127.0.0.1";
 const expectedName = process.env.ROOKIE_E2E_COOKIE_NAME ?? "rookie_ci";
 const expectedValue = process.env.ROOKIE_E2E_COOKIE_VALUE ?? "bar";
+const manifestPath = findManifest(userDataDir, expectedName);
 
 let dbPath = process.env.ROOKIE_E2E_COOKIE_DB;
 if (!dbPath) {
@@ -55,6 +57,7 @@ if (!dbPath) {
 // branch remains trusted-ref-only even though Linux Chrome now gates pull
 // requests. See CHANGELOG.md.
 let results;
+let detailed;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
   results = [
@@ -71,6 +74,13 @@ if (process.platform === "win32") {
       await rookieCookies.chromiumBased(keyPath, dbPath, [domain]),
     ],
   ];
+  if (manifestPath) {
+    detailed = await rookieCookies.chromiumBasedDetailed(
+      keyPath,
+      dbPath,
+      undefined,
+    );
+  }
 } else {
   results = [
     [
@@ -90,6 +100,13 @@ if (process.platform === "win32") {
       ),
     ],
   ];
+  if (manifestPath) {
+    detailed = await rookieCookies.chromiumBasedDetailed(
+      dbPath,
+      undefined,
+      process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
+    );
+  }
 }
 
 results = results.map(([surface, cookies]) => [
@@ -123,6 +140,15 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
 }
 
 for (const [surface, result, surfaceName, surfaceValue] of results) {
+  if (manifestPath) {
+    verifyCookieRecords(
+      manifestPath,
+      "filtered_flat",
+      result,
+      `Node ${surface}`,
+    );
+    continue;
+  }
   const seeded = result.find((c) => c.name === surfaceName);
   if (!seeded) {
     console.error(
@@ -138,6 +164,15 @@ for (const [surface, result, surfaceName, surfaceValue] of results) {
   }
 }
 
+if (manifestPath) {
+  verifyCookieRecords(
+    manifestPath,
+    "detailed",
+    detailed,
+    "Node chromiumBasedDetailed",
+  );
+}
+
 console.log(
-  `rookie-cookies (${process.platform}): ${expectedName}=${expectedValue} verified (${results[0][1].length} cookies for ${domain}; surfaces: ${results.map(([surface]) => surface).join(", ")})`,
+  `rookie-cookies (${process.platform}): ${manifestPath ? "exact cookie corpus" : `${expectedName}=${expectedValue}`} verified (${results[0][1].length} cookies for ${domain}; surfaces: ${results.map(([surface]) => surface).join(", ")})`,
 );

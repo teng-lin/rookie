@@ -12,6 +12,7 @@ import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
 
 const profileDir = process.env.ROOKIE_E2E_FIREFOX_PROFILE;
 if (!profileDir) {
@@ -30,7 +31,33 @@ if (!existsSync(dbPath)) {
 
 const cookies = await rookieCookies.cookiesFromPath(dbPath, [domain]);
 const legacy = await rookieCookies.firefoxBased(dbPath, [domain]);
-const detailed = await rookieCookies.firefoxBasedDetailed(dbPath, [domain]);
+const detailed = await rookieCookies.firefoxBasedDetailed(dbPath);
+
+const manifestPath = findManifest(profileDir, expectedName);
+if (manifestPath) {
+  verifyCookieRecords(
+    manifestPath,
+    "filtered_flat",
+    cookies,
+    "Node cookiesFromPath",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "filtered_flat",
+    legacy,
+    "Node firefoxBased",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "detailed",
+    detailed,
+    "Node firefoxBasedDetailed",
+  );
+  console.log(
+    `rookie-cookies (${process.platform}, firefox): exact cookie corpus verified (${cookies.length} filtered cookies)`,
+  );
+  process.exit(0);
+}
 
 const seeded = cookies.find((c) => c.name === expectedName);
 if (!seeded) {

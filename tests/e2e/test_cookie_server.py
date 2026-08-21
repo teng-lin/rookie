@@ -33,6 +33,43 @@ class CookieServerTests(unittest.TestCase):
         with mock.patch.dict(SERVER.os.environ, {"ROOKIE_E2E_COOKIE_PORT": "9123"}):
             self.assertEqual(SERVER.listen_port(), 9123)
 
+    def test_corpus_route_emits_attribute_matrix_from_declaration(self) -> None:
+        headers = SERVER.corpus_headers(
+            "/corpus/initial?engine=chromium&tiers=portable_smoke",
+            "127.0.0.1:8765",
+        )
+        self.assertGreater(len(headers), 10)
+        self.assertIn(
+            "rookie_http_only=server-only; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
+            headers,
+        )
+        self.assertIn(
+            "rookie_ss_none=none; Path=/; Max-Age=3600; Secure; SameSite=None",
+            headers,
+        )
+        self.assertTrue(any(header.startswith("rookie_large=" + "x" * 3584) for header in headers))
+
+    def test_corpus_route_is_engine_tier_phase_and_origin_aware(self) -> None:
+        deep_firefox = SERVER.corpus_headers(
+            "/corpus/initial?engine=firefox&tiers=deep", "127.0.0.1:8765"
+        )
+        self.assertEqual(deep_firefox, [])
+        deep_chromium = SERVER.corpus_headers(
+            "/corpus/initial?engine=chromium&tiers=deep", "127.0.0.1:8765"
+        )
+        self.assertTrue(any(header.startswith("rookie_session=session") for header in deep_chromium))
+        mutation = SERVER.corpus_headers(
+            "/corpus/mutate?engine=chromium&tiers=portable_smoke",
+            "127.0.0.1:8765",
+        )
+        self.assertEqual(len(mutation), 2)
+        decoy = SERVER.corpus_headers(
+            "/corpus/initial?engine=chromium&tiers=portable_smoke",
+            "localhost:8765",
+        )
+        self.assertEqual(len(decoy), 1)
+        self.assertTrue(decoy[0].startswith("rookie_decoy="))
+
 
 class ClaimedE2eHelperTests(unittest.TestCase):
     def test_keychain_accounts_preserve_configured_vendor_identity(self) -> None:

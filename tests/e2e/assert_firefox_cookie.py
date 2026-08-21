@@ -1,5 +1,4 @@
-"""Assert that rookie_cookies can extract the `rookie_ci=bar` cookie from the
-Firefox profile seeded earlier in the same CI job.
+"""Assert exact rookie_cookies output for the seeded Firefox profile.
 
 Driven by env vars:
   ROOKIE_E2E_FIREFOX_PROFILE  required — same path passed to the seed step
@@ -16,6 +15,8 @@ import time
 from pathlib import Path
 
 import rookie_cookies
+
+from cookie_manifest import find_manifest, load_manifest, verify_records
 
 
 def main() -> int:
@@ -34,10 +35,31 @@ def main() -> int:
 
     cookies = rookie_cookies.cookies_from_path(str(db_path), [domain])
     legacy = rookie_cookies.firefox_based(str(db_path), [domain])
-    detailed = rookie_cookies.firefox_based_detailed(str(db_path), [domain])
+    detailed = rookie_cookies.firefox_based_detailed(str(db_path), None)
 
     expected_name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
+    manifest_path = find_manifest(profile_dir, expected_name=expected_name)
+    if manifest_path is not None:
+        manifest = load_manifest(manifest_path)
+        verify_records(
+            manifest, "filtered_flat", cookies, surface="Python cookies_from_path"
+        )
+        verify_records(
+            manifest, "filtered_flat", legacy, surface="Python firefox_based"
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            detailed,
+            surface="Python firefox_based_detailed",
+        )
+        print(
+            f"rookie_cookies ({sys.platform}, firefox): exact cookie corpus "
+            f"verified ({len(cookies)} filtered cookies)"
+        )
+        return 0
+
     seeded = next((c for c in cookies if c["name"] == expected_name), None)
     if seeded is None:
         print(

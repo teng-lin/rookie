@@ -87,6 +87,77 @@ class AssertCliCookieTests(unittest.TestCase):
         self.assertNotIn("--local-state-path", run.call_args.args[0])
 
     @mock.patch.object(HARNESS.subprocess, "run")
+    def test_manifest_mode_verifies_flat_and_detailed_exact_sets(
+        self, run: mock.Mock
+    ) -> None:
+        cookie = {
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": False,
+            "expires": 4_102_444_800,
+            "name": "rookie_ci",
+            "value": "bar",
+            "http_only": False,
+            "same_site": 1,
+        }
+        detailed = {
+            "cookie": cookie,
+            "context": {
+                "top_frame_site_key": None,
+                "has_cross_site_ancestor": None,
+                "source_scheme": None,
+                "source_port": None,
+                "is_persistent": None,
+                "origin_attributes": "",
+                "user_context_id": None,
+                "partition_key": None,
+                "private_browsing_id": None,
+            },
+        }
+        manifest = {
+            "schema_version": 1,
+            "tiers": ["portable_smoke"],
+            "identities": {
+                "filtered_flat": ["domain", "path", "name"],
+                "unfiltered_flat": ["domain", "path", "name"],
+                "detailed": [
+                    "cookie.domain",
+                    "cookie.path",
+                    "cookie.name",
+                    "context.origin_attributes",
+                ],
+            },
+            "expected": {
+                "filtered_flat": [cookie],
+                "unfiltered_flat": [cookie],
+                "detailed": [detailed],
+            },
+        }
+        (self.cookies.parent / "rookie-e2e-cookie-manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, json.dumps([cookie]), ""),
+            subprocess.CompletedProcess([], 0, json.dumps([detailed]), ""),
+        ]
+
+        count = HARNESS.assert_cli_cookie(
+            self.cookies,
+            key_path=None,
+            domain="127.0.0.1",
+            cli_path=self.cli,
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(run.call_count, 2)
+        detailed_command = run.call_args_list[1].args[0]
+        self.assertEqual(
+            detailed_command[1:4], ["from-path", str(self.cookies), "--format"]
+        )
+        self.assertEqual(detailed_command[4], "detailed")
+        self.assertNotIn("--domains", detailed_command)
+
+    @mock.patch.object(HARNESS.subprocess, "run")
     def test_browser_command_uses_profile_discovery(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess(
             [], 0, '[{"name":"rookie_ci","value":"bar"}]', ""
