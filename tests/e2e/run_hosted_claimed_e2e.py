@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Seed an installed claimed browser and extract rookie_ci=bar.
 
-Installed Chromium-family browsers are launched through their native headless
-CLI. Playwright explicitly does not guarantee arbitrary executablePath builds,
-and a branded browser can hang before its control pipe becomes ready even when
-the browser has successfully started. Gecko forks use their native CLI too.
-Safari launches the normal system application so the seed reaches its
-persistent profile; IE uses a pinned 32-bit IEDriver server in Edge IE mode.
+Installed Chromium-family browsers are launched through their native CLI,
+using foreground Xvfb on most Linux images and modern headless mode where the
+runner has no interactive desktop or a first-run UI blocks startup. A published
+DevTools port seeds the persistent profile without relying on Playwright's
+arbitrary-executable launch contract. Gecko forks use their native CLI too;
+Safari launches the normal system application, and IE uses a pinned 32-bit
+IEDriver server in Edge IE mode.
 """
 
 from __future__ import annotations
