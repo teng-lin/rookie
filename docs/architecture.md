@@ -367,16 +367,24 @@ Root `Cargo.toml` workspace members:
 
 Features on the core crate (`rookie-rs/Cargo.toml`):
 
-- `default = ["appbound"]` — Windows App-Bound `v20`.
+- `default = ["appbound", "internet-explorer"]` — Windows App-Bound `v20`
+  and the deprecated IE ESE backend.
 - `appbound` — empty feature flag; gates `available_decryption_tiers` and the Windows injector.
+- `internet-explorer` — enables the `libesedb` native backend. The feature-off
+  backend keeps the same facade signatures and returns a capability-disabled
+  error before native or filesystem work.
 - `dto-schema` — `schemars` derives on report DTO types for `generate-dto-schema` only.
 - `e2e-appbound-steering` — empty by default; compiles in `narrow_for_tests`' `ROOKIE_E2E_APPBOUND_MODE` read outside `cfg(test)`, for the Windows App-Bound canary only (`tests/e2e/run_windows_appbound_canary.ps1`). Never enabled in a published build.
 
 Feature graphs differ:
 
-- **crates.io `rookie-cookies`:** `default = ["appbound"]`.
-- **Workspace bindings:** `workspace.dependencies.rookie-cookies` sets `default-features = false`. Python and Node **Windows** target deps re-enable `features = ["appbound"]`. **Unix** bindings use `rookie-cookies.workspace = true` with that workspace default, so they do **not** enable `appbound` (and `v20` is Windows-only anyway).
-- **CLI:** its own `default = ["appbound"]` forwards `rookie-cookies/appbound`.
+- **crates.io `rookie-cookies`:** defaults enable `appbound` and
+  `internet-explorer`.
+- **Workspace bindings:** `workspace.dependencies.rookie-cookies` sets
+  `default-features = false`. Python and Node **Windows** target dependencies
+  re-enable both Windows capabilities. Unix bindings enable neither.
+- **CLI:** its defaults forward both Windows capabilities; the release contract
+  records them explicitly for the Windows artifact.
 
 #### How they compose
 
@@ -459,7 +467,7 @@ Platform `cfg` is constrained to an explicit allowlist (issue #218), enforced by
 | Report remaining engines | `report_build/dispatch/{macos,windows,other}.rs` |
 | Legacy remaining engines | `legacy/dispatch/{macos,windows,other}.rs` |
 | App-Bound | `windows/appbound/` + `browser/appbound_host.rs` |
-| Safari / IE native acquisition | `registry/safari.rs`, `registry/internet_explorer.rs`; parsers remain cross-host testable |
+| Safari / IE native acquisition | `registry/safari.rs`, `registry/internet_explorer.rs`; the IE facade selects `internet_explorer/{esedb,disabled}.rs`; parsers remain cross-host testable |
 
 The registry's data model and cross-host parsers stay portable; the registry files themselves are **not** target-agnostic. In particular, `registry.rs` contains Unix/Windows path-byte gates and platform dispatch, while `registry/{chromium,safari,internet_explorer,profile_query}.rs` contain allowlisted target gates. New gates still require an allowlist entry and rationale; “target-agnostic registry” is not an architectural invariant.
 
@@ -510,7 +518,15 @@ No plugin trait. `report_build::collect_extraction` / `collect_listing` and `leg
 
 **Safari** (`safari.rs` parser, `registry/safari.rs` inventory): `Cookies.binarycookies`, `AcquisitionPolicy::Fixed`, `SourceAcquisition::StableFileImage`. File-size ceiling 64 MiB. Embedded NUL fields rejected (C4c). macOS Full Disk Access. Inventory types left the decoder (#280).
 
-**Internet Explorer** (`internet_explorer.rs`, `internet_explorer_model.rs`, `registry/internet_explorer.rs`): ESE WebCache, `SourceAcquisition::EseDatabase` overlaid once a query is attempted. Public `internet_explorer` / `internet_explorer_based` and the ESE engine module (`internet_explorer.rs`) are `cfg(target_os = "windows")`. The model/parser (`internet_explorer_model.rs`) is compiled on every target (`browser/mod.rs` ungated `mod internet_explorer_model`) so decoder tests run off Windows.
+**Internet Explorer** (`internet_explorer/{mod,esedb,disabled}.rs`,
+`internet_explorer_model.rs`, `registry/internet_explorer.rs`): ESE WebCache,
+`SourceAcquisition::EseDatabase` overlaid once a query is attempted. Public
+`internet_explorer` / `internet_explorer_based` remain Windows APIs regardless
+of the `internet-explorer` feature. The facade selects either the `libesedb`
+backend or a signature-identical disabled backend that fails before I/O. The
+disabled path reports `InternetExplorerFailureStage::Acquisition` and tells the
+caller to rebuild with the feature. The model/parser is compiled on every
+target so decoder tests run off Windows.
 
 #### Crypto
 

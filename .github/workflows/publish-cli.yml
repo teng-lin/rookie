@@ -105,8 +105,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          # Install only the selected macOS target. The contract now sends
+          # x86_64 to macos-15-intel instead of cross-building it on ARM.
+          targets: ${{ contains(matrix.platform, 'macos') && matrix.target || '' }}
 
       - name: Build
         run: cargo build ${{ matrix.args }} --target ${{ matrix.target }} --package rookie-cookies-cli --bin rookie-cookies --release --locked

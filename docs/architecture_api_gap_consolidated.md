@@ -677,7 +677,21 @@ Runs from the first consolidation pass are listed with the exact command line so
 | Doctests | `cargo test --workspace --doc --locked` | Passed (first pass; not re-run) |
 | Strict rustdoc | `RUSTDOCFLAGS="-D warnings" cargo doc -p rookie-cookies --all-features --no-deps --locked` | Fails on the two confirmed `load()` links |
 | Windows execution | — | Not performed; Windows-only conclusions are source-validated |
-| Windows cross-compilation from macOS | — | Inconclusive; bundled C dependencies lacked a configured Windows toolchain/sysroot |
+| Windows cross-compilation from macOS | — | Original result superseded by the follow-up verification below. |
+
+---
+
+**Windows cross-build follow-up:** re-verified on 2026-08-21 at commit
+`d360e0be455cb87c119c9a9682fa94b037d835be`. The command
+`cargo-zigbuild check -p rookie-cookies --target
+x86_64-pc-windows-gnu --no-default-features --locked` failed deterministically
+because `libesedb-sys 0.2.1` selected Unix and macOS configuration from host
+`cfg!` expressions in its `build.rs`. The resulting POSIX header and API errors
+are consequences of that host/target defect. MSVC separately requires a
+configured Windows SDK/sysroot for bundled C; that requirement does not explain
+the GNU + Zig reproduction. Editing the extracted `OUT_DIR` configuration is
+not durable because the build script copies a fresh bundled source tree on each
+run.
 
 ---
 

@@ -51,9 +51,24 @@ The command checks these versions and targets before compiling and prints every
 underlying command. CI uses `check-platforms --skip-host` because the normal
 macOS job already runs native Clippy. The Windows GNU check deliberately uses
 `--no-default-features --features appbound`, leaving the default-on
-`internet-explorer` backend out of this fast source check. It catches Windows
-Rust signature and call-site drift; the native Windows MSVC job remains the
-authority for C compilation, linking, ABI, and runtime behavior.
+`internet-explorer` backend out of this fast source check.
+
+Cross-platform verification has three distinct levels:
+
+1. **Fast source check:** `xtask check-platforms` selects Linux and Windows
+   Rust modules. Its Windows leg keeps `appbound` but disables
+   `internet-explorer`, avoiding the ESE C backend. It catches stale call sites,
+   imports, and signature drift; the GNU target is not the shipped ABI.
+2. **Full supported cross-build:** macOS-to-MSVC with `cargo-xwin`, all
+   features, and a fixed `libesedb-sys` release proves the supported C and Rust
+   graph can cross-build. Until that dependency release exists, this level is
+   expected to remain unavailable.
+3. **Native execution:** Windows MSVC CI and installed-artifact smoke tests are
+   authoritative for SDK, link, ABI, and runtime behavior. Release workflows
+   execute the exact packaged CLI before upload.
+
+Do not use `DOCS_RS=1` as a substitute for the feature boundary: dependencies
+may suppress native work for unrelated documentation-build reasons.
 
 Generate the report consumed by the last command with the pinned nightly and
 coverage tool used by CI:
@@ -95,7 +110,9 @@ expands the language matrix.
 **Every pull request** — one `check (${{ os }})` job per OS.
 
 - **fmt**, Clippy (`-D warnings`), workspace tests, **and**
-  `--no-default-features` so the non-`appbound` Windows branch cannot rot.
+  `--no-default-features` so the non-`appbound`, non-IE Windows branches cannot
+  rot. The cross-target job also checks Windows with `appbound` enabled and IE
+  disabled.
 - **cargo-audit** against `security/audit-exceptions.toml` (blocking; Ubuntu).
 - **Public API snapshots** (`scripts/check-public-api.py`) on Linux, macOS, and
   Windows.

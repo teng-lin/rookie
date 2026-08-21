@@ -12,7 +12,7 @@ the Node-API addon.
 | Python binding | CPython **≥ 3.11**, [maturin](https://www.maturin.rs/) (CI pins **1.14.1**) |
 | Node binding | Node.js **≥ 22** (build the native module on **22** to match CI) |
 | Linux | `python3-dev`, `libdbus-1-dev`, `dbus` (zbus / Secret Service). E2E also wants `gnome-keyring`, `libsecret-tools`, `xvfb`. |
-| Windows | MSVC (`x86_64-pc-windows-msvc`). Default **`appbound`** feature pulls the App-Bound / v20 path. |
+| Windows | MSVC (`x86_64-pc-windows-msvc`). Default **`appbound`** and **`internet-explorer`** features pull their native Windows backends. |
 | macOS | Xcode CLT. Keychain E2E uses `/usr/bin/security`. |
 
 ```console
@@ -22,18 +22,32 @@ sudo apt-get install -y python3-dev libdbus-1-dev dbus
 
 ## Features
 
-`rookie-cookies` (the crate) defaults to `appbound`. That feature only changes
-Windows: Chrome-family **v20 / App-Bound** decryption (Chrome, Edge, Brave,
-Cốc Cốc, Avast). The feature compiles both COM injection and the elevated
-SYSTEM fallback; the request policy still decides what may run. The default is
-`InjectionOnly`, while `AllowElevatedFallback` must be selected explicitly.
+`rookie-cookies` (the crate) defaults to `appbound` and `internet-explorer`.
+Both only change Windows:
 
-- **Python** and **Node** bindings enable `appbound` automatically on Windows
-  (`cfg(windows)`). Unix builds leave it off.
-- **CLI** default features include `appbound`. Release Windows artifacts pass
-  `--features appbound` explicitly (`artifact-smoke.yml`, publish workflows).
-- To compile the legacy non-App-Bound Windows branch:
-  `cargo test -p rookie-cookies --no-default-features`.
+- `appbound` enables Chrome-family **v20 / App-Bound** decryption (Chrome,
+  Edge, Brave, Cốc Cốc, Avast). It compiles both COM injection and the elevated
+  SYSTEM fallback; the request policy still decides what may run. The default
+  is `InjectionOnly`, while `AllowElevatedFallback` must be selected explicitly.
+- `internet-explorer` enables the deprecated ESE WebCache backend and its
+  `libesedb` native dependency. It remains default-on for 0.6 compatibility.
+  Turning it off retains the IE entry-point signatures, but calls return an
+  actionable feature-disabled error before filesystem or ESE access.
+
+- **Python** and **Node** bindings enable `appbound` and `internet-explorer`
+  automatically on Windows (`cfg(windows)`). Unix builds leave them off.
+- **CLI** defaults forward both features. Release Windows artifacts record the
+  complete feature set in `release/platform-contract.json`.
+- To compile the Windows Rust surface without the ESE C dependency, disable
+  defaults and enable only App-Bound:
+
+  ```console
+  cargo check -p rookie-cookies --target x86_64-pc-windows-msvc \
+    --no-default-features --features appbound --locked
+  ```
+
+  This still needs an MSVC SDK/sysroot for bundled SQLite. The faster
+  Zig-backed source check is documented in [testing.md](testing.md).
 
 `dto-schema` is only for `cargo run -p rookie-cookies --bin generate-dto-schema`.
 
@@ -57,8 +71,8 @@ cargo build -p rookie-cookies-cli --release --locked
 # binary: target/release/rookie-cookies  (target/release/rookie-cookies.exe on Windows)
 ```
 
-Windows release builds that must decrypt v20 should keep default features
-(or pass `--features appbound`). See [testing.md](testing.md) for the
+Windows release builds should keep both default capabilities (or pass
+`--features appbound,internet-explorer`). See [testing.md](testing.md) for the
 Chrome / Edge / Brave canary that exercises that binary.
 
 ## Python binding
@@ -106,7 +120,12 @@ rebuilding.
 ```console
 cargo test --workspace --all-targets --locked
 cargo test --workspace --doc --locked
+cargo run -p xtask --locked -- check-platforms
 ```
+
+`check-platforms` requires the pinned Zig and `cargo-zigbuild` versions listed
+in [testing.md](testing.md). It is the quick source-compatibility loop, not a
+replacement for native Windows execution.
 
 Real browsers (libsecret / Keychain / DPAPI `v10`) and the elevated Windows
 **v20** canary for **Chrome, Edge, and Brave** are documented in

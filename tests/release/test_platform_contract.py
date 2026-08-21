@@ -107,6 +107,56 @@ class RealContractTests(unittest.TestCase):
         self.assertEqual(len(crate), 1)
         self.assertIn("internet-explorer", crate[0]["features"])
 
+    def test_macos_x64_release_cells_use_the_intel_runner(self) -> None:
+        contract = platform_contract.load_contract()
+        matches = [
+            cell
+            for cell in platform_contract.cells(contract)
+            if cell.get("os") == "darwin" and cell.get("cpu") in {"x64", "x86_64"}
+        ]
+        self.assertEqual({cell["artifact_id"] for cell in matches}, {"cli", "npm-native", "wheel"})
+        self.assertTrue(matches)
+        for cell in matches:
+            self.assertEqual(cell.get("runner"), "macos-15-intel", cell)
+
+    def test_darwin_wheel_matrix_uses_contract_runners(self) -> None:
+        contract = platform_contract.load_contract()
+        self.assertEqual(
+            platform_contract.emit_matrix(contract, "wheel-darwin"),
+            {
+                "include": [
+                    {"target": "aarch64", "runner": "macos-latest"},
+                    {"target": "x86_64", "runner": "macos-15-intel"},
+                ]
+            },
+        )
+
+    def test_publish_cli_smokes_the_manifest_verified_binary_before_upload(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/publish-cli.yml").read_text(
+            encoding="utf-8"
+        )
+        rename = workflow.index("- name: Rename Windows")
+        harness = workflow.index("- name: Run consumer harness against manifest-verified artifact")
+        upload = workflow.index("- name: Upload Windows")
+        self.assertLess(rename, harness)
+        self.assertLess(harness, upload)
+
+    def test_publish_npm_tests_the_downloaded_intel_addon(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/publish-npm.yml").read_text(
+            encoding="utf-8"
+        )
+        test_job = workflow[workflow.index("  test-macOS-windows-binding:") :]
+        self.assertIn("host: macos-15-intel\n            target: x86_64-apple-darwin", test_job)
+        self.assertLess(test_job.index("- name: Download artifacts"), test_job.index("- name: Test bindings"))
+
+    def test_publish_py_uses_contract_runner_and_smokes_before_upload(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/publish-py.yml").read_text(
+            encoding="utf-8"
+        )
+        macos_job = workflow[workflow.index("  macos:") : workflow.index("  sdist:")]
+        self.assertIn("runs-on: ${{ matrix.runner }}", macos_job)
+        self.assertLess(macos_job.index("- name: Smoke-test the exact wheel"), macos_job.index("- name: Upload wheel"))
+
     def test_npm_workflow_consumes_contract_publish_inputs_and_order(self) -> None:
         workflow = (REPOSITORY_ROOT / ".github/workflows/publish-npm.yml").read_text(
             encoding="utf-8"
@@ -364,6 +414,21 @@ class ValidationTests(unittest.TestCase):
         contract = {"cells": [base_cell(artifact_id="wheel", registry="pypi", cpu=None)]}
         failures = platform_contract.validate(contract, today=date(2026, 1, 1))
         self.assertTrue(any("cpu" in failure for failure in failures))
+
+    def test_macos_wheel_cell_missing_runner_fails(self) -> None:
+        contract = {
+            "cells": [
+                base_cell(
+                    artifact_id="wheel",
+                    registry="pypi",
+                    os="darwin",
+                    cpu="x86_64",
+                    runner=None,
+                )
+            ]
+        }
+        failures = platform_contract.validate(contract, today=date(2026, 1, 1))
+        self.assertTrue(any("macOS wheel" in failure and "runner" in failure for failure in failures))
 
     def test_artifact_types_without_extra_requirements_are_unaffected(self) -> None:
         contract = {"cells": [base_cell(artifact_id="crate", registry="crates.io", os=None, cpu=None, libc=None)]}
