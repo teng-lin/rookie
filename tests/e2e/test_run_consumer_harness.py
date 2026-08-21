@@ -87,14 +87,11 @@ def write_manifest(
     artifact_paths: list[Path],
     *,
     manifest_digest: str | None = None,
-    compute_real_digest: bool = False,
+    compute_real_digest: bool = True,
 ) -> None:
     """`manifest_digest` sets an exact (possibly deliberately wrong) value;
-    `compute_real_digest=True` computes the value run-consumer-harness.py's
-    `--output` path actually recomputes and checks against, for tests that
-    need a manifest to genuinely pass that check. The two are mutually
-    exclusive."""
-    assert not (manifest_digest is not None and compute_real_digest)
+    by default the helper computes the value every consumer-harness mode now
+    verifies. An explicit digest overrides that default for negative tests."""
     records = []
     for artifact_path in artifact_paths:
         data = artifact_path.read_bytes()
@@ -106,12 +103,12 @@ def write_manifest(
             }
         )
     release: dict[str, object] = {"version": "0.5.9"}
-    if compute_real_digest:
-        release["manifest_digest"] = jcs.digest({"release": release, "artifacts": records})
-    elif manifest_digest is not None:
+    if manifest_digest is not None:
         release["manifest_digest"] = manifest_digest
+    elif compute_real_digest:
+        release["manifest_digest"] = jcs.digest({"release": release, "artifacts": records})
     path.write_text(
-        json.dumps({"schema_version": 2, "release": release, "artifacts": records}),
+        json.dumps({"schema_version": 4, "release": release, "artifacts": records}),
         encoding="utf-8",
     )
 
@@ -390,6 +387,16 @@ class ConsumerHarnessTests(unittest.TestCase):
             # ["keyring"] -- assert a manifest claiming something else is
             # caught, not trusted.
             manifest["artifacts"][0]["helper_roles"] = ["appbound"]
+            manifest["release"]["manifest_digest"] = jcs.digest(
+                {
+                    "release": {
+                        key: value
+                        for key, value in manifest["release"].items()
+                        if key != "manifest_digest"
+                    },
+                    "artifacts": manifest["artifacts"],
+                }
+            )
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
             result = self.run_harness(root, manifest_path)
@@ -488,7 +495,7 @@ class ConsumerHarnessTests(unittest.TestCase):
             make_npm_tarball(tarball, name="rookie-cookies")
             manifest_path = root / "manifest.json"
             # No manifest_digest= given -- write_manifest() omits the field.
-            write_manifest(manifest_path, root, [tarball])
+            write_manifest(manifest_path, root, [tarball], compute_real_digest=False)
             evidence_path = root / "evidence.json"
 
             result = subprocess.run(
@@ -544,6 +551,30 @@ class ConsumerHarnessTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not match", result.stderr)
             self.assertFalse(evidence_path.exists())
+
+    def test_verification_without_output_rejects_a_stale_manifest_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tarball = root / "rookie-cookies-1.0.0.tgz"
+            make_npm_tarball(tarball, name="rookie-cookies")
+            manifest_path = root / "manifest.json"
+            write_manifest(manifest_path, root, [tarball], manifest_digest="d" * 64)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--manifest",
+                    str(manifest_path),
+                    "--artifacts-root",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match", result.stderr)
 
     def test_output_fails_closed_on_an_empty_string_manifest_digest(self) -> None:
         # Regression test: `manifest_digest is None` alone does not catch a

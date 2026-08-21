@@ -6,6 +6,20 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-beta.3] - 2026-08-21
+
+### Changed
+
+- crates.io publication now uses its GitHub OIDC trusted publisher instead of
+  a stored registry token, and PyPI publication can recover an interrupted run
+  by reconciling the original digest-verified distributions.
+- Release manifests are now recomputed before every consumer-harness and CI
+  proof check, and release preparation rejects an empty changelog section.
+- The Rust workspace now declares and continuously tests Rust 1.88 as its MSRV;
+  the published crate also declares crates.io categories.
+- Windows ESET scan records remain available for incident investigation but are
+  no longer described as a release gate.
+
 ## [0.6.0-beta.2] - 2026-08-21
 
 ### Added

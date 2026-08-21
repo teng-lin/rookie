@@ -7,11 +7,12 @@ default-members = ["rookie-rs", "bindings/python"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0-beta.2"
+version = "0.6.0-beta.3"
+rust-version = "1.88"
 
 [workspace.dependencies.rookie-cookies]
 path = "rookie-rs"
-version = "0.6.0-beta.2"
+version = "0.6.0-beta.3"
 default-features = false
 
 [profile.release]

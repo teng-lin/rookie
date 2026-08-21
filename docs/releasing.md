@@ -45,8 +45,8 @@ Create a protected GitHub Actions environment named `release`, with admin
 bypass disabled and its deployment branch/tag policy restricted to exactly
 `main` and `v*` (the only refs any publish workflow legitimately dispatches
 from — see the ref table above). There is deliberately no required reviewer
-here: the gate is fully automated — the SemVer floor, blocking RustSec, the
-scan-evidence records, required CI checks, and the tag ruleset below are the
+here: the gate is fully automated — the SemVer floor, blocking RustSec,
+required CI checks, and the tag ruleset below are the
 whole stop, not a backstop to a human approval step. The judgment call already
 happened when the operator chose to dispatch the workflow; publishing then
 proceeds unattended once those checks pass.
@@ -162,7 +162,8 @@ The `pull_request` event intentionally runs only Ubuntu Chrome/Firefox in
 suites against its branch and require every job to pass:
 
 ```console
-export RELEASE_BRANCH=release/0.6.0-beta.2
+export VERSION=0.6.0-beta.3
+export RELEASE_BRANCH="release/$VERSION"
 gh workflow run e2e.yml --ref "$RELEASE_BRANCH" \
   -f appbound_only=false -f multi_browser=true
 gh workflow run test-rust.yml --ref "$RELEASE_BRANCH" -f suite=nightly
@@ -257,21 +258,25 @@ returns npm `E404`, publishes its already-packaged release tarball with the
 `release` environment's `NPM_TOKEN`, and then lets the ordinary OIDC publish
 loop verify the same tarball by integrity before continuing.
 
-For `v0.6.0-beta.2`, bootstrap the new Linux ARM64 package with:
+Use this only when a future platform-contract package has no npm package record.
+First prove that `npm view <new-package> name` returns `E404`, then dispatch:
 
 ```console
 gh workflow run publish-npm.yml --ref main \
   -f version="$VERSION" \
-  -f bootstrap_package="rookie-cookies-linux-arm64-gnu"
+  -f bootstrap_package="<new-package>"
 ```
 
-Use this command *instead of* the ordinary npm command in the publish sequence
-above for this one release. Do not pass `bootstrap_package` for an established
-package: the guarded step refuses it. After the run creates
-`rookie-cookies-linux-arm64-gnu`, configure
-that package's trusted publisher with the same owner/repository/workflow/
-environment settings listed above, delete `NPM_TOKEN`, and omit the bootstrap
-input from every later release.
+Use this command *instead of* the ordinary npm command for that package's first
+release. Do not pass `bootstrap_package` for an established package: the guarded
+step refuses it. After the run creates the package, configure its trusted
+publisher with the same owner/repository/workflow/environment settings listed
+above, delete `NPM_TOKEN`, and omit the bootstrap input from every later
+release.
+
+`rookie-cookies-linux-arm64-gnu` completed this bootstrap in `v0.6.0-beta.2`.
+Its trusted publisher is configured and `NPM_TOKEN` was deleted on 2026-08-21;
+never pass it as `bootstrap_package` again.
 
 pip and cargo skip pre-release versions by default, so PyPI and crates.io
 need no equivalent tag handling.
@@ -285,12 +290,11 @@ binary, and publishes these prepared native tarballs before the root package:
 - `rookie-cookies-linux-x64-gnu`
 - `rookie-cookies-win32-x64-msvc`
 
-### Checksum-identified Windows scan
+### Optional checksum-identified Windows scan evidence
 
-Issue [#191](https://github.com/teng-lin/rookie-cookies/issues/191) tracks an
-unresolved historical ESET detection. The npm package job now places these
-additional files in its `npm-release-<version>` workflow artifact before the
-`publish` job runs:
+Issue [#191](https://github.com/teng-lin/rookie-cookies/issues/191) tracks a
+historical ESET detection. The npm package job places these additional files in
+its `npm-release-<version>` workflow artifact for optional incident analysis:
 
 - `scan/rookie_cookies.win32-x64-msvc.node`, copied byte-for-byte from the
   Windows package assembled by the workflow;
@@ -298,14 +302,11 @@ additional files in its `npm-release-<version>` workflow artifact before the
   tag commit, byte length, and SHA-256 for that native module and all six npm
   tarballs.
 
-There is no reviewer gate between the package job and `publish` — do not
-dispatch or let the `publish` job proceed until the scan below is complete and
-recorded; nothing else stops it. For a checksum-identified scan, download that
-workflow artifact onto a disposable, fully patched Windows VM before the
-`publish` job runs, and verify every manifest digest before scanning the
-`.node` file. Do not load or execute the native module during this check.
-Record the disposition as structured evidence bound to the artifact's
-SHA-256, rather than as free-form issue prose, using
+This scan is not a release gate or publication precondition. If investigating a
+detection, download the workflow artifact onto a disposable, fully patched
+Windows VM, verify every manifest digest, and scan the `.node` file without
+loading or executing it. Record the disposition as structured evidence bound
+to the artifact's SHA-256, rather than as free-form issue prose, using
 `scripts/record-scan-disposition.py` against the downloaded
 `release-scan-manifest.json`:
 
@@ -327,10 +328,9 @@ bound to that exact artifact's SHA-256, so the record can't silently drift
 onto a different build — and prints the entry as JSON. Paste that JSON, plus
 any ESET false-positive submission and final vendor disposition, onto #191.
 
-This repository cannot substitute a different antivirus result for that ESET
-evidence. Do not claim the historical detection is cleared, or close #191,
-until a current checksum-identified scan is recorded or ESET has reclassified
-the exact sample.
+Do not claim the historical detection is cleared, or close #191, without
+checksum-identified evidence for the sample under investigation or an ESET
+reclassification of that exact sample.
 
 ## Packaging-proof: what the release pipeline actually verifies
 
@@ -339,6 +339,13 @@ Each publish workflow (`publish-crate.yml`, `publish-cli.yml`,
 (`scripts/write-release-scan-manifest.py`) before its publishing step, then runs
 `scripts/run-consumer-harness.py` against it. Together these give every
 shipped artifact:
+
+- **A verified whole-manifest binding.** Every consumer-harness invocation
+  recomputes `release.manifest_digest` over the manifest's release metadata and
+  artifact records before it exercises an artifact. `write-ci-proof.py`
+  independently recomputes the same digest before binding required checks to
+  it, so a stale or hand-edited digest stops publication even when no separate
+  consumer-evidence output was requested.
 
 - **A digest tied to its declared helper roles.** Each manifest record's
   `helper_roles` is matched against the artifact's cell in
@@ -471,9 +478,9 @@ also uploads a `cli-scan-manifest-<target>` workflow artifact containing a
 `release-scan-manifest.json` scoped to that leg's one binary (source SHA,
 controller SHA, platform-contract digest, byte length, SHA-256) — the same
 manifest shape `publish-npm.yml` produces, applied per CLI target instead of
-once for all six npm packages. Verify the Windows executable against its
-sidecar before its separate ESET scan, then record the disposition the same
-way as the npm scan, against the Windows leg's own manifest:
+once for all six npm packages. For optional incident analysis, verify the
+Windows executable against its sidecar before scanning, then record the
+disposition against the Windows leg's own manifest:
 
 ```console
 python3 scripts/record-scan-disposition.py \
@@ -486,8 +493,8 @@ python3 scripts/record-scan-disposition.py \
   --reviewer <your GitHub username>
 ```
 
-Paste the printed entry onto #191; the npm native module and CLI executable
-are distinct artifacts and neither scan stands in for the other.
+When relevant to #191, paste the printed entry there. The npm native module and
+CLI executable are distinct artifacts and neither scan stands in for the other.
 
 `workflow_dispatch` runs the copy of the workflow file stored *at the dispatched
 ref*. Dispatching from `v$VERSION` therefore runs that tag's own copy of
@@ -634,10 +641,10 @@ gh release upload "v$VERSION" \
 
 Each platform binary must be built on its own host. Use the workflow's matrix as
 the reference for target names, for the `.exe` suffix on Windows asset names,
-and for the `--features appbound` flag the Windows build adds. After upload,
-record the Windows scan disposition against that target's
-`release-scan-manifest.json` the same way as in "Publish CLI binaries" — the
-npm native module scan does not cover the CLI executable. Prefer
+and for the `--features appbound` flag the Windows build adds. For optional
+incident analysis after upload, record the Windows scan disposition against
+that target's `release-scan-manifest.json` the same way as in "Publish CLI
+binaries" — the npm native module scan does not cover the CLI executable. Prefer
 `retry-cli-asset.yml` when Actions is available; it writes the sidecar and
 uploads both files.
 
@@ -653,8 +660,8 @@ upload can succeed before the workflow reports a timeout.
 For npm, inspect all six package names at the requested version. The workflow
 is integrity-idempotent: it accepts an already-published package only when the
 registry integrity matches the rebuilt immutable tarball, then continues with
-the missing packages. If the one-time bootstrap package was created before a
-later failure, configure its trusted publisher and re-dispatch without
+the missing packages. If a future one-time bootstrap package is created before
+a later failure, configure its trusted publisher and re-dispatch without
 `bootstrap_package`. Do not rebuild by hand or attempt to overwrite any
 package version; npm, PyPI, and crates.io versions are immutable.
 

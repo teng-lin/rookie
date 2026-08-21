@@ -188,6 +188,20 @@ class ChangelogTests(unittest.TestCase):
                 "# Changelog\n\n## [Unreleased]\n\n## [0.5.10] - 2026-08-20\n\n### Added\n\n- Human prose.\n\n## [0.5.9] - 2026-08-15\n",
             )
 
+    def test_rejects_an_empty_unreleased_section(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            text = "# Changelog\n\n## [Unreleased]\n\n## [0.5.9] - 2026-08-15\n"
+            path = self.write_changelog(directory, text)
+
+            with self.assertRaisesRegex(
+                bump_version.ReleaseError, "Unreleased must contain release-note prose"
+            ):
+                bump_version.update_changelog(
+                    path, "0.5.9", "0.5.10", "2026-08-20", True
+                )
+
+            self.assertEqual(path.read_text(encoding="utf-8"), text)
+
     def test_rerun_of_prepared_current_version_is_a_no_op(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             text = "# Changelog\n\n## [Unreleased]\n\n## [0.5.10] - 2026-08-20\n"

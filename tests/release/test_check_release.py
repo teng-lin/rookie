@@ -99,5 +99,27 @@ class LatestPublishedVersionTests(unittest.TestCase):
         )
 
 
+class ChangelogSectionTests(unittest.TestCase):
+    def test_extracts_release_prose_until_the_next_release(self) -> None:
+        document = (
+            "## [Unreleased]\n\n## [0.6.0] - 2026-08-21\n\n"
+            "### Added\n\n- Stable summary.\n\n## [0.5.9] - 2026-08-15\n"
+        )
+        heading = check_release.re.search(r"^## \[0\.6\.0\].*$", document, flags=check_release.re.MULTILINE)
+        self.assertIsNotNone(heading)
+        assert heading is not None
+        self.assertEqual(
+            check_release.section_body(document, heading.end()).strip(),
+            "### Added\n\n- Stable summary.",
+        )
+
+    def test_empty_release_body_is_detectable(self) -> None:
+        document = "## [0.6.0] - 2026-08-21\n\n## [0.5.9] - 2026-08-15\n"
+        heading = check_release.re.search(r"^## \[0\.6\.0\].*$", document, flags=check_release.re.MULTILINE)
+        self.assertIsNotNone(heading)
+        assert heading is not None
+        self.assertFalse(check_release.section_body(document, heading.end()).strip())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,8 @@ CANONICAL_REPOSITORY = "https://github.com/teng-lin/rookie-cookies"
 PYTHON_DOCUMENTATION = f"{CANONICAL_REPOSITORY}/blob/main/bindings/python/README.md"
 ISSUE_TRACKER = f"{CANONICAL_REPOSITORY}/issues"
 NODE_ENGINE_RANGE = ">=22"
+RUST_MSRV = "1.88"
+RUST_CATEGORIES = ["authentication", "os", "web-programming"]
 SEMVER_PATTERN = re.compile(
     r"^(0|[1-9][0-9]*)\."
     r"(0|[1-9][0-9]*)\."
@@ -42,6 +44,9 @@ RUST_PACKAGES = (
     ("cli/Cargo.toml", "rookie-cookies-cli"),
     ("bindings/python/Cargo.toml", "rookie-cookies-python"),
     ("bindings/node/Cargo.toml", "rookie-cookies-node"),
+)
+RUST_VERSION_MANIFESTS = tuple(path for path, _package in RUST_PACKAGES) + (
+    "xtask/Cargo.toml",
 )
 
 
@@ -109,6 +114,16 @@ def inherited_package_version(manifest: dict[str, Any]) -> bool:
     return manifest.get("package", {}).get("version") == {"workspace": True}
 
 
+def inherited_rust_version(manifest: dict[str, Any]) -> bool:
+    return manifest.get("package", {}).get("rust-version") == {"workspace": True}
+
+
+def section_body(document: str, heading_end: int) -> str:
+    next_heading = re.search(r"^## ", document[heading_end:], flags=re.MULTILINE)
+    end = heading_end + next_heading.start() if next_heading else len(document)
+    return document[heading_end:end]
+
+
 def inherited_dependency(
     specification: Any, expected_features: list[str] | None = None
 ) -> bool:
@@ -156,7 +171,17 @@ def main() -> int:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     metadata: list[tuple[str, Any, Any]] = [
+        (
+            "Cargo.toml workspace Rust MSRV",
+            workspace["workspace"]["package"].get("rust-version"),
+            RUST_MSRV,
+        ),
         ("rookie-rs/Cargo.toml package name", core["package"]["name"], "rookie-cookies"),
+        (
+            "rookie-rs/Cargo.toml categories",
+            core["package"].get("categories"),
+            RUST_CATEGORIES,
+        ),
         ("rookie-rs/Cargo.toml repository", core["package"]["repository"], CANONICAL_REPOSITORY),
         ("bindings/python pyproject package name", pyproject["project"]["name"], "rookie-cookies"),
         ("bindings/python pyproject readme", pyproject["project"].get("readme"), "README.md"),
@@ -272,6 +297,12 @@ def main() -> int:
                 f"Cargo.lock {package_name}: expected one local package at {expected}, found {lock_versions}"
             )
 
+    for manifest_path in RUST_VERSION_MANIFESTS:
+        if not inherited_rust_version(load_toml(manifest_path)):
+            failures.append(
+                f"{manifest_path}: package.rust-version must inherit workspace.package.rust-version"
+            )
+
     dependency_specs = (
         ("cli/Cargo.toml rookie-cookies dependency", cli["dependencies"]["rookie-cookies"], []),
         (
@@ -382,24 +413,29 @@ def main() -> int:
         for label, actual, expected_value in metadata
         if actual != expected_value
     )
-    release_headings = re.findall(
-        rf"^## \[{re.escape(expected)}\] - (\d{{4}}-\d{{2}}-\d{{2}})[ \t]*$",
-        changelog,
-        flags=re.MULTILINE,
+    release_matches = list(
+        re.finditer(
+            rf"^## \[{re.escape(expected)}\] - (\d{{4}}-\d{{2}}-\d{{2}})[ \t]*$",
+            changelog,
+            flags=re.MULTILINE,
+        )
     )
-    if len(release_headings) != 1:
+    if len(release_matches) != 1:
         failures.append(
-            f"CHANGELOG.md: expected exactly one dated {expected} release heading, found {len(release_headings)}"
+            f"CHANGELOG.md: expected exactly one dated {expected} release heading, found {len(release_matches)}"
         )
     else:
+        release_date = release_matches[0].group(1)
         try:
-            parsed_release_date = date.fromisoformat(release_headings[0])
+            parsed_release_date = date.fromisoformat(release_date)
         except ValueError:
             parsed_release_date = None
-        if parsed_release_date is None or parsed_release_date.isoformat() != release_headings[0]:
+        if parsed_release_date is None or parsed_release_date.isoformat() != release_date:
             failures.append(
-                f"CHANGELOG.md: release {expected} has invalid date {release_headings[0]!r}"
+                f"CHANGELOG.md: release {expected} has invalid date {release_date!r}"
             )
+        if not section_body(changelog, release_matches[0].end()).strip():
+            failures.append(f"CHANGELOG.md: release {expected} has no release-note prose")
     unreleased_headings = re.findall(
         r"^## \[Unreleased\][ \t]*$", changelog, flags=re.MULTILINE
     )

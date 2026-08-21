@@ -30,6 +30,18 @@ COMMIT_SHA = "a" * 40
 MANIFEST_DIGEST = "d" * 64
 
 
+def real_manifest() -> dict[str, object]:
+    release: dict[str, object] = {
+        "kind": "release",
+        "version": "1.0.0",
+        "tag": "v1.0.0",
+        "source_sha": COMMIT_SHA,
+    }
+    artifacts: list[object] = []
+    release["manifest_digest"] = jcs.digest({"release": release, "artifacts": artifacts})
+    return {"schema_version": 4, "release": release, "artifacts": artifacts}
+
+
 def build_good_fixture(
     repo: str, commit_sha: str
 ) -> tuple[dict[str, object], dict[int, dict[str, object]], dict[int, dict[str, object]]]:
@@ -311,10 +323,8 @@ class MainTests(unittest.TestCase):
         check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
         with tempfile.TemporaryDirectory() as temporary:
             manifest_path = Path(temporary) / "release-scan-manifest.json"
-            manifest_path.write_text(
-                json.dumps({"release": {"manifest_digest": MANIFEST_DIGEST}, "artifacts": []}),
-                encoding="utf-8",
-            )
+            manifest = real_manifest()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             output = Path(temporary) / "ci-proof.json"
             with mock.patch.object(
                 write_ci_proof,
@@ -339,7 +349,39 @@ class MainTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             proof = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(proof["manifest_digest"], MANIFEST_DIGEST)
+            self.assertEqual(proof["manifest_digest"], manifest["release"]["manifest_digest"])
+
+    def test_manifest_flag_rejects_a_stale_digest(self) -> None:
+        check_runs, jobs, runs = build_good_fixture(REPO, COMMIT_SHA)
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest_path = Path(temporary) / "release-scan-manifest.json"
+            manifest = real_manifest()
+            manifest["release"]["version"] = "1.0.1"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            output = Path(temporary) / "ci-proof.json"
+            with mock.patch.object(
+                write_ci_proof,
+                "gh_api",
+                fake_gh_api_for(check_runs, jobs, runs, commit_sha=COMMIT_SHA),
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "write-ci-proof.py",
+                    "--repo",
+                    REPO,
+                    "--commit-sha",
+                    COMMIT_SHA,
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output),
+                ],
+            ):
+                exit_code = write_ci_proof.main()
+
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(output.exists())
 
     def test_manifest_flag_fails_closed_on_a_missing_digest_field(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
