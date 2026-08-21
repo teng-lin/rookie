@@ -8,6 +8,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import ssl
 import sys
 import threading
@@ -16,6 +17,8 @@ from urllib.parse import parse_qs, urlparse
 
 ALLOWED_TOP_HOSTS = frozenset({"top.rookie-a.test", "other.rookie-c.test"})
 ALLOWED_THIRD_HOST = "third.rookie-b.test"
+STRESS_HOST_PATTERN = re.compile(r"seed\.rookie-(?P<index>[0-7])\.test\Z")
+MAX_STRESS_COOKIES_PER_HOST = 64
 
 
 class ContextCookieServer(ThreadingHTTPServer):
@@ -137,6 +140,69 @@ addEventListener("message", (event) => {{
                 HTTPStatus.OK,
                 json.dumps({"cookie": self.headers.get("Cookie", "")}),
                 content_type="application/json",
+            )
+            return
+
+        stress_match = STRESS_HOST_PATTERN.fullmatch(host)
+        if parsed.path == "/stress/seed":
+            if stress_match is None:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress host\n")
+                return
+            query = parse_qs(parsed.query)
+            try:
+                count = int(query.get("count", ["40"])[0])
+            except ValueError:
+                count = 0
+            if not 1 <= count <= MAX_STRESS_COOKIES_PER_HOST:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress count\n")
+                return
+            host_index = int(stress_match.group("index"))
+            cookies = tuple(
+                f"stress_{host_index}_{cookie_index}=seed-{host_index}-{cookie_index}; "
+                "Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600"
+                for cookie_index in range(count)
+            )
+            self.send_body(
+                HTTPStatus.OK,
+                json.dumps({"host_index": host_index, "seeded": count}),
+                content_type="application/json",
+                cookies=cookies,
+            )
+            return
+
+        if parsed.path == "/stress/mutate":
+            if stress_match is None:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress host\n")
+                return
+            query = parse_qs(parsed.query)
+            try:
+                round_number = int(query.get("round", [""])[0])
+            except ValueError:
+                round_number = -1
+            if not 0 <= round_number <= 999:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid mutation round\n")
+                return
+            host_index = int(stress_match.group("index"))
+            delete_index = round_number + 1
+            cookies = (
+                f"stress_{host_index}_0=updated-{round_number}; Secure; HttpOnly; "
+                "SameSite=Lax; Path=/; Max-Age=1209600",
+                f"stress_{host_index}_{delete_index}=deleted; Secure; HttpOnly; SameSite=Lax; "
+                "Path=/; Max-Age=0",
+                f"stress_{host_index}_round_{round_number}=added-{round_number}; "
+                "Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600",
+            )
+            self.send_body(
+                HTTPStatus.OK,
+                json.dumps(
+                    {
+                        "host_index": host_index,
+                        "round": round_number,
+                        "deleted_index": delete_index,
+                    }
+                ),
+                content_type="application/json",
+                cookies=cookies,
             )
             return
 

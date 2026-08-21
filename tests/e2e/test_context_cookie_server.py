@@ -115,6 +115,42 @@ class ContextCookieServerTests(unittest.TestCase):
             },
         )
 
+    def test_stress_seed_distributes_a_bounded_cookie_batch(self) -> None:
+        status, headers, body = self.request(
+            "seed.rookie-3.test", "/stress/seed?count=40"
+        )
+        self.assertEqual(status, 200)
+        cookies = [value for name, value in headers if name.lower() == "set-cookie"]
+        self.assertEqual(len(cookies), 40)
+        self.assertTrue(cookies[0].startswith("stress_3_0=seed-3-0;"))
+        self.assertTrue(cookies[-1].startswith("stress_3_39=seed-3-39;"))
+        self.assertEqual(json.loads(body), {"host_index": 3, "seeded": 40})
+
+    def test_stress_seed_rejects_unbounded_or_wrong_host_requests(self) -> None:
+        status, _, _ = self.request(
+            "seed.rookie-0.test",
+            f"/stress/seed?count={SERVER.MAX_STRESS_COOKIES_PER_HOST + 1}",
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request("top.rookie-a.test", "/stress/seed?count=40")
+        self.assertEqual(status, 400)
+
+    def test_stress_mutation_updates_deletes_and_adds(self) -> None:
+        status, headers, body = self.request(
+            "seed.rookie-5.test", "/stress/mutate?round=7"
+        )
+        self.assertEqual(status, 200)
+        cookies = [value for name, value in headers if name.lower() == "set-cookie"]
+        self.assertEqual(len(cookies), 3)
+        self.assertIn("stress_5_0=updated-7", cookies[0])
+        self.assertIn("stress_5_8=deleted", cookies[1])
+        self.assertIn("Max-Age=0", cookies[1])
+        self.assertIn("stress_5_round_7=added-7", cookies[2])
+        self.assertEqual(
+            json.loads(body),
+            {"host_index": 5, "round": 7, "deleted_index": 8},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
