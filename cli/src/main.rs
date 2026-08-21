@@ -1,16 +1,11 @@
-#![allow(deprecated)]
-
 use clap::error::ErrorKind;
-use clap::{Command, CommandFactory, FromArgMatches};
+use clap::{CommandFactory, FromArgMatches};
 use rookie_cookies::common::enums::Cookie;
 use rookie_cookies::direct_path::{
-  chromium_cookies_from_path, cookies_from_path, ChromiumCredentialSource, ChromiumPathRequest,
-  DirectPathRequest,
+  extract_from_path, ChromiumCredentialSource, PathExtractRequest,
 };
 use rookie_cookies::CancellationHandle;
 use std::path::PathBuf;
-mod browsers_map;
-use browsers_map::BROWSERS_MAP;
 mod args;
 use args::{Args, JobCommand};
 use rookie_cookies::common::format;
@@ -44,13 +39,10 @@ fn print_line_or_exit(line: &str) {
 /// come soon -- the conventional "first signal asks nicely, second signal
 /// means it now" escalation.
 ///
-/// Only the `--browser`/`--path` extraction modes call this: those are the
-/// only ones built from a [`rookie_cookies::Request`]/`DirectPathRequest`/
-/// `ChromiumPathRequest`, which is what actually observes cancellation.
-/// `--load`, `--report`, and the `--list-*` modes keep the process's
-/// default signal disposition (immediate termination) unchanged, since
-/// `rookie_cookies::load`/`load_report`/`browser_report`/`browser_profiles`/
-/// `supported_browsers` have no cancellation hook to drive.
+/// Every job subcommand except `browsers` calls this and carries the
+/// resulting handle in the request or [`rookie_cookies::ExecutionControl`] it
+/// builds. `browsers` wraps `supported_browsers`, which reads an embedded,
+/// in-memory catalog and deliberately takes no control at all.
 fn install_cancel_on_signal() -> CancellationHandle {
   let handle = CancellationHandle::new();
   let armed = handle.clone();
@@ -76,16 +68,13 @@ fn install_cancel_on_signal() -> CancellationHandle {
   handle
 }
 
-fn print_cookies(args: Args, cookies: Vec<Cookie>) {
-  match args.format.as_str() {
-    "json" => {
-      let str = format::json(cookies);
-      print_line_or_exit(&str);
-    }
-    "netscape" => {
-      let data = format::netscape(cookies);
-      print_line_or_exit(&data);
-    }
+/// Emits the flat, non-detailed cookie list `extract_from_path` returns --
+/// the `from-path --domains` job, which has no warnings or isolation context
+/// to carry (see [`print_read_result`]).
+fn print_flat_cookies(format: &str, cookies: Vec<Cookie>) {
+  match format {
+    "json" => print_line_or_exit(&format::json(cookies)),
+    "netscape" => print_line_or_exit(&format::netscape(cookies)),
     _ => {}
   }
 }
@@ -96,42 +85,118 @@ fn emit_warnings(warnings: &[rookie_cookies::ReadWarning]) {
   }
 }
 
-fn print_job_cookies(format: &str, cookies: Vec<Cookie>) {
+/// Emits a snapshot job's (`read`/`from-path`) cookies in the requested
+/// format.
+///
+/// `json` and `netscape` stay the eight-field compatibility projection:
+/// neither format has a column for a CHIPS partition key or a Firefox
+/// container identity, so widening them would mean inventing new columns or
+/// silently dropping the isolation `detailed` exists to keep. `detailed` is
+/// the only format that carries a `DetailedCookie`'s context.
+fn print_read_result(format: &str, result: rookie_cookies::ReadResult) {
   match format {
-    "json" => print_line_or_exit(&format::json(cookies)),
-    "netscape" => print_line_or_exit(&format::netscape(cookies)),
+    "json" => print_line_or_exit(&format::json(result.into_cookies())),
+    "netscape" => print_line_or_exit(&format::netscape(result.into_cookies())),
+    "detailed" => print_line_or_exit(&format::detailed_json(result.into_detailed_cookies())),
     _ => {}
   }
 }
 
-fn apply_timeout(
-  mut request: rookie_cookies::ReadRequest,
-  timeout_secs: Option<u64>,
-) -> rookie_cookies::ReadRequest {
-  if let Some(secs) = timeout_secs {
-    request = request.timeout(std::time::Duration::from_secs(secs));
+/// Maps a validated `--resource` value to its typed kind. See
+/// [`parse_app_bound`] for why an unreachable arm is safe here.
+fn parse_resource(value: &str) -> rookie_cookies::ResourceKind {
+  match value {
+    "navigation" => rookie_cookies::ResourceKind::Navigation,
+    "subresource" => rookie_cookies::ResourceKind::Subresource,
+    other => unreachable!("clap already validated --resource: {other}"),
   }
-  request
+}
+
+/// Maps a validated `--method` value to its typed class. See
+/// [`parse_app_bound`] for why an unreachable arm is safe here.
+fn parse_method(value: &str) -> rookie_cookies::MethodClass {
+  match value {
+    "safe" => rookie_cookies::MethodClass::Safe,
+    "unsafe" => rookie_cookies::MethodClass::Unsafe,
+    other => unreachable!("clap already validated --method: {other}"),
+  }
+}
+
+/// Rejects a `--profile`/`--select` combination neither request builder can
+/// express.
+///
+/// `--select all` means "every profile"; `--profile <q>` means "this one, and
+/// only this one". Combined, they contradict each other -- `ProfileSelection`
+/// has no "all" arm and `ReportScope` cannot be simultaneously narrowed to one
+/// query and left at `AllProfiles`. This is the same conflict a binding would
+/// hit constructing the request directly, so it is raised as the typed
+/// [`rookie_cookies::RequestError::ConflictingProfileSelection`] before any
+/// I/O, not a bespoke CLI usage error.
+///
+/// `widen_to_all` is false for `read`: unlike a report, a snapshot has no
+/// "every profile" shape at all (one `ReadResult` holds one `profile_id`), so
+/// `--select all` is rejected there whether or not `--profile` is also given.
+fn reject_conflicting_profile_selection(
+  profile: Option<&str>,
+  select: Option<&str>,
+  widen_to_all: bool,
+) -> rookie_cookies::Result<()> {
+  let selects_all = select == Some("all");
+  if selects_all && (profile.is_some() || !widen_to_all) {
+    return Err(rookie_cookies::RequestError::ConflictingProfileSelection.into());
+  }
+  Ok(())
+}
+
+/// Maps a validated `--app-bound` value to its typed policy.
+///
+/// Clap's `PossibleValuesParser` already restricts the flag to exactly these
+/// three values, so there is no fourth arm to classify by parsing here.
+fn parse_app_bound(value: &str) -> rookie_cookies::AppBoundPolicy {
+  match value {
+    "disabled" => rookie_cookies::AppBoundPolicy::Disabled,
+    "injection-only" => rookie_cookies::AppBoundPolicy::InjectionOnly,
+    "allow-elevated-fallback" => rookie_cookies::AppBoundPolicy::AllowElevatedFallback,
+    other => unreachable!("clap already validated --app-bound: {other}"),
+  }
+}
+
+/// Builds the [`rookie_cookies::ExecutionControl`] shared by every job
+/// subcommand: `--timeout-secs`, `--app-bound`, and this invocation's
+/// SIGINT/SIGTERM cancellation handle.
+fn execution_control(
+  timeout_secs: Option<u64>,
+  app_bound: Option<String>,
+  cancellation: CancellationHandle,
+) -> rookie_cookies::ExecutionControl {
+  let mut control = rookie_cookies::ExecutionControl::default().cancellation(cancellation);
+  if let Some(secs) = timeout_secs {
+    control = control.timeout(std::time::Duration::from_secs(secs));
+  }
+  if let Some(policy) = app_bound {
+    control = control.app_bound(parse_app_bound(&policy));
+  }
+  control
 }
 
 fn chromium_credential_selector(
-  key_path: Option<String>,
+  local_state_path: Option<String>,
   browser_id: Option<String>,
   plaintext_only: bool,
 ) -> std::io::Result<Option<ChromiumCredentialSource>> {
-  let selector_count = usize::from(key_path.is_some())
+  let selector_count = usize::from(local_state_path.is_some())
     + usize::from(browser_id.is_some())
     + usize::from(plaintext_only);
   if selector_count > 1 {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidInput,
-      "--key-path, --browser-id, and --plaintext-only are mutually exclusive",
+      "--local-state-path, --browser-id, and --plaintext-only are mutually exclusive",
     ));
   }
 
-  Ok(if let Some(key_path) = key_path {
+  Ok(if let Some(local_state_path) = local_state_path {
     Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-      key_path,
+      local_state_path,
     )))
   } else if let Some(browser_id) = browser_id {
     Some(ChromiumCredentialSource::BrowserId(browser_id))
@@ -143,70 +208,184 @@ fn chromium_credential_selector(
 }
 
 fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>> {
+  // `browsers`/`profiles` are listing jobs, not extraction; the INFO log
+  // stays scoped to the jobs that actually run acquisition/decryption, same
+  // distinction the pre-subcommand top-level flags drew.
+  if !matches!(command, JobCommand::Browsers | JobCommand::Profiles { .. }) {
+    tracing::info!("extracting cookies");
+  }
   match command {
     JobCommand::Read {
       browser,
       profile,
       include_expired,
+      include_session,
+      select,
       format,
       timeout_secs,
+      app_bound,
     } => {
-      let mut request = apply_timeout(
-        rookie_cookies::ReadRequest::browser(browser).include_expired(include_expired),
-        timeout_secs,
-      );
+      reject_conflicting_profile_selection(profile.as_deref(), select.as_deref(), false)?;
+      let cancellation = install_cancel_on_signal();
+      let control = execution_control(timeout_secs, app_bound, cancellation);
+      let mut request = rookie_cookies::ReadRequest::browser(browser)
+        .include_expired(include_expired)
+        .execution(control);
+      if include_session {
+        request = request.include_session();
+      }
       if let Some(profile) = profile {
         request = request.profile(profile);
       }
       let result = rookie_cookies::read(request)?;
       emit_warnings(result.warnings());
-      print_job_cookies(&format, result.into_cookies());
+      print_read_result(&format, result);
     }
-    JobCommand::Profiles { browser } => {
-      let profiles = rookie_cookies::profiles(&browser)?;
+    JobCommand::Profiles {
+      browser,
+      timeout_secs,
+    } => {
+      let cancellation = install_cancel_on_signal();
+      // No `--app-bound`: listing never reaches the v20 key lookup, so
+      // there's no policy for `execution_control` to apply here.
+      let control = execution_control(timeout_secs, None, cancellation);
+      let profiles = rookie_cookies::profiles_with(&browser, control)?;
       print_line_or_exit(&serde_json::to_string_pretty(&profiles)?);
     }
     JobCommand::Report {
       browser,
       profile,
       domains,
+      select,
+      timeout_secs,
+      app_bound,
     } => {
-      let report = rookie_cookies::browser_report(&browser, profile.as_deref(), domains)?;
+      reject_conflicting_profile_selection(profile.as_deref(), select.as_deref(), true)?;
+      let cancellation = install_cancel_on_signal();
+      let control = execution_control(timeout_secs, app_bound, cancellation);
+      let report = match browser {
+        Some(browser) => {
+          // Mirrors `browser_report`'s own request shape -- that convenience
+          // function has no `_with` twin to carry a control, so it is built
+          // here directly instead of through it.
+          let mut request = rookie_cookies::ReportRequest::browser(&browser)
+            .domains(domains)
+            .execution(control);
+          request = match profile {
+            Some(profile) => request.profile(profile),
+            // Omitting `--select`, or passing `--select all`, leaves the
+            // request at its default `ReportScope::AllProfiles` -- exactly
+            // what `browser_report(id, None, domains)` has always meant.
+            None if select.as_deref() == Some("legacy-first") => request.scope(
+              rookie_cookies::ReportScope::One(rookie_cookies::ProfileSelection::LegacyFirst),
+            ),
+            None => request,
+          };
+          rookie_cookies::extract_report(request)?
+        }
+        // No `--browser`: the `load_report` fan-out, which has no per-browser
+        // selection to narrow -- clap's `requires = "browser"` on `--profile`
+        // and `--select` already keeps this arm from seeing either.
+        None => {
+          let request = rookie_cookies::LoadReportRequest::default()
+            .domains(domains)
+            .execution(control);
+          rookie_cookies::load_report_with(request)?
+        }
+      };
       print_line_or_exit(&serde_json::to_string_pretty(&report)?);
     }
     JobCommand::FromPath {
       path,
       include_expired,
       format,
-      key_path,
+      local_state_path,
       browser_id,
       plaintext_only,
+      domains,
       timeout_secs,
+      app_bound,
     } => {
-      let mut request = rookie_cookies::FromPathRequest::new(path).include_expired(include_expired);
-      if let Some(secs) = timeout_secs {
-        request = request.timeout(std::time::Duration::from_secs(secs));
+      // `extract_from_path`/`PathExtractRequest` is the only from-path job
+      // with domain filtering, and it returns a flat, non-detailed cookie
+      // list with no per-row warnings -- checked before any I/O, same as
+      // `reject_conflicting_profile_selection`.
+      if domains.is_some() && format == "detailed" {
+        return Err(Box::new(std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "--format detailed is not available together with --domains",
+        )));
       }
-      if let Some(credentials) = chromium_credential_selector(key_path, browser_id, plaintext_only)?
-      {
-        request = request.chromium_credentials(credentials);
+      let cancellation = install_cancel_on_signal();
+      let control = execution_control(timeout_secs, app_bound, cancellation);
+      let credentials = chromium_credential_selector(local_state_path, browser_id, plaintext_only)?;
+      match domains {
+        Some(domains) => {
+          let request = path_extract_request(path, credentials)?
+            .domains(Some(domains))
+            .execution(control);
+          let cookies = extract_from_path(request)?;
+          print_flat_cookies(&format, cookies);
+        }
+        None => {
+          let mut request = rookie_cookies::FromPathRequest::new(path)
+            .include_expired(include_expired)
+            .execution(control);
+          if let Some(credentials) = credentials {
+            request = request.chromium_credentials(credentials);
+          }
+          let result = rookie_cookies::from_path(request)?;
+          emit_warnings(result.warnings());
+          print_read_result(&format, result);
+        }
       }
-      let result = rookie_cookies::from_path(request)?;
-      emit_warnings(result.warnings());
-      print_job_cookies(&format, result.into_cookies());
     }
     JobCommand::Header {
       url,
       browser,
       profile,
+      top_level_site,
+      resource,
+      method,
+      user_context_id,
+      private_browsing_id,
+      include_session,
+      timeout_secs,
+      app_bound,
     } => {
-      let mut request = rookie_cookies::ReadRequest::browser(browser);
+      let cancellation = install_cancel_on_signal();
+      let control = execution_control(timeout_secs, app_bound, cancellation);
+      let mut request = rookie_cookies::ReadRequest::browser(browser).execution(control);
+      if include_session {
+        request = request.include_session();
+      }
       if let Some(profile) = profile {
         request = request.profile(profile);
       }
       let result = rookie_cookies::read(request)?;
       emit_warnings(result.warnings());
-      print_line_or_exit(&result.header(&url)?);
+
+      let mut context = rookie_cookies::SendContext::url(url);
+      if let Some(site) = top_level_site {
+        context = context.top_level_site(site);
+      }
+      if let Some(resource) = resource {
+        context = context.resource(parse_resource(&resource));
+      }
+      if let Some(method) = method {
+        context = context.method(parse_method(&method));
+      }
+      if let Some(id) = user_context_id {
+        context = context.user_context_id(id);
+      }
+      if let Some(id) = private_browsing_id {
+        context = context.private_browsing_id(id);
+      }
+      print_line_or_exit(&result.header(&context)?);
+    }
+    JobCommand::Browsers => {
+      let browsers = rookie_cookies::supported_browsers()?;
+      print_line_or_exit(&serde_json::to_string_pretty(&browsers)?);
     }
   }
   Ok(())
@@ -220,168 +399,65 @@ fn print_version() {
   ));
 }
 
-fn usage_error(
-  command: &mut Command,
-  kind: ErrorKind,
-  message: impl std::fmt::Display,
-) -> clap::Error {
-  command.error(kind, message)
-}
-
-/// This is only a pre-check; `browser_profiles` and `browser_report` resolve the
-/// ID themselves. Registry construction failures are surfaced instead of
-/// being mistaken for an empty registered inventory.
-fn registration_of(browser: &str) -> rookie_cookies::Result<bool> {
-  let registered = rookie_cookies::supported_browsers()?;
-  Ok(registered.iter().any(|descriptor| {
-    descriptor.id.as_str() == browser || descriptor.aliases.iter().any(|alias| alias == browser)
-  }))
-}
-
-fn legacy_browser_values() -> String {
-  BROWSERS_MAP
-    .iter()
-    .map(|key| {
-      if key.contains(char::is_whitespace) {
-        format!("\"{key}\"")
-      } else {
-        (*key).to_string()
-      }
-    })
-    .collect::<Vec<_>>()
-    .join(", ")
-}
-
-fn canonical_legacy_browser(browser: &str) -> &str {
-  match browser {
-    "opera gx" | "opera-gx" => "opera_gx",
-    _ => browser,
-  }
-}
-
-fn cookies_from_explicit_path(
+/// Builds the [`PathExtractRequest`] for `credentials`, as selected by
+/// [`chromium_credential_selector`].
+///
+/// `PathExtractRequest`'s browser-identity constructors are themselves
+/// `#[cfg(unix)]`/`#[cfg(windows)]` -- a platform mismatch is a build-time
+/// absence there, not a runtime check, because that type is the deliberately
+/// non-portable half of the pair (see [`FromPathRequest`](rookie_cookies::FromPathRequest),
+/// which stays portable for exactly this reason and is what plain `from-path`
+/// uses instead -- this is only reached behind `from-path --domains`). The
+/// CLI still accepts `--local-state-path`/`--browser-id` on every platform, so
+/// a selector this binary cannot construct is turned into a plain usage error
+/// here rather than failing to compile only on some targets.
+fn path_extract_request(
   path: String,
-  domains: Option<Vec<String>>,
-  key_path: Option<String>,
-  browser_id: Option<String>,
-  plaintext_only: bool,
-  cancellation: CancellationHandle,
-) -> rookie_cookies::Result<Vec<Cookie>> {
-  let credential_selector = chromium_credential_selector(key_path, browser_id, plaintext_only)?;
-
-  let Some(credentials) = credential_selector else {
-    let mut request = DirectPathRequest::new(path).cancellation(cancellation);
-    if let Some(domains) = domains {
-      request = request.domains(domains);
+  credentials: Option<ChromiumCredentialSource>,
+) -> std::io::Result<PathExtractRequest> {
+  Ok(match credentials {
+    None => PathExtractRequest::sniff(path),
+    Some(ChromiumCredentialSource::PlaintextOnly) => PathExtractRequest::plaintext(path),
+    #[cfg(unix)]
+    Some(ChromiumCredentialSource::BrowserId(id)) => PathExtractRequest::unix_identity(path, id),
+    #[cfg(not(unix))]
+    Some(ChromiumCredentialSource::BrowserId(_)) => {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "--browser-id is only supported on Unix",
+      ))
     }
-    return cookies_from_path(request);
-  };
-
-  let mut request = ChromiumPathRequest::new(path)
-    .credentials(credentials)
-    .cancellation(cancellation);
-  if let Some(domains) = domains {
-    request = request.domains(domains);
-  }
-  chromium_cookies_from_path(request)
+    #[cfg(windows)]
+    Some(ChromiumCredentialSource::LocalStateFile(local_state)) => {
+      PathExtractRequest::windows_local_state(path, local_state)
+    }
+    #[cfg(not(windows))]
+    Some(ChromiumCredentialSource::LocalStateFile(_)) => {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "--local-state-path is only supported on Windows",
+      ))
+    }
+    // `ChromiumCredentialSource` is `#[non_exhaustive]`; `chromium_credential_selector`
+    // never builds a fourth variant.
+    Some(_) => unreachable!("chromium_credential_selector only builds the variants matched above"),
+  })
 }
 
-/// Post-parse mode validation from Section 5.8. `--browser` no longer carries a
-/// closed `PossibleValuesParser`, so the accepted set depends on the mode: the
-/// historical `BROWSERS_MAP` keys alone without a list/report mode, and the
-/// registered IDs and aliases with one. Every rejection stays a clap usage
-/// error so the exit code and error class survive the move out of clap.
-fn validate_modes(args: &Args, command: &mut Command) -> Result<(), clap::Error> {
-  if args.command.is_some() {
-    let mixed = args.browser.is_some()
-      || args.load
-      || args.path.is_some()
-      || args.list_browsers
-      || args.list_profiles
-      || args.report
-      || args.profile.is_some()
-      || args.domains.is_some()
-      || args.key_path.is_some()
-      || args.browser_id.is_some()
-      || args.plaintext_only;
-    if mixed {
-      return Err(usage_error(
-        command,
-        ErrorKind::ArgumentConflict,
-        "a job subcommand cannot be mixed with top-level --browser / --load / --path / \
-         --list-browsers / --list-profiles / --report / --profile / --domains",
-      ));
-    }
-    return Ok(());
+/// `main`'s `Result` return would otherwise print a failing `Err` via `Debug`
+/// (Rust's `Termination` impl for `Result`), which for the typed
+/// `rookie_cookies::Error` is its raw enum shape (e.g.
+/// `Source(InvalidSource { .. })`) rather than the sanitized, human-readable
+/// message its `Display` impl gives. Printing `Display` here is what an
+/// `anyhow::Error` return used to give for free through its own `Debug` impl.
+fn main() {
+  if let Err(error) = run() {
+    eprintln!("{error}");
+    std::process::exit(1);
   }
-
-  if args.is_structured_output_mode() && args.format == "netscape" {
-    return Err(usage_error(
-      command,
-      ErrorKind::ArgumentConflict,
-      "the argument '--format netscape' cannot be used with '--list-browsers', \
-       '--list-profiles', or '--report'",
-    ));
-  }
-
-  let Some(browser) = args.browser.as_deref() else {
-    return Ok(());
-  };
-
-  if args.widens_browser_to_registry() {
-    let registered = registration_of(browser).map_err(|error| {
-      usage_error(
-        command,
-        ErrorKind::Io,
-        format!("could not read the embedded browser registry: {error:#}"),
-      )
-    })?;
-    if registered {
-      return Ok(());
-    }
-    return Err(usage_error(
-      command,
-      ErrorKind::InvalidValue,
-      format!(
-        "invalid value '{browser}' for '--browser <BROWSER>': \
-         not a registered browser ID or alias\n  \
-         run '--list-browsers' for the registered IDs"
-      ),
-    ));
-  }
-
-  if BROWSERS_MAP.contains(canonical_legacy_browser(browser)) {
-    return Ok(());
-  }
-
-  if registration_of(browser).map_err(|error| {
-    usage_error(
-      command,
-      ErrorKind::Io,
-      format!("could not read the embedded browser registry: {error:#}"),
-    )
-  })? {
-    return Err(usage_error(
-      command,
-      ErrorKind::InvalidValue,
-      format!(
-        "'{browser}' is only reachable through the registry\n  \
-         use '--report --browser {browser}'"
-      ),
-    ));
-  }
-
-  Err(usage_error(
-    command,
-    ErrorKind::InvalidValue,
-    format!(
-      "invalid value '{browser}' for '--browser <BROWSER>'\n  [possible values: {}]",
-      legacy_browser_values()
-    ),
-  ))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
   tracing_subscriber::fmt()
     .with_writer(std::io::stderr)
     .with_ansi(false)
@@ -400,84 +476,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Err(error) => error.format(&mut command).exit(),
   };
   if args.version {
+    // `#[arg(exclusive = true)]` only rules out other *arguments*; clap's
+    // subcommand slot is a separate mechanism it doesn't cover, so a
+    // subcommand given alongside `--version` is rejected here by hand.
+    if args.command.is_some() {
+      command
+        .error(
+          ErrorKind::ArgumentConflict,
+          "the argument '--version' cannot be used with a subcommand",
+        )
+        .exit();
+    }
     print_version();
     return Ok(());
   }
-  if let Err(error) = validate_modes(&args, &mut command) {
-    error.exit();
-  }
-
-  if let Some(command) = args.command.clone() {
-    return run_job_command(command);
-  }
-
-  if args.list_browsers {
-    let browsers = rookie_cookies::supported_browsers()?;
-    print_line_or_exit(&serde_json::to_string_pretty(&browsers)?);
-    return Ok(());
-  }
-  if args.list_profiles {
-    let browser = args
-      .browser
-      .as_deref()
-      .expect("clap requires --browser with --list-profiles");
-    let profiles = rookie_cookies::browser_profiles(browser)?;
-    print_line_or_exit(&serde_json::to_string_pretty(&profiles)?);
-    return Ok(());
-  }
-
-  tracing::info!("extracting cookies");
-
-  if args.report {
-    let report = match &args.browser {
-      Some(browser) => {
-        rookie_cookies::browser_report(browser, args.profile.as_deref(), args.domains.clone())?
-      }
-      None => rookie_cookies::load_report(args.domains.clone())?,
-    };
-    print_line_or_exit(&serde_json::to_string_pretty(&report)?);
-    return Ok(());
-  }
-
-  #[allow(unused_assignments)]
-  let mut cookies = vec![];
-  let args_c = args.clone();
-  if args.load {
-    cookies = rookie_cookies::load(args.domains)?;
-  } else if let Some(browser) = args.browser {
-    let cancellation = install_cancel_on_signal();
-    let mut request = if args.profile.is_some() {
-      rookie_cookies::Request::browser(&browser)
-    } else {
-      let canonical = canonical_legacy_browser(&browser);
-      assert!(
-        BROWSERS_MAP.contains(canonical),
-        "validate_modes rejects browsers outside the legacy map without --profile"
-      );
-      rookie_cookies::Request::browser(canonical)
-    };
-    if let Some(profile) = args.profile {
-      request = request.profile(profile);
-    }
-    request = request.domains(args.domains).cancellation(cancellation);
-    cookies = rookie_cookies::extract(request)?;
-  } else if let Some(path) = args.path {
-    let cancellation = install_cancel_on_signal();
-    cookies = cookies_from_explicit_path(
-      path,
-      args.domains,
-      args.key_path,
-      args.browser_id,
-      args.plaintext_only,
-      cancellation,
-    )?;
-  } else {
-    // Default load from all
-    cookies = rookie_cookies::load(args.domains)?;
-  }
-  print_cookies(args_c, cookies);
-
-  Ok(())
+  let Some(job) = args.command else {
+    // No subcommand and no `--version`: there is no longer a no-subcommand
+    // default action (the old `load()` fallback) to run instead, so this is
+    // the same shape clap gives a genuinely required subcommand -- built by
+    // hand because `--version`'s `exclusive = true` needs `command` to stay
+    // optional for clap's own required-arg check.
+    command
+      .error(
+        ErrorKind::MissingSubcommand,
+        "a subcommand is required (read, from-path, header, report, profiles, browsers)",
+      )
+      .exit();
+  };
+  run_job_command(job)
 }
 
 #[cfg(test)]
@@ -486,14 +512,14 @@ mod tests {
 
   #[test]
   fn credential_selector_rejects_every_conflicting_shape() {
-    for (key_path, browser_id, plaintext_only) in [
+    for (local_state_path, browser_id, plaintext_only) in [
       (Some("Local State"), Some("chrome"), false),
       (Some("Local State"), None, true),
       (None, Some("chrome"), true),
       (Some("Local State"), Some("chrome"), true),
     ] {
       let error = chromium_credential_selector(
-        key_path.map(str::to_owned),
+        local_state_path.map(str::to_owned),
         browser_id.map(str::to_owned),
         plaintext_only,
       )

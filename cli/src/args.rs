@@ -3,121 +3,28 @@ use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None, disable_version_flag = true)]
 pub struct Args {
-  /// Path to cookies file
-  #[arg(short, long, conflicts_with_all = ["browser", "load"])]
-  pub path: Option<String>,
-
-  /// Path to Chromium's Windows Local State file
-  #[arg(
-    short,
-    long,
-    requires = "path",
-    conflicts_with_all = [
-      "browser",
-      "load",
-      "browser_id",
-      "plaintext_only",
-      "list_browsers",
-      "list_profiles",
-      "report",
-      "profile"
-    ]
-  )]
-  pub key_path: Option<String>,
-
-  /// Canonical Chromium browser identity for key lookup
-  #[arg(
-    long,
-    requires = "path",
-    conflicts_with_all = [
-      "browser",
-      "load",
-      "key_path",
-      "plaintext_only",
-      "list_browsers",
-      "list_profiles",
-      "report",
-      "profile"
-    ]
-  )]
-  pub browser_id: Option<String>,
-
-  /// Require every Chromium row at --path to be plaintext
-  #[arg(
-    long,
-    requires = "path",
-    conflicts_with_all = [
-      "browser",
-      "load",
-      "key_path",
-      "browser_id",
-      "list_browsers",
-      "list_profiles",
-      "report",
-      "profile"
-    ]
-  )]
-  pub plaintext_only: bool,
-
-  /// Domains to filter
-  #[arg(short, long)]
-  pub domains: Option<Vec<String>>,
-
   /// Get version
   #[arg(short, long, exclusive = true)]
   pub version: bool,
 
-  /// Get cookies from specified browser (see --list-browsers)
-  #[arg(
-    short,
-    long,
-    conflicts_with_all = ["path", "key_path", "browser_id", "plaintext_only", "load"]
-  )]
-  pub browser: Option<String>,
-
-  /// Get cookies from all possible browsers
-  #[arg(
-    short,
-    long,
-    default_missing_value = "true",
-    conflicts_with_all = ["path", "key_path", "browser_id", "plaintext_only", "browser"]
-  )]
-  pub load: bool,
-
-  /// Specify output format
-  #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
-  pub format: String,
-
-  /// List registered browsers as JSON
-  #[arg(
-    long,
-    conflicts_with_all = ["browser", "load", "path", "key_path", "browser_id", "plaintext_only", "domains", "list_profiles", "report", "profile"]
-  )]
-  pub list_browsers: bool,
-
-  /// List the discovered profiles of --browser as JSON
-  #[arg(
-    long,
-    requires = "browser",
-    conflicts_with_all = ["load", "path", "key_path", "browser_id", "plaintext_only", "domains", "report", "profile"]
-  )]
-  pub list_profiles: bool,
-
-  /// Emit a structured extraction report as JSON
-  #[arg(
-    long,
-    conflicts_with_all = ["load", "path", "key_path", "browser_id", "plaintext_only"]
-  )]
-  pub report: bool,
-
-  /// Select one profile by opaque id, display name, directory name, or
-  /// non-lossy path. Requires --browser. Legal with or without --report.
-  #[arg(long, requires = "browser")]
-  pub profile: Option<String>,
-
+  /// `None` only when neither a subcommand nor `--version` was given --
+  /// `main.rs::run` turns that into a clap-shaped usage error itself, since
+  /// there is no longer a no-subcommand default action (`load()`) to fall
+  /// back to.
   #[command(subcommand)]
   pub command: Option<JobCommand>,
 }
+
+/// Shared `--app-bound` values across every subcommand, in the CLI's
+/// kebab-case spelling; `main.rs::parse_app_bound` maps these to
+/// [`rookie_cookies::AppBoundPolicy`].
+const APP_BOUND_VALUES: [&str; 3] = ["disabled", "injection-only", "allow-elevated-fallback"];
+
+/// Shared `--select` values; `legacy-first` is every job's default
+/// (`ProfileSelection::LegacyFirst`/`ReportScope::AllProfiles`'s narrowed
+/// twin), `all` is a report-only widening `read` cannot express -- see
+/// `main.rs::reject_conflicting_profile_selection`.
+const SELECT_VALUES: [&str; 2] = ["legacy-first", "all"];
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum JobCommand {
@@ -132,20 +39,47 @@ pub enum JobCommand {
     /// Keep expired cookies
     #[arg(long)]
     include_expired: bool,
-    #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
+    /// Also acquire the browser's declared session store
+    #[arg(long)]
+    include_session: bool,
+    /// `all` is rejected: a snapshot has no "every profile" shape (see `report`)
+    #[arg(long, value_parser = PossibleValuesParser::new(SELECT_VALUES))]
+    select: Option<String>,
+    #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json", "detailed"]), default_value = "json")]
     format: String,
     #[arg(long)]
     timeout_secs: Option<u64>,
+    /// Windows App-Bound (v20) recovery policy
+    #[arg(long, value_parser = PossibleValuesParser::new(APP_BOUND_VALUES))]
+    app_bound: Option<String>,
   },
   /// List discovered profiles (no decrypt)
-  Profiles { browser: String },
-  /// Structured extraction report
-  Report {
+  // No `--app-bound`: listing never reaches the v20 key lookup, so the
+  // design's binding table gives `browser_profiles`/`profiles` only
+  // `timeout`/`cancellation` -- an App-Bound knob here would silently do
+  // nothing.
+  Profiles {
     browser: String,
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+  },
+  /// Structured extraction report. Omitting `--browser` reports every
+  /// registered browser (the `load_report` fan-out).
+  Report {
     #[arg(short, long)]
+    browser: Option<String>,
+    #[arg(short, long, requires = "browser")]
     profile: Option<String>,
     #[arg(short, long)]
     domains: Option<Vec<String>>,
+    /// Defaults to `all`: every installation and profile of `--browser`
+    #[arg(long, requires = "browser", value_parser = PossibleValuesParser::new(SELECT_VALUES))]
+    select: Option<String>,
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+    /// Windows App-Bound (v20) recovery policy
+    #[arg(long, value_parser = PossibleValuesParser::new(APP_BOUND_VALUES))]
+    app_bound: Option<String>,
   },
   /// Read cookies from an explicit cookie database path
   #[command(name = "from-path")]
@@ -153,42 +87,56 @@ pub enum JobCommand {
     path: String,
     #[arg(long)]
     include_expired: bool,
-    #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json"]), default_value = "json")]
+    /// `detailed` is unavailable together with `--domains`: that combination
+    /// runs through `extract_from_path`'s flat, non-detailed job instead of
+    /// `from_path`'s portable, isolation-carrying one -- see main.rs.
+    #[arg(short, long, value_parser = PossibleValuesParser::new(["netscape", "json", "detailed"]), default_value = "json")]
     format: String,
     #[arg(long, conflicts_with_all = ["browser_id", "plaintext_only"])]
-    key_path: Option<String>,
-    #[arg(long, conflicts_with_all = ["key_path", "plaintext_only"])]
+    local_state_path: Option<String>,
+    #[arg(long, conflicts_with_all = ["local_state_path", "plaintext_only"])]
     browser_id: Option<String>,
-    #[arg(long, conflicts_with_all = ["key_path", "browser_id"])]
+    #[arg(long, conflicts_with_all = ["local_state_path", "browser_id"])]
     plaintext_only: bool,
+    #[arg(short, long)]
+    domains: Option<Vec<String>>,
     #[arg(long)]
     timeout_secs: Option<u64>,
+    /// Windows App-Bound (v20) recovery policy
+    #[arg(long, value_parser = PossibleValuesParser::new(APP_BOUND_VALUES))]
+    app_bound: Option<String>,
   },
-  /// Cookie request-header view over a snapshot
+  /// Cookie request-header view over a snapshot, for one `SendContext`
   Header {
+    #[arg(long)]
     url: String,
     #[arg(short, long)]
     browser: String,
     #[arg(short, long)]
     profile: Option<String>,
+    /// The top-level site the request is made from; required once the
+    /// snapshot holds any CHIPS-partitioned or Firefox-containered cookie
+    #[arg(long)]
+    top_level_site: Option<String>,
+    #[arg(long, value_parser = PossibleValuesParser::new(["navigation", "subresource"]))]
+    resource: Option<String>,
+    #[arg(long, value_parser = PossibleValuesParser::new(["safe", "unsafe"]))]
+    method: Option<String>,
+    /// Firefox Multi-Account Containers identity
+    #[arg(long)]
+    user_context_id: Option<u32>,
+    /// Firefox private-browsing identity
+    #[arg(long)]
+    private_browsing_id: Option<u32>,
+    /// Also acquire the browser's declared session store
+    #[arg(long)]
+    include_session: bool,
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+    /// Windows App-Bound (v20) recovery policy
+    #[arg(long, value_parser = PossibleValuesParser::new(APP_BOUND_VALUES))]
+    app_bound: Option<String>,
   },
-}
-
-impl Args {
-  /// Structured JSON DTO modes; Netscape is forbidden here.
-  pub fn is_structured_output_mode(&self) -> bool {
-    self.list_browsers || self.list_profiles || self.report
-  }
-
-  /// True when `--browser` must accept any registered id/alias.
-  pub fn widens_browser_to_registry(&self) -> bool {
-    self.is_structured_output_mode() || self.profile.is_some()
-  }
-
-  /// True when a Section 5.8 list/report mode is selected, which is what
-  /// widens `--browser` from the legacy map to the registry.
-  #[allow(dead_code)]
-  pub fn is_generic_mode(&self) -> bool {
-    self.widens_browser_to_registry()
-  }
+  /// List every browser registered for the running OS (no filesystem access)
+  Browsers,
 }
