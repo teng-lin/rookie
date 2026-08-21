@@ -193,6 +193,10 @@ def plant_keychain() -> None:
                 "/usr/bin/security",
                 "add-generic-password",
                 "-U",
+                # The CI keychain contains only this known test password. Let
+                # the freshly installed browser read it without an interactive
+                # macOS ACL prompt, which hosted runners cannot answer.
+                "-A",
                 "-a",
                 account,
                 "-s",
@@ -231,7 +235,7 @@ def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
 def chromium_native_command(
     exe: str,
     user_data: Path,
-    _url: str,
+    url: str,
     *,
     remote_debugging_port: int = 0,
     platform: str | None = None,
@@ -248,12 +252,16 @@ def chromium_native_command(
         "--disable-default-apps",
         f"--user-data-dir={user_data}",
         f"--remote-debugging-port={remote_debugging_port}",
-        "about:blank",
+        url,
     ]
     if platform.startswith("linux"):
         cmd.insert(-2, "--password-store=gnome-libsecret")
         if has_xvfb:
             cmd = ["xvfb-run", "-a", *cmd]
+    elif platform == "darwin":
+        # Chromium's test keychain returns the same mock_password planted above,
+        # avoiding GUI keychain ACL prompts while retaining real v10 encryption.
+        cmd.insert(-2, "--use-mock-keychain")
     elif platform == "win32":
         # Hosted Windows runners execute as a service without an interactive
         # desktop. Native browsers need their own modern headless mode there.
@@ -267,11 +275,14 @@ def pick_devtools_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_for_devtools_endpoint(
+def wait_for_devtools_or_cookie(
     proc: subprocess.Popen[bytes] | subprocess.Popen[str],
     port: int,
+    user_data: Path,
     timeout: float = 45,
-) -> None:
+) -> bool:
+    """Return True for CDP, or False when startup navigation seeded directly."""
+
     endpoint = f"http://127.0.0.1:{port}/json/version"
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -279,9 +290,15 @@ def wait_for_devtools_endpoint(
             with urlopen(endpoint, timeout=2) as response:
                 payload = json.load(response)
             if payload.get("webSocketDebuggerUrl"):
-                return
+                return True
         except (OSError, ValueError):
             pass
+        # Edge on Linux and Yandex on macOS can honor the startup URL while
+        # leaving their advertised debugging endpoint unreachable. The real
+        # database is the artifact under test, so a persisted cookie is a
+        # stronger success signal than a vendor-specific CDP handshake.
+        if cookies_db_has_name(user_data):
+            return False
         status = proc.poll()
         if status not in (None, 0):
             raise SystemExit(
@@ -318,8 +335,9 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
     saw_cookie = False
     try:
-        wait_for_devtools_endpoint(proc, devtools_port)
-        navigate_chromium_cdp(devtools_port, url)
+        has_devtools = wait_for_devtools_or_cookie(proc, devtools_port, user_data)
+        if has_devtools:
+            navigate_chromium_cdp(devtools_port, url)
         deadline = time.time() + 30
         while time.time() < deadline:
             if cookies_db_has_name(user_data):
@@ -329,7 +347,7 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
             time.sleep(0.5)
         if not saw_cookie:
             raise SystemExit(
-                "native Chromium CDP navigation accepted rookie_ci but the "
+                "native Chromium navigation requested rookie_ci but the "
                 "profile did not persist it"
             )
     finally:

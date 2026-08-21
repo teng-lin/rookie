@@ -89,21 +89,11 @@ try {
   // target at the canary URL performs the real navigation without crossing
   // that fork-specific page-session boundary.
   await send("Target.createTarget", { url });
-
-  const deadline = Date.now() + 10_000;
-  let seeded;
-  while (Date.now() < deadline) {
-    const { cookies = [] } = await send("Storage.getCookies");
-    seeded = cookies.find(
-      ({ domain, name }) => name === "rookie_ci" && domain === "127.0.0.1",
-    );
-    if (seeded?.value === "bar") break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (!seeded || seeded.value !== "bar") {
-    throw new Error("native browser did not accept rookie_ci=bar");
-  }
-  console.log(`native CDP seed accepted rookie_ci=bar at ${url}`);
+  // Browser-level Storage.getCookies hangs in several macOS Chromium forks,
+  // even after Target.createTarget succeeds. Give the network request time to
+  // finish and let the Python harness verify the persisted SQLite row instead.
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  console.log(`native CDP navigation requested ${url}`);
 } finally {
   // A protocol-level close gives the native process a chance to checkpoint
   // its persistent cookie database before the extractor opens it.

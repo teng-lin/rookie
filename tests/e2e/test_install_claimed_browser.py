@@ -56,6 +56,7 @@ class InstallCatalogTests(unittest.TestCase):
         self.assertIn("/Applications/Safari.app/Contents/MacOS/Safari", safari["exe"])
         self.assertEqual(internet_explorer["kind"], "internet_explorer")
         self.assertEqual(internet_explorer["runner"], "windows-2022")
+        self.assertIn("iedriver-win32", internet_explorer["exe"][0])
         self.assertTrue(
             any(
                 path.endswith("IEDriverServer.exe") for path in internet_explorer["exe"]

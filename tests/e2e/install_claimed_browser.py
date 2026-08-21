@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
+import io
 import json
 import os
 import shutil
@@ -19,6 +21,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 
 socket.setdefaulttimeout(120)
@@ -266,6 +269,7 @@ HOSTS: dict[str, dict] = {
             # ships the IE capability and the runner image includes IEDriver.
             "runner": "windows-2022",
             "exe": [
+                r"%RUNNER_TEMP%\rookie-ci\iedriver-win32\IEDriverServer.exe",
                 r"%IEWebDriver%\IEDriverServer.exe",
                 r"C:\SeleniumWebDrivers\IEDriver\IEDriverServer.exe",
             ],
@@ -586,6 +590,34 @@ def install_playwright_product(product: str) -> None:
 
 
 def configure_internet_explorer(spec: dict) -> None:
+    # The hosted image currently carries the 64-bit driver, while Edge IE mode
+    # creates a 32-bit Trident process. IEDriver cannot read cookies across that
+    # bitness boundary, so install Selenium's pinned official Win32 build.
+    driver_url = (
+        "https://github.com/SeleniumHQ/selenium/releases/download/"
+        "selenium-4.14.0/IEDriverServer_Win32_4.14.0.zip"
+    )
+    expected_sha256 = "542547970163c91080b6908cd223840743a4ac18f8197a44ea41be7cf1d41e48"
+    driver_root = (
+        Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
+        / "rookie-ci/iedriver-win32"
+    )
+    driver = driver_root / "IEDriverServer.exe"
+    if not driver.is_file():
+        print(f"+ download {driver_url}", flush=True)
+        with urllib.request.urlopen(driver_url) as response:
+            archive_bytes = response.read()
+        actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise SystemExit(
+                "Selenium Win32 IEDriver archive hash mismatch: "
+                f"expected {expected_sha256}, got {actual_sha256}"
+            )
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            executable = archive.read("IEDriverServer.exe")
+        driver_root.mkdir(parents=True, exist_ok=True)
+        driver.write_bytes(executable)
+
     browser_candidates = [expand(path) for path in spec["browser_exe"]]
     script = r"""
 $ErrorActionPreference = 'Stop'

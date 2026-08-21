@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import run_hosted_claimed_e2e as hosted
 import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
+    def test_persisted_cookie_can_replace_unreachable_devtools_endpoint(self) -> None:
+        proc = mock.Mock()
+        with (
+            mock.patch.object(hosted, "urlopen", side_effect=OSError),
+            mock.patch.object(hosted, "cookies_db_has_name", return_value=True),
+        ):
+            has_devtools = hosted.wait_for_devtools_or_cookie(
+                proc, 9222, Path("/tmp/profile")
+            )
+        self.assertFalse(has_devtools)
+
     def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:
         command = hosted.chromium_native_command(
             "/opt/browser",
@@ -24,6 +36,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         self.assertIn("--password-store=gnome-libsecret", command)
         self.assertIn("--remote-debugging-port=9222", command)
         self.assertNotIn("--remote-debugging-pipe", command)
+        self.assertEqual(command[-1], "http://127.0.0.1:8765/set")
 
     def test_non_linux_chromium_needs_neither_xvfb_nor_libsecret(self) -> None:
         command = hosted.chromium_native_command(
@@ -36,7 +49,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertEqual(command[0], "/Applications/Browser")
         self.assertNotIn("--password-store=gnome-libsecret", command)
+        self.assertIn("--use-mock-keychain", command)
         self.assertIn("--remote-debugging-port=9223", command)
+        self.assertEqual(command[-1], "http://127.0.0.1:8765/set")
 
     def test_windows_chromium_uses_native_headless_mode(self) -> None:
         command = hosted.chromium_native_command(
@@ -48,6 +63,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertIn("--headless=new", command)
         self.assertIn("--remote-debugging-port=9224", command)
+        self.assertEqual(command[-1], "http://127.0.0.1:8765/set")
 
     def test_ie_driver_command_is_platform_native(self) -> None:
         self.assertEqual(
