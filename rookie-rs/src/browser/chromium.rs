@@ -116,7 +116,7 @@ pub(crate) fn chromium_based_plaintext_only_with_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
     domains.as_deref(),
@@ -147,7 +147,7 @@ pub(crate) fn chromium_based_detailed_plaintext_only_with_runtime(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
     domains.as_deref(),
@@ -175,13 +175,13 @@ pub fn chromium_based(
   #[cfg(target_os = "linux")]
   {
     let provider = LinuxPlatformKeyProvider::new(config);
-    query_cookies(&provider, &(), db_path, domains, force_kill)
+    extract_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
   }
 
   #[cfg(target_os = "macos")]
   {
     let provider = MacosPlatformKeyProvider::new(config);
-    query_cookies(&provider, &(), db_path, domains, force_kill)
+    extract_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
   }
 
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -206,13 +206,13 @@ pub fn chromium_based_detailed(
   #[cfg(target_os = "linux")]
   {
     let provider = LinuxPlatformKeyProvider::new(config);
-    query_detailed_cookies(&provider, &(), db_path, domains, force_kill)
+    extract_detailed_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
   }
 
   #[cfg(target_os = "macos")]
   {
     let provider = MacosPlatformKeyProvider::new(config);
-    query_detailed_cookies(&provider, &(), db_path, domains, force_kill)
+    extract_detailed_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
   }
 
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -233,7 +233,7 @@ pub(crate) fn chromium_based_probe_with_key_outcomes(
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProbeResult> {
-  query_cookies_probe_with_key_outcomes(outcomes, db_path, domains, force_kill, runtime)
+  acquire_chromium_probe_with_key_outcomes(outcomes, db_path, domains, force_kill, runtime)
 }
 
 /// Row-issue samples are collected against the report contract's bound rather
@@ -590,7 +590,7 @@ fn project_legacy_draft(db_path: &Path, draft: ChromiumExtractionDraft) -> Resul
 }
 
 // The flat projection is only reached on Unix now, but Windows still builds
-// it under `cfg(test)` through `query_cookies_with_key_outcomes_runtime`.
+// it under `cfg(test)` through `extract_cookies_with_key_outcomes_runtime`.
 #[cfg(any(unix, test))]
 fn project_legacy_draft_with_runtime(
   db_path: &Path,
@@ -629,7 +629,7 @@ fn project_detailed_draft_with_runtime(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
-fn query_cookies<Context: ?Sized, Provider>(
+fn extract_cookies_with_provider<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
   db_path: PathBuf,
@@ -646,11 +646,11 @@ where
   );
   let runtime = BoundaryRuntime::new(&clock, deadline);
   let outcomes = retrieve_key_outcomes(provider, context, &runtime)?;
-  query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
+  extract_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
-fn query_detailed_cookies<Context: ?Sized, Provider>(
+fn extract_detailed_cookies_with_provider<Context: ?Sized, Provider>(
   provider: &Provider,
   context: &Context,
   db_path: PathBuf,
@@ -667,11 +667,13 @@ where
   );
   let runtime = BoundaryRuntime::new(&clock, deadline);
   let outcomes = retrieve_key_outcomes(provider, context, &runtime)?;
-  query_detailed_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
+  extract_detailed_cookies_with_key_outcomes_runtime(
+    outcomes, db_path, domains, force_kill, &runtime,
+  )
 }
 
 #[cfg(test)]
-pub(crate) fn query_cookies_with_key_outcomes(
+pub(crate) fn extract_cookies_with_key_outcomes(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -679,20 +681,20 @@ pub(crate) fn query_cookies_with_key_outcomes(
 ) -> Result<Vec<Cookie>> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  query_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
+  extract_cookies_with_key_outcomes_runtime(outcomes, db_path, domains, force_kill, &runtime)
 }
 
 // `windows` dropped from this gate: Windows direct-path acquisition now goes
 // through the detailed seam, so nothing outside tests asks it for flat rows.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
-pub(crate) fn query_cookies_with_key_outcomes_runtime(
+pub(crate) fn extract_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     &outcomes,
     db_path.clone(),
     domains.as_deref(),
@@ -706,14 +708,14 @@ pub(crate) fn query_cookies_with_key_outcomes_runtime(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
-pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
+pub(crate) fn extract_detailed_cookies_with_key_outcomes_runtime(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     &outcomes,
     db_path.clone(),
     domains.as_deref(),
@@ -727,13 +729,13 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery(
+pub(crate) fn extract_detailed_cookies_with_key_outcomes_without_platform_recovery(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     outcomes,
     db_path.clone(),
     domains,
@@ -747,12 +749,12 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
+pub(crate) fn extract_detailed_cookies_plaintext_without_platform_recovery(
   db_path: PathBuf,
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     &ChromiumKeyOutcomes::default(),
     db_path.clone(),
     domains,
@@ -766,14 +768,14 @@ pub(crate) fn query_detailed_cookies_plaintext_without_platform_recovery(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn query_cookies_probe_with_key_outcomes(
+fn acquire_chromium_probe_with_key_outcomes(
   outcomes: ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<ChromiumProbeResult> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     &outcomes,
     db_path.clone(),
     domains.as_deref(),
@@ -794,7 +796,7 @@ fn query_cookies_probe_with_key_outcomes(
 /// The database-acquisition strategy for a single Chromium read.
 ///
 /// Once projection is applied by the caller, this is the only axis on which the
-/// former `query_*` wrappers diverged: whether the read is wrapped in the
+/// former per-projection wrappers diverged: whether the read is wrapped in the
 /// Windows force-kill lock recovery, and if so whether a process holding the
 /// database open may be terminated.
 ///
@@ -819,7 +821,7 @@ enum ChromiumAcquisition {
 
 /// Every flag that distinguishes one Chromium acquire from another, collapsed
 /// into one value so callers state a policy tuple instead of picking a bespoke
-/// `query_*` wrapper.
+/// wrapper.
 ///
 /// Projection is deliberately absent: the draft carries every projection's data
 /// and the caller selects one with `project_*`, so it never influenced the
@@ -838,7 +840,7 @@ struct ChromiumAcquireOptions {
 /// are resolved. `ChromiumExtractionDraft`, `ChromiumRowIssue`, and the
 /// decoder's row vocabulary stop here — callers project the draft or turn it
 /// into a [`Source`].
-fn acquire_chromium_source(
+fn acquire_chromium_draft_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<&[String]>,
@@ -850,7 +852,7 @@ fn acquire_chromium_source(
     acquisition,
   } = options;
   match acquisition {
-    ChromiumAcquisition::DirectRead => query_cookies_from_database_with_runtime(
+    ChromiumAcquisition::DirectRead => decode_chromium_database_with_runtime(
       outcomes,
       db_path,
       domains,
@@ -866,7 +868,7 @@ fn acquire_chromium_source(
           force_kill,
           runtime,
           |path, runtime| {
-            query_cookies_from_database_with_runtime(
+            decode_chromium_database_with_runtime(
               outcomes,
               path.to_path_buf(),
               domains,
@@ -879,7 +881,7 @@ fn acquire_chromium_source(
       #[cfg(not(target_os = "windows"))]
       {
         let _ = force_kill;
-        query_cookies_from_database_with_runtime(
+        decode_chromium_database_with_runtime(
           outcomes,
           db_path,
           domains,
@@ -892,13 +894,13 @@ fn acquire_chromium_source(
 }
 
 #[cfg(test)]
-fn query_cookies_engine_outcome(
+fn acquire_chromium_draft(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<ChromiumExtractionDraft> {
-  query_cookies_engine_outcome_mode(
+  acquire_chromium_draft_mode(
     outcomes,
     db_path,
     domains,
@@ -913,14 +915,14 @@ fn query_cookies_engine_outcome(
 /// This is the engine's crate boundary: `ChromiumExtractionDraft`,
 /// `ChromiumRowIssue`, and the decoder's row vocabulary stop here. The caller
 /// hands over the candidate it selected, which becomes `Source::origin`.
-pub(crate) fn query_cookies_engine_outcome_with_runtime(
+pub(crate) fn acquire_chromium_source_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   origin: SourceCandidate,
   domains: Option<Vec<String>>,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Source> {
-  let draft = acquire_chromium_source(
+  let draft = acquire_chromium_draft_with_runtime(
     outcomes,
     origin.path.clone(),
     domains.as_deref(),
@@ -934,7 +936,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
 }
 
 #[cfg(test)]
-fn query_cookies_engine_outcome_mode(
+fn acquire_chromium_draft_mode(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
@@ -944,7 +946,7 @@ fn query_cookies_engine_outcome_mode(
 ) -> Result<ChromiumExtractionDraft> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  acquire_chromium_source(
+  acquire_chromium_draft_with_runtime(
     outcomes,
     db_path,
     domains.as_deref(),
@@ -956,7 +958,7 @@ fn query_cookies_engine_outcome_mode(
   )
 }
 
-fn query_cookies_from_database_with_runtime(
+fn decode_chromium_database_with_runtime(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
   domains: Option<&[String]>,
@@ -1157,12 +1159,12 @@ where
 }
 
 #[cfg(test)]
-fn query_cookies_from_connection(
+fn decode_chromium_connection(
   connection: &rusqlite::Connection,
   outcomes: &ChromiumKeyOutcomes,
   domains: Option<&[String]>,
 ) -> Result<ChromiumExtractionDraft> {
-  query_cookies_from_connection_mode(
+  decode_chromium_connection_mode(
     connection,
     outcomes,
     domains,
@@ -1172,7 +1174,7 @@ fn query_cookies_from_connection(
 }
 
 #[cfg(test)]
-fn query_cookies_from_connection_mode(
+fn decode_chromium_connection_mode(
   connection: &rusqlite::Connection,
   outcomes: &ChromiumKeyOutcomes,
   domains: Option<&[String]>,

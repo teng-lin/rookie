@@ -82,7 +82,7 @@ pub(crate) fn firefox_based_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let outcome = query_cookies_engine_outcome_with_runtime(&db_path, domains.as_deref(), runtime);
+  let outcome = acquire_mozilla_profile_with_runtime(&db_path, domains.as_deref(), runtime);
   super::legacy::project_canonical_outcome_with_runtime(
     "firefox",
     super::report_build::finalize_singleton_source(
@@ -116,7 +116,7 @@ pub(crate) fn firefox_based_detailed_with_runtime(
   domains: Option<Vec<String>>,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  let outcome = query_cookies_engine_outcome_with_runtime(&db_path, domains.as_deref(), runtime);
+  let outcome = acquire_mozilla_profile_with_runtime(&db_path, domains.as_deref(), runtime);
   super::legacy::project_canonical_detailed_outcome_with_runtime(
     "firefox",
     super::report_build::finalize_singleton_source(
@@ -313,7 +313,7 @@ pub(crate) enum MozillaCandidateOutcome {
 /// store": a session-only profile with no `cookies.sqlite` still attempts the
 /// query and so still gets a failed persistent source here. Whether that
 /// survives into a report is the adapter's half of the decision --
-/// [`super::registry::gecko::populate_gecko_sources`] drops it for a profile
+/// [`super::registry::gecko::acquire_gecko_sources`] drops it for a profile
 /// that neither discovered a persistent store nor still has one on disk, which
 /// is knowledge only the listing and the filesystem have. The direct path keeps
 /// every source, because it has no discovery and "attempted" is its whole gate.
@@ -411,24 +411,24 @@ fn session_source(origin: SourceIdentity, session: MozillaSessionDraft) -> Sourc
 /// only logs. Missing session candidates are not outcomes: absence is normal.
 ///
 /// Production callers thread a runtime through
-/// [`query_cookies_engine_outcome_with_runtime`]; this standard-runtime
+/// [`acquire_mozilla_profile_with_runtime`]; this standard-runtime
 /// wrapper remains for the walk's characterization tests.
 #[cfg(test)]
-pub(crate) fn query_cookies_engine_outcome(
+pub(crate) fn acquire_mozilla_profile(
   db_path: &Path,
   domains: Option<&[String]>,
 ) -> MozillaExtract {
   let clock = SystemClock;
   let runtime = BoundaryRuntime::standard(&clock);
-  query_cookies_engine_outcome_with_runtime(db_path, domains, &runtime)
+  acquire_mozilla_profile_with_runtime(db_path, domains, &runtime)
 }
 
-pub(crate) fn query_cookies_engine_outcome_with_runtime(
+pub(crate) fn acquire_mozilla_profile_with_runtime(
   db_path: &Path,
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
 ) -> MozillaExtract {
-  query_cookies_engine_outcome_with_session_probe(
+  acquire_mozilla_profile_with_session_probe(
     db_path,
     domains,
     runtime,
@@ -440,7 +440,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
 /// selection over every [`SESSION_CANDIDATES`] entry, each acquired as its own
 /// [`Source`]. The registry path does not come through here -- it drives the
 /// same per-candidate acquisitions from the candidates its listing planted
-/// (`populate_gecko_sources`) -- but both share [`select_session_sources`], so
+/// (`acquire_gecko_sources`) -- but both share [`select_session_sources`], so
 /// the first-valid rule cannot fork.
 ///
 /// The persistent source is emitted first, then the session sources in
@@ -448,7 +448,7 @@ pub(crate) fn query_cookies_engine_outcome_with_runtime(
 /// persistent gate (see [`MozillaExtract`]), and the report orders sources by
 /// role and precedence, so producing them out of walk order would reshuffle
 /// equal keys under a stable sort.
-fn query_cookies_engine_outcome_with_session_probe<P>(
+fn acquire_mozilla_profile_with_session_probe<P>(
   db_path: &Path,
   domains: Option<&[String]>,
   runtime: &BoundaryRuntime<'_>,
@@ -514,7 +514,7 @@ where
 }
 
 /// The first-valid selection rule over session candidate outcomes, shared by
-/// the direct-path walk and the registry's candidate-driven populate.
+/// the direct-path walk and the registry's candidate-driven acquisition.
 ///
 /// Failed-but-present candidates are pushed (`selected: false`) and iteration
 /// continues; a missing candidate pushes nothing; the first successful
@@ -655,8 +655,9 @@ fn session_outcome_from_probe(
 }
 
 /// Acquires one planted [`SourceCandidate`] as its own [`Source`], dispatching
-/// on the candidate's role. This is the production query the candidate-driven
-/// Gecko populate injects; only the candidate's path, role, format, and
+/// on the candidate's role. This is the production acquisition the
+/// candidate-driven Gecko adapter injects; only the candidate's path, role,
+/// format, and
 /// precedence are read -- everything the resulting source reports is
 /// re-derived from the read itself.
 pub(crate) fn acquire_candidate_source(

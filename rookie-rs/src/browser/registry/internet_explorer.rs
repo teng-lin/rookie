@@ -3,13 +3,12 @@ use super::super::report_core::{CookieSourceFormatId, CookieSourceRoleId};
 use super::super::source::SourceStats;
 use super::super::source::{Source, SourceCandidate, SourceFailureStage};
 use super::{
-  acquire_each_candidate, canonical_installation_root, embedded_registry, engine_roots,
-  installation_id, installation_root_is_directory, normalized_path_bytes, populate_engine_sources,
-  profile_id, retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles,
-  AcquisitionPolicy, BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs,
-  DiscoveryIssue, DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity,
-  ExtractCompletion, LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition,
-  PERSISTENT_SOURCE_PRECEDENCE,
+  acquire_each_candidate, acquire_engine_sources, canonical_installation_root, embedded_registry,
+  engine_roots, installation_id, installation_root_is_directory, normalized_path_bytes, profile_id,
+  retain_engine_runtime_stop, select_listing_profiles, sort_discovered_profiles, AcquisitionPolicy,
+  BrowserEngine, DiscoveredProfile, DiscoveryContext, DiscoveryFs, DiscoveryIssue,
+  DiscoveryStrategy, EngineExtract, EngineListing, EngineProfileIdentity, ExtractCompletion,
+  LegacyRank, ProfileLocator, ProfileSelection, SourceAcquisition, PERSISTENT_SOURCE_PRECEDENCE,
 };
 #[cfg(test)]
 use super::{DiscoveryCounters, ExtractedProfile};
@@ -187,7 +186,7 @@ where
   )
 }
 
-/// The Internet Explorer report with the deadline threaded to the populate
+/// The Internet Explorer report with the deadline threaded to the acquisition
 /// walk. The production Windows callers pass a runtime; the injected-query test
 /// seam passes `None` and gets the same walk with the deadline samples elided.
 fn internet_explorer_report_with_context_using_runtime<F, Q>(
@@ -204,12 +203,12 @@ where
 {
   let mut listing = discover_internet_explorer_with_context(context, browser_id)?;
   select_listing_profiles(&mut listing, browser_id, selection)?;
-  Ok(populate_internet_explorer_sources_impl(
+  Ok(acquire_internet_explorer_sources_impl(
     listing, domains, runtime, query,
   ))
 }
 
-pub(super) fn populate_internet_explorer_sources<Q>(
+pub(super) fn acquire_internet_explorer_sources<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
   query: Q,
@@ -217,10 +216,10 @@ pub(super) fn populate_internet_explorer_sources<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  populate_internet_explorer_sources_impl(listing, domains, None, query)
+  acquire_internet_explorer_sources_impl(listing, domains, None, query)
 }
 
-fn populate_internet_explorer_sources_with_runtime<Q>(
+fn acquire_internet_explorer_sources_with_runtime<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
@@ -229,21 +228,21 @@ fn populate_internet_explorer_sources_with_runtime<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  populate_internet_explorer_sources_impl(listing, domains, Some(runtime), query)
+  acquire_internet_explorer_sources_impl(listing, domains, Some(runtime), query)
 }
 
-/// Candidate-driven populate. Each candidate is acquired in turn. A successful
+/// Candidate-driven acquisition. Each candidate is acquired in turn. A successful
 /// query returns the engine-built [`Source`], which already carries the
 /// effective `EseDatabase` acquisition; a failed query overlays it here after
 /// the attempt, matching the frozen listing-to-extract behaviour.
 ///
-/// The envelope is [`populate_engine_sources`] and the per-candidate walk is
+/// The envelope is [`acquire_engine_sources`] and the per-candidate walk is
 /// [`acquire_each_candidate`], shared with Safari; all that is left here is how
 /// Internet Explorer writes a failed query onto the placeholder. Sharing the
 /// walk is also how this engine acquired Safari's deadline samples: it
 /// previously relied entirely on a stop surfacing through the query's error
 /// chain, which is still the path a stop mid-read takes.
-fn populate_internet_explorer_sources_impl<Q>(
+fn acquire_internet_explorer_sources_impl<Q>(
   listing: EngineListing,
   domains: Option<&[String]>,
   runtime: Option<&crate::common::deadline::BoundaryRuntime<'_>>,
@@ -252,7 +251,7 @@ fn populate_internet_explorer_sources_impl<Q>(
 where
   Q: FnMut(SourceCandidate, Option<&[String]>) -> Result<Source>,
 {
-  populate_engine_sources(
+  acquire_engine_sources(
     listing,
     ExtractCompletion::RetainAttempted,
     |_identity, candidates| {
@@ -362,7 +361,7 @@ pub(crate) fn legacy_internet_explorer_outcome_with_runtime(
     browser_id,
     ProfileSelection::LegacyFirstProfile,
   )?;
-  let outcome = populate_internet_explorer_sources_with_runtime(
+  let outcome = acquire_internet_explorer_sources_with_runtime(
     listing,
     domains.as_deref(),
     runtime,
@@ -496,26 +495,25 @@ mod tests {
       BoundaryStop::ResourceExhausted,
     ] {
       let calls = Cell::new(0);
-      let populated =
-        populate_internet_explorer_sources(discovered_sources(), None, |origin, _| {
-          let call = calls.get();
-          calls.set(call + 1);
-          if call == 0 {
-            Ok(extracted_internet_explorer_source(
-              origin,
-              Vec::new(),
-              7,
-              2,
-              2,
-              None,
-            ))
-          } else {
-            Err(anyhow::Error::new(InternetExplorerFailure::new(
-              InternetExplorerFailureStage::Parse,
-              anyhow::Error::new(stop),
-            )))
-          }
-        });
+      let populated = acquire_internet_explorer_sources(discovered_sources(), None, |origin, _| {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+          Ok(extracted_internet_explorer_source(
+            origin,
+            Vec::new(),
+            7,
+            2,
+            2,
+            None,
+          ))
+        } else {
+          Err(anyhow::Error::new(InternetExplorerFailure::new(
+            InternetExplorerFailureStage::Parse,
+            anyhow::Error::new(stop),
+          )))
+        }
+      });
 
       assert_eq!(calls.get(), 2);
       assert_eq!(populated.boundary_stop, Some(stop));
@@ -534,7 +532,7 @@ mod tests {
   /// checks the deadline on entry, so the stop boundary is unmoved. These two
   /// tests pin the samples themselves rather than that coupling.
   #[test]
-  fn populate_stops_after_the_candidate_that_exhausted_the_deadline() {
+  fn acquisition_stops_after_the_candidate_that_exhausted_the_deadline() {
     use crate::common::deadline::{
       test_clock::ManualClock, BoundaryStop, CancellationToken, Deadline,
     };
@@ -553,7 +551,7 @@ mod tests {
         token.clone(),
       );
       let calls = Cell::new(0);
-      let populated = populate_internet_explorer_sources_with_runtime(
+      let populated = acquire_internet_explorer_sources_with_runtime(
         discovered_sources(),
         None,
         &runtime,
@@ -578,7 +576,7 @@ mod tests {
   }
 
   #[test]
-  fn populate_queries_nothing_when_the_deadline_is_already_spent() {
+  fn acquisition_attempts_nothing_when_the_deadline_is_already_spent() {
     use crate::common::deadline::{
       test_clock::ManualClock, BoundaryStop, CancellationToken, Deadline,
     };
@@ -591,7 +589,7 @@ mod tests {
       CancellationToken::default(),
     );
     clock.advance(Duration::from_secs(1));
-    let populated = populate_internet_explorer_sources_with_runtime(
+    let populated = acquire_internet_explorer_sources_with_runtime(
       discovered_sources(),
       None,
       &runtime,
@@ -609,7 +607,7 @@ mod tests {
 
   fn stopped_adapter_outcome(stop: crate::common::deadline::BoundaryStop) -> EngineExtract {
     let calls = Cell::new(0);
-    let populated = populate_internet_explorer_sources(discovered_sources(), None, |origin, _| {
+    let populated = acquire_internet_explorer_sources(discovered_sources(), None, |origin, _| {
       let call = calls.get();
       calls.set(call + 1);
       if call == 0 {

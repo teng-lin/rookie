@@ -20,14 +20,14 @@ fn unique_tmpdir(tag: &str) -> PathBuf {
   dir
 }
 
-fn query_cookies_with_legacy_keys(
+fn extract_cookies_with_legacy_keys(
   keys: Vec<Vec<u8>>,
   db_path: PathBuf,
   domains: Option<Vec<String>>,
   force_kill: bool,
 ) -> Result<Vec<Cookie>> {
   let provider = LegacySharedKeyProvider::new(keys);
-  query_cookies(&provider, &(), db_path, domains, force_kill)
+  extract_cookies_with_provider(&provider, &(), db_path, domains, force_kill)
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn query_outcome_with_legacy_keys(
   db_path: PathBuf,
 ) -> Result<ChromiumExtractionDraft> {
   let outcomes = ChromiumKeyOutcomes::from_legacy_shared(keys);
-  query_cookies_engine_outcome(&outcomes, db_path, None, false)
+  acquire_chromium_draft(&outcomes, db_path, None, false)
 }
 
 // (host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly, samesite)
@@ -80,7 +80,7 @@ fn seed_chromium_schema_version(connection: &rusqlite::Connection, version: u32)
 }
 
 // Minimal `cookies` table mirroring the columns chromium_based reads.
-// Real Chrome schema has many more columns, but query_cookies only
+// Real Chrome schema has many more columns, but Chromium extraction only
 // selects these nine.
 fn seed_chromium_cookies(db: &Path, rows: &[ChromiumRow<'_>]) {
   let conn = rusqlite::Connection::open(db).expect("open writable sqlite");
@@ -138,8 +138,8 @@ fn detailed_cookies_preserve_partition_collisions() {
   drop(connection);
 
   let provider = LegacySharedKeyProvider::new(Vec::new());
-  let cookies =
-    query_detailed_cookies(&provider, &(), db, None, false).expect("extract detailed cookies");
+  let cookies = extract_detailed_cookies_with_provider(&provider, &(), db, None, false)
+    .expect("extract detailed cookies");
   assert_eq!(cookies.len(), 2);
   assert_eq!(cookies[0].cookie.name, cookies[1].cookie.name);
   assert_eq!(cookies[0].cookie.domain, cookies[1].cookie.domain);
@@ -189,7 +189,7 @@ fn detailed_query_keeps_legacy_schemas_readable() {
   );
 
   let provider = LegacySharedKeyProvider::new(Vec::new());
-  let cookies = query_detailed_cookies(&provider, &(), db, None, false)
+  let cookies = extract_detailed_cookies_with_provider(&provider, &(), db, None, false)
     .expect("missing optional columns remain compatible");
   assert_eq!(cookies.len(), 1);
   assert_eq!(cookies[0].context, CookieContext::default());
@@ -215,10 +215,10 @@ fn malformed_optional_context_is_retained_without_projection_divergence() {
   drop(connection);
 
   let provider = LegacySharedKeyProvider::new(Vec::new());
-  let legacy = query_cookies(&provider, &(), db.clone(), None, false)
+  let legacy = extract_cookies_with_provider(&provider, &(), db.clone(), None, false)
     .expect("legacy projection does not inspect detailed columns");
   assert_eq!(legacy.len(), 1);
-  let detailed = query_detailed_cookies(&provider, &(), db, None, false)
+  let detailed = extract_detailed_cookies_with_provider(&provider, &(), db, None, false)
     .expect("malformed optional context is retained as raw typed loss");
   assert_eq!(detailed.len(), 1);
   assert_eq!(detailed[0].context, CookieContext::default());
@@ -248,11 +248,11 @@ fn malformed_detailed_context_skips_only_its_row() {
   drop(connection);
 
   let provider = LegacySharedKeyProvider::new(Vec::new());
-  let legacy = query_cookies(&provider, &(), db.clone(), None, false)
+  let legacy = extract_cookies_with_provider(&provider, &(), db.clone(), None, false)
     .expect("legacy projection keeps every row");
   assert_eq!(legacy.len(), 3);
 
-  let extraction = query_cookies_engine_outcome_mode(
+  let extraction = acquire_chromium_draft_mode(
     &ChromiumKeyOutcomes::from_legacy_shared(Vec::new()),
     db.clone(),
     None,
@@ -283,7 +283,7 @@ fn malformed_detailed_context_skips_only_its_row() {
     vec!["before", "malformed", "after"]
   );
 
-  let public_result = query_detailed_cookies(&provider, &(), db, None, false)
+  let public_result = extract_detailed_cookies_with_provider(&provider, &(), db, None, false)
     .expect("public detailed extraction returns the valid rows");
   assert_eq!(public_result.len(), 3);
 }
@@ -309,7 +309,7 @@ fn decode_unseal_preserves_row_failure_precedence_order_and_typed_source_chain()
     )
     .expect("seed compound and interleaved failures");
 
-  let outcome = query_cookies_from_connection_mode(
+  let outcome = decode_chromium_connection_mode(
     &connection,
     &ChromiumKeyOutcomes::default(),
     None,
@@ -361,7 +361,7 @@ fn compound_row_failure_keeps_decrypt_precedence_over_context() {
     )
     .expect("seed compound failure");
 
-  let outcome = query_cookies_from_connection_mode(
+  let outcome = decode_chromium_connection_mode(
     &connection,
     &ChromiumKeyOutcomes::default(),
     None,
@@ -415,7 +415,7 @@ fn windows_native_share_denied_valid_database_reaches_real_query_policy() {
   );
 
   let exclusive = open_without_file_sharing(&db);
-  let error = query_cookies_with_legacy_keys(vec![], db.clone(), None, false)
+  let error = extract_cookies_with_legacy_keys(vec![], db.clone(), None, false)
     .expect_err("real query boundary must report the native sharing denial");
 
   let locked = error
@@ -453,7 +453,7 @@ fn windows_native_share_denied_valid_database_reaches_real_query_policy() {
   );
 
   drop(exclusive);
-  let cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
+  let cookies = extract_cookies_with_legacy_keys(vec![], db, None, false)
     .expect("the unchanged database is readable after releasing the fixture handle");
   assert_eq!(cookies.len(), 1);
   assert_eq!(cookies[0].name, "plain");
@@ -563,7 +563,7 @@ fn injected_provider_routes_mixed_tiers_once_and_isolates_a_failed_tier() {
     },
   };
 
-  let mut cookies = query_cookies(&provider, "linux-installation", db, None, false)
+  let mut cookies = extract_cookies_with_provider(&provider, "linux-installation", db, None, false)
     .expect("good tiers survive one failed tier");
 
   assert_eq!(provider.calls.get(), 1);
@@ -1010,7 +1010,7 @@ fn provider_failures_are_counted_once_per_distinct_tier_and_not_as_rejected_rows
     ),
     v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
   };
-  let outcome = query_cookies_engine_outcome(&outcomes, db, None, false)
+  let outcome = acquire_chromium_draft(&outcomes, db, None, false)
     .expect("provider failure remains a record-level outcome");
 
   assert!(outcome.cookies.is_empty());
@@ -1057,7 +1057,7 @@ fn dual_populated_v20_provider_failure_is_reportable_but_legacy_errors() {
     ),
   };
 
-  let outcome = query_cookies_engine_outcome(&outcomes, db.clone(), None, false)
+  let outcome = acquire_chromium_draft(&outcomes, db.clone(), None, false)
     .expect("provider failure remains reportable after a successful query");
   assert!(outcome.cookies.is_empty());
   assert_eq!(outcome.stats.rows_seen, 1);
@@ -1067,7 +1067,7 @@ fn dual_populated_v20_provider_failure_is_reportable_but_legacy_errors() {
   assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::ProviderFailed);
   assert!(outcome.legacy_error.is_some());
 
-  let error = query_cookies_with_key_outcomes(outcomes, db, None, false)
+  let error = extract_cookies_with_key_outcomes(outcomes, db, None, false)
     .expect_err("legacy projection must fail when every row is unavailable");
   assert!(!format!("{error:#}").contains("plaintext sentinel must not escape"));
   assert!(format!("{error:#}").contains("App-Bound provider failure"));
@@ -1093,7 +1093,7 @@ fn dual_populated_legacy_dpapi_pipeline_never_projects_plaintext() {
     )],
   );
 
-  let outcome = query_cookies_engine_outcome(&ChromiumKeyOutcomes::default(), db, None, false)
+  let outcome = acquire_chromium_draft(&ChromiumKeyOutcomes::default(), db, None, false)
     .expect("unsupported DPAPI remains a row-level outcome");
   assert!(outcome.cookies.is_empty());
   assert_eq!(outcome.stats.rows_skipped, 1);
@@ -1133,7 +1133,7 @@ fn detailed_pipeline_unseals_dual_populated_ciphertext_before_projection() {
     v20: crate::browser::chromium_crypto::ChromiumKeyOutcome::NotApplicable,
   };
 
-  let outcome = query_cookies_engine_outcome_mode(
+  let outcome = acquire_chromium_draft_mode(
     &outcomes,
     db,
     None,
@@ -1183,7 +1183,7 @@ fn dual_populated_v20_pipeline_decrypts_with_app_bound_tier() {
   };
 
   let outcome =
-    query_cookies_engine_outcome(&outcomes, db, None, false).expect("v20 pipeline extraction");
+    acquire_chromium_draft(&outcomes, db, None, false).expect("v20 pipeline extraction");
   assert_eq!(outcome.cookies.len(), 1);
   assert_eq!(outcome.cookies[0].value, "decrypted v20");
   assert_ne!(
@@ -1193,8 +1193,8 @@ fn dual_populated_v20_pipeline_decrypts_with_app_bound_tier() {
 }
 
 #[test]
-fn query_cookies_missing_db_errors() {
-  let result = query_cookies_with_legacy_keys(
+fn chromium_extraction_missing_db_errors() {
+  let result = extract_cookies_with_legacy_keys(
     vec![],
     PathBuf::from("/nonexistent/cookies.db"),
     None,
@@ -1208,11 +1208,11 @@ fn query_cookies_missing_db_errors() {
 }
 
 #[test]
-fn query_cookies_non_sqlite_file_errors() {
+fn chromium_extraction_non_sqlite_file_errors() {
   let dir = unique_tmpdir("chr-bad-sqlite");
   let db = dir.join("Cookies");
   std::fs::write(&db, b"not a sqlite database at all").unwrap();
-  let result = query_cookies_with_legacy_keys(vec![], db, None, false);
+  let result = extract_cookies_with_legacy_keys(vec![], db, None, false);
   assert!(
     result.is_err(),
     "expected Err for bogus sqlite, got {:?}",
@@ -1224,7 +1224,7 @@ fn query_cookies_non_sqlite_file_errors() {
 // DB+WAL acquisition must succeed without consulting privilege, shadow-copy,
 // or restart-manager fallbacks.
 #[test]
-fn query_cookies_reads_cookies_committed_to_an_active_wal() {
+fn chromium_extraction_reads_cookies_committed_to_an_active_wal() {
   // Self-cleaning, unlike `unique_tmpdir`; held to the end of the test.
   let dir = crate::utils::TempDir::new().expect("temp dir");
   let db = dir.path().join("Cookies");
@@ -1259,7 +1259,7 @@ fn query_cookies_reads_cookies_committed_to_an_active_wal() {
     )
     .expect("insert WAL row");
 
-  let mut cookies = query_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
+  let mut cookies = extract_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
 
   cookies.sort_by(|a, b| a.name.cmp(&b.name));
   let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
@@ -1269,16 +1269,16 @@ fn query_cookies_reads_cookies_committed_to_an_active_wal() {
 }
 
 #[test]
-fn query_cookies_empty_table_returns_empty() {
+fn chromium_extraction_empty_table_returns_empty() {
   let dir = unique_tmpdir("chr-empty-table");
   let db = dir.join("Cookies");
   seed_chromium_cookies(&db, &[]);
-  let cookies = query_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
+  let cookies = extract_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
   assert!(cookies.is_empty(), "{:?}", cookies);
 }
 
 #[test]
-fn query_cookies_errors_when_every_row_fails_to_decode() {
+fn chromium_extraction_errors_when_every_row_fails_to_decode() {
   let dir = unique_tmpdir("chr-all-rows-bad");
   let db = dir.join("Cookies");
   seed_chromium_cookies(&db, &[]);
@@ -1314,7 +1314,7 @@ fn query_cookies_errors_when_every_row_fails_to_decode() {
   assert!(diagnostic.contains("ColumnRead(\"name\")"), "{diagnostic}");
   assert!(diagnostic.contains("row 1"), "{diagnostic}");
 
-  let result = query_cookies_with_legacy_keys(vec![], db, None, false);
+  let result = extract_cookies_with_legacy_keys(vec![], db, None, false);
   assert!(
     result.is_err(),
     "expected Err when no row decodes, got {:?}",
@@ -1323,7 +1323,7 @@ fn query_cookies_errors_when_every_row_fails_to_decode() {
 }
 
 #[test]
-fn query_cookies_emits_a_valid_empty_value() {
+fn chromium_extraction_emits_a_valid_empty_value() {
   let dir = unique_tmpdir("chr-valueless-plus-bad");
   let db = dir.join("Cookies");
   // An empty value is valid cookie data and must not disappear merely
@@ -1343,7 +1343,7 @@ fn query_cookies_emits_a_valid_empty_value() {
     .expect("insert bad row");
   drop(conn);
 
-  let cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
+  let cookies = extract_cookies_with_legacy_keys(vec![], db, None, false)
     .expect("valueless row is not a failure");
   assert_eq!(cookies.len(), 1, "{cookies:?}");
   assert_eq!(cookies[0].name, "empty");
@@ -1351,7 +1351,7 @@ fn query_cookies_emits_a_valid_empty_value() {
 }
 
 #[test]
-fn query_cookies_defaults_null_and_out_of_range_metadata() {
+fn chromium_extraction_defaults_null_and_out_of_range_metadata() {
   let dir = unique_tmpdir("chr-null-metadata");
   let db = dir.join("Cookies");
   let connection = rusqlite::Connection::open(&db).expect("open writable sqlite");
@@ -1393,7 +1393,7 @@ fn query_cookies_defaults_null_and_out_of_range_metadata() {
 
   let outcomes = ChromiumKeyOutcomes::from_legacy_shared(vec![]);
   let extraction =
-    query_cookies_from_connection(&connection, &outcomes, None).expect("query cookies");
+    decode_chromium_connection(&connection, &outcomes, None).expect("decode cookies");
   assert_eq!(extraction.cookies.len(), 1, "{:?}", extraction.cookies);
   let cookie = &extraction.cookies[0];
   assert_eq!(cookie.name, "kept");
@@ -1436,7 +1436,7 @@ fn canonical_retains_malformed_booleans_while_legacy_skips_historically_unreadab
 
   let outcomes = ChromiumKeyOutcomes::from_legacy_shared(vec![]);
   let extraction =
-    query_cookies_from_connection(&connection, &outcomes, None).expect("query cookies");
+    decode_chromium_connection(&connection, &outcomes, None).expect("decode cookies");
   assert_eq!(
     extraction.stats,
     ChromiumExtractionStats {
@@ -1507,7 +1507,7 @@ fn plaintext_value_failure_precedes_metadata_while_ciphertext_reaches_unseal() {
     )
     .expect("seed compound column failures");
 
-  let outcome = query_cookies_from_connection(&connection, &ChromiumKeyOutcomes::default(), None)
+  let outcome = decode_chromium_connection(&connection, &ChromiumKeyOutcomes::default(), None)
     .expect("column failures remain row outcomes");
   assert_eq!(outcome.stats.rows_seen, 2);
   assert_eq!(outcome.stats.rows_skipped, 2);
@@ -1526,7 +1526,7 @@ fn plaintext_value_failure_precedes_metadata_while_ciphertext_reaches_unseal() {
 }
 
 #[test]
-fn query_cookies_returns_plaintext_value_when_value_is_set() {
+fn chromium_extraction_returns_plaintext_value_when_value_is_set() {
   let dir = unique_tmpdir("chr-plaintext");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -1545,7 +1545,7 @@ fn query_cookies_returns_plaintext_value_when_value_is_set() {
       1,
     )],
   );
-  let cookies = query_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
+  let cookies = extract_cookies_with_legacy_keys(vec![], db, None, false).expect("decode");
   assert_eq!(cookies.len(), 1, "{:?}", cookies);
   let c = &cookies[0];
   assert_eq!(c.domain, ".example.com");
@@ -1732,7 +1732,7 @@ fn the_unseal_issue_codes_are_the_ones_the_engine_emits() {
 
 #[cfg(unix)]
 #[test]
-fn query_cookies_filters_by_domain() {
+fn chromium_extraction_filters_by_domain() {
   let dir = unique_tmpdir("chr-domain-filter");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -1742,7 +1742,7 @@ fn query_cookies_filters_by_domain() {
       ("other.test", "/", false, 0, "drop", "no", b"", false, 0),
     ],
   );
-  let mut cookies = query_cookies_with_legacy_keys(
+  let mut cookies = extract_cookies_with_legacy_keys(
     vec![],
     db,
     Some(vec!["example.com".to_string(), "other.test".to_string()]),
@@ -1755,7 +1755,7 @@ fn query_cookies_filters_by_domain() {
 }
 
 #[test]
-fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
+fn chromium_extraction_enforces_domain_boundaries_and_fail_closed_filters() {
   let dir = unique_tmpdir("chr-domain-filter-boundary");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -1841,7 +1841,7 @@ fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
   };
 
   let domains = vec!["example.com".to_string()];
-  let outcome = query_cookies_from_connection(&connection, &outcomes, Some(&domains))
+  let outcome = decode_chromium_connection(&connection, &outcomes, Some(&domains))
     .expect("filter exact host and subdomains");
   assert_eq!(names(&outcome), vec!["exact", "subdomain", "trailing-dot"]);
   assert_eq!(outcome.stats.rows_seen, 3);
@@ -1849,18 +1849,18 @@ fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
   assert_eq!(outcome.stats.cookies_emitted, 3);
 
   let dotted_domains = vec![".example.com.".to_string()];
-  let dotted = query_cookies_from_connection(&connection, &outcomes, Some(&dotted_domains))
+  let dotted = decode_chromium_connection(&connection, &outcomes, Some(&dotted_domains))
     .expect("leading and trailing dots must not narrow the SQL candidate set");
   assert_eq!(names(&dotted), vec!["exact", "subdomain", "trailing-dot"]);
 
   let mixed_domains = vec!["".to_string(), "example.com".to_string()];
-  let mixed = query_cookies_from_connection(&connection, &outcomes, Some(&mixed_domains))
+  let mixed = decode_chromium_connection(&connection, &outcomes, Some(&mixed_domains))
     .expect("a blank entry must not broaden a valid allowlist");
   assert_eq!(names(&mixed), vec!["exact", "subdomain", "trailing-dot"]);
 
   for invalid in ["", " \t ", ".", "%", "_"] {
     let domains = vec![invalid.to_string()];
-    let outcome = query_cookies_from_connection(&connection, &outcomes, Some(&domains))
+    let outcome = decode_chromium_connection(&connection, &outcomes, Some(&domains))
       .expect("invalid filter must be a successful empty result");
     assert!(
       outcome.cookies.is_empty(),
@@ -1872,12 +1872,12 @@ fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
   }
 
   let empty_domains = Vec::new();
-  let empty = query_cookies_from_connection(&connection, &outcomes, Some(&empty_domains))
+  let empty = decode_chromium_connection(&connection, &outcomes, Some(&empty_domains))
     .expect("an explicit empty allowlist must validate the schema and match nothing");
   assert!(empty.cookies.is_empty());
   assert_eq!(empty.stats.rows_seen, 0);
 
-  let empty_detailed = query_cookies_from_connection_mode(
+  let empty_detailed = decode_chromium_connection_mode(
     &connection,
     &outcomes,
     Some(&empty_domains),
@@ -1890,11 +1890,11 @@ fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
 
   let empty_database = rusqlite::Connection::open_in_memory().expect("open empty database");
   assert!(
-    query_cookies_from_connection(&empty_database, &outcomes, Some(&empty_domains)).is_err(),
+    decode_chromium_connection(&empty_database, &outcomes, Some(&empty_domains)).is_err(),
     "a legacy empty allowlist must not bypass schema validation"
   );
   assert!(
-    query_cookies_from_connection_mode(
+    decode_chromium_connection_mode(
       &empty_database,
       &outcomes,
       Some(&empty_domains),
@@ -1906,7 +1906,7 @@ fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
   );
 
   let unfiltered =
-    query_cookies_from_connection(&connection, &outcomes, None).expect("unfiltered query");
+    decode_chromium_connection(&connection, &outcomes, None).expect("unfiltered decode");
   assert_eq!(
     names(&unfiltered),
     vec![
@@ -1924,7 +1924,7 @@ fn query_cookies_enforces_domain_boundaries_and_fail_closed_filters() {
 
 #[cfg(unix)]
 #[test]
-fn query_cookies_domain_filter_treats_sql_as_data() {
+fn chromium_extraction_domain_filter_treats_sql_as_data() {
   let dir = unique_tmpdir("chr-domain-filter-sql");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -1946,13 +1946,13 @@ fn query_cookies_domain_filter_treats_sql_as_data() {
   );
 
   let cookies =
-    query_cookies_with_legacy_keys(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false)
+    extract_cookies_with_legacy_keys(vec![], db, Some(vec!["' OR 1=1 --".to_string()]), false)
       .expect("decode");
   assert!(cookies.is_empty(), "{:?}", cookies);
 }
 
 #[test]
-fn query_cookies_does_not_broaden_valid_domain_filter_with_sql_input() {
+fn chromium_extraction_does_not_broaden_valid_domain_filter_with_sql_input() {
   let dir = unique_tmpdir("chr-domain-filter-scope");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -1963,7 +1963,7 @@ fn query_cookies_does_not_broaden_valid_domain_filter_with_sql_input() {
     ],
   );
 
-  let cookies = query_cookies_with_legacy_keys(
+  let cookies = extract_cookies_with_legacy_keys(
     vec![],
     db,
     Some(vec!["example.com".to_string(), "') OR 1=1 --".to_string()]),
@@ -1975,7 +1975,7 @@ fn query_cookies_does_not_broaden_valid_domain_filter_with_sql_input() {
 }
 
 #[test]
-fn query_cookies_percent_domain_is_not_a_wildcard() {
+fn chromium_extraction_percent_domain_is_not_a_wildcard() {
   let dir = unique_tmpdir("chr-domain-filter-percent");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -1986,8 +1986,8 @@ fn query_cookies_percent_domain_is_not_a_wildcard() {
     ],
   );
 
-  let cookies =
-    query_cookies_with_legacy_keys(vec![], db, Some(vec!["%".to_string()]), false).expect("decode");
+  let cookies = extract_cookies_with_legacy_keys(vec![], db, Some(vec!["%".to_string()]), false)
+    .expect("decode");
   assert!(
     cookies.is_empty(),
     "a literal '%' domain must not match every host: {:?}",
@@ -1996,7 +1996,7 @@ fn query_cookies_percent_domain_is_not_a_wildcard() {
 }
 
 #[test]
-fn query_cookies_underscore_domain_is_not_a_wildcard() {
+fn chromium_extraction_underscore_domain_is_not_a_wildcard() {
   let dir = unique_tmpdir("chr-domain-filter-underscore");
   let db = dir.join("Cookies");
   seed_chromium_cookies(
@@ -2007,8 +2007,8 @@ fn query_cookies_underscore_domain_is_not_a_wildcard() {
     ],
   );
 
-  let cookies =
-    query_cookies_with_legacy_keys(vec![], db, Some(vec!["_".to_string()]), false).expect("decode");
+  let cookies = extract_cookies_with_legacy_keys(vec![], db, Some(vec!["_".to_string()]), false)
+    .expect("decode");
   assert!(
     cookies.is_empty(),
     "a literal '_' domain must not match every single-character host: {:?}",
@@ -2153,7 +2153,7 @@ fn query_outcome_verifies_host_hashes_and_classifies_decode_failures() {
   assert_eq!(outcome.issues[0].code, ChromiumRowIssueCode::Decode);
   assert_eq!(outcome.issues[0].occurrences, 1);
 
-  let mut detailed = query_cookies_engine_outcome_mode(
+  let mut detailed = acquire_chromium_draft_mode(
     &ChromiumKeyOutcomes::from_legacy_shared(vec![key.to_vec()]),
     db,
     None,
@@ -2179,7 +2179,7 @@ fn query_outcome_verifies_host_hashes_and_classifies_decode_failures() {
 
 #[cfg(unix)]
 #[test]
-fn query_cookies_ignores_malformed_and_undecryptable_rows() {
+fn chromium_extraction_ignores_malformed_and_undecryptable_rows() {
   let dir = unique_tmpdir("chr-malformed-rows");
   let db = dir.join("Cookies");
   let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
@@ -2233,8 +2233,8 @@ fn query_cookies_ignores_malformed_and_undecryptable_rows() {
     )
     .expect("insert row 4");
 
-  let mut cookies = query_cookies_with_legacy_keys(vec![], db, None, false)
-    .expect("query_cookies should succeed despite bad rows");
+  let mut cookies = extract_cookies_with_legacy_keys(vec![], db, None, false)
+    .expect("Chromium extraction should succeed despite bad rows");
   cookies.sort_by(|a, b| a.name.cmp(&b.name));
   let names: Vec<_> = cookies.iter().map(|c| c.name.as_str()).collect();
   assert_eq!(names, vec!["valid1", "valid2"], "{:?}", cookies);
