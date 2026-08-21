@@ -1010,11 +1010,33 @@ fn project_canonical_report_with_runtime(
         }
       }
       failures = retained_failures;
+      // A7: a row whose required host identity did not survive decode is
+      // omitted rather than emitted as `domain: ""`, and the loss becomes a
+      // source issue so the report still accounts for it. `extract` flattens
+      // this same projection and inherits the omission; it has no channel for
+      // the count, which is the stated cost of returning a bare list.
+      let malformed_hosts = finalized_records
+        .iter()
+        .filter(|record| !record.has_host_identity())
+        .count();
       let mut cookies = finalized_records
         .into_iter()
+        .filter(super::cookie_record::FinalizedCookieRecord::has_host_identity)
         .map(|record| record.into_cookie_with_semantics(semantics))
         .collect::<Vec<_>>();
       sort_cookies(&mut cookies);
+      if malformed_hosts > 0 {
+        let mut malformed = issue(
+          SourceIssue::MALFORMED_HOST_IDENTITY,
+          // `decode` is the stage that produced the unusable value: the row
+          // was read and parsed, and it is the decoded host that is missing.
+          ExtractionStageCode::decode(),
+          IssueSeverityCode::warning(),
+          "cookie row has no host identity after decode",
+        );
+        malformed.occurrences = u32::try_from(malformed_hosts).unwrap_or(u32::MAX);
+        push_aggregated(&mut source_issues, malformed);
+      }
       stats.add(&source.stats);
       public_sources.push(SourceExtraction {
         source: source.source,

@@ -34,6 +34,9 @@ impl ReadWarningCode {
     if code == COLUMN_READ_FAILED || code == SourceIssue::ROW_READ_FAILED {
       return Some(Self::RowReadFailed);
     }
+    if code == SourceIssue::MALFORMED_HOST_IDENTITY {
+      return Some(Self::MalformedHostIdentity);
+    }
     None
   }
 }

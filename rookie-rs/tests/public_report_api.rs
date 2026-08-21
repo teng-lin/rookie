@@ -1096,3 +1096,64 @@ fn a_profile_whose_only_source_fails_is_an_error_not_an_empty_snapshot() {
     error.code()
   );
 }
+
+/// A7 reaches the report too, as a source issue rather than a warning.
+///
+/// A report has a channel for the loss; `extract` inherits the omission and
+/// not the count, because a bare `Vec<Cookie>` has nowhere to put it. Both are
+/// better than emitting `domain: ""`, which matches nothing and belongs to no
+/// site.
+#[test]
+fn a_report_omits_an_empty_host_row_and_records_it_as_a_source_issue() {
+  let home = SyntheticHome::new("report-malformed-host");
+  let root = home.chrome_root();
+  let database = root.join("Default/Network/Cookies");
+  std::fs::create_dir_all(database.parent().expect("profile directory"))
+    .expect("create profile directory");
+  let connection = rusqlite::Connection::open(&database).expect("open cookie database");
+  connection
+    .execute_batch(
+      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+      INSERT INTO meta (key, value) VALUES ('version', '23');
+      CREATE TABLE cookies (
+        host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,
+        expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+        encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+        samesite INTEGER NOT NULL
+      );
+      INSERT INTO cookies VALUES ('', '/', 0, 0, 'hostless', 'v', X'', 0, 0);
+      INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'kept', 'v', X'', 0, 0);",
+    )
+    .expect("seed cookies");
+  drop(connection);
+  std::fs::write(root.join("Local State"), b"{}").expect("write Local State");
+
+  let report =
+    rookie_cookies::browser_report("chrome", None, None).expect("report the seeded profile");
+  let source = report
+    .profiles
+    .iter()
+    .flat_map(|profile| profile.sources.iter())
+    .find(|source| source.cookies.iter().any(|cookie| cookie.name == "kept"))
+    .expect("the seeded source");
+  assert!(
+    source
+      .cookies
+      .iter()
+      .all(|cookie| !cookie.domain.is_empty()),
+    "a malformed host must never reach the report as an empty domain"
+  );
+  let issue = source
+    .issues
+    .iter()
+    .find(|issue| issue.code.as_str() == "malformed_host_identity")
+    .expect("the omission is recorded, not silent");
+  assert_eq!(issue.occurrences, 1);
+
+  // `extract` flattens the same projection: same omission, no channel to
+  // report the count through.
+  let flat = rookie_cookies::extract(rookie_cookies::ExtractRequest::browser("chrome"))
+    .expect("flat extract");
+  assert!(flat.iter().all(|cookie| !cookie.domain.is_empty()));
+  assert!(flat.iter().any(|cookie| cookie.name == "kept"));
+}

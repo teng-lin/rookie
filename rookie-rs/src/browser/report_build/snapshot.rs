@@ -133,6 +133,10 @@ fn profile_snapshot_with_runtime(
       cookies.push(record.into_detailed_cookie_with_semantics(semantics));
     }
   }
+  // A7, counted here because this seam owns its own projection and its own
+  // warning fold. The report route records the same omission as a source
+  // issue instead; each surface counts it once, in the channel it has.
+  let (cookies, warnings) = legacy::drop_malformed_hosts(cookies, warnings);
 
   // A snapshot is not a report: it has nowhere to put "every source failed"
   // and must not answer it with an empty list. `flatten_selected_report_cookies`

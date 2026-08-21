@@ -413,7 +413,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
         runtime,
         stop_projection,
       )?;
-      Ok((cookies, warnings))
+      Ok(drop_malformed_hosts(cookies, warnings))
     }
     "gecko" => {
       let extract = registry::legacy_gecko_outcome_with_runtime(
@@ -434,7 +434,7 @@ fn browser_cookies_and_warnings_with_stop_projection(
         runtime,
         stop_projection,
       )?;
-      Ok((cookies, row_read_warnings(skipped)))
+      Ok(drop_malformed_hosts(cookies, row_read_warnings(skipped)))
     }
     engine => dispatch::remaining_engine_snapshot_with_runtime(
       &browser.canonical_id,
@@ -466,7 +466,34 @@ pub(super) fn cookies_and_skipped_from_engine_extract(
     runtime,
     stop_projection,
   )?;
-  Ok((cookies, row_read_warnings(skipped)))
+  Ok(drop_malformed_hosts(cookies, row_read_warnings(skipped)))
+}
+
+/// A7: drops rows whose required host identity did not survive decode, and
+/// counts them.
+///
+/// This lives beside the warning fold rather than in the projector because the
+/// projector has no channel to report the loss through, and an omission a
+/// caller cannot see is the thing A7 exists to prevent. `extract` inherits the
+/// omission and not the count -- it returns a bare `Vec<Cookie>`, which is the
+/// stated cost of that shape.
+pub(crate) fn drop_malformed_hosts(
+  cookies: Vec<DetailedCookie>,
+  mut warnings: ReadWarningCounts,
+) -> LegacySnapshot {
+  let before = cookies.len();
+  let kept: Vec<DetailedCookie> = cookies
+    .into_iter()
+    .filter(|detailed| !detailed.cookie.domain.trim_matches('.').is_empty())
+    .collect();
+  let dropped = before.saturating_sub(kept.len()) as u64;
+  if dropped > 0 {
+    warnings.record(
+      crate::read_warning::ReadWarningCode::MalformedHostIdentity,
+      dropped,
+    );
+  }
+  (kept, warnings)
 }
 
 fn row_read_warnings(skipped: u64) -> ReadWarningCounts {

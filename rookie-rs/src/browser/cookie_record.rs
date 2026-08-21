@@ -665,6 +665,18 @@ impl FinalizedCookieRecord {
     &self.0.name
   }
 
+  /// Whether this record still has the host identity every send-match rule
+  /// keys on.
+  ///
+  /// A7: a row whose domain did not survive decode matches nothing and belongs
+  /// to no site, so emitting it as `domain: ""` puts a value in the output
+  /// that no caller can act on. Every projection omits it and counts it
+  /// instead; this is the one predicate they share, so they cannot disagree
+  /// about what "malformed" means.
+  pub(crate) fn has_host_identity(&self) -> bool {
+    !self.0.domain_raw().trim_matches('.').is_empty()
+  }
+
   pub(crate) fn into_cookie_with_semantics(self, semantics: LegacyProjectionSemantics) -> Cookie {
     // Construction proved this is Plain, so this match is exhaustive over the
     // sealed invariant and cannot silently discard a record.

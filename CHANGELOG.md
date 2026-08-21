@@ -17,9 +17,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `windows_local_state` (Windows).
   `ChromiumCredentialSource::Automatic` is gone: it was the default and it
   could never succeed on Windows. Isolation-carrying path output now comes
-  from `from_path(..).detailed_cookies()`, so
-  `chromium_cookies_from_path_detailed` is gone too — a real narrowing, since
-  a domain-filtered *detailed* path list is no longer expressible.
+  from `from_path(..).detailed_cookies()`, so the Rust free function backing
+  `chromium_cookies_from_path_detailed` is gone too — a real narrowing at that
+  layer, since a domain-filtered *detailed* path list is no longer expressible
+  through it. **Python keeps the function and its `domains` option**: it is
+  now backed by `from_path(..).into_detailed_cookies()` plus a domain filter
+  applied in the binding, reimplementing the core's exact (but
+  binding-unreachable, `pub(crate)`) matching rule rather than dropping the
+  capability for existing callers.
 - Sniffing a Chromium database is plaintext-capable only; an encrypted row is
   the new `missing_chromium_credentials`. On Unix that is a narrowing (the
   ordered identity probe is gone). On Windows it is a widening: the old call
@@ -77,6 +82,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the binding's `u32` range.
 - The generated report JSON Schema now enforces the same lexical constraints
   as Rust for open vocabulary identifiers and opaque installation/profile IDs.
+- Python `ReadResult` gains `detailed_cookies()`: isolation-intact records,
+  each `{"cookie": <8-field dict>, "context": {...}}`, backed by the core's
+  `detailed_cookies()`. New warning codes `malformed_host_identity` and
+  `unparsable_partition_key` surface through the existing `ReadWarning.code`
+  string, no binding change needed.
+- Python `read()` / `jar()` gain `include_session: bool = False` and
+  `select: Literal["legacy_first"] = "legacy_first"`; `browser_report()` gains
+  `select: Literal["legacy_first", "all"] = "all"`. Passing `profile=`/
+  `profile_id=` together with `select="all"` (or `select="all"` to
+  `read`/`jar` at all, which cannot express it) raises `RookieRequestError`
+  with `code == "conflicting_profile_selection"` before any I/O.
+- Python `ReadResult.header()` accepts a `SendContext`-shaped mapping or
+  keyword arguments (`top_level_site`, `resource`, `method`,
+  `user_context_id`, `private_browsing_id`, `now`) in addition to a bare URL
+  string, mirroring Rust's `SendContext`. `RookieRequestError` gains a
+  `required: list[str]` attribute naming the selectors an
+  `incomplete_send_context` fault was missing (empty for every other kind).
 
 ### Removed
 
@@ -124,10 +146,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `includeSession: true` (Node), or `--include-session` (CLI). This fails
   quietly — a smaller list, no error. Report jobs are unaffected: they always
   retain session sources.
-- A row whose required host identity did not survive decode is omitted from a
-  snapshot and counted under the new `malformed_host_identity` warning, rather
-  than emitted as `domain: ""`. Unknown *optional* isolation fields stay `None`
-  and never drop a row.
+- A row whose required host identity did not survive decode is omitted rather
+  than emitted as `domain: ""`, which matches nothing and belongs to no site.
+  Snapshots count it under the new `malformed_host_identity` warning; reports
+  record it as a source issue of the same name; `extract` inherits the omission
+  and not the count, because a bare `Vec<Cookie>` has nowhere to put it — use
+  `read` or `extract_report` when the count matters. Unknown *optional*
+  isolation fields stay `None` and never drop a row.
 - **Windows App-Bound (v20) is now opt-in on the 0.6 job surface.**
   `AppBoundPolicy` defaults to `Disabled`, so `read` / `extract` /
   `extract_report` / `from_path` no longer inject into a browser process, spawn
