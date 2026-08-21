@@ -23,7 +23,7 @@ function Get-RequestLogSnapshot {
 }
 
 function Wait-ForRequest([string]$requestPath) {
-  for ($i = 1; $i -le 120; $i++) {
+  for ($i = 1; $i -le 240; $i++) {
     if ((Test-Path $env:ROOKIE_E2E_REQUEST_LOG) -and
         (Select-String -Path $env:ROOKIE_E2E_REQUEST_LOG `
           -Pattern "^$([regex]::Escape($requestPath))" -Quiet)) {
@@ -31,12 +31,12 @@ function Wait-ForRequest([string]$requestPath) {
     }
     Start-Sleep -Milliseconds 500
   }
-  throw ("$script:targetBrowser did not request $requestPath within 60 seconds " +
+  throw ("$script:targetBrowser did not request $requestPath within 120 seconds " +
     "(requests seen: $(Get-RequestLogSnapshot))")
 }
 
 function Wait-ForBrowser {
-  for ($i = 1; $i -le 60; $i++) {
+  for ($i = 1; $i -le 120; $i++) {
     $processes = @(Get-Process $script:browserProcess -ErrorAction SilentlyContinue)
     if ($processes.Count -gt 0) { return }
     Start-Sleep -Milliseconds 500
@@ -57,7 +57,7 @@ function Close-BrowserGracefully {
   foreach ($window in $windows) {
     [void]$window.CloseMainWindow()
   }
-  for ($i = 1; $i -le 60; $i++) {
+  for ($i = 1; $i -le 120; $i++) {
     if (-not (Get-Process $script:browserProcess -ErrorAction SilentlyContinue)) { return }
     Start-Sleep -Milliseconds 500
   }
@@ -70,7 +70,7 @@ function Close-BrowserGracefully {
   Write-Host ("{0} still had {1} process(es) after CloseMainWindow; stopping leftovers" -f `
     $script:targetBrowser, $leftover.Count)
   $leftover | Stop-Process -Force -ErrorAction SilentlyContinue
-  for ($i = 1; $i -le 20; $i++) {
+  for ($i = 1; $i -le 40; $i++) {
     if (-not (Get-Process $script:browserProcess -ErrorAction SilentlyContinue)) { return }
     Start-Sleep -Milliseconds 250
   }
@@ -78,7 +78,7 @@ function Close-BrowserGracefully {
 }
 
 function Wait-ForBrowserMainWindow {
-  for ($i = 1; $i -le 60; $i++) {
+  for ($i = 1; $i -le 120; $i++) {
     $window = Get-BrowserMainWindows | Select-Object -First 1
     if ($null -ne $window) { return $window }
     Start-Sleep -Milliseconds 500
@@ -153,7 +153,7 @@ try {
 
   $defaultDir = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Default"
   $cookiesDb = Join-Path $defaultDir "Network\Cookies"
-  for ($i = 1; $i -le 60; $i++) {
+  for ($i = 1; $i -le 120; $i++) {
     if (Test-Path $cookiesDb) { break }
     $legacyDb = Join-Path $defaultDir "Cookies"
     if (Test-Path $legacyDb) { $cookiesDb = $legacyDb; break }

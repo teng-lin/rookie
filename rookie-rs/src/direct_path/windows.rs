@@ -497,22 +497,34 @@ Start-Sleep -Seconds 300
   fn plaintext_database() -> (crate::utils::TempDir, PathBuf) {
     let directory = crate::utils::TempDir::new().expect("temporary database directory");
     let path = directory.path().join("Cookies");
-    let connection = rusqlite::Connection::open(&path).expect("create Chromium fixture");
+    let wal_path = crate::common::sqlite::sidecar(&path, "-wal");
+    let mut connection = rusqlite::Connection::open(&path).expect("create Chromium fixture");
     connection
       .execute_batch(
-        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); \
+        "PRAGMA journal_mode = WAL; \
+         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); \
          INSERT INTO meta (key, value) VALUES ('version', '23'); \
          CREATE TABLE cookies (\
            host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER, \
            name TEXT, value TEXT, encrypted_value BLOB, is_httponly INTEGER, \
            samesite INTEGER\
-         ); \
-         INSERT INTO cookies VALUES (\
-           'example.test', '/', 0, 0, 'plain', 'value', X'', 0, 0\
          );",
       )
-      .expect("seed Chromium fixture");
+      .expect("seed Chromium fixture schema");
+    let tx = connection.transaction().expect("begin WAL transaction");
+    tx.execute(
+      "INSERT INTO cookies VALUES (\
+         'example.test', '/', 0, 0, 'plain', 'value', X'', 0, 0\
+       );",
+      [],
+    )
+    .expect("insert cookie in WAL");
+    tx.commit().expect("commit WAL transaction");
+    let wal_bytes = std::fs::read(&wal_path).unwrap_or_default();
     drop(connection);
+    if !wal_bytes.is_empty() {
+      let _ = std::fs::write(&wal_path, &wal_bytes);
+    }
     (directory, path)
   }
 

@@ -17,3 +17,6 @@ default-features = false
 [profile.release]
 lto = true
 strip = "symbols"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"

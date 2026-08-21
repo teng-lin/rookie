@@ -24,3 +24,7 @@ e2e-appbound-steering = ["rookie-cookies/e2e-appbound-steering"]
 [[bin]]
 name = "rookie-cookies"
 path = "src/main.rs"
+
+[lints]
+workspace = true
+

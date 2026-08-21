@@ -154,6 +154,7 @@ mod deterministic_dpapi {
       pbData: ptr::null_mut(),
     };
 
+    // SAFETY: `input` references valid initialized memory and `output` receives the protected blob.
     unsafe {
       CryptProtectData(
         &input,
@@ -168,8 +169,10 @@ mod deterministic_dpapi {
     }
     assert!(!output.pbData.is_null(), "CryptProtectData returned null");
 
+    // SAFETY: `output.pbData` is non-null and points to `output.cbData` initialized bytes from CryptProtectData.
     let protected =
       unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    // SAFETY: `output.pbData` is a valid allocation from CryptProtectData to be freed.
     let free_result = unsafe { LocalFree(output.pbData.cast()) };
     assert!(free_result.is_null(), "LocalFree failed");
     protected

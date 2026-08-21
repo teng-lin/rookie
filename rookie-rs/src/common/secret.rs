@@ -61,7 +61,7 @@ impl SecretBytes {
       return Err(SecretUtf8Error);
     }
     let bytes = self.bytes.take().expect("secret bytes are present");
-    // Safety: validation immediately above covered this exact byte vector.
+    // SAFETY: validation immediately above covered this exact byte vector.
     let value = unsafe { String::from_utf8_unchecked(bytes) };
     Ok(SecretString::new(value))
   }
@@ -99,7 +99,7 @@ impl SecretBytes {
       bytes[suffix_len..].zeroize();
       bytes.truncate(suffix_len);
     }
-    // Safety: the retained suffix was validated before the in-place move.
+    // SAFETY: the retained suffix was validated before the in-place move.
     Ok(SecretString::new(unsafe {
       String::from_utf8_unchecked(bytes)
     }))
@@ -191,7 +191,7 @@ impl Drop for SecretString {
     if let Some(value) = self.value.as_mut() {
       #[cfg(test)]
       let original_len = value.len();
-      // Safety: replacing every byte with zero preserves UTF-8 validity, and
+      // SAFETY: replacing every byte with zero preserves UTF-8 validity, and
       // the vector is cleared before this method returns.
       let bytes = unsafe { value.as_mut_vec() };
       bytes.as_mut_slice().zeroize();

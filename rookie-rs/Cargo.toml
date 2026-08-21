@@ -121,3 +121,6 @@ name = "simple"
 
 [[example]]
 name = "from_path"
+
+[lints]
+workspace = true

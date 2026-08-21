@@ -292,11 +292,11 @@ where
 
 fn open_database(db_path: &Path, force_kill: bool, runtime: &BoundaryRuntime<'_>) -> Result<EseDb> {
   runtime.check()?;
-  let lock_status = unsafe {
-    // `force_kill` comes from the explicitly opted-in public extraction API.
-    crate::windows::restart_manager::release_file_lock(db_path, force_kill, runtime)
-  }
-  .with_context(|| format!("Unable to inspect locks on WebCache database {REDACTED_PATH}"))?;
+  // SAFETY: `db_path` is a valid path to inspect, `force_kill` is the caller-selected
+  // disruption policy, and Restart Manager owns the registered resources for the duration of the call.
+  let lock_status =
+    unsafe { crate::windows::restart_manager::release_file_lock(db_path, force_kill, runtime) }
+      .with_context(|| format!("Unable to inspect locks on WebCache database {REDACTED_PATH}"))?;
   runtime.check()?;
   let released_processes = require_unlocked_database(db_path, lock_status)?;
 
