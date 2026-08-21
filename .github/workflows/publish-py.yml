@@ -7,6 +7,11 @@ on:
         description: Version to publish from the matching v-prefixed tag
         required: true
         type: string
+      recovery_run_id:
+        description: Failed publish-py.yml run ID whose exact artifacts should be resumed
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -55,6 +60,7 @@ jobs:
   # release/platform-contract.json is the one place the wheel target lists
   # are spelled out now — see scripts/platform_contract.py.
   load-contract:
+    if: inputs.recovery_run_id == ''
     runs-on: ubuntu-latest
     outputs:
       linux_matrix: ${{ steps.matrix.outputs.linux_matrix }}
@@ -73,6 +79,7 @@ jobs:
           echo "macos_matrix=$(python3 scripts/platform_contract.py --emit-matrix wheel-darwin)" >>"$GITHUB_OUTPUT"
 
   linux:
+    if: inputs.recovery_run_id == ''
     name: Build Linux wheel (${{ matrix.target }})
     needs: [preflight, load-contract]
     runs-on: ${{ matrix.runner }}
@@ -100,9 +107,10 @@ jobs:
           name: python-linux-${{ matrix.target }}
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   windows:
+    if: inputs.recovery_run_id == ''
     name: Build Windows wheel (${{ matrix.target }})
     needs: [preflight, load-contract]
     runs-on: windows-latest
@@ -130,9 +138,10 @@ jobs:
           name: python-windows-${{ matrix.target }}
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   macos:
+    if: inputs.recovery_run_id == ''
     name: Build macOS wheel (${{ matrix.target }})
     needs: [preflight, load-contract]
     runs-on: macos-latest
@@ -159,9 +168,10 @@ jobs:
           name: python-macos-${{ matrix.target }}
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   sdist:
+    if: inputs.recovery_run_id == ''
     name: Build source distribution
     needs: preflight
     runs-on: ubuntu-latest
@@ -183,9 +193,10 @@ jobs:
           name: python-sdist
           path: bindings/python/dist
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
 
   release:
+    if: inputs.recovery_run_id == ''
     name: Publish rookie-cookies ${{ inputs.version }}
     needs: [linux, windows, macos, sdist]
     runs-on: ubuntu-latest
@@ -238,7 +249,7 @@ jobs:
           name: python-scan-manifest
           path: release-scan-manifest.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
       - name: Run consumer harness against manifest-verified artifacts
         run: |
           python3 scripts/run-consumer-harness.py \
@@ -265,9 +276,183 @@ jobs:
           name: python-ci-proof
           path: ci-proof.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
       - name: Publish distributions with trusted publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
           verbose: true
+
+      - name: Verify published PyPI digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if python3 scripts/reconcile-pypi.py \
+              --project rookie-cookies \
+              --version "$RELEASE_VERSION" \
+              --manifest release-scan-manifest.json \
+              --artifacts-root "$GITHUB_WORKSPACE" \
+              --require-complete; then
+              exit 0
+            fi
+            test "$attempt" -eq 6 || sleep $((attempt * 5))
+          done
+          exit 1
+
+  recovery:
+    if: inputs.recovery_run_id != ''
+    name: Recover rookie-cookies ${{ inputs.version }} from run ${{ inputs.recovery_run_id }}
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/project/rookie-cookies/${{ inputs.version }}/
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify the failed source run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::recovery_run_id must be a positive Actions run ID"
+            exit 1
+          fi
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID")"
+          if ! jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$GITHUB_SHA" \
+            --arg tag "v$RELEASE_VERSION" \
+            '
+              .repository.full_name == $repository
+              and .path == ".github/workflows/publish-py.yml"
+              and .event == "workflow_dispatch"
+              and .head_sha == $sha
+              and .head_branch == $tag
+              and .status == "completed"
+              and (
+                .conclusion == "failure"
+                or .conclusion == "cancelled"
+                or .conclusion == "timed_out"
+              )
+            ' <<<"$run_json" >/dev/null; then
+            echo "::error::run $RECOVERY_RUN_ID is not a completed failed publish-py.yml run for v$RELEASE_VERSION at $GITHUB_SHA"
+            exit 1
+          fi
+
+      - name: Download original Linux wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: python-linux-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download original Windows wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: python-windows-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download original macOS wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: python-macos-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download original source distribution
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-sdist
+          path: dist
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download original release manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-scan-manifest
+          path: recovery
+          run-id: ${{ inputs.recovery_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify original manifest and distributions
+        run: |
+          python3 scripts/run-consumer-harness.py \
+            --manifest recovery/release-scan-manifest.json \
+            --artifacts-root "$GITHUB_WORKSPACE"
+
+      - name: Verify non-spoofable CI proof for the recovery bundle
+        run: |
+          python3 scripts/write-ci-proof.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit-sha "$GITHUB_SHA" \
+            --manifest recovery/release-scan-manifest.json \
+            --output recovery/ci-proof.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Reconcile PyPI and stage only missing files
+        id: reconcile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/reconcile-pypi.py \
+            --project rookie-cookies \
+            --version "$RELEASE_VERSION" \
+            --manifest recovery/release-scan-manifest.json \
+            --artifacts-root "$GITHUB_WORKSPACE" \
+            --output-dir pypi-upload
+          if find pypi-upload -maxdepth 1 -type f -print -quit | grep -q .; then
+            echo "has_missing=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "has_missing=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload recovery proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-recovery-proof-${{ inputs.recovery_run_id }}
+          path: recovery/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish only missing distributions with trusted publishing
+        if: steps.reconcile.outputs.has_missing == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: pypi-upload/
+          verbose: true
+
+      - name: Verify recovered PyPI digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if python3 scripts/reconcile-pypi.py \
+              --project rookie-cookies \
+              --version "$RELEASE_VERSION" \
+              --manifest recovery/release-scan-manifest.json \
+              --artifacts-root "$GITHUB_WORKSPACE" \
+              --require-complete; then
+              exit 0
+            fi
+            test "$attempt" -eq 6 || sleep $((attempt * 5))
+          done
+          exit 1

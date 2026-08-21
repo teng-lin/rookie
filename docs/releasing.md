@@ -62,12 +62,15 @@ name and package version, while the immutability ruleset keeps that reviewed
 tag commit immutable between creation and manual dispatch — including against
 the person dispatching it.
 
-Configure these credentials without committing or pasting their values into an
-issue, pull request, or workflow log:
+Configure these publishers and credentials without committing or pasting any
+secret values into an issue, pull request, or workflow log:
 
-1. Add a crates.io API token as the `CARGO_REGISTRY_TOKEN` secret in the
-   `release` environment. crates.io requires a token-authenticated first
-   release before trusted publishing can be configured.
+1. Configure crates.io trusted publishing for owner `teng-lin`, repository
+   `rookie-cookies`, workflow `publish-crate.yml`, and environment `release`.
+   The workflow exchanges GitHub's OIDC identity for a temporary crates.io
+   token and revokes it when the job ends; it does not use a stored
+   `CARGO_REGISTRY_TOKEN` secret. Delete that legacy environment secret if it
+   still exists.
 2. On PyPI, create a pending GitHub Trusted Publisher for project
    `rookie-cookies`, owner `teng-lin`, repository `rookie-cookies`, workflow
    `publish-py.yml`, and environment `release`. No PyPI token is needed by the
@@ -85,10 +88,11 @@ issue, pull request, or workflow log:
    the package, immediately configure its trusted publisher and delete the
    `NPM_TOKEN` environment secret.
 
-Local `~/.pypirc`, `~/.npmrc`, and Cargo credential files are not automatically
-available to GitHub Actions. Keep them owner-readable only and transfer tokens
-through GitHub's encrypted secret form, never through the command line history
-or repository files.
+Local `~/.pypirc`, `~/.npmrc`, and Cargo credential files are not available to
+GitHub Actions. crates.io, PyPI, and established npm packages use OIDC and need
+no copied credential; only the guarded first-package npm bootstrap uses a
+stored token. Enter that token through GitHub's encrypted secret form, never
+through command-line history or repository files.
 
 ## Prepare a release
 
@@ -641,15 +645,6 @@ This workflow only triggers on `workflow_dispatch`, so it cannot be exercised
 by normal pull request CI. Review its YAML carefully and dispatch-test it
 against a real tag before relying on it for a release.
 
-## After the first crates.io release
-
-Configure crates.io trusted publishing for `publish-crate.yml`. Then update the
-crate workflow to use crates.io's OIDC authentication action and delete the
-long-lived `CARGO_REGISTRY_TOKEN` GitHub secret.
-
-The pending PyPI publisher becomes a normal trusted publisher automatically
-after its first successful run.
-
 ## Partial failures
 
 Never blindly rerun a failed publish job. First check the registry because an
@@ -663,14 +658,25 @@ later failure, configure its trusted publisher and re-dispatch without
 `bootstrap_package`. Do not rebuild by hand or attempt to overwrite any
 package version; npm, PyPI, and crates.io versions are immutable.
 
-For PyPI, `publish-py.yml` no longer passes `skip-existing: true` to
-`pypa/gh-action-pypi-publish`: a partial failure (say, 3 of 6 files uploaded
-before a timeout) means re-dispatching the whole workflow now hits PyPI's hard
-"File already exists" rejection on every already-uploaded file, rather than
-those being silently treated as already-there. Check `pypi.org/project/
-rookie-cookies/<version>/#files` first to see which files actually made it.
-If some are missing, download the failed run's `python-sdist`/
-`python-linux-*`/`python-windows-*`/`python-macos-*` workflow artifacts and
-publish only the missing files by hand with `twine upload <missing files>`
-rather than re-dispatching the workflow against a distribution set that
-partially already exists.
+For PyPI, recover through the same trusted-publisher workflow by passing the
+failed Actions run ID. Dispatch from the same immutable release tag used by the
+failed run:
+
+```console
+gh workflow run publish-py.yml --ref "v$VERSION" \
+  -f version="$VERSION" -f recovery_run_id=<failed-run-id>
+```
+
+Recovery never rebuilds a wheel or sdist. It verifies that the source run was a
+completed failed `publish-py.yml` dispatch for the same tag and source SHA,
+downloads that run's exact distributions and release manifest, reruns the
+consumer harness and CI proof, and compares each local SHA-256 with PyPI. An
+existing identical file is accepted, a digest mismatch or unexpected file
+fails closed, and only absent files are submitted through PyPI trusted
+publishing. The workflow performs the same digest comparison again after the
+upload. Python release artifacts and proofs are retained for 30 days so this
+recovery path does not depend on rebuilding immutable release files.
+
+If the failed run has no `python-scan-manifest` artifact, it failed before the
+publish job reached any registry mutation; fix the pre-publication failure and
+run a normal dispatch without `recovery_run_id`.
