@@ -4,6 +4,8 @@ use super::super::chromium_projection::{
 };
 use super::*;
 use crate::browser::chromium_crypto::LegacySharedKeyProvider;
+#[cfg(target_os = "linux")]
+use crate::browser::chromium_crypto::KeyProvider;
 #[cfg(target_os = "windows")]
 use crate::browser::chromium_database_acquisition::{WindowsDatabaseLocked, WindowsLockedFile};
 #[cfg(target_os = "windows")]

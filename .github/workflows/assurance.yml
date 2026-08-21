@@ -71,6 +71,8 @@ jobs:
           workspaces: fuzz
       - name: Install pinned cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Build sanitizer-backed fuzz target
+        run: cargo +nightly-2025-11-23 fuzz build ${{ matrix.target }}
       - name: Run sanitizer-backed fuzz target
         env:
           FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '300' || '45' }}
