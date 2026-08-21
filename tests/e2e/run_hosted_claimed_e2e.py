@@ -11,6 +11,7 @@ persistent profile; IE uses a pinned 32-bit IEDriver server in Edge IE mode.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import shlex
@@ -252,25 +253,24 @@ def chromium_native_command(
         "--no-first-run",
         "--disable-default-apps",
         f"--user-data-dir={user_data}",
-        f"--remote-debugging-port={remote_debugging_port}",
-        url,
     ]
     if platform.startswith("linux"):
-        cmd.insert(-2, "--password-store=gnome-libsecret")
+        cmd.append("--password-store=gnome-libsecret")
         if "microsoft-edge" in Path(exe).name:
             # The image's Edge launcher can remain on its first-run UI under
             # Xvfb without ever servicing the startup URL or DevTools socket.
-            cmd.insert(-2, "--headless=new")
-        if has_xvfb:
-            cmd = ["xvfb-run", "-a", *cmd]
+            cmd.append("--headless=new")
     elif platform == "darwin":
         # Chromium's test keychain returns the same mock_password planted above,
         # avoiding GUI keychain ACL prompts while retaining real v10 encryption.
-        cmd.insert(-2, "--use-mock-keychain")
+        cmd.append("--use-mock-keychain")
     elif platform == "win32":
         # Hosted Windows runners execute as a service without an interactive
         # desktop. Native browsers need their own modern headless mode there.
-        cmd.insert(-2, "--headless=new")
+        cmd.append("--headless=new")
+    cmd.extend((f"--remote-debugging-port={remote_debugging_port}", url))
+    if platform.startswith("linux") and has_xvfb:
+        cmd = ["xvfb-run", "-a", *cmd]
     return cmd
 
 
@@ -518,33 +518,198 @@ def esent_copy_command(source: Path, destination: Path) -> list[str]:
     return ["esentutl.exe", "/y", str(source), f"/d{destination}", "/o"]
 
 
-def webcache_host_commands() -> list[list[str]]:
-    # Depending on the Windows image revision, the per-user ESE instance is
-    # hosted by either taskhostw or a COM surrogate after Edge/IE has exited.
+def esent_recovery_command(snapshot_dir: Path) -> list[str]:
     return [
-        ["taskkill", "/F", "/IM", "taskhostw.exe"],
-        ["taskkill", "/F", "/IM", "dllhost.exe"],
+        "esentutl.exe",
+        "/r",
+        "V01",
+        f"/l{snapshot_dir}",
+        f"/s{snapshot_dir}",
+        f"/d{snapshot_dir}",
+        "/o",
     ]
 
 
-def snapshot_internet_explorer_store(cookie_file: Path) -> Path:
-    """Copy the real ESE store out of the Windows WebCache share lock."""
+class _FileTime(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
 
-    for command in webcache_host_commands():
-        subprocess.run(command, check=False, capture_output=True)
-    time.sleep(2)
-    destination = (
-        Path(tempfile.gettempdir()) / f"rookie-ie-WebCacheV01-{time.time_ns()}.dat"
-    )
-    completed = subprocess.run(
-        esent_copy_command(cookie_file, destination),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+
+class _RmUniqueProcess(ctypes.Structure):
+    _fields_ = [("pid", ctypes.c_uint32), ("started", _FileTime)]
+
+
+class _RmProcessInfo(ctypes.Structure):
+    _fields_ = [
+        ("process", _RmUniqueProcess),
+        ("app_name", ctypes.c_wchar * 256),
+        ("service_name", ctypes.c_wchar * 64),
+        ("application_type", ctypes.c_uint32),
+        ("app_status", ctypes.c_uint32),
+        ("terminal_session_id", ctypes.c_uint32),
+        ("restartable", ctypes.c_int),
+    ]
+
+
+def locking_process_ids(path: Path) -> list[int]:
+    """Return only processes holding this WebCache file via Restart Manager."""
+
+    if sys.platform != "win32":
+        raise SystemExit("Restart Manager lock discovery requires Windows")
+    restart_manager = ctypes.WinDLL("rstrtmgr")  # type: ignore[attr-defined]
+    start_session = restart_manager.RmStartSession
+    register_resources = restart_manager.RmRegisterResources
+    get_list = restart_manager.RmGetList
+    end_session = restart_manager.RmEndSession
+    start_session.argtypes = [
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_uint32,
+        ctypes.c_wchar_p,
+    ]
+    register_resources.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_wchar_p),
+        ctypes.c_uint32,
+        ctypes.POINTER(_RmUniqueProcess),
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    get_list.argtypes = [
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(_RmProcessInfo),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    end_session.argtypes = [ctypes.c_uint32]
+    start_session.restype = register_resources.restype = ctypes.c_uint32
+    get_list.restype = end_session.restype = ctypes.c_uint32
+
+    session = ctypes.c_uint32()
+    session_key = ctypes.create_unicode_buffer(33)
+    result = start_session(ctypes.byref(session), 0, session_key)
+    if result != 0:
+        raise SystemExit(f"Restart Manager could not start a session: {result}")
+    try:
+        resources = (ctypes.c_wchar_p * 1)(str(path))
+        result = register_resources(session, 1, resources, 0, None, 0, None)
+        if result != 0:
+            raise SystemExit(f"Restart Manager could not register WebCache: {result}")
+
+        needed = ctypes.c_uint32()
+        count = ctypes.c_uint32()
+        reboot_reasons = ctypes.c_uint32()
+        result = get_list(
+            session,
+            ctypes.byref(needed),
+            ctypes.byref(count),
+            None,
+            ctypes.byref(reboot_reasons),
+        )
+        if result == 0:
+            return []
+        if result != 234:  # ERROR_MORE_DATA
+            raise SystemExit(f"Restart Manager could not inspect WebCache: {result}")
+
+        for _attempt in range(3):
+            count.value = needed.value
+            processes = (_RmProcessInfo * needed.value)()
+            result = get_list(
+                session,
+                ctypes.byref(needed),
+                ctypes.byref(count),
+                processes,
+                ctypes.byref(reboot_reasons),
+            )
+            if result == 0:
+                return sorted(
+                    {
+                        int(processes[index].process.pid)
+                        for index in range(count.value)
+                        if processes[index].process.pid != os.getpid()
+                    }
+                )
+            if result != 234:
+                break
+        raise SystemExit(
+            f"Restart Manager could not enumerate WebCache locks: {result}"
+        )
+    finally:
+        end_session(session)
+
+
+def webcache_host_commands(process_ids: list[int]) -> list[list[str]]:
+    return [
+        ["taskkill", "/F", "/PID", str(process_id)]
+        for process_id in sorted(set(process_ids))
+        if process_id > 0
+    ]
+
+
+def release_webcache_locks(cookie_file: Path) -> None:
+    # The hosted runner is disposable, but taskhostw and dllhost are generic
+    # system hosts. Restart Manager scopes termination to the exact processes
+    # that own this IE session's WebCache file.
+    for _attempt in range(3):
+        process_ids = locking_process_ids(cookie_file)
+        if not process_ids:
+            return
+        for command in webcache_host_commands(process_ids):
+            subprocess.run(command, check=False, capture_output=True, timeout=15)
+        time.sleep(1)
+    remaining = locking_process_ids(cookie_file)
+    if remaining:
+        raise SystemExit(f"WebCache remains locked by process IDs: {remaining}")
+
+
+def _esent_details(completed: subprocess.CompletedProcess[str]) -> str:
+    return completed.stderr.strip() or completed.stdout.strip() or "<no output>"
+
+
+def snapshot_internet_explorer_store(cookie_file: Path) -> Path:
+    """Copy and recover the real IE ESE store plus its transaction logs."""
+
+    release_webcache_locks(cookie_file)
+    snapshot_dir = Path(tempfile.mkdtemp(prefix="rookie-ie-WebCache-"))
+    destination = snapshot_dir / cookie_file.name
+    for source in cookie_file.parent.glob("V01*"):
+        if source.is_file():
+            shutil.copy2(source, snapshot_dir / source.name)
+    try:
+        completed = subprocess.run(
+            esent_copy_command(cookie_file, destination),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        details = (error.stderr or error.stdout or "<no output>").strip()
+        raise SystemExit(
+            f"esentutl timed out while copying IE WebCache: {details}"
+        ) from error
     if completed.returncode != 0 or not destination.is_file():
-        details = completed.stderr.strip() or completed.stdout.strip() or "<no output>"
-        raise SystemExit(f"esentutl could not snapshot IE WebCache: {details}")
+        raise SystemExit(
+            f"esentutl could not snapshot IE WebCache: {_esent_details(completed)}"
+        )
+
+    try:
+        recovered = subprocess.run(
+            esent_recovery_command(snapshot_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        details = (error.stderr or error.stdout or "<no output>").strip()
+        raise SystemExit(
+            f"esentutl timed out while recovering IE WebCache: {details}"
+        ) from error
+    if recovered.returncode != 0:
+        raise SystemExit(
+            f"esentutl could not recover IE WebCache: {_esent_details(recovered)}"
+        )
     return destination
 
 

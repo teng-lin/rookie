@@ -605,7 +605,7 @@ def configure_internet_explorer(spec: dict) -> None:
     driver = driver_root / "IEDriverServer.exe"
     if not driver.is_file():
         print(f"+ download {driver_url}", flush=True)
-        with urllib.request.urlopen(driver_url) as response:
+        with urllib.request.urlopen(driver_url, timeout=60) as response:
             archive_bytes = response.read()
         actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
         if actual_sha256 != expected_sha256:

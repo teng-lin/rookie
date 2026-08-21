@@ -153,12 +153,14 @@ def seed_once(
             capabilities(engine, os.environ.get("ROOKIE_E2E_EDGE_BINARY"), url),
             timeout=60,
         )
-        value = response.get("value", {})
+        value = response.get("value")
+        value = value if isinstance(value, dict) else {}
         session_id = value.get("sessionId") or response.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             raise WebDriverError(f"WebDriver did not return a session id: {response!r}")
         deadline = time.time() + 30
         while time.time() < deadline:
+            cookie = None
             try:
                 cookie_response = request_json(
                     port,
@@ -167,12 +169,12 @@ def seed_once(
                     timeout=5,
                 )
                 cookie = cookie_response.get("value")
-                if isinstance(cookie, dict) and cookie.get("value") == "bar":
-                    # Capture the persistent store before deleting the
-                    # session. IE mode can checkpoint it after navigation.
-                    return wait_for_changed_cookie_file(engine, before, timeout=30)
             except WebDriverError:
                 pass
+            if isinstance(cookie, dict) and cookie.get("value") == "bar":
+                # Capture the persistent store before deleting the session. IE
+                # mode can checkpoint it after navigation.
+                return wait_for_changed_cookie_file(engine, before, timeout=30)
             time.sleep(0.5)
         raise WebDriverError("browser never exposed rookie_ci=bar through WebDriver")
     finally:

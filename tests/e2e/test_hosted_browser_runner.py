@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -63,12 +64,77 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            hosted.webcache_host_commands(),
+            hosted.esent_recovery_command(destination.parent),
             [
-                ["taskkill", "/F", "/IM", "taskhostw.exe"],
-                ["taskkill", "/F", "/IM", "dllhost.exe"],
+                "esentutl.exe",
+                "/r",
+                "V01",
+                f"/l{destination.parent}",
+                f"/s{destination.parent}",
+                f"/d{destination.parent}",
+                "/o",
             ],
         )
+        self.assertEqual(
+            hosted.webcache_host_commands([4321, 1234, 4321, -1]),
+            [
+                ["taskkill", "/F", "/PID", "1234"],
+                ["taskkill", "/F", "/PID", "4321"],
+            ],
+        )
+
+    def test_ie_null_new_session_value_is_a_webdriver_error(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 1
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(webdriver, "free_port", return_value=4444),
+            mock.patch.object(webdriver.subprocess, "Popen", return_value=proc),
+            mock.patch.object(webdriver, "wait_for_driver"),
+            mock.patch.object(webdriver, "capabilities", return_value={}),
+            mock.patch.object(webdriver, "request_json", return_value={"value": None}),
+        ):
+            with self.assertRaisesRegex(
+                webdriver.WebDriverError, "did not return a session id"
+            ):
+                webdriver.seed_once(
+                    "internet_explorer",
+                    "IEDriverServer.exe",
+                    "http://127.0.0.1/set",
+                    Path(tmp) / "driver.log",
+                    {},
+                )
+
+    def test_ie_cookie_store_timeout_is_not_reported_as_query_failure(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 1
+        responses = [
+            {"value": {"sessionId": "session"}},
+            {"value": {"name": "rookie_ci", "value": "bar"}},
+        ]
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(webdriver, "free_port", return_value=4444),
+            mock.patch.object(webdriver.subprocess, "Popen", return_value=proc),
+            mock.patch.object(webdriver, "wait_for_driver"),
+            mock.patch.object(webdriver, "capabilities", return_value={}),
+            mock.patch.object(webdriver, "request_json", side_effect=responses),
+            mock.patch.object(
+                webdriver,
+                "wait_for_changed_cookie_file",
+                side_effect=webdriver.WebDriverError("cookie store did not update"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                webdriver.WebDriverError, "cookie store did not update"
+            ):
+                webdriver.seed_once(
+                    "internet_explorer",
+                    "IEDriverServer.exe",
+                    "http://127.0.0.1/set",
+                    Path(tmp) / "driver.log",
+                    {},
+                )
 
     def test_non_linux_chromium_needs_neither_xvfb_nor_libsecret(self) -> None:
         command = hosted.chromium_native_command(

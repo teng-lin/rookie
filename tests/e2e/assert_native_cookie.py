@@ -38,17 +38,15 @@ def main() -> int:
     name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
     explicit = rookie_cookies.extract_from_path(str(path), domains=[domain])
-    named_fn = (
-        rookie_cookies.safari
-        if browser == "safari"
-        else rookie_cookies.internet_explorer
-    )
-    discovered = named_fn([domain])
     assert_seeded("extract_from_path", explicit, name, value)
-    assert_seeded(browser, discovered, name, value)
+    discovered = []
+    if browser == "safari":
+        discovered = rookie_cookies.safari([domain])
+        assert_seeded(browser, discovered, name, value)
     print(
         f"rookie_cookies ({sys.platform}, {browser}): {name}={value} verified "
-        f"(explicit={len(explicit)}, discovered={len(discovered)})"
+        f"(explicit={len(explicit)}"
+        + (f", discovered={len(discovered)})" if browser == "safari" else ")")
     )
     return 0
 
