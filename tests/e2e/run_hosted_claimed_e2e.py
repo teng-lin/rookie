@@ -6,7 +6,7 @@ CLI. Playwright explicitly does not guarantee arbitrary executablePath builds,
 and a branded browser can hang before its control pipe becomes ready even when
 the browser has successfully started. Gecko forks use their native CLI too.
 Safari launches the normal system application so the seed reaches its
-persistent profile; IE uses the image-provided IEDriver server in Edge IE mode.
+persistent profile; IE uses a pinned 32-bit IEDriver server in Edge IE mode.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from webdriver_cookie import (
     WebDriverError,
     file_snapshot,
     seed_with_startup_retry,
+    stop_browser,
     wait_for_changed_cookie_file,
 )
 
@@ -256,6 +257,10 @@ def chromium_native_command(
     ]
     if platform.startswith("linux"):
         cmd.insert(-2, "--password-store=gnome-libsecret")
+        if "microsoft-edge" in Path(exe).name:
+            # The image's Edge launcher can remain on its first-run UI under
+            # Xvfb without ever servicing the startup URL or DevTools socket.
+            cmd.insert(-2, "--headless=new")
         if has_xvfb:
             cmd = ["xvfb-run", "-a", *cmd]
     elif platform == "darwin":
@@ -509,6 +514,28 @@ def assert_native(cookie_file: Path, browser: str) -> None:
     )
 
 
+def esent_copy_command(source: Path, destination: Path) -> list[str]:
+    return ["esentutl.exe", "/y", str(source), f"/d{destination}", "/o"]
+
+
+def snapshot_internet_explorer_store(cookie_file: Path) -> Path:
+    """Copy the real ESE store out of the Windows WebCache share lock."""
+
+    destination = (
+        Path(tempfile.gettempdir()) / f"rookie-ie-WebCacheV01-{time.time_ns()}.dat"
+    )
+    completed = subprocess.run(
+        esent_copy_command(cookie_file, destination),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0 or not destination.is_file():
+        details = completed.stderr.strip() or completed.stdout.strip() or "<no output>"
+        raise SystemExit(f"esentutl could not snapshot IE WebCache: {details}")
+    return destination
+
+
 def run() -> int:
     browser = os.environ.get("ROOKIE_E2E_BROWSER_ID", "")
     engine = os.environ.get("ROOKIE_E2E_ENGINE", "chromium")
@@ -539,6 +566,8 @@ def run() -> int:
         elif engine == "internet_explorer":
             before = file_snapshot(engine)
             cookie_file = seed_with_startup_retry(engine, exe, url, before)
+            stop_browser(engine)
+            cookie_file = snapshot_internet_explorer_store(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
             assert_native(cookie_file, browser)

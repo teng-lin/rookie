@@ -92,7 +92,7 @@ try {
   // Browser-level Storage.getCookies hangs in several macOS Chromium forks,
   // even after Target.createTarget succeeds. Give the network request time to
   // finish and let the Python harness verify the persisted SQLite row instead.
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  await new Promise((resolve) => setTimeout(resolve, 10_000));
   console.log(`native CDP navigation requested ${url}`);
 } finally {
   // A protocol-level close gives the native process a chance to checkpoint

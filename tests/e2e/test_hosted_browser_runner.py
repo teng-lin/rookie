@@ -38,6 +38,31 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         self.assertNotIn("--remote-debugging-pipe", command)
         self.assertEqual(command[-1], "http://127.0.0.1:8765/set")
 
+    def test_linux_edge_uses_headless_mode_to_bypass_first_run_ui(self) -> None:
+        command = hosted.chromium_native_command(
+            "/usr/bin/microsoft-edge",
+            Path("/tmp/profile"),
+            "http://127.0.0.1:8765/set",
+            platform="linux",
+            has_xvfb=True,
+            remote_debugging_port=9222,
+        )
+        self.assertIn("--headless=new", command)
+
+    def test_ie_snapshot_uses_windows_esent_copy_mode(self) -> None:
+        source = Path(r"C:\WebCache\WebCacheV01.dat")
+        destination = Path(r"D:\temp\rookie-ie.dat")
+        self.assertEqual(
+            hosted.esent_copy_command(source, destination),
+            [
+                "esentutl.exe",
+                "/y",
+                str(source),
+                f"/d{destination}",
+                "/o",
+            ],
+        )
+
     def test_non_linux_chromium_needs_neither_xvfb_nor_libsecret(self) -> None:
         command = hosted.chromium_native_command(
             "/Applications/Browser",
