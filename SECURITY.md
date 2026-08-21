@@ -2,10 +2,10 @@
 
 ## Supported versions
 
-Security fixes are applied to the current `0.6.x` prerelease line and the
-default branch. Older releases and the archived upstream project are not
-supported. If a fix cannot be backported safely, maintainers may require an
-upgrade to the next `0.6.x` release.
+Security fixes are applied to the current release line and the default branch.
+Older releases and the archived upstream project are not supported. If a fix
+cannot be backported safely, maintainers may require an upgrade to the latest
+release.
 
 ## Reporting a vulnerability
 

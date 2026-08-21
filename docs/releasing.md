@@ -17,8 +17,8 @@ One version across three ecosystems:
 CLI GitHub-release assets: `publish-cli.yml`. Retry one missing CLI target
 from `main` with `retry-cli-asset.yml`.
 
-The tree may still publish `0.6.0-alpha.x` while documenting the **0.6.0** API
-surface.
+Exact release versions come from workspace metadata and are verified by
+`scripts/check-release.py`; this runbook does not hard-code the current version.
 
 Registry releases are immutable and the npm publication is not atomic. Every
 release workflow therefore runs only by manual dispatch, and every one refuses
@@ -170,7 +170,7 @@ gh workflow run publish-npm.yml --ref main -f version="$VERSION"
 Do not start all three commands together. Wait for each workflow to finish and
 verify its registry before dispatching the next one.
 
-For pre-releases (such as `0.6.0-alpha.1`), `publish-npm.yml` derives the npm
+For pre-releases (such as `1.2.3-alpha.1`), `publish-npm.yml` derives the npm
 dist-tag from the version's pre-release identifier (e.g., `alpha`) and refuses
 to publish a pre-release under `latest`. An explicit tag can be supplied
 instead via `-f tag=`:

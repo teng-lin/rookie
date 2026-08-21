@@ -4,7 +4,7 @@
 - **Date:** 2026-08-20 (reconciled after the public job/projection refactor)
 - **Status:** Maintained current-state reference
 - **Workspace:** repository root
-- **Crate:** `rookie-cookies` at `rookie-rs/` (workspace version `0.6.0-beta.1`)
+- **Crate:** `rookie-cookies` at `rookie-rs/` (workspace metadata is authoritative for the current version)
 - **Kind:** descriptive map of the system as it exists today, not a proposal for a new feature
 - **Does not amend:** ADR 0001–0005, `rookie-rs/public-api/*.txt`, `schema/report-dto.schema.json`, `rookie-rs/browser_registry.json`
 
@@ -341,7 +341,7 @@ Canonical browser IDs (ADR 0001 §2) include `arc, brave, cachy, chrome, chromiu
 | `extract_report` / `browser_report` / bindings `report(...)` | `chrome_profile()` (deprecated shim onto `extract_report`) |
 | `ReadResult.header(&SendContext)` / CLI `header` subcommand | No top-level binding `header()`. No crate-root `fn get` or `fn report` |
 
-Session policy is orthogonal to profile selection (ADR 0004 Decision 7, **amended in 0.6.0**): **no-profile** `read` uses the compatibility flatten (set-equals `chrome()` / `extract` when `include_expired=true`, persistent / legacy-eligible only); **with-profile** `read` selects one profile via `collect_extraction` + `finalize_outcomes_with_runtime`. Neither route goes through `extract_report` any more — both stop at `FinalizedCookieRecord` and project `DetailedCookie`. Whether the profile's declared session store is acquired is answered separately by `SessionPolicy` (`PersistentOnly` by default, enforced in `registry/gecko.rs::gecko_profile_plan` **before lookup**, so the file is never opened unless asked), and it applies to both routes: `read(ReadRequest::browser("firefox").include_session())` with no profile now works, and naming a profile alone no longer imports session cookies. The superseded 0.6-beta text coupled the two ("with-profile" implied session, "naming the legacy-first profile can return more cookies than omitting it", "session import must pass `profile=`") — that coupling also discarded `CookieContext` through the frozen report DTO, which is why it was replaced rather than kept. Session import now passes `include_session()` / `include_session=True`.
+Session policy is orthogonal to profile selection (ADR 0004 Decision 7): **no-profile** `read` uses the compatibility flatten (set-equals `chrome()` / `extract` when `include_expired=true`, persistent / legacy-eligible only); **with-profile** `read` selects one profile via `collect_extraction` + `finalize_outcomes_with_runtime`. Neither route goes through `extract_report` any more — both stop at `FinalizedCookieRecord` and project `DetailedCookie`. Whether the profile's declared session store is acquired is answered separately by `SessionPolicy` (`PersistentOnly` by default, enforced in `registry/gecko.rs::gecko_profile_plan` **before lookup**, so the file is never opened unless asked), and it applies to both routes: `read(ReadRequest::browser("firefox").include_session())` with no profile works, and naming a profile alone does not import session cookies. Earlier prerelease text coupled the two ("with-profile" implied session, "naming the legacy-first profile can return more cookies than omitting it", "session import must pass `profile=`") — that coupling also discarded `CookieContext` through the frozen report DTO, which is why it was replaced rather than kept. Session import now passes `include_session()` / `include_session=True`.
 
 `load()` retains its historical browser set and concatenation order; new browsers do not enter it. `load_report()` covers every registered browser on the running OS.
 
@@ -1669,7 +1669,7 @@ From the root README and ADRs:
 - `*_based` / `any_browser` exist in 0.6 and are deprecated for 0.7.
 - IE functions exist in 0.6 and are deprecated.
 - `chrome_profile` is already `#[deprecated(since = "0.6.0", note = "use extract_report(...) or browser_report(...)")]`.
-- The workspace is currently `0.6.0-beta.1`; snippets document the **0.6.0** recommended surface.
+- Snippets document the recommended 0.6 surface; package metadata is authoritative for an exact build version.
 
 No feature flag is required to land this file. Rollback is `git revert` of the docs PR.
 

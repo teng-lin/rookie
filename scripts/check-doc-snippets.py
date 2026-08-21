@@ -457,13 +457,13 @@ def main() -> int:
     required_headings = (
         (
             repo / "bindings" / "python" / "README.md",
-            ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6"),
+            ("Recommended usage (0.6 series)", "0.5.6 API", "Migrate 0.5.6"),
         ),
         (
             repo / "bindings" / "node" / "README.md",
-            ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6"),
+            ("Recommended usage (0.6 series)", "0.5.6 API", "Migrate 0.5.6"),
         ),
-        (repo / "rookie-rs" / "README.md", ("Recommended 0.6.0", "0.5.6 API", "Migrate 0.5.6")),
+        (repo / "rookie-rs" / "README.md", ("Recommended usage (0.6 series)", "0.5.6 API", "Migrate 0.5.6")),
     )
     for path, needles in required_headings:
         text = path.read_text(encoding="utf-8")

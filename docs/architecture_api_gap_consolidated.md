@@ -2,14 +2,20 @@
 
 - **Author:** Codex
 - **Date:** 2026-08-20
-- **Status:** Validated consolidation and remediation plan
+- **Status:** Historical review record (findings remediated or superseded)
 - **Revision:** 3
 - **Scope:** Rust core, CLI, Python binding, Node binding, generated report schema, public documentation, and CI contracts
-- **Inputs:** [`architecture_api_gap_claude.md`](architecture_api_gap_claude.md), [`architecture_api_gap_codex.md`](architecture_api_gap_codex.md), and [`architecture_api_gap_grok.md`](architecture_api_gap_grok.md)
-- **Baseline:** workspace version `0.6.0-beta.1`
+- **Inputs:** `architecture_api_gap_claude.md`, `architecture_api_gap_codex.md`, and `architecture_api_gap_grok.md` (temporary review artifacts; not retained)
+- **Baseline:** the 0.6 prerelease workspace at the commit recorded in the verification section
 - **Does not amend:** ADR 0001–0005, public API snapshots, the report DTO schema, or `browser_registry.json`
 
 ---
+
+> **Historical record.** This is a point-in-time review from 2026-08-20, not
+> current operating guidance. Its major findings were subsequently remediated
+> or superseded. Use [the architecture map](architecture.md), the
+> [ADRs](adr/), [testing guide](testing.md), [release runbook](releasing.md),
+> and [security index](security.md) for the maintained contracts.
 
 ## Purpose and validation standard
 
@@ -472,7 +478,7 @@ The following are directly verified:
 2. Strict rustdoc fails on a private `fan_out` link and an unresolved `load_report` link in `load()` documentation.
 3. `browser_report` incorrectly says names and paths are not selection keys; implementation uses the ADR 0003 unified resolver.
 4. `load()` is listed as deprecated in architecture guidance but lacks `#[deprecated]`.
-5. All four READMEs still advertise `0.6.0-alpha.x` while the workspace is `0.6.0-beta.1`.
+5. At this baseline, all four READMEs hard-coded stale prerelease labels. The maintained guides now defer exact versions to package metadata.
 6. Session-cookie guidance is demonstrated with Chrome, but all 36 Chromium registry entries declare no separate session source. Only Gecko-family entries declare session JSON formats.
 7. The architecture class catalog names a nonexistent `KeyPath` credential variant and omits `Automatic` and `LocalStateFile`.
 8. Root documentation says all macOS Chromium uses Keychain v10 despite registry exceptions for Cốc Cốc and Yandex.
@@ -655,7 +661,7 @@ Corrections and qualifications:
 
 ## Verification record
 
-**Baseline:** commit `e6199b0a7b22a0b22e3d6efb1b5d449b3cf06cd1`, workspace version `0.6.0-beta.1`, host `darwin` (macOS), recorded `2026-08-20`. Working tree clean apart from untracked `docs/architecture*.md`.
+**Baseline:** commit `e6199b0a7b22a0b22e3d6efb1b5d449b3cf06cd1`, 0.6 prerelease workspace, host `darwin` (macOS), recorded `2026-08-20`. Working tree clean apart from untracked `docs/architecture*.md`.
 
 Runs from the first consolidation pass are listed with the exact command line so they can be reproduced or challenged. They were **not** re-executed during the review round below; treat any row not marked as re-verified as a first-pass claim against the same commit.
 
@@ -693,7 +699,7 @@ An initial review challenged parts of this document. Each point below was re-che
 
 The reviewer also confirmed C1–C5, C7, A3, A5, and D1 items 3–4 independently against source, and endorsed the closed-on-purpose list (no engine trait, no Chromium inventory merge, no URL-filtered `ReadRequest`, no line-budget carve, and retention of the snapshot/report/extract split). Those require no change here.
 
-Three corrections propagated back into [`architecture_api_gap_claude.md`](architecture_api_gap_claude.md), which has been amended in place with each change recorded in its own verification record:
+Three corrections propagated back into the temporary `architecture_api_gap_claude.md` source review, which was amended in place with each change recorded in its own verification record:
 
 - **§B1** described a plaintext master key persisting in the parent environment. `retrieve_via_injection` decodes `app_bound_encrypted_key`, strips the `APPB` prefix, and passes that still-encrypted blob to the child; the decrypted key is returned as `Zeroizing<Vec<u8>>` and never reaches the environment. The concurrency defect is real; the credential-exposure framing was not.
 - **§B2** claimed CLI cleanup warnings are never printed because no `log`↔`tracing` bridge is installed. `cli/Cargo.toml` does not disable default features, so `tracing-subscriber`'s `tracing-log` is active and `fmt()…init()` installs the bridge. The primary finding — Ctrl-C kills the process before `Drop` runs at all — is unaffected.
@@ -711,4 +717,9 @@ The consolidated document is authoritative where a source report's summary or im
 
 ## Scope note
 
-This is a validated review and implementation recommendation, not an implementation. It intentionally preserves the existing ADR decisions and distinguishes 0.6-safe changes from breaking 0.7 work. Revision 3 modifies only this consolidated document. Production source, schemas, and public API snapshots were not modified. The Claude input was amended during revision 2 as recorded above; the Codex and Grok inputs were left unchanged.
+This is a historical validated review and implementation recommendation, not
+current implementation guidance. It intentionally preserves the existing ADR
+decisions and distinguishes 0.6-safe changes from breaking 0.7 work. Revision
+3 modified only this consolidated document. Production source, schemas, and
+public API snapshots were not modified. The temporary source reviews were not
+retained; their relevant conclusions are preserved here.

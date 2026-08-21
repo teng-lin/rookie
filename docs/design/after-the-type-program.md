@@ -3,8 +3,8 @@
 - **Author:** maintainers
 - **Date:** 2026-08-19
 - **Status:** Historical program record (completed)
-- **Crate:** `rookie-rs` (workspace `/Users/blackmyth/src/rookie-cookies`)
-- **Release context:** 0.6.0-beta.1 shipped. Internal structure, not a product feature.
+- **Crate:** `rookie-rs` (crate path `rookie-rs/`)
+- **Release context:** written during the 0.6 prerelease cycle. Internal structure, not a product feature.
 - **Does not revive:** GitHub #260. No `foo.rs` → `foo/mod.rs`. No 600-line prod budget. No CI size lint. Module layout stays `foo.rs` + `foo/child.rs`.
 - **ADRs:** 0001–0004 freeze behavior. ADR 0005 (`docs/adr/0005-stage-boundary-types-and-extraction-vocabulary.md`, workspace, Status: Accepted, 2026-08-19) is type-program law — listing/extract types, the fence, rejected `trait Engine` / `T<Stage>` / file-carve, and Decision 1: `Source` embeds `origin: SourceCandidate`. This program's first PR **amends ADR 0005 in place** with leftover leaks, remaining vocabulary, compatibility homes, and Mozilla origin follow-through. Do not mint ADR 0006. Do not rewrite 0005's locked type-program decisions.
 
