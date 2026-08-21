@@ -795,10 +795,10 @@ pub(crate) fn legacy_windows_chromium_detailed_with_runtime(
   if force_kill {
     request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
   }
-  // Windows Chromium acquisition owns its own classification, exactly as
-  // `detailed_from_path_inner` does for a credential-bearing request: a locked
-  // database has to be recovered before it can be classified at all.
-  platform::chromium_from_path_detailed(request, runtime)
+  // The uniform platform facade detects the Windows credential-bearing request
+  // and delegates before classification, because a locked database has to be
+  // recovered before it can be classified at all.
+  platform::detailed_from_path(request, runtime)
 }
 
 #[cfg(test)]
