@@ -24,6 +24,7 @@ from pathlib import Path
 import rookie_cookies
 
 from cookie_manifest import find_manifest, load_manifest, verify_records
+from cookie_state import assert_cookie_state, state_from_environment
 
 
 def find_cookie_db(user_data_dir: Path) -> Path:
@@ -209,20 +210,19 @@ def main() -> int:
                 surface=f"Python {surface}",
             )
             continue
-        seeded = next((c for c in result if c["name"] == surface_name), None)
-        if seeded is None:
-            print(
-                f"{surface}: seeded cookie {surface_name!r} not found among "
-                f"{len(result)} cookies for domain {domain}",
-                file=sys.stderr,
-            )
-            return 1
-        if seeded["value"] != surface_value:
-            print(
-                f"{surface}: cookie value mismatch: expected {surface_value!r}, "
-                f"got {seeded['value']!r}",
-                file=sys.stderr,
-            )
+        try:
+            required, forbidden = state_from_environment(surface_name, surface_value)
+            if os.environ.get("ROOKIE_E2E_REQUIRED_COOKIES_JSON"):
+                assert_cookie_state(result, required, forbidden, surface=surface)
+            else:
+                assert_cookie_state(
+                    result,
+                    {surface_name: surface_value},
+                    [],
+                    surface=surface,
+                )
+        except (AssertionError, ValueError) as error:
+            print(error, file=sys.stderr)
             return 1
 
     if manifest is not None:

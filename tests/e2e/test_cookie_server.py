@@ -70,6 +70,32 @@ class CookieServerTests(unittest.TestCase):
         self.assertEqual(len(decoy), 1)
         self.assertTrue(decoy[0].startswith("rookie_decoy="))
 
+    def test_active_writer_baseline_has_replace_and_delete_subjects(self) -> None:
+        self.assertEqual(
+            SERVER.Handler.cookie_headers("/active-writer/baseline"),
+            [
+                "rookie_ci=before; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_remove=present; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_added=; Path=/; Max-Age=0; SameSite=Lax",
+            ],
+        )
+
+    def test_active_writer_mutation_replaces_adds_and_deletes(self) -> None:
+        self.assertEqual(
+            SERVER.Handler.cookie_headers("/active-writer/mutate"),
+            [
+                "rookie_ci=after; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_added=present; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
+            ],
+        )
+
+    def test_staged_wal_route_keeps_its_historical_canary_cookie(self) -> None:
+        self.assertIn(
+            "rookie_wal=live; Path=/; Max-Age=3600; SameSite=Lax",
+            SERVER.Handler.cookie_headers("/wal"),
+        )
+
 
 class ClaimedE2eHelperTests(unittest.TestCase):
     def test_keychain_accounts_preserve_configured_vendor_identity(self) -> None:

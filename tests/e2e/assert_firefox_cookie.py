@@ -17,6 +17,7 @@ from pathlib import Path
 import rookie_cookies
 
 from cookie_manifest import find_manifest, load_manifest, verify_records
+from cookie_state import assert_cookie_state, state_from_environment
 
 
 def main() -> int:
@@ -67,22 +68,27 @@ def main() -> int:
             surface="Python from_path.detailed_cookies",
         )
     else:
-        seeded = next((c for c in cookies if c["name"] == expected_name), None)
-        if seeded is None:
-            print(
-                f"seeded cookie {expected_name!r} not found among {len(cookies)} cookies "
-                f"for domain {domain}",
-                file=sys.stderr,
+        try:
+            required, forbidden = state_from_environment(expected_name, expected_value)
+            assert_cookie_state(cookies, required, forbidden, surface="cookies_from_path")
+            assert_cookie_state(legacy, required, forbidden, surface="firefox_based")
+            assert_cookie_state(
+                [record["cookie"] for record in detailed],
+                required,
+                forbidden,
+                surface="firefox_based_detailed",
             )
+            assert_cookie_state(
+                [record["cookie"] for record in direct_detailed],
+                required,
+                forbidden,
+                surface="from_path.detailed_cookies",
+            )
+        except (AssertionError, ValueError) as error:
+            print(error, file=sys.stderr)
             return 1
 
-        if seeded["value"] != expected_value:
-            print(
-                f"cookie value mismatch: expected {expected_value!r}, "
-                f"got {seeded['value']!r}",
-                file=sys.stderr,
-            )
-            return 1
+        seeded = next(c for c in cookies if c["name"] == expected_name)
 
         if legacy != cookies:
             print("legacy firefox_based disagrees with cookies_from_path", file=sys.stderr)

@@ -120,8 +120,13 @@ logs, errors, help/version, profiles, spaces/Unicode paths).
 `.github/workflows/e2e.yml` gates pull requests with real Ubuntu Chrome and
 Firefox. Pushes to `main`, the nightly schedule, and `workflow_dispatch` also
 run the macOS and Windows jobs. Every job starts a loopback cookie server,
-seeds a disposable profile, then asserts the same cookie through **Rust,
-Python, Node, and CLI**. The elevated Windows App-Bound and shadow-copy jobs
+seeds a disposable profile, then leaves the browser open while **Rust, Python,
+Node, and CLI** read the browser-owned database. The runner replaces one
+cookie, adds another, deletes a third, repeats every extraction, probes browser
+liveness, closes gracefully, and verifies that the closed snapshot matches the
+final open state. Each checkpoint logs the resolved profile/database paths,
+browser and seeder process evidence, browser/schema versions, SQLite journal
+mode, and sidecar presence. The elevated Windows App-Bound and shadow-copy jobs
 remain trusted-ref-only.
 
 | Runner | Browser and crypto | Surfaces |
@@ -133,7 +138,11 @@ remain trusted-ref-only.
 | Windows 2025 | Chrome custom profile, **legacy DPAPI `v10`** (workspace user-data-dir; App-Bound is not expected) | Rust, Python, Node, CLI |
 | Windows 2025 | Firefox | Rust, Python, Node, CLI |
 
-These jobs never inspect the operator’s real default profile.
+These jobs pass an explicit workspace-scoped profile to Playwright and never
+discover or inspect the operator’s real default profile. The protocol is
+implemented by `tests/e2e/run_active_writer_e2e.py` and the two
+`seed_*_cookie.mjs` seeders; its file-based commands make the same
+ready/hold/mutate/probe/close contract portable across all three runner OSes.
 
 Current CLI job shapes to use when reproducing an E2E assertion:
 
@@ -157,7 +166,8 @@ cookie.
 ## Windows App-Bound v20 (Chrome, Edge, Brave)
 
 Hosted **v20 / App-Bound** coverage is the `windows-chrome-appbound` job in
-`e2e.yml` (`e2e windows × {chrome,edge,brave} (App-Bound v20 canary)`). It is
+`e2e.yml` (`e2e windows × {chrome,edge,brave}` with the
+`App-Bound v20 staged-WAL recovery + liveness` suffix). It is
 **not** a pull-request job.
 
 | When | Browsers |
@@ -191,8 +201,10 @@ It fails closed unless all of this holds:
 - a copy of that v20 row is staged under a new name in a synthetic WAL,
   absent from a main-database-only copy, and checked through a lock-free
   DB+WAL snapshot;
-- explicit-path WAL extraction while the browser is live — Chrome / Edge /
-  Brave must stay alive through Rust, Python, Node, and CLI;
+- explicit-path staged-WAL extraction while the browser is live — Chrome /
+  Edge / Brave must stay alive while Rust, Python, Node, and CLI read the
+  separately staged fixture. This proves recovery and browser liveness, not
+  active-writer behavior against the browser-owned database;
 - after a graceful main-window close, default profile/key discovery works on
   all four surfaces.
 

@@ -24,6 +24,7 @@ from cookie_manifest import (
     load_manifest,
     verify_records,
 )
+from cookie_state import assert_cookie_state, state_from_environment
 
 
 COOKIE_NAME = "rookie_ci"
@@ -144,6 +145,13 @@ def assert_cli_cookie(
             record = record.get("cookie")
         if isinstance(record, dict):
             flat_cookies.append(record)
+    if os.environ.get("ROOKIE_E2E_REQUIRED_COOKIES_JSON"):
+        try:
+            required, forbidden = state_from_environment(expected_name, expected_value)
+            assert_cookie_state(flat_cookies, required, forbidden, surface="CLI")
+        except (AssertionError, ValueError) as error:
+            raise HarnessError(str(error)) from error
+        return len(cookies)
     if not any(
         cookie.get("name") == expected_name
         and cookie.get("value") == expected_value

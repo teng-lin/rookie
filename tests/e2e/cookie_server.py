@@ -1,8 +1,9 @@
 """Local HTTP server used by browser E2E tests.
 
-The legacy ``/set`` and ``/wal`` routes retain their focused canaries. Corpus
-routes are declarative: ``/corpus/<phase>?engine=<engine>&tiers=<csv>`` emits
-the matching operations from :file:`cookie_corpus.json`.
+The legacy ``/set`` and ``/wal`` routes retain their focused canaries, while
+active-writer routes provide deterministic add/replace/delete transitions.
+Corpus routes are declarative: ``/corpus/<phase>?engine=<engine>&tiers=<csv>``
+emits the matching operations from :file:`cookie_corpus.json`.
 
 Run from the workspace root: `python3 tests/e2e/cookie_server.py`.
 """
@@ -85,6 +86,27 @@ class Handler(BaseHTTPRequestHandler):
     # of parking a worker thread on them until the browser exits.
     timeout = 10
 
+    @staticmethod
+    def cookie_headers(path: str) -> list[str]:
+        attributes = "Path=/; Max-Age=3600; SameSite=Lax"
+        if path.startswith("/active-writer/baseline"):
+            return [
+                f"rookie_ci=before; {attributes}",
+                f"rookie_remove=present; {attributes}",
+                "rookie_added=; Path=/; Max-Age=0; SameSite=Lax",
+            ]
+        if path.startswith("/active-writer/mutate"):
+            return [
+                f"rookie_ci=after; {attributes}",
+                f"rookie_added=present; {attributes}",
+                "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
+            ]
+
+        headers = [f"rookie_ci=bar; {attributes}"]
+        if path.startswith("/wal"):
+            headers.append(f"rookie_wal=live; {attributes}")
+        return headers
+
     def do_GET(self) -> None:
         request_log = os.environ.get("ROOKIE_E2E_REQUEST_LOG")
         if request_log:
@@ -97,20 +119,8 @@ class Handler(BaseHTTPRequestHandler):
             for header in corpus_cookie_headers:
                 self.send_header("Set-Cookie", header)
         else:
-            # Preserve the original focused canary for native-browser and WAL
-            # jobs that have not opted into the corpus seeder.
-            self.send_header(
-                "Set-Cookie",
-                "rookie_ci=bar; Path=/; Max-Age=3600; SameSite=Lax",
-            )
-        # The App-Bound canary requests this route while Chrome stays open.
-        # Its second cookie should therefore be visible through Chrome's live
-        # write-ahead log, rather than only after a browser shutdown/checkpoint.
-        if self.path.startswith("/wal"):
-            self.send_header(
-                "Set-Cookie",
-                "rookie_wal=live; Path=/; Max-Age=3600; SameSite=Lax",
-            )
+            for header in self.cookie_headers(self.path):
+                self.send_header("Set-Cookie", header)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ok")

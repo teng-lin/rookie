@@ -21,6 +21,7 @@
 #[test]
 #[ignore]
 fn extracts_seeded_cookie_from_firefox_profile() {
+  use std::collections::BTreeMap;
   use std::env;
   use std::io::Write;
   use std::path::PathBuf;
@@ -116,18 +117,41 @@ fn extracts_seeded_cookie_from_firefox_profile() {
     return;
   }
 
+  let required = env::var("ROOKIE_E2E_REQUIRED_COOKIES_JSON")
+    .map(|raw| {
+      serde_json::from_str::<BTreeMap<String, String>>(&raw)
+        .expect("ROOKIE_E2E_REQUIRED_COOKIES_JSON must be a string map")
+    })
+    .unwrap_or_else(|_| BTreeMap::from([(expected_name.clone(), expected_value)]));
+  let forbidden = env::var("ROOKIE_E2E_FORBIDDEN_COOKIES_JSON")
+    .map(|raw| {
+      serde_json::from_str::<Vec<String>>(&raw)
+        .expect("ROOKIE_E2E_FORBIDDEN_COOKIES_JSON must be a string array")
+    })
+    .unwrap_or_default();
+  for (name, value) in required {
+    let matches: Vec<_> = cookies
+      .iter()
+      .filter(|cookie| cookie.name == name)
+      .collect();
+    assert_eq!(
+      matches.len(),
+      1,
+      "expected exactly one `{name}` among {} cookies for {domain}",
+      cookies.len()
+    );
+    assert_eq!(matches[0].value, value, "cookie `{name}` value mismatch");
+  }
+  for name in forbidden {
+    assert!(
+      cookies.iter().all(|cookie| cookie.name != name),
+      "forbidden/deleted cookie `{name}` remained for {domain}"
+    );
+  }
   let seeded = cookies
     .iter()
-    .find(|c| c.name == expected_name)
-    .unwrap_or_else(|| {
-      panic!(
-        "seeded cookie `{}` not found among {} cookies for domain {}",
-        expected_name,
-        cookies.len(),
-        domain
-      )
-    });
-  assert_eq!(seeded.value, expected_value, "cookie value mismatch");
+    .find(|cookie| cookie.name == expected_name)
+    .expect("primary active-writer cookie must be required");
   let now = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .expect("system time after Unix epoch")

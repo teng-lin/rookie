@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
-# Seed a Chromium-family browser and assert rust/python/node/cli on Unix.
+# Exercise an isolated Chromium profile while the real browser owns its DB.
 set -euo pipefail
 
 channel="${1:?usage: run_hosted_chromium_e2e.sh <channel>}"
 user_data="${ROOKIE_E2E_USER_DATA_DIR:?ROOKIE_E2E_USER_DATA_DIR must be set}"
+browser_id="${ROOKIE_E2E_BROWSER_ID:-chrome}"
 mkdir -p "$user_data"
 
 run_inner() {
-  python3 tests/e2e/cookie_server.py &
-  SERVER_PID=$!
   cleanup() {
-    kill "$SERVER_PID" 2>/dev/null || true
     if [[ -n "${ROOKIE_E2E_KEYCHAIN_SERVICE:-}" ]]; then
-      /usr/bin/security delete-generic-password \
-        -a "${ROOKIE_E2E_KEYCHAIN_ACCOUNT:-Chrome}" \
-        -s "$ROOKIE_E2E_KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
+      cleanup_accounts=("${ROOKIE_E2E_KEYCHAIN_ACCOUNT:-Chrome}")
+      if [[ "$ROOKIE_E2E_KEYCHAIN_SERVICE" == "Chrome Safe Storage" ]]; then
+        cleanup_accounts+=("Chrome" "Chromium")
+      fi
+      cleanup_seen=""
+      for cleanup_account in "${cleanup_accounts[@]}"; do
+        case " $cleanup_seen " in
+          *" $cleanup_account "*) continue ;;
+        esac
+        cleanup_seen+=" $cleanup_account"
+        /usr/bin/security delete-generic-password \
+          -a "$cleanup_account" \
+          -s "$ROOKIE_E2E_KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
+      done
     fi
   }
   trap cleanup EXIT
@@ -22,7 +31,6 @@ run_inner() {
   if [[ -n "${ROOKIE_E2E_KEYCHAIN_SERVICE:-}" ]]; then
     account="${ROOKIE_E2E_KEYCHAIN_ACCOUNT:-Chrome}"
     accounts=("$account")
-    # Playwright Chromium's registry identity is Chrome Safe Storage / Chromium.
     if [[ "$ROOKIE_E2E_KEYCHAIN_SERVICE" == "Chrome Safe Storage" ]]; then
       accounts+=("Chrome" "Chromium")
     fi
@@ -39,39 +47,20 @@ run_inner() {
     done
   fi
 
-  ready=0
-  for _ in $(seq 1 30); do
-    if curl -fs http://127.0.0.1:8765/ >/dev/null; then
-      ready=1
-      break
-    fi
-    sleep 0.5
-  done
-  test "$ready" = 1
-
+  args=(
+    tests/e2e/run_active_writer_e2e.py
+    --engine chromium
+    --profile "$user_data"
+    --channel "$channel"
+    --browser-id "$browser_id"
+  )
   if command -v xvfb-run >/dev/null 2>&1; then
-    xvfb-run -a node tests/e2e/seed_chromium_cookie.mjs \
-      "$channel" "$user_data" "http://127.0.0.1:8765/set"
-  else
-    node tests/e2e/seed_chromium_cookie.mjs \
-      "$channel" "$user_data" "http://127.0.0.1:8765/set"
+    args+=(--xvfb)
   fi
-
-  test -f "$user_data/Default/Network/Cookies" || test -f "$user_data/Default/Cookies"
-  browser_id="${ROOKIE_E2E_BROWSER_ID:-chrome}"
-  # e2e_chrome.rs hardcodes Chrome Keychain / libsecret names.
-  if [[ "$browser_id" == "chrome" ]]; then
-    cargo test --test e2e_chrome --locked -- --ignored --nocapture
-  fi
-  .venv/bin/python tests/e2e/assert_chrome_cookie.py
-  node tests/e2e/assert_chrome_cookie.mjs
-  cookies_db="$user_data/Default/Network/Cookies"
-  [[ -f "$cookies_db" ]] || cookies_db="$user_data/Default/Cookies"
-  .venv/bin/python tests/e2e/assert_cli_cookie.py "$cookies_db" --browser-id "$browser_id"
+  .venv/bin/python "${args[@]}"
 }
 
-export channel user_data
-export ROOKIE_E2E_BROWSER_ID="${ROOKIE_E2E_BROWSER_ID:-}"
+export channel user_data browser_id
 export ROOKIE_E2E_KEYCHAIN_SERVICE="${ROOKIE_E2E_KEYCHAIN_SERVICE:-}"
 export ROOKIE_E2E_KEYCHAIN_ACCOUNT="${ROOKIE_E2E_KEYCHAIN_ACCOUNT:-}"
 if [[ "$(uname -s)" == "Linux" ]]; then

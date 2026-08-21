@@ -1,9 +1,9 @@
 // Launches a real Chromium-family browser via Playwright, navigates to the
-// declarative cookie-corpus routes, writes an independent expected manifest,
-// and closes — leaving a persistent profile that rookie-cookies extracts.
+// declarative cookie-corpus routes and writes an independent manifest. With a
+// control directory, it instead remains open for the active-writer protocol.
 //
 // Usage:
-//   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url>
+//   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url> [control-dir]
 //
 // channel: "chrome" | "msedge" | "chromium" | "chrome-beta" | etc.
 //   "chromium" uses Playwright's bundled Chromium (no channel).
@@ -19,13 +19,16 @@
 // falling back to older default keys.
 
 import { chromium } from "playwright";
+import { join } from "node:path";
 import { seedCookieCorpus } from "./seed_cookie_corpus.mjs";
 
-const [channelArg, userDataDir, url] = process.argv.slice(2);
+import { runActiveWriterProtocol } from "./active_writer_protocol.mjs";
+
+const [channelArg, userDataDir, url, controlDir] = process.argv.slice(2);
 
 if (!channelArg || !userDataDir || !url) {
   console.error(
-    "usage: node seed_chromium_cookie.mjs <channel> <user-data-dir> <url>",
+    "usage: node seed_chromium_cookie.mjs <channel> <user-data-dir> <url> [control-dir]",
   );
   process.exit(2);
 }
@@ -61,17 +64,29 @@ const context = await chromium.launchPersistentContext(userDataDir, {
 
 try {
   const page = await context.newPage();
-  const { manifest, manifestPath, userAgent } = await seedCookieCorpus({
-    context,
-    page,
-    engine: "chromium",
-    profileDir: userDataDir,
-    baseUrl: url,
-  });
-  console.log(
-    `seeded ${manifest.expected.unfiltered_flat.length} Chromium corpus cookies; ` +
-      `manifest: ${manifestPath}; user agent: ${userAgent}`,
-  );
+  if (controlDir) {
+    await runActiveWriterProtocol({
+      context,
+      page,
+      controlDir,
+      baselineUrl: url,
+      engine: "chromium",
+      profileDir: userDataDir,
+      databasePath: join(userDataDir, "Default", "Network", "Cookies"),
+    });
+  } else {
+    const { manifest, manifestPath, userAgent } = await seedCookieCorpus({
+      context,
+      page,
+      engine: "chromium",
+      profileDir: userDataDir,
+      baseUrl: url,
+    });
+    console.log(
+      `seeded ${manifest.expected.unfiltered_flat.length} Chromium corpus cookies; ` +
+        `manifest: ${manifestPath}; user agent: ${userAgent}`,
+    );
+  }
 } finally {
-  await context.close();
+  await context.close().catch(() => {});
 }

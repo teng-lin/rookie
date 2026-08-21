@@ -13,6 +13,7 @@ import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
 import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
+import { assertCookieState, stateFromEnvironment } from "./cookie_state.mjs";
 
 const profileDir = process.env.ROOKIE_E2E_FIREFOX_PROFILE;
 if (!profileDir) {
@@ -65,6 +66,24 @@ if (manifestPath) {
     "Node fromPath.detailedCookies",
   );
 } else {
+  const { required, forbidden } = stateFromEnvironment(
+    expectedName,
+    expectedValue,
+  );
+  assertCookieState(cookies, required, forbidden, "cookiesFromPath");
+  assertCookieState(legacy, required, forbidden, "firefoxBased");
+  assertCookieState(
+    detailed.map(({ cookie }) => cookie),
+    required,
+    forbidden,
+    "firefoxBasedDetailed",
+  );
+  assertCookieState(
+    directSnapshot.detailedCookies.map(({ cookie }) => cookie),
+    required,
+    forbidden,
+    "fromPath.detailedCookies",
+  );
   const seeded = cookies.find((c) => c.name === expectedName);
   if (!seeded) {
     console.error(

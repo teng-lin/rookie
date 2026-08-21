@@ -18,6 +18,7 @@ import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
 import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
+import { assertCookieState, stateFromEnvironment } from "./cookie_state.mjs";
 
 const userDataDir = process.env.ROOKIE_E2E_USER_DATA_DIR;
 if (!userDataDir) {
@@ -205,18 +206,14 @@ for (const [surface, result, surfaceName, surfaceValue] of results) {
     );
     continue;
   }
-  const seeded = result.find((c) => c.name === surfaceName);
-  if (!seeded) {
-    console.error(
-      `${surface}: seeded cookie '${surfaceName}' not found among ${result.length} cookies for ${domain}`,
-    );
-    process.exit(1);
-  }
-  if (seeded.value !== surfaceValue) {
-    console.error(
-      `${surface}: cookie value mismatch: expected '${surfaceValue}', got '${seeded.value}'`,
-    );
-    process.exit(1);
+  const { required, forbidden } = stateFromEnvironment(
+    surfaceName,
+    surfaceValue,
+  );
+  if (process.env.ROOKIE_E2E_REQUIRED_COOKIES_JSON) {
+    assertCookieState(result, required, forbidden, surface);
+  } else {
+    assertCookieState(result, { [surfaceName]: surfaceValue }, [], surface);
   }
 }
 
