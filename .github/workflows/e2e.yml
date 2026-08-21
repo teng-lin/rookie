@@ -134,7 +134,8 @@ jobs:
 
             COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
             [ -f "$COOKIES_DB" ] || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
-            .venv/bin/python tests/e2e/assert_cli_cookie.py "$COOKIES_DB"
+            .venv/bin/python tests/e2e/assert_cli_cookie.py \
+              "$COOKIES_DB" --browser-id chrome
           SH
 
   ubuntu-firefox:
@@ -421,7 +422,8 @@ jobs:
           COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Network/Cookies"
           [ -f "$COOKIES_DB" ] \
             || COOKIES_DB="$ROOKIE_E2E_USER_DATA_DIR/Default/Cookies"
-          .venv/bin/python tests/e2e/assert_cli_cookie.py "$COOKIES_DB"
+          .venv/bin/python tests/e2e/assert_cli_cookie.py \
+            "$COOKIES_DB" --browser-id chrome
 
   windows-firefox:
     name: e2e windows × firefox
@@ -850,7 +852,7 @@ jobs:
           $cookiesDb = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Default\Network\Cookies"
           $localState = Join-Path $env:ROOKIE_E2E_USER_DATA_DIR "Local State"
           & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-            "$cookiesDb" --key-path "$localState"
+            "$cookiesDb" --local-state-path "$localState"
 
       - name: Exercise row-level DPAPI across schema 23 and 24
         env:
@@ -892,7 +894,7 @@ jobs:
             $cookiesDb = Join-Path $root "Default\Network\Cookies"
             $localState = Join-Path $root "Local State"
             & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-              "$cookiesDb" --key-path "$localState"
+              "$cookiesDb" --local-state-path "$localState"
           }
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
@@ -964,7 +966,7 @@ jobs:
             & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
             node tests/e2e/assert_chrome_cookie.mjs
             & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-              "$cookiesDb" --key-path "$localState"
+              "$cookiesDb" --local-state-path "$localState"
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }

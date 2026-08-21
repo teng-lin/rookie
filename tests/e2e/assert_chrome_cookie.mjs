@@ -58,8 +58,8 @@ if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
   results = [
     [
-      "chromiumCookiesFromPath(LocalStateFile)",
-      await rookieCookies.chromiumCookiesFromPath(dbPath, {
+      "extractFromPath(LocalStateFile)",
+      await rookieCookies.extractFromPath(dbPath, {
         domains: [domain],
         localStatePath: keyPath,
         appBound: "allow_elevated_fallback",
@@ -70,15 +70,8 @@ if (process.platform === "win32") {
 } else {
   results = [
     [
-      "chromiumCookiesFromPath(Automatic)",
-      await rookieCookies.chromiumCookiesFromPath(dbPath, {
-        domains: [domain],
-        appBound: "allow_elevated_fallback",
-      }),
-    ],
-    [
-      "chromiumCookiesFromPath(BrowserId)",
-      await rookieCookies.chromiumCookiesFromPath(dbPath, {
+      "extractFromPath(BrowserId)",
+      await rookieCookies.extractFromPath(dbPath, {
         domains: [domain],
         browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
         appBound: "allow_elevated_fallback",

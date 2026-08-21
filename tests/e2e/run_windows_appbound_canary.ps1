@@ -247,7 +247,7 @@ try {
   Assert-BrowserAlive
 
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-    "$walCookiesDb" --key-path "$localState"
+    "$walCookiesDb" --local-state-path "$localState"
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound COM injection (injection_only) failed" }
   Assert-BrowserAlive
 
@@ -270,7 +270,7 @@ try {
   Assert-BrowserAlive
 
   & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-    "$walCookiesDb" --key-path "$localState"
+    "$walCookiesDb" --local-state-path "$localState"
   if ($LASTEXITCODE -ne 0) { throw "CLI App-Bound elevated fallback (elevated_only) failed" }
   Assert-BrowserAlive
 
