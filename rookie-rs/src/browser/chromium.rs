@@ -707,26 +707,6 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_runtime(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn query_cookies_with_key_outcomes_without_platform_recovery(
-  outcomes: &ChromiumKeyOutcomes,
-  db_path: PathBuf,
-  domains: Option<&[String]>,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  let draft = acquire_chromium_source(
-    outcomes,
-    db_path.clone(),
-    domains,
-    ChromiumAcquireOptions {
-      encrypted_value_policy: EncryptedValuePolicy::UseKeyOutcomes,
-      acquisition: ChromiumAcquisition::DirectRead,
-    },
-    runtime,
-  )?;
-  project_legacy_draft_with_runtime(&db_path, draft, runtime)
-}
-
-#[cfg(target_os = "windows")]
 pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery(
   outcomes: &ChromiumKeyOutcomes,
   db_path: PathBuf,
@@ -744,25 +724,6 @@ pub(crate) fn query_detailed_cookies_with_key_outcomes_without_platform_recovery
     runtime,
   )?;
   project_detailed_draft_with_runtime(&db_path, draft, runtime)
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn query_cookies_plaintext_without_platform_recovery(
-  db_path: PathBuf,
-  domains: Option<&[String]>,
-  runtime: &BoundaryRuntime<'_>,
-) -> Result<Vec<Cookie>> {
-  let draft = acquire_chromium_source(
-    &ChromiumKeyOutcomes::default(),
-    db_path.clone(),
-    domains,
-    ChromiumAcquireOptions {
-      encrypted_value_policy: EncryptedValuePolicy::RejectMissingIdentity,
-      acquisition: ChromiumAcquisition::DirectRead,
-    },
-    runtime,
-  )?;
-  project_legacy_draft_with_runtime(&db_path, draft, runtime)
 }
 
 #[cfg(target_os = "windows")]

@@ -1273,25 +1273,40 @@ mod tests {
   fn windows_chromium_options_keep_the_explicit_credential_contract() {
     let (_directory, path) = chromium_database(&[]);
 
-    let generic_error = extract_from_path(PathExtractRequest::sniff(&path)).unwrap_err();
+    // Sniffing a plaintext Chromium database on Windows is `Ok` as of 0.6.0.
+    // `cookies_from_path` used to return `MissingLocalStateFile` for
+    // `ChromiumSqlite` *before* attempting extraction, so even a fully
+    // plaintext database failed on Windows while succeeding on Unix. Only a
+    // row that is actually encrypted needs credentials now, which is what
+    // makes the two platforms agree.
+    let (_plain_directory, plain_path) = chromium_database(&[("example.test", "plaintext", b"")]);
+    let sniffed = extract_from_path(PathExtractRequest::sniff(&plain_path))
+      .expect("a plaintext Chromium database needs no credentials on Windows either");
+    assert_eq!(sniffed[0].value, "plaintext");
+
+    // The other half of the same rule: an encrypted row is the only thing that
+    // actually demands credentials, and it says so precisely.
+    let (_encrypted_directory, encrypted_path) =
+      chromium_database(&[("example.test", "", b"v10encrypted")]);
+    let encrypted_error =
+      extract_from_path(PathExtractRequest::sniff(&encrypted_path)).unwrap_err();
     assert_eq!(
-      source_error(&generic_error).invalid_options_reason(),
-      Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
+      source_error(&encrypted_error).invalid_options_reason(),
+      Some(&InvalidDirectPathOptionsReason::MissingChromiumCredentials)
     );
 
-    for request in [
-      PathExtractRequest::sniff(&path),
-      PathExtractRequest::with_credentials(
-        &path,
-        Some(ChromiumCredentialSource::LocalStateFile(PathBuf::new())),
-      ),
-    ] {
-      let error = extract_from_path(request).unwrap_err();
-      assert_eq!(
-        source_error(&error).invalid_options_reason(),
-        Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
-      );
-    }
+    // An explicitly empty Local State selector stays a request fault: the
+    // caller named a credential source and left it blank, which is a mistake
+    // they can fix, not an absent selector.
+    let error = extract_from_path(PathExtractRequest::with_credentials(
+      &path,
+      Some(ChromiumCredentialSource::LocalStateFile(PathBuf::new())),
+    ))
+    .unwrap_err();
+    assert_eq!(
+      source_error(&error).invalid_options_reason(),
+      Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
+    );
 
     for (browser_id, expected) in [
       ("", InvalidDirectPathOptionsReason::EmptyBrowserId),

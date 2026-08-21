@@ -356,22 +356,18 @@ class RookieCookiesHelpersTest(unittest.TestCase):
             _seed_chromium_database(
                 db_path, [(".example.test", "wanted", "plain", b"")]
             )
+            # Every desktop target agrees here as of 0.6.0. Windows used to
+            # reject a credential-less Chromium path with
+            # MissingLocalStateFile *before* attempting extraction, so a fully
+            # plaintext database failed there while succeeding on Unix. Only a
+            # genuinely encrypted row demands credentials now, so this branch
+            # is deliberately no longer platform-split.
             for options in (None, {}, {"plaintext_only": False}):
                 with self.subTest(options=options):
-                    if sys.platform == "win32":
-                        # Missing an explicit Local State file is a request
-                        # fault on Windows (rookie_cookies.RookieRequestError,
-                        # a ValueError subclass) -- see DirectPathError's
-                        # InvalidOptions/MissingLocalStateFile reason.
-                        with self.assertRaises(ValueError):
-                            rookie_cookies.chromium_cookies_from_path(
-                                str(db_path), options
-                            )
-                    else:
-                        cookies = rookie_cookies.chromium_cookies_from_path(
-                            str(db_path), options
-                        )
-                        self.assertEqual(cookies[0]["name"], "wanted")
+                    cookies = rookie_cookies.chromium_cookies_from_path(
+                        str(db_path), options
+                    )
+                    self.assertEqual(cookies[0]["name"], "wanted")
 
             plaintext = rookie_cookies.chromium_cookies_from_path(
                 str(db_path), {"plaintext_only": True}

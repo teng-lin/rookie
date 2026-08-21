@@ -8,7 +8,7 @@ use crate::browser::chromium_platform_keys::{
   ChromiumKeyIdentity, ChromiumKeyRequest, HostKeySession,
 };
 use crate::common::deadline::BoundaryRuntime;
-use crate::enums::{Cookie, DetailedCookie};
+use crate::enums::DetailedCookie;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -273,23 +273,7 @@ pub(super) fn chromium_from_path_detailed(
   request: PathExtractRequest,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<Vec<DetailedCookie>> {
-  match chromium_from_path(request, ChromiumProjection::Detailed, runtime)? {
-    ChromiumProjectionResult::Detailed(cookies) => Ok(cookies),
-    ChromiumProjectionResult::Legacy(_) => {
-      unreachable!("detailed request returned legacy cookies")
-    }
-  }
-}
-
-#[derive(Clone, Copy)]
-enum ChromiumProjection {
-  Legacy,
-  Detailed,
-}
-
-enum ChromiumProjectionResult {
-  Legacy(Vec<Cookie>),
-  Detailed(Vec<DetailedCookie>),
+  chromium_from_path(request, runtime)
 }
 
 enum PreparedCredentials {
@@ -299,9 +283,8 @@ enum PreparedCredentials {
 
 fn chromium_from_path(
   request: PathExtractRequest,
-  projection: ChromiumProjection,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumProjectionResult> {
+) -> Result<Vec<DetailedCookie>> {
   let PathExtractRequest {
     target: request,
     domains,
@@ -335,7 +318,6 @@ fn chromium_from_path(
       credentials,
       request.path,
       domains,
-      projection,
       shutdown_allowed,
       runtime,
     );
@@ -354,7 +336,6 @@ fn chromium_from_path(
         &credentials,
         acquired_path.to_path_buf(),
         domains.as_deref(),
-        projection,
         runtime,
       )
     },
@@ -384,34 +365,19 @@ fn query_prepared(
   credentials: PreparedCredentials,
   path: PathBuf,
   domains: Option<Vec<String>>,
-  projection: ChromiumProjection,
   force_kill: bool,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumProjectionResult> {
-  match (credentials, projection) {
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Legacy) => {
-      crate::browser::chromium::chromium_based_plaintext_only_with_runtime(
-        path, domains, force_kill, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Detailed) => {
+) -> Result<Vec<DetailedCookie>> {
+  match credentials {
+    PreparedCredentials::PlaintextOnly => {
       crate::browser::chromium::chromium_based_detailed_plaintext_only_with_runtime(
         path, domains, force_kill, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_with_key_outcomes_runtime(
-        outcomes, path, domains, force_kill, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Detailed) => {
+    PreparedCredentials::KeyOutcomes(outcomes) => {
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_runtime(
         outcomes, path, domains, force_kill, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
   }
 }
@@ -420,33 +386,18 @@ fn query_prepared_without_platform_recovery(
   credentials: &PreparedCredentials,
   path: PathBuf,
   domains: Option<&[String]>,
-  projection: ChromiumProjection,
   runtime: &BoundaryRuntime<'_>,
-) -> Result<ChromiumProjectionResult> {
-  match (credentials, projection) {
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_plaintext_without_platform_recovery(
-        path, domains, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::PlaintextOnly, ChromiumProjection::Detailed) => {
+) -> Result<Vec<DetailedCookie>> {
+  match credentials {
+    PreparedCredentials::PlaintextOnly => {
       crate::browser::chromium::query_detailed_cookies_plaintext_without_platform_recovery(
         path, domains, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Legacy) => {
-      crate::browser::chromium::query_cookies_with_key_outcomes_without_platform_recovery(
-        outcomes, path, domains, runtime,
-      )
-      .map(ChromiumProjectionResult::Legacy)
-    }
-    (PreparedCredentials::KeyOutcomes(outcomes), ChromiumProjection::Detailed) => {
+    PreparedCredentials::KeyOutcomes(outcomes) => {
       crate::browser::chromium::query_detailed_cookies_with_key_outcomes_without_platform_recovery(
         outcomes, path, domains, runtime,
       )
-      .map(ChromiumProjectionResult::Detailed)
     }
   }
 }
@@ -608,10 +559,13 @@ Start-Sleep -Seconds 300
         .locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown),
     )
     .expect_err("Windows automatic credentials require an explicit Local State file");
+    // `extract_from_path` returns the typed `Error` now, so the fault is a
+    // variant to match rather than an `anyhow` payload to downcast.
+    let crate::Error::Source(typed) = &error else {
+      panic!("an invalid path request is Error::Source, got {error:?}");
+    };
     assert_eq!(
-      error
-        .downcast_ref::<crate::direct_path::DirectPathError>()
-        .and_then(crate::direct_path::DirectPathError::invalid_options_reason),
+      typed.invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
     );
     assert!(
