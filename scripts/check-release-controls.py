@@ -250,9 +250,14 @@ def check_required_checks(repo: str, commit_sha: str) -> list[str]:
         if not runs:
             failures.append(f"required check {name!r}: no check run found for {commit_sha}")
             continue
-        # A commit can carry more than one run of the same name (reruns); the
-        # most recently started run is the one that governs.
-        latest = max(runs, key=lambda run: run.get("started_at") or "")
+        # A commit can carry more than one run of the same name. A tag push can
+        # create a newer, intentionally skipped copy of a dispatch-only release
+        # gate; that non-execution must not mask the successful manual gate.
+        # Among runs that actually execute, the newest still governs so a later
+        # pending or failed rerun keeps publication fail-closed.
+        executed = [run for run in runs if run.get("conclusion") != "skipped"]
+        candidates = executed or runs
+        latest = max(candidates, key=lambda run: run.get("started_at") or "")
         if latest.get("status") != "completed":
             failures.append(f"required check {name!r}: not completed (status={latest.get('status')!r})")
         elif latest.get("conclusion") != "success":
