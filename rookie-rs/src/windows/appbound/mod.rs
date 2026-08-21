@@ -265,12 +265,12 @@ impl Attempts {
         injection: true,
         elevated: true,
       },
-      // `AppBoundPolicy` is `#[non_exhaustive]`. A policy this build does not
-      // know about must not be read as permission to do more.
-      _ => Self {
-        injection: false,
-        elevated: false,
-      },
+      // `AppBoundPolicy` is `#[non_exhaustive]`, but that only binds
+      // downstream crates -- in here the match is exhaustive, so no wildcard
+      // arm is reachable. Leaving it off is deliberate: a new policy variant
+      // must fail to compile here rather than silently inherit an arm, since
+      // the safe default for an unknown policy is a judgement call this file
+      // has to make explicitly.
     }
   }
 }

@@ -678,17 +678,18 @@ pub(crate) fn legacy_windows_chromium_with_runtime(
   force_kill: bool,
   runtime: &crate::common::deadline::BoundaryRuntime<'_>,
 ) -> Result<Vec<Cookie>> {
-  let mut request = PathExtractRequest::with_credentials(
-    db_path,
-    Some(ChromiumCredentialSource::LocalStateFile(local_state)),
-  );
-  if let Some(domains) = domains {
-    request = request.domains(domains);
-  }
-  if force_kill {
-    request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
-  }
-  platform::extract_from_path(request, runtime)
+  Ok(
+    legacy_windows_chromium_detailed_with_runtime(
+      local_state,
+      db_path,
+      domains,
+      force_kill,
+      runtime,
+    )?
+    .into_iter()
+    .map(DetailedCookie::into_cookie)
+    .collect(),
+  )
 }
 
 #[cfg(target_os = "windows")]
@@ -703,13 +704,14 @@ pub(crate) fn legacy_windows_chromium_detailed_with_runtime(
     db_path,
     Some(ChromiumCredentialSource::LocalStateFile(local_state)),
   );
-  if let Some(domains) = domains {
-    request = request.domains(domains);
-  }
+  request = request.domains(domains);
   if force_kill {
     request = request.locked_database_policy(ChromiumLockedDatabasePolicy::AllowProcessShutdown);
   }
-  platform::detailed_from_path_inner(request, runtime)
+  // Windows Chromium acquisition owns its own classification, exactly as
+  // `detailed_from_path_inner` does for a credential-bearing request: a locked
+  // database has to be recovered before it can be classified at all.
+  platform::chromium_from_path_detailed(request, runtime)
 }
 
 #[cfg(test)]
@@ -1273,7 +1275,7 @@ mod tests {
 
     let generic_error = extract_from_path(PathExtractRequest::sniff(&path)).unwrap_err();
     assert_eq!(
-      direct_path_error(&generic_error).invalid_options_reason(),
+      source_error(&generic_error).invalid_options_reason(),
       Some(&InvalidDirectPathOptionsReason::MissingLocalStateFile)
     );
 

@@ -307,7 +307,7 @@ pub(crate) fn internet_explorer_report(
 ) -> Result<EngineExtract> {
   let clock = crate::common::deadline::SystemClock;
   let runtime = crate::common::deadline::BoundaryRuntime::standard(&clock);
-  internet_explorer_report_with_runtime(browser_id, profile_id, domains, &runtime)
+  internet_explorer_report_with_runtime(browser_id, selection, domains, &runtime)
 }
 
 #[cfg(target_os = "windows")]

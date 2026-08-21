@@ -1,5 +1,4 @@
 use super::{undetected, undetected_listing, BrowserDraft, BrowserListing};
-use crate::browser::registry::ProfileSelection;
 use crate::browser::report_core::BrowserId;
 use crate::common::deadline::BoundaryRuntime;
 use anyhow::Result;
@@ -27,6 +26,7 @@ pub(super) fn remaining_engine_listing(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::browser::registry::ProfileSelection;
 
   #[test]
   fn other_leaf_reports_platform_only_engines_as_undetected() {
