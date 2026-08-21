@@ -57,7 +57,8 @@ pub enum Error {
   Stopped(StopReason),
   /// A caller-supplied path or path option was invalid.
   Source(DirectPathError),
-  /// Discovery, acquisition, decryption, or another engine failure.
+  /// Discovery, source inspection, acquisition, decryption, or another engine
+  /// failure.
   Engine(EngineError),
 }
 
@@ -136,7 +137,15 @@ impl From<RequestError> for Error {
 
 impl From<DirectPathError> for Error {
   fn from(error: DirectPathError) -> Self {
-    Self::Source(error)
+    if is_source_inspection_failure(&error) {
+      let diagnostic = anyhow::Error::new(error);
+      Self::Engine(EngineError::from_cause(
+        EngineCause::SourceInspectionFailed,
+        &diagnostic,
+      ))
+    } else {
+      Self::Source(error)
+    }
   }
 }
 
@@ -164,6 +173,7 @@ pub(crate) enum EngineCause {
   NoSelectedSource,
   NoDiscoveredSource,
   DiscoveryFailed,
+  SourceInspectionFailed,
 }
 
 impl EngineCause {
@@ -172,8 +182,22 @@ impl EngineCause {
       Self::NoSelectedSource => "no_selected_source",
       Self::NoDiscoveredSource => "no_discovered_source",
       Self::DiscoveryFailed => "discovery_failed",
+      Self::SourceInspectionFailed => "source_inspection_failed",
     }
   }
+}
+
+/// Distinguishes the one operational [`DirectPathError`] reason from the
+/// caller-correctable path and option failures that belong in [`Error::Source`].
+///
+/// The reason is already a typed value attached while the file is inspected;
+/// keeping this match here avoids both parsing a diagnostic and replacing the
+/// underlying I/O/SQLite cause in the internal `anyhow` chain.
+fn is_source_inspection_failure(error: &DirectPathError) -> bool {
+  matches!(
+    error.invalid_source_reason(),
+    Some(crate::direct_path::InvalidCookieSourceReason::SourceInspectionFailed)
+  )
 }
 
 /// An engine failure that carries its typed cause **without** changing what
@@ -226,6 +250,12 @@ pub(crate) fn map_job_error(error: anyhow::Error) -> Error {
     return Error::Request(request.clone());
   }
   if let Some(source) = error.downcast_ref::<DirectPathError>() {
+    if is_source_inspection_failure(source) {
+      return Error::Engine(EngineError::from_cause(
+        EngineCause::SourceInspectionFailed,
+        &error,
+      ));
+    }
     return Error::Source(source.clone());
   }
   if let Some(failure) = error.downcast_ref::<EngineFailure>() {
@@ -268,6 +298,10 @@ mod tests {
       (EngineCause::NoSelectedSource, "no_selected_source"),
       (EngineCause::NoDiscoveredSource, "no_discovered_source"),
       (EngineCause::DiscoveryFailed, "discovery_failed"),
+      (
+        EngineCause::SourceInspectionFailed,
+        "source_inspection_failed",
+      ),
     ] {
       let error = map_job_error(EngineFailure::new(cause, "diagnostic text").into());
       let Error::Engine(engine) = &error else {
@@ -303,7 +337,11 @@ mod tests {
     // `DirectPathError` with the stop underneath. If `map_job_error` tested
     // for the source error first, every timeout on a direct-path job would be
     // reclassified as caller input. This pins the downcast order.
-    let wrapped = anyhow::Error::new(BoundaryStop::TimedOut).context(direct_path_error());
+    let source = DirectPathError::InvalidSource {
+      path: PathBuf::from("/tmp/rookie-error-fixture/Cookies"),
+      reason: InvalidCookieSourceReason::SourceInspectionFailed,
+    };
+    let wrapped = anyhow::Error::new(BoundaryStop::TimedOut).context(source);
     assert!(
       wrapped.downcast_ref::<DirectPathError>().is_some(),
       "fixture must actually look like a source error to the naive check"
@@ -311,6 +349,47 @@ mod tests {
     let error = map_job_error(wrapped);
     assert_eq!(error.stop_reason(), Some(StopReason::TimedOut));
     assert_eq!(error.code(), "timed_out");
+  }
+
+  #[test]
+  fn source_inspection_failure_is_engine_with_its_stable_code_and_sanitized_diagnostic() {
+    let private_path = "/private/secret/profile/Cookies";
+    let source = DirectPathError::InvalidSource {
+      path: PathBuf::from(private_path),
+      reason: InvalidCookieSourceReason::SourceInspectionFailed,
+    };
+    let wrapped = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+      .context(format!("cannot inspect {private_path}"))
+      .context(source);
+
+    assert!(wrapped.downcast_ref::<std::io::Error>().is_some());
+    assert_eq!(crate::anyhow_fault_kind(&wrapped), FaultKind::Engine);
+    let error = map_job_error(wrapped);
+    let Error::Engine(engine) = &error else {
+      panic!("an operational inspection failure must be Error::Engine, got {error:?}");
+    };
+    assert_eq!(engine.code(), "source_inspection_failed");
+    assert_eq!(error.code(), "source_inspection_failed");
+    assert_eq!(error.fault_kind(), FaultKind::Engine);
+    assert!(!engine.message().contains(private_path));
+    assert!(engine
+      .message()
+      .contains(crate::common::diagnostic::REDACTED_PATH));
+  }
+
+  #[test]
+  fn direct_conversion_classifies_only_inspection_failure_as_engine() {
+    let inspection = DirectPathError::InvalidSource {
+      path: PathBuf::from("/tmp/rookie-error-fixture/Cookies"),
+      reason: InvalidCookieSourceReason::SourceInspectionFailed,
+    };
+    let error = Error::from(inspection);
+    assert!(matches!(error, Error::Engine(_)));
+    assert_eq!(error.code(), "source_inspection_failed");
+
+    let error = Error::from(direct_path_error());
+    assert!(matches!(error, Error::Source(_)));
+    assert_eq!(error.code(), "expected_chromium_sqlite");
   }
 
   #[test]

@@ -1182,6 +1182,28 @@ classDiagram
     Engine(EngineError)
   }
 
+  class DirectPathError {
+    <<enum>>
+    InvalidSource(path, reason)
+    InvalidOptions(source, reason)
+    UnsupportedTarget(source, target)
+  }
+
+  class InvalidCookieSourceReason {
+    <<enum>>
+    NotARegularFile
+    SourceInspectionFailed
+    UnrecognizedSignature
+    UnsupportedSqliteSchema
+    AmbiguousSqliteSchema
+    ExpectedChromiumSqlite
+  }
+
+  class EngineError {
+    +code()
+    +message()
+  }
+
   ReadRequest --> BrowserTarget
   ExtractRequest --> BrowserTarget
   ReportRequest --> BrowserTarget
@@ -1205,6 +1227,10 @@ classDiagram
   PathExtractRequest --> Cookie : extract_from_path()
   ExtractRequest ..> ReportRequest : From (narrows only)
   Error --> RequestError
+  Error --> DirectPathError
+  Error --> EngineError
+  DirectPathError --> InvalidCookieSourceReason
+  InvalidCookieSourceReason ..> EngineError : SourceInspectionFailed maps to
 ```
 
 `BrowserTarget<S>` owns browser/profile/session selection; `ExecutionControl` owns timeout/cancellation/App-Bound policy. `ReportRequest` intentionally has no session setter: report jobs always retain the selected profiles' declared session sources. `FromPathRequest` is the portable snapshot wrapper; `PathExtractRequest` is the Rust flat, domain-filterable direct-path job and alone exposes the opt-in locked-database shutdown policy.
@@ -1337,7 +1363,17 @@ flowchart TD
 
 **New in 0.6.0:** `FromPathRequest` builds one `direct_path::PathExtractRequest` regardless of whether Chromium credentials were given — the credential-vs-sniff branch lives in the request's `ChromiumCredentialSource` value, not in which function is called. Rust removed the old path functions. Python and Node retain `cookies_from_path` / `chromium_cookies_from_path` (and their camelCase forms) only as deprecated aliases; their canonical flat job is `extract_from_path` / `extractFromPath`, while detailed output comes from `from_path` / `fromPath`.
 
-Classification failures are `DirectPathError::InvalidSource`, classified as `Error::Source` (deprecated `FaultKind::Request`), including `SourceInspectionFailed` — a known coarseness. Direct-path does not consult the profile resolver.
+Classification attaches `DirectPathError::InvalidSource` without discarding
+the underlying typed I/O/SQLite cause. Caller-correctable reasons (missing or
+non-file path, unrecognized signature, unsupported/ambiguous schema, or a
+recognized non-Chromium source passed to a Chromium request) classify as
+`Error::Source` (deprecated `FaultKind::Request`). The operational
+`SourceInspectionFailed` reason instead classifies as `Error::Engine`
+(`FaultKind::Engine`) with stable code `source_inspection_failed`; the full
+diagnostic is sanitized at the public edge and never parsed for policy.
+`BoundaryStop` is tested first, so a timeout/cancellation wrapped during source
+inspection remains `Error::Stopped`. Direct-path does not consult the profile
+resolver.
 
 #### Chromium unseal (v10 / v20 / ABE)
 
@@ -1481,7 +1517,7 @@ See §2 CLI. **Rewritten in 0.6.0**: the top-level flag grammar (`--browser` / `
 
 ### Errors
 
-`Error` (`Request` / `Stopped` / `Source` / `Engine`) is the crate-wide result error as of 0.6.0; `code()` and `stop_reason()` are the stable machine contract, and deprecated `fault_kind()` remains the coarser two-way FFI split for callers not yet migrated. `RequestError::code()` is the stable branch key: `unknown_browser`, `empty_profile_selector`, `unknown_profile`, `ambiguous_profile`, `lossy_profile_path`, `missing_browser`, `invalid_url`, plus 0.6.0's `invalid_top_level_site`, `clock_unrepresentable`, `incomplete_send_context`, `app_bound_unavailable`, `conflicting_credential_selectors`, `conflicting_profile_selection`. Human `Display` is not stable. `DirectPathError` has `kind()` + reason codes, including new `missing_chromium_credentials`. `EngineError::code()` is `no_selected_source`, `no_discovered_source`, `discovery_failed`, or `engine_failure`. `StopReason` is recovered via `Error::stop_reason()` (or the deprecated free function `stop_reason(&error)` for the `anyhow` bridge) from `BoundaryStop` in the chain.
+`Error` (`Request` / `Stopped` / `Source` / `Engine`) is the crate-wide result error as of 0.6.0; `code()` and `stop_reason()` are the stable machine contract, and deprecated `fault_kind()` remains the coarser two-way FFI split for callers not yet migrated. `RequestError::code()` is the stable branch key: `unknown_browser`, `empty_profile_selector`, `unknown_profile`, `ambiguous_profile`, `lossy_profile_path`, `missing_browser`, `invalid_url`, plus 0.6.0's `invalid_top_level_site`, `clock_unrepresentable`, `incomplete_send_context`, `app_bound_unavailable`, `conflicting_credential_selectors`, `conflicting_profile_selection`. Human `Display` is not stable. `DirectPathError` has `kind()` + reason codes, including new `missing_chromium_credentials`; its operational `SourceInspectionFailed` reason maps to `Error::Engine` without removing the public reason variant. `EngineError::code()` is `no_selected_source`, `no_discovered_source`, `discovery_failed`, `source_inspection_failed`, or `engine_failure`. `StopReason` is recovered via `Error::stop_reason()` (or the deprecated free function `stop_reason(&error)` for the `anyhow` bridge) from `BoundaryStop` in the chain.
 
 ---
 
@@ -1646,7 +1682,7 @@ Only decisions and deferred work already recorded in ADRs or code. Not product b
 1. **Chromium inventory unification (ADR 0005 Decision 4).** Closed unless a fifth engine is added or a stage-boundary defect ships in the Chromium path. The tax is three Chromium-armed dispatch sites and a convention-enforced boundary on the largest engine.
 2. **Historical identifiers (ADR 0005 Decision 3). Resolved.** The deliberate mechanical rename aligned live internal identifiers with the accepted stage vocabulary: adapter walks use `acquire_*`, Chromium database/connection work uses `decode_*`, and full compatibility wrappers use `extract_*`. Frozen wire and genuine SQL `query` identifiers are unchanged.
 3. **Compatibility family-fallback strings (after-the-type-program leftover 2).** Detection of all-rows-rejected is counters + issue codes. Substitution of frozen family fallback text still compares a diagnostic against `SourceIssue::generic_row_read_failed_message`. Policy-on-prose for product strings, not for the boolean.
-4. **`Error::Source` / `fault_kind` coarseness (`error.rs`).** Every `DirectPathError` classifies as `Error::Source` (deprecated `FaultKind::Request`), including `SourceInspectionFailed` (corrupt/locked file as well as a wrong path). Splitting that reason to `Engine` is a documented reasonable future refinement, not attempted in 0.6.0's `map_job_error`.
+4. **`Error::Source` / `fault_kind` coarseness (`error.rs`). Resolved.** `SourceInspectionFailed` now maps by its typed reason to `Error::Engine` / deprecated `FaultKind::Engine` with stable code `source_inspection_failed`; caller-correctable direct-path reasons remain `Error::Source`, and `BoundaryStop` retains precedence.
 5. **ADR 0001 deferred surfaces.** Rich canonical cookie metadata on the public/binding snapshot, CookieEditor output, a non-terminating Windows locked-handle provider, and changing legacy functions to all-profile defaults remain deferred.
 6. **v12 SecretPortal.** Recognized, unsupported, until a provider exists.
 7. **`acquire_each_candidate` vs `acquire_by_policy`.** Safari/IE still answer `Result<Source>` rather than `MozillaCandidateOutcome`; folding them is the outcome-type unification noted in `registry.rs` (§14b), not required for the current architecture.

@@ -288,10 +288,12 @@ properties while retaining the N-API status in `code`. `kind` is one of
 URL, conflicting selectors; `code` is `InvalidArg`), `"stopped"` (the request's
 `timeoutMs` elapsed or a `CancellationHandle` fired; `code` is `Cancelled` for
 a cancellation and `GenericFailure` for a timeout or resource-exhaustion
-stop), `"source"` (a direct-path caller-supplied path or path option was
-invalid; `code` is `InvalidArg`), or `"engine"` (discovery, acquisition, or
-decryption failed for a reason other than caller input; `code` is
-`GenericFailure`). Treat `kind` as an open string for forward compatibility —
+stop), `"source"` (a caller-correctable direct-path source or option was
+invalid; `code` is `InvalidArg`), or `"engine"` (discovery, acquisition,
+decryption, or operational source inspection failed; `code` is
+`GenericFailure`). An I/O, SQLite, locked, or corrupt-file inspection failure
+has `rookieCode === "source_inspection_failed"`; diagnostics remain
+path-sanitized. Treat `kind` as an open string for forward compatibility —
 `rookie_cookies::Error` is `#[non_exhaustive]`, so a newer core release can
 add a variant this binding folds into `"engine"` until it is given its own
 bucket.

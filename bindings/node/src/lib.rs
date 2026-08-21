@@ -2210,6 +2210,23 @@ mod tests {
   }
 
   #[test]
+  fn source_inspection_failure_is_an_engine_generic_failure() {
+    let error = rookie_cookies::Error::from(
+      rookie_cookies::direct_path::DirectPathError::InvalidSource {
+        path: PathBuf::from("/private/secret/profile/Cookies"),
+        reason: rookie_cookies::direct_path::InvalidCookieSourceReason::SourceInspectionFailed,
+      },
+    );
+    let details = binding_error_details(&error);
+
+    assert!(matches!(error, rookie_cookies::Error::Engine(_)));
+    assert_eq!(details.kind, "engine");
+    assert_eq!(details.rookie_code, Some("source_inspection_failed"));
+    assert_eq!(status_for_error(&error), Status::GenericFailure);
+    assert!(!details.message.contains("/private/secret"));
+  }
+
+  #[test]
   fn expiry_above_i64_max_is_omitted_instead_of_wrapping() {
     let cookies = cookies_to_js(vec![Cookie {
       domain: "example.test".to_string(),

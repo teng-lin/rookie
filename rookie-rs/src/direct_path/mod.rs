@@ -67,7 +67,10 @@ impl fmt::Display for CookieSourceKind {
 pub enum InvalidCookieSourceReason {
   /// The path is missing or does not identify a regular file.
   NotARegularFile,
-  /// The source could not be inspected because an I/O or SQLite operation failed.
+  /// The source could not be inspected because an I/O or SQLite operation
+  /// failed. Public jobs classify this operational reason as
+  /// [`crate::Error::Engine`], while preserving `source_inspection_failed` as
+  /// the stable code; other invalid-source reasons remain [`crate::Error::Source`].
   SourceInspectionFailed,
   /// The file header does not match a recognized cookie-store format.
   UnrecognizedSignature,
@@ -130,8 +133,14 @@ impl InvalidDirectPathOptionsReason {
   }
 }
 
-/// A stable direct-path request error carried inside the returned
+/// A stable direct-path classification error carried inside the returned
 /// [`anyhow::Error`] chain.
+///
+/// Most variants describe caller-correctable input and become
+/// [`crate::Error::Source`]. [`InvalidCookieSourceReason::SourceInspectionFailed`]
+/// preserves its public typed reason here but becomes [`crate::Error::Engine`]
+/// at a public job edge because changing the request cannot repair an
+/// operational I/O or SQLite failure.
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Eq)]
 pub enum DirectPathError {
@@ -893,6 +902,14 @@ mod tests {
         .is_some(),
       "the SQLite acquisition/query cause remains downcastable: {error:#}"
     );
+
+    let public_error = extract_from_path(PathExtractRequest::sniff(&path)).unwrap_err();
+    assert!(
+      matches!(public_error, crate::Error::Engine(_)),
+      "an operational inspection failure is an engine fault: {public_error:?}"
+    );
+    assert_eq!(public_error.code(), "source_inspection_failed");
+    assert_eq!(public_error.fault_kind(), crate::FaultKind::Engine);
   }
 
   #[test]
