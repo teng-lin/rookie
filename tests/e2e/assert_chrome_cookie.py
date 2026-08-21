@@ -59,39 +59,30 @@ def main() -> int:
     # workflow does not run on pull requests. See CHANGELOG.md.
     if sys.platform == "win32":
         key_path = user_data_dir / "Local State"
-        canonical = rookie_cookies.chromium_cookies_from_path(
+        canonical = rookie_cookies.extract_from_path(
             str(db_path),
-            {
-                "domains": [domain],
-                "local_state_path": str(key_path),
-                "app_bound": "allow_elevated_fallback",
-            },
+            domains=[domain],
+            local_state_path=str(key_path),
+            app_bound="allow_elevated_fallback",
         )
         legacy = rookie_cookies.chromium_based(
             str(key_path), str(db_path), [domain]
         )
         results = [
-            ("chromium_cookies_from_path(LocalStateFile)", canonical),
+            ("extract_from_path(LocalStateFile)", canonical),
             ("chromium_based", legacy),
         ]
     else:
-        automatic = rookie_cookies.chromium_cookies_from_path(
-            str(db_path),
-            {"domains": [domain], "app_bound": "allow_elevated_fallback"},
-        )
         browser_id = os.environ.get("ROOKIE_E2E_BROWSER_ID", "chrome")
-        canonical = rookie_cookies.chromium_cookies_from_path(
+        canonical = rookie_cookies.extract_from_path(
             str(db_path),
-            {
-                "domains": [domain],
-                "browser_id": browser_id,
-                "app_bound": "allow_elevated_fallback",
-            },
+            domains=[domain],
+            browser_id=browser_id,
+            app_bound="allow_elevated_fallback",
         )
         legacy = rookie_cookies.chromium_based(str(db_path), [domain], browser_id)
         results = [
-            ("chromium_cookies_from_path(Automatic)", automatic),
-            ("chromium_cookies_from_path(BrowserId)", canonical),
+            ("extract_from_path(BrowserId)", canonical),
             ("chromium_based", legacy),
         ]
 

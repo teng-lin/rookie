@@ -41,7 +41,7 @@ try {
     & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
     node tests/e2e/assert_chrome_cookie.mjs
     & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-        $cookiesDb --key-path $localState
+        $cookiesDb --local-state-path $localState
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
 }

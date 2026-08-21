@@ -179,13 +179,13 @@ def surface_args(surface: str, request: list[str]) -> list[str]:
     if surface != "cli":
         return request
     if request[0] == "profiles":
-        return ["--list-profiles", "--browser", request[1]]
+        return request
     if request[0] == "report":
-        result = ["--report", "--browser", request[1]]
+        result = ["report", "--browser", request[1]]
         if len(request) == 3:
             result.extend(["--profile", request[2]])
         return result
-    return ["--report"]
+    return ["report"]
 
 
 def invoke(command: list[str], surface: str, request: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:

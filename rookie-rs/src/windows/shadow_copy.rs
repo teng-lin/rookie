@@ -90,3 +90,29 @@ fn raw_copy(src: &Path, dst: &Path, runtime: &BoundaryRuntime<'_>) -> Result<()>
   runtime.check()?;
   result
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::common::deadline::{BoundaryRuntime, Deadline, SystemClock};
+
+  /// `shadow_copy` had no direct tests at all. This pins its first validation
+  /// step, which runs before the privilege gate and so is deterministic on any
+  /// host: a source that does not exist is rejected up front rather than
+  /// surfacing later as an admin-rights or raw-copy failure.
+  #[test]
+  fn missing_source_is_rejected_before_the_privilege_gate() {
+    let clock = SystemClock;
+    let runtime = BoundaryRuntime::new(&clock, Deadline::standard());
+    let error = shadow_copy(
+      PathBuf::from(r"C:\rookie-nonexistent\does\not\exist\Cookies"),
+      PathBuf::from(r"C:\rookie-nonexistent\destination"),
+      &runtime,
+    )
+    .expect_err("a missing source cannot be shadow copied");
+    assert!(
+      error.to_string().contains("Source file does not exist"),
+      "{error}",
+    );
+  }
+}
