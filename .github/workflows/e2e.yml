@@ -899,6 +899,11 @@ jobs:
           }
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
+        env:
+          # Chrome 151 on windows-2025 can exceed Playwright's 30s default on
+          # a cold launch. The Ubuntu canary uses the same bounded allowance;
+          # extraction assertions remain non-retried and fail immediately.
+          ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS: '120000'
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force -Path "$env:ROOKIE_E2E_USER_DATA_DIR" | Out-Null

@@ -289,6 +289,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Artifact smoke on Ubuntu ARM64: maturin-action's manylinux container left
   `RUSTC_WRAPPER=sccache` in the host job environment, so the native Node
   binding build failed looking for a host `sccache`.
+- The Windows legacy-DPAPI real-browser canary now gives system Chrome the
+  same bounded 120-second cold-start allowance as the Ubuntu canary. Chrome
+  151 could exceed Playwright's 30-second default before extraction began;
+  cookie extraction and validation assertions are still never retried.
 
 ## [0.6.0-beta.1] - 2026-08-18
 
