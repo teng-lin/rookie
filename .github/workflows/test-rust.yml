@@ -471,3 +471,39 @@ jobs:
       - name: Build sdist
         working-directory: bindings/python
         run: python -m maturin sdist --out dist
+
+  release-gate:
+    name: "release gate: full test suite"
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.suite == 'nightly' }}
+    needs:
+      - decide
+      - check
+      - freebsd-native
+      - node-tests
+      - python-tests
+      - linux
+      - windows
+      - macos
+      - sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every full-suite test and package lane
+        env:
+          DECIDE: ${{ needs.decide.result }}
+          CHECK: ${{ needs.check.result }}
+          FREEBSD: ${{ needs.freebsd-native.result }}
+          NODE: ${{ needs.node-tests.result }}
+          PYTHON: ${{ needs.python-tests.result }}
+          LINUX_WHEEL: ${{ needs.linux.result }}
+          WINDOWS_WHEEL: ${{ needs.windows.result }}
+          MACOS_WHEEL: ${{ needs.macos.result }}
+          SDIST: ${{ needs.sdist.result }}
+        run: |
+          set -euo pipefail
+          for result in \
+            "$DECIDE" "$CHECK" "$FREEBSD" "$NODE" "$PYTHON" \
+            "$LINUX_WHEEL" "$WINDOWS_WHEEL" "$MACOS_WHEEL" "$SDIST"
+          do
+            test "$result" = success
+          done

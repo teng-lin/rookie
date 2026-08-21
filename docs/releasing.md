@@ -72,11 +72,18 @@ issue, pull request, or workflow log:
    `rookie-cookies`, owner `teng-lin`, repository `rookie-cookies`, workflow
    `publish-py.yml`, and environment `release`. No PyPI token is needed by the
    workflow.
-3. Configure npm trusted publishing for `rookie-cookies` and all five native
-   platform packages. For each package, use owner `teng-lin`, repository
-   `rookie-cookies`, workflow `publish-npm.yml`, environment `release`, and
-   allow the `npm publish` operation. The workflow uses OIDC and does not need
-   an npm token.
+3. Configure npm trusted publishing for `rookie-cookies` and every native
+   platform package that already exists. For each package, use owner
+   `teng-lin`, repository `rookie-cookies`, workflow `publish-npm.yml`,
+   environment `release`, and allow the `npm publish` operation. Normal
+   releases use OIDC and do not need an npm token.
+4. npm cannot configure a trusted publisher for a package that has never been
+   published. To add a new contract package without a manual upload, create a
+   granular npm token that is allowed to create/publish it and add that token
+   to the `release` environment as `NPM_TOKEN`. Use the guarded one-time
+   `bootstrap_package` dispatch described below. After that workflow creates
+   the package, immediately configure its trusted publisher and delete the
+   `NPM_TOKEN` environment secret.
 
 Local `~/.pypirc`, `~/.npmrc`, and Cargo credential files are not automatically
 available to GitHub Actions. Keep them owner-readable only and transfer tokens
@@ -144,8 +151,45 @@ trusted publishing run on Node.js 24. The workflow creates all six immutable
 tarballs without running publish lifecycle scripts and saves them as a workflow
 artifact before any registry write.
 
-Merge the release pull request and wait for all main-branch checks to pass.
-Create an annotated tag from the resulting main commit:
+Merge the release pull request and wait for all automatic main-branch checks
+to pass. Then run every full CI and browser suite against the exact commit that
+will be tagged. The aggregate `release gate: ...` jobs exist only for these
+manual release-mode dispatches and are required by every publish workflow's CI
+proof:
+
+```console
+git fetch origin main
+export RELEASE_SHA="$(git rev-parse origin/main)"
+
+gh workflow run test-rust.yml --ref main -f suite=nightly
+gh workflow run e2e.yml --ref main -f appbound_only=false -f multi_browser=true
+gh workflow run e2e-release.yml --ref main
+gh workflow run artifact-smoke.yml --ref main
+gh workflow run assurance.yml --ref main
+gh workflow run security.yml --ref main
+```
+
+These cover the full Rust/Node/Python runtime and OS matrix, FreeBSD and wheel/
+sdist packaging, every installed-artifact platform including Linux ARM64 and
+macOS Intel, coverage and sanitizer-backed fuzzing, dependency/secret/CodeQL
+security scans, the complete claimed-browser installer plus fixture matrices,
+and the real-browser matrix including Chrome, Edge, and Brave App-Bound v20.
+Wait for all six workflows. Verify that each run's `headSha` is
+`$RELEASE_SHA`, that all six aggregate release gates succeeded, and that
+`origin/main` still points to `$RELEASE_SHA`; if `main` moved during the gate,
+restart the gate against its new tip. The authenticated preflight performs the
+same fail-closed check used by the publish workflows:
+
+```console
+python3 scripts/check-release-controls.py \
+  --repo teng-lin/rookie-cookies \
+  --commit-sha "$RELEASE_SHA"
+git fetch origin main
+test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
+```
+
+Only after that exact-commit gate passes, create an annotated tag from the
+resulting main commit:
 
 ```console
 git switch main
@@ -178,6 +222,32 @@ instead via `-f tag=`:
 ```console
 gh workflow run publish-npm.yml --ref main -f version="$VERSION" -f tag="alpha"
 ```
+
+### One-time npm package bootstrap
+
+Trusted publishing cannot be configured for a package name until npm has a
+package record. `bootstrap_package` solves that first-publication cycle inside
+the normal release workflow; it is not a manual upload. The workflow accepts
+only a package emitted by `release/platform-contract.json`, proves the package
+returns npm `E404`, publishes its already-packaged release tarball with the
+`release` environment's `NPM_TOKEN`, and then lets the ordinary OIDC publish
+loop verify the same tarball by integrity before continuing.
+
+For `v0.6.0-beta.2`, bootstrap the new Linux ARM64 package with:
+
+```console
+gh workflow run publish-npm.yml --ref main \
+  -f version="$VERSION" \
+  -f bootstrap_package="rookie-cookies-linux-arm64-gnu"
+```
+
+Use this command *instead of* the ordinary npm command in the publish sequence
+above for this one release. Do not pass `bootstrap_package` for an established
+package: the guarded step refuses it. After the run creates
+`rookie-cookies-linux-arm64-gnu`, configure
+that package's trusted publisher with the same owner/repository/workflow/
+environment settings listed above, delete `NPM_TOKEN`, and omit the bootstrap
+input from every later release.
 
 pip and cargo skip pre-release versions by default, so PyPI and crates.io
 need no equivalent tag handling.
@@ -565,11 +635,13 @@ after its first successful run.
 Never blindly rerun a failed publish job. First check the registry because an
 upload can succeed before the workflow reports a timeout.
 
-For npm, inspect all six package names at the requested version. If the native
-packages exist but the root package does not, download the failed run's
-`npm-release-<version>` artifact and publish its unchanged root tarball with
-lifecycle scripts disabled. Do not rebuild or attempt to overwrite any package
-version; npm, PyPI, and crates.io versions are immutable.
+For npm, inspect all six package names at the requested version. The workflow
+is integrity-idempotent: it accepts an already-published package only when the
+registry integrity matches the rebuilt immutable tarball, then continues with
+the missing packages. If the one-time bootstrap package was created before a
+later failure, configure its trusted publisher and re-dispatch without
+`bootstrap_package`. Do not rebuild by hand or attempt to overwrite any
+package version; npm, PyPI, and crates.io versions are immutable.
 
 For PyPI, `publish-py.yml` no longer passes `skip-existing: true` to
 `pypa/gh-action-pypi-publish`: a partial failure (say, 3 of 6 files uploaded

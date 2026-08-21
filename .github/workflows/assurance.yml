@@ -78,3 +78,21 @@ jobs:
             cargo +nightly-2025-11-23 fuzz run ${{ matrix.target }} -- \
               -max_total_time="$FUZZ_SECONDS" -timeout=10 \
               -max_len=4096 -rss_limit_mb=2048
+
+  release-gate:
+    name: "release gate: assurance"
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    needs:
+      - coverage
+      - fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require coverage and every sanitizer-backed fuzz target
+        env:
+          COVERAGE: ${{ needs.coverage.result }}
+          FUZZ: ${{ needs.fuzz.result }}
+        run: |
+          set -euo pipefail
+          test "$COVERAGE" = success
+          test "$FUZZ" = success

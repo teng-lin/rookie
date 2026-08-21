@@ -68,3 +68,24 @@ jobs:
       - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           category: /language:${{ matrix.language }}
+
+  release-gate:
+    name: "release gate: security"
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    needs:
+      - osv
+      - secrets
+      - codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require dependency, history-secret, and CodeQL scans
+        env:
+          OSV: ${{ needs.osv.result }}
+          SECRETS: ${{ needs.secrets.result }}
+          CODEQL: ${{ needs.codeql.result }}
+        run: |
+          set -euo pipefail
+          test "$OSV" = success
+          test "$SECRETS" = success
+          test "$CODEQL" = success

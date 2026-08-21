@@ -473,6 +473,26 @@ class MainTests(unittest.TestCase):
 
 
 class PublishWorkflowProofTests(unittest.TestCase):
+    def test_every_full_release_suite_has_a_required_exact_commit_gate(self) -> None:
+        expected = {
+            "release gate: full test suite": ".github/workflows/test-rust.yml",
+            "release gate: real browsers": ".github/workflows/e2e.yml",
+            "release gate: claimed browsers": ".github/workflows/e2e-release.yml",
+            "release gate: installed artifacts": ".github/workflows/artifact-smoke.yml",
+            "release gate: assurance": ".github/workflows/assurance.yml",
+            "release gate: security": ".github/workflows/security.yml",
+        }
+        for check_name, workflow_path in expected.items():
+            with self.subTest(check=check_name):
+                self.assertIn(check_name, write_ci_proof.REQUIRED_CHECK_RUNS)
+                self.assertEqual(
+                    write_ci_proof._TRUSTED_WORKFLOW_FOR_CHECK[check_name],
+                    workflow_path,
+                )
+                workflow = (REPOSITORY_ROOT / workflow_path).read_text(encoding="utf-8")
+                self.assertIn(f'name: "{check_name}"', workflow)
+                self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
+
     def test_every_publish_workflow_blocks_before_its_publish_mutation(self) -> None:
         mutation_markers = {
             "publish-npm.yml": 'npm publish "./$tarball"',

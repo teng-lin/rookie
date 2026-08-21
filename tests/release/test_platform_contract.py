@@ -97,6 +97,17 @@ class RealContractTests(unittest.TestCase):
         self.assertNotIn("native_packages=(", workflow)
         self.assertNotIn('test "${#tarballs[@]}" -eq 5', workflow)
 
+    def test_npm_first_package_bootstrap_is_explicit_and_contract_guarded(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/publish-npm.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("bootstrap_package:", workflow)
+        self.assertIn("if: inputs.bootstrap_package != ''", workflow)
+        self.assertIn("NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}", workflow)
+        self.assertIn("--emit-npm-publish-order", workflow)
+        self.assertIn("could not prove that $BOOTSTRAP_PACKAGE is absent", workflow)
+        self.assertIn('NPM_CONFIG_USERCONFIG="$bootstrap_npmrc" npm publish', workflow)
+
     def test_pack_script_outputs_exactly_the_contract_tarballs(self) -> None:
         contract = platform_contract.load_contract()
         with tempfile.TemporaryDirectory() as temporary:

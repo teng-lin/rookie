@@ -61,3 +61,31 @@ jobs:
       rust-target: x86_64-apple-darwin
       python-target: x86_64
       npm-platform: darwin-x64
+
+  release-gate:
+    name: "release gate: installed artifacts"
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    needs:
+      - linux-x64
+      - linux-arm64
+      - windows-x64
+      - macos-arm64
+      - macos-intel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every installed-artifact platform
+        env:
+          LINUX_X64: ${{ needs.linux-x64.result }}
+          LINUX_ARM64: ${{ needs.linux-arm64.result }}
+          WINDOWS_X64: ${{ needs.windows-x64.result }}
+          MACOS_ARM64: ${{ needs.macos-arm64.result }}
+          MACOS_INTEL: ${{ needs.macos-intel.result }}
+        run: |
+          set -euo pipefail
+          for result in \
+            "$LINUX_X64" "$LINUX_ARM64" "$WINDOWS_X64" \
+            "$MACOS_ARM64" "$MACOS_INTEL"
+          do
+            test "$result" = success
+          done

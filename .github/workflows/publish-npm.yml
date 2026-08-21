@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ""
+      bootstrap_package:
+        description: "One-time token bootstrap for an allow-listed package that does not exist on npm"
+        required: false
+        type: string
+        default: ""
 
 env:
   DEBUG: napi:*
@@ -597,6 +602,66 @@ jobs:
             echo "::error::v$RELEASE_VERSION now resolves to $object_sha, but the packaged commit is $EXPECTED_RELEASE_SHA"
             exit 1
           fi
+      # npm cannot configure a trusted publisher for a package until that
+      # package exists. This opt-in step bootstraps exactly one package from
+      # the contract with the release environment's short-lived/granular
+      # token. It refuses established packages; all normal publication below
+      # remains OIDC-only. Remove NPM_TOKEN after configuring the new
+      # package's trusted publisher (see docs/releasing.md).
+      - name: Bootstrap first publication for a new npm package
+        if: inputs.bootstrap_package != ''
+        shell: bash
+        env:
+          BOOTSTRAP_PACKAGE: ${{ inputs.bootstrap_package }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t publish_packages < <(
+            python3 ../../scripts/platform_contract.py --emit-npm-publish-order
+          )
+          allowed=false
+          for package in "${publish_packages[@]}"; do
+            if test "$package" = "$BOOTSTRAP_PACKAGE"; then
+              allowed=true
+              break
+            fi
+          done
+          if test "$allowed" != true; then
+            echo "::error::bootstrap_package '$BOOTSTRAP_PACKAGE' is not an npm package in release/platform-contract.json"
+            exit 1
+          fi
+
+          view_stdout="$(mktemp)"
+          view_stderr="$(mktemp)"
+          bootstrap_npmrc="$(mktemp)"
+          cleanup() {
+            rm -f "$view_stdout" "$view_stderr" "$bootstrap_npmrc"
+          }
+          trap cleanup EXIT
+
+          if npm view "$BOOTSTRAP_PACKAGE" name --json >"$view_stdout" 2>"$view_stderr"; then
+            echo "::error::$BOOTSTRAP_PACKAGE already exists on npm; configure trusted publishing and dispatch without bootstrap_package"
+            exit 1
+          fi
+          if ! grep -Eq 'E404|404 Not Found' "$view_stderr"; then
+            echo "::error::could not prove that $BOOTSTRAP_PACKAGE is absent from npm"
+            cat "$view_stderr" >&2
+            exit 1
+          fi
+          if test -z "${NODE_AUTH_TOKEN:-}"; then
+            echo "::error::the release environment has no NPM_TOKEN for the requested first-package bootstrap"
+            exit 1
+          fi
+
+          tarball="release-packages/$BOOTSTRAP_PACKAGE-$RELEASE_VERSION.tgz"
+          test -f "$tarball"
+          chmod 600 "$bootstrap_npmrc"
+          printf '%s\n' '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}' >"$bootstrap_npmrc"
+          echo "Bootstrapping $BOOTSTRAP_PACKAGE@$RELEASE_VERSION under npm dist-tag: $NPM_TAG"
+          NPM_CONFIG_USERCONFIG="$bootstrap_npmrc" npm publish "./$tarball" \
+            --access public --ignore-scripts --provenance --tag "$NPM_TAG"
       - name: Publish
         shell: bash
         env:

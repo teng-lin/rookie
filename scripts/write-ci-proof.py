@@ -86,7 +86,9 @@ DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 # job>", and the run this resolves to is always the *caller's* run --
 # reusable workflows execute inside the caller's run, not a separate one);
 # "check (ubuntu-latest)" is test-rust.yml's combined Linux job (fmt,
-# package, metadata, cargo-audit, clippy, tests, public API).
+# package, metadata, cargo-audit, clippy, tests, public API). The six
+# "release gate: ..." sentinels are manual, exact-commit aggregations: each
+# succeeds only after every lane in its full release-mode workflow succeeds.
 _TRUSTED_WORKFLOW_FOR_CHECK: dict[str, str] = {
     "e2e ubuntu × chrome (libsecret)": ".github/workflows/e2e.yml",
     "e2e ubuntu × firefox": ".github/workflows/e2e.yml",
@@ -96,6 +98,12 @@ _TRUSTED_WORKFLOW_FOR_CHECK: dict[str, str] = {
     "e2e windows × chrome (App-Bound v20 canary)": ".github/workflows/e2e.yml",
     "e2e windows × chrome (legacy DPAPI)": ".github/workflows/e2e.yml",
     "check (ubuntu-latest)": ".github/workflows/test-rust.yml",
+    "release gate: full test suite": ".github/workflows/test-rust.yml",
+    "release gate: real browsers": ".github/workflows/e2e.yml",
+    "release gate: claimed browsers": ".github/workflows/e2e-release.yml",
+    "release gate: installed artifacts": ".github/workflows/artifact-smoke.yml",
+    "release gate: assurance": ".github/workflows/assurance.yml",
+    "release gate: security": ".github/workflows/security.yml",
 }
 for _platform in _ARTIFACT_SMOKE_PLATFORMS:
     for _sub_job in _ARTIFACT_SMOKE_SUB_JOBS:
@@ -104,9 +112,8 @@ assert set(_TRUSTED_WORKFLOW_FOR_CHECK) == set(REQUIRED_CHECK_RUNS), (
     "every REQUIRED_CHECK_RUNS name must have a trusted workflow mapping, and vice versa"
 )
 
-# All three trusted workflows also trigger on `schedule` and `workflow_dispatch`
-# (see e.g. artifact-smoke.yml's Monday cron, e2e.yml's nightly cron, and
-# every workflow's manual workflow_dispatch trigger) -- rejecting those would
+# The trusted workflows trigger on some combination of `push`, `schedule`, and
+# `workflow_dispatch` (every full release gate is manual) -- rejecting those would
 # produce false failures on a perfectly genuine run: `verify_required_checks`
 # already picks the *most recently started* run for a given check name, so a
 # Monday cron firing while a release commit sits at the tip of `main` would
