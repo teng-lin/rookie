@@ -518,9 +518,21 @@ def esent_copy_command(source: Path, destination: Path) -> list[str]:
     return ["esentutl.exe", "/y", str(source), f"/d{destination}", "/o"]
 
 
+def webcache_host_commands() -> list[list[str]]:
+    # Depending on the Windows image revision, the per-user ESE instance is
+    # hosted by either taskhostw or a COM surrogate after Edge/IE has exited.
+    return [
+        ["taskkill", "/F", "/IM", "taskhostw.exe"],
+        ["taskkill", "/F", "/IM", "dllhost.exe"],
+    ]
+
+
 def snapshot_internet_explorer_store(cookie_file: Path) -> Path:
     """Copy the real ESE store out of the Windows WebCache share lock."""
 
+    for command in webcache_host_commands():
+        subprocess.run(command, check=False, capture_output=True)
+    time.sleep(2)
     destination = (
         Path(tempfile.gettempdir()) / f"rookie-ie-WebCacheV01-{time.time_ns()}.dat"
     )

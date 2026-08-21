@@ -73,34 +73,29 @@ function send(method, params = {}) {
       reject(new Error(`${method} timed out`));
     }, 10_000);
     pending.set(id, { method, resolve, reject, timeout });
-    socket.send(
-      JSON.stringify({
-        id,
-        method,
-        params,
-      }),
-    );
+    socket.send(JSON.stringify({ id, method, params }));
   });
 }
 
 try {
-  // Vivaldi publishes a healthy browser endpoint but can stop responding as
-  // soon as a client attaches to its custom start-page target. Creating the
-  // target at the canary URL performs the real navigation without crossing
-  // that fork-specific page-session boundary.
-  await send("Target.createTarget", { url });
-  // Browser-level Storage.getCookies hangs in several macOS Chromium forks,
-  // even after Target.createTarget succeeds. Give the network request time to
-  // finish and let the Python harness verify the persisted SQLite row instead.
+  // Vivaldi's page-session commands can hang even for a fresh target. Keep the
+  // browser-level protocol only, but force the canary target into the foreground
+  // so Windows service sessions do not indefinitely throttle its navigation.
+  const { targetId } = await send("Target.createTarget", {
+    url,
+    newWindow: true,
+    background: false,
+  });
+  await send("Target.activateTarget", { targetId });
   await new Promise((resolve) => setTimeout(resolve, 10_000));
-  console.log(`native CDP navigation requested ${url}`);
+  console.log(`native CDP foreground target requested ${url}`);
 } finally {
   // A protocol-level close gives the native process a chance to checkpoint
   // its persistent cookie database before the extractor opens it.
   try {
     await send("Browser.close");
   } catch (error) {
-    if (socket.readyState === WebSocket.OPEN) throw error;
+    console.warn(`Browser.close did not complete: ${error.message}`);
   }
   if (socket.readyState === WebSocket.OPEN) socket.close();
 }

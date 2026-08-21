@@ -62,6 +62,13 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 "/o",
             ],
         )
+        self.assertEqual(
+            hosted.webcache_host_commands(),
+            [
+                ["taskkill", "/F", "/IM", "taskhostw.exe"],
+                ["taskkill", "/F", "/IM", "dllhost.exe"],
+            ],
+        )
 
     def test_non_linux_chromium_needs_neither_xvfb_nor_libsecret(self) -> None:
         command = hosted.chromium_native_command(
