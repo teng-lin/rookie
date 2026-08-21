@@ -20,11 +20,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from `from_path(..).detailed_cookies()`, so the Rust free function backing
   `chromium_cookies_from_path_detailed` is gone too — a real narrowing at that
   layer, since a domain-filtered *detailed* path list is no longer expressible
-  through it. **Python keeps the function and its `domains` option**: it is
-  now backed by `from_path(..).into_detailed_cookies()` plus a domain filter
-  applied in the binding, reimplementing the core's exact (but
-  binding-unreachable, `pub(crate)`) matching rule rather than dropping the
-  capability for existing callers.
+  through it. **Python keeps the function** (now backed by
+  `from_path(..).into_detailed_cookies()`) but drops its `domains` option:
+  passing `domains` raises `RookieRequestError` rather than the binding
+  reimplementing the core's `pub(crate)` matching rule to fake the filter
+  back. Python's `from_path()` gains `plaintext_only` / `browser_id` /
+  `local_state_path` keyword arguments (mutually exclusive, validated with
+  the now-wired-up `conflicting_credential_selectors` code before any I/O)
+  for the same credential selection `chromium_cookies_from_path`'s options
+  dict already offered.
 - Sniffing a Chromium database is plaintext-capable only; an encrypted row is
   the new `missing_chromium_credentials`. On Unix that is a narrowing (the
   ordered identity probe is gone). On Windows it is a widening: the old call
