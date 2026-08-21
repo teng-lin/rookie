@@ -61,6 +61,9 @@ appbound = []
 # of this crate -- the CLI, and the Python/Node bindings -- doesn't pull in
 # schemars and its transitive deps for a capability they never call.
 dto-schema = ["dep:schemars"]
+# Internal libFuzzer entry points. This feature is excluded from default
+# builds and exposes no supported consumer API; see `fuzz/README.md`.
+fuzzing = []
 # End-to-end steering of the Windows App-Bound attempt order, used only by
 # `tests/e2e/run_windows_appbound_canary.ps1`. The canary must exercise the
 # elevated-DPAPI fallback in isolation, which no public `AppBoundPolicy` value

@@ -4,7 +4,7 @@
 //! identifies the source before selecting a target capability, so unsupported
 //! platforms and invalid options are reported as stable, downcastable errors.
 
-mod shared;
+pub(crate) mod shared;
 
 #[cfg(target_os = "linux")]
 mod linux;

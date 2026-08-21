@@ -9,6 +9,7 @@ crypto coverage.
 | Deterministic | Contracts, fixtures, lint, public API, packaged consumers | `test-rust.yml` (`check` job), local `cargo test` |
 | Real browsers | Seeded profiles plus Windows App-Bound **v20** | `e2e.yml` (Chrome/Firefox + App-Bound canary), `e2e-release.yml` (Edge/Chromium, silent-install catalog, release fixtures) |
 | Installed artifacts | Shipped CLI, wheel, and npm tarballs in a clean directory | `artifact-smoke.yml` (main / nightly / manual; not PRs) |
+| Assurance | Dependency/secret/code scanning, branch coverage, sanitizer-backed parser fuzzing | `security.yml`, `assurance.yml` |
 
 CI has three lanes. A pull request is not the full product.
 
@@ -32,7 +33,21 @@ python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
 python3 -m unittest discover -s tests/release -p 'test_*.py' -v
 python3 scripts/check-doc-snippets.py
 python3 scripts/check-release.py
+python3 scripts/check-coverage.py --report coverage.json
 ```
+
+Generate the report consumed by the last command with the pinned nightly and
+coverage tool used by CI:
+
+```console
+cargo install cargo-llvm-cov --version 0.9.0 --locked
+cargo +nightly-2025-11-23 llvm-cov \
+  --workspace --all-features --all-targets --branch \
+  --json --output-path coverage.json
+```
+
+`coverage.toml` holds aggregate and critical-file floors. A floor is a ratchet:
+raise it after sustained improvement; lowering it requires explicit review.
 
 After `maturin develop --release --locked` in `bindings/python`:
 
@@ -63,6 +78,14 @@ expands the language matrix.
 - **fmt**, Clippy (`-D warnings`), workspace tests, **and**
   `--no-default-features` so the non-`appbound` Windows branch cannot rot.
 - **cargo-audit** against `security/audit-exceptions.toml` (blocking; Ubuntu).
+- **OSV-Scanner** recursively covers committed Cargo and npm lockfiles and
+  fails on a reported advisory; Gitleaks scans committed history/PR changes;
+  CodeQL analyzes Rust, Python, and JavaScript/TypeScript (`security.yml`).
+- **Measured coverage** uses nightly branch instrumentation and enforces the
+  checked-in floors in `coverage.toml` (`assurance.yml`).
+- **Parser fuzzing** runs the three targets documented in `fuzz/README.md`
+  under libFuzzer sanitizer instrumentation on every PR and for longer on the
+  daily schedule (`assurance.yml`).
 - **Public API snapshots** (`scripts/check-public-api.py`) on Linux, macOS, and
   Windows.
 - **Authoritative discovery:** `config.json` and `common/paths.rs` must stay

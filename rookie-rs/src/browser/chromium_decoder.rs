@@ -476,8 +476,8 @@ impl ChromiumCookieCursor<'_> {
   }
 }
 
-#[cfg(test)]
-pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
   let connection = rusqlite::Connection::open_in_memory()?;
   connection.execute_batch(
     "CREATE TABLE meta (key TEXT, value TEXT);

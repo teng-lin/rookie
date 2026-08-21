@@ -98,6 +98,40 @@ impl Decoder<MozillaSessionReadOnlySource<'_>, CookieRecord> for MozillaSessionD
   }
 }
 
+/// Exercises both session-store containers with attacker-controlled bytes.
+///
+/// The mozLz4 advertised length is derived from two input bytes and capped at
+/// 64 KiB. Production accepts larger real profiles, but a fuzz iteration must
+/// not turn four arbitrary bytes into a repeated 64 MiB allocation.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+  fn decode(bytes: &[u8], format: SessionStoreFormat) {
+    let source = MozillaSessionReadOnlySource {
+      bytes,
+      format,
+      domains: None,
+    };
+    let decoder = MozillaSessionDecoder;
+    let clock = crate::common::deadline::SystemClock;
+    let runtime = BoundaryRuntime::standard(&clock);
+    let mut sink = |_record| Ok(());
+    let _ = decoder.decode(&source, &mut sink, &runtime);
+  }
+
+  decode(bytes, SessionStoreFormat::LegacyJson);
+
+  let advertised = bytes
+    .get(..2)
+    .map(|prefix| u16::from_le_bytes([prefix[0], prefix[1]]))
+    .unwrap_or(0);
+  let mut jsonlz4 = Vec::with_capacity(12 + bytes.len());
+  jsonlz4.extend_from_slice(b"mozLz40\0");
+  jsonlz4.extend_from_slice(&u32::from(advertised).to_le_bytes());
+  jsonlz4.extend_from_slice(bytes);
+  decode(&jsonlz4, SessionStoreFormat::JsonLz4);
+  Ok(())
+}
+
 pub(crate) fn parse_session_path_with_runtime(
   path: &Path,
   format: SessionStoreFormat,

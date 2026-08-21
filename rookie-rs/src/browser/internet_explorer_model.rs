@@ -311,8 +311,8 @@ impl std::error::Error for InternetExplorerFailure {
   }
 }
 
-#[cfg(test)]
-pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
   let mut numeric = [0_u8; 8];
   for (target, source) in numeric.iter_mut().zip(bytes.iter().copied()) {
     *target = source;

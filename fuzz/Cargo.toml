@@ -1,0 +1,36 @@
+[package]
+name = "rookie-cookies-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rookie-cookies = { path = "../rookie-rs", default-features = false, features = ["fuzzing"] }
+
+[[bin]]
+name = "portable_decoders"
+path = "fuzz_targets/portable_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mozilla_session"
+path = "fuzz_targets/mozilla_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source_classifier"
+path = "fuzz_targets/source_classifier.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

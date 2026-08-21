@@ -26,6 +26,9 @@
 pub mod common;
 pub mod config;
 pub mod direct_path;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod report;
 mod utils;
 pub use common::enums;

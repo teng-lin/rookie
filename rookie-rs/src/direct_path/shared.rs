@@ -76,7 +76,7 @@ pub(super) fn read_header_with_runtime(
   Ok(header)
 }
 
-pub(super) fn classify_header(header: &[u8]) -> Result<Option<CookieSourceKind>> {
+pub(crate) fn classify_header(header: &[u8]) -> Result<Option<CookieSourceKind>> {
   if header.starts_with(b"SQLite format 3\0") {
     return Ok(None);
   }
