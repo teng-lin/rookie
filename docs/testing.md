@@ -15,7 +15,7 @@ CI has three lanes. A pull request is not the full product.
 
 | Lane | Trigger | What runs |
 | --- | --- | --- |
-| **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Real Ubuntu Chrome + Firefox gate every PR. Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
+| **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows); the required macOS check also cross-checks Linux and Windows source. Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Real Ubuntu Chrome + Firefox gate every PR. Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
 | **Nightly** | Scheduled test/E2E workflows, plus manual dispatch | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. `security.yml` runs dependency, secret, and code scanning; `assurance.yml` runs measured coverage and sanitizer-backed fuzzing. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
 | **Release** | `v*` tag, GitHub Release, `workflow_dispatch` on `e2e-release.yml`, or a PR labeled `e2e-release` | The hosted installer matrix again, plus engine fixtures for every `release_fixture` cell. A labeled PR stays opted in across later `synchronize` events. App-Bound Edge+Brave is the `e2e.yml` nightly / `multi_browser` dispatch, not this workflow. macOS Intel artifact smoke (schedule/manual). |
 
@@ -26,6 +26,7 @@ cargo test --workspace --all-targets --locked
 cargo test --workspace --doc --locked
 cargo test -p rookie-cookies --no-default-features --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo run -p xtask --locked -- check-platforms
 cargo run -p xtask --locked -- check-cfg-locations
 cargo run -p xtask --locked -- check-stage-boundary
 
@@ -35,6 +36,24 @@ python3 scripts/check-doc-snippets.py
 python3 scripts/check-release.py
 python3 scripts/check-coverage.py --report coverage.json
 ```
+
+`check-platforms` runs native Clippy followed by Linux GNU and Windows GNU
+Clippy through Zig. Install its exact tested prerequisites before using it:
+
+```console
+cargo install cargo-zigbuild --version 0.23.0 --locked
+# Install Zig 0.16.0 from https://ziglang.org/download/
+rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
+rustup component add clippy
+```
+
+The command checks these versions and targets before compiling and prints every
+underlying command. CI uses `check-platforms --skip-host` because the normal
+macOS job already runs native Clippy. The Windows GNU check deliberately uses
+`--no-default-features --features appbound`, leaving the default-on
+`internet-explorer` backend out of this fast source check. It catches Windows
+Rust signature and call-site drift; the native Windows MSVC job remains the
+authority for C compilation, linking, ABI, and runtime behavior.
 
 Generate the report consumed by the last command with the pinned nightly and
 coverage tool used by CI:
@@ -85,6 +104,9 @@ expands the language matrix.
 - **cfg allowlist:** `cargo run -p xtask -- check-cfg-locations`.
 - **Stage boundary:** `cargo run -p xtask -- check-stage-boundary` — listing types
   must have nowhere to put an extraction result (ADR 0005).
+- **Cross-target source check:** macOS runs `xtask check-platforms --skip-host`
+  against Linux GNU and Windows GNU with pinned Zig tooling. The native Windows
+  job remains the complete MSVC/native-dependency gate.
 - **DTO schema + generated Python dataclasses** must match `report_core.rs`.
 - **Release metadata** (`check-release.py`, platform contract, consumer
   harness coverage) and `tests/e2e/test_browser_coverage.py`.

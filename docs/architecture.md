@@ -361,7 +361,7 @@ Root `Cargo.toml` workspace members:
 | `bindings/python/` | `rookie-cookies-python` (`cdylib` `rookie_cookies`) | PyO3 0.29, abi3-py311. Default workspace member. |
 | `bindings/node/` | `rookie-cookies-node` (`cdylib`) | napi-rs; async `Task` on the worker pool. Not a default member. |
 | `cli/` | `rookie-cookies-cli` binary `rookie-cookies` | clap; JSON / Netscape; job subcommands. |
-| `xtask/` | `xtask` (publish = false) | `check-cfg-locations`, `list-cfg-locations`, `check-stage-boundary`. |
+| `xtask/` | `xtask` (publish = false) | `check-cfg-locations`, `list-cfg-locations`, `check-stage-boundary`, `check-platforms`. |
 
 `examples/rust/http` is workspace-excluded. Default members are `rookie-rs` and `bindings/python` so `cargo test` from the root does not require Node toolchains.
 
