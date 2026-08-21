@@ -19,6 +19,10 @@ jobs:
     permissions:
       actions: read
       contents: read
+      # The pinned reusable workflow declares this permission even when SARIF
+      # upload is disabled for pull requests. GitHub rejects the call before
+      # starting any jobs unless the caller grants the same ceiling.
+      security-events: write
     with:
       scan-args: |-
         --recursive
