@@ -186,6 +186,104 @@ class RequiredChecksTests(unittest.TestCase):
             failures = check_release_controls.check_required_checks("owner/repo", "a" * 40)
         self.assertEqual(failures, [])
 
+    def test_ignores_newer_skipped_duplicate_after_success(self) -> None:
+        name = check_release_controls.REQUIRED_CHECK_RUNS[0]
+        response = {
+            "check_runs": [
+                {
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "skipped",
+                    "started_at": "2026-01-02T00:00:00Z",
+                },
+            ]
+            + [
+                {
+                    "name": other,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                }
+                for other in check_release_controls.REQUIRED_CHECK_RUNS[1:]
+            ]
+        }
+        with mock.patch.object(check_release_controls, "gh_api", return_value=response):
+            failures = check_release_controls.check_required_checks("owner/repo", "a" * 40)
+        self.assertEqual(failures, [])
+
+    def test_newer_failed_rerun_still_governs(self) -> None:
+        name = check_release_controls.REQUIRED_CHECK_RUNS[0]
+        response = {
+            "check_runs": [
+                {
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "started_at": "2026-01-02T00:00:00Z",
+                },
+            ]
+            + [
+                {
+                    "name": other,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                }
+                for other in check_release_controls.REQUIRED_CHECK_RUNS[1:]
+            ]
+        }
+        with mock.patch.object(check_release_controls, "gh_api", return_value=response):
+            failures = check_release_controls.check_required_checks("owner/repo", "a" * 40)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("conclusion is 'failure'", failures[0])
+
+    def test_unorderable_non_skipped_rerun_fails_closed(self) -> None:
+        name = check_release_controls.REQUIRED_CHECK_RUNS[0]
+        response = {
+            "check_runs": [
+                {
+                    "id": 1,
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "name": name,
+                    "status": "queued",
+                    "conclusion": None,
+                    "started_at": None,
+                },
+            ]
+            + [
+                {
+                    "name": other,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-01-01T00:00:00Z",
+                }
+                for other in check_release_controls.REQUIRED_CHECK_RUNS[1:]
+            ]
+        }
+        with mock.patch.object(check_release_controls, "gh_api", return_value=response):
+            failures = check_release_controls.check_required_checks("owner/repo", "a" * 40)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("cannot order check run 2", failures[0])
+        self.assertIn("started_at is missing", failures[0])
+
     def test_pages_past_the_first_hundred_check_runs(self) -> None:
         # A required check that only appears on page 2 must still count; a
         # single-page fetch is what blocked publish-cli for v0.6.0-beta.1.

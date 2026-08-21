@@ -6,6 +6,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release-control checks no longer let a newer, intentionally skipped copy of
+  a dispatch-only gate mask the successful exact-commit release run.
+
 ## [0.6.0-beta.3] - 2026-08-21
 
 ### Changed
