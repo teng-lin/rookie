@@ -98,7 +98,17 @@ function legacyPlatformDeclarations() {
 
 let loader = readFileSync(loaderPath, 'utf8')
 
-if (!loader.includes("const { optionalDependencies = {} } = require('./package.json')")) {
+if (!loader.includes('const { platform, arch } = process')) {
+  loader = loader.replace(
+    "const { readFileSync } = require('fs')\n",
+    "const { readFileSync } = require('fs')\nconst { platform, arch } = process\n"
+  )
+}
+
+if (
+  loader.includes('let loadError = null') &&
+  !loader.includes("const { optionalDependencies = {} } = require('./package.json')")
+) {
   loader = loader.replace(
     'const { platform, arch } = process\n',
     "const { platform, arch } = process\nconst { optionalDependencies = {} } = require('./package.json')\n"
@@ -126,30 +136,37 @@ if (!loader.includes('No prebuilt rookie-cookies binding is published')) {
   )
 }
 
-const nativeBindingDestructurePattern = /^const \{ .*\bversion\b.*\} = nativeBinding$/m
-if (!nativeBindingDestructurePattern.test(loader)) {
-  throw new Error(
-    "patch-loader.js: could not find the napi-generated `const { ..., version, ... } = nativeBinding` line; napi-rs output format may have changed"
-  )
-}
-loader = loader.replace(
-  nativeBindingDestructurePattern,
+const canonicalNativeBindingDestructure =
   'const { CancellationHandle, version, toNetscape, anyBrowser, extractFromPath, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, jar, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding'
-)
+const nativeBindingDestructurePattern = /^const \{ .*\bversion\b.*\} = nativeBinding$/m
+const napiV3ExportFacadePattern =
+  /^module\.exports = nativeBinding\n(?:module\.exports\.(\w+) = nativeBinding\.\1\n?)+/m
 
-// Every napi-generated raw export is a simple self-reexport
-// (`module.exports.name = name`), whatever the name -- unlike this script's
-// own validated exports further down (`module.exports.name = requiredNative(name, 'name')`
-// or an asyncNative(...)/platformNative(...) call), which never take this
-// shape. Matching that shape generically, instead of a specific name like
-// `version`, means a new napi export sorting ahead of every previously
-// known one (as CancellationHandle did) still gets sliced off here instead
-// of surviving as an unvalidated duplicate of its own patched export below.
-const exportStart = loader.search(
-  /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.(\w+) = \1$)/m
-)
-if (exportStart === -1) {
-  throw new Error('Generated loader has no export facade')
+let exportStart
+if (nativeBindingDestructurePattern.test(loader)) {
+  loader = loader.replace(nativeBindingDestructurePattern, canonicalNativeBindingDestructure)
+
+  // napi-rs v2 follows the destructure with self-reexports. An already
+  // patched loader instead follows it with this script's validation helpers.
+  exportStart = loader.search(
+    /^(?:function (?:requiredNative|asyncNative|unsupportedPlatform|platformNative)\(|module\.exports\.(\w+) = \1$)/m
+  )
+} else {
+  // napi-rs v3 stopped destructuring the binding and emits a
+  // `module.exports = nativeBinding` facade instead. Cut that whole facade
+  // and install the same explicit local bindings the validation layer uses.
+  const napiV3ExportFacade = loader.match(napiV3ExportFacadePattern)
+  if (napiV3ExportFacade) {
+    loader =
+      loader.slice(0, napiV3ExportFacade.index) + canonicalNativeBindingDestructure + '\n\n'
+    exportStart = loader.length
+  }
+}
+
+if (exportStart === undefined || exportStart === -1) {
+  throw new Error(
+    'patch-loader.js: could not find the napi-generated native binding export facade; napi-rs output format may have changed'
+  )
 }
 
 loader = loader.slice(0, exportStart)
@@ -494,6 +511,12 @@ writeFileSync(loaderPath, loader)
 
 let types = readFileSync(typesPath, 'utf8')
 
+// napi-rs v3 emits aliases for the Rust identifiers even when `js_name`
+// supplies the public class names. They are types only (the patched runtime
+// facade intentionally does not export them), so remove the aliases to keep
+// the declaration surface aligned with the actual package exports.
+types = types.replace(/^export type Js(?:CancellationHandle|ReadResult) = .*\n\n?/gm, '')
+
 // Whether `types` is napi's own fresh output (the only case that can be
 // trusted to reflect this build's actual #[cfg(...)] gates) or a *previously
 // patched* file being fed back in, e.g. by a test asserting patch-loader.js
@@ -667,6 +690,10 @@ types = types.replace(
   /^\/\*\* (?:Windows-only browsers|macOS-only browsers|Unix browsers|Windows browsers) \*\/\n?/gm,
   ''
 )
+// napi-rs v3 leaves a different number of blank lines where target-gated
+// declarations were omitted or removed. Collapse those gaps so Linux, macOS,
+// and Windows regenerate the same committed declaration file byte-for-byte.
+types = types.replace(/\n{3,}/g, '\n\n')
 
 types = types.trimEnd()
 types += `
@@ -674,6 +701,10 @@ ${facadeMarker}
 export type AppBoundPolicy = 'disabled' | 'injection_only' | 'allow_elevated_fallback'
 export type ResourceKind = 'navigation' | 'subresource'
 export type MethodClass = 'safe' | 'unsafe'
+// napi-rs v2 generated these public aliases; retain them across the v3
+// generator migration so existing TypeScript imports remain source-compatible.
+export type JsCancellationHandle = CancellationHandle
+export type JsReadResult = ReadResult
 /** Structured diagnostics attached to errors rejected by facade operations. */
 export interface RookieError extends Error {
   kind: 'request' | 'stopped' | 'source' | 'engine'

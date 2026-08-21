@@ -1249,6 +1249,8 @@ test("generated report exports and declarations survive patching", (t) => {
 
   // Counters are declared u32 precisely so no report field becomes a BigInt.
   t.false(types.includes("bigint"), "no declaration may use BigInt");
+  t.regex(types, /export type JsCancellationHandle = CancellationHandle/);
+  t.regex(types, /export type JsReadResult = ReadResult/);
 });
 
 // Executes the real scripts/patch-loader.js against a disposable copy of the
@@ -1313,6 +1315,23 @@ test("patch-loader reproduces the committed artifacts exactly", (t) => {
   );
 });
 
+test("patch-loader normalizes target-dependent declaration spacing", (t) => {
+  const result = runPatchLoader(({ loader, types }) => {
+    const chrome = types.match(/^export declare function chrome\([^\n]*$/m)?.[0];
+    if (!chrome) throw new Error("generated declarations have no chrome export");
+    return {
+      loader,
+      types: types.replace(`${chrome}\n\n`, `${chrome}\n\n\n\n`),
+    };
+  });
+
+  t.is(result.status, 0, result.stderr);
+  t.is(
+    result.types,
+    readFileSync(new URL("../index.d.ts", import.meta.url), "utf8"),
+  );
+});
+
 test("patch-loader rejects generated declarations that arrive incomplete", (t) => {
   const result = runPatchLoader(({ loader, types }) => ({
     loader,
@@ -1328,8 +1347,8 @@ test("patch-loader rejects generated declarations that arrive incomplete", (t) =
 
 test("patch-loader rejects the historical slice-at-load regression", (t) => {
   // Slicing the generated types at a common declaration such as `load`
-  // discarded every API generated after it, which is where firefoxProfiles and
-  // now all four report functions live.
+  // discarded every API generated after it. napi-rs v3 sorts declarations by
+  // name, so supportedBrowsers is a stable post-load sentinel for that loss.
   const result = runPatchLoader(({ loader, types }) => {
     const load = types.indexOf("export declare function load(");
     return { loader, types: types.slice(0, types.indexOf("\n", load) + 1) };
@@ -1337,7 +1356,7 @@ test("patch-loader rejects the historical slice-at-load regression", (t) => {
 
   t.not(result.status, 0);
   t.regex(result.stderr, /Generated declarations were truncated/);
-  t.regex(result.stderr, /\bfirefoxProfiles\b/);
+  t.regex(result.stderr, /\bsupportedBrowsers\b/);
 });
 
 test("patch-loader rejects patching that would drop a declaration", (t) => {
