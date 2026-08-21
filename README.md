@@ -108,6 +108,13 @@ sqlite/session layout on all three OSes.
 | Rust | edition 2021 crate | `cargo add rookie-cookies` |
 | CLI | same repo / release binaries | `rookie-cookies --help` |
 
+**Windows App-Bound security note:** the recommended job APIs default to
+unprivileged reflective COM injection into a spawned browser process when they
+encounter `v20` cookies. Endpoint security products can flag that behavior.
+Set `AppBoundPolicy::Disabled` in Rust, `app_bound="disabled"` in Python,
+`appBound: "disabled"` in Node, or `--app-bound disabled` in the CLI to opt
+out; App-Bound rows will then be omitted and reported as unavailable.
+
 ## Recommended 0.6 usage
 
 Pass a **profile** to select one discovered profile; omit it to match the old

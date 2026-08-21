@@ -751,13 +751,11 @@ fn run_worker<T>(worker: impl FnOnce() -> Result<T>) -> Result<T> {
 fn parse_app_bound(policy: Option<&str>) -> Result<AppBoundPolicy> {
   match policy {
     None => Ok(AppBoundPolicy::default()),
-    Some("disabled") => Ok(AppBoundPolicy::Disabled),
-    Some("injection_only") => Ok(AppBoundPolicy::InjectionOnly),
-    Some("allow_elevated_fallback") => Ok(AppBoundPolicy::AllowElevatedFallback),
-    Some(other) => Err(napi::Error::new(
-      Status::InvalidArg,
-      format!("unknown appBound policy: {other}"),
-    )),
+    Some(value) => value
+      .parse()
+      .map_err(|error: rookie_cookies::ParseAppBoundPolicyError| {
+        napi::Error::new(Status::InvalidArg, error.to_string())
+      }),
   }
 }
 
@@ -766,37 +764,8 @@ fn parse_app_bound(policy: Option<&str>) -> Result<AppBoundPolicy> {
 /// time (an all-profiles report naming one profile, or `select: "all"` on a
 /// job that can only ever mean one profile) becomes this one structured
 /// `RequestError` instead, raised before any I/O runs.
-fn conflicting_profile_selection() -> napi::Error {
-  classify_fault(rookie_cookies::Error::Request(
-    RequestError::ConflictingProfileSelection,
-  ))
-}
-
-/// Validates `select` for a job that can only ever answer with one profile
-/// (`read`). Only `"legacy_first"` (or omitted) is representable;
-/// `"all"` -- which only report jobs can express -- and any other value
-/// reject before any I/O runs.
-fn validate_single_profile_select(select: Option<&str>) -> Result<()> {
-  match select {
-    None | Some("legacy_first") => Ok(()),
-    Some(_) => Err(conflicting_profile_selection()),
-  }
-}
-
-/// Validates a report job's `select`/`profile` combination. Naming a
-/// `profile` already narrows the report to it regardless of `select`, so the
-/// only real conflict is `select: "all"` paired with an explicit `profile`
-/// -- asking for one profile and every profile at once, which `ReportScope`
-/// cannot represent.
-fn validate_report_select(select: Option<&str>, has_profile: bool) -> Result<()> {
-  match select {
-    None | Some("legacy_first") | Some("all") => {}
-    Some(_) => return Err(conflicting_profile_selection()),
-  }
-  if has_profile && select == Some("all") {
-    return Err(conflicting_profile_selection());
-  }
-  Ok(())
+fn classify_selection<T>(result: std::result::Result<T, RequestError>) -> Result<T> {
+  result.map_err(|error| classify_fault(rookie_cookies::Error::Request(error)))
 }
 
 fn parse_resource_kind(kind: Option<&str>) -> Result<ResourceKind> {
@@ -864,24 +833,12 @@ fn chromium_credentials(
   plaintext_only: bool,
   option_names: &'static str,
 ) -> Result<Option<ChromiumCredentialSource>> {
-  let selector_count = usize::from(browser_id.is_some())
-    + usize::from(local_state_path.is_some())
-    + usize::from(plaintext_only);
-  if selector_count > 1 {
-    return Err(napi::Error::new(Status::InvalidArg, option_names));
-  }
-
-  Ok(if let Some(browser_id) = browser_id {
-    Some(ChromiumCredentialSource::BrowserId(browser_id.to_owned()))
-  } else if let Some(local_state_path) = local_state_path {
-    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-      local_state_path,
-    )))
-  } else if plaintext_only {
-    Some(ChromiumCredentialSource::PlaintextOnly)
-  } else {
-    None
-  })
+  ChromiumCredentialSource::from_selectors(
+    browser_id.map(str::to_owned),
+    local_state_path.map(PathBuf::from),
+    plaintext_only,
+  )
+  .map_err(|_| napi::Error::new(Status::InvalidArg, option_names))
 }
 
 /// Builds the flat-list `PathExtractRequest` for `credentials`, choosing
@@ -1776,6 +1733,7 @@ impl JsReadResult {
 
 pub struct ReadTask {
   options: ReadOptions,
+  selection: ProfileSelection,
   app_bound: AppBoundPolicy,
   cancellation: Option<CancellationHandle>,
 }
@@ -1788,10 +1746,9 @@ impl Task for ReadTask {
     let options = &self.options;
     let app_bound = self.app_bound;
     run_worker(|| {
-      let mut request = ReadRequest::browser(&options.browser).app_bound(app_bound);
-      if let Some(profile) = options.profile.as_deref() {
-        request = request.profile(profile);
-      }
+      let mut request = ReadRequest::browser(&options.browser)
+        .selection(self.selection.clone())
+        .app_bound(app_bound);
       if options.include_expired == Some(true) {
         request = request.include_expired(true);
       }
@@ -1826,10 +1783,14 @@ pub fn read(
   options: ReadOptions,
   cancellation: Option<&JsCancellationHandle>,
 ) -> Result<AsyncTask<ReadTask>> {
-  validate_single_profile_select(options.select.as_deref())?;
+  let selection = classify_selection(ProfileSelection::from_binding_options(
+    options.profile.as_deref(),
+    options.select.as_deref(),
+  ))?;
   let app_bound = parse_app_bound(options.app_bound.as_deref())?;
   Ok(AsyncTask::new(ReadTask {
     options,
+    selection,
     app_bound,
     cancellation: cancellation.map(|handle| handle.0.clone()),
   }))
@@ -1871,6 +1832,7 @@ pub fn profiles(browser_id: String, options: Option<ProfilesOptions>) -> AsyncTa
 
 pub struct JobReportTask {
   options: ReportOptions,
+  scope: ReportScope,
   app_bound: AppBoundPolicy,
 }
 
@@ -1884,18 +1846,8 @@ impl Task for JobReportTask {
     run_worker(|| {
       let mut request = ReportRequest::browser(&options.browser)
         .domains(options.domains.clone())
+        .scope(self.scope.clone())
         .app_bound(app_bound);
-      match options.profile.as_deref() {
-        Some(profile) => request = request.profile(profile),
-        // No profile named: `select: "legacy_first"` narrows to one profile
-        // instead of the `ReportRequest::browser` default of every profile.
-        // `validate_report_select` already rejected every other `select`
-        // value, so nothing else reaches this arm.
-        None if options.select.as_deref() == Some("legacy_first") => {
-          request = request.scope(ReportScope::from(ProfileSelection::LegacyFirst));
-        }
-        None => {}
-      }
       if let Some(ms) = options.timeout_ms {
         request = request.timeout(Duration::from_millis(u64::from(ms)));
       }
@@ -1913,9 +1865,16 @@ impl Task for JobReportTask {
 /// `options.appBound` defaults to `"injection_only"`, same as `read`.
 #[napi(js_name = "report", ts_return_type = "Promise<ExtractionReportObject>")]
 pub fn report(options: ReportOptions) -> Result<AsyncTask<JobReportTask>> {
-  validate_report_select(options.select.as_deref(), options.profile.is_some())?;
+  let scope = classify_selection(ReportScope::from_binding_options(
+    options.profile.as_deref(),
+    options.select.as_deref(),
+  ))?;
   let app_bound = parse_app_bound(options.app_bound.as_deref())?;
-  Ok(AsyncTask::new(JobReportTask { options, app_bound }))
+  Ok(AsyncTask::new(JobReportTask {
+    options,
+    scope,
+    app_bound,
+  }))
 }
 
 pub struct FromPathTask {

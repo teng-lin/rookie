@@ -6,6 +6,7 @@ pub(crate) mod chromium_crypto;
 pub(crate) mod chromium_database_acquisition;
 pub(crate) mod chromium_decoder;
 pub(crate) mod chromium_platform_keys;
+pub(crate) mod chromium_projection;
 #[cfg(test)]
 pub(crate) mod chromium_test_support;
 pub(crate) mod compatibility;

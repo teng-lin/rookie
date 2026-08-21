@@ -29,6 +29,21 @@ impl ProfileSelection {
       _ => None,
     }
   }
+
+  /// Builds a single-profile selection from flattened binding/CLI options.
+  ///
+  /// `select` uses the cross-binding snake-case vocabulary. A snapshot cannot
+  /// represent `"all"`; unknown values and contradictory shapes return the
+  /// same stable [`crate::RequestError::ConflictingProfileSelection`].
+  pub fn from_binding_options(
+    profile: Option<&str>,
+    select: Option<&str>,
+  ) -> Result<Self, crate::RequestError> {
+    if !matches!(select, None | Some("legacy_first")) {
+      return Err(crate::RequestError::ConflictingProfileSelection);
+    }
+    Ok(profile.map_or(Self::LegacyFirst, |query| Self::Query(query.to_owned())))
+  }
 }
 
 /// How wide a report's scope is.
@@ -53,6 +68,32 @@ impl ReportScope {
       Self::One(selection) => selection.query(),
       _ => None,
     }
+  }
+
+  /// Builds a report scope from flattened binding/CLI options.
+  ///
+  /// Omitted `select` preserves the historical behavior: all profiles when no
+  /// profile was named, or the named profile otherwise. Explicitly combining
+  /// a profile with `"all"`, or supplying an unknown value, returns
+  /// [`crate::RequestError::ConflictingProfileSelection`].
+  pub fn from_binding_options(
+    profile: Option<&str>,
+    select: Option<&str>,
+  ) -> Result<Self, crate::RequestError> {
+    if !matches!(select, None | Some("legacy_first") | Some("all"))
+      || (profile.is_some() && select == Some("all"))
+    {
+      return Err(crate::RequestError::ConflictingProfileSelection);
+    }
+
+    Ok(match (profile, select) {
+      (Some(query), _) => Self::One(ProfileSelection::Query(query.to_owned())),
+      (None, Some("legacy_first")) => Self::One(ProfileSelection::LegacyFirst),
+      (None, None | Some("all")) => Self::AllProfiles,
+      // The vocabulary and conflict checks above make every other shape
+      // unreachable while keeping this match robust to future enum variants.
+      (None, Some(_)) => unreachable!("selection vocabulary was validated"),
+    })
   }
 }
 
@@ -85,6 +126,30 @@ mod tests {
     assert_eq!(
       ReportScope::from(ProfileSelection::LegacyFirst),
       ReportScope::One(ProfileSelection::LegacyFirst)
+    );
+  }
+
+  #[test]
+  fn binding_options_share_one_profile_scope_rule() {
+    assert_eq!(
+      ProfileSelection::from_binding_options(Some("Default"), Some("legacy_first")),
+      Ok(ProfileSelection::Query("Default".into()))
+    );
+    assert_eq!(
+      ProfileSelection::from_binding_options(None, Some("all")),
+      Err(crate::RequestError::ConflictingProfileSelection)
+    );
+    assert_eq!(
+      ReportScope::from_binding_options(None, None),
+      Ok(ReportScope::AllProfiles)
+    );
+    assert_eq!(
+      ReportScope::from_binding_options(None, Some("legacy_first")),
+      Ok(ReportScope::One(ProfileSelection::LegacyFirst))
+    );
+    assert_eq!(
+      ReportScope::from_binding_options(Some("Default"), Some("all")),
+      Err(crate::RequestError::ConflictingProfileSelection)
     );
   }
 }

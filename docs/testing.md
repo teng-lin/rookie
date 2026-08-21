@@ -9,13 +9,14 @@ crypto coverage.
 | Deterministic | Contracts, fixtures, lint, public API, packaged consumers | `test-rust.yml` (`check` job), local `cargo test` |
 | Real browsers | Seeded profiles plus Windows App-Bound **v20** | `e2e.yml` (Chrome/Firefox + App-Bound canary), `e2e-release.yml` (Edge/Chromium, silent-install catalog, release fixtures) |
 | Installed artifacts | Shipped CLI, wheel, and npm tarballs in a clean directory | `artifact-smoke.yml` (main / nightly / manual; not PRs) |
+| Assurance | Dependency/secret/code scanning, branch coverage, sanitizer-backed parser fuzzing | `security.yml`, `assurance.yml` |
 
 CI has three lanes. A pull request is not the full product.
 
 | Lane | Trigger | What runs |
 | --- | --- | --- |
 | **PR** | `pull_request`, push to `main` | One `check` job per OS (fmt/package/metadata/audit on Ubuntu; rust lint+test and public API on Linux, macOS, and Windows). Node **build+test** staggered (Ubuntu 22 / macOS 24 / Windows 26). Python **build+tests** staggered (Ubuntu 3.12 / macOS 3.13 / Windows 3.14). Real Ubuntu Chrome + Firefox gate every PR. Completeness check for `tests/e2e/browser_coverage.json` lives in the Ubuntu `check` job. |
-| **Nightly** | `test-rust.yml` / `e2e.yml` / `e2e-release.yml` schedule, or `workflow_dispatch` suite=nightly | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
+| **Nightly** | Scheduled test/E2E workflows, plus manual dispatch | Full Node 3 OS × 22/24/26, full Python 3 OS × 3.11–3.14, FreeBSD VM, manylinux/Windows/macOS Intel wheels, sdist. `security.yml` runs dependency, secret, and code scanning; `assurance.yml` runs measured coverage and sanitizer-backed fuzzing. Real Chrome/Firefox (`e2e.yml`). The installer matrix in `e2e-release.yml` adds Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari on their supported hosted images. App-Bound Chrome+Edge+Brave. Artifact smoke. **Not** the fixture matrix. |
 | **Release** | `v*` tag, GitHub Release, `workflow_dispatch` on `e2e-release.yml`, or a PR labeled `e2e-release` | The hosted installer matrix again, plus engine fixtures for every `release_fixture` cell. A labeled PR stays opted in across later `synchronize` events. App-Bound Edge+Brave is the `e2e.yml` nightly / `multi_browser` dispatch, not this workflow. macOS Intel artifact smoke (schedule/manual). |
 
 ## Local commands
@@ -32,7 +33,21 @@ python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
 python3 -m unittest discover -s tests/release -p 'test_*.py' -v
 python3 scripts/check-doc-snippets.py
 python3 scripts/check-release.py
+python3 scripts/check-coverage.py --report coverage.json
 ```
+
+Generate the report consumed by the last command with the pinned nightly and
+coverage tool used by CI:
+
+```console
+cargo install cargo-llvm-cov --version 0.9.0 --locked
+cargo +nightly-2025-11-23 llvm-cov \
+  --workspace --all-features --all-targets --branch \
+  --json --output-path coverage.json
+```
+
+`coverage.toml` holds aggregate and critical-file floors. A floor is a ratchet:
+raise it after sustained improvement; lowering it requires explicit review.
 
 After `maturin develop --release --locked` in `bindings/python`:
 
@@ -81,6 +96,13 @@ expands the language matrix.
 
 **Nightly only**
 
+- **OSV-Scanner** recursively covers committed manifests and lockfiles and
+  fails on a reported advisory; Gitleaks scans committed history; CodeQL
+  analyzes Rust, Python, and JavaScript/TypeScript (`security.yml`).
+- **Measured coverage** uses nightly branch instrumentation and enforces the
+  checked-in floors in `coverage.toml` (`assurance.yml`).
+- **Parser fuzzing** runs the three targets documented in `fuzz/README.md`
+  under bounded libFuzzer sanitizer instrumentation (`assurance.yml`).
 - Node: build+tests on the full 3 OS × 22/24/26 product.
 - Python build+tests on the full 3 OS × 3.11–3.14 product.
 - **FreeBSD VM:** Mozilla `from-path` works; Chromium SQLite is unsupported there

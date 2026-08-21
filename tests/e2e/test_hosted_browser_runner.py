@@ -67,6 +67,21 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             )
         self.assertFalse(has_devtools)
 
+    def test_devtools_wait_fails_immediately_after_launcher_error(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 23
+        with (
+            mock.patch.object(hosted, "urlopen", side_effect=OSError),
+            mock.patch.object(hosted, "cookies_db_has_name", return_value=False),
+            mock.patch.object(hosted.time, "sleep") as sleep,
+            self.assertRaisesRegex(SystemExit, "exited 23"),
+        ):
+            hosted.wait_for_devtools_or_cookie(
+                proc, 9222, Path("/tmp/profile"), timeout=60
+            )
+
+        sleep.assert_not_called()
+
     def test_chromium_cookie_checkpoint_is_retried_after_launcher_exit(self) -> None:
         proc = mock.Mock()
         proc.poll.return_value = 0
@@ -90,6 +105,43 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             wait_for_cookie.call_args_list,
             [mock.call(profile, 30), mock.call(profile, 15)],
         )
+
+    def test_chromium_cleanup_kills_launcher_that_ignores_terminate(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.wait.side_effect = hosted.subprocess.TimeoutExpired("browser", 10)
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=False),
+            mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
+            mock.patch.object(hosted.time, "sleep"),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser", Path("/tmp/profile"), "http://127.0.0.1:8765/set"
+            )
+
+        proc.terminate.assert_called_once_with()
+        proc.wait.assert_called_once_with(timeout=10)
+        proc.kill.assert_called_once_with()
+
+    def test_chromium_cookie_retry_exhaustion_reports_candidates(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        profile = Path("/tmp/profile")
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=False),
+            mock.patch.object(
+                hosted, "wait_for_chromium_cookie", side_effect=[False, False]
+            ),
+            mock.patch.object(hosted, "chromium_cookie_dbs", return_value=[]),
+            self.assertRaisesRegex(SystemExit, "cookie databases: <none>"),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser", profile, "http://127.0.0.1:8765/set"
+            )
 
     def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:
         command = hosted.chromium_native_command(

@@ -150,7 +150,7 @@ fn profile_snapshot_with_runtime(
   // read. Only the second is worth retrying.
   if termination == Termination::Completed && !succeeded_any {
     let cause = if selected_any {
-      EngineCause::NoSelectedSource
+      EngineCause::SourceExtractionFailed
     } else {
       EngineCause::NoDiscoveredSource
     };

@@ -136,6 +136,8 @@ pub mod rookie_cookies::direct_path
 pub rookie_cookies::direct_path::ChromiumCredentialSource::BrowserId(alloc::string::String)
 pub rookie_cookies::direct_path::ChromiumCredentialSource::LocalStateFile(std::path::PathBuf)
 pub rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly
+impl rookie_cookies::direct_path::ChromiumCredentialSource
+pub fn rookie_cookies::direct_path::ChromiumCredentialSource::from_selectors(core::option::Option<alloc::string::String>, core::option::Option<std::path::PathBuf>, bool) -> anyhow::Result<core::option::Option<Self>, rookie_cookies::RequestError>
 impl core::clone::Clone for rookie_cookies::direct_path::ChromiumCredentialSource
 pub fn rookie_cookies::direct_path::ChromiumCredentialSource::clone(&self) -> rookie_cookies::direct_path::ChromiumCredentialSource
 impl core::cmp::Eq for rookie_cookies::direct_path::ChromiumCredentialSource
@@ -1215,6 +1217,8 @@ pub const rookie_cookies::report::MAX_ISSUE_SAMPLES: usize
 pub rookie_cookies::AppBoundPolicy::AllowElevatedFallback
 pub rookie_cookies::AppBoundPolicy::Disabled
 pub rookie_cookies::AppBoundPolicy::InjectionOnly
+impl rookie_cookies::AppBoundPolicy
+pub const fn rookie_cookies::AppBoundPolicy::as_str(self) -> &'static str
 impl core::clone::Clone for rookie_cookies::AppBoundPolicy
 pub fn rookie_cookies::AppBoundPolicy::clone(&self) -> rookie_cookies::AppBoundPolicy
 impl core::cmp::Eq for rookie_cookies::AppBoundPolicy
@@ -1224,8 +1228,13 @@ impl core::default::Default for rookie_cookies::AppBoundPolicy
 pub fn rookie_cookies::AppBoundPolicy::default() -> rookie_cookies::AppBoundPolicy
 impl core::fmt::Debug for rookie_cookies::AppBoundPolicy
 pub fn rookie_cookies::AppBoundPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::AppBoundPolicy
+pub fn rookie_cookies::AppBoundPolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for rookie_cookies::AppBoundPolicy
 impl core::marker::StructuralPartialEq for rookie_cookies::AppBoundPolicy
+impl core::str::traits::FromStr for rookie_cookies::AppBoundPolicy
+pub type rookie_cookies::AppBoundPolicy::Err = rookie_cookies::ParseAppBoundPolicyError
+pub fn rookie_cookies::AppBoundPolicy::from_str(&str) -> core::result::Result<Self, Self::Err>
 impl core::marker::Freeze for rookie_cookies::AppBoundPolicy
 impl core::marker::Send for rookie_cookies::AppBoundPolicy
 impl core::marker::Sync for rookie_cookies::AppBoundPolicy
@@ -1301,6 +1310,7 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MethodClass
 pub rookie_cookies::ProfileSelection::LegacyFirst
 pub rookie_cookies::ProfileSelection::Query(alloc::string::String)
 impl rookie_cookies::ProfileSelection
+pub fn rookie_cookies::ProfileSelection::from_binding_options(core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<Self, rookie_cookies::RequestError>
 pub fn rookie_cookies::ProfileSelection::query(&self) -> core::option::Option<&str>
 impl core::clone::Clone for rookie_cookies::ProfileSelection
 pub fn rookie_cookies::ProfileSelection::clone(&self) -> rookie_cookies::ProfileSelection
@@ -1324,6 +1334,7 @@ impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::ProfileSelection
 pub rookie_cookies::ReportScope::AllProfiles
 pub rookie_cookies::ReportScope::One(rookie_cookies::ProfileSelection)
 impl rookie_cookies::ReportScope
+pub fn rookie_cookies::ReportScope::from_binding_options(core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<Self, rookie_cookies::RequestError>
 pub fn rookie_cookies::ReportScope::query(&self) -> core::option::Option<&str>
 impl core::clone::Clone for rookie_cookies::ReportScope
 pub fn rookie_cookies::ReportScope::clone(&self) -> rookie_cookies::ReportScope
@@ -1611,6 +1622,26 @@ impl core::marker::Sync for rookie_cookies::MozillaProfile
 impl core::marker::Unpin for rookie_cookies::MozillaProfile
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::MozillaProfile
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::MozillaProfile
+pub struct rookie_cookies::ParseAppBoundPolicyError
+impl rookie_cookies::ParseAppBoundPolicyError
+pub fn rookie_cookies::ParseAppBoundPolicyError::value(&self) -> &str
+impl core::clone::Clone for rookie_cookies::ParseAppBoundPolicyError
+pub fn rookie_cookies::ParseAppBoundPolicyError::clone(&self) -> rookie_cookies::ParseAppBoundPolicyError
+impl core::cmp::Eq for rookie_cookies::ParseAppBoundPolicyError
+impl core::cmp::PartialEq for rookie_cookies::ParseAppBoundPolicyError
+pub fn rookie_cookies::ParseAppBoundPolicyError::eq(&self, &rookie_cookies::ParseAppBoundPolicyError) -> bool
+impl core::error::Error for rookie_cookies::ParseAppBoundPolicyError
+impl core::fmt::Debug for rookie_cookies::ParseAppBoundPolicyError
+pub fn rookie_cookies::ParseAppBoundPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rookie_cookies::ParseAppBoundPolicyError
+pub fn rookie_cookies::ParseAppBoundPolicyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rookie_cookies::ParseAppBoundPolicyError
+impl core::marker::Freeze for rookie_cookies::ParseAppBoundPolicyError
+impl core::marker::Send for rookie_cookies::ParseAppBoundPolicyError
+impl core::marker::Sync for rookie_cookies::ParseAppBoundPolicyError
+impl core::marker::Unpin for rookie_cookies::ParseAppBoundPolicyError
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::ParseAppBoundPolicyError
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::ParseAppBoundPolicyError
 pub struct rookie_cookies::ReadRequest
 impl rookie_cookies::ReadRequest
 pub fn rookie_cookies::ReadRequest::app_bound(self, rookie_cookies::AppBoundPolicy) -> Self

@@ -22,7 +22,8 @@ const APP_BOUND_VALUES: [&str; 3] = ["disabled", "injection-only", "allow-elevat
 
 /// Shared `--select` values. `read` defaults to `legacy-first`; `report`
 /// defaults to `all`. `all` is a report-only widening a snapshot cannot
-/// express -- see `main.rs::reject_conflicting_profile_selection`.
+/// express -- core `ProfileSelection::from_binding_options` /
+/// `ReportScope::from_binding_options` validate the flattened CLI shape.
 const SELECT_VALUES: [&str; 2] = ["legacy-first", "all"];
 
 #[derive(Subcommand, Debug, Clone)]

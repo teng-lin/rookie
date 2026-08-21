@@ -8,9 +8,10 @@ never the source tree, only the packaged/built artifact, extracted into a
 fresh scratch directory outside the git checkout (mirroring the pattern
 scripts/check-packaged-rust-consumer.py already established for the crate).
 
-Scope, honestly: npm tarballs are exercised structurally; CLI binaries and
-Python wheels are actually executed (`--version` for the CLI, an isolated
-`pip install` + `import` + `version()` for wheels) when the artifact's
+Scope, honestly: Rust crate archives are compiled and executed through an
+isolated external consumer; npm tarballs are exercised structurally; CLI
+binaries and Python wheels are actually executed (`--version` for the CLI,
+an isolated `pip install` + `import` + `version()` for wheels) when the artifact's
 declared platform matches the host running this harness -- otherwise they
 fall back to checksum-verified-only, which is reported, not silently
 skipped. A cross-platform npm tarball gets that same fallback outcome when
@@ -19,8 +20,8 @@ gets it too, unconditionally: it can't be `require()`d without its owning
 npm package (see `exercise_native_addon`). A Python sdist has no compiled
 platform to match against and always falls through the same way; building
 one from source isn't a meaningful smoke check for this harness.
-`publish-npm.yml`, `publish-cli.yml`, and `publish-py.yml` all now write a
-manifest and call this harness before their respective registry writes.
+Every publish workflow writes a manifest and calls this harness before its
+registry or GitHub release write.
 
 This still isn't full per-helper-role live extraction (no real Keychain/
 DPAPI/keyring/App-Bound credential read happens here — the Windows App-Bound
@@ -337,6 +338,30 @@ def exercise_native_addon(path: Path, scratch: Path) -> str:
     return f"checksum-verified only (native addon execution needs its owning npm package, not a bare .node)"
 
 
+def exercise_rust_crate(path: Path) -> str:
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "check-packaged-rust-consumer.py"),
+                "--archive",
+                str(path),
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise HarnessError(
+            f"{path.name}: packaged Rust consumer did not complete within {error.timeout}s"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        raise HarnessError(
+            f"{path.name}: packaged Rust consumer failed with exit code {error.returncode}"
+        ) from error
+    return "compiled and executed through an isolated packaged-crate consumer"
+
+
 def exercise(record: dict[str, Any], path: Path, scratch: Path, contract: dict[str, Any]) -> str:
     name = path.name
     if name.endswith(".tgz"):
@@ -345,6 +370,8 @@ def exercise(record: dict[str, Any], path: Path, scratch: Path, contract: dict[s
         return exercise_native_addon(path, scratch)
     if name.endswith(".whl"):
         return exercise_python_wheel(path, scratch)
+    if name.endswith(".crate"):
+        return exercise_rust_crate(path)
     if cli_binary_target(name) is not None:
         return exercise_cli_binary(path, scratch, contract)
     return "checksum-verified only (no exercise routine for this artifact type yet)"
@@ -356,18 +383,21 @@ def exercise(record: dict[str, Any], path: Path, scratch: Path, contract: dict[s
 # `exercise_native_addon`), but every `npm-native` cell always ships paired
 # with the native tarball that structurally exercises the same install, so
 # the cell as a whole is still covered.
-_ARTIFACT_IDS_WITH_EXERCISE_COVERAGE = {"npm-root", "npm-native", "cli", "wheel"}
+_ARTIFACT_IDS_WITH_EXERCISE_COVERAGE = {
+    "crate",
+    "npm-root",
+    "npm-native",
+    "cli",
+    "wheel",
+}
 
 # `execute: "native"` artifact_ids that deliberately have no exercise()
 # coverage and never will, so they don't belong in the set above but also
 # aren't a gap `check_native_execution_coverage` should flag:
-#   - "crate": published straight from source by `publish-crate.yml`, which
-#     never writes a release-scan-manifest.json or calls this harness at
-#     all -- there is no artifact here to have coverage for.
 #   - "sdist": always falls through to checksum-verified-only, deliberately
 #     -- building a wheel from source isn't a meaningful smoke check for
 #     this harness (see the module docstring).
-_ARTIFACT_IDS_DELIBERATELY_UNCOVERED = {"crate", "sdist"}
+_ARTIFACT_IDS_DELIBERATELY_UNCOVERED = {"sdist"}
 
 
 def check_native_execution_coverage(contract: dict[str, Any]) -> list[str]:

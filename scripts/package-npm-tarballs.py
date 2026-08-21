@@ -10,6 +10,9 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import platform_contract  # noqa: E402
+
 
 def npm_pack(npm: str, package: Path, output: Path, *, cwd: Path) -> Path:
     result = subprocess.run(
@@ -62,9 +65,20 @@ def main() -> int:
         check=True,
     )
     npm_root = node_root / "npm"
-    platforms = args.platforms or sorted(
-        path.name for path in npm_root.iterdir() if (path / "package.json").is_file()
+    contract = platform_contract.load_contract()
+    contract_failures = platform_contract.validate(contract)
+    contract_failures.extend(
+        platform_contract.validate_npm_repository(contract, node_root)
     )
+    if contract_failures:
+        parser.error(
+            "npm repository does not match release/platform-contract.json:\n- "
+            + "\n- ".join(contract_failures)
+        )
+    platforms = args.platforms or [
+        package.removeprefix("rookie-cookies-")
+        for package in platform_contract.npm_publish_packages(contract)[:-1]
+    ]
     if len(platforms) != len(set(platforms)):
         parser.error(f"duplicate platforms requested: {platforms}")
 

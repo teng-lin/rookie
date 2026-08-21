@@ -14,6 +14,12 @@ and PyPy are not supported in 0.6.
 pip install rookie-cookies
 ```
 
+> **Windows App-Bound security note:** jobs default to unprivileged reflective
+> injection into a spawned browser process, which endpoint security can flag.
+> Pass `app_bound="disabled"` to `read`, `jar`, `from_path`, or report jobs to
+> perform no App-Bound process work; `v20` rows will then be omitted with a
+> warning.
+
 ## Recommended 0.6.0 usage
 
 ```python

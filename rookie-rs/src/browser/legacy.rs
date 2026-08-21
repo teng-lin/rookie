@@ -239,11 +239,11 @@ fn selected_records(
     CompatibilityDisposition::Failed(diagnostic) => match boundary_stop {
       Some(stop) => Err(stop.into()),
       // Every selected source was attempted and none produced a usable
-      // result. Typed so the job edge emits `no_selected_source` without
-      // parsing this diagnostic, and transparent so the diagnostic survives.
+      // result. Typed as the source's own stable failure code rather than
+      // `no_selected_source`: a source was selected, then failed.
       None => Err(
         EngineFailure::new(
-          EngineCause::NoSelectedSource,
+          EngineCause::SourceExtractionFailed,
           diagnostic.as_str().to_owned(),
         )
         .into(),

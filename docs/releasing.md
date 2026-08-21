@@ -240,16 +240,17 @@ the exact sample.
 
 ## Packaging-proof: what the release pipeline actually verifies
 
-Each publish workflow (`publish-cli.yml`, `publish-npm.yml`, `publish-py.yml`)
-writes a `release-scan-manifest.json` (`scripts/write-release-scan-manifest.py`)
-before its registry-writing step, then runs
+Each publish workflow (`publish-crate.yml`, `publish-cli.yml`,
+`publish-npm.yml`, `publish-py.yml`) writes a `release-scan-manifest.json`
+(`scripts/write-release-scan-manifest.py`) before its publishing step, then runs
 `scripts/run-consumer-harness.py` against it. Together these give every
 shipped artifact:
 
 - **A digest tied to its declared helper roles.** Each manifest record's
   `helper_roles` is matched against the artifact's cell in
   `release/platform-contract.json` (by filename — CLI binary target triple,
-  npm package/addon platform, or wheel platform tag) at write time, and
+  npm package/addon platform, wheel platform tag, or `.crate` package type)
+  at write time, and
   re-checked against the *current* contract at verify time — so "client plus
   every enabled helper role" is one digest-identified, cross-checked unit,
   not an implicit assumption. `scripts/run-consumer-harness.py
@@ -257,11 +258,12 @@ shipped artifact:
   if a contract cell claims `execute: "native"` for an artifact type the
   harness has no real exercise routine for.
 - **Real execution outside the checkout**, where the artifact's declared
-  platform matches the verifying host: the CLI binary's `--version`, and an
-  isolated `pip install` + `import` + `version()` for a Python wheel. An npm
-  tarball is checked structurally (package layout, declared entry point);
-  a native `.node` addon and a Python sdist stay checksum-verified only —
-  see `run-consumer-harness.py`'s module docstring for why.
+  platform matches the verifying host: the CLI binary's `--version`, an
+  isolated `pip install` + `import` + `version()` for a Python wheel, and a
+  compiled and executed external consumer for the packaged Rust crate. An
+  npm tarball is checked structurally (package layout, declared entry point);
+  a native `.node` addon and a Python sdist stay checksum-verified only — see
+  `run-consumer-harness.py`'s module docstring for why.
 
 **What this does not cover**, and why it's out of scope here rather than
 silently skipped: the original PR6 spec (tracked through #225 and #230 R3)
@@ -279,33 +281,21 @@ that language actually requires is tracked separately in
 
 Two pieces of release-hardening program #230's "PR 2": R4 (candidate-bundle
 evidence) is implemented and tested but still not load-bearing — it doesn't
-gate any `publish-*.yml` workflow. R5 (`write-ci-proof.py`) **is** now wired
-into all three publish workflows, but **advisory-only**: `publish-npm.yml`,
-`publish-cli.yml`, and `publish-py.yml` each call it with `--advisory` right
-after writing that release's manifest and running the R3 harness, and before
-the registry-mutating step (immediately after, in the same job, for
-`publish-cli.yml`/`publish-py.yml`; in `publish-npm.yml` the call is in the
-`package` job, which only prepares tarballs — the actual `npm publish` runs
-afterward in the downstream `publish` job that `needs: [preflight,
-package]`). `--advisory` means a verification failure
-prints a `::warning::` annotation instead of failing the job — it never
-blocks a publish yet.
+gate any `publish-*.yml` workflow. R5 (`write-ci-proof.py`) is a
+**blocking gate** in all four publish workflows. The npm, CLI, PyPI, and
+crates.io workflows call it after writing the release manifest and running
+the R3 consumer harness, and before their registry or GitHub release
+mutation. Any missing required check, untrusted producing workflow, stale
+manifest binding, API failure, or malformed response exits nonzero and stops
+publication. The proof artifact upload also uses `if-no-files-found: error`,
+so a workflow cannot continue with a silently absent proof.
 
-Why advisory rather than hard-blocking immediately: all three workflows are
-`workflow_dispatch`-only, so they never run on this repo's own PR CI — there
-is no way to see the actual gate exercised against a real release before it
-reaches one. A bug in `write-ci-proof.py`'s verification logic would
-otherwise present as *the next real release silently failing to publish*,
-with nothing beforehand to catch it. Advisory-first converts that into a
-loud, visible log annotation on a real release instead, so the mechanism can
-prove itself before it gets the authority to block one.
-
-**Promoting to hard-blocking**: once `--advisory` has been observed
-producing a correct, successful `ci-proof.json` on an actual release (not
-just in the mocked test suite), drop `--advisory` from each of the three
-call sites in `publish-npm.yml`/`publish-cli.yml`/`publish-py.yml`. No other
-change is needed — the verification logic itself doesn't change between the
-two modes.
+The crates.io path packages the actual `.crate`, records it in a release scan
+manifest, and compiles and executes an isolated consumer against that archive
+before producing its CI proof. `cargo publish --dry-run` remains an additional
+registry-shaped validation; the final `cargo publish` still repackages from
+the same clean, SHA-pinned checkout because Cargo does not publish a supplied
+archive directly.
 
 **R4 — candidate-bundle evidence** (`.github/workflows/candidate-bundle.yml`).
 A PR that adds or changes a cell in `release/platform-contract.json` (checked
@@ -342,7 +332,7 @@ Both scripts have full unit test coverage (`tests/release/test_jcs.py`,
 `tests/e2e/test_run_consumer_harness.py` / `tests/release/test_platform_contract.py`).
 `write-ci-proof.py`'s tests mock every `gh_api` response; anyone changing its
 verification logic should re-run it by hand against a real commit as part of
-that review, since none of the three publish workflows run on this repo's
+that review, since none of the four publish workflows run on this repo's
 own PR CI (`python3 scripts/write-ci-proof.py --repo <owner>/<repo>
 --commit-sha <sha> --manifest-digest <64 hex chars> --output
 /tmp/ci-proof.json`, read-only against the GitHub API — or `--manifest
@@ -350,12 +340,11 @@ own PR CI (`python3 scripts/write-ci-proof.py --repo <owner>/<repo>
 read the digest from a real manifest file directly, matching what the
 publish workflows themselves do).
 
-What's still open: promoting R5 to hard-blocking (see above), R4's evidence
-gate (still not wired into any publish workflow — it produces a standalone
-review artifact on qualifying PRs, not a pass/fail gate, so "advisory" vs
-"blocking" doesn't apply to it the way it does to R5), and the rest of #230's
-PR 2 (R6's digest-safe publication state machine and R7's controlled
-cutover), neither of which is started.
+What's still open: R4's evidence gate (it produces a standalone review
+artifact on qualifying PRs but is not yet bound to a later release), plus
+R6's post-publication registry-digest reconciliation/state machine and R7's
+controlled cutover. Those require durable candidate lineage and registry
+state that this repository does not currently record.
 
 ## Verify
 

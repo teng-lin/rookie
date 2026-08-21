@@ -1,0 +1,30 @@
+# Coverage floors are intentionally below the observed baseline so normal
+# compiler/platform variance does not make the first run flaky. Raise a floor
+# whenever sustained coverage exceeds it; lowering one requires review.
+[workspace]
+lines = 80.0
+branches = 70.0
+
+[files."rookie-rs/src/browser/chromium_decoder.rs"]
+lines = 92.0
+branches = 85.0
+
+[files."rookie-rs/src/browser/mozilla_session.rs"]
+lines = 88.0
+branches = 72.0
+
+[files."rookie-rs/src/browser/safari.rs"]
+lines = 90.0
+branches = 70.0
+
+[files."rookie-rs/src/browser/internet_explorer_model.rs"]
+lines = 86.0
+branches = 70.0
+
+[files."rookie-rs/src/common/secret.rs"]
+lines = 95.0
+branches = 70.0
+
+[files."rookie-rs/src/error.rs"]
+lines = 90.0
+branches = 75.0

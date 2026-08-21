@@ -426,6 +426,19 @@ fn a_report_with_no_selected_success_is_the_typed_no_selected_source_code() {
 }
 
 #[test]
+fn a_selected_failed_report_source_keeps_its_source_failure_code() {
+  let report = selected_success_report("completed");
+  let mut wire = serde_json::to_value(report).expect("report serializes");
+  wire["profiles"][0]["sources"][0]["status"] = serde_json::json!("failed");
+  wire["profiles"][0]["sources"][0]["cookies"] = serde_json::json!([]);
+  let report = serde_json::from_value(wire).expect("failed-source fixture deserializes");
+
+  let error = flatten_selected_report_cookies(report, browser::outcome::Termination::Completed)
+    .expect_err("a selected failed source cannot flatten");
+  assert_eq!(Error::from(error).code(), "source_extraction_failed");
+}
+
+#[test]
 fn profile_resolution_and_extraction_share_one_absolute_manual_clock_budget() {
   use common::deadline::{test_clock::ManualClock, CancellationToken, Deadline};
   use std::cell::Cell;

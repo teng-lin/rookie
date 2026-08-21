@@ -93,7 +93,8 @@ paths = [
 [grandfathered]
 # Named in #218's own problem statement as the four original hot spots;
 # no rollout PR claims to have fully contained these.
-"rookie-rs/src/browser/chromium.rs" = { max_cfg = 33, reason = "original #218 hot spot, not a rollout target; ratcheted 60 -> 34 when the inline test module moved to browser/chromium/tests.rs, then 34 -> 33 when the unseal test imports it had carried for that module left with the tests" }
+"rookie-rs/src/browser/chromium.rs" = { max_cfg = 6, reason = "original #218 hot spot; ratcheted 33 -> 6 when compatibility/direct-path projection and its platform-gated shims moved to chromium_projection.rs, leaving the registry-facing acquire engine independent of report_build" }
+"rookie-rs/src/browser/chromium_projection.rs" = { max_cfg = 25, reason = "platform-gated compatibility and direct-path projection carved from chromium.rs to break report_build -> registry/chromium -> chromium -> report_build; exact moved ceiling, with the combined Chromium cfg budget reduced by 2" }
 "rookie-rs/src/browser/registry.rs" = { max_cfg = 8, reason = "original #218 hot spot at 27; now shared-core only after the chromium/gecko split (PR #251) moved its engine-specific cfg out, plus 2 new cfg-gated re-export lines needed so chromium.rs's platform-gated symbols aren't unconditionally re-exported" }
 "rookie-rs/src/browser/registry/chromium.rs" = { max_cfg = 9, reason = "Chromium-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target; ratcheted 20 -> 9 when the inline test module moved to browser/registry/chromium/tests.rs and took 11 cfg with it" }
 "rookie-rs/src/browser/registry/gecko.rs" = { max_cfg = 1, reason = "Gecko-specific cfg split out of registry.rs's original #218 grandfathered ceiling (PR #251); not a rollout target" }

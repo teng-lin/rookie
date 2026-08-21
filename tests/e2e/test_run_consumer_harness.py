@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +23,12 @@ assert JCS_SPEC is not None and JCS_SPEC.loader is not None
 jcs = importlib.util.module_from_spec(JCS_SPEC)
 sys.modules[JCS_SPEC.name] = jcs
 JCS_SPEC.loader.exec_module(jcs)
+
+HARNESS_SPEC = importlib.util.spec_from_file_location("consumer_harness", SCRIPT)
+assert HARNESS_SPEC is not None and HARNESS_SPEC.loader is not None
+consumer_harness = importlib.util.module_from_spec(HARNESS_SPEC)
+sys.modules[HARNESS_SPEC.name] = consumer_harness
+HARNESS_SPEC.loader.exec_module(consumer_harness)
 
 _HOST_OS = {"Darwin": "darwin", "Linux": "linux", "Windows": "win32"}[platform_module.system()]
 _HOST_CPU = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(
@@ -133,6 +140,21 @@ def make_npm_tarball(
 
 
 class ConsumerHarnessTests(unittest.TestCase):
+    def test_crate_dispatch_runs_the_packaged_consumer(self) -> None:
+        archive = Path("/tmp/rookie-cookies-1.0.0.crate")
+        with mock.patch.object(consumer_harness.subprocess, "run") as run:
+            outcome = consumer_harness.exercise(
+                {},
+                archive,
+                Path("/tmp/scratch"),
+                contract=consumer_harness.platform_contract.load_contract(),
+            )
+
+        self.assertIn("isolated packaged-crate consumer", outcome)
+        arguments = run.call_args.args[0]
+        self.assertIn("check-packaged-rust-consumer.py", arguments[1])
+        self.assertEqual(arguments[-2:], ["--archive", str(archive)])
+
     def run_harness(self, artifacts_root: Path, manifest_path: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [

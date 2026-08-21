@@ -136,16 +136,8 @@ fn parse_method(value: &str) -> rookie_cookies::MethodClass {
 /// `widen_to_all` is false for `read`: unlike a report, a snapshot has no
 /// "every profile" shape at all (one `ReadResult` holds one `profile_id`), so
 /// `--select all` is rejected there whether or not `--profile` is also given.
-fn reject_conflicting_profile_selection(
-  profile: Option<&str>,
-  select: Option<&str>,
-  widen_to_all: bool,
-) -> rookie_cookies::Result<()> {
-  let selects_all = select == Some("all");
-  if selects_all && (profile.is_some() || !widen_to_all) {
-    return Err(rookie_cookies::RequestError::ConflictingProfileSelection.into());
-  }
-  Ok(())
+fn canonical_select(select: Option<&str>) -> Option<String> {
+  select.map(|value| value.replace('-', "_"))
 }
 
 /// Maps a validated `--app-bound` value to its typed policy.
@@ -153,12 +145,10 @@ fn reject_conflicting_profile_selection(
 /// Clap's `PossibleValuesParser` already restricts the flag to exactly these
 /// three values, so there is no fourth arm to classify by parsing here.
 fn parse_app_bound(value: &str) -> rookie_cookies::AppBoundPolicy {
-  match value {
-    "disabled" => rookie_cookies::AppBoundPolicy::Disabled,
-    "injection-only" => rookie_cookies::AppBoundPolicy::InjectionOnly,
-    "allow-elevated-fallback" => rookie_cookies::AppBoundPolicy::AllowElevatedFallback,
-    other => unreachable!("clap already validated --app-bound: {other}"),
-  }
+  value
+    .replace('-', "_")
+    .parse()
+    .unwrap_or_else(|_| unreachable!("clap already validated --app-bound: {value}"))
 }
 
 /// Builds the [`rookie_cookies::ExecutionControl`] shared by every job
@@ -184,26 +174,16 @@ fn chromium_credential_selector(
   browser_id: Option<String>,
   plaintext_only: bool,
 ) -> std::io::Result<Option<ChromiumCredentialSource>> {
-  let selector_count = usize::from(local_state_path.is_some())
-    + usize::from(browser_id.is_some())
-    + usize::from(plaintext_only);
-  if selector_count > 1 {
-    return Err(std::io::Error::new(
+  ChromiumCredentialSource::from_selectors(
+    browser_id,
+    local_state_path.map(PathBuf::from),
+    plaintext_only,
+  )
+  .map_err(|_| {
+    std::io::Error::new(
       std::io::ErrorKind::InvalidInput,
       "--local-state-path, --browser-id, and --plaintext-only are mutually exclusive",
-    ));
-  }
-
-  Ok(if let Some(local_state_path) = local_state_path {
-    Some(ChromiumCredentialSource::LocalStateFile(PathBuf::from(
-      local_state_path,
-    )))
-  } else if let Some(browser_id) = browser_id {
-    Some(ChromiumCredentialSource::BrowserId(browser_id))
-  } else if plaintext_only {
-    Some(ChromiumCredentialSource::PlaintextOnly)
-  } else {
-    None
+    )
   })
 }
 
@@ -225,17 +205,19 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       timeout_secs,
       app_bound,
     } => {
-      reject_conflicting_profile_selection(profile.as_deref(), select.as_deref(), false)?;
+      let canonical_select = canonical_select(select.as_deref());
+      let selection = rookie_cookies::ProfileSelection::from_binding_options(
+        profile.as_deref(),
+        canonical_select.as_deref(),
+      )?;
       let cancellation = install_cancel_on_signal();
       let control = execution_control(timeout_secs, app_bound, cancellation);
       let mut request = rookie_cookies::ReadRequest::browser(browser)
+        .selection(selection)
         .include_expired(include_expired)
         .execution(control);
       if include_session {
         request = request.include_session();
-      }
-      if let Some(profile) = profile {
-        request = request.profile(profile);
       }
       let result = rookie_cookies::read(request)?;
       emit_warnings(result.warnings());
@@ -260,27 +242,22 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       timeout_secs,
       app_bound,
     } => {
-      reject_conflicting_profile_selection(profile.as_deref(), select.as_deref(), true)?;
       let cancellation = install_cancel_on_signal();
       let control = execution_control(timeout_secs, app_bound, cancellation);
       let report = match browser {
         Some(browser) => {
+          let canonical_select = canonical_select(select.as_deref());
+          let scope = rookie_cookies::ReportScope::from_binding_options(
+            profile.as_deref(),
+            canonical_select.as_deref(),
+          )?;
           // Mirrors `browser_report`'s own request shape -- that convenience
           // function has no `_with` twin to carry a control, so it is built
           // here directly instead of through it.
-          let mut request = rookie_cookies::ReportRequest::browser(&browser)
+          let request = rookie_cookies::ReportRequest::browser(&browser)
             .domains(domains)
+            .scope(scope)
             .execution(control);
-          request = match profile {
-            Some(profile) => request.profile(profile),
-            // Omitting `--select`, or passing `--select all`, leaves the
-            // request at its default `ReportScope::AllProfiles` -- exactly
-            // what `browser_report(id, None, domains)` has always meant.
-            None if select.as_deref() == Some("legacy-first") => request.scope(
-              rookie_cookies::ReportScope::One(rookie_cookies::ProfileSelection::LegacyFirst),
-            ),
-            None => request,
-          };
           rookie_cookies::extract_report(request)?
         }
         // No `--browser`: the `load_report` fan-out, which has no per-browser
@@ -309,7 +286,7 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       // `extract_from_path`/`PathExtractRequest` is the only from-path job
       // with domain filtering, and it returns a flat, non-detailed cookie
       // list with no per-row warnings -- checked before any I/O, same as
-      // `reject_conflicting_profile_selection`.
+      // `ReportScope::from_binding_options`.
       if domains.is_some() && format == "detailed" {
         return Err(Box::new(std::io::Error::new(
           std::io::ErrorKind::InvalidInput,

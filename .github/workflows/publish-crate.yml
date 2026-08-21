@@ -25,6 +25,9 @@ jobs:
     environment:
       name: release
       url: https://crates.io/crates/rookie-cookies/${{ inputs.version }}
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -54,10 +57,56 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Verify crate package
-        run: cargo publish --dry-run --locked -p rookie-cookies --features appbound
+      - name: Build and verify crate package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --locked -p rookie-cookies
+          cargo publish --dry-run --locked -p rookie-cookies --features appbound
+          mkdir -p release-packages/crate
+          cp \
+            "target/package/rookie-cookies-$RELEASE_VERSION.crate" \
+            release-packages/crate/
         env:
           ROOKIE_COOKIES_SOURCE_SHA: ${{ env.RELEASE_SHA }}
+
+      - name: Write crate scan manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          contract_digest="$(python3 scripts/platform_contract.py --digest)"
+          python3 scripts/write-release-scan-manifest.py \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$RELEASE_SHA" \
+            --controller-sha "$GITHUB_SHA" \
+            --platform-contract-digest "$contract_digest" \
+            --root "$GITHUB_WORKSPACE" \
+            --output release-packages/crate/release-scan-manifest.json \
+            "release-packages/crate/rookie-cookies-$RELEASE_VERSION.crate"
+
+      - name: Run consumer harness against manifest-verified crate
+        run: |
+          python3 scripts/run-consumer-harness.py \
+            --manifest release-packages/crate/release-scan-manifest.json \
+            --artifacts-root "$GITHUB_WORKSPACE"
+
+      - name: Verify non-spoofable CI proof for this release commit
+        run: |
+          python3 scripts/write-ci-proof.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit-sha "$RELEASE_SHA" \
+            --manifest release-packages/crate/release-scan-manifest.json \
+            --output release-packages/crate/ci-proof.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload crate release proof
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: crate-release-${{ inputs.version }}
+          path: release-packages/crate/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Publish crate
         run: cargo publish --locked -p rookie-cookies --features appbound

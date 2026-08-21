@@ -14,6 +14,14 @@ impl fmt::Debug for RedactedCookieValue {
 /// which this crate already passes through untouched.
 pub const SAME_SITE_UNSPECIFIED: i64 = -1;
 
+/// The frozen eight-field compatibility cookie projection.
+///
+/// Existing flat Rust functions, language bindings, JSON output, and format
+/// helpers preserve this exact shape through the 0.6 series. Browser-specific
+/// partition/container identity is intentionally not added here; use
+/// [`DetailedCookie`] when that context matters. Adding or reinterpreting a
+/// field on this type is a compatibility change, not an ordinary DTO cleanup.
+//
 // `Clone`/`PartialEq`/`Eq`/`Hash` are additive in 0.6.0: bindings used to
 // hand-copy the eight fields to get a second owned value, and `ReadResult`
 // needs one clone per row to keep `cookies()` a borrow. `Debug` still redacts

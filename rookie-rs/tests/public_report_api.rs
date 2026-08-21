@@ -1091,7 +1091,7 @@ fn a_profile_whose_only_source_fails_is_an_error_not_an_empty_snapshot() {
     "expected an engine failure, got {error:?}"
   );
   assert!(
-    matches!(error.code(), "no_selected_source" | "no_discovered_source"),
+    matches!(error.code(), "source_extraction_failed"),
     "unexpected code {}",
     error.code()
   );

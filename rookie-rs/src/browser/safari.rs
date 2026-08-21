@@ -870,8 +870,8 @@ pub(crate) fn golden_binarycookies_test_fixture() -> Vec<u8> {
   tests::golden_fixture()
 }
 
-#[cfg(test)]
-pub(super) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn malformed_decoder_gate_case(bytes: &[u8]) -> Result<()> {
   let source = SafariReadOnlySource { bytes };
   let decoder = SafariBoundaryDecoder;
   let clock = SystemClock;
