@@ -23,6 +23,7 @@ async function main() {
 
   const rookieCookies = require("rookie-cookies");
   assert.equal(typeof rookieCookies.version, "function");
+  assert.equal(typeof rookieCookies.jar, "function");
   assert.match(rookieCookies.version(), /^\d+\.\d+\.\d+/);
 
   let cookies;

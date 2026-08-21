@@ -65,6 +65,7 @@ const EXPECTED_EXPORTS = [
   "loadReport",
   "ReadResult",
   "read",
+  "jar",
   "profiles",
   "report",
   "fromPath",
@@ -722,6 +723,7 @@ test("bad async API arguments reject instead of throwing synchronously", async (
     // an invalid field value is what actually triggers a napi conversion
     // error here.
     ["loadReport", () => rookieCookies.loadReport({ domains: 42 })],
+    ["jar", () => rookieCookies.jar({ browser: 42 })],
   ];
 
   for (const [name, call] of invalidCalls) {
@@ -778,7 +780,7 @@ Path=Profiles/work
         env: { ...process.env, ...fixture.environment },
       },
     );
-    const { profiles, cookies } = JSON.parse(stdout);
+    const { profiles, cookies, jarCookies } = JSON.parse(stdout);
     t.deepEqual(
       profiles.map(({ name, isDefault }) => ({ name, isDefault })),
       [
@@ -799,6 +801,7 @@ Path=Profiles/work
       httpOnly: false,
       sameSite: 0,
     });
+    t.deepEqual(jarCookies, cookies, "jar is read(...).cookies projection sugar");
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
@@ -1551,6 +1554,7 @@ test("public JavaScript examples await async extraction APIs", (t) => {
     "chromiumBased",
     "chromiumBasedDetailed",
     "read",
+    "jar",
     "fromPath",
     "profiles",
     "report",

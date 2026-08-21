@@ -46,6 +46,15 @@ fn missing_browser_is_request_error() {
 }
 
 #[test]
+fn jar_uses_the_same_request_validation_as_read() {
+  let error = jar(ReadRequest::browser("")).unwrap_err();
+  let crate::Error::Request(request_error) = &error else {
+    panic!("a missing browser is a request error, got {error:?}");
+  };
+  assert_eq!(request_error.code(), "missing_browser");
+}
+
+#[test]
 fn header_rejects_ftp() {
   let result = result(Vec::new());
   assert!(result

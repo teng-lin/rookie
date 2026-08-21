@@ -16,7 +16,7 @@ archived. We still ship that project's public call shapes (`chrome()`,
 `firefox()`, `load()`, and friends) so existing consumers keep working.
 
 That compatibility is a **bridge, not a promise**. New work should use the 0.6
-job API (`read` / Python `jar`). Later releases will break the old surface as we
+job API (`read` / `jar`). Later releases will break the old surface as we
 add capabilities and clean up the design. Plan on migrating; do not take the
 legacy helpers as frozen forever.
 
@@ -136,6 +136,10 @@ those calls fail with the missing selectors instead of merging isolation
 boundaries. There is no top-level binding `header()`, and no crate-root Rust
 `get` / `report`.
 
+`jar` is warning-discarding projection sugar over the same `read` job. Python
+returns `http.cookiejar.CookieJar`; Node returns `CookieObject[]`; Rust returns
+`Vec<Cookie>`. Use `read` when warnings or partition/container context matter.
+
 ### Python
 
 ```python
@@ -150,14 +154,19 @@ rows = cookies.read(browser="chrome", profile="Work").as_list()
 ### Node.js
 
 ```javascript
-import { read } from "rookie-cookies";
+import { jar, read } from "rookie-cookies";
 
-const snapshot = await read({
+const sessionCookies = await jar({
   browser: "firefox",
   profile: "default-release",
   includeSession: true,
 });
-console.log(snapshot.cookies, snapshot.header("https://example.com/"));
+
+const snapshot = await read({
+  browser: "chrome",
+  profile: "Work",
+});
+console.log(sessionCookies, snapshot.header("https://example.com/"));
 ```
 
 Extraction is async. Always `await`.
@@ -165,14 +174,18 @@ Extraction is async. Always `await`.
 ### Rust
 
 ```rust
-use rookie_cookies::{read, ReadRequest, SendContext};
+use rookie_cookies::{jar, read, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
-    let snapshot = read(
+    let session_cookies = jar(
         ReadRequest::browser("firefox")
             .profile("default-release")
             .include_session(),
     )?;
+    let snapshot = read(
+        ReadRequest::browser("chrome").profile("Work"),
+    )?;
+    println!("{} cookies", session_cookies.len());
     println!("{}", snapshot.header(&SendContext::url("https://example.com/"))?);
     Ok(())
 }

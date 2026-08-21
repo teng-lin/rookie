@@ -27,7 +27,7 @@ cargo add rookie-cookies
 ## Recommended usage (0.6 series)
 
 ```rust
-use rookie_cookies::{read, ReadRequest, SendContext};
+use rookie_cookies::{jar, read, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
     // Selecting a profile no longer implies session cookies; ask for them with
@@ -37,12 +37,13 @@ fn main() -> rookie_cookies::Result<()> {
             .profile("default-release")
             .include_session(),
     )?;
+    let flat = jar(ReadRequest::browser("chrome"))?;
     for cookie in snapshot.cookies() {
         println!("{} {}", cookie.domain, cookie.name);
     }
     let header = snapshot.header(&SendContext::url("https://example.com/"))?;
     let owned = snapshot.into_cookies();
-    let _ = (header, owned);
+    let _ = (flat, header, owned);
     Ok(())
 }
 ```
@@ -51,6 +52,10 @@ fn main() -> rookie_cookies::Result<()> {
 `header(&SendContext)` as a view. There is **no** crate-root `get` or `report`
 function. Bindings-facing `profiles(browser_id)` exists as an alias of
 `browser_profiles`; structured reports use `extract_report` / `browser_report`.
+
+`jar(request)` is `read(request)?.into_cookies()` projection sugar. It returns
+Rust's language-native `Vec<Cookie>` and discards warnings and
+partition/container context; use `read` when either matters.
 
 - No-profile `read(ReadRequest::browser("chrome"))` matches the compatibility
   flatten used by `chrome()` / `extract` when `include_expired` is set
