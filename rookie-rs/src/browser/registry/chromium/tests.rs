@@ -1044,6 +1044,50 @@ fn wildcard_roots_are_sorted_before_generic_discovery() {
 }
 
 #[test]
+fn octo_browser_wildcard_temporary_profiles_extract_successfully() {
+  let temp = TempDir::new("octo-extraction");
+  let home = temp.path().join("home");
+  let local_app_data = home.join("LocalAppData");
+  let context = context_for(
+    PlatformId::Windows,
+    home,
+    [("LOCALAPPDATA", local_app_data.clone())],
+  );
+  let root_pattern = browser_root(&context, "octo_browser", "octo-local-temporary");
+  let parent = root_pattern.parent().expect("Octo parent");
+  let profile_dir = parent.join("test-profile-uuid");
+  std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+  std::fs::write(
+    profile_dir.join("Local State"),
+    br#"{"os_crypt":{"encrypted_key":"placeholder"}}"#,
+  )
+  .expect("write Local State");
+  seed_cookie(
+    &profile_dir.join("Default"),
+    true,
+    "octo_cookie",
+    "cookie_val",
+  );
+
+  let provider = CountingProvider::default();
+  let report = extract_chromium_with_provider_and_selection(
+    &context,
+    "octo_browser",
+    ProfileSelection::AllProfiles,
+    None,
+    &provider,
+  )
+  .expect("extract Octo Browser");
+
+  assert_eq!(report.installations.len(), 1);
+  assert_eq!(report.installations[0].profiles.len(), 1);
+  assert_eq!(
+    report.installations[0].profiles[0].cookies()[0].name,
+    "octo_cookie"
+  );
+}
+
+#[test]
 fn chrome_channels_use_real_side_by_side_directories_on_every_os() {
   let temp = TempDir::new("channel-roots");
   let cases = [
