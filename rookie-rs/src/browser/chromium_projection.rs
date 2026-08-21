@@ -10,7 +10,9 @@ use super::chromium::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 use super::chromium_crypto::retrieve_key_outcomes;
-use super::chromium_crypto::{ChromiumKeyOutcomes, KeyProvider};
+use super::chromium_crypto::ChromiumKeyOutcomes;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use super::chromium_crypto::KeyProvider;
 use super::chromium_decoder::EncryptedValuePolicy;
 use super::source::{AcquisitionPolicy, SourceAcquisition, SourceCandidate};
 use crate::common::deadline::BoundaryRuntime;
