@@ -151,6 +151,26 @@ trusted publishing run on Node.js 24. The workflow creates all six immutable
 tarballs without running publish lifecycle scripts and saves them as a workflow
 artifact before any registry write.
 
+Do not treat skipped jobs on the release pull request as release evidence.
+The `pull_request` event intentionally runs only Ubuntu Chrome/Firefox in
+`e2e.yml` and staggers one Node and one Python version per OS in
+`test-rust.yml`. Before merging a release PR, manually dispatch both complete
+suites against its branch and require every job to pass:
+
+```console
+export RELEASE_BRANCH=release/0.6.0-beta.2
+gh workflow run e2e.yml --ref "$RELEASE_BRANCH" \
+  -f appbound_only=false -f multi_browser=true
+gh workflow run test-rust.yml --ref "$RELEASE_BRANCH" -f suite=nightly
+```
+
+The first command adds macOS Chrome/Firefox, Windows Firefox, legacy DPAPI,
+NonDisruptive shadow-copy recovery, and Chrome/Edge/Brave App-Bound v20 to the
+Ubuntu browser lanes. The second runs the complete Node and Python products on
+every supported CI OS—including macOS Node 22/24/26 and Python
+3.11/3.12/3.13/3.14—plus FreeBSD, wheels, and sdist. These branch runs catch a
+problem before merge, but do not replace the exact-`main` release gates below.
+
 Merge the release pull request and wait for all automatic main-branch checks
 to pass. Then run every full CI and browser suite against the exact commit that
 will be tagged. The aggregate `release gate: ...` jobs exist only for these
