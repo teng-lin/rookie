@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -12,6 +13,34 @@ import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
+    def test_seeded_legacy_chromium_db_wins_over_empty_network_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            user_data = Path(tmp)
+            network = user_data / "Default/Network/Cookies"
+            legacy = user_data / "Default/Cookies"
+            for database in (network, legacy):
+                database.parent.mkdir(parents=True, exist_ok=True)
+                connection = hosted.sqlite3.connect(database)
+                connection.execute("create table cookies (name text)")
+                if database == legacy:
+                    connection.execute("insert into cookies values ('rookie_ci')")
+                connection.commit()
+                connection.close()
+
+            self.assertTrue(hosted.cookies_db_has_name(user_data))
+            self.assertEqual(
+                hosted.find_chromium_db(user_data, name="rookie_ci"), legacy
+            )
+
+    def test_wininet_cookie_seed_is_persistent_and_gmt(self) -> None:
+        seeded = hosted.wininet_cookie_data(
+            datetime(2026, 8, 21, 12, 30, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual(
+            seeded,
+            "bar; expires=Fri, 21-Aug-2026 13:30:00 GMT; path=/",
+        )
+
     def test_persisted_cookie_can_replace_unreachable_devtools_endpoint(self) -> None:
         proc = mock.Mock()
         with (

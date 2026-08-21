@@ -12,6 +12,7 @@ persistent profile; IE uses a pinned 32-bit IEDriver server in Edge IE mode.
 from __future__ import annotations
 
 import ctypes
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import shlex
@@ -216,11 +217,15 @@ def stage_chromium_user_data(user_data: Path) -> None:
     # search-engine data and crashes after deleting an unsigned `{}` stub.
 
 
-def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
-    try:
-        db = find_chromium_db(user_data)
-    except SystemExit:
-        return False
+def chromium_cookie_dbs(user_data: Path) -> list[Path]:
+    candidates = [
+        user_data / "Default/Network/Cookies",
+        user_data / "Default/Cookies",
+    ]
+    return [candidate for candidate in candidates if candidate.is_file()]
+
+
+def cookie_db_has_name(db: Path, name: str = "rookie_ci") -> bool:
     try:
         connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
@@ -232,6 +237,10 @@ def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
     except sqlite3.Error:
         return False
     return row is not None
+
+
+def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
+    return any(cookie_db_has_name(db, name) for db in chromium_cookie_dbs(user_data))
 
 
 def chromium_native_command(
@@ -383,11 +392,14 @@ def seed_gecko(exe: str, profile: Path, url: str) -> None:
         raise SystemExit(f"gecko seed did not write {cookies}")
 
 
-def find_chromium_db(user_data: Path) -> Path:
-    for rel in ("Default/Network/Cookies", "Default/Cookies"):
-        candidate = user_data / rel
-        if candidate.is_file():
-            return candidate
+def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
+    candidates = chromium_cookie_dbs(user_data)
+    if name:
+        for candidate in candidates:
+            if cookie_db_has_name(candidate, name):
+                return candidate
+    if candidates:
+        return candidates[0]
     raise SystemExit(f"no Chromium Cookies db under {user_data}")
 
 
@@ -395,6 +407,8 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
+    db = find_chromium_db(user_data, name="rookie_ci")
+    env["ROOKIE_E2E_COOKIE_DB"] = str(db)
     py = venv_python()
     subprocess.run(
         [
@@ -420,7 +434,6 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
         env=env,
         cwd=str(ROOT),
     )
-    db = find_chromium_db(user_data)
     cli = [str(py), str(ROOT / "tests/e2e/assert_cli_cookie.py"), str(db)]
     if sys.platform == "win32":
         cli.extend(["--local-state-path", str(user_data / "Local State")])
@@ -666,6 +679,35 @@ def _esent_details(completed: subprocess.CompletedProcess[str]) -> str:
     return completed.stderr.strip() or completed.stdout.strip() or "<no output>"
 
 
+def wininet_cookie_data(now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    expires = (now + timedelta(hours=1)).strftime("%a, %d-%b-%Y %H:%M:%S GMT")
+    return f"bar; expires={expires}; path=/"
+
+
+def seed_internet_explorer_wininet(url: str) -> None:
+    """Persist the canary through IE's native WinINet cookie database API."""
+
+    if sys.platform != "win32":
+        raise SystemExit("WinINet cookie seeding requires Windows")
+    wininet = ctypes.WinDLL("wininet")  # type: ignore[attr-defined]
+    set_cookie = wininet.InternetSetCookieExW
+    set_cookie.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_size_t,
+    ]
+    set_cookie.restype = ctypes.c_uint32
+    state = set_cookie(url, "rookie_ci", wininet_cookie_data(), 0, 0)
+    # INTERNET_COOKIE_STATE_ACCEPT through INTERNET_COOKIE_STATE_DOWNGRADE all
+    # represent stored cookies; UNKNOWN and REJECT do not.
+    if state not in (1, 2, 3, 4):
+        raise SystemExit(f"WinINet rejected the persistent IE canary (state {state})")
+    print("native WinINet persistent cookie seeded", flush=True)
+
+
 def snapshot_internet_explorer_store(cookie_file: Path) -> Path:
     """Copy and recover the real IE ESE store plus its transaction logs."""
 
@@ -744,6 +786,11 @@ def run() -> int:
             before = file_snapshot(engine)
             cookie_file = seed_with_startup_retry(engine, exe, url, before)
             stop_browser(engine)
+            wininet_before = file_snapshot(engine)
+            seed_internet_explorer_wininet(url)
+            cookie_file = wait_for_changed_cookie_file(
+                engine, wininet_before, timeout=30
+            )
             cookie_file = snapshot_internet_explorer_store(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
