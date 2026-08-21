@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,6 +63,101 @@ class RealContractTests(unittest.TestCase):
                 "rookie-cookies-win32-x64-msvc",
             ),
         )
+
+    def test_npm_publish_order_and_tarballs_come_from_publish_cells(self) -> None:
+        contract = platform_contract.load_contract()
+        packages = platform_contract.npm_publish_packages(contract)
+        self.assertEqual(
+            packages,
+            (
+                "rookie-cookies-darwin-arm64",
+                "rookie-cookies-darwin-x64",
+                "rookie-cookies-linux-arm64-gnu",
+                "rookie-cookies-linux-x64-gnu",
+                "rookie-cookies-win32-x64-msvc",
+                "rookie-cookies",
+            ),
+        )
+        self.assertEqual(packages[-1], "rookie-cookies")
+        self.assertEqual(
+            platform_contract.npm_publish_tarballs(contract, "1.2.3"),
+            tuple(f"{package}-1.2.3.tgz" for package in packages),
+        )
+
+    def test_real_npm_manifests_and_optional_dependencies_match_contract(self) -> None:
+        contract = platform_contract.load_contract()
+        self.assertEqual(platform_contract.validate_npm_repository(contract), [])
+
+    def test_npm_workflow_consumes_contract_publish_inputs_and_order(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/publish-npm.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertGreaterEqual(workflow.count("--emit-npm-tarballs"), 2)
+        self.assertIn("--emit-npm-publish-order", workflow)
+        self.assertNotIn("native_packages=(", workflow)
+        self.assertNotIn('test "${#tarballs[@]}" -eq 5', workflow)
+
+    def test_pack_script_outputs_exactly_the_contract_tarballs(self) -> None:
+        contract = platform_contract.load_contract()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            node_root = root / "node"
+            npm_root = node_root / "npm"
+            node_root.mkdir()
+            shutil.copy2(
+                REPOSITORY_ROOT / "bindings/node/package.json",
+                node_root / "package.json",
+            )
+            for package in platform_contract.npm_publish_packages(contract)[:-1]:
+                platform_name = package.removeprefix("rookie-cookies-")
+                source = REPOSITORY_ROOT / "bindings/node/npm" / platform_name
+                destination = npm_root / platform_name
+                destination.mkdir(parents=True)
+                shutil.copy2(source / "package.json", destination / "package.json")
+                metadata = json.loads((destination / "package.json").read_text(encoding="utf-8"))
+                (destination / metadata["main"]).write_bytes(b"test-addon")
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_npm = fake_bin / "npm"
+            fake_npm.write_text(
+                """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+package = Path(sys.argv[2])
+output = Path(sys.argv[sys.argv.index("--pack-destination") + 1])
+metadata = json.loads((package / "package.json").read_text(encoding="utf-8"))
+filename = f"{metadata['name']}-{metadata['version']}.tgz"
+(output / filename).write_bytes(b"test-tarball")
+print(json.dumps([{"filename": filename}]))
+""",
+                encoding="utf-8",
+            )
+            fake_npm.chmod(0o755)
+            output = root / "tarballs"
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPOSITORY_ROOT / "scripts/package-npm-tarballs.py"),
+                    "--node-root",
+                    str(node_root),
+                    "--output",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            version = json.loads((node_root / "package.json").read_text(encoding="utf-8"))["version"]
+            self.assertEqual(
+                {path.name for path in output.glob("*.tgz")},
+                set(platform_contract.npm_publish_tarballs(contract, version)),
+            )
 
     def test_wheel_linux_matrix_includes_native_arm64_runner(self) -> None:
         contract = platform_contract.load_contract()
@@ -128,6 +225,13 @@ class MatchCellForArtifactTests(unittest.TestCase):
         cell = platform_contract.match_cell_for_artifact(self.contract, "rookie_cookies-1.0.0.tar.gz")
         assert cell is not None
         self.assertEqual(cell["artifact_id"], "sdist")
+
+    def test_matches_packaged_rust_crate(self) -> None:
+        cell = platform_contract.match_cell_for_artifact(
+            self.contract, "rookie-cookies-1.0.0.crate"
+        )
+        assert cell is not None
+        self.assertEqual(cell["artifact_id"], "crate")
 
     def test_unrecognized_wheel_platform_tag_raises_instead_of_guessing(self) -> None:
         with self.assertRaises(platform_contract.ArtifactMatchError):

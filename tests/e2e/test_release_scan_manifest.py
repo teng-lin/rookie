@@ -21,6 +21,37 @@ JCS_SPEC.loader.exec_module(jcs)
 
 
 class ReleaseScanManifestTests(unittest.TestCase):
+    def test_records_packaged_rust_crate_against_crate_contract_cell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_root = Path(temporary)
+            archive = artifact_root / "rookie-cookies-0.6.0-beta.1.crate"
+            archive.write_bytes(b"crate-archive")
+            output = artifact_root / "release-scan-manifest.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--version",
+                    "0.6.0-beta.1",
+                    "--source-sha",
+                    "a" * 40,
+                    "--controller-sha",
+                    "c" * 40,
+                    "--platform-contract-digest",
+                    "d" * 64,
+                    "--root",
+                    str(artifact_root),
+                    "--output",
+                    str(output),
+                    str(archive),
+                ],
+                check=True,
+            )
+
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["artifacts"][0]["path"], archive.name)
+            self.assertEqual(manifest["artifacts"][0]["helper_roles"], [])
+
     def test_records_exact_source_and_artifact_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             artifact_root = Path(temporary) / "release"

@@ -131,6 +131,7 @@ jobs:
   # platform/target list is spelled out now — see scripts/platform_contract.py.
   load-contract:
     runs-on: ubuntu-latest
+    needs: preflight
     defaults:
       run:
         working-directory: .
@@ -139,11 +140,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
           persist-credentials: false
       - id: matrix
         run: |
           set -euo pipefail
-          python3 scripts/platform_contract.py --validate
+          python3 scripts/platform_contract.py --validate --validate-npm-repository
           echo "matrix=$(python3 scripts/platform_contract.py --emit-matrix npm-native)" >>"$GITHUB_OUTPUT"
 
   build:
@@ -452,8 +454,17 @@ jobs:
           windows_binary="rookie_cookies.win32-x64-msvc.node"
           mkdir -p "$scan_dir"
           cp "npm/win32-x64-msvc/$windows_binary" "$scan_dir/$windows_binary"
+          mapfile -t expected_names < <(
+            python3 ../../scripts/platform_contract.py \
+              --emit-npm-tarballs "$RELEASE_VERSION"
+          )
           mapfile -t tarballs < <(find "$release_root" -maxdepth 1 -name '*.tgz' -type f | sort)
-          test "${#tarballs[@]}" -eq 5
+          mapfile -t actual_names < <(printf '%s\n' "${tarballs[@]##*/}" | sort)
+          mapfile -t sorted_expected_names < <(printf '%s\n' "${expected_names[@]}" | sort)
+          test "${#tarballs[@]}" -eq "${#expected_names[@]}"
+          diff -u \
+            <(printf '%s\n' "${sorted_expected_names[@]}") \
+            <(printf '%s\n' "${actual_names[@]}")
           contract_digest="$(python3 ../../scripts/platform_contract.py --digest)"
           python ../../scripts/write-release-scan-manifest.py \
             --version "$RELEASE_VERSION" \
@@ -468,15 +479,10 @@ jobs:
           python3 ../../scripts/run-consumer-harness.py \
             --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
             --artifacts-root ../../release-packages/npm
-      # Release-hardening program R5, advisory-only for now (see
-      # docs/releasing.md): resolves each required check to its exact
-      # producing job/run rather than trusting a check-run name alone.
-      # --advisory means this always exits 0 (a ::warning:: annotation on
-      # failure, not a job failure) -- this workflow only runs via
-      # workflow_dispatch, so it gets no PR-time CI of its own to validate
-      # the gate against before a real release; promote to hard-blocking
-      # (drop --advisory) once it's been observed working on one.
-      - name: Verify non-spoofable CI proof for this release commit (advisory)
+      # Release-hardening program R5: resolve each required check to its exact
+      # producing job/run rather than trusting a check-run name alone. This is
+      # a blocking release gate; a missing or unverifiable proof fails closed.
+      - name: Verify non-spoofable CI proof for this release commit
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
@@ -485,23 +491,13 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --commit-sha "$RELEASE_SHA" \
             --manifest ../../release-packages/npm/scan/release-scan-manifest.json \
-            --output ../../release-packages/npm/scan/ci-proof.json \
-            --advisory
-      # A dedicated upload, mirroring publish-cli.yml/publish-py.yml, so a
-      # verification failure (which never writes ci-proof.json at all) is
-      # visible here too, not only via the step's own ::warning:: above --
-      # `if-no-files-found: warn`, not `error`, since a missing file is an
-      # expected possible outcome of --advisory, not itself an error. This is
-      # in addition to, not instead of, the "Upload release tarballs" step
-      # below: that step's whole-directory upload already sweeps up
-      # ci-proof.json on success, but gives no failure signal of its own when
-      # the file was never written, since the rest of scan/ still exists.
+            --output ../../release-packages/npm/scan/ci-proof.json
       - name: Upload CI proof
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-ci-proof
           path: release-packages/npm/scan/ci-proof.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
       - name: Upload release tarballs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -524,6 +520,13 @@ jobs:
       - preflight
       - package
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
       - name: Setup node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -541,10 +544,21 @@ jobs:
           NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
         run: |
           set -euo pipefail
-          test "$(find release-packages -maxdepth 1 -name '*.tgz' -type f | wc -l)" -eq 6
+          mapfile -t expected_tarballs < <(
+            python3 ../../scripts/platform_contract.py \
+              --emit-npm-tarballs "$RELEASE_VERSION"
+          )
+          mapfile -t actual_tarballs < <(
+            find release-packages -maxdepth 1 -name '*.tgz' -type f -printf '%f\n' | sort
+          )
+          mapfile -t sorted_expected_tarballs < <(printf '%s\n' "${expected_tarballs[@]}" | sort)
+          test "${#actual_tarballs[@]}" -eq "${#expected_tarballs[@]}"
+          diff -u \
+            <(printf '%s\n' "${sorted_expected_tarballs[@]}") \
+            <(printf '%s\n' "${actual_tarballs[@]}")
           echo "Verified publish inputs (target npm dist-tag: $NPM_TAG)"
-          for tarball in release-packages/*.tgz; do
-            npm publish "./$tarball" --dry-run --access public --ignore-scripts --tag "$NPM_TAG"
+          for tarball in "${expected_tarballs[@]}"; do
+            npm publish "./release-packages/$tarball" --dry-run --access public --ignore-scripts --tag "$NPM_TAG"
           done
       - name: Re-verify release tag still points at the packaged commit
         shell: bash
@@ -590,11 +604,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Publishing to npm with dist-tag: $NPM_TAG"
-          native_packages=(
-            rookie-cookies-darwin-arm64
-            rookie-cookies-darwin-x64
-            rookie-cookies-linux-x64-gnu
-            rookie-cookies-win32-x64-msvc
+          mapfile -t publish_packages < <(
+            python3 ../../scripts/platform_contract.py --emit-npm-publish-order
           )
           publish_tarball() {
             package_name="$1"
@@ -611,7 +622,6 @@ jobs:
             fi
             npm publish "./$tarball" --access public --ignore-scripts --provenance --tag "$NPM_TAG"
           }
-          for package in "${native_packages[@]}"; do
+          for package in "${publish_packages[@]}"; do
             publish_tarball "$package" "release-packages/$package-$RELEASE_VERSION.tgz"
           done
-          publish_tarball rookie-cookies "release-packages/rookie-cookies-$RELEASE_VERSION.tgz"

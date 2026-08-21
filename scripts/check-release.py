@@ -251,6 +251,7 @@ def main() -> int:
     ]
 
     failures: list[str] = []
+    failures.extend(platform_contract.validate_npm_repository(platform_contract.load_contract()))
 
     previous = latest_published_version(ROOT, excluding=expected)
     if previous is not None and semver_precedence_key(expected) <= semver_precedence_key(previous):

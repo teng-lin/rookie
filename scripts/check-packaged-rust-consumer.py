@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import shutil
@@ -51,17 +52,33 @@ def extract_package(archive: Path, destination: Path, version: str) -> Path:
 
 
 def main() -> None:
-    version = package_version()
-    run(
-        "cargo",
-        "package",
-        "--package",
-        "rookie-cookies",
-        "--allow-dirty",
-        "--no-verify",
-        "--locked",
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--archive",
+        type=Path,
+        help="consume this existing .crate archive instead of creating a new package",
     )
-    archive = ROOT / "target" / "package" / f"rookie-cookies-{version}.crate"
+    args = parser.parse_args()
+    version = package_version()
+    if args.archive is None:
+        run(
+            "cargo",
+            "package",
+            "--package",
+            "rookie-cookies",
+            "--allow-dirty",
+            "--no-verify",
+            "--locked",
+        )
+        archive = ROOT / "target" / "package" / f"rookie-cookies-{version}.crate"
+    else:
+        archive = args.archive.resolve(strict=True)
+        expected_name = f"rookie-cookies-{version}.crate"
+        if archive.name != expected_name:
+            parser.error(
+                f"archive name must be {expected_name!r} for workspace version {version}, "
+                f"got {archive.name!r}"
+            )
     with tempfile.TemporaryDirectory(prefix="rookie-packaged-consumer-") as temporary:
         temporary_path = Path(temporary)
         packaged_crate = extract_package(archive, temporary_path / "package", version)
@@ -127,6 +144,7 @@ rusqlite = {{ version = "=0.40.2", default-features = false, features = ["bundle
         run(
             "cargo",
             "check",
+            "--locked",
             "--manifest-path",
             str(consumer / "Cargo.toml"),
             cwd=consumer,
@@ -134,6 +152,7 @@ rusqlite = {{ version = "=0.40.2", default-features = false, features = ["bundle
         run(
             "cargo",
             "run",
+            "--locked",
             "--bin",
             "sqlite_inventory",
             "--manifest-path",

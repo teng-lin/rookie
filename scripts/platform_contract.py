@@ -125,6 +125,140 @@ def npm_native_packages(contract: dict[str, Any]) -> tuple[str, ...]:
     return tuple(f"rookie-cookies-{platform}" for platform in platforms)
 
 
+def npm_publish_packages(contract: dict[str, Any]) -> tuple[str, ...]:
+    """npm packages to publish, with native packages before the root loader.
+
+    The order is significant: the root package declares every native package
+    as an optional dependency, so publishing it last avoids exposing a root
+    version whose platform package is not available yet.
+    """
+    native = sorted(
+        f"rookie-cookies-{cell['npm_platform']}"
+        for cell in cells(contract, artifact_id="npm-native")
+        if cell.get("registry") == "npm" and cell.get("publish") is True
+    )
+    if len(native) != len(set(native)):
+        raise ContractError(f"published npm package names are not unique: {native}")
+    roots = [
+        cell
+        for cell in cells(contract, artifact_id="npm-root")
+        if cell.get("registry") == "npm" and cell.get("publish") is True
+    ]
+    if len(roots) != 1:
+        raise ContractError(
+            f"expected exactly one published npm-root cell, found {len(roots)}"
+        )
+    return (*native, "rookie-cookies")
+
+
+def npm_publish_tarballs(contract: dict[str, Any], version: str) -> tuple[str, ...]:
+    """Expected immutable npm tarball basenames in publish order."""
+    return tuple(f"{package}-{version}.tgz" for package in npm_publish_packages(contract))
+
+
+def validate_npm_repository(
+    contract: dict[str, Any], node_root: Path = ROOT / "bindings" / "node"
+) -> list[str]:
+    """Cross-check the npm contract against checked-in package metadata.
+
+    This deliberately validates exact sets. A newly checked-in native package,
+    optional dependency, or published contract cell must be represented by all
+    three surfaces before a release can proceed.
+    """
+    failures: list[str] = []
+    try:
+        published = npm_publish_packages(contract)
+    except ContractError as error:
+        return [str(error)]
+    expected_native_names = set(published[:-1])
+    expected_platforms = {
+        package.removeprefix("rookie-cookies-") for package in expected_native_names
+    }
+
+    npm_root = node_root / "npm"
+    try:
+        actual_platforms = {
+            path.name
+            for path in npm_root.iterdir()
+            if path.is_dir() and (path / "package.json").is_file()
+        }
+    except OSError as error:
+        return [f"cannot read native npm package directory {npm_root}: {error}"]
+    if actual_platforms != expected_platforms:
+        failures.append(
+            "checked-in native npm directories do not match published contract cells: "
+            f"expected {sorted(expected_platforms)}, found {sorted(actual_platforms)}"
+        )
+
+    try:
+        root_metadata = json.loads((node_root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"cannot read npm root package metadata: {error}"]
+    optional_dependencies = root_metadata.get("optionalDependencies")
+    actual_optional_names = (
+        set(optional_dependencies) if isinstance(optional_dependencies, dict) else set()
+    )
+    if actual_optional_names != expected_native_names:
+        failures.append(
+            "root optionalDependencies do not match published native contract cells: "
+            f"expected {sorted(expected_native_names)}, found {sorted(actual_optional_names)}"
+        )
+    if root_metadata.get("name") != "rookie-cookies":
+        failures.append(
+            f"root npm package name must be 'rookie-cookies', found {root_metadata.get('name')!r}"
+        )
+    if isinstance(optional_dependencies, dict):
+        for package_name in sorted(expected_native_names & actual_optional_names):
+            if optional_dependencies[package_name] != root_metadata.get("version"):
+                failures.append(
+                    f"root optional dependency {package_name} must use root version "
+                    f"{root_metadata.get('version')!r}, found {optional_dependencies[package_name]!r}"
+                )
+
+    cells_by_platform = {
+        cell["npm_platform"]: cell
+        for cell in cells(contract, artifact_id="npm-native")
+        if cell.get("registry") == "npm" and cell.get("publish") is True
+    }
+    # npm's `libc` selector is meaningful on Linux. The contract still records
+    # Windows' ABI as `msvc`, but npm package metadata correctly omits it.
+    npm_libc = {None: None, "gnu": "glibc", "musl": "musl", "msvc": None}
+    for platform_name in sorted(expected_platforms & actual_platforms):
+        metadata_path = npm_root / platform_name / "package.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            failures.append(f"cannot read {metadata_path}: {error}")
+            continue
+        cell = cells_by_platform[platform_name]
+        expected = {
+            "name": f"rookie-cookies-{platform_name}",
+            "os": [cell["os"]],
+            "cpu": [cell["cpu"]],
+            "main": f"rookie_cookies.{platform_name}.node",
+        }
+        expected_libc = npm_libc.get(cell.get("libc"), cell.get("libc"))
+        if expected_libc is not None:
+            expected["libc"] = [expected_libc]
+        for key, expected_value in expected.items():
+            if metadata.get(key) != expected_value:
+                failures.append(
+                    f"{metadata_path}: {key} must be {expected_value!r}, "
+                    f"found {metadata.get(key)!r}"
+                )
+        if expected_libc is None and "libc" in metadata:
+            failures.append(
+                f"{metadata_path}: libc must be absent for contract libc=null"
+            )
+        if metadata.get("version") != root_metadata.get("version"):
+            failures.append(
+                f"{metadata_path}: version {metadata.get('version')!r} does not match "
+                f"root version {root_metadata.get('version')!r}"
+            )
+
+    return failures
+
+
 class ArtifactMatchError(Exception):
     """Raised when a release artifact's filename can't be matched to exactly
     one contract cell -- see `match_cell_for_artifact`."""
@@ -224,6 +358,10 @@ def match_cell_for_artifact(contract: dict[str, Any], filename: str) -> dict[str
 
     if filename.endswith(".tar.gz"):
         matches = cells(contract, artifact_id="sdist")
+        return matches[0] if matches else None
+
+    if filename.endswith(".crate"):
+        matches = cells(contract, artifact_id="crate")
         return matches[0] if matches else None
 
     return None
@@ -442,6 +580,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validate", action="store_true", help="validate the contract and exit")
     parser.add_argument("--digest", action="store_true", help="print the contract's SHA-256 digest and exit")
     parser.add_argument(
+        "--validate-npm-repository",
+        action="store_true",
+        help="cross-check published npm cells against package manifests and optionalDependencies",
+    )
+    parser.add_argument(
+        "--emit-npm-publish-order",
+        action="store_true",
+        help="print published npm package names, one per line, with the root package last",
+    )
+    parser.add_argument(
+        "--emit-npm-tarballs",
+        metavar="VERSION",
+        help="print expected npm tarball basenames for VERSION, one per line, in publish order",
+    )
+    parser.add_argument(
         "--emit-matrix",
         choices=_EMITTABLE_MATRICES,
         help="print one workflow's build matrix as compact JSON (for GitHub Actions fromJSON) and exit",
@@ -466,6 +619,18 @@ def main() -> int:
         print(contract_digest(args.contract))
         return 0
 
+    if args.emit_npm_publish_order:
+        contract = load_contract(args.contract)
+        for package in npm_publish_packages(contract):
+            print(package)
+        return 0
+
+    if args.emit_npm_tarballs:
+        contract = load_contract(args.contract)
+        for tarball in npm_publish_tarballs(contract, args.emit_npm_tarballs):
+            print(tarball)
+        return 0
+
     if args.emit_matrix:
         contract = load_contract(args.contract)
         print(json.dumps(emit_matrix(contract, args.emit_matrix), separators=(",", ":")))
@@ -485,6 +650,8 @@ def main() -> int:
 
     contract = load_contract(args.contract)
     failures = validate(contract)
+    if args.validate_npm_repository:
+        failures.extend(validate_npm_repository(contract))
     if failures:
         print("Platform contract is invalid:", file=sys.stderr)
         for failure in failures:

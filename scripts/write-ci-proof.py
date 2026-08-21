@@ -37,14 +37,9 @@ explicitly out of scope here, matching how PR 1's R3 already deferred full
 attestation to a later phase; this script itself never mutates anything and
 holds no publish authority of its own.
 
-Wired into `publish-npm.yml`/`publish-cli.yml`/`publish-py.yml` (release-
-hardening program PR 2 slice 2) with `--advisory`: none of those workflows
-run on a PR's own CI (all three are `workflow_dispatch`-only), so this can't
-be live-validated against a real release before it ships, and a bug here
-must not be able to silently block a real publish. `--advisory` turns any
-failure into a `::warning::` annotation instead of a nonzero exit. Promote
-to hard-blocking (drop `--advisory` at each call site) once it has been
-observed working correctly on a real release -- see docs/releasing.md.
+Wired into every publish workflow as a blocking gate immediately before the
+registry or GitHub release mutation. Any missing, stale, or unverifiable
+proof fails closed and prevents publication -- see docs/releasing.md.
 
 Requires the `gh` CLI, authenticated, same as `check-release-controls.py`.
 """
@@ -259,16 +254,6 @@ def parse_args() -> argparse.Namespace:
         help="path to a release-scan-manifest.json to read release.manifest_digest from directly",
     )
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument(
-        "--advisory",
-        action="store_true",
-        help=(
-            "never exit non-zero: print a GitHub Actions ::warning:: annotation on any "
-            "failure instead of failing the calling workflow step. For release-hardening "
-            "program R5's initial advisory-only rollout into publish-*.yml -- see "
-            "docs/releasing.md for the condition to drop this and hard-block instead."
-        ),
-    )
     return parser.parse_args()
 
 
@@ -286,20 +271,8 @@ def _resolve_manifest_digest(args: argparse.Namespace) -> tuple[str | None, str 
     return digest, None
 
 
-def _report_failure(problems: list[str], *, advisory: bool) -> int:
+def _report_failure(problems: list[str]) -> int:
     summary = "CI proof verification failed:\n" + "\n".join(f"- {problem}" for problem in problems)
-    if advisory:
-        # A single-line ::warning:: annotation, so it's visually loud in the
-        # Actions UI, followed by the full multi-line detail as ordinary log
-        # output (GitHub Actions workflow commands only recognize the first
-        # line of a `::warning::`, so the detail has to go separately to not
-        # be silently dropped).
-        print(
-            "::warning::CI proof verification failed (advisory-only for now, does not "
-            "block publish -- see docs/releasing.md and the log below for details)"
-        )
-        print(summary, file=sys.stderr)
-        return 0
     print(summary, file=sys.stderr)
     return 1
 
@@ -331,16 +304,13 @@ def main() -> int:
         except ControlFailure as error:
             problems.append(f"CI proof could not be produced: {error}")
         except Exception as error:  # noqa: BLE001
-            # --advisory's whole point is that a bug *here* must never be able
-            # to hard-block a real publish (see the module docstring) -- this
-            # is the backstop for anything not already anticipated by the
-            # narrower except clauses above and inside _resolve_manifest_digest
-            # (a manifest file with unexpected bytes, a malformed API response
-            # shape missing a field this code indexes directly, etc).
+            # Keep failures actionable and fail closed even for malformed API
+            # responses or unexpected manifest bytes, rather than leaking an
+            # unstructured traceback from a release gate.
             problems.append(f"CI proof could not be produced due to an unexpected error: {error!r}")
 
     if problems:
-        return _report_failure(problems, advisory=args.advisory)
+        return _report_failure(problems)
 
     proof = {
         "schema_version": 1,
