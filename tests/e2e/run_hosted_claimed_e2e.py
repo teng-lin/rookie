@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from urllib.request import urlopen
 
+from browser_coverage_contract import assert_observed_depth, coverage_row, load_coverage
 from webdriver_cookie import (
     WebDriverError,
     file_snapshot,
@@ -37,6 +38,87 @@ from webdriver_cookie import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+REGISTRY_PATH = ROOT / "rookie-rs/browser_registry.json"
+
+
+def current_platform() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+
+def isolated_discovery_environment(root: Path) -> dict[str, str]:
+    """Return registry environment variables that cannot reach a user profile."""
+
+    home = root / "home"
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "LOCALAPPDATA": str(home / "AppData/Local"),
+        "APPDATA": str(home / "AppData/Roaming"),
+    }
+
+
+def registry_browser(platform: str, browser: str) -> dict:
+    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    matches = [
+        item
+        for item in registry["platforms"][platform]
+        if item["canonical_id"] == browser
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected one registry entry for {platform}/{browser}, got {len(matches)}"
+        )
+    return matches[0]
+
+
+def resolve_fixture_root(template: str, environment: dict[str, str]) -> Path:
+    replacements = {
+        "{home}": environment["HOME"],
+        "{config_home}": environment["XDG_CONFIG_HOME"],
+        "{xdg_config_home}": environment["XDG_CONFIG_HOME"],
+        "{local_app_data}": environment["LOCALAPPDATA"],
+        "{roaming_app_data}": environment["APPDATA"],
+    }
+    value = template
+    for placeholder, replacement in replacements.items():
+        value = value.replace(placeholder, replacement)
+    # Some packaged Windows roots contain a package-family glob.  Hosted
+    # cells currently avoid those products, but resolving it keeps this helper
+    # deterministic and makes its unit contract complete.
+    value = value.replace("*", "rookie-fixture")
+    if "{" in value or "}" in value:
+        raise SystemExit(f"unresolved registry root template {template!r}")
+    return Path(value)
+
+
+def prepare_discovered_profile(
+    sandbox: Path, platform: str, browser: str, engine: str
+) -> tuple[Path, dict[str, str]]:
+    """Choose a real registry root below an isolated temporary home."""
+
+    environment = isolated_discovery_environment(sandbox)
+    entry = registry_browser(platform, browser)
+    roots = sorted(entry["roots"], key=lambda root: root["priority"])
+    if not roots:
+        raise SystemExit(f"registry browser {browser!r} has no discovery roots")
+    root = resolve_fixture_root(roots[0]["template"], environment)
+    if engine == "gecko":
+        profile = root / "Profiles/rookie-e2e"
+        profile.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "profiles.ini").write_text(
+            "[Profile0]\nName=rookie-e2e\nIsRelative=1\n"
+            "Path=Profiles/rookie-e2e\nDefault=1\n",
+            encoding="utf-8",
+        )
+        return profile, environment
+    root.mkdir(parents=True, exist_ok=True)
+    return root, environment
 
 
 def pick_cookie_port() -> int:
@@ -451,6 +533,7 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
+    env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
     db = find_chromium_db(user_data, name="rookie_ci")
     env["ROOKIE_E2E_COOKIE_DB"] = str(db)
     py = venv_python()
@@ -484,11 +567,25 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     else:
         cli.extend(["--browser-id", browser_id])
     subprocess.run(cli, check=True, env=env)
+    subprocess.run([*cli, "--detailed"], check=True, env=env)
+    subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            "--browser",
+            browser_id,
+            "--detailed",
+        ],
+        check=True,
+        env=env,
+    )
 
 
-def assert_gecko(profile: Path) -> None:
+def assert_gecko(profile: Path, browser_id: str) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_FIREFOX_PROFILE"] = str(profile)
+    env["ROOKIE_E2E_BROWSER_ID"] = browser_id
+    env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
     py = venv_python()
     subprocess.run(
         [
@@ -507,6 +604,27 @@ def assert_gecko(profile: Path) -> None:
     )
     subprocess.run(
         [str(py), str(ROOT / "tests/e2e/assert_firefox_cookie.py")],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            str(profile / "cookies.sqlite"),
+            "--detailed",
+        ],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            "--browser",
+            browser_id,
+            "--detailed",
+        ],
         check=True,
         env=env,
     )
@@ -808,9 +926,32 @@ def run() -> int:
             "ROOKIE_E2E_BROWSER_ID and ROOKIE_E2E_BROWSER_PATH must be set"
         )
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", ROOT))
-    user_data = Path(
+    requested_user_data = Path(
         os.environ.get("ROOKIE_E2E_USER_DATA_DIR", workspace / ".rookie-ci" / browser)
     )
+    platform = current_platform()
+    coverage = load_coverage()
+    row = coverage_row(platform, browser, coverage)
+    if row["lane"] != "nightly_hosted" or row["engine"] != engine:
+        raise SystemExit(
+            f"coverage contract disagrees with hosted job: {platform}/{browser}/{engine}"
+        )
+    if engine in {"chromium", "gecko"}:
+        sandbox = requested_user_data.parent / f"{browser}-registry-sandbox"
+        user_data, discovery_environment = prepare_discovered_profile(
+            sandbox, platform, browser, engine
+        )
+        # Discovery must see only the isolated home, while cargo/rustup still
+        # need their already-installed toolchains from the runner account.
+        original_home = Path(os.environ.get("HOME", str(Path.home())))
+        os.environ.setdefault("CARGO_HOME", str(original_home / ".cargo"))
+        os.environ.setdefault("RUSTUP_HOME", str(original_home / ".rustup"))
+        os.environ.update(discovery_environment)
+        os.environ.pop("CHROME_CONFIG_HOME", None)
+        os.environ["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
+        print(f"isolated registry profile: {user_data}", flush=True)
+    else:
+        user_data = requested_user_data
     # Chromium 136+ ignores remote-debugging switches for the product's
     # default data directory. A non-default profile is therefore required for
     # browser automation, including branded forks such as Windows Yandex.
@@ -822,7 +963,7 @@ def run() -> int:
         url = f"http://127.0.0.1:{port}/set"
         if engine == "gecko":
             seed_gecko(exe, user_data, url)
-            assert_gecko(user_data)
+            assert_gecko(user_data, browser)
         elif engine == "safari":
             before = file_snapshot(engine)
             cookie_file = seed_safari_native(exe, url, before, request_log)
@@ -854,7 +995,15 @@ def run() -> int:
             server.wait(timeout=5)
         except subprocess.TimeoutExpired:
             server.kill()
-    print(f"hosted claimed e2e ok: {browser} ({engine})")
+    observed = {"browser_launch", "explicit_path"}
+    if engine == "chromium":
+        observed.update(
+            {"registry_id", "detailed", "discovery", "recommended_read", "crypto"}
+        )
+    elif engine == "gecko":
+        observed.update({"registry_id", "detailed", "discovery", "recommended_read"})
+    assert_observed_depth(row, observed, coverage)
+    print(f"hosted claimed e2e ok: {browser} ({engine}); depth={sorted(observed)}")
     return 0
 
 

@@ -423,6 +423,89 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
   }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+#[ignore]
+fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
+  let db_path = helpers::resolve_db_path();
+  let domain = helpers::domain();
+  let browser_id = std::env::var("ROOKIE_E2E_BROWSER_ID").unwrap_or_else(|_| "chrome".to_owned());
+
+  let direct = rookie_cookies::FromPathRequest::new(&db_path)
+    .app_bound(rookie_cookies::AppBoundPolicy::AllowElevatedFallback);
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let direct = direct.chromium_browser_id(&browser_id);
+  #[cfg(target_os = "windows")]
+  let direct = direct.chromium_local_state(helpers::resolve_key_path());
+  let direct = rookie_cookies::from_path(direct)
+    .unwrap_or_else(|error| panic!("from_path({}) failed: {error}", db_path.display()));
+  assert_eq!(
+    direct.browser_id(),
+    None,
+    "explicit paths do not run discovery"
+  );
+  assert_eq!(
+    direct.profile_id(),
+    None,
+    "explicit paths do not select profiles"
+  );
+  helpers::assert_seeded(direct.cookies(), &domain);
+  assert!(
+    direct
+      .detailed_cookies()
+      .iter()
+      .any(|record| record.cookie.name
+        == std::env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_owned())),
+    "from_path detailed output omitted the seeded cookie"
+  );
+
+  if std::env::var("ROOKIE_E2E_CHECK_RECOMMENDED_READ").as_deref() != Ok("1") {
+    eprintln!("recommended read/discovery check was not requested");
+    return;
+  }
+  let canonical_db = db_path
+    .canonicalize()
+    .expect("canonical cookie database path");
+  let profiles = rookie_cookies::profiles(&browser_id)
+    .unwrap_or_else(|error| panic!("profiles({browser_id}) failed: {error}"));
+  let mut matching = profiles.iter().filter(|profile| {
+    profile.sources.iter().any(|source| {
+      std::fs::canonicalize(&source.path)
+        .map(|path| path == canonical_db)
+        .unwrap_or(false)
+    })
+  });
+  let profile = matching.next().unwrap_or_else(|| {
+    panic!(
+      "discovery did not report source {}: {profiles:#?}",
+      db_path.display()
+    )
+  });
+  assert!(
+    matching.next().is_none(),
+    "source matched more than one discovered profile"
+  );
+  assert_eq!(profile.profile.browser_id.as_str(), browser_id);
+
+  let profile_id = profile.profile.profile_id.to_string();
+  let snapshot = rookie_cookies::read(
+    rookie_cookies::ReadRequest::browser(&browser_id)
+      .profile(&profile_id)
+      .app_bound(rookie_cookies::AppBoundPolicy::AllowElevatedFallback),
+  )
+  .unwrap_or_else(|error| panic!("read({browser_id}, {profile_id}) failed: {error}"));
+  assert_eq!(snapshot.browser_id(), Some(browser_id.as_str()));
+  assert_eq!(snapshot.profile_id(), Some(profile_id.as_str()));
+  helpers::assert_seeded(snapshot.cookies(), &domain);
+  assert!(
+    snapshot.detailed_cookies().iter().any(|record| {
+      record.cookie.name
+        == std::env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_owned())
+    }),
+    "recommended read detailed output omitted the seeded cookie"
+  );
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore]

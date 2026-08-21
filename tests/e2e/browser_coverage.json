@@ -1,9 +1,147 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "lanes": {
     "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and normal-profile Safari on supported hosted images.",
     "release_fixture": "Deterministic engine checks plus browser-id coverage in e2e-release.yml (tag, release, workflow_dispatch); no browser is launched.",
     "manual": "Operator-owned fallback for a registry cell without a viable hosted runner. No current cells rely on it."
+  },
+  "depth_capabilities": {
+    "registry_id": "The canonical browser ID is exposed by the public registry.",
+    "browser_launch": "A real browser process persists the seeded cookie store.",
+    "explicit_path": "Supported explicit-path APIs decode the seeded store.",
+    "detailed": "Isolation-preserving detailed output is asserted.",
+    "discovery": "Registry-root discovery identifies the expected profile and source path.",
+    "recommended_read": "The recommended read API selects and decodes the expected discovered profile.",
+    "crypto": "A real platform credential path decrypts a browser-produced value.",
+    "exact_set": "The complete decoded cookie set is compared with an independent manifest.",
+    "active_writer": "Extraction reads the same store while its browser is still writing it.",
+    "partitioned": "Browser-produced partition or container identity is asserted semantically."
+  },
+  "depth_levels": {
+    "none": "The cell makes no claim for this capability.",
+    "fixture": "The capability is asserted with a generated or captured fixture.",
+    "live": "The capability is asserted against output produced by a launched browser in the same job."
+  },
+  "depth_profiles": {
+    "hosted_chromium": {
+      "registry_id": "live",
+      "browser_launch": "live",
+      "explicit_path": "live",
+      "detailed": "live",
+      "discovery": "live",
+      "recommended_read": "live",
+      "crypto": "live",
+      "exact_set": "none",
+      "active_writer": "none",
+      "partitioned": "none"
+    },
+    "hosted_gecko": {
+      "registry_id": "live",
+      "browser_launch": "live",
+      "explicit_path": "live",
+      "detailed": "live",
+      "discovery": "live",
+      "recommended_read": "live",
+      "crypto": "none",
+      "exact_set": "none",
+      "active_writer": "none",
+      "partitioned": "none"
+    },
+    "hosted_native": {
+      "registry_id": "none",
+      "browser_launch": "live",
+      "explicit_path": "live",
+      "detailed": "none",
+      "discovery": "none",
+      "recommended_read": "none",
+      "crypto": "none",
+      "exact_set": "none",
+      "active_writer": "none",
+      "partitioned": "none"
+    },
+    "fixture_chromium": {
+      "registry_id": "fixture",
+      "browser_launch": "none",
+      "explicit_path": "fixture",
+      "detailed": "fixture",
+      "discovery": "fixture",
+      "recommended_read": "none",
+      "crypto": "none",
+      "exact_set": "none",
+      "active_writer": "none",
+      "partitioned": "none"
+    },
+    "fixture_gecko": {
+      "registry_id": "fixture",
+      "browser_launch": "none",
+      "explicit_path": "fixture",
+      "detailed": "fixture",
+      "discovery": "fixture",
+      "recommended_read": "fixture",
+      "crypto": "none",
+      "exact_set": "none",
+      "active_writer": "none",
+      "partitioned": "none"
+    },
+    "fixture_native": {
+      "registry_id": "fixture",
+      "browser_launch": "none",
+      "explicit_path": "none",
+      "detailed": "none",
+      "discovery": "none",
+      "recommended_read": "none",
+      "crypto": "none",
+      "exact_set": "none",
+      "active_writer": "none",
+      "partitioned": "none"
+    }
+  },
+  "cookie_context_fields": {
+    "top_frame_site_key": {
+      "classification": "fixture_only",
+      "engines": ["chromium"],
+      "rationale": "Chromium CHIPS keys are currently asserted only from authored SQLite fixtures."
+    },
+    "has_cross_site_ancestor": {
+      "classification": "fixture_only",
+      "engines": ["chromium"],
+      "rationale": "Chromium cross-site ancestry is currently asserted only from authored SQLite fixtures."
+    },
+    "source_scheme": {
+      "classification": "fixture_only",
+      "engines": ["chromium"],
+      "rationale": "Chromium source schemes are currently asserted only from authored SQLite fixtures."
+    },
+    "source_port": {
+      "classification": "fixture_only",
+      "engines": ["chromium"],
+      "rationale": "Chromium source ports are currently asserted only from authored SQLite fixtures."
+    },
+    "is_persistent": {
+      "classification": "fixture_only",
+      "engines": ["chromium", "gecko"],
+      "rationale": "Live stores expose persistence but the E2E assertions do not verify its semantics."
+    },
+    "origin_attributes": {
+      "classification": "fixture_only",
+      "engines": ["gecko"],
+      "rationale": "Live Firefox checks key presence while semantic values remain fixture-only."
+    },
+    "user_context_id": {
+      "classification": "fixture_only",
+      "engines": ["gecko"],
+      "rationale": "Firefox container identities require a test container and remain fixture-only."
+    },
+    "partition_key": {
+      "classification": "fixture_only",
+      "engines": ["gecko"],
+      "rationale": "Firefox dynamic partition keys have not been seeded by a live E2E browser."
+    },
+    "private_browsing_id": {
+      "classification": "non_persistable",
+      "engines": ["gecko"],
+      "rationale": "Private browsing cookies are intentionally not written to the persistent cookie database."
+    }
   },
   "fixture_limitations": {
     "linux/cachy": "Deprecated browser with no maintained release channel.",
@@ -27,283 +165,330 @@
       "platform": "linux",
       "browser": "brave",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "linux",
       "browser": "cachy",
       "engine": "gecko",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_gecko"
     },
     {
       "platform": "linux",
       "browser": "chrome",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "linux",
       "browser": "chromium",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "linux",
       "browser": "edge",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "linux",
       "browser": "firefox",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "linux",
       "browser": "librewolf",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "linux",
       "browser": "opera",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "linux",
       "browser": "vivaldi",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "linux",
       "browser": "zen",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "macos",
       "browser": "arc",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "macos",
       "browser": "brave",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "chrome",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "chromium",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "coccoc",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "macos",
       "browser": "edge",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "firefox",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "macos",
       "browser": "librewolf",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "macos",
       "browser": "opera",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "opera_gx",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "safari",
       "engine": "safari",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_native"
     },
     {
       "platform": "macos",
       "browser": "vivaldi",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "yandex",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "macos",
       "browser": "zen",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "windows",
       "browser": "arc",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "avast",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "brave",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "browser_from_vought",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "chrome",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "chromium",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "coccoc",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "dc_browser",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "duckduckgo",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "edge",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "firefox",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "windows",
       "browser": "internet_explorer",
       "engine": "internet_explorer",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_native"
     },
     {
       "platform": "windows",
       "browser": "librewolf",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     },
     {
       "platform": "windows",
       "browser": "octo_browser",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "opera",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "opera_gx",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "qq_browser",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "sogou",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "speed_360",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "speed_360x",
       "engine": "chromium",
-      "lane": "release_fixture"
+      "lane": "release_fixture",
+      "depth_profile": "fixture_chromium"
     },
     {
       "platform": "windows",
       "browser": "vivaldi",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "yandex",
       "engine": "chromium",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_chromium"
     },
     {
       "platform": "windows",
       "browser": "zen",
       "engine": "gecko",
-      "lane": "nightly_hosted"
+      "lane": "nightly_hosted",
+      "depth_profile": "hosted_gecko"
     }
   ]
 }

@@ -49,6 +49,7 @@ def assert_cli_cookie(
     expected_value: Optional[str] = None,
     browser: Optional[str] = None,
     browser_id: Optional[str] = None,
+    detailed: bool = False,
 ) -> int:
     """Run the CLI and return the number of cookies in its JSON response."""
     expected_name = expected_name or os.environ.get(
@@ -70,11 +71,14 @@ def assert_cli_cookie(
     if browser is not None:
         # `read` is an unfiltered snapshot; domain filtering belongs to
         # `report` and `from-path` in the subcommand-only CLI.
-        command.extend(("read", "--browser", browser, "--format", "json"))
-    else:
         command.extend(
-            ("from-path", str(cookies_path), "--domains", domain, "--format", "json")
+            ("read", "--browser", browser, "--format", "detailed" if detailed else "json")
         )
+    else:
+        command.extend(("from-path", str(cookies_path)))
+        if not detailed:
+            command.extend(("--domains", domain))
+        command.extend(("--format", "detailed" if detailed else "json"))
     if key_path is not None:
         command.extend(("--local-state-path", str(key_path)))
     if browser_id is not None:
@@ -134,11 +138,16 @@ def assert_cli_cookie(
             raise HarnessError(str(error)) from error
         return len(cookies)
 
+    flat_cookies = []
+    for record in cookies:
+        if detailed and isinstance(record, dict):
+            record = record.get("cookie")
+        if isinstance(record, dict):
+            flat_cookies.append(record)
     if not any(
-        isinstance(cookie, dict)
-        and cookie.get("name") == expected_name
+        cookie.get("name") == expected_name
         and cookie.get("value") == expected_value
-        for cookie in cookies
+        for cookie in flat_cookies
     ):
         raise HarnessError(
             f"CLI did not return {expected_name}={expected_value}; output was: "
@@ -214,6 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="domain filter (default: ROOKIE_E2E_DOMAIN or 127.0.0.1)",
     )
     parser.add_argument(
+        "--detailed",
+        action="store_true",
+        help="assert isolation-preserving detailed output",
+    )
+    parser.add_argument(
         "--cli",
         dest="cli_path",
         type=Path,
@@ -239,6 +253,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_value=expected_value,
             browser=args.browser,
             browser_id=args.browser_id,
+            detailed=args.detailed,
         )
     except HarnessError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -247,7 +262,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     scope = (
         f"{count} cookies returned by unfiltered {args.browser} read"
         if args.browser is not None
-        else f"{count} cookies for {args.domain}"
+        else (
+            f"{count} detailed cookies from the explicit path"
+            if args.detailed
+            else f"{count} cookies for {args.domain}"
+        )
     )
     print(f"rookie-cookies CLI: {expected_name}={expected_value} verified ({scope})")
     return 0

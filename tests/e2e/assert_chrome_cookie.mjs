@@ -12,7 +12,7 @@
 // Requires `npm run build` to have produced the
 // platform-specific .node binary alongside bindings/node/index.js.
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
@@ -57,7 +57,8 @@ if (!dbPath) {
 // branch remains trusted-ref-only even though Linux Chrome now gates pull
 // requests. See CHANGELOG.md.
 let results;
-let detailed;
+let directSnapshot;
+let recommendedSnapshot;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
   results = [
@@ -74,13 +75,11 @@ if (process.platform === "win32") {
       await rookieCookies.chromiumBased(keyPath, dbPath, [domain]),
     ],
   ];
-  if (manifestPath) {
-    detailed = await rookieCookies.chromiumBasedDetailed(
-      keyPath,
-      dbPath,
-      undefined,
-    );
-  }
+  directSnapshot = await rookieCookies.fromPath({
+    path: dbPath,
+    localStatePath: keyPath,
+    appBound: "allow_elevated_fallback",
+  });
 } else {
   results = [
     [
@@ -100,14 +99,26 @@ if (process.platform === "win32") {
       ),
     ],
   ];
-  if (manifestPath) {
-    detailed = await rookieCookies.chromiumBasedDetailed(
-      dbPath,
-      undefined,
-      process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
-    );
-  }
+  directSnapshot = await rookieCookies.fromPath({
+    path: dbPath,
+    browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
+    appBound: "allow_elevated_fallback",
+  });
 }
+
+if (directSnapshot.browserId !== null || directSnapshot.profileId !== null) {
+  console.error("fromPath unexpectedly reported a discovered identity");
+  process.exit(1);
+}
+if (
+  !directSnapshot.detailedCookies.some(
+    ({ cookie }) => cookie.name === expectedName,
+  )
+) {
+  console.error("fromPath.detailedCookies omitted the seeded cookie");
+  process.exit(1);
+}
+results.push(["fromPath.detailedCookies", directSnapshot.cookies]);
 
 results = results.map(([surface, cookies]) => [
   surface,
@@ -136,6 +147,51 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
     await browserFn([domain]),
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_VALUE ?? expectedValue,
+  ]);
+}
+
+if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
+  const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome";
+  const profiles = await rookieCookies.profiles(browserId);
+  const matchingProfiles = profiles.filter(({ sources }) =>
+    sources.some(({ path }) => realpathSync(path) === realpathSync(dbPath)),
+  );
+  if (matchingProfiles.length !== 1) {
+    console.error(
+      `${browserId} discovery found ${matchingProfiles.length} profiles for source ${dbPath}; profiles=${JSON.stringify(profiles)}`,
+    );
+    process.exit(1);
+  }
+  const identity = matchingProfiles[0].profile;
+  if (identity.browserId !== browserId) {
+    console.error(`discovery returned wrong browser identity: ${JSON.stringify(identity)}`);
+    process.exit(1);
+  }
+  recommendedSnapshot = await rookieCookies.read({
+    browser: browserId,
+    profile: identity.profileId,
+    appBound: "allow_elevated_fallback",
+  });
+  if (
+    recommendedSnapshot.browserId !== browserId ||
+    recommendedSnapshot.profileId !== identity.profileId
+  ) {
+    console.error("recommended read returned the wrong browser/profile identity");
+    process.exit(1);
+  }
+  if (
+    !recommendedSnapshot.detailedCookies.some(
+      ({ cookie }) => cookie.name === expectedName,
+    )
+  ) {
+    console.error("recommended read detailed output omitted the seeded cookie");
+    process.exit(1);
+  }
+  results.push([
+    "read(profile).detailedCookies",
+    recommendedSnapshot.cookies,
+    expectedName,
+    expectedValue,
   ]);
 }
 
@@ -168,9 +224,17 @@ if (manifestPath) {
   verifyCookieRecords(
     manifestPath,
     "detailed",
-    detailed,
-    "Node chromiumBasedDetailed",
+    directSnapshot.detailedCookies,
+    "Node fromPath.detailedCookies",
   );
+  if (recommendedSnapshot) {
+    verifyCookieRecords(
+      manifestPath,
+      "detailed",
+      recommendedSnapshot.detailedCookies,
+      "Node read(profile).detailedCookies",
+    );
+  }
 }
 
 console.log(

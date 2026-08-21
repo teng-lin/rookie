@@ -177,6 +177,37 @@ class AssertCliCookieTests(unittest.TestCase):
         self.assertNotIn("from-path", command)
         self.assertNotIn("--domains", command)
 
+    @mock.patch.object(HARNESS.subprocess, "run")
+    def test_detailed_command_asserts_nested_cookie_without_domain_flattening(
+        self, run: mock.Mock
+    ) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                [
+                    {
+                        "cookie": {"name": "rookie_ci", "value": "bar"},
+                        "context": {"origin_attributes": ""},
+                    }
+                ]
+            ),
+            "",
+        )
+
+        count = HARNESS.assert_cli_cookie(
+            self.cookies,
+            key_path=None,
+            domain="127.0.0.1",
+            cli_path=self.cli,
+            detailed=True,
+        )
+
+        self.assertEqual(count, 1)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--format") + 1], "detailed")
+        self.assertNotIn("--domains", command)
+
     def test_rejects_path_and_browser_together(self) -> None:
         with self.assertRaisesRegex(HARNESS.HarnessError, "exactly one"):
             HARNESS.assert_cli_cookie(

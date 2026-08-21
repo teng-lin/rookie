@@ -138,3 +138,69 @@ fn extracts_seeded_cookie_from_firefox_profile() {
     "Firefox expiry must be Unix seconds near the seeded Max-Age, got {expires} at {now}"
   );
 }
+
+#[test]
+#[ignore]
+fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
+  use std::env;
+  use std::path::PathBuf;
+
+  let profile_dir =
+    env::var("ROOKIE_E2E_FIREFOX_PROFILE").expect("ROOKIE_E2E_FIREFOX_PROFILE must be set");
+  let browser_id = env::var("ROOKIE_E2E_BROWSER_ID").unwrap_or_else(|_| "firefox".to_owned());
+  let expected_name = env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_owned());
+  let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_owned());
+  let db_path = PathBuf::from(profile_dir).join("cookies.sqlite");
+
+  let direct = rookie_cookies::from_path(rookie_cookies::FromPathRequest::new(&db_path))
+    .unwrap_or_else(|error| panic!("from_path({}) failed: {error}", db_path.display()));
+  assert_eq!(direct.browser_id(), None);
+  assert_eq!(direct.profile_id(), None);
+  let detailed = direct
+    .detailed_cookies()
+    .iter()
+    .find(|record| record.cookie.name == expected_name)
+    .expect("from_path detailed output omitted the seeded cookie");
+  assert_eq!(detailed.cookie.value, expected_value);
+
+  if env::var("ROOKIE_E2E_CHECK_RECOMMENDED_READ").as_deref() != Ok("1") {
+    eprintln!("recommended read/discovery check was not requested");
+    return;
+  }
+  let canonical_db = db_path
+    .canonicalize()
+    .expect("canonical cookie database path");
+  let profiles = rookie_cookies::profiles(&browser_id)
+    .unwrap_or_else(|error| panic!("profiles({browser_id}) failed: {error}"));
+  let mut matching = profiles.iter().filter(|profile| {
+    profile.sources.iter().any(|source| {
+      std::fs::canonicalize(&source.path)
+        .map(|path| path == canonical_db)
+        .unwrap_or(false)
+    })
+  });
+  let profile = matching.next().unwrap_or_else(|| {
+    panic!(
+      "discovery did not report source {}: {profiles:#?}",
+      db_path.display()
+    )
+  });
+  assert!(
+    matching.next().is_none(),
+    "source matched more than one discovered profile"
+  );
+  assert_eq!(profile.profile.browser_id.as_str(), browser_id);
+
+  let profile_id = profile.profile.profile_id.to_string();
+  let snapshot =
+    rookie_cookies::read(rookie_cookies::ReadRequest::browser(&browser_id).profile(&profile_id))
+      .unwrap_or_else(|error| panic!("read({browser_id}, {profile_id}) failed: {error}"));
+  assert_eq!(snapshot.browser_id(), Some(browser_id.as_str()));
+  assert_eq!(snapshot.profile_id(), Some(profile_id.as_str()));
+  let detailed = snapshot
+    .detailed_cookies()
+    .iter()
+    .find(|record| record.cookie.name == expected_name)
+    .expect("recommended read detailed output omitted the seeded cookie");
+  assert_eq!(detailed.cookie.value, expected_value);
+}

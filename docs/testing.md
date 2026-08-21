@@ -214,6 +214,20 @@ A new registry browser missing from that file fails PR metadata tests
 in lockstep with those lanes. Every registered (OS, browser) pair has
 exactly one lane.
 
+The manifest's `depth_profile` is a second, independent contract. It classifies
+each cell's registry identity, browser launch, explicit-path, detailed,
+discovery, recommended-read, crypto, exact-set, active-writer, and partitioned
+coverage as `none`, `fixture`, or `live`. Hosted and fixture runners record a
+capability only after its assertion succeeds and compare that record with the
+declared profile. A new claim therefore fails until its harness assertion
+exists and passes.
+
+`cookie_context_fields` separately classifies all nine `CookieContext` fields
+as `live`, `fixture_only`, or `non_persistable`, with engine applicability and
+a rationale. A detailed-output smoke test therefore cannot be mistaken for
+semantic CHIPS/container coverage: those semantics remain fixture-only until a
+browser-produced value is asserted.
+
 | Lane | What it proves | When it runs |
 | --- | --- | --- |
 | **hosted** (`nightly_hosted`) | Real browser, seed `rookie_ci`, extract on Rust / Python / Node / CLI | Chrome/Firefox in `e2e.yml` (push to `main`, nightly, `workflow_dispatch`). Extra products in `e2e-release.yml` (nightly, `v*` tags, GitHub Releases, `workflow_dispatch`, or a PR labeled `e2e-release`). |
@@ -298,12 +312,19 @@ The fixture exceptions are deliberate and machine-checked in
 `tests/e2e/run_claimed_browser_fixtures.py` on Ubuntu, macOS, and Windows:
 
 - every claimed id on that OS must appear in `supported_browsers()`;
-- Gecko ids share one generated `cookies.sqlite`;
+- feasible fixture-lane Chromium and Gecko ids get a registry-correct root
+  below a temporary, isolated home;
+- discovery must identify the exact generated profile and source path;
+- Chromium fixtures exercise plaintext explicit-path and detailed reads;
+- Gecko fixtures additionally exercise a profile-scoped recommended `read`;
 - Windows extracts one current-user DPAPI fixture once (no per-id `browser_id`);
-- Unix Chromium ids only check that `chromium_cookies_from_path` accepts the
-  id (no cookies to decrypt).
+- no generated discovery fixture claims a real platform crypto path.
 
-That is registry/identity coverage, not crypto coverage.
+The live hosted Chromium/Gecko harness uses the same registry-root discipline:
+it launches the browser only against a profile below an isolated CI home, then
+asserts explicit-path detailed output, discovered browser/profile/source
+identity, and profile-scoped recommended reads. Explicit-path coverage remains
+because it is a separate supported contract.
 
 ### Native hosted constraints
 

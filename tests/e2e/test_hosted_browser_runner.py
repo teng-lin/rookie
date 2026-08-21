@@ -13,6 +13,47 @@ import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
+    def test_isolated_discovery_environment_stays_below_sandbox(self) -> None:
+        sandbox = Path("/tmp/rookie-registry-sandbox")
+        environment = hosted.isolated_discovery_environment(sandbox)
+        self.assertTrue(
+            all(Path(value).is_relative_to(sandbox) for value in environment.values())
+        )
+
+    def test_registry_root_template_resolves_only_isolated_placeholders(self) -> None:
+        environment = hosted.isolated_discovery_environment(Path("/tmp/sandbox"))
+        resolved = hosted.resolve_fixture_root(
+            "{local_app_data}/Packages/Browser_*/User Data", environment
+        )
+        self.assertEqual(
+            resolved,
+            Path("/tmp/sandbox/home/AppData/Local/Packages/Browser_rookie-fixture/User Data"),
+        )
+
+    def test_gecko_discovery_profile_has_a_profiles_ini(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                hosted,
+                "registry_browser",
+                return_value={
+                    "roots": [
+                        {
+                            "template": "{home}/.fixture-browser",
+                            "priority": 10,
+                        }
+                    ]
+                },
+            ):
+                profile, environment = hosted.prepare_discovered_profile(
+                    Path(tmp), "linux", "fixture", "gecko"
+                )
+
+            self.assertEqual(
+                profile, Path(environment["HOME"]) / ".fixture-browser/Profiles/rookie-e2e"
+            )
+            profiles_ini = profile.parents[1] / "profiles.ini"
+            self.assertIn("Path=Profiles/rookie-e2e", profiles_ini.read_text())
+
     def test_seeded_legacy_chromium_db_wins_over_empty_network_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             user_data = Path(tmp)
