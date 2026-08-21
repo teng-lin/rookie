@@ -24,8 +24,9 @@ sudo apt-get install -y python3-dev libdbus-1-dev dbus
 
 `rookie-cookies` (the crate) defaults to `appbound`. That feature only changes
 Windows: Chrome-family **v20 / App-Bound** decryption (Chrome, Edge, Brave,
-Cốc Cốc, Avast) via COM injection into a spawned browser process, with
-elevated SYSTEM impersonation as fallback.
+Cốc Cốc, Avast). The feature compiles both COM injection and the elevated
+SYSTEM fallback; the request policy still decides what may run. The default is
+`InjectionOnly`, while `AllowElevatedFallback` must be selected explicitly.
 
 - **Python** and **Node** bindings enable `appbound` automatically on Windows
   (`cfg(windows)`). Unix builds leave it off.

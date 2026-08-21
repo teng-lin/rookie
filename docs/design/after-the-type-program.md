@@ -2,13 +2,20 @@
 
 - **Author:** maintainers
 - **Date:** 2026-08-19
-- **Status:** Draft
+- **Status:** Historical program record (completed)
 - **Crate:** `rookie-rs` (workspace `/Users/blackmyth/src/rookie-cookies`)
 - **Release context:** 0.6.0-beta.1 shipped. Internal structure, not a product feature.
 - **Does not revive:** GitHub #260. No `foo.rs` → `foo/mod.rs`. No 600-line prod budget. No CI size lint. Module layout stays `foo.rs` + `foo/child.rs`.
 - **ADRs:** 0001–0004 freeze behavior. ADR 0005 (`docs/adr/0005-stage-boundary-types-and-extraction-vocabulary.md`, workspace, Status: Accepted, 2026-08-19) is type-program law — listing/extract types, the fence, rejected `trait Engine` / `T<Stage>` / file-carve, and Decision 1: `Source` embeds `origin: SourceCandidate`. This program's first PR **amends ADR 0005 in place** with leftover leaks, remaining vocabulary, compatibility homes, and Mozilla origin follow-through. Do not mint ADR 0006. Do not rewrite 0005's locked type-program decisions.
 
 Public freeze (do not lift — the DTO exception contemplated in Rev 9 was suspended in Rev 13, so there is no exception): `rookie-rs/public-api/*.txt`, report DTO + `schema/report-dto.schema.json`, `browser_registry.json`, ADR 0001–0004 **behavior**, listing `selected` / `acquisition` / `exists` bytes (frozen per engine), direct-path synthetic identities (`"0"*64` / `"1"*64` / `"display_name": "direct"`), `rookie-rs/tests/goldens/<os>/*.json` (re-golden only with explicit commit + reason). Named-API / characterization error text that goldens do not contain (`legacy.rs:601–624`, `report_build.rs:2576–2603`) is also frozen for this program.
+
+> **Historical record.** This document captures the audit and implementation
+> plan at successive points during the completed refactor. Statements such as
+> “still,” “next,” “home after PR,” line-number references, and the unwired-CI
+> finding describe those points in time. Use [the architecture
+> map](../architecture.md) for current types, ownership, job flows, and CI
+> fences; ADR 0005 remains the durable decision record.
 
 ---
 

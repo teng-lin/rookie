@@ -8,8 +8,8 @@ use crate::common::enums::Cookie;
 use crate::RequestError;
 use url::Url;
 
-/// Post-filter for `header(url)`: RFC 6265 domain + path + Secure, then
-/// omit empty names / CTL / forbidden Cookie octets.
+/// URL-dependent part of the `header(&SendContext)` view: RFC 6265 domain +
+/// path + Secure, then omit empty names / CTL / forbidden Cookie octets.
 #[derive(Debug)]
 pub(crate) struct GetFilter {
   parsed: ParsedRequest,

@@ -514,8 +514,9 @@ def chrome_profile(
     :param domains: Optional list of domains to extract only from them
     :return: A report retaining profile identity, source provenance, and typed
         discovery/extraction issues
-    :raises RuntimeError: The selector is missing or ambiguous, or discovery
-        changed before extraction. The message is diagnostic, not stable.
+    :raises RookieRequestError: The selector is missing or ambiguous.
+    :raises RookieEngineError: Discovery or extraction failed after selection.
+        The message is diagnostic, not stable.
     """
     ...
 

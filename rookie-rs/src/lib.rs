@@ -745,12 +745,11 @@ pub fn browser(id: &str, domains: Option<Vec<String>>) -> anyhow::Result<Vec<Coo
 
 /// Execution control for the deprecated v0.5.9 bridge.
 ///
-/// The new job surface defaults [`AppBoundPolicy`] to `Disabled`, because
-/// unsolicited process injection should be something a caller asks for. The
-/// bridge cannot ask: `chrome(None)` and `browser(id, None)` have no options
-/// argument, and their Windows v20 capability shipped in 0.5.8. Defaulting
-/// them to `Disabled` would silently stop decrypting rows they read today, on
-/// the surface this release promises to keep working.
+/// The new job surface defaults [`AppBoundPolicy`] to `InjectionOnly`: it
+/// preserves current Windows v20 capability without allowing SYSTEM
+/// impersonation. The bridge cannot express a policy at all, and its Windows
+/// v20 capability shipped in 0.5.8, so it retains
+/// `AllowElevatedFallback` for the 0.6 compatibility window.
 pub(crate) fn legacy_execution() -> ExecutionControl {
   ExecutionControl::default().app_bound(AppBoundPolicy::AllowElevatedFallback)
 }

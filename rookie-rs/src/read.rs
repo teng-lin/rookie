@@ -64,9 +64,11 @@ impl std::fmt::Display for ReadWarning {
 /// Construct it with [`ReadRequest::browser`]. Without
 /// [`profile`](Self::profile), [`read`] preserves the legacy first-profile,
 /// legacy-compatible source selection. Supplying a profile uses the unified
-/// profile resolver and selects exactly one discovered profile; Gecko-family
-/// profiles may then contribute their separately declared session source.
-/// Chromium browsers do not declare a separate session source.
+/// profile resolver and selects exactly one discovered profile. Session
+/// acquisition is an independent [`SessionPolicy`]: call
+/// [`include_session`](Self::include_session) with or without a profile query
+/// to acquire the selected Gecko profile's declared session source. Chromium
+/// browsers do not declare a separate session source.
 ///
 /// Fields are private, so not calling a builder is distinguishable from
 /// passing an empty value. Snapshot reads have a 30-second default timeout;
@@ -510,8 +512,9 @@ impl std::fmt::Debug for ReadResult {
 /// Without a profile selector, this preserves the named-helper compatibility
 /// policy: the first legacy-compatible profile and its legacy-eligible
 /// sources. With [`ReadRequest::profile`], the unified resolver selects one
-/// profile and report selection determines its sources. Gecko-family session
-/// JSON is considered only on that profile-selected route.
+/// profile and extraction selection determines its sources. In both cases,
+/// Gecko-family session JSON is considered only when the request's
+/// [`SessionPolicy`] is [`SessionPolicy::IncludeSession`].
 ///
 /// # Errors
 ///
@@ -740,9 +743,9 @@ impl FromPathRequest {
 
 /// Executes one [`FromPathRequest`] without registered-browser discovery.
 ///
-/// The returned [`ReadResult::browser_id`] is currently the empty string and
-/// [`ReadResult::profile_id`] is `None`; the explicit path, not registry
-/// identity, is authoritative for this operation.
+/// The returned [`ReadResult::browser_id`] and [`ReadResult::profile_id`] are
+/// both `None`; the explicit path, not registry identity, is authoritative
+/// for this operation.
 ///
 /// # Errors
 ///

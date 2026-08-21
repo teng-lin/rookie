@@ -130,7 +130,7 @@ impl DetailedCookie {
 /// context-aware view instead.
 #[deprecated(
   since = "0.6.0",
-  note = "unfiltered compatibility formatter; use ReadResult::header(url) for a URL-scoped header view"
+  note = "unfiltered compatibility formatter; use ReadResult::header(&SendContext) for a send-scoped header view"
 )]
 pub trait CookieToString {
   /// Joins every cookie in the vector as semicolon-separated `name=value`
