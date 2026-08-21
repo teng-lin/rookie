@@ -140,9 +140,13 @@ match rookie_cookies::direct_path::extract_from_path(
 ```
 
 `Error` has four variants — `Request` (caller input), `Stopped` (timeout,
-cancellation, resource ceiling), `Source` (an explicit path or path option),
-and `Engine` (discovery, acquisition, decryption). `Error::code()` is the
-stable machine-readable identifier for all four; never branch on `Display`.
+cancellation, resource ceiling), `Source` (a caller-correctable explicit path
+or path option), and `Engine` (discovery, acquisition, decryption, or an
+operational path-inspection failure). A corrupt, locked, or otherwise
+uninspectable explicit source is `Engine` with code `source_inspection_failed`;
+a missing/non-file path or unsupported signature/schema remains `Source`.
+`Error::code()` is the stable machine-readable identifier for all four; never
+branch on `Display`.
 
 `*_based`, `any_browser`, and the other v0.5.9 bridge functions remain through
 0.6 and are deprecated for 0.7. They still return `anyhow::Result`, so the two

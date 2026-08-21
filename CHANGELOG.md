@@ -72,8 +72,11 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Rust: one typed public `Error` (`Request` / `Stopped` / `Source` / `Engine`)
   with a stable `code()` on every variant, plus `EngineError` carrying the
   `no_selected_source`, `no_discovered_source`, `discovery_failed`, and
-  `engine_failure` codes. Those codes were previously unrecoverable: the sites
-  that produce them raised formatted strings. Python gains `RookieError`,
+  `engine_failure` codes. Direct-path I/O/SQLite inspection failures also keep
+  their existing `source_inspection_failed` code while classifying as engine
+  failures rather than caller mistakes. Those codes were previously
+  unrecoverable: the sites that produce them raised formatted strings. Python
+  gains `RookieError`,
   `RookieStoppedError`, and `RookieSourceError` beside the existing request and
   engine exceptions; Node's `kind` is now `request` / `stopped` / `source` /
   `engine`.
@@ -110,6 +113,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no desktop browser cookie store this project can honestly support.
 
 ### Changed
+
+- A direct-path `SourceInspectionFailed` caused by an I/O, SQLite, locked, or
+  corrupt-file inspection failure is now `Error::Engine` / deprecated
+  `FaultKind::Engine`; Python raises `RookieEngineError`/`RuntimeError`, and
+  Node reports `kind == "engine"` with `GenericFailure`. The stable
+  `source_inspection_failed` machine code and sanitized diagnostic are
+  unchanged. Caller-correctable path, source-kind, platform, and option
+  failures remain `Error::Source` / `RookieSourceError` / `InvalidArg`.
 
 - **Breaking (Rust):** `rookie_cookies::Result<T>` is now
   `Result<T, rookie_cookies::Error>`. It was `anyhow::Result<T>` through

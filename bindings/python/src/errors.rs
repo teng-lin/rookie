@@ -487,4 +487,31 @@ mod tests {
     })
     .expect("classified source error must carry source metadata");
   }
+
+  #[test]
+  fn classify_error_maps_source_inspection_failure_to_engine_runtime_error() {
+    Python::initialize();
+    let error =
+      rookie_core::Error::from(rookie_core::direct_path::DirectPathError::InvalidSource {
+        path: std::path::PathBuf::from("/private/secret/profile/Cookies"),
+        reason: rookie_core::direct_path::InvalidCookieSourceReason::SourceInspectionFailed,
+      });
+    assert!(matches!(error, rookie_core::Error::Engine(_)));
+    let exception = classify_error(error);
+    Python::attach(|py| -> PyResult<()> {
+      assert!(exception.is_instance_of::<RookieEngineError>(py));
+      assert!(exception.is_instance_of::<PyRuntimeError>(py));
+      assert!(!exception.is_instance_of::<RookieSourceError>(py));
+      assert!(!exception.is_instance_of::<PyValueError>(py));
+      let value = exception.value(py);
+      assert_eq!(value.getattr("kind")?.extract::<String>()?, "engine");
+      assert_eq!(
+        value.getattr("code")?.extract::<String>()?,
+        "source_inspection_failed"
+      );
+      assert!(!value.str()?.to_string_lossy().contains("/private/secret"));
+      Ok(())
+    })
+    .expect("classified inspection failure must be an engine runtime error");
+  }
 }

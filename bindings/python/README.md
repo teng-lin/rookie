@@ -194,6 +194,11 @@ this API are `RookieRequestError`, not a bare `RuntimeError`. `from_path`
 accepts the same three credential selectors directly (as keyword arguments)
 for a Chromium path.
 
+Caller-correctable path/source/option failures raise `RookieSourceError`.
+Operational inspection failures—such as an I/O, SQLite, locked, or corrupt
+file failure—raise `RookieEngineError`/`RuntimeError` with
+`code == "source_inspection_failed"`; diagnostics remain path-sanitized.
+
 `cookies_from_path` (positional `domains`, no credential selectors) and
 `chromium_cookies_from_path` (an options dict) are deprecated aliases onto
 `extract_from_path` — same behavior, kept for 0.6-beta callers, not removed
@@ -297,9 +302,9 @@ RuntimeError` code keeps working:
 | Class | Also subclasses | `kind` | Raised when |
 | --- | --- | --- | --- |
 | `RookieRequestError` | `ValueError` | `"request"` | Caller input was invalid (unknown browser/profile, bad option) |
-| `RookieSourceError` (subclasses `RookieRequestError`) | `ValueError` | `"source"` | An explicit path/option did not identify a valid, supported cookie source |
+| `RookieSourceError` (subclasses `RookieRequestError`) | `ValueError` | `"source"` | A caller-correctable explicit path/source/option was invalid |
 | `RookieStoppedError` | `RuntimeError` | `"stopped"` | A `timeout` elapsed, `cancellation` fired, or an internal resource limit was hit |
-| `RookieEngineError` | `RuntimeError` | `"engine"` | Discovery, acquisition, or decryption failed |
+| `RookieEngineError` | `RuntimeError` | `"engine"` | Discovery, acquisition, decryption, or source inspection failed |
 
 `RookieSourceError` subclasses `RookieRequestError` rather than sitting beside
 it under `RookieError`, so `except RookieRequestError` (or `except

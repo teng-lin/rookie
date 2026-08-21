@@ -112,7 +112,7 @@ class RookieSourceError(RookieRequestError):
     kind: Literal["source"]
 
 class RookieEngineError(RookieError, RuntimeError):
-    """Extraction or engine failure unrelated to caller input."""
+    """Extraction, source inspection, or engine failure unrelated to caller input."""
     kind: Literal["engine"]
 
 DetailedCookieList = List[DetailedCookie]
@@ -174,6 +174,9 @@ def extract_from_path(
     :raises RookieRequestError: More than one credential selector was given
         (``conflicting_credential_selectors``), a platform-incompatible one,
         or an unrecognized ``app_bound`` value
+    :raises RookieEngineError: Source inspection failed due to an I/O, SQLite,
+        locked, or corrupt-file failure (``source_inspection_failed``), or
+        extraction failed after classification
     """
     ...
 
@@ -742,6 +745,9 @@ def from_path(
         encrypted Chromium database. Windows only.
     :raises RookieRequestError: More than one credential selector was given
         (``conflicting_credential_selectors``), or a platform-incompatible one
+    :raises RookieEngineError: Source inspection failed due to an I/O, SQLite,
+        locked, or corrupt-file failure (``source_inspection_failed``), or
+        extraction failed after classification
     """
     ...
 

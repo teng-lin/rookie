@@ -288,11 +288,17 @@ pub(crate) fn anyhow_fault_kind(error: &anyhow::Error) -> FaultKind {
   // `.chain()` -- a `.context(value)` layer's concrete stored type is an
   // anyhow-internal wrapper, which `.chain()`'s `dyn StdError::downcast_ref`
   // cannot see through, unlike `Error::downcast_ref` itself.
-  if error
-    .downcast_ref::<direct_path::DirectPathError>()
-    .is_some()
-    || error.downcast_ref::<RequestError>().is_some()
-  {
+  if let Some(source) = error.downcast_ref::<direct_path::DirectPathError>() {
+    return if matches!(
+      source.invalid_source_reason(),
+      Some(direct_path::InvalidCookieSourceReason::SourceInspectionFailed)
+    ) {
+      FaultKind::Engine
+    } else {
+      FaultKind::Request
+    };
+  }
+  if error.downcast_ref::<RequestError>().is_some() {
     FaultKind::Request
   } else {
     FaultKind::Engine
