@@ -135,7 +135,7 @@ jobs:
   macos:
     name: Build macOS wheel (${{ matrix.target }})
     needs: [preflight, load-contract]
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.load-contract.outputs.macos_matrix) }}
@@ -153,6 +153,19 @@ jobs:
           args: --release --out dist --find-interpreter --locked
           working-directory: bindings/python
           sccache: true
+      - name: Smoke-test the exact wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheels=(bindings/python/dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install \
+            --disable-pip-version-check --no-index --no-deps "${wheels[0]}"
+          "$smoke_root/venv/bin/python" -c \
+            'import rookie_cookies; value = rookie_cookies.version(); assert value; print(value)'
       - name: Upload wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

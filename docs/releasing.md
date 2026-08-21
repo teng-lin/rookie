@@ -134,7 +134,7 @@ python3 scripts/check-release.py
 python3 scripts/check-release.py "$VERSION"
 cargo test --workspace --all-targets --locked
 cargo test --workspace --doc --locked
-cargo publish --dry-run -p rookie-cookies --features appbound
+cargo publish --dry-run -p rookie-cookies --features appbound,internet-explorer
 (
   cd bindings/node
   npm ci --ignore-scripts
@@ -147,9 +147,10 @@ cargo publish --dry-run -p rookie-cookies --features appbound
 Use `--ignore-scripts` for the npm preview. The release workflow builds and
 tests every native binary. Native builds run on Node.js 22; macOS, Windows, and
 Linux Docker tests load them on Node.js 22, 24, and 26; and packaging plus
-trusted publishing run on Node.js 24. The workflow creates all six immutable
-tarballs without running publish lifecycle scripts and saves them as a workflow
-artifact before any registry write.
+trusted publishing run on Node.js 24. macOS x64 CLI, Node, and wheel artifacts
+build on `macos-15-intel`, while arm64 stays on Apple Silicon. The workflow
+creates all six immutable tarballs without running publish lifecycle scripts
+and saves them as a workflow artifact before any registry write.
 
 Do not treat skipped jobs on the release pull request as release evidence.
 The `pull_request` event intentionally runs only Ubuntu Chrome/Firefox in
@@ -462,8 +463,12 @@ x86_64), Linux (x86_64 and aarch64), and Windows x86_64. A later failed matrix l
 retried with `retry-cli-asset.yml`, not by re-dispatching the whole workflow
 (see "A failed platform leg does not auto-retry").
 
-Each CLI asset is uploaded with a same-named `.sha256` sidecar. Each matrix leg
-also uploads a `cli-scan-manifest-<target>` workflow artifact containing a
+Each CLI asset is uploaded with a same-named `.sha256` sidecar. Before upload,
+the consumer harness verifies that manifest's digest and runs the exact renamed
+binary's `--version` outside the checkout on its matching native runner. This
+includes `rookie-cookies-cli-x86_64-pc-windows-msvc.exe`; the real-browser
+App-Bound canary remains a separate credential-path test. Each matrix leg also
+uploads a `cli-scan-manifest-<target>` workflow artifact containing a
 `release-scan-manifest.json` scoped to that leg's one binary (source SHA,
 controller SHA, platform-contract digest, byte length, SHA-256) — the same
 manifest shape `publish-npm.yml` produces, applied per CLI target instead of
@@ -621,7 +626,7 @@ git status --porcelain # must print nothing
 export TARGET=x86_64-unknown-linux-gnu
 cargo build --release --locked --target "$TARGET" \
   --package rookie-cookies-cli --bin rookie-cookies
-# Windows: add --features appbound and the .exe suffix on the asset name.
+# Windows: add --features appbound,internet-explorer and the .exe suffix.
 mv "target/$TARGET/release/rookie-cookies" "rookie-cookies-cli-$TARGET"
 python3 scripts/write-sha256-sidecar.py "rookie-cookies-cli-$TARGET"
 gh release upload "v$VERSION" \
@@ -630,7 +635,8 @@ gh release upload "v$VERSION" \
 
 Each platform binary must be built on its own host. Use the workflow's matrix as
 the reference for target names, for the `.exe` suffix on Windows asset names,
-and for the `--features appbound` flag the Windows build adds. After upload,
+and for the `--features appbound,internet-explorer` flags the Windows build
+adds. After upload,
 record the Windows scan disposition against that target's
 `release-scan-manifest.json` the same way as in "Publish CLI binaries" — the
 npm native module scan does not cover the CLI executable. Prefer

@@ -114,6 +114,26 @@ def wheel_linux_matrix(contract: dict[str, Any]) -> dict[str, Any]:
     return {"include": include}
 
 
+def wheel_darwin_matrix(contract: dict[str, Any]) -> dict[str, Any]:
+    """macOS wheel matrix with each architecture's contract-owned runner.
+
+    GitHub's ``macos-latest`` runner is Apple Silicon. Keeping the runner on
+    the cell prevents an x86_64 wheel from silently becoming an ARM-hosted
+    cross-build when the workflow matrix changes.
+    """
+    include = []
+    for cell in sorted(
+        (
+            cell
+            for cell in cells(contract, artifact_id="wheel")
+            if cell["os"] == "darwin" and cell["build"]
+        ),
+        key=lambda cell: cell["cpu"],
+    ):
+        include.append({"target": cell["cpu"], "runner": cell["runner"]})
+    return {"include": include}
+
+
 def npm_native_packages(contract: dict[str, Any]) -> tuple[str, ...]:
     """Native npm package names, in the same order the old hardcoded tuple used.
 
@@ -427,6 +447,9 @@ def validate(contract: dict[str, Any], *, today: date | None = None) -> list[str
             if cell.get(required_key) is None:
                 failures.append(f"{label}: missing required field {required_key!r} for artifact_id {artifact_id!r}")
 
+        if artifact_id == "wheel" and cell.get("os") == "darwin" and cell.get("runner") is None:
+            failures.append(f"{label}: missing required field 'runner' for a macOS wheel")
+
         registry = cell.get("registry")
         if registry not in VALID_REGISTRIES:
             failures.append(f"{label}: registry {registry!r} is not one of {sorted(VALID_REGISTRIES)}")
@@ -569,6 +592,8 @@ def emit_matrix(contract: dict[str, Any], name: str) -> Any:
         return npm_native_matrix(contract)
     if name == "wheel-linux":
         return wheel_linux_matrix(contract)
+    if name == "wheel-darwin":
+        return wheel_darwin_matrix(contract)
     if name.startswith("wheel-"):
         return {"target": wheel_targets(contract, name.removeprefix("wheel-"))}
     raise ContractError(f"unknown matrix name {name!r}, expected one of {_EMITTABLE_MATRICES}")

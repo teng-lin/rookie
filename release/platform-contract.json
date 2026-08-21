@@ -111,19 +111,15 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "untested",
+      "execute": "native",
       "helper_roles": [
         "keychain"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "macos-latest GitHub runners are Apple Silicon (arm64); the x64 build is a native cross-compile with no QEMU involved, but nothing in publish-npm.yml executes the resulting binary or exercises real Keychain access from an actual Intel host or Rosetta process.",
-        "expires": "2026-12-31"
-      },
-      "notes": "Built via cross-compile only; publish-npm.yml's test-macOS-windows-binding matrix does not include darwin-x64.",
+      "accepted_risk": null,
+      "notes": "Built natively on macos-15-intel, then the exact downloaded addon is exercised across Node 22/24/26 by publish-npm.yml's binding test matrix.",
       "npm_platform": "darwin-x64",
       "target_triple": "x86_64-apple-darwin",
-      "runner": "macos-latest"
+      "runner": "macos-15-intel"
     },
     {
       "artifact_id": "npm-native",
@@ -234,18 +230,14 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "untested",
+      "execute": "native",
       "helper_roles": [
         "keychain"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Same cross-compile-without-execution situation as the darwin-x64 npm-native cell: built on an arm64 runner, never run.",
-        "expires": "2026-12-31"
-      },
-      "notes": "Built via cross-compile on macos-latest (arm64); publish-cli.yml has no execution/test step for any target.",
+      "accepted_risk": null,
+      "notes": "Built natively on macos-15-intel. publish-cli.yml records the renamed binary in a digest-bound manifest and runs that exact binary's --version outside the checkout before upload.",
       "target_triple": "x86_64-apple-darwin",
-      "runner": "macos-latest"
+      "runner": "macos-15-intel"
     },
     {
       "artifact_id": "cli",
@@ -258,16 +250,12 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "untested",
+      "execute": "native",
       "helper_roles": [
         "keyring"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Built natively on ubuntu-22.04 (matching architecture, no emulation), but publish-cli.yml only builds and uploads the CLI binary \u2014 it never runs it before attaching it to the release.",
-        "expires": "2026-12-31"
-      },
-      "notes": "e2e.yml's ubuntu-chrome job does exercise a separately pre-built CLI binary via 'Pre-build the rookie-cookies CLI', but that is a dev build from source, not this exact release artifact.",
+      "accepted_risk": null,
+      "notes": "Built natively on ubuntu-22.04. publish-cli.yml records the renamed binary in a digest-bound manifest and runs that exact binary's --version outside the checkout before upload.",
       "target_triple": "x86_64-unknown-linux-gnu",
       "runner": "ubuntu-22.04"
     },
@@ -287,7 +275,7 @@
         "keyring"
       ],
       "accepted_risk": null,
-      "notes": "Built on ubuntu-24.04-arm. artifact-smoke.yml linux-arm64 consume runs the arm64 CLI (a separately built but same-triple binary); publish-cli.yml still does not execute the GitHub-release asset before attach.",
+      "notes": "Built natively on ubuntu-24.04-arm. publish-cli.yml records the renamed binary in a digest-bound manifest and runs that exact binary's --version outside the checkout before upload.",
       "target_triple": "aarch64-unknown-linux-gnu",
       "runner": "ubuntu-24.04-arm"
     },
@@ -305,17 +293,13 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "untested",
+      "execute": "native",
       "helper_roles": [
         "dpapi",
         "appbound"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "Built natively on windows-latest, but publish-cli.yml never runs the built binary; the App-Bound canary in e2e.yml exercises a separate dev build, not this release artifact.",
-        "expires": "2026-12-31"
-      },
-      "notes": "Highest-value gap to close first: this is the same App-Bound-featured target that has a dedicated real-hardware canary elsewhere, just not wired to the release artifact itself.",
+      "accepted_risk": null,
+      "notes": "Built natively on windows-latest. publish-cli.yml records the renamed executable in a digest-bound manifest and runs that exact executable's --version outside the checkout before upload; the separate App-Bound canary exercises the credential path.",
       "target_triple": "x86_64-pc-windows-msvc",
       "runner": "windows-latest"
     },
@@ -403,16 +387,13 @@
       "build": true,
       "advertise": true,
       "publish": true,
-      "execute": "untested",
+      "execute": "native",
       "helper_roles": [
         "keychain"
       ],
-      "accepted_risk": {
-        "owner": "teng-lin",
-        "rationale": "macos-latest runners are arm64; this is a native cross-compile (no QEMU) but the resulting wheel is never executed.",
-        "expires": "2026-12-31"
-      },
-      "notes": null
+      "accepted_risk": null,
+      "notes": "Built natively on macos-15-intel and installed into a fresh virtual environment before the exact wheel is uploaded.",
+      "runner": "macos-15-intel"
     },
     {
       "artifact_id": "wheel",
@@ -434,7 +415,8 @@
         "keychain"
       ],
       "accepted_risk": null,
-      "notes": "Runs on macos-latest, the matching native architecture."
+      "notes": "Runs on macos-latest, the matching native architecture.",
+      "runner": "macos-latest"
     }
   ]
 }

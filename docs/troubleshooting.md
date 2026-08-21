@@ -47,6 +47,26 @@ On Windows Chromium paths, select credentials explicitly with exactly one of
 `--browser-id`, `--local-state-path` (a `Local State` file), or
 `--plaintext-only`.
 
+## A cross-build selects headers for the build host
+
+If a macOS-to-Windows build mentions POSIX-only headers or functions such as
+`sys/ioctl.h`, `langinfo.h`, `strerror_r`, or the two-argument Unix `mkdir`,
+inspect dependency build scripts for `cfg!(windows)`, `cfg!(unix)`, or
+`cfg!(target_os = ...)`. A build script runs as a host executable, so those
+expressions describe the host. Target-dependent decisions must use Cargo's
+`CARGO_CFG_TARGET_OS`, `CARGO_CFG_TARGET_FAMILY`, and
+`CARGO_CFG_TARGET_ENV` variables.
+
+`libesedb-sys 0.2.1` has this host/target bug. Switching from MSVC to MinGW or
+adding Zig cannot correct it; Windows GNU exposes further bundled-C portability
+gaps after the branch is fixed. Editing `target/.../out` or Cargo's registry
+cache is also temporary because the build script re-extracts its source tree.
+
+For the fast Windows Rust check, disable only the IE capability with the
+documented `xtask check-platforms` command. A full Windows build still belongs
+on native MSVC CI until a consumable upstream `libesedb-sys` fix and an MSVC
+SDK/sysroot are available.
+
 ## Manually import website cookies in a browser
 
 To push extracted cookies back into a browser console on an already-open origin.
