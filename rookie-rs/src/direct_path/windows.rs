@@ -500,7 +500,8 @@ Start-Sleep -Seconds 300
     let connection = rusqlite::Connection::open(&path).expect("create Chromium fixture");
     connection
       .execute_batch(
-        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); \
+        "PRAGMA journal_mode = WAL; \
+         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); \
          INSERT INTO meta (key, value) VALUES ('version', '23'); \
          CREATE TABLE cookies (\
            host_key TEXT, path TEXT, is_secure INTEGER, expires_utc INTEGER, \
