@@ -190,6 +190,7 @@ def validate_npm_tarballs(
     for declaration in (
         "export interface ChromiumPathOptions",
         "export declare class CancellationHandle",
+        "export declare function jar(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>",
         "export declare function cookiesFromPath(path: string, domains?: string[] | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null)",
         "export declare function chromiumCookiesFromPath(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null)",
         "export declare function chromiumCookiesFromPathDetailed(path: string, options?: ChromiumPathOptions | null, timeoutMs?: number | null, cancellation?: CancellationHandle | null)",

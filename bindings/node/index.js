@@ -324,7 +324,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { CancellationHandle, version, toNetscape, anyBrowser, extractFromPath, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding
+const { CancellationHandle, version, toNetscape, anyBrowser, extractFromPath, cookiesFromPath, chromiumCookiesFromPath, chromiumCookiesFromPathDetailed, firefox, firefoxProfiles, firefoxProfile, zen, librewolf, cachy, chrome, chromeProfiles, chromeProfile, brave, arc, edge, opera, operaGx, chromium, vivaldi, firefoxBased, firefoxBasedDetailed, supportedBrowsers, browserProfiles, browserReport, loadReport, load, octoBrowser, internetExplorer, safari, chromiumBased, chromiumBasedDetailed, read, jar, ReadResult, profiles, report, fromPath, testWorkerPanic } = nativeBinding
 
 function requiredNative(nativeFunction, name) {
   if (typeof nativeFunction !== 'function') {
@@ -647,6 +647,7 @@ module.exports.browserReport = asyncNative(browserReport, 'browserReport')
 module.exports.loadReport = asyncNative(loadReport, 'loadReport')
 module.exports.ReadResult = requiredNative(ReadResult, 'ReadResult')
 module.exports.read = asyncNative(read, 'read')
+module.exports.jar = asyncNative(jar, 'jar')
 module.exports.profiles = asyncNative(profiles, 'profiles')
 module.exports.report = asyncNative(report, 'report')
 module.exports.fromPath = asyncNative(fromPath, 'fromPath')

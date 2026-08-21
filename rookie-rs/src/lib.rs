@@ -82,7 +82,8 @@ use enums::Cookie;
 pub use error::{EngineError, Error};
 pub use execution::{AppBoundPolicy, ExecutionControl, ParseAppBoundPolicyError};
 pub use read::{
-  from_path, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult, ReadWarning,
+  from_path, jar, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult,
+  ReadWarning,
 };
 pub use request_error::RequestError;
 pub use selection::{ProfileSelection, ReportScope};

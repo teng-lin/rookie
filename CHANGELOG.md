@@ -8,6 +8,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Rust and Node now expose `jar` alongside Python. It is projection sugar for
+  `read`: Rust returns `Vec<Cookie>`, Node resolves to `CookieObject[]`, and
+  both discard snapshot warnings and isolation context just as Python's
+  `read(...).as_jar()` projection does.
 - **Three path request types become two.** `DirectPathRequest` and
   `ChromiumPathRequest` are replaced by `PathExtractRequest` +
   `extract_from_path`; `DirectPathRequest` was `ChromiumPathRequest` minus

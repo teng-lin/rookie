@@ -11,9 +11,20 @@ Named store verbs (`chrome()`, `load()`, two-arg Rust `browser()`) remain the co
 
 ## Decision
 
-1. The recommended entry is `read` (Python also `jar` = `read().as_jar()`).
+1. The recommended entry is `read`; every library language also exposes a
+   warning-discarding `jar` projection. Python returns its standard-library
+   `CookieJar`; Node returns `CookieObject[]`; Rust returns `Vec<Cookie>`.
 2. Every `read` / `from_path` snapshot is unfiltered. URL send-match is not applied to the snapshot.
-3. The jar owns send-match. `header` is a view (crate-private `GetFilter`) exposed as `ReadResult.header` and the CLI `header` subcommand only. There is no top-level binding `header()`. **Amended in 0.6.0:** it takes a `SendContext`, not a bare URL. A URL cannot say which browsing context a request is made from, so `header(url)` had no way to distinguish a CHIPS-partitioned cookie from an unpartitioned one and merged them. A snapshot holding an isolated cookie now *demands* the selector that identifies it.
+3. The consuming HTTP client owns send-match; Python's standard-library jar
+   can do that directly, while Node/Rust `jar` returns the flat records their
+   client or cookie-store library consumes. `header` is a view (crate-private
+   `GetFilter`) exposed as `ReadResult.header` and the CLI `header` subcommand
+   only. There is no top-level binding `header()`. **Amended in 0.6.0:** it
+   takes a `SendContext`, not a bare URL. A URL cannot say which browsing
+   context a request is made from, so `header(url)` had no way to distinguish
+   a CHIPS-partitioned cookie from an unpartitioned one and merged them. A
+   snapshot holding an isolated cookie now *demands* the selector that
+   identifies it.
 4. A persistent cookie-database path is a resolver key (see ADR 0003’s query set plus this addition). `from_path` is a different universe and does not call the profile resolver.
 5. Frozen `chrome()` / `load()` / eight-field `Cookie` / no all-profile flatten stay. **Amended in 0.6.0:** `Cookie` keeps its eight fields and gains derives only; it is now a *projection* of the snapshot, whose native representation is `DetailedCookie`. "No all-profile flatten" is now a type fact rather than a rule — `ProfileSelection` cannot express it (ADR 0003).
 6. Do not add crate-root `fn report` or `fn get`.
@@ -27,6 +38,6 @@ Named store verbs (`chrome()`, `load()`, two-arg Rust `browser()`) remain the co
 
 ## Consequences
 
-- Docs lead with `jar(browser=…)` and `read(…).as_list()`, not `get(url).as_jar()`.
+- Docs lead with `jar(...)` and `read(...)`, not `get(url).as_jar()`.
 - Callers who want session cookies pass `include_session` (0.6.0). Before 0.6.0 they passed `profile=`, which is the migration trap: `jar(profile="Default")` returns a smaller jar in 0.6.0, with no error.
 - `chrome()` remains the compatibility set; `read` is the session-importer when `include_session` is passed, with or without a profile.

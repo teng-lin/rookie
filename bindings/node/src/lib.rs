@@ -1783,16 +1783,55 @@ pub fn read(
   options: ReadOptions,
   cancellation: Option<&JsCancellationHandle>,
 ) -> Result<AsyncTask<ReadTask>> {
+  Ok(AsyncTask::new(prepare_read_task(options, cancellation)?))
+}
+
+fn prepare_read_task(
+  options: ReadOptions,
+  cancellation: Option<&JsCancellationHandle>,
+) -> Result<ReadTask> {
   let selection = classify_selection(ProfileSelection::from_binding_options(
     options.profile.as_deref(),
     options.select.as_deref(),
   ))?;
   let app_bound = parse_app_bound(options.app_bound.as_deref())?;
-  Ok(AsyncTask::new(ReadTask {
+  Ok(ReadTask {
     options,
     selection,
     app_bound,
     cancellation: cancellation.map(|handle| handle.0.clone()),
+  })
+}
+
+pub struct JarTask {
+  read: ReadTask,
+}
+
+impl Task for JarTask {
+  type Output = ReadResult;
+  type JsValue = Vec<CookieObject>;
+
+  fn compute(&mut self) -> Result<Self::Output> {
+    self.read.compute()
+  }
+
+  fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+    cookies_to_js(output.into_cookies())
+  }
+}
+
+/// Convenience sugar for `read(options).cookies`.
+///
+/// Warnings and isolation context are discarded; use `read` when either
+/// matters. JavaScript has no standard cookie-jar type, so this returns the
+/// binding's language-native flat `CookieObject[]` projection.
+#[napi(js_name = "jar", ts_return_type = "Promise<Array<CookieObject>>")]
+pub fn jar(
+  options: ReadOptions,
+  cancellation: Option<&JsCancellationHandle>,
+) -> Result<AsyncTask<JarTask>> {
+  Ok(AsyncTask::new(JarTask {
+    read: prepare_read_task(options, cancellation)?,
   }))
 }
 

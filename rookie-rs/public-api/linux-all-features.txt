@@ -1910,6 +1910,7 @@ pub fn rookie_cookies::firefox_based_detailed(std::path::PathBuf, core::option::
 pub fn rookie_cookies::firefox_profile(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::firefox_profiles() -> anyhow::Result<alloc::vec::Vec<rookie_cookies::MozillaProfile>>
 pub fn rookie_cookies::from_path(rookie_cookies::FromPathRequest) -> rookie_cookies::Result<rookie_cookies::ReadResult>
+pub fn rookie_cookies::jar(rookie_cookies::ReadRequest) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::librewolf(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::load(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> anyhow::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
 pub fn rookie_cookies::load_report(core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> rookie_cookies::Result<rookie_cookies::report::ExtractionReport>

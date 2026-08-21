@@ -23,20 +23,31 @@ npm install rookie-cookies
 ## Recommended usage (0.6 series)
 
 ```js
-import { read } from "rookie-cookies";
+import { jar, read } from "rookie-cookies";
 
-const snapshot = await read({
+const cookies = await jar({
   browser: "firefox",
   profile: "default-release",
   includeSession: true,
 });
-console.log(snapshot.cookies, snapshot.warnings);
+
+const snapshot = await read({
+  browser: "chrome",
+  profile: "Work",
+});
+console.log(cookies, snapshot.warnings);
 console.log(snapshot.header("https://example.com/"));
 ```
 
 Pass `profile` to select one discovered profile. `read` never URL-filters.
 There is **no** top-level `header()` — call `ReadResult.header(url)` on the
 snapshot.
+
+`jar(options)` is `read(options).cookies` projection sugar: it returns a flat
+`CookieObject[]` and discards warnings and partition/container context. Node
+has no standard-library cookie-jar class; pass the returned records to the HTTP
+client or cookie-store library you use. Choose `read` when you need diagnostics,
+isolation-aware records, or the built-in header view.
 
 - No-profile `await read({ browser: "chrome" })` matches legacy `chrome()`
   (persistent / legacy-eligible cookies).
@@ -61,7 +72,7 @@ Firefox `partitionKey` value did not match the expected shape). Branch on
 Named helpers (`chrome()`, `brave()`, `load()`) still work and also return
 Promises. They are the compatibility bridge from
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) / `@rookie-rs/api`
-and will break in a later major version. Prefer `read` for new code.
+and will break in a later major version. Prefer `read` / `jar` for new code.
 
 ## Isolation: detailed cookies and the header view
 

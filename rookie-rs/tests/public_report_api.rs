@@ -375,7 +375,7 @@ fn cookie_key(cookie: &rookie_cookies::enums::Cookie) -> (String, String, String
 }
 
 #[test]
-fn no_profile_extract_matches_chrome() {
+fn no_profile_flat_projections_match_chrome() {
   let _home = seeded_chrome("extract-eq-chrome");
   let via_chrome = rookie_cookies::chrome(None).expect("chrome");
   let via_extract =
@@ -392,6 +392,13 @@ fn no_profile_extract_matches_chrome() {
   let mut read_keys: Vec<_> = via_read.cookies().iter().map(cookie_key).collect();
   read_keys.sort();
   assert_eq!(read_keys, chrome_keys);
+
+  let via_jar =
+    rookie_cookies::jar(rookie_cookies::ReadRequest::browser("chrome").include_expired(true))
+      .expect("jar");
+  let mut jar_keys: Vec<_> = via_jar.iter().map(cookie_key).collect();
+  jar_keys.sort();
+  assert_eq!(jar_keys, read_keys);
 }
 
 #[test]

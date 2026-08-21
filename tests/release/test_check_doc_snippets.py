@@ -203,16 +203,18 @@ class CheckDocSnippetsTests(unittest.TestCase):
         self.assertIn("chrome", exports)
         self.assertNotIn("header", exports)
 
-    def test_node_export_loader_sees_read_not_top_level_header(self) -> None:
+    def test_node_export_loader_sees_read_and_jar_not_top_level_header(self) -> None:
         exports = self.checker.load_node_exports(REPOSITORY_ROOT)
         self.assertIn("read", exports)
+        self.assertIn("jar", exports)
         self.assertIn("chrome", exports)
         self.assertIn("ReadResult", exports)
         self.assertNotIn("header", exports)
 
-    def test_rust_export_loader_sees_read_request(self) -> None:
+    def test_rust_export_loader_sees_read_jar_request(self) -> None:
         exports = self.checker.load_rust_exports(REPOSITORY_ROOT)
         self.assertIn("read", exports)
+        self.assertIn("jar", exports)
         self.assertIn("ReadRequest", exports)
         self.assertIn("browser", exports)
         # A `direct_path` re-export, to prove the loader walks the submodule
@@ -238,6 +240,7 @@ class CheckDocSnippetsTests(unittest.TestCase):
         (node / "index.d.ts").write_text(
             "export declare function chrome(): Promise<unknown>\n"
             "export declare function read(): Promise<unknown>\n"
+            "export declare function jar(): Promise<unknown>\n"
             "export declare function brave(): Promise<unknown>\n"
             "export declare function load(): Promise<unknown>\n"
             "export declare class ReadResult {}\n"
@@ -248,11 +251,12 @@ class CheckDocSnippetsTests(unittest.TestCase):
         rust.mkdir(parents=True)
         (rust / "lib.rs").write_text(
             "pub fn chrome() {}\npub fn brave() {}\npub fn browser() {}\n"
-            "pub fn read() {}\npub struct ReadRequest;\n",
+            "pub fn read() {}\npub fn jar() {}\npub struct ReadRequest;\n",
             encoding="utf-8",
         )
         (rust / "read.rs").write_text(
-            "pub struct ReadRequest;\npub struct ReadResult;\npub fn read() {}\n",
+            "pub struct ReadRequest;\npub struct ReadResult;\npub fn read() {}\n"
+            "pub fn jar() {}\n",
             encoding="utf-8",
         )
         (rust / "direct_path").mkdir()

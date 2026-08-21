@@ -540,6 +540,26 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
   map_job_result(read_inner(request))
 }
 
+/// Executes one [`ReadRequest`] and returns its flat cookie projection.
+///
+/// This is convenience sugar for `read(request)?.into_cookies()`, matching the
+/// binding-level `jar` jobs. Warnings and isolation context are discarded; use
+/// [`read`] when either matters. Unlike Python, Rust has no standard-library
+/// cookie-jar type, so the language-native projection is a `Vec<Cookie>`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use rookie_cookies::{jar, ReadRequest};
+///
+/// let cookies = jar(ReadRequest::browser("chrome"))?;
+/// println!("{} cookies", cookies.len());
+/// # Ok::<(), rookie_cookies::Error>(())
+/// ```
+pub fn jar(request: ReadRequest) -> Result<Vec<Cookie>> {
+  read(request).map(ReadResult::into_cookies)
+}
+
 fn read_inner(request: ReadRequest) -> anyhow::Result<ReadResult> {
   let browser_id = request.target.resolve()?.to_owned();
   let clock = SystemClock;

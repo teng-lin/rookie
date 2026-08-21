@@ -435,6 +435,14 @@ export interface ReadWarningObject {
  * impersonation stays opt-in via `"allow_elevated_fallback"`.
  */
 export declare function read(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<ReadResult>
+/**
+ * Convenience sugar for `read(options).cookies`.
+ *
+ * Warnings and isolation context are discarded; use `read` when either
+ * matters. JavaScript has no standard cookie-jar type, so this returns the
+ * binding's language-native flat `CookieObject[]` projection.
+ */
+export declare function jar(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 /** Alias of `browserProfiles`. No decrypt, no `appBound`. */
 export declare function profiles(browserId: string, options?: ProfilesOptions | undefined | null): Promise<Array<ProfileDescriptorObject>>
 /**
