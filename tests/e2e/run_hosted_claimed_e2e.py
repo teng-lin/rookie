@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Seed an installed claimed browser and extract rookie_ci=bar.
 
-Chromium-family browsers are driven through Playwright + executablePath.
-Gecko forks are launched with --headless --profile (Playwright's Firefox
-is a patched build and cannot drive LibreWolf/Zen).
+Installed Chromium-family browsers are launched through their native headless
+CLI. Playwright explicitly does not guarantee arbitrary executablePath builds,
+and a branded browser can hang before its control pipe becomes ready even when
+the browser has successfully started. Gecko forks use their native CLI too.
+Safari and IE use their image-provided vendor WebDriver servers.
 """
 
 from __future__ import annotations
@@ -18,6 +20,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+from webdriver_cookie import (
+    file_snapshot,
+    seed_with_startup_retry,
+    wait_for_changed_cookie_file,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,7 +59,11 @@ def wait_for_server(
                 return
         except OSError:
             time.sleep(0.25)
-    logs = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    logs = (
+        log_path.read_text(encoding="utf-8", errors="replace")
+        if log_path.is_file()
+        else ""
+    )
     raise SystemExit(
         f"cookie server did not become ready at http://127.0.0.1:{port}/\n{logs}"
     )
@@ -155,7 +167,16 @@ def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
     return row is not None
 
 
-def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
+def chromium_native_command(
+    exe: str,
+    user_data: Path,
+    url: str,
+    *,
+    platform: str | None = None,
+    has_xvfb: bool | None = None,
+) -> list[str]:
+    platform = platform or sys.platform
+    has_xvfb = shutil.which("xvfb-run") is not None if has_xvfb is None else has_xvfb
     screenshot = Path(tempfile.gettempdir()) / "rookie-claimed-seed.png"
     cmd = [
         exe,
@@ -171,10 +192,15 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         "--dump-dom",
         url,
     ]
-    if sys.platform.startswith("linux"):
+    if platform.startswith("linux"):
         cmd.insert(-1, "--password-store=gnome-libsecret")
-        if shutil.which("xvfb-run"):
+        if has_xvfb:
             cmd = ["xvfb-run", "-a", *cmd]
+    return cmd
+
+
+def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
+    cmd = chromium_native_command(exe, user_data, url)
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
     saw_cookie = False
@@ -204,22 +230,6 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
                 proc.kill()
     if not cookies_db_has_name(user_data):
         raise SystemExit("native chromium seed did not persist rookie_ci")
-
-
-def seed_chromium(channel: str, user_data: Path, url: str, exe: str) -> None:
-    cmd = ["node", str(ROOT / "tests/e2e/seed_chromium_cookie.mjs"), channel, str(user_data), url]
-    if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
-        cmd = ["xvfb-run", "-a", *cmd]
-    try:
-        subprocess.run(cmd, check=True, cwd=str(ROOT))
-        return
-    except subprocess.CalledProcessError as error:
-        print(
-            f"playwright seed failed ({error.returncode}); "
-            "retrying with a native --headless launch",
-            flush=True,
-        )
-    seed_chromium_native(exe, user_data, url)
 
 
 def seed_gecko(exe: str, profile: Path, url: str) -> None:
@@ -252,8 +262,30 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     py = venv_python()
-    subprocess.run([str(py), str(ROOT / "tests/e2e/assert_chrome_cookie.py")], check=True, env=env)
-    subprocess.run(["node", str(ROOT / "tests/e2e/assert_chrome_cookie.mjs")], check=True, env=env, cwd=str(ROOT))
+    subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--test",
+            "e2e_chrome",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
+    subprocess.run(
+        [str(py), str(ROOT / "tests/e2e/assert_chrome_cookie.py")], check=True, env=env
+    )
+    subprocess.run(
+        ["node", str(ROOT / "tests/e2e/assert_chrome_cookie.mjs")],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
     db = find_chromium_db(user_data)
     cli = [str(py), str(ROOT / "tests/e2e/assert_cli_cookie.py"), str(db)]
     if sys.platform == "win32":
@@ -267,6 +299,21 @@ def assert_gecko(profile: Path) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_FIREFOX_PROFILE"] = str(profile)
     py = venv_python()
+    subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--test",
+            "e2e_firefox",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
     subprocess.run(
         [str(py), str(ROOT / "tests/e2e/assert_firefox_cookie.py")],
         check=True,
@@ -289,12 +336,58 @@ def assert_gecko(profile: Path) -> None:
     )
 
 
+def assert_native(cookie_file: Path, browser: str) -> None:
+    env = os.environ.copy()
+    env["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
+    env["ROOKIE_E2E_BROWSER_ID"] = browser
+    py = venv_python()
+    subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--test",
+            "e2e_native",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
+    subprocess.run(
+        [str(py), str(ROOT / "tests/e2e/assert_native_cookie.py")],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
+    subprocess.run(
+        ["node", str(ROOT / "tests/e2e/assert_native_cookie.mjs")],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
+    subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            str(cookie_file),
+        ],
+        check=True,
+        env=env,
+        cwd=str(ROOT),
+    )
+
+
 def run() -> int:
     browser = os.environ.get("ROOKIE_E2E_BROWSER_ID", "")
     engine = os.environ.get("ROOKIE_E2E_ENGINE", "chromium")
     exe = os.environ.get("ROOKIE_E2E_BROWSER_PATH", "")
     if not browser or not exe:
-        raise SystemExit("ROOKIE_E2E_BROWSER_ID and ROOKIE_E2E_BROWSER_PATH must be set")
+        raise SystemExit(
+            "ROOKIE_E2E_BROWSER_ID and ROOKIE_E2E_BROWSER_PATH must be set"
+        )
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", ROOT))
     user_data = Path(
         os.environ.get("ROOKIE_E2E_USER_DATA_DIR", workspace / ".rookie-ci" / browser)
@@ -308,10 +401,17 @@ def run() -> int:
         if engine == "gecko":
             seed_gecko(exe, user_data, url)
             assert_gecko(user_data)
+        elif engine in ("safari", "internet_explorer"):
+            before = file_snapshot(engine)
+            seed_with_startup_retry(engine, exe, url)
+            cookie_file = wait_for_changed_cookie_file(engine, before)
+            os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
+            print(f"native cookie store: {cookie_file}", flush=True)
+            assert_native(cookie_file, browser)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
             stage_chromium_user_data(user_data)
-            seed_chromium("chromium", user_data, url, exe)
+            seed_chromium_native(exe, user_data, url)
             assert_chromium(user_data, browser)
     finally:
         server.terminate()

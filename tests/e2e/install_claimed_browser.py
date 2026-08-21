@@ -23,6 +23,8 @@ from pathlib import Path
 
 socket.setdefaulttimeout(120)
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def this_os() -> str:
     if sys.platform == "win32":
@@ -39,6 +41,53 @@ def expand(path: str) -> str:
 # Silent-install recipes that have a documented package manager or a stable
 # official download URL. Obscure/commercial/deprecated products are omitted.
 HOSTS: dict[str, dict] = {
+    "chromium": {
+        "engine": "chromium",
+        "keychain_service": "Chrome Safe Storage",
+        "keychain_account": "Chromium",
+        "linux": {
+            "kind": "playwright_browser",
+            "product": "chromium",
+            "exe": [],
+        },
+        "macos": {
+            "kind": "playwright_browser",
+            "product": "chromium",
+            "exe": [],
+        },
+        "windows": {
+            "kind": "playwright_browser",
+            "product": "chromium",
+            "exe": [],
+        },
+    },
+    "edge": {
+        "engine": "chromium",
+        "keychain_service": "Microsoft Edge Safe Storage",
+        "keychain_account": "Microsoft Edge",
+        "linux": {
+            "kind": "playwright_channel",
+            "product": "msedge",
+            "exe": [
+                "microsoft-edge",
+                "microsoft-edge-stable",
+                "/opt/microsoft/msedge/msedge",
+            ],
+        },
+        "macos": {
+            "kind": "playwright_channel",
+            "product": "msedge",
+            "exe": ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+        },
+        "windows": {
+            "kind": "playwright_channel",
+            "product": "msedge",
+            "exe": [
+                r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+                r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+            ],
+        },
+    },
     "brave": {
         "engine": "chromium",
         "keychain_service": "Brave Safe Storage",
@@ -150,6 +199,33 @@ HOSTS: dict[str, dict] = {
             ],
         },
     },
+    "safari": {
+        "engine": "safari",
+        "macos": {
+            "kind": "safaridriver",
+            "configure": True,
+            "exe": ["/usr/bin/safaridriver"],
+            "browser_exe": ["/Applications/Safari.app/Contents/MacOS/Safari"],
+        },
+    },
+    "internet_explorer": {
+        "engine": "internet_explorer",
+        "windows": {
+            "kind": "internet_explorer",
+            "configure": True,
+            # Standalone IE was removed from Server 2025. Server 2022 still
+            # ships the IE capability and the runner image includes IEDriver.
+            "runner": "windows-2022",
+            "exe": [
+                r"%IEWebDriver%\IEDriverServer.exe",
+                r"C:\SeleniumWebDrivers\IEDriver\IEDriverServer.exe",
+            ],
+            "browser_exe": [
+                r"%ProgramFiles%\Internet Explorer\iexplore.exe",
+                r"%ProgramFiles(x86)%\Internet Explorer\iexplore.exe",
+            ],
+        },
+    },
 }
 
 RUNNERS = {
@@ -252,11 +328,7 @@ def find_exe(candidates: list[str]) -> str | None:
         candidate = Path(path)
         if candidate.name and candidate.name not in names:
             names.append(candidate.name)
-        which = (
-            shutil.which(path)
-            if os.sep not in path and "/" not in path
-            else None
-        )
+        which = shutil.which(path) if os.sep not in path and "/" not in path else None
         if which and is_launchable(Path(which)):
             return which
         if is_launchable(candidate):
@@ -273,6 +345,41 @@ def wait_for_exe(candidates: list[str], timeout: float = 90) -> str | None:
     deadline = time.time() + timeout
     while True:
         exe = find_exe(candidates)
+        if exe:
+            return exe
+        if time.time() >= deadline:
+            return None
+        time.sleep(2)
+
+
+def playwright_executable() -> str | None:
+    completed = subprocess.run(
+        [
+            "node",
+            "-e",
+            "const {chromium}=require('playwright');process.stdout.write(chromium.executablePath())",
+        ],
+        cwd=ROOT / "tests/e2e",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    path = Path(completed.stdout.strip())
+    return str(path.resolve()) if is_launchable(path) else None
+
+
+def find_spec_exe(spec: dict) -> str | None:
+    if spec["kind"] == "playwright_browser":
+        return playwright_executable()
+    return find_exe(spec["exe"])
+
+
+def wait_for_spec_exe(spec: dict, timeout: float = 90) -> str | None:
+    deadline = time.time() + timeout
+    while True:
+        exe = find_spec_exe(spec)
         if exe:
             return exe
         if time.time() >= deadline:
@@ -309,7 +416,9 @@ def install_brave_apt() -> None:
     run(["sudo", "apt-get", "install", "-y", "brave-browser"])
 
 
-def _install_apt_repo(*, key_url: str, keyring: str, source_line: str, package: str) -> None:
+def _install_apt_repo(
+    *, key_url: str, keyring: str, source_line: str, package: str
+) -> None:
     run(["sudo", "apt-get", "install", "-y", "curl", "gnupg"])
     with urllib.request.urlopen(key_url, timeout=60) as response:
         payload = response.read()
@@ -400,6 +509,87 @@ def install_winget(package_id: str) -> None:
         print(f"winget exited {completed.returncode}; will use the binary if it exists")
 
 
+def install_playwright_product(product: str) -> None:
+    run(
+        ["npx", "playwright", "install", product],
+        cwd=ROOT / "tests/e2e",
+    )
+
+
+def configure_safaridriver() -> None:
+    # Apple documents `safaridriver --enable`; sudo is needed on a fresh
+    # hosted image and is passwordless on GitHub's macOS runners.
+    run(["sudo", "/usr/bin/safaridriver", "--enable"])
+
+
+def configure_internet_explorer(spec: dict) -> None:
+    browser_candidates = [expand(path) for path in spec["browser_exe"]]
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$browserCandidates = @(
+  "$env:ProgramFiles\Internet Explorer\iexplore.exe",
+  "${env:ProgramFiles(x86)}\Internet Explorer\iexplore.exe"
+)
+$browser = $browserCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $browser) {
+  $capability = Get-WindowsCapability -Online `
+    -Name 'Browser.InternetExplorer~~~~0.0.11.0' |
+    Select-Object -First 1
+  if (-not $capability) {
+    throw 'Windows does not expose the Internet Explorer capability'
+  }
+  if ($capability.State -ne 'Installed') {
+    $result = Add-WindowsCapability -Online -Name $capability.Name
+    if ($result.RestartNeeded) {
+      Write-Host 'Internet Explorer capability reports RestartNeeded; trying the binary before failing'
+    }
+  }
+  $browser = $browserCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $browser) {
+  throw 'Internet Explorer installation did not produce iexplore.exe'
+}
+
+# IEDriver requires matching Protected Mode values and 100% zoom. The runner
+# is ephemeral, so configure all zones for this one native-browser canary.
+1..4 | ForEach-Object {
+  $zone = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Zones\$_"
+  New-Item -Path $zone -Force | Out-Null
+  New-ItemProperty -Path $zone -Name 2500 -PropertyType DWord -Value 0 -Force |
+    Out-Null
+}
+$zoom = 'HKCU:\Software\Microsoft\Internet Explorer\Zoom'
+New-Item -Path $zoom -Force | Out-Null
+New-ItemProperty -Path $zoom -Name ZoomFactor -PropertyType DWord -Value 100000 -Force |
+  Out-Null
+$main = 'HKCU:\Software\Microsoft\Internet Explorer\Main'
+New-Item -Path $main -Force | Out-Null
+New-ItemProperty -Path $main -Name DisableFirstRunCustomize -PropertyType DWord -Value 2 -Force |
+  Out-Null
+$policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Main'
+New-Item -Path $policy -Force | Out-Null
+New-ItemProperty -Path $policy -Name NotifyDisableIEOptions -PropertyType DWord -Value 0 -Force |
+  Out-Null
+Write-Host "Internet Explorer ready: $browser"
+"""
+    run(
+        [
+            "powershell",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ]
+    )
+    if not find_exe(browser_candidates):
+        raise SystemExit(
+            "Internet Explorer configuration completed without iexplore.exe"
+        )
+
+
 def install_spec(spec: dict) -> None:
     kind = spec["kind"]
     if kind == "brave_apt":
@@ -414,6 +604,12 @@ def install_spec(spec: dict) -> None:
         install_brew(spec["cask"])
     elif kind == "winget":
         install_winget(spec["id"])
+    elif kind in ("playwright_browser", "playwright_channel"):
+        install_playwright_product(spec["product"])
+    elif kind == "safaridriver":
+        configure_safaridriver()
+    elif kind == "internet_explorer":
+        configure_internet_explorer(spec)
     else:
         raise SystemExit(f"unknown install kind {kind!r}")
 
@@ -428,7 +624,7 @@ def matrix() -> list[dict[str, str]]:
                 {
                     "os": platform if platform != "linux" else "ubuntu",
                     "platform": platform,
-                    "runner": RUNNERS[platform],
+                    "runner": meta[platform].get("runner", RUNNERS[platform]),
                     "browser": browser,
                     "engine": meta["engine"],
                 }
@@ -454,19 +650,26 @@ def install_browser(browser: str, platform: str) -> str:
             "this cell should stay on the fixture lane"
         )
     spec = meta[platform]
-    exe = find_exe(spec["exe"])
+    if spec.get("configure"):
+        install_spec(spec)
+    exe = find_spec_exe(spec)
     if exe is None:
         install_spec(spec)
         # Silent installers (especially winget per-user) often return before
         # the executable is visible on disk.
-        exe = wait_for_exe(spec["exe"])
+        exe = wait_for_spec_exe(spec)
     if exe is None:
-        raise SystemExit(f"installed {browser} on {platform} but could not find the executable")
+        raise SystemExit(
+            f"installed {browser} on {platform} but could not find the executable"
+        )
     env = {
         "ROOKIE_E2E_BROWSER_PATH": exe,
         "ROOKIE_E2E_BROWSER_ID": browser,
         "ROOKIE_E2E_ENGINE": meta["engine"],
     }
+    browser_exe = find_exe(spec.get("browser_exe", []))
+    if browser_exe:
+        env["ROOKIE_E2E_BROWSER_BINARY"] = browser_exe
     if meta.get("keychain_service"):
         env["ROOKIE_E2E_KEYCHAIN_SERVICE"] = meta["keychain_service"]
         env["ROOKIE_E2E_KEYCHAIN_ACCOUNT"] = meta["keychain_account"]

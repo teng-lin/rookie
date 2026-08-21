@@ -45,19 +45,21 @@ NIGHTLY_HOSTED = frozenset(
         ("macos", "librewolf"),
         ("macos", "opera"),
         ("macos", "opera_gx"),
+        ("macos", "safari"),
         ("macos", "zen"),
         ("windows", "brave"),
         ("windows", "chrome"),
         ("windows", "chromium"),
         ("windows", "edge"),
         ("windows", "firefox"),
+        ("windows", "internet_explorer"),
         ("windows", "librewolf"),
         ("windows", "opera"),
         ("windows", "opera_gx"),
         ("windows", "zen"),
     }
 )
-MANUAL = frozenset({("macos", "safari"), ("windows", "internet_explorer")})
+MANUAL: frozenset[tuple[str, str]] = frozenset()
 
 
 def _load_json(path: Path) -> dict:

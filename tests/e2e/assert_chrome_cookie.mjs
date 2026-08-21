@@ -51,8 +51,9 @@ if (!dbPath) {
 // bridge and keeps allow_elevated_fallback unconditionally.
 //
 // Consequence worth knowing: because this pins a policy, nothing here
-// exercises the default. That is covered by a Rust unit test, since this
-// workflow does not run on pull requests. See CHANGELOG.md.
+// exercises the default. That is covered by a Rust unit test. This Windows
+// branch remains trusted-ref-only even though Linux Chrome now gates pull
+// requests. See CHANGELOG.md.
 let results;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");

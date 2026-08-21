@@ -256,17 +256,11 @@ mod deterministic_dpapi {
 fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
   let db_path = helpers::resolve_db_path();
   let domain = helpers::domain();
-
-  let config = rookie_cookies::config::Browser {
-    channels: None,
-    paths: vec![db_path.to_string_lossy().into_owned()],
-    unix_crypt_name: Some("chrome".to_string()),
-    osx_key_service: None,
-    osx_key_user: None,
-  };
+  let browser_id = std::env::var("ROOKIE_E2E_BROWSER_ID").unwrap_or_else(|_| "chrome".to_owned());
+  let config = rookie_cookies::config::get_browser_config(&browser_id);
 
   let cookies =
-    rookie_cookies::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]), false)
+    rookie_cookies::chromium_based(config, db_path.clone(), Some(vec![domain.clone()]), false)
       .unwrap_or_else(|e| {
         panic!(
           "rookie_cookies::chromium_based({}) failed: {e}",
@@ -283,17 +277,11 @@ fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
 fn extracts_seeded_cookie_through_real_macos_keychain_provider() {
   let db_path = helpers::resolve_db_path();
   let domain = helpers::domain();
-
-  let config = rookie_cookies::config::Browser {
-    channels: None,
-    paths: vec![db_path.to_string_lossy().into_owned()],
-    unix_crypt_name: None,
-    osx_key_service: Some("Chrome Safe Storage".to_string()),
-    osx_key_user: Some("Chrome".to_string()),
-  };
+  let browser_id = std::env::var("ROOKIE_E2E_BROWSER_ID").unwrap_or_else(|_| "chrome".to_owned());
+  let config = rookie_cookies::config::get_browser_config(&browser_id);
 
   let cookies =
-    rookie_cookies::chromium_based(&config, db_path.clone(), Some(vec![domain.clone()]), false)
+    rookie_cookies::chromium_based(config, db_path.clone(), Some(vec![domain.clone()]), false)
       .unwrap_or_else(|e| {
         panic!(
           "rookie_cookies::chromium_based({}) failed: {e}",
