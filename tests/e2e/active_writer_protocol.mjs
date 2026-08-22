@@ -116,6 +116,18 @@ async function probe(context, page, origin, expected, forbidden) {
   return { cookieCount: cookies.length, readyState };
 }
 
+async function physicallyDeleteCookie(context, origin, name) {
+  // Firefox has intermittently acknowledged a name-filtered clear while
+  // retaining that cookie in both its jar and moz_cookies. This profile is
+  // synthetic and origin-scoped, so rebuild its controlled jar around the
+  // forbidden row to force a browser-owned physical delete.
+  const survivors = (await context.cookies(origin)).filter(
+    (cookie) => cookie.name !== name,
+  );
+  await context.clearCookies();
+  if (survivors.length > 0) await context.addCookies(survivors);
+}
+
 function ackPayload({
   sequence,
   phase,
@@ -210,7 +222,7 @@ export async function runActiveWriterProtocol({
     // but Firefox may retain an expired tombstone in moz_cookies until a later
     // cleanup. Use the browser API to make this a physical delete transition
     // so raw-inventory compatibility surfaces can assert absence too.
-    await context.clearCookies({ name: "rookie_remove" });
+    await physicallyDeleteCookie(context, origin, "rookie_remove");
     const mutatedLiveness = await probe(
       context,
       page,

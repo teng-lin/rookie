@@ -74,8 +74,11 @@ test("ready/hold/mutate/probe/close protocol keeps an owned context live", async
           expires: 4_102_444_800,
         }));
       },
-      async clearCookies({ name }) {
-        state.delete(name);
+      async clearCookies() {
+        state.clear();
+      },
+      async addCookies(cookies) {
+        for (const { name, value } of cookies) state.set(name, value);
       },
       async newPage() {
         return {
@@ -154,8 +157,11 @@ test("churn failure is reported without waiting for the command timeout", async 
           value,
           expires: 4_102_444_800,
         })),
-      async clearCookies({ name }) {
-        state.delete(name);
+      async clearCookies() {
+        state.clear();
+      },
+      async addCookies(cookies) {
+        for (const { name, value } of cookies) state.set(name, value);
       },
       async newPage() {
         return {
