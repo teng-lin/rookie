@@ -51,10 +51,11 @@ outside controlled-origin value equality.
 All Chromium/Gecko profiles are newly created below an isolated home. Safari
 cannot use a custom persistent profile directory, so its runner is hard-gated
 to a fresh GitHub-hosted account and refuses local execution. Its portable
-corpus uses a generated one-day self-signed TLS leaf installed into admin trust
-on the disposable hosted VM. The leaf and hostname are checked through macOS
-Security.framework, and a pinned live TLS handshake checks the same certificate;
-all trust state disappears with the VM. This is required because Safari rejects
+corpus uses a generated one-day TLS leaf pinned directly into admin trust on the
+disposable hosted VM; its private signing CA is neither trusted nor served. The
+leaf and hostname are checked through macOS Security.framework, and a pinned
+live TLS handshake checks the same certificate. All trust state disappears with
+the VM. This is required because Safari rejects
 `Secure` cookies from loopback HTTP. Named-site behavior remains a separate
 depth axis: live CHIPS/dFPI and stress lanes use generated TLS certificates and local test
 domains, including exact `source_scheme`, source-port, ancestry, and partition
