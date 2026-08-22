@@ -147,6 +147,31 @@ class ActiveWriterProtocolTests(unittest.TestCase):
             self.assertEqual(metadata["metadataSource"], "sqlite-header-while-locked")
             self.assertGreater(metadata["sqliteSchemaVersion"], 0)
 
+    def test_windows_metadata_reports_exclusive_lock_when_header_is_denied(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_chromium_db(Path(tmp))
+            with (
+                mock.patch.object(os, "name", "nt"),
+                mock.patch.object(
+                    active.sqlite3,
+                    "connect",
+                    side_effect=sqlite3.OperationalError(
+                        "unable to open database file"
+                    ),
+                ),
+                mock.patch.object(
+                    Path,
+                    "open",
+                    side_effect=PermissionError("browser owns the file"),
+                ),
+            ):
+                metadata = active.database_metadata(database, "chromium", timeout=0)
+            self.assertEqual(metadata["metadataSource"], "browser-exclusive-lock")
+            self.assertEqual(metadata["journalMode"], "unavailable-while-open")
+            self.assertIsNone(metadata["browserSchemaVersion"])
+
     def test_locked_firefox_readiness_defers_to_the_browser_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "cookies.sqlite"

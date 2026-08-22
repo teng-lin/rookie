@@ -214,6 +214,21 @@ def sqlite_probe_was_blocked_by_browser(database: Path, error: sqlite3.Error) ->
     )
 
 
+def exclusively_locked_database_metadata(database: Path) -> dict[str, Any]:
+    """Record an honest open-state proof when Windows denies even raw reads."""
+
+    return {
+        "metadataSource": "browser-exclusive-lock",
+        "journalMode": "unavailable-while-open",
+        "sqliteSchemaVersion": None,
+        "sqliteUserVersion": None,
+        "browserSchemaVersion": None,
+        "walPresent": Path(f"{database}-wal").is_file(),
+        "journalPresent": Path(f"{database}-journal").is_file(),
+        "sharedMemoryPresent": Path(f"{database}-shm").is_file(),
+    }
+
+
 def database_metadata(
     database: Path, engine: str, timeout: float = 10
 ) -> dict[str, Any]:
@@ -247,7 +262,12 @@ def database_metadata(
             last_error = error
             if time.monotonic() >= deadline:
                 if sqlite_probe_was_blocked_by_browser(database, error):
-                    return locked_database_header_metadata(database, engine)
+                    try:
+                        return locked_database_header_metadata(database, engine)
+                    except PermissionError:
+                        if os.name == "nt" and database.is_file():
+                            return exclusively_locked_database_metadata(database)
+                        raise
                 raise ActiveWriterError(
                     f"could not inspect active database metadata: {last_error}"
                 ) from error
@@ -790,8 +810,15 @@ def run(args: argparse.Namespace) -> None:
         seeder.wait(timeout=args.timeout)
         if seeder.returncode != 0:
             raise ActiveWriterError(f"browser seeder exited {seeder.returncode}")
+        closed_proof = {
+            "checkpoint": "closed",
+            "browserState": "closed",
+            "databasePath": str(database),
+            "ack": closed,
+            **database_metadata(database, args.engine),
+        }
         print(
-            f"ACTIVE_WRITER_PROOF {json.dumps({'checkpoint': 'closed', 'browserState': 'closed', 'databasePath': str(database), 'ack': closed}, sort_keys=True)}",
+            f"ACTIVE_WRITER_PROOF {json.dumps(closed_proof, sort_keys=True)}",
             flush=True,
         )
         if args.engine == "chromium" and sys.platform == "win32":
