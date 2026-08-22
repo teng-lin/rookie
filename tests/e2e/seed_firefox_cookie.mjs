@@ -23,9 +23,14 @@ if (!userDataDir || !url) {
   process.exit(2);
 }
 
-const context = await firefox.launchPersistentContext(userDataDir, {
-  headless: false,
-});
+const launchOptions = { headless: false };
+if (process.env.ROOKIE_E2E_BROWSER_PATH) {
+  launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
+}
+const context = await firefox.launchPersistentContext(
+  userDataDir,
+  launchOptions,
+);
 
 try {
   const page = await context.newPage();

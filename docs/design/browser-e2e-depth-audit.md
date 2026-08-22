@@ -2,8 +2,8 @@
 
 - **Author:** Codex
 - **Date:** 2026-08-21
-- **Status:** Implemented in `codex/browser-e2e-depth`; remote browser jobs pending
-  CI execution
+- **Status:** Implemented in `codex/browser-e2e-depth`; disposable-profile live
+  validation complete on macOS; remote OS/browser jobs pending CI execution
 - **Baseline:** `f0df3d1`
 - **Scope:** Browser-generated cookie fixtures, hosted live-browser extraction,
   Rust/Python/Node/CLI assertions, cookie isolation context, discovery, and
@@ -411,11 +411,12 @@ Every browser job should log at least:
 ## Implementation outcome
 
 The remediation is implemented on the integration branch as executable test
-contracts, not only as additional matrix metadata. No developer-machine
-Chrome, Safari, or Brave profile was opened or extracted while doing this
-work. The partition/container and stress runners refuse to run outside CI and
-require their disposable profile below `RUNNER_TEMP`; core runners accept only
-the explicit profile paths supplied by their workflows.
+contracts, not only as additional matrix metadata. Local live validation used
+only newly created profiles below `/tmp`; no installed browser's normal profile
+was opened or extracted. Safari was not run locally because the harness cannot
+redirect Safari to a disposable profile. The partition/container and stress
+runners refuse to run outside an explicitly declared CI scratch root, and core
+runners accept only profile paths supplied by their workflows.
 
 | Program | Implemented outcome |
 | --- | --- |
@@ -434,14 +435,42 @@ silently getting ahead of its harness.
 ### Validation boundary
 
 The repository changes can be syntax-, unit-, compile-, and fixture-tested
-without touching an installed browser profile. Genuine encryption,
-browser-owned database, CHIPS/dFPI/container, and schema-capture assertions are
-deliberately executable only on isolated CI runners. Those jobs still need to
-run on the branch before merge. In particular, the capture workflow and
-sanitizer are complete, but current and previous browser-generated persistent
-cookie candidates cannot honestly be called retained fixtures until the
-manual workflow has run and its artifacts have been reviewed. The workflow
-does not commit or trust those artifacts automatically.
+without touching an installed browser profile. Live local runs are permitted
+only with an explicit newly created profile. For macOS Chromium-family runs, a
+temporary Keychain containing only the known test credential is prepended,
+made available to any isolated discovery HOME, and removed in a `finally`
+block after restoring the exact original search list. Safari remains CI-only
+until it can be given equivalent profile isolation.
+
+The capture workflow and sanitizer are complete, but current and previous
+browser-generated persistent-cookie candidates cannot honestly be called
+retained fixtures until the manual workflow has run and its artifacts have
+been reviewed. The workflow does not commit or trust those artifacts
+automatically.
+
+### Local live-browser evidence
+
+All evidence below was produced on 2026-08-21/22 with disposable profiles; the
+normal Keychain search list was verified restored after every macOS run.
+
+| Browser / lane | Result |
+| --- | --- |
+| Chrome for Testing 151 exact corpus | 19 unfiltered and 18 domain-filtered cookies matched exactly on Rust, Python, Node, and CLI, including detailed and discovery/recommended reads. |
+| Brave 151 exact corpus | The same complete cross-surface contract passed. The run independently exposed Brave's 180-day far-future expiry clamp, versus Chrome's 400-day clamp; the corpus now carries browser-specific bounded expiry oracles. |
+| Chrome for Testing 151 active writer | The exact live database was proven as `Default/Cookies` (schema 24), add/replace/delete transitions passed on all four surfaces while the browser remained alive, and the final closed snapshot equaled the final open snapshot. This also proved the harness handles both current `Default/Cookies` and older `Default/Network/Cookies` layouts. |
+| Chrome for Testing 151 CHIPS | Two real partition keys plus a colliding unpartitioned cookie survived detailed extraction. Positive, negative, and incomplete `SendContext` header selection passed on all four surfaces. |
+| Chrome for Testing 151 stress | 320 cookies across eight registrable domains, three mutation rounds, four concurrent public surfaces, 192 exact live extraction runs, final closed equality, and typed timeout/cancellation/recovery controls passed. |
+| Firefox 153 exact corpus | 20 unfiltered and 19 filtered cookies passed every surface, explicit/detailed/discovery/recommended paths, and the live schema-17 SameSite sentinel was corrected. |
+| Firefox 153 active writer | Browser-locked database extraction, mutations, liveness, and exact open/closed snapshots passed on every surface. |
+| Firefox 153 dFPI and container | Two real dFPI partition keys and a real temporary-extension-created `userContextId=6` container cookie passed exact extraction and header isolation on every surface. |
+| Firefox 153 stress | The same 320-cookie, three-round, 192-run contract passed against a genuinely locked live Firefox store, including write-generation proof and lock controls. |
+
+These live runs found failures that the former one-cookie checks could not have
+found: a Chromium cookie-database location change, Firefox schema-17 SameSite
+encoding, millisecond Firefox partition expiry, transient Chromium renderer
+PIDs in ownership proofs, browser-specific expiry clamps, Secure-loopback
+source-scheme semantics, and current Chromium ancestor-chain semantics. Each
+failure now has a harness or decoder regression test.
 
 ## Definition of done
 

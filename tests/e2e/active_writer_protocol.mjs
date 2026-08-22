@@ -77,6 +77,16 @@ async function waitForFile(path, timeoutMs) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
+async function waitForAnyFile(paths, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const existing = paths.find((path) => existsSync(path));
+    if (existing) return existing;
+    await delay(100);
+  }
+  throw new Error(`timed out waiting for one of: ${paths.join(", ")}`);
+}
+
 async function waitForCommand(controlDir, sequence, timeoutMs) {
   const path = join(controlDir, `command-${sequence}.json`);
   await waitForFile(path, timeoutMs);
@@ -151,7 +161,9 @@ export async function runActiveWriterProtocol({
   }
 
   const resolvedProfile = realpathSync(resolve(profileDir));
-  const resolvedDatabase = resolve(databasePath);
+  const databaseCandidates = (
+    Array.isArray(databasePath) ? databasePath : [databasePath]
+  ).map((path) => resolve(path));
   const origin = new URL(baselineUrl).origin;
   const commandTimeoutMs = Number(
     process.env.ROOKIE_E2E_ACTIVE_WRITER_TIMEOUT_MS || 300000,
@@ -159,7 +171,13 @@ export async function runActiveWriterProtocol({
 
   try {
     await page.goto(baselineUrl, { waitUntil: "networkidle" });
-    await waitForFile(resolvedDatabase, commandTimeoutMs);
+    // Chromium has used both Default/Network/Cookies and Default/Cookies.
+    // Select the database the live browser actually created instead of
+    // hard-coding one schema generation into the ownership proof.
+    const resolvedDatabase = await waitForAnyFile(
+      databaseCandidates,
+      commandTimeoutMs,
+    );
     const userAgent = await page.evaluate(() => navigator.userAgent);
     const browser = context.browser();
     const browserVersion = browser?.version() ?? "unknown";
@@ -190,6 +208,11 @@ export async function runActiveWriterProtocol({
     }
     const mutateUrl = new URL("/active-writer/mutate", baselineUrl).href;
     await page.goto(mutateUrl, { waitUntil: "networkidle" });
+    // Set-Cookie expiry removes the cookie from the browser jar immediately,
+    // but Firefox may retain an expired tombstone in moz_cookies until a later
+    // cleanup. Use the browser API to make this a physical delete transition
+    // so raw-inventory compatibility surfaces can assert absence too.
+    await context.clearCookies({ name: "rookie_remove" });
     const mutatedLiveness = await probe(
       context,
       page,

@@ -43,6 +43,19 @@ def header_tokens(header: str) -> list[str]:
     return sorted(token.strip() for token in header.split(";") if token.strip())
 
 
+def schemeful_site(origin: str) -> str:
+    """Return the controlled test origin's browser-persisted schemeful site."""
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(origin)
+    host = parsed.hostname or ""
+    labels = host.split(".")
+    if len(labels) != 3 or labels[0] not in {"top", "other"}:
+        raise ContextAssertionError(f"unexpected controlled top-level origin {origin!r}")
+    return f"{parsed.scheme}://{'.'.join(labels[1:])}"
+
+
 def validate_context_snapshot(
     snapshot: Snapshot,
     *,
@@ -228,11 +241,14 @@ def validate_context_snapshot(
 
     matching_context = {
         "url": f"{third_origin}/echo",
-        "top_level_site": top_origin,
+        "top_level_site": schemeful_site(top_origin),
         "resource": "subresource",
         "method": "safe",
     }
-    other_context = {**matching_context, "top_level_site": other_top_origin}
+    other_context = {
+        **matching_context,
+        "top_level_site": schemeful_site(other_top_origin),
+    }
     matching_header = snapshot.header(matching_context)
     other_header = snapshot.header(other_context)
     expected_matching = [

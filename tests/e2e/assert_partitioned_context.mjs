@@ -36,6 +36,15 @@ if (!Number.isSafeInteger(sourcePort) || sourcePort <= 0) {
   throw new Error(`invalid source port ${sourcePortArg}`);
 }
 
+function schemefulSite(origin) {
+  const parsed = new URL(origin);
+  const labels = parsed.hostname.split(".");
+  if (labels.length !== 3 || !["top", "other"].includes(labels[0])) {
+    throw new Error(`unexpected controlled top-level origin ${origin}`);
+  }
+  return `${parsed.protocol}//${labels.slice(1).join(".")}`;
+}
+
 const options = { path: database };
 if (engine === "chromium") options.browserId = browserId;
 const snapshot = await rookieCookies.fromPath(options);
@@ -80,7 +89,9 @@ if (rawManifestPath) {
 function exactlyTwo(name) {
   const records = byName.get(name) || [];
   if (records.length !== 2) {
-    throw new Error(`expected exactly two colliding ${name} identities, got ${records.length}`);
+    throw new Error(
+      `expected exactly two colliding ${name} identities, got ${records.length}`,
+    );
   }
   return records;
 }
@@ -88,11 +99,17 @@ function exactlyTwo(name) {
 const top = exactlyTwo("rookie_top");
 const chips = byName.get("rookie_chips");
 if (engine === "chromium") {
-  if (top.some(({ context }) => context.topFrameSiteKey != null && context.topFrameSiteKey !== "")) {
+  if (
+    top.some(
+      ({ context }) =>
+        context.topFrameSiteKey != null && context.topFrameSiteKey !== "",
+    )
+  ) {
     throw new Error("first-party top cookie became partitioned");
   }
   const unpartitioned = chips.filter(
-    ({ context }) => context.topFrameSiteKey == null || context.topFrameSiteKey === "",
+    ({ context }) =>
+      context.topFrameSiteKey == null || context.topFrameSiteKey === "",
   );
   if (
     unpartitioned.length !== 1 ||
@@ -114,7 +131,9 @@ if (engine === "chromium") {
     }
     labels.add(label);
     if (record.cookie.value !== `partition-${label}`) {
-      throw new Error(`Chromium partition ${label} carried ${record.cookie.value}`);
+      throw new Error(
+        `Chromium partition ${label} carried ${record.cookie.value}`,
+      );
     }
     if (record.context.hasCrossSiteAncestor !== true) {
       throw new Error("CHIPS row lost its cross-site ancestor bit");
@@ -132,7 +151,8 @@ if (engine === "chromium") {
 } else {
   const dfpi = exactlyTwo("rookie_dfpi");
   const unpartitioned = chips.filter(
-    ({ context }) => context.partitionKey == null || context.partitionKey === "",
+    ({ context }) =>
+      context.partitionKey == null || context.partitionKey === "",
   );
   if (
     unpartitioned.length !== 1 ||
@@ -147,12 +167,15 @@ if (engine === "chromium") {
     for (const record of records) {
       if (
         record.cookie.name === "rookie_chips" &&
-        (record.context.partitionKey == null || record.context.partitionKey === "")
+        (record.context.partitionKey == null ||
+          record.context.partitionKey === "")
       ) {
         continue;
       }
       const label = ["a", "c"].find((candidate) =>
-        String(record.context.partitionKey).includes(`rookie-${candidate}.test`),
+        String(record.context.partitionKey).includes(
+          `rookie-${candidate}.test`,
+        ),
       );
       if (!label || labels.has(label)) {
         throw new Error(
@@ -164,17 +187,28 @@ if (engine === "chromium") {
         typeof record.context.originAttributes !== "string" ||
         !record.context.originAttributes.includes("partitionKey=")
       ) {
-        throw new Error(`${record.cookie.name} lacks partitioned originAttributes`);
+        throw new Error(
+          `${record.cookie.name} lacks partitioned originAttributes`,
+        );
       }
       if (![null, 0].includes(record.context.userContextId)) {
-        throw new Error(`${record.cookie.name} unexpectedly entered a container`);
+        throw new Error(
+          `${record.cookie.name} unexpectedly entered a container`,
+        );
       }
       if (![null, 0].includes(record.context.privateBrowsingId)) {
-        throw new Error(`${record.cookie.name} unexpectedly entered private browsing`);
+        throw new Error(
+          `${record.cookie.name} unexpectedly entered private browsing`,
+        );
       }
-      const expected = record.cookie.name === "rookie_chips" ? `partition-${label}` : `dfpi-${label}`;
+      const expected =
+        record.cookie.name === "rookie_chips"
+          ? `partition-${label}`
+          : `dfpi-${label}`;
       if (record.cookie.value !== expected) {
-        throw new Error(`${record.cookie.name} partition ${label} carried ${record.cookie.value}`);
+        throw new Error(
+          `${record.cookie.name} partition ${label} carried ${record.cookie.value}`,
+        );
       }
     }
   }
@@ -182,14 +216,14 @@ if (engine === "chromium") {
 
 const matchingContext = {
   url: `${thirdOrigin}/echo`,
-  topLevelSite: topOrigin,
+  topLevelSite: schemefulSite(topOrigin),
   resource: "subresource",
   method: "safe",
 };
 const matching = snapshot.header(matchingContext);
 const other = snapshot.header({
   ...matchingContext,
-  topLevelSite: otherTopOrigin,
+  topLevelSite: schemefulSite(otherTopOrigin),
 });
 const tokens = (header) =>
   header
@@ -201,10 +235,7 @@ let expectedMatching = [
   "rookie_chips=partition-a",
   "rookie_chips=unpartitioned",
 ];
-let expectedOther = [
-  "rookie_chips=partition-c",
-  "rookie_chips=unpartitioned",
-];
+let expectedOther = ["rookie_chips=partition-c", "rookie_chips=unpartitioned"];
 if (engine === "firefox") {
   expectedMatching.push("rookie_dfpi=dfpi-a");
   expectedOther.push("rookie_dfpi=dfpi-c");
@@ -213,12 +244,17 @@ if (rawManifest) {
   expectedMatching = rawManifest.expected_headers.matching;
   expectedOther = rawManifest.expected_headers.other_top_level_site;
 }
-if (JSON.stringify(tokens(matching)) !== JSON.stringify([...expectedMatching].sort())) {
+if (
+  JSON.stringify(tokens(matching)) !==
+  JSON.stringify([...expectedMatching].sort())
+) {
   throw new Error(
     `matching header set mismatch: expected ${JSON.stringify([...expectedMatching].sort())}, got ${JSON.stringify(tokens(matching))}`,
   );
 }
-if (JSON.stringify(tokens(other)) !== JSON.stringify([...expectedOther].sort())) {
+if (
+  JSON.stringify(tokens(other)) !== JSON.stringify([...expectedOther].sort())
+) {
   throw new Error(
     `other header set mismatch: expected ${JSON.stringify([...expectedOther].sort())}, got ${JSON.stringify(tokens(other))}`,
   );
@@ -233,8 +269,8 @@ try {
   });
   throw new Error("partitioned snapshot accepted an incomplete context");
 } catch (error) {
-  if (error.code !== "incomplete_send_context") throw error;
-  missingSelector = error.code;
+  if (error.rookieCode !== "incomplete_send_context") throw error;
+  missingSelector = error.rookieCode;
 }
 
 const result = {

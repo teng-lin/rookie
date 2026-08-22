@@ -74,6 +74,21 @@ class CookieServerTests(unittest.TestCase):
         self.assertEqual(len(decoy), 1)
         self.assertTrue(decoy[0].startswith("rookie_decoy="))
 
+    def test_health_and_browser_subresource_routes_never_seed_legacy_cookies(
+        self,
+    ) -> None:
+        self.assertEqual(SERVER.Handler.cookie_headers("/"), [])
+        self.assertEqual(SERVER.Handler.cookie_headers("/favicon.ico"), [])
+
+    def test_empty_corpus_result_does_not_fall_back_to_the_legacy_cookie(self) -> None:
+        self.assertEqual(
+            SERVER.corpus_headers(
+                "/corpus/mutate?engine=firefox&tiers=portable_smoke",
+                "localhost:8765",
+            ),
+            [],
+        )
+
     def test_active_writer_baseline_has_replace_and_delete_subjects(self) -> None:
         self.assertEqual(
             SERVER.Handler.cookie_headers("/active-writer/baseline"),
@@ -98,11 +113,10 @@ class CookieServerTests(unittest.TestCase):
         headers = SERVER.Handler.cookie_headers(
             "/active-writer/churn?expiry=4102444800"
         )
-        self.assertEqual(len(headers), 3)
+        self.assertEqual(len(headers), 2)
         self.assertIn("rookie_ci=after", headers[0])
         self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", headers[0])
         self.assertIn("rookie_added=present", headers[1])
-        self.assertIn("Max-Age=0", headers[2])
 
     def test_staged_wal_route_keeps_its_historical_canary_cookie(self) -> None:
         self.assertIn(

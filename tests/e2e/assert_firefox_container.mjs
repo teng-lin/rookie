@@ -13,7 +13,7 @@ if (!database || !Number.isSafeInteger(userContextId) || userContextId <= 0) {
   process.exit(2);
 }
 
-const snapshot = await rookieCookies.fromPath(database);
+const snapshot = await rookieCookies.fromPath({ path: database });
 const context = {
   url: "https://container.rookie.test/",
   topLevelSite: "https://container.rookie.test/",
@@ -33,7 +33,7 @@ try {
   throw new Error("Node accepted a missing Firefox container selector");
 } catch (error) {
   if (
-    error.code !== "incomplete_send_context" &&
+    error.rookieCode !== "incomplete_send_context" &&
     !String(error).includes("incomplete_send_context")
   ) {
     throw error;

@@ -14,7 +14,6 @@ import sys
 from typing import Any, Sequence
 from urllib.parse import parse_qsl, urlparse
 from urllib.request import HTTPSHandler, build_opener
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from browser_coverage_contract import emit_representative_depth
 from run_active_writer_e2e import (
@@ -24,6 +23,13 @@ from run_active_writer_e2e import (
     run_checked,
     venv_python,
 )
+from run_exact_corpus_e2e import (
+    REGISTRY_PATH,
+    configure_isolated_keychain,
+    isolated_environment,
+    platform_id,
+    resolve_registry_root,
+)
 
 
 MARKER = {
@@ -31,10 +37,6 @@ MARKER = {
     "kind": "rookie-cookie-fixture-source",
     "source_kind": "disposable_e2e_profile",
 }
-FIREFOX_CONTAINER_EXTENSION = Path(__file__).with_name("firefox_container_extension")
-FIREFOX_CONTAINER_EXTENSION_ID = "rookie-container-e2e@rookie.test"
-
-
 def require_remote_sandbox(path: Path) -> Path:
     if os.environ.get("CI", "").lower() != "true":
         raise ActiveWriterError(
@@ -55,34 +57,45 @@ def require_remote_sandbox(path: Path) -> Path:
     return sandbox
 
 
-def stage_firefox_container_extension(profile: Path) -> Path:
-    """Install the checked-in unsigned test extension in a disposable profile."""
-
-    extensions = profile / "extensions"
-    extensions.mkdir(parents=True, exist_ok=True)
-    target = extensions / f"{FIREFOX_CONTAINER_EXTENSION_ID}.xpi"
-    with ZipFile(target, "x", compression=ZIP_DEFLATED) as archive:
-        for name in ("manifest.json", "background.js"):
-            archive.write(FIREFOX_CONTAINER_EXTENSION / name, name)
-    return target
+def playwright_executable(engine: str) -> str:
+    browser_type = "chromium" if engine == "chromium" else "firefox"
+    result = subprocess.run(
+        [
+            "node",
+            "-e",
+            f"process.stdout.write(require('playwright').{browser_type}.executablePath())",
+        ],
+        cwd=str(ROOT / "tests/e2e"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    executable = Path(result.stdout).resolve(strict=True)
+    return str(executable)
 
 
 def discovery_layout(engine: str, sandbox: Path) -> tuple[Path, dict[str, str]]:
-    isolated_home = sandbox / "home"
-    config_home = isolated_home / ".config"
     environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(isolated_home),
-            "XDG_CONFIG_HOME": str(config_home),
-            "LOCALAPPDATA": str(isolated_home / "AppData/Local"),
-            "APPDATA": str(isolated_home / "AppData/Roaming"),
-        }
-    )
+    environment.update(isolated_environment(sandbox))
+    configure_isolated_keychain(environment)
+    if not environment.get("ROOKIE_E2E_BROWSER_PATH"):
+        environment["ROOKIE_E2E_BROWSER_PATH"] = playwright_executable(engine)
+    browser_id = "chromium" if engine == "chromium" else "firefox"
+    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    entries = [
+        entry
+        for entry in registry["platforms"][platform_id()]
+        if entry["canonical_id"] == browser_id
+    ]
+    if len(entries) != 1:
+        raise ActiveWriterError(
+            f"expected one registry entry for {platform_id()}/{browser_id}, got {len(entries)}"
+        )
+    root_spec = min(entries[0]["roots"], key=lambda candidate: candidate["priority"])
+    root = resolve_registry_root(root_spec["template"], environment)
     if engine == "chromium":
-        profile = config_home / "chromium"
+        profile = root
     else:
-        root = isolated_home / "snap/firefox/common/.mozilla/firefox"
         profile = root / "Profiles/rookie-context"
         profile.mkdir(parents=True, exist_ok=True)
         (root / "profiles.ini").write_text(
@@ -200,6 +213,13 @@ def _chromium_expiry(raw: object) -> int | None:
     return (value - offset) // 1_000_000 if value > offset else None
 
 
+def _firefox_expiry(raw: object, schema_version: int) -> int | None:
+    value = int(raw)
+    if value <= 0:
+        return None
+    return value // 1000 if schema_version >= 16 else value
+
+
 def _unsigned(attributes: dict[str, str], name: str) -> int | None:
     value = attributes.get(name)
     return int(value) if value is not None and value.isdigit() else None
@@ -212,6 +232,7 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
     connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
+        schema_version = int(connection.execute("pragma user_version").fetchone()[0])
         columns = {
             str(row[1]) for row in connection.execute(f"pragma table_info({table})")
         }
@@ -325,7 +346,7 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
                 "domain": host,
                 "path": str(row["path"]),
                 "secure": bool(row["isSecure"]),
-                "expires": int(row["expiry"]),
+                "expires": _firefox_expiry(row["expiry"], schema_version),
                 "name": name,
                 "value": value,
                 "http_only": bool(row["isHttpOnly"]),
@@ -500,6 +521,7 @@ def run(args: argparse.Namespace) -> None:
             "test",
             "--test",
             "e2e_context",
+            "browser_produced_partition_context_survives_snapshot_and_header_filter",
             "--locked",
             "--",
             "--ignored",

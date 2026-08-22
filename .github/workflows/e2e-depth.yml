@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '43 6 * * *'
+    - cron: "43 6 * * *"
   workflow_dispatch:
     inputs:
       run_stress:
@@ -36,16 +36,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: "22"
       - name: Install browser and desktop dependencies
         working-directory: tests/e2e
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y xvfb openssl
-          npm install --no-save playwright@1.62.1
+          npm install --no-save playwright@1.62.1 web-ext@10.6.0
           npx playwright install --with-deps ${{ matrix.engine }}
       - name: Build every public surface
         run: |
@@ -87,10 +87,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: "22"
       - name: Install browser and desktop dependencies
         working-directory: tests/e2e
         run: |
@@ -128,13 +128,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: "22"
       - name: Install Playwright controller for system Chrome
         env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         working-directory: tests/e2e
         run: npm install --no-save playwright@1.62.1
       - name: Build stress emitters and public surfaces
@@ -150,15 +150,9 @@ jobs:
           ROOKIE_E2E_PASSWORD_STORE: keychain
           ROOKIE_E2E_BROWSER_CHANNEL: chrome
         run: |
-          cleanup() {
-            /usr/bin/security delete-generic-password -a Chrome -s 'Chrome Safe Storage' >/dev/null 2>&1 || true
-            /usr/bin/security delete-generic-password -a Chromium -s 'Chrome Safe Storage' >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          cleanup
-          /usr/bin/security add-generic-password -U -a Chrome -s 'Chrome Safe Storage' -w mock_password
-          /usr/bin/security add-generic-password -U -a Chromium -s 'Chrome Safe Storage' -w mock_password
-          .venv/bin/python tests/e2e/run_browser_cookie_stress_e2e.py \
-            --engine chromium --browser-id chrome \
-            --sandbox "$RUNNER_TEMP/rookie-stress-chrome-keychain" \
-            --workers 4 --iterations 3 --rounds 3
+          .venv/bin/python tests/e2e/run_with_ephemeral_keychain.py \
+            --service 'Chrome Safe Storage' --account Chrome --account Chromium -- \
+            .venv/bin/python tests/e2e/run_browser_cookie_stress_e2e.py \
+              --engine chromium --browser-id chrome \
+              --sandbox "$RUNNER_TEMP/rookie-stress-chrome-keychain" \
+              --workers 4 --iterations 3 --rounds 3

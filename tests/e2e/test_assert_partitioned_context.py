@@ -60,7 +60,7 @@ class FakeSnapshot:
         top = context.get("top_level_site")
         if top is None:
             raise FakeError("incomplete_send_context")
-        if "top.rookie-a.test" in top:
+        if "rookie-a.test" in top:
             values = ["rookie_chips=partition-a", "rookie_chips=unpartitioned"]
             if any(
                 record["cookie"]["name"] == "rookie_dfpi" for record in self.records

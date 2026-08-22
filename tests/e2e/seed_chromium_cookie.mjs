@@ -36,7 +36,9 @@ if (!channelArg || !userDataDir || !url) {
 const channel = channelArg === "edge" ? "msedge" : channelArg;
 const linuxArgs =
   process.platform === "linux"
-    ? [`--password-store=${process.env.ROOKIE_E2E_PASSWORD_STORE || "gnome-libsecret"}`]
+    ? [
+        `--password-store=${process.env.ROOKIE_E2E_PASSWORD_STORE || "gnome-libsecret"}`,
+      ]
     : [];
 
 const launchOptions = {
@@ -52,6 +54,15 @@ const launchOptions = {
     ...linuxArgs,
   ],
 };
+if (
+  process.platform === "darwin" &&
+  process.env.ROOKIE_E2E_DISABLE_MOCK_KEYCHAIN === "1"
+) {
+  launchOptions.ignoreDefaultArgs = [
+    "--use-mock-keychain",
+    "--password-store=basic",
+  ];
+}
 if (process.env.ROOKIE_E2E_BROWSER_PATH) {
   launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
 } else if (channel && channel !== "chromium") {
@@ -74,7 +85,10 @@ try {
       baselineUrl: url,
       engine: "chromium",
       profileDir: userDataDir,
-      databasePath: join(userDataDir, "Default", "Network", "Cookies"),
+      databasePath: [
+        join(userDataDir, "Default", "Network", "Cookies"),
+        join(userDataDir, "Default", "Cookies"),
+      ],
     });
   } else {
     const { manifest, manifestPath, userAgent } = await seedCookieCorpus({

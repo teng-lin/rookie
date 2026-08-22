@@ -42,6 +42,8 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
     server: ContextCookieServer
 
     def log_message(self, format: str, *args: object) -> None:
+        if args and "/stress/churn?" in str(args[0]):
+            return
         print(f"context-cookie-server: {format % args}", file=sys.stderr)
 
     def host(self) -> str:
@@ -62,8 +64,13 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.end_headers()
+            self.wfile.write(encoded)
+        except (BrokenPipeError, ConnectionResetError):
+            # A browser navigation may replace the churn page immediately
+            # after headers are accepted; the Set-Cookie write already landed.
+            pass
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         parsed = urlparse(self.path)
@@ -164,7 +171,7 @@ addEventListener("message", (event) => {{
                 "<!doctype html><title>unpartitioned-seeded</title>\n",
                 content_type="text/html; charset=utf-8",
                 cookies=(
-                    "rookie_chips=unpartitioned; Secure; HttpOnly; SameSite=Lax; "
+                    "rookie_chips=unpartitioned; Secure; HttpOnly; SameSite=None; "
                     "Path=/; Max-Age=3600",
                 ),
             )

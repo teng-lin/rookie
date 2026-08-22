@@ -10,6 +10,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import time
 from typing import Sequence
 from urllib.parse import parse_qsl
 
@@ -17,19 +18,104 @@ from browser_coverage_contract import emit_representative_depth
 from cookie_manifest import ManifestError, load_manifest, verify_records
 from run_active_writer_e2e import ActiveWriterError, ROOT, run_checked, venv_python
 from run_partition_context_e2e import (
+    MARKER,
+    _firefox_expiry,
     database_for,
     discovered_profile_id,
-    discovery_layout,
+    playwright_executable,
     require_remote_sandbox,
     schema_metadata,
-    stage_firefox_container_extension,
 )
+from run_exact_corpus_e2e import isolated_environment, stage_discovered_profile
+
+
+FIREFOX_CONTAINER_EXTENSION = Path(__file__).with_name("firefox_container_extension")
+FIREFOX_CONTAINER_NAME = "rookie-e2e-container"
+
+
+def seed_container_with_web_ext(
+    profile: Path,
+    environment: dict[str, str],
+    sandbox: Path,
+    *,
+    xvfb: bool,
+    timeout: float = 120,
+) -> None:
+    """Load the unsigned test extension temporarily into the disposable profile."""
+
+    web_ext = ROOT / "tests/e2e/node_modules/.bin/web-ext"
+    if not web_ext.is_file():
+        raise ActiveWriterError(
+            "web-ext is required for the Firefox container lane; install web-ext@10.6.0"
+        )
+    browser = environment.get("ROOKIE_E2E_BROWSER_PATH")
+    if not browser or not Path(browser).is_file():
+        raise ActiveWriterError("container lane lacks an explicit Firefox executable")
+    command = [
+        str(web_ext),
+        "run",
+        "--source-dir",
+        str(FIREFOX_CONTAINER_EXTENSION),
+        "--artifacts-dir",
+        str(sandbox / "web-ext-artifacts"),
+        "--firefox",
+        browser,
+        "--firefox-profile",
+        str(profile),
+        "--keep-profile-changes",
+        "--profile-create-if-missing",
+        "--no-reload",
+        "--no-input",
+        "--no-config-discovery",
+        "--start-url",
+        "about:blank",
+    ]
+    if xvfb:
+        command = ["xvfb-run", "-a", *command]
+    process = subprocess.Popen(command, cwd=str(ROOT), env=environment, text=True)
+    containers = profile / "containers.json"
+    deadline = time.monotonic() + timeout
+    observed = False
+    try:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise ActiveWriterError(
+                    f"web-ext exited {process.returncode} before creating the container"
+                )
+            try:
+                payload = json.loads(containers.read_text(encoding="utf-8"))
+                observed = any(
+                    identity.get("name") == FIREFOX_CONTAINER_NAME
+                    and int(identity.get("userContextId", 0)) > 0
+                    for identity in payload.get("identities", [])
+                )
+            except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+                observed = False
+            if observed:
+                # The extension awaits contextualIdentities.create before
+                # cookies.set; allow the immediately following write to land.
+                time.sleep(2)
+                break
+            time.sleep(0.1)
+        if not observed:
+            raise ActiveWriterError("Firefox did not create the disposable container")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 
 
 def write_container_manifest(database: Path, output: Path) -> int:
     connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
+        schema_version = int(connection.execute("pragma user_version").fetchone()[0])
         rows = connection.execute(
             "select * from moz_cookies where name = 'rookie_container'"
         ).fetchall()
@@ -60,7 +146,7 @@ def write_container_manifest(database: Path, output: Path) -> int:
         "domain": str(row["host"]),
         "path": str(row["path"]),
         "secure": bool(row["isSecure"]),
-        "expires": int(row["expiry"]),
+        "expires": _firefox_expiry(row["expiry"], schema_version),
         "name": str(row["name"]),
         "value": str(row["value"]),
         "http_only": bool(row["isHttpOnly"]),
@@ -275,18 +361,24 @@ def verify_cli_headers(
 
 def run(args: argparse.Namespace) -> None:
     sandbox = require_remote_sandbox(args.sandbox)
-    profile, environment = discovery_layout("firefox", sandbox)
-    xpi = stage_firefox_container_extension(profile)
-    observed = sandbox / "firefox-container-browser-observed.json"
-    seed = [
-        "node",
-        "tests/e2e/seed_firefox_container_cookie.mjs",
-        str(profile),
-        str(observed),
-    ]
-    if args.xvfb:
-        seed = ["xvfb-run", "-a", *seed]
-    run_checked(seed, environment, "firefox-container-seed")
+    profile = sandbox / "seed-profile"
+    profile.mkdir()
+    (profile / ".rookie-cookie-fixture-source.json").write_text(
+        json.dumps(MARKER, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    environment = os.environ.copy()
+    environment.update(isolated_environment(sandbox / "seed-runtime"))
+    environment["ROOKIE_E2E_BROWSER_PATH"] = playwright_executable("firefox")
+    seed_container_with_web_ext(
+        profile,
+        environment,
+        sandbox,
+        xvfb=args.xvfb,
+    )
+    profile, discovery_environment, expected_profile_id = stage_discovered_profile(
+        "firefox", "firefox", profile
+    )
+    environment.update(discovery_environment)
     database = database_for("firefox", profile)
     manifest = sandbox / "firefox-container-raw-manifest.json"
     user_context_id = write_container_manifest(database, manifest)
@@ -298,6 +390,10 @@ def run(args: argparse.Namespace) -> None:
         }
     )
     profile_id = discovered_profile_id("firefox", "firefox", database)
+    if profile_id != expected_profile_id:
+        raise ActiveWriterError(
+            f"container profile identity mismatch: {profile_id} != {expected_profile_id}"
+        )
     environment.update(
         {
             "ROOKIE_E2E_CONTEXT_DB": str(database),
@@ -353,7 +449,8 @@ def run(args: argparse.Namespace) -> None:
                 "profile": str(profile),
                 "profile_id": profile_id,
                 "database": str(database),
-                "extension": str(xpi),
+                "extension": str(FIREFOX_CONTAINER_EXTENSION),
+                "extension_install": "web-ext-temporary",
                 "user_context_id": user_context_id,
                 "raw_manifest": str(manifest),
                 "surfaces": ["rust", "python", "node", "cli"],

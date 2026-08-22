@@ -80,6 +80,18 @@ fn header_tokens(header: &str) -> Vec<String> {
   tokens
 }
 
+fn controlled_schemeful_site(origin: &str) -> String {
+  let parsed = url::Url::parse(origin).expect("controlled top-level origin must be a URL");
+  let host = parsed
+    .host_str()
+    .expect("controlled top-level origin must have a host");
+  let site = host
+    .strip_prefix("top.")
+    .or_else(|| host.strip_prefix("other."))
+    .expect("controlled top-level origin must use the top/other alias");
+  format!("{}://{site}", parsed.scheme())
+}
+
 #[test]
 #[ignore = "requires a disposable real-browser profile seeded by CI"]
 fn browser_produced_partition_context_survives_snapshot_and_header_filter() {
@@ -242,17 +254,19 @@ fn browser_produced_partition_context_survives_snapshot_and_header_filter() {
   }
 
   let request_url = format!("{third_origin}/echo");
+  let top_site = controlled_schemeful_site(&top_origin);
+  let other_top_site = controlled_schemeful_site(&other_top_origin);
   let matching = snapshot
     .header(
       &SendContext::url(&request_url)
-        .top_level_site(&top_origin)
+        .top_level_site(&top_site)
         .subresource(),
     )
     .expect("complete matching context must build a header");
   let other = snapshot
     .header(
       &SendContext::url(&request_url)
-        .top_level_site(&other_top_origin)
+        .top_level_site(&other_top_site)
         .subresource(),
     )
     .expect("complete non-matching context must build a header");

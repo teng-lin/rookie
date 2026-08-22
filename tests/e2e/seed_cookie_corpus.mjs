@@ -14,29 +14,46 @@ const defaultCorpusPath = join(moduleDir, "cookie_corpus.json");
 export function expandedValue(operation) {
   if (Object.hasOwn(operation, "value")) return String(operation.value);
   const repeat = operation.value_repeat;
-  if (!repeat) throw new Error("cookie operation must define value or value_repeat");
+  if (!repeat)
+    throw new Error("cookie operation must define value or value_repeat");
   return String(repeat.text).repeat(Number(repeat.count));
 }
 
 export function selectedTiers(corpus, environment = process.env) {
   const configured = environment.ROOKIE_E2E_CORPUS_TIERS;
   const tiers = configured
-    ? configured.split(",").map((value) => value.trim()).filter(Boolean)
+    ? configured
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
     : corpus.default_tiers;
   for (const tier of tiers) {
     if (!Object.hasOwn(corpus.tiers, tier)) {
       throw new Error(`unknown cookie corpus tier '${tier}'`);
     }
   }
-  if (tiers.length === 0) throw new Error("cookie corpus must select at least one tier");
+  if (tiers.length === 0)
+    throw new Error("cookie corpus must select at least one tier");
   return [...new Set(tiers)];
 }
 
-export function applicableScenarios(corpus, engine, tiers, platform = process.platform) {
+export function corpusPlatform(platform = process.platform) {
+  if (platform === "darwin") return "macos";
+  if (platform === "win32") return "windows";
+  return platform;
+}
+
+export function applicableScenarios(
+  corpus,
+  engine,
+  tiers,
+  platform = corpusPlatform(),
+) {
+  const normalizedPlatform = corpusPlatform(platform);
   return corpus.scenarios.filter(
     (scenario) =>
       scenario.applicability.engines.includes(engine) &&
-      scenario.applicability.platforms.includes(platform) &&
+      scenario.applicability.platforms.includes(normalizedPlatform) &&
       scenario.tiers.some((tier) => tiers.includes(tier)),
   );
 }
@@ -64,18 +81,26 @@ function observedExpiry(cookie) {
     : Math.trunc(cookie.expires);
 }
 
-function validateBrowserObservation(cookie, scenario) {
+function validateBrowserObservation(cookie, scenario, browserId) {
   const operation = finalOperation(scenario);
   const expectedValue = expandedValue(operation);
   const mismatches = [];
-  if (cookie.value !== expectedValue) mismatches.push(`value=${JSON.stringify(cookie.value)}`);
-  if (cookie.path !== (operation.path ?? "/")) mismatches.push(`path=${JSON.stringify(cookie.path)}`);
-  if (cookie.secure !== Boolean(operation.secure)) mismatches.push(`secure=${cookie.secure}`);
-  if (cookie.httpOnly !== Boolean(operation.http_only)) mismatches.push(`httpOnly=${cookie.httpOnly}`);
+  if (cookie.value !== expectedValue)
+    mismatches.push(`value=${JSON.stringify(cookie.value)}`);
+  if (cookie.path !== (operation.path ?? "/"))
+    mismatches.push(`path=${JSON.stringify(cookie.path)}`);
+  if (cookie.secure !== Boolean(operation.secure))
+    mismatches.push(`secure=${cookie.secure}`);
+  if (cookie.httpOnly !== Boolean(operation.http_only))
+    mismatches.push(`httpOnly=${cookie.httpOnly}`);
   if (operation.same_site && cookie.sameSite !== operation.same_site) {
     mismatches.push(`sameSite=${JSON.stringify(cookie.sameSite)}`);
   }
-  if (Object.hasOwn(operation, "max_age") && operation.max_age > 0 && observedExpiry(cookie) == null) {
+  if (
+    Object.hasOwn(operation, "max_age") &&
+    operation.max_age > 0 &&
+    observedExpiry(cookie) == null
+  ) {
     mismatches.push("expires=session");
   }
   if (
@@ -84,6 +109,22 @@ function validateBrowserObservation(cookie, scenario) {
     observedExpiry(cookie) != null
   ) {
     mismatches.push(`expires=${cookie.expires}`);
+  }
+  const expiryWindow =
+    scenario.expected.expiry_seconds_from_now_by_browser?.[browserId] ??
+    scenario.expected.expiry_seconds_from_now;
+  if (expiryWindow) {
+    const secondsFromNow =
+      observedExpiry(cookie) - Math.trunc(Date.now() / 1000);
+    if (
+      !Number.isSafeInteger(secondsFromNow) ||
+      secondsFromNow < expiryWindow.min ||
+      secondsFromNow > expiryWindow.max
+    ) {
+      mismatches.push(
+        `expirySecondsFromNow=${secondsFromNow} outside ${expiryWindow.min}..${expiryWindow.max}`,
+      );
+    }
   }
   if (mismatches.length > 0) {
     throw new Error(
@@ -109,8 +150,13 @@ function flatExpectation(cookie, scenario, engine) {
 function contextExpectation(corpus, engine, operation, baseUrl) {
   const template = corpus.context_expectations[engine];
   const parsed = new URL(baseUrl);
-  const sourceScheme = parsed.protocol === "https:" ? 2 : 1;
-  const sourcePort = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  // Chromium records a Secure cookie set from a trustworthy loopback HTTP
+  // origin with the secure source-scheme enum, even though the request URL is
+  // http://. Model the browser's persisted semantics, not just the URL text.
+  const sourceScheme = operation.secure || parsed.protocol === "https:" ? 2 : 1;
+  const sourcePort = Number(
+    parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+  );
   const persistent =
     (Object.hasOwn(operation, "max_age") && operation.max_age > 0) ||
     Object.hasOwn(operation, "expires");
@@ -128,13 +174,20 @@ export function buildExpectedManifest({
   corpus,
   engine,
   tiers,
-  platform = process.platform,
+  platform = corpusPlatform(),
   baseUrl,
   observedCookies,
   browserVersion,
   userAgent,
+  browserId = engine,
 }) {
-  const scenarios = applicableScenarios(corpus, engine, tiers, platform);
+  const normalizedPlatform = corpusPlatform(platform);
+  const scenarios = applicableScenarios(
+    corpus,
+    engine,
+    tiers,
+    normalizedPlatform,
+  );
   const unmatched = new Set(observedCookies.map((_cookie, index) => index));
   const filteredFlat = [];
   const unfilteredFlat = [];
@@ -148,9 +201,14 @@ export function buildExpectedManifest({
       .filter(({ cookie }) => cookieMatchesScenario(cookie, scenario, corpus));
     if (!scenario.expected.stored) {
       if (matches.length !== 0) {
-        throw new Error(`deleted/rejected scenario '${scenario.id}' remained in the browser cookie jar`);
+        throw new Error(
+          `deleted/rejected scenario '${scenario.id}' remained in the browser cookie jar`,
+        );
       }
-      excluded.push({ scenario_id: scenario.id, reason: "expected_not_stored" });
+      excluded.push({
+        scenario_id: scenario.id,
+        reason: "expected_not_stored",
+      });
       scenarioObservations.push({ scenario_id: scenario.id, stored: false });
       continue;
     }
@@ -161,7 +219,7 @@ export function buildExpectedManifest({
     }
     const { cookie, index } = matches[0];
     unmatched.delete(index);
-    validateBrowserObservation(cookie, scenario);
+    validateBrowserObservation(cookie, scenario, browserId);
     const flat = flatExpectation(cookie, scenario, engine);
     const origin = corpus.origins[scenario.origin];
     unfilteredFlat.push(flat);
@@ -184,14 +242,16 @@ export function buildExpectedManifest({
       const cookie = observedCookies[index];
       return `${cookie.domain}${cookie.path}:${cookie.name}`;
     });
-    throw new Error(`fresh browser profile contained unexpected cookies: ${unexpected.join(", ")}`);
+    throw new Error(
+      `fresh browser profile contained unexpected cookies: ${unexpected.join(", ")}`,
+    );
   }
 
   return {
     schema_version: 1,
     corpus_schema_version: corpus.schema_version,
     engine,
-    platform,
+    platform: normalizedPlatform,
     tiers,
     browser: {
       version: browserVersion,
@@ -213,11 +273,20 @@ function routeUrl(baseUrl, corpus, originName, phase, engine, tiers) {
   const url = new URL(baseUrl);
   url.hostname = corpus.origins[originName].hostname;
   url.pathname = `/corpus/${phase}`;
-  url.search = new URLSearchParams({ engine, tiers: tiers.join(",") }).toString();
+  url.search = new URLSearchParams({
+    engine,
+    tiers: tiers.join(","),
+  }).toString();
   return url.href;
 }
 
-export async function seedCookieCorpus({ context, page, engine, profileDir, baseUrl }) {
+export async function seedCookieCorpus({
+  context,
+  page,
+  engine,
+  profileDir,
+  baseUrl,
+}) {
   const corpusPath = process.env.ROOKIE_E2E_COOKIE_CORPUS || defaultCorpusPath;
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
   const tiers = selectedTiers(corpus);
@@ -230,7 +299,10 @@ export async function seedCookieCorpus({ context, page, engine, profileDir, base
           scenario.origin === originName &&
           scenario.operations.some((operation) => operation.phase === phase),
       );
-      if (needed) routes.push(routeUrl(baseUrl, corpus, originName, phase, engine, tiers));
+      if (needed)
+        routes.push(
+          routeUrl(baseUrl, corpus, originName, phase, engine, tiers),
+        );
     }
   }
   for (const route of routes) {
@@ -246,9 +318,11 @@ export async function seedCookieCorpus({ context, page, engine, profileDir, base
     observedCookies: await context.cookies(),
     browserVersion: context.browser()?.version() ?? "unknown",
     userAgent,
+    browserId: process.env.ROOKIE_E2E_BROWSER_ID || engine,
   });
   const manifestPath =
-    process.env.ROOKIE_E2E_COOKIE_MANIFEST || join(profileDir, MANIFEST_FILENAME);
+    process.env.ROOKIE_E2E_COOKIE_MANIFEST ||
+    join(profileDir, MANIFEST_FILENAME);
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,

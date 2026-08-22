@@ -118,7 +118,7 @@ class ContextCookieServerTests(unittest.TestCase):
         self.assertEqual(
             cookies,
             [
-                "rookie_chips=unpartitioned; Secure; HttpOnly; SameSite=Lax; "
+                "rookie_chips=unpartitioned; Secure; HttpOnly; SameSite=None; "
                 "Path=/; Max-Age=3600"
             ],
         )

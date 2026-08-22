@@ -2,7 +2,14 @@
 // The browser profile must be explicitly marked disposable; no discovery is
 // performed and no default profile is ever opened.
 
-import { access, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import process from "node:process";
 
@@ -56,8 +63,9 @@ if (
   throw new Error(`${markerPath} is not a disposable E2E profile marker`);
 }
 
-const hosts = Array.from({ length: 8 }, (_, index) =>
-  `seed.rookie-${index}.test`,
+const hosts = Array.from(
+  { length: 8 },
+  (_, index) => `seed.rookie-${index}.test`,
 );
 const hostRules = hosts.map((host) => `MAP ${host} 127.0.0.1`).join(",");
 const timeout = Number(process.env.ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS || 120000);
@@ -85,9 +93,16 @@ if (engine === "chromium") {
     timeout,
     args: chromiumArgs,
   };
-  if (process.env.ROOKIE_E2E_BROWSER_PATH) {
-    launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
-  } else if (process.env.ROOKIE_E2E_BROWSER_CHANNEL) {
+  if (
+    process.platform === "darwin" &&
+    process.env.ROOKIE_E2E_DISABLE_MOCK_KEYCHAIN === "1"
+  ) {
+    launchOptions.ignoreDefaultArgs = [
+      "--use-mock-keychain",
+      "--password-store=basic",
+    ];
+  }
+  if (process.env.ROOKIE_E2E_BROWSER_CHANNEL) {
     launchOptions.channel = process.env.ROOKIE_E2E_BROWSER_CHANNEL;
   }
 } else {
@@ -102,14 +117,17 @@ if (engine === "chromium") {
   };
 }
 
+if (process.env.ROOKIE_E2E_BROWSER_PATH) {
+  launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
+}
+
 const delay = (milliseconds) =>
   new Promise((accept) => setTimeout(accept, milliseconds));
 
 async function waitForCommand(sequence) {
   const path = join(controlDir, `command-${sequence}.json`);
-  const deadline = Date.now() + Number(
-    process.env.ROOKIE_E2E_STRESS_TIMEOUT_MS || 300000,
-  );
+  const deadline =
+    Date.now() + Number(process.env.ROOKIE_E2E_STRESS_TIMEOUT_MS || 300000);
   while (Date.now() < deadline) {
     try {
       return JSON.parse(await readFile(path, "utf8"));
@@ -124,11 +142,10 @@ async function waitForCommand(sequence) {
 async function writeControl(name, payload) {
   const target = join(controlDir, name);
   const temporary = `${target}.tmp-${process.pid}`;
-  await writeFile(
-    temporary,
-    `${JSON.stringify(payload, null, 2)}\n`,
-    { encoding: "utf8", flag: "wx" },
-  );
+  await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+  });
   await rename(temporary, target);
 }
 
@@ -136,7 +153,10 @@ async function databaseForProfile() {
   const candidates =
     engine === "firefox"
       ? [join(profile, "cookies.sqlite")]
-      : [join(profile, "Default", "Network", "Cookies"), join(profile, "Default", "Cookies")];
+      : [
+          join(profile, "Default", "Network", "Cookies"),
+          join(profile, "Default", "Cookies"),
+        ];
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     for (const candidate of candidates) {
@@ -149,7 +169,9 @@ async function databaseForProfile() {
     }
     await delay(50);
   }
-  throw new Error(`timed out locating ${engine} cookie database below ${profile}`);
+  throw new Error(
+    `timed out locating ${engine} cookie database below ${profile}`,
+  );
 }
 
 async function browserLiveness(context, page) {
@@ -157,7 +179,9 @@ async function browserLiveness(context, page) {
     name.startsWith("stress_"),
   ).length;
   if (cookieCount !== 320) {
-    throw new Error(`browser liveness probe saw ${cookieCount} stress cookies, expected 320`);
+    throw new Error(
+      `browser liveness probe saw ${cookieCount} stress cookies, expected 320`,
+    );
   }
   return {
     readyState: await page.evaluate(() => document.readyState),
@@ -200,7 +224,9 @@ async function startWriteChurn(context, manifest) {
     }))
     .sort((left, right) => left.host.localeCompare(right.host));
   if (states.length !== hosts.length) {
-    throw new Error(`write churn expected ${hosts.length} stable rows, got ${states.length}`);
+    throw new Error(
+      `write churn expected ${hosts.length} stable rows, got ${states.length}`,
+    );
   }
   const churnPage = await context.newPage();
   let active = true;
@@ -212,7 +238,10 @@ async function startWriteChurn(context, manifest) {
         const target = new URL(`https://${state.host}:${port}/stress/churn`);
         target.searchParams.set("value", state.value);
         target.searchParams.set("expiry", String(state.expires));
-        await churnPage.goto(target.href, { waitUntil: "domcontentloaded", timeout });
+        await churnPage.goto(target.href, {
+          waitUntil: "domcontentloaded",
+          timeout,
+        });
         requests += 1;
       }
     }
@@ -229,7 +258,13 @@ async function startWriteChurn(context, manifest) {
   };
 }
 
-async function navigateAndCapture(context, page, captureMode, captureRound, output) {
+async function navigateAndCapture(
+  context,
+  page,
+  captureMode,
+  captureRound,
+  output,
+) {
   for (const host of hosts) {
     const target =
       captureMode === "seed"
@@ -256,10 +291,7 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
           : `seed-${hostIndex}-${cookieIndex}`;
       expected.set(`${host}\0${name}`, value);
     }
-    expected.set(
-      `${host}\0stress_shared`,
-      `seed-${hostIndex}-39`,
-    );
+    expected.set(`${host}\0stress_shared`, `seed-${hostIndex}-39`);
     if (captureMode === "mutate") {
       for (let priorRound = 0; priorRound <= captureRound; priorRound += 1) {
         expected.set(
@@ -277,7 +309,9 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
       const key = `${host}\0${cookie.name}`;
       const expectedValue = expected.get(key);
       if (expectedValue === undefined) {
-        throw new Error(`browser retained an unexpected stress identity ${key}`);
+        throw new Error(
+          `browser retained an unexpected stress identity ${key}`,
+        );
       }
       if (cookie.value !== expectedValue) {
         throw new Error(
@@ -291,7 +325,9 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
         cookie.sameSite !== "Lax" ||
         cookie.expires <= 0
       ) {
-        throw new Error(`browser attributes disagreed for ${key}: ${JSON.stringify(cookie)}`);
+        throw new Error(
+          `browser attributes disagreed for ${key}: ${JSON.stringify(cookie)}`,
+        );
       }
       expected.delete(key);
       return {
@@ -356,7 +392,11 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
           engine === "chromium"
             ? {
                 top_frame_site_key: null,
-                has_cross_site_ancestor: false,
+                // These cookies are set by top-level navigations initiated
+                // from a different test site (including about:blank for the
+                // first navigation). Current Chromium persists that browser-
+                // observed ancestor-chain bit as true.
+                has_cross_site_ancestor: true,
                 source_scheme: 2,
                 source_port: port,
                 is_persistent: true,
@@ -400,15 +440,99 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
   return manifest;
 }
 
-const context = await browserType.launchPersistentContext(profile, launchOptions);
+async function writeQuiescentManifest(context, template, output) {
+  const expected = new Map(
+    template.expected.unfiltered_flat.map((cookie) => [
+      `${cookie.domain}\0${cookie.path}\0${cookie.name}`,
+      cookie,
+    ]),
+  );
+  const detailed = new Map(
+    template.expected.detailed.map((record) => [
+      `${record.cookie.domain}\0${record.cookie.path}\0${record.cookie.name}`,
+      record.context,
+    ]),
+  );
+  const accepted = (await context.cookies())
+    .filter(({ name }) => name.startsWith("stress_"))
+    .map((cookie) => {
+      const identity = `${cookie.domain}\0${cookie.path}\0${cookie.name}`;
+      const prior = expected.get(identity);
+      if (!prior || prior.value !== cookie.value) {
+        throw new Error(
+          `quiescent browser identity/value drifted: ${identity}`,
+        );
+      }
+      if (
+        cookie.secure !== true ||
+        cookie.httpOnly !== true ||
+        cookie.sameSite !== "Lax" ||
+        cookie.expires <= 0
+      ) {
+        throw new Error(
+          `quiescent browser attributes drifted: ${JSON.stringify(cookie)}`,
+        );
+      }
+      expected.delete(identity);
+      return {
+        domain: cookie.domain,
+        path: cookie.path,
+        secure: true,
+        expires: Math.trunc(cookie.expires),
+        name: cookie.name,
+        value: cookie.value,
+        http_only: true,
+        same_site: 1,
+      };
+    })
+    .sort((left, right) =>
+      `${left.domain}\0${left.path}\0${left.name}`.localeCompare(
+        `${right.domain}\0${right.path}\0${right.name}`,
+      ),
+    );
+  if (accepted.length !== 320 || expected.size !== 0) {
+    throw new Error(
+      `quiescent browser retained ${accepted.length} rows; missing=${JSON.stringify([...expected.keys()].sort())}`,
+    );
+  }
+  const manifest = structuredClone(template);
+  manifest.expected.filtered_flat = accepted;
+  manifest.expected.unfiltered_flat = accepted;
+  manifest.expected.detailed = accepted.map((cookie) => ({
+    cookie,
+    context: detailed.get(`${cookie.domain}\0${cookie.path}\0${cookie.name}`),
+  }));
+  manifest.observations.push({
+    scenario_id: "quiescent_browser_snapshot",
+    stored: true,
+    cookies: accepted.length,
+  });
+  await writeFile(output, `${JSON.stringify(manifest, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+  });
+  return manifest;
+}
+
+const context = await browserType.launchPersistentContext(
+  profile,
+  launchOptions,
+);
 try {
   const page = await context.newPage();
-  const initial = await navigateAndCapture(context, page, mode, round, manifestPath);
+  const initial = await navigateAndCapture(
+    context,
+    page,
+    mode,
+    round,
+    manifestPath,
+  );
   if (controlDir) {
     await mkdir(controlDir, { recursive: true });
     const resolvedProfile = await realpath(profile);
     const databasePath = await databaseForProfile();
     const browserVersion = initial.browser.version;
+    let currentManifest = initial;
     let churn = await startWriteChurn(context, initial);
     await writeControl(
       "ack-0.json",
@@ -429,10 +553,25 @@ try {
     while (true) {
       const command = await waitForCommand(sequence);
       if (command.sequence !== sequence) {
-        throw new Error(`stress command sequence mismatch: ${JSON.stringify(command)}`);
+        throw new Error(
+          `stress command sequence mismatch: ${JSON.stringify(command)}`,
+        );
       }
       if (command.action === "close") {
         const stoppedChurn = await churn.stop();
+        const closedManifestPath = resolve(String(command.manifest));
+        if (
+          closedManifestPath === profile ||
+          closedManifestPath.startsWith(`${profile}/`)
+        ) {
+          throw new Error("quiescent manifest must remain outside the profile");
+        }
+        await delay(250);
+        currentManifest = await writeQuiescentManifest(
+          context,
+          currentManifest,
+          closedManifestPath,
+        );
         await writeControl(
           `ack-${sequence}.json`,
           acknowledgement({
@@ -441,7 +580,7 @@ try {
             browserVersion,
             resolvedProfile,
             databasePath,
-            manifest: null,
+            manifest: closedManifestPath,
             liveness: {
               ...(await browserLiveness(context, page)),
               writeChurn: stoppedChurn,
@@ -456,7 +595,9 @@ try {
       await churn.stop();
       const nextManifest = resolve(String(command.manifest));
       if (nextManifest === profile || nextManifest.startsWith(`${profile}/`)) {
-        throw new Error("stress mutation manifest must remain outside the profile");
+        throw new Error(
+          "stress mutation manifest must remain outside the profile",
+        );
       }
       const captured = await navigateAndCapture(
         context,
@@ -465,6 +606,7 @@ try {
         command.round,
         nextManifest,
       );
+      currentManifest = captured;
       churn = await startWriteChurn(context, captured);
       await writeControl(
         `ack-${sequence}.json`,

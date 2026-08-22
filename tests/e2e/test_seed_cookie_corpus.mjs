@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applicableScenarios,
   buildExpectedManifest,
+  corpusPlatform,
   expandedValue,
   selectedTiers,
 } from "./seed_cookie_corpus.mjs";
@@ -25,7 +26,7 @@ function scenario(id, origin, name, { stored = true } = {}) {
     tiers: ["portable_smoke"],
     applicability: {
       engines: ["chromium", "firefox"],
-      platforms: [process.platform],
+      platforms: [corpusPlatform()],
     },
     origin,
     operations: [
@@ -85,7 +86,7 @@ test("tier and applicability selection is declarative", () => {
       declaration,
       "chromium",
       ["portable_smoke"],
-      process.platform,
+      corpusPlatform(),
     ).length,
     3,
   );
@@ -95,8 +96,31 @@ test("tier and applicability selection is declarative", () => {
   );
 });
 
+test("Node platform IDs map to corpus platform IDs", () => {
+  assert.equal(corpusPlatform("darwin"), "macos");
+  assert.equal(corpusPlatform("win32"), "windows");
+  assert.equal(corpusPlatform("linux"), "linux");
+
+  const declaration = corpus();
+  for (const item of declaration.scenarios) {
+    item.applicability.platforms = ["macos"];
+  }
+  assert.deepEqual(
+    applicableScenarios(
+      declaration,
+      "firefox",
+      ["portable_smoke"],
+      "darwin",
+    ).map(({ id }) => id),
+    ["primary", "decoy", "deleted"],
+  );
+});
+
 test("value-repeat expansion is deterministic", () => {
-  assert.equal(expandedValue({ value_repeat: { text: "ab", count: 3 } }), "ababab");
+  assert.equal(
+    expandedValue({ value_repeat: { text: "ab", count: 3 } }),
+    "ababab",
+  );
 });
 
 test("manifest separates filtered, unfiltered, and detailed exact sets", () => {
@@ -127,7 +151,7 @@ test("manifest separates filtered, unfiltered, and detailed exact sets", () => {
     corpus: declaration,
     engine: "chromium",
     tiers: ["portable_smoke"],
-    platform: process.platform,
+    platform: corpusPlatform(),
     baseUrl: "http://127.0.0.1:8765/set",
     observedCookies,
     browserVersion: "unit-test",
@@ -151,7 +175,7 @@ test("unexpected browser cookies cannot silently enter expected output", () => {
         corpus: declaration,
         engine: "chromium",
         tiers: ["portable_smoke"],
-        platform: process.platform,
+        platform: corpusPlatform(),
         baseUrl: "http://127.0.0.1:8765/set",
         observedCookies: [
           {
@@ -170,4 +194,74 @@ test("unexpected browser cookies cannot silently enter expected output", () => {
       }),
     /expected exactly one accepted browser cookie/,
   );
+});
+
+test("declarative expiry clamp bounds reject circular browser observations", () => {
+  const declaration = corpus();
+  declaration.scenarios = [declaration.scenarios[0]];
+  declaration.scenarios[0].expected.expiry_seconds_from_now = {
+    min: 100,
+    max: 200,
+  };
+  assert.throws(
+    () =>
+      buildExpectedManifest({
+        corpus: declaration,
+        engine: "chromium",
+        tiers: ["portable_smoke"],
+        platform: corpusPlatform(),
+        baseUrl: "http://127.0.0.1:8765/set",
+        observedCookies: [
+          {
+            domain: "127.0.0.1",
+            path: "/",
+            name: "rookie_primary",
+            value: "primary",
+            secure: false,
+            httpOnly: false,
+            sameSite: "Lax",
+            expires: Math.trunc(Date.now() / 1000) + 300,
+          },
+        ],
+        browserVersion: "unit-test",
+        userAgent: "unit-test",
+      }),
+    /expirySecondsFromNow=.*outside 100\.\.200/,
+  );
+});
+
+test("browser-specific expiry clamp bounds cover Chromium-family policy", () => {
+  const declaration = corpus();
+  declaration.scenarios = [declaration.scenarios[0]];
+  declaration.scenarios[0].expected.expiry_seconds_from_now = {
+    min: 300,
+    max: 400,
+  };
+  declaration.scenarios[0].expected.expiry_seconds_from_now_by_browser = {
+    brave: { min: 100, max: 200 },
+  };
+  const expires = Math.trunc(Date.now() / 1000) + 150;
+  const manifest = buildExpectedManifest({
+    corpus: declaration,
+    engine: "chromium",
+    browserId: "brave",
+    tiers: ["portable_smoke"],
+    platform: corpusPlatform(),
+    baseUrl: "http://127.0.0.1:8765/set",
+    observedCookies: [
+      {
+        domain: "127.0.0.1",
+        path: "/",
+        name: "rookie_primary",
+        value: "primary",
+        secure: false,
+        httpOnly: false,
+        sameSite: "Lax",
+        expires,
+      },
+    ],
+    browserVersion: "unit-test",
+    userAgent: "unit-test",
+  });
+  assert.equal(manifest.expected.unfiltered_flat[0].expires, expires);
 });

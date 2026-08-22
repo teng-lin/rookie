@@ -29,7 +29,10 @@ if (
 
 const profile = resolve(profileArg);
 const observedManifest = resolve(observedManifestArg);
-if (observedManifest === profile || observedManifest.startsWith(`${profile}/`)) {
+if (
+  observedManifest === profile ||
+  observedManifest.startsWith(`${profile}/`)
+) {
   throw new Error("observed manifest must be outside the disposable profile");
 }
 
@@ -82,9 +85,16 @@ if (engine === "chromium") {
       `--password-store=${process.env.ROOKIE_E2E_PASSWORD_STORE || "basic"}`,
     ],
   };
-  if (process.env.ROOKIE_E2E_BROWSER_PATH) {
-    launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
-  } else if (process.env.ROOKIE_E2E_BROWSER_CHANNEL) {
+  if (
+    process.platform === "darwin" &&
+    process.env.ROOKIE_E2E_DISABLE_MOCK_KEYCHAIN === "1"
+  ) {
+    launchOptions.ignoreDefaultArgs = [
+      "--use-mock-keychain",
+      "--password-store=basic",
+    ];
+  }
+  if (process.env.ROOKIE_E2E_BROWSER_CHANNEL) {
     launchOptions.channel = process.env.ROOKIE_E2E_BROWSER_CHANNEL;
   }
 } else {
@@ -105,7 +115,14 @@ if (engine === "chromium") {
   };
 }
 
-const context = await browserType.launchPersistentContext(profile, launchOptions);
+if (process.env.ROOKIE_E2E_BROWSER_PATH) {
+  launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
+}
+
+const context = await browserType.launchPersistentContext(
+  profile,
+  launchOptions,
+);
 try {
   const page = await context.newPage();
   const thirdOrigin = new URL(top.searchParams.get("third_origin"));
@@ -120,16 +137,23 @@ try {
   );
   for (const target of [topUrl, otherTop.href]) {
     await page.goto(target, { waitUntil: "domcontentloaded", timeout });
-    await page.waitForFunction(() => document.title === "partition-seeded", null, {
-      timeout,
-    });
+    await page.waitForFunction(
+      () => document.title === "partition-seeded",
+      null,
+      {
+        timeout,
+      },
+    );
   }
 
   const cookies = (await context.cookies()).filter(({ name }) =>
     name.startsWith("rookie_"),
   );
   const names = cookies.map(({ name }) => name);
-  for (const [required, minimum] of [["rookie_top", 2], ["rookie_chips", 3]]) {
+  for (const [required, minimum] of [
+    ["rookie_top", 2],
+    ["rookie_chips", 3],
+  ]) {
     if (names.filter((name) => name === required).length < minimum) {
       throw new Error(
         `${engine} did not expose both ${required} identities; observed ${names.sort().join(", ")}`,

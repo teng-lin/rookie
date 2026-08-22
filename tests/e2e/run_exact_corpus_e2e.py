@@ -30,6 +30,7 @@ from run_active_writer_e2e import (
 
 
 REGISTRY_PATH = ROOT / "rookie-rs/browser_registry.json"
+SECURITY = Path("/usr/bin/security")
 
 
 def platform_id() -> str:
@@ -42,13 +43,48 @@ def platform_id() -> str:
 
 def isolated_environment(root: Path) -> dict[str, str]:
     home = root / "home"
+    original_home = Path(os.environ.get("HOME", str(Path.home())))
     return {
         "HOME": str(home),
         "USERPROFILE": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "LOCALAPPDATA": str(home / "AppData/Local"),
         "APPDATA": str(home / "AppData/Roaming"),
+        "CARGO_HOME": os.environ.get("CARGO_HOME", str(original_home / ".cargo")),
+        "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", str(original_home / ".rustup")),
     }
+
+
+def configure_isolated_keychain(environment: dict[str, str]) -> None:
+    """Expose only the wrapper's disposable keychain inside an isolated HOME."""
+
+    if sys.platform != "darwin":
+        return
+    keychain = os.environ.get("ROOKIE_E2E_EPHEMERAL_KEYCHAIN")
+    password = os.environ.get("ROOKIE_E2E_EPHEMERAL_KEYCHAIN_PASSWORD")
+    if not keychain and not password:
+        return
+    if not keychain or not password:
+        raise ActiveWriterError("incomplete ephemeral Keychain handoff")
+    keychain_path = Path(keychain).resolve(strict=True)
+    isolated_home = Path(environment["HOME"])
+    (isolated_home / "Library/Preferences").mkdir(parents=True, exist_ok=True)
+    child_environment = os.environ.copy()
+    child_environment.update(environment)
+    subprocess.run(
+        [str(SECURITY), "list-keychains", "-d", "user", "-s", str(keychain_path)],
+        check=True,
+        env=child_environment,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [str(SECURITY), "unlock-keychain", "-p", password, str(keychain_path)],
+        check=True,
+        env=child_environment,
+        capture_output=True,
+        text=True,
+    )
 
 
 def normalized_path_bytes(path: Path) -> bytes:
@@ -101,6 +137,7 @@ def stage_discovered_profile(
     if sandbox.exists():
         raise ActiveWriterError(f"discovery sandbox already exists: {sandbox}")
     environment = isolated_environment(sandbox)
+    configure_isolated_keychain(environment)
     registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     entries = [
         entry
@@ -189,6 +226,7 @@ def run(args: argparse.Namespace) -> None:
             "ROOKIE_E2E_DOMAIN": "127.0.0.1",
             "ROOKIE_E2E_COOKIE_NAME": "rookie_ci",
             "ROOKIE_E2E_COOKIE_VALUE": "bar",
+            "ROOKIE_E2E_BROWSER_ID": args.browser_id,
         }
     )
     server = subprocess.Popen(

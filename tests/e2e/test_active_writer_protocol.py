@@ -54,6 +54,29 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 database.resolve(),
             )
 
+    def test_ready_ack_accepts_legacy_chromium_database_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            database = profile / "Default/Cookies"
+            database.parent.mkdir(parents=True)
+            database.touch()
+            process = mock.Mock(spec=subprocess.Popen)
+            process.pid = 4321
+            process.poll.return_value = None
+            ack = {
+                "engine": "chromium",
+                "phase": "ready",
+                "profileDir": str(profile.resolve()),
+                "databasePath": str(database.resolve()),
+                "seederPid": os.getpid(),
+                "browserProcessIds": [os.getpid()],
+                "liveness": {"readyState": "complete", "cookieCount": 2},
+            }
+            self.assertEqual(
+                active.validate_profile_proof(ack, "chromium", profile, process),
+                database.resolve(),
+            )
+
     def test_ready_ack_rejects_database_outside_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -104,6 +127,32 @@ class ActiveWriterProtocolTests(unittest.TestCase):
             self.assertEqual(metadata["browserSchemaVersion"], 24)
             self.assertIn(metadata["journalMode"], {"delete", "wal"})
             self.assertTrue(metadata["walPresent"])
+
+    def test_locked_firefox_readiness_defers_to_the_browser_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "cookies.sqlite"
+            connection = sqlite3.connect(database, isolation_level=None)
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("create table moz_cookies (name text)")
+            connection.execute("insert into moz_cookies values ('rookie_ci')")
+            connection.execute("BEGIN EXCLUSIVE")
+            try:
+                active.wait_for_storage_names(
+                    database,
+                    "firefox",
+                    {"rookie_ci": "before"},
+                    [],
+                    0.3,
+                    allow_locked_after=0.01,
+                )
+                metadata = active.database_metadata(database, "firefox", timeout=0.01)
+                self.assertEqual(
+                    metadata["metadataSource"], "sqlite-header-while-locked"
+                )
+                self.assertEqual(metadata["journalMode"], "rollback")
+            finally:
+                connection.execute("ROLLBACK")
+                connection.close()
 
     def test_storage_transition_requires_add_replace_subject_and_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

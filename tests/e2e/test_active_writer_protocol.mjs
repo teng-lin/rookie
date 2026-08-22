@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -65,6 +72,9 @@ test("ready/hold/mutate/probe/close protocol keeps an owned context live", async
           value,
           expires: 4_102_444_800,
         }));
+      },
+      async clearCookies({ name }) {
+        state.delete(name);
       },
       async newPage() {
         return {

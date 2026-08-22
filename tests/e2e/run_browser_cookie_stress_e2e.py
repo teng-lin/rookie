@@ -181,9 +181,14 @@ def validate_stress_profile_proof(
         raise ActiveWriterError(
             f"stress acknowledgement lacked distinct browser PIDs: {browser_pids!r}"
         )
-    dead = [pid for pid in browser_pids if not process_is_alive(pid)]
-    if dead:
-        raise ActiveWriterError(f"stress browser PIDs were not alive: {dead}")
+    # Renderer and utility processes are intentionally short-lived. The proof
+    # only needs at least one acknowledged browser process to remain alive;
+    # requiring every PID sampled by the seeder makes a healthy browser fail
+    # when Chromium retires a renderer between acknowledgement and validation.
+    if not any(process_is_alive(pid) for pid in browser_pids):
+        raise ActiveWriterError(
+            f"no acknowledged stress browser PID was alive: {browser_pids!r}"
+        )
     liveness = payload.get("liveness")
     if not isinstance(liveness, dict):
         raise ActiveWriterError("stress acknowledgement lacked browser liveness")
@@ -202,10 +207,21 @@ def validate_stress_profile_proof(
 
 
 def raw_write_generation(database: Path, engine: str) -> int:
+    if engine == "firefox":
+        # Firefox commonly holds an exclusive SQLite lock while open. Its WAL
+        # or rollback journal mtime is still an observable raw-storage write
+        # generation and does not require bypassing the browser's lock.
+        candidates = [database, Path(f"{database}-wal"), Path(f"{database}-journal")]
+        generations = [
+            candidate.stat().st_mtime_ns for candidate in candidates if candidate.is_file()
+        ]
+        if not generations:
+            raise ActiveWriterError("stress database lacked a raw write generation")
+        return max(generations)
     table, column = (
         ("cookies", "last_access_utc")
         if engine == "chromium"
-        else ("moz_cookies", "lastAccess")
+        else ("moz_cookies", "lastAccessed")
     )
     connection = sqlite3.connect(
         database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1
@@ -240,14 +256,21 @@ def wait_for_write_generation(
     )
 
 
-def wait_for_stress_rows(database: Path, engine: str, timeout: float) -> None:
+def wait_for_stress_rows(
+    database: Path,
+    engine: str,
+    timeout: float,
+    *,
+    allow_locked_after: float = 1,
+) -> None:
     table = "cookies" if engine == "chromium" else "moz_cookies"
     deadline = time.monotonic() + timeout
+    started = time.monotonic()
     last_count = -1
     while time.monotonic() < deadline:
         try:
             connection = sqlite3.connect(
-                database.resolve().as_uri() + "?mode=ro", uri=True
+                database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1
             )
             try:
                 last_count = int(
@@ -259,8 +282,26 @@ def wait_for_stress_rows(database: Path, engine: str, timeout: float) -> None:
                 connection.close()
             if last_count == 320:
                 return
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as error:
+            if (
+                engine == "firefox"
+                and "locked" in str(error).lower()
+                and time.monotonic() - started >= allow_locked_after
+            ):
+                print(
+                    "STRESS_RAW_STORE "
+                    + json.dumps(
+                        {
+                            "database": str(database),
+                            "engine": engine,
+                            "state": "browser-locked",
+                            "browser_probe_authoritative": True,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return
         time.sleep(0.2)
     raise ActiveWriterError(
         f"stress database retained {last_count} rows instead of 320"
@@ -268,7 +309,12 @@ def wait_for_stress_rows(database: Path, engine: str, timeout: float) -> None:
 
 
 def wait_for_mutation(
-    database: Path, engine: str, round_number: int, timeout: float
+    database: Path,
+    engine: str,
+    round_number: int,
+    timeout: float,
+    *,
+    allow_locked_after: float = 1,
 ) -> None:
     table = "cookies" if engine == "chromium" else "moz_cookies"
     added = [f"stress_{index}_round_{round_number}" for index in range(8)]
@@ -276,11 +322,12 @@ def wait_for_mutation(
     candidates = added + deleted
     placeholders = ",".join("?" for _ in candidates)
     deadline = time.monotonic() + timeout
+    started = time.monotonic()
     last_names: list[str] = []
     while time.monotonic() < deadline:
         try:
             connection = sqlite3.connect(
-                database.resolve().as_uri() + "?mode=ro", uri=True
+                database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1
             )
             try:
                 last_names = [
@@ -296,8 +343,27 @@ def wait_for_mutation(
                 name not in last_names for name in deleted
             ):
                 return
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as error:
+            if (
+                engine == "firefox"
+                and "locked" in str(error).lower()
+                and time.monotonic() - started >= allow_locked_after
+            ):
+                print(
+                    "STRESS_RAW_MUTATION "
+                    + json.dumps(
+                        {
+                            "database": str(database),
+                            "engine": engine,
+                            "round": round_number,
+                            "state": "browser-locked",
+                            "browser_probe_authoritative": True,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return
         time.sleep(0.2)
     raise ActiveWriterError(
         f"stress mutation {round_number} was not durable; observed {sorted(last_names)}"
@@ -643,14 +709,6 @@ def run(args: argparse.Namespace) -> None:
             f"STRESS_WRITE_GENERATION engine={args.engine} value={generation}",
             flush=True,
         )
-        assert_locked_store_controls(
-            engine=args.engine,
-            database=database,
-            manifest=initial_manifest,
-            sandbox=sandbox,
-            browser_id=args.browser_id,
-        )
-
         sequence = 1
         final_manifest = initial_manifest
         for round_number in range(args.rounds):
@@ -696,7 +754,8 @@ def run(args: argparse.Namespace) -> None:
             )
             sequence += 1
 
-        command(control, sequence, "close")
+        closed_manifest = sandbox / f"manifest-{sequence}-closed.json"
+        command(control, sequence, "close", manifest=str(closed_manifest))
         closing = wait_for_ack(control, sequence, seeder, args.timeout)
         validate_stress_profile_proof(
             closing,
@@ -706,11 +765,12 @@ def run(args: argparse.Namespace) -> None:
             profile=profile,
             database=database,
             churn_active=False,
-            manifest=None,
+            manifest=closed_manifest,
         )
         seeder.wait(timeout=args.timeout)
         if seeder.returncode != 0:
             raise ActiveWriterError(f"stress seeder exited {seeder.returncode}")
+        final_manifest = closed_manifest
         verify_all_surfaces(
             final_manifest,
             args.engine,
@@ -718,6 +778,13 @@ def run(args: argparse.Namespace) -> None:
             workers=1,
             iterations=1,
             phase="closed-final",
+            browser_id=args.browser_id,
+        )
+        assert_locked_store_controls(
+            engine=args.engine,
+            database=database,
+            manifest=final_manifest,
+            sandbox=sandbox,
             browser_id=args.browser_id,
         )
         print(

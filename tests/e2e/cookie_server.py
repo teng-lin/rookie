@@ -89,20 +89,21 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def cookie_headers(path: str) -> list[str]:
+        route = urlsplit(path).path
         attributes = "Path=/; Max-Age=3600; SameSite=Lax"
-        if path.startswith("/active-writer/baseline"):
+        if route == "/active-writer/baseline":
             return [
                 f"rookie_ci=before; {attributes}",
                 f"rookie_remove=present; {attributes}",
                 "rookie_added=; Path=/; Max-Age=0; SameSite=Lax",
             ]
-        if path.startswith("/active-writer/mutate"):
+        if route == "/active-writer/mutate":
             return [
                 f"rookie_ci=after; {attributes}",
                 f"rookie_added=present; {attributes}",
                 "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
             ]
-        if path.startswith("/active-writer/churn"):
+        if route == "/active-writer/churn":
             query = parse_qs(urlsplit(path).query)
             try:
                 expiry = int(query.get("expiry", [""])[0])
@@ -112,13 +113,16 @@ class Handler(BaseHTTPRequestHandler):
             return [
                 f"rookie_ci=after; {fixed}",
                 f"rookie_added=present; {fixed}",
-                "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
             ]
 
-        headers = [f"rookie_ci=bar; {attributes}"]
-        if path.startswith("/wal"):
-            headers.append(f"rookie_wal=live; {attributes}")
-        return headers
+        if route == "/set":
+            return [f"rookie_ci=bar; {attributes}"]
+        if route == "/wal":
+            return [
+                f"rookie_ci=bar; {attributes}",
+                f"rookie_wal=live; {attributes}",
+            ]
+        return []
 
     def do_GET(self) -> None:
         request_log = os.environ.get("ROOKIE_E2E_REQUEST_LOG")
@@ -127,8 +131,9 @@ class Handler(BaseHTTPRequestHandler):
                 log.write(f"{self.path}\n")
 
         self.send_response(200)
+        is_corpus_route = urlsplit(self.path).path.startswith("/corpus/")
         corpus_cookie_headers = corpus_headers(self.path, self.headers.get("Host", ""))
-        if corpus_cookie_headers:
+        if is_corpus_route:
             for header in corpus_cookie_headers:
                 self.send_header("Set-Cookie", header)
         else:

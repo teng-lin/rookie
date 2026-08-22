@@ -100,10 +100,13 @@ def send_command(control_dir: Path, sequence: int, action: str) -> None:
     )
 
 
-def expected_database(engine: str, profile: Path) -> Path:
+def expected_databases(engine: str, profile: Path) -> tuple[Path, ...]:
     if engine == "chromium":
-        return profile / "Default" / "Network" / "Cookies"
-    return profile / "cookies.sqlite"
+        return (
+            profile / "Default" / "Network" / "Cookies",
+            profile / "Default" / "Cookies",
+        )
+    return (profile / "cookies.sqlite",)
 
 
 def process_is_alive(pid: int) -> bool:
@@ -144,10 +147,13 @@ def validate_profile_proof(
             f"seeder profile mismatch: {acknowledged_profile} != {resolved_profile}"
         )
     database = Path(str(ack.get("databasePath"))).resolve(strict=True)
-    expected = expected_database(engine, resolved_profile).resolve(strict=True)
-    if database != expected:
+    expected = tuple(
+        candidate.resolve(strict=False)
+        for candidate in expected_databases(engine, resolved_profile)
+    )
+    if database not in expected:
         raise ActiveWriterError(
-            f"seeder database mismatch: {database} != active profile DB {expected}"
+            f"seeder database mismatch: {database} not in active profile DBs {expected}"
         )
     try:
         database.relative_to(resolved_profile)
@@ -227,16 +233,41 @@ def database_metadata(
         except sqlite3.Error as error:
             last_error = error
             if time.monotonic() >= deadline:
+                if "locked" in str(error).lower():
+                    return locked_database_header_metadata(database, engine)
                 raise ActiveWriterError(
                     f"could not inspect active database metadata: {last_error}"
                 ) from error
             time.sleep(0.1)
     return {
+        "metadataSource": "sqlite-pragma",
         "journalMode": journal_mode,
         "sqliteSchemaVersion": schema_version,
         "sqliteUserVersion": user_version,
         "browserSchemaVersion": browser_schema_version,
         "walPresent": Path(f"{database}-wal").is_file(),
+        "journalPresent": Path(f"{database}-journal").is_file(),
+        "sharedMemoryPresent": Path(f"{database}-shm").is_file(),
+    }
+
+
+def locked_database_header_metadata(database: Path, engine: str) -> dict[str, Any]:
+    """Read non-secret SQLite header metadata without taking a database lock."""
+
+    with database.open("rb") as stream:
+        header = stream.read(100)
+    if len(header) != 100 or not header.startswith(b"SQLite format 3\x00"):
+        raise ActiveWriterError("locked active database lacked a valid SQLite header")
+    sqlite_schema_version = int.from_bytes(header[40:44], "big")
+    sqlite_user_version = int.from_bytes(header[60:64], "big")
+    wal_present = Path(f"{database}-wal").is_file()
+    return {
+        "metadataSource": "sqlite-header-while-locked",
+        "journalMode": "wal" if header[18] == 2 or wal_present else "rollback",
+        "sqliteSchemaVersion": sqlite_schema_version,
+        "sqliteUserVersion": sqlite_user_version,
+        "browserSchemaVersion": sqlite_user_version if engine == "firefox" else None,
+        "walPresent": wal_present,
         "journalPresent": Path(f"{database}-journal").is_file(),
         "sharedMemoryPresent": Path(f"{database}-shm").is_file(),
     }
@@ -248,6 +279,8 @@ def wait_for_storage_names(
     required: dict[str, str],
     forbidden: list[str],
     timeout: float,
+    *,
+    allow_locked_after: float | None = None,
 ) -> None:
     table = "cookies" if engine == "chromium" else "moz_cookies"
     expected_names = set(required)
@@ -256,7 +289,7 @@ def wait_for_storage_names(
     while time.monotonic() < deadline:
         try:
             uri = f"{database.resolve().as_uri()}?mode=ro"
-            connection = sqlite3.connect(uri, uri=True, timeout=1)
+            connection = sqlite3.connect(uri, uri=True, timeout=0.05)
             try:
                 rows = connection.execute(
                     f"select name from {table} where name in ({','.join('?' for _ in expected_names | set(forbidden))})",
@@ -271,6 +304,25 @@ def wait_for_storage_names(
                 return
         except sqlite3.Error as error:
             last_error = error
+            if (
+                allow_locked_after is not None
+                and "locked" in str(error).lower()
+                and time.monotonic() >= deadline - timeout + allow_locked_after
+            ):
+                print(
+                    "ACTIVE_WRITER_RAW_STORE "
+                    + json.dumps(
+                        {
+                            "database": str(database),
+                            "engine": engine,
+                            "state": "browser-locked",
+                            "browser_probe_authoritative": True,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return
         time.sleep(0.2)
     detail = f"; last SQLite error: {last_error}" if last_error else ""
     raise ActiveWriterError(
@@ -627,6 +679,7 @@ def run(args: argparse.Namespace) -> None:
             BASELINE_REQUIRED,
             BASELINE_FORBIDDEN,
             args.timeout,
+            allow_locked_after=1.0 if args.engine == "firefox" else None,
         )
         log_checkpoint("open-baseline", ready, database, args.engine, seeder)
         if args.engine == "chromium" and sys.platform == "win32":
@@ -671,6 +724,7 @@ def run(args: argparse.Namespace) -> None:
             MUTATED_REQUIRED,
             MUTATED_FORBIDDEN,
             args.timeout,
+            allow_locked_after=1.0 if args.engine == "firefox" else None,
         )
         log_checkpoint("open-mutated", mutated, database, args.engine, seeder)
         run_surface_assertions(
