@@ -393,8 +393,8 @@ def generate_trusted_safari_certificate(
     extensions.write_text(
         "[server]\n"
         "subjectAltName=IP:127.0.0.1,DNS:localhost\n"
-        "basicConstraints=critical,CA:FALSE\n"
-        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "basicConstraints=CA:FALSE\n"
+        "keyUsage=digitalSignature,keyEncipherment\n"
         "extendedKeyUsage=serverAuth\n",
         encoding="utf-8",
     )
@@ -413,9 +413,9 @@ def generate_trusted_safari_certificate(
                 "-subj",
                 "/CN=Rookie E2E Local CA",
                 "-addext",
-                "basicConstraints=critical,CA:TRUE",
+                "basicConstraints=CA:TRUE",
                 "-addext",
-                "keyUsage=critical,keyCertSign,cRLSign",
+                "keyUsage=keyCertSign,cRLSign",
                 "-keyout",
                 str(authority_key),
                 "-out",
@@ -663,10 +663,10 @@ def chromium_automation_user_data(
     """Select a fresh browser-launch root without weakening discovery checks."""
 
     # Chromium 136+ products may suppress remote debugging when --user-data-dir
-    # names their computed default root. Windows Yandex enforces that boundary;
-    # launch it in the separately supplied disposable scratch root, then stage
-    # the stopped browser output into the equally disposable registry root.
-    if browser == "yandex" and platform == "windows":
+    # names their computed default root. Linux Edge and Windows Yandex enforce
+    # that boundary; launch them in the separately supplied disposable scratch
+    # root, then stage stopped output into the disposable registry root.
+    if (browser, platform) in {("edge", "linux"), ("yandex", "windows")}:
         return requested
     return registry_root
 

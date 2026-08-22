@@ -133,6 +133,18 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             registry,
         )
 
+    def test_linux_edge_uses_a_non_default_disposable_launch_root(self) -> None:
+        requested = Path("/tmp/rookie-ci/edge")
+        registry = Path("/tmp/sandbox/home/.config/microsoft-edge")
+        self.assertEqual(
+            hosted.chromium_automation_user_data("edge", "linux", requested, registry),
+            requested,
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data("edge", "macos", requested, registry),
+            registry,
+        )
+
     def test_stopped_automation_profile_is_staged_into_empty_registry_root(
         self,
     ) -> None:
@@ -614,6 +626,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         sign_command = run.call_args_list[2].args[0]
         self.assertEqual(sign_command[0:3], ["/opt/openssl", "x509", "-req"])
         self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", extensions)
+        self.assertNotIn("critical", extensions)
+        self.assertNotIn("critical", openssl_command)
         trust_command = run.call_args_list[3].args[0]
         self.assertEqual(
             trust_command[:5],
