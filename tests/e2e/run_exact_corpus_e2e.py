@@ -152,7 +152,9 @@ def stage_discovered_profile(
     root = resolve_registry_root(root_spec["template"], environment)
     if engine == "chromium":
         root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, root)
+        shutil.copytree(
+            source, root, symlinks=True, ignore_dangling_symlinks=True
+        )
         staged_profile = root
         locator = Path("Default")
     else:
@@ -165,6 +167,8 @@ def stage_discovered_profile(
         shutil.copytree(
             source,
             staged_profile,
+            symlinks=True,
+            ignore_dangling_symlinks=True,
             ignore=shutil.ignore_patterns("lock", ".parentlock", "parent.lock"),
         )
         (root / "profiles.ini").write_text(

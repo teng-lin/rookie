@@ -106,6 +106,10 @@ def run_isolated(
             try:
                 security("delete-keychain", keychain)
             except subprocess.CalledProcessError:
+                if restore_error is not None:
+                    raise EphemeralKeychainError(
+                        "failed to restore the original macOS user keychain search list"
+                    ) from restore_error
                 if Path(keychain).exists():
                     raise
             if restore_error is not None:

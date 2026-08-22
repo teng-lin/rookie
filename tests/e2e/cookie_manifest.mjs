@@ -3,7 +3,7 @@
 // shared native projection bug from becoming its own expected value.
 
 import { existsSync } from "node:fs";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -29,14 +29,14 @@ export function findManifest(profileOrDb, expectedName = "rookie_ci") {
     return process.env.ROOKIE_E2E_COOKIE_MANIFEST;
   }
   if (!profileOrDb || expectedName !== "rookie_ci") return null;
-  let current = profileOrDb;
+  let current = resolve(profileOrDb);
   if (!existsSync(join(current, MANIFEST_FILENAME))) current = dirname(current);
-  const root = parse(current).root;
   while (true) {
     const candidate = join(current, MANIFEST_FILENAME);
     if (existsSync(candidate)) return candidate;
-    if (current === root) return null;
-    current = dirname(current);
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
   }
 }
 

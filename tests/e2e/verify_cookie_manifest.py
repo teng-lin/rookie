@@ -25,7 +25,7 @@ def main() -> int:
             actual,
             surface=args.surface,
         )
-    except (ManifestError, json.JSONDecodeError) as error:
+    except (ManifestError, OSError, json.JSONDecodeError) as error:
         print(f"cookie manifest verification failed: {error}", file=sys.stderr)
         return 1
     print(f"{args.surface}: exact {args.projection} verified ({count} rows)")

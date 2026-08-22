@@ -87,7 +87,7 @@ class CookieStressRunnerTests(unittest.TestCase):
             workers=4,
             iterations=3,
         )
-        self.assertEqual(run.call_count, 12)
+        self.assertEqual(len(run.call_args_list), 12)
         self.assertEqual(result["runs"], 12)
         self.assertEqual(result["rows_per_run"], 1)
 

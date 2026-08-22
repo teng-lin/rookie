@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { recordsForVerifier } from "./cookie_manifest.mjs";
+import { findManifest, recordsForVerifier } from "./cookie_manifest.mjs";
 
 test("Node session cookies normalize optional expiry to semantic null", () => {
   const flat = { domain: "example.test", name: "session" };
@@ -27,4 +27,11 @@ test("defined expiry and unrelated shape remain unchanged", () => {
   ]);
   assert.equal(normalized[0], persistent);
   assert.equal(normalized[1], malformed);
+});
+
+test("manifest discovery terminates for relative paths", () => {
+  assert.equal(
+    findManifest("tests/e2e/nonexistent-profile/Default/Cookies"),
+    null,
+  );
 });

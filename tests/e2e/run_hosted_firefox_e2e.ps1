@@ -2,19 +2,19 @@
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 
-$profile = $env:ROOKIE_E2E_FIREFOX_PROFILE
-if (-not $profile) { throw "ROOKIE_E2E_FIREFOX_PROFILE must be set" }
-New-Item -ItemType Directory -Force -Path $profile | Out-Null
+$firefoxProfile = $env:ROOKIE_E2E_FIREFOX_PROFILE
+if (-not $firefoxProfile) { throw "ROOKIE_E2E_FIREFOX_PROFILE must be set" }
+New-Item -ItemType Directory -Force -Path $firefoxProfile | Out-Null
 
 & .\.venv\Scripts\python.exe tests/e2e/run_exact_corpus_e2e.py `
     --engine firefox `
-    --profile $profile `
+    --profile $firefoxProfile `
     --browser-id "firefox"
 if ($LASTEXITCODE -ne 0) { throw "Firefox exact-corpus E2E failed" }
 
 & .\.venv\Scripts\python.exe tests/e2e/run_active_writer_e2e.py `
     --engine firefox `
-    --profile "${profile}-active-writer" `
+    --profile "${firefoxProfile}-active-writer" `
     --browser-id "firefox"
 if ($LASTEXITCODE -ne 0) { throw "Firefox active-writer E2E failed" }
 

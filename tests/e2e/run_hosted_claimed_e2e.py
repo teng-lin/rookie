@@ -29,6 +29,7 @@ from urllib.request import urlopen
 
 from browser_coverage_contract import assert_observed_depth, coverage_row, load_coverage
 from run_exact_corpus_e2e import digest_fields, normalized_path_bytes
+from run_partition_context_e2e import _firefox_expiry
 from webdriver_cookie import (
     WebDriverError,
     file_snapshot,
@@ -584,6 +585,7 @@ def write_live_smoke_manifest(engine: str, profile: Path, database: Path) -> Pat
         columns = {
             str(row[1]) for row in connection.execute(f"pragma table_info({table})")
         }
+        schema_version = int(connection.execute("pragma user_version").fetchone()[0])
         rows = connection.execute(f"select * from {table}").fetchall()
     finally:
         connection.close()
@@ -643,7 +645,7 @@ def write_live_smoke_manifest(engine: str, profile: Path, database: Path) -> Pat
             "domain": str(row["host"]),
             "path": str(row["path"]),
             "secure": bool(row["isSecure"]),
-            "expires": int(row["expiry"]),
+            "expires": _firefox_expiry(row["expiry"], schema_version),
             "name": "rookie_ci",
             "value": "bar",
             "http_only": bool(row["isHttpOnly"]),

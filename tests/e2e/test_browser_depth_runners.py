@@ -77,7 +77,7 @@ class IsolatedBrowserRunnerTests(unittest.TestCase):
             self.assertTrue(profiles_ini.is_file())
             self.assertTrue(profile.is_relative_to(Path(environment["HOME"])))
             self.assertEqual(environment["ROOKIE_E2E_BROWSER_PATH"], str(executable))
-            if sys.platform == "darwin":
+            if sys.platform == "linux":
                 self.assertNotIn("snap/firefox", str(profile))
 
     def test_partition_oracle_normalizes_firefox_schema_16_milliseconds(self) -> None:
@@ -205,6 +205,7 @@ class IsolatedBrowserRunnerTests(unittest.TestCase):
             initial = raw_write_generation(database, "firefox")
             wal = Path(f"{database}-wal")
             wal.write_bytes(b"browser write")
+            os.utime(wal, ns=(initial + 1_000_000_000, initial + 1_000_000_000))
             self.assertGreater(raw_write_generation(database, "firefox"), initial)
 
     def test_firefox_stress_accepts_only_a_genuine_live_sqlite_lock(self) -> None:
@@ -248,10 +249,17 @@ class IsolatedBrowserRunnerTests(unittest.TestCase):
             database.parent.mkdir(parents=True)
             database.touch()
             (source / "Local State").write_text("{}", encoding="utf-8")
+            lock = source / "SingletonLock"
+            try:
+                lock.symlink_to("missing-browser-process")
+            except OSError:
+                lock = None
             staged, environment, profile_id = stage_discovered_profile(
                 "chromium", "chrome", source
             )
             self.assertTrue((staged / "Default/Network/Cookies").is_file())
+            if lock is not None:
+                self.assertTrue((staged / "SingletonLock").is_symlink())
             self.assertTrue(staged.is_relative_to(Path(environment["HOME"])))
             self.assertEqual(len(profile_id), 64)
             self.assertTrue(

@@ -42,7 +42,7 @@ fn extracts_seeded_native_cookie() {
       )
     });
   assert_eq!(seeded.value, expected_value, "cookie value mismatch");
-  assert_eq!(seeded.domain, "127.0.0.1", "native domain mismatch");
+  assert_eq!(seeded.domain, domain, "native domain mismatch");
   assert_eq!(seeded.path, "/", "native path mismatch");
   assert!(!seeded.secure, "native cookie unexpectedly became Secure");
   assert!(

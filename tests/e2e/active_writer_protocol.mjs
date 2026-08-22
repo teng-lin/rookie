@@ -68,15 +68,6 @@ export function processIdsForProfile(profileDir) {
   }
 }
 
-async function waitForFile(path, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(path)) return;
-    await delay(100);
-  }
-  throw new Error(`timed out waiting for ${path}`);
-}
-
 async function waitForAnyFile(paths, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -87,9 +78,16 @@ async function waitForAnyFile(paths, timeoutMs) {
   throw new Error(`timed out waiting for one of: ${paths.join(", ")}`);
 }
 
-async function waitForCommand(controlDir, sequence, timeoutMs) {
+async function waitForCommand(controlDir, sequence, timeoutMs, aborted) {
   const path = join(controlDir, `command-${sequence}.json`);
-  await waitForFile(path, timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    const abortError = aborted?.();
+    if (abortError !== undefined) throw abortError;
+    if (Date.now() >= deadline)
+      throw new Error(`timed out waiting for ${path}`);
+    await delay(100);
+  }
   const command = JSON.parse(readFileSync(path, "utf8"));
   if (command.sequence !== sequence) {
     throw new Error(
@@ -240,14 +238,32 @@ export async function runActiveWriterProtocol({
     churnUrl.searchParams.set("expiry", String(stableExpiry));
     let keepChurning = true;
     let churnRequests = 0;
+    let churnError;
     const churnPromise = (async () => {
       while (keepChurning) {
         await churnPage.goto(churnUrl.href, { waitUntil: "commit" });
         churnRequests += 1;
         await delay(20);
       }
-    })();
-    while (churnRequests < 2) await delay(10);
+    })().catch((error) => {
+      churnError = error;
+      keepChurning = false;
+    });
+    const churnDeadline = Date.now() + commandTimeoutMs;
+    while (churnRequests < 2 && churnError === undefined) {
+      if (Date.now() >= churnDeadline) {
+        keepChurning = false;
+        await churnPage.close();
+        await churnPromise;
+        throw new Error("timed out warming active-writer churn");
+      }
+      await delay(10);
+    }
+    if (churnError !== undefined) {
+      await churnPromise;
+      await churnPage.close();
+      throw churnError;
+    }
     atomicWriteJson(
       join(controlDir, "ack-1.json"),
       ackPayload({
@@ -265,13 +281,24 @@ export async function runActiveWriterProtocol({
       }),
     );
 
-    const probeCommand = await waitForCommand(controlDir, 2, commandTimeoutMs);
-    if (probeCommand.action !== "probe") {
-      throw new Error(`expected probe command, got ${probeCommand.action}`);
+    let probeCommand;
+    try {
+      probeCommand = await waitForCommand(
+        controlDir,
+        2,
+        commandTimeoutMs,
+        () => churnError,
+      );
+      if (probeCommand.action !== "probe") {
+        throw new Error(`expected probe command, got ${probeCommand.action}`);
+      }
+    } finally {
+      keepChurning = false;
+      if (probeCommand === undefined) await churnPage.close();
+      await churnPromise;
+      if (probeCommand !== undefined) await churnPage.close();
     }
-    keepChurning = false;
-    await churnPromise;
-    await churnPage.close();
+    if (churnError !== undefined) throw churnError;
     const probeLiveness = await probe(
       context,
       page,

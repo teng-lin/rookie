@@ -220,6 +220,7 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
   let profile_dir =
     env::var("ROOKIE_E2E_FIREFOX_PROFILE").expect("ROOKIE_E2E_FIREFOX_PROFILE must be set");
   let browser_id = env::var("ROOKIE_E2E_BROWSER_ID").unwrap_or_else(|_| "firefox".to_owned());
+  let domain = env::var("ROOKIE_E2E_DOMAIN").unwrap_or_else(|_| "127.0.0.1".to_owned());
   let expected_name = env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_owned());
   let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_owned());
   let db_path = PathBuf::from(&profile_dir).join("cookies.sqlite");
@@ -244,11 +245,7 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
       &expected_name,
     );
   } else {
-    state::assert(
-      direct.cookies(),
-      "unfiltered",
-      "Rust Firefox from_path cookies",
-    );
+    state::assert(direct.cookies(), &domain, "Rust Firefox from_path cookies");
     let detailed_cookies: Vec<_> = direct
       .detailed_cookies()
       .iter()
@@ -256,7 +253,7 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
       .collect();
     state::assert(
       &detailed_cookies,
-      "unfiltered",
+      &domain,
       "Rust Firefox from_path detailed_cookies",
     );
   }
@@ -325,7 +322,7 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
   } else {
     state::assert(
       snapshot.cookies(),
-      "unfiltered",
+      &domain,
       "Rust Firefox recommended read cookies",
     );
     let detailed_cookies: Vec<_> = snapshot
@@ -335,7 +332,7 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
       .collect();
     state::assert(
       &detailed_cookies,
-      "unfiltered",
+      &domain,
       "Rust Firefox recommended read detailed_cookies",
     );
   }

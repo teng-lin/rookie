@@ -231,6 +231,7 @@ async function startWriteChurn(context, manifest) {
   const churnPage = await context.newPage();
   let active = true;
   let requests = 0;
+  let churnError;
   const work = (async () => {
     while (active) {
       for (const state of states) {
@@ -245,14 +246,31 @@ async function startWriteChurn(context, manifest) {
         requests += 1;
       }
     }
-  })();
-  while (requests < states.length) await delay(10);
+  })().catch((error) => {
+    churnError = error;
+    active = false;
+  });
+  const warmupDeadline = Date.now() + timeout;
+  while (requests < states.length && churnError === undefined) {
+    if (Date.now() >= warmupDeadline) {
+      active = false;
+      await churnPage.close();
+      await work;
+      throw new Error("timed out warming stress-cookie write churn");
+    }
+    await delay(10);
+  }
+  if (churnError !== undefined) {
+    await churnPage.close();
+    throw churnError;
+  }
   return {
     proof: () => ({ active, requests }),
     stop: async () => {
       active = false;
       await work;
       await churnPage.close();
+      if (churnError !== undefined) throw churnError;
       return { active: false, requests };
     },
   };

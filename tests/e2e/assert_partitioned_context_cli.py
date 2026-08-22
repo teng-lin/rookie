@@ -66,11 +66,15 @@ class CliSnapshot:
         )
         if completed.returncode != 0:
             details = completed.stderr.strip() or completed.stdout.strip()
-            code = (
-                "incomplete_send_context"
-                if "top_level_site" in details or "top-level site" in details
-                else None
-            )
+            code = None
+            for line in reversed(details.splitlines()):
+                try:
+                    error = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(error, dict) and isinstance(error.get("code"), str):
+                    code = error["code"]
+                    break
             raise CliHeaderError(details, code)
         return completed.stdout.strip()
 
@@ -129,6 +133,7 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     except (
         ContextAssertionError,
+        CliHeaderError,
         json.JSONDecodeError,
         OSError,
         subprocess.CalledProcessError,

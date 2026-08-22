@@ -123,7 +123,7 @@ if (
   console.error("fromPath.detailedCookies omitted the seeded cookie");
   process.exit(1);
 }
-results.push(["fromPath.detailedCookies", directSnapshot.cookies, "unfiltered_flat"]);
+results.push(["fromPath.cookies", directSnapshot.cookies, "unfiltered_flat"]);
 
 results = results.map(([surface, cookies, projection]) => [
   surface,
@@ -160,8 +160,15 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
 if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
   const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome";
   const profiles = await rookieCookies.profiles(browserId);
+  const expectedDatabase = realpathSync(dbPath);
   const matchingProfiles = profiles.filter(({ sources }) =>
-    sources.some(({ path }) => realpathSync(path) === realpathSync(dbPath)),
+    sources.some(({ path }) => {
+      try {
+        return realpathSync(path) === expectedDatabase;
+      } catch {
+        return false;
+      }
+    }),
   );
   if (matchingProfiles.length !== 1) {
     console.error(
@@ -171,7 +178,9 @@ if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
   }
   const identity = matchingProfiles[0].profile;
   if (identity.browserId !== browserId) {
-    console.error(`discovery returned wrong browser identity: ${JSON.stringify(identity)}`);
+    console.error(
+      `discovery returned wrong browser identity: ${JSON.stringify(identity)}`,
+    );
     process.exit(1);
   }
   const expectedProfileId = process.env.ROOKIE_E2E_EXPECTED_PROFILE_ID;
@@ -190,7 +199,9 @@ if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
     recommendedSnapshot.browserId !== browserId ||
     recommendedSnapshot.profileId !== identity.profileId
   ) {
-    console.error("recommended read returned the wrong browser/profile identity");
+    console.error(
+      "recommended read returned the wrong browser/profile identity",
+    );
     process.exit(1);
   }
   if (
@@ -210,25 +221,22 @@ if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
   ]);
 }
 
-for (const [surface, result, projection, surfaceName, surfaceValue] of results) {
+for (const [
+  surface,
+  result,
+  projection,
+  surfaceName,
+  surfaceValue,
+] of results) {
   if (manifestPath) {
-    verifyCookieRecords(
-      manifestPath,
-      projection,
-      result,
-      `Node ${surface}`,
-    );
+    verifyCookieRecords(manifestPath, projection, result, `Node ${surface}`);
     continue;
   }
   const { required, forbidden } = stateFromEnvironment(
     surfaceName,
     surfaceValue,
   );
-  if (process.env.ROOKIE_E2E_REQUIRED_COOKIES_JSON) {
-    assertCookieState(result, required, forbidden, surface);
-  } else {
-    assertCookieState(result, { [surfaceName]: surfaceValue }, [], surface);
-  }
+  assertCookieState(result, required, forbidden, surface);
 }
 
 if (manifestPath) {

@@ -33,6 +33,30 @@ FIREFOX_CONTAINER_EXTENSION = Path(__file__).with_name("firefox_container_extens
 FIREFOX_CONTAINER_NAME = "rookie-e2e-container"
 
 
+def container_cookie_present(database: Path) -> bool:
+    """Return whether Firefox has committed the container seed to its store."""
+
+    if not database.is_file():
+        return False
+    try:
+        connection = sqlite3.connect(
+            database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0
+        )
+    except sqlite3.Error:
+        return False
+    try:
+        return (
+            connection.execute(
+                "select 1 from moz_cookies where name = 'rookie_container' limit 1"
+            ).fetchone()
+            is not None
+        )
+    except sqlite3.Error:
+        return False
+    finally:
+        connection.close()
+
+
 def seed_container_with_web_ext(
     profile: Path,
     environment: dict[str, str],
@@ -91,14 +115,13 @@ def seed_container_with_web_ext(
                 )
             except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
                 observed = False
-            if observed:
-                # The extension awaits contextualIdentities.create before
-                # cookies.set; allow the immediately following write to land.
-                time.sleep(2)
+            if observed and container_cookie_present(profile / "cookies.sqlite"):
                 break
             time.sleep(0.1)
         if not observed:
             raise ActiveWriterError("Firefox did not create the disposable container")
+        if not container_cookie_present(profile / "cookies.sqlite"):
+            raise ActiveWriterError("Firefox container cookie never reached the store")
     finally:
         if process.poll() is None:
             process.terminate()

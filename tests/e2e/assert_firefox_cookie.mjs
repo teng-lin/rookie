@@ -150,8 +150,15 @@ let recommendedSnapshot;
 if (recommendedChecked) {
   const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "firefox";
   const profiles = await rookieCookies.profiles(browserId);
+  const expectedDatabase = realpathSync(dbPath);
   const matchingProfiles = profiles.filter(({ sources }) =>
-    sources.some(({ path }) => realpathSync(path) === realpathSync(dbPath)),
+    sources.some(({ path }) => {
+      try {
+        return realpathSync(path) === expectedDatabase;
+      } catch {
+        return false;
+      }
+    }),
   );
   if (matchingProfiles.length !== 1) {
     console.error(
@@ -175,7 +182,9 @@ if (recommendedChecked) {
     recommendedSnapshot.browserId !== browserId ||
     recommendedSnapshot.profileId !== identity.profileId
   ) {
-    console.error("recommended read returned the wrong browser/profile identity");
+    console.error(
+      "recommended read returned the wrong browser/profile identity",
+    );
     process.exit(1);
   }
   const recommended = recommendedSnapshot.detailedCookies.find(

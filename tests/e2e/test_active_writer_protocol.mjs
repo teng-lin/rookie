@@ -35,6 +35,7 @@ function writeCommand(control, sequence, action) {
 
 test("ready/hold/mutate/probe/close protocol keeps an owned context live", async () => {
   const root = mkdtempSync(join(tmpdir(), "rookie-active-writer-js-"));
+  process.env.ROOKIE_E2E_ACTIVE_WRITER_TIMEOUT_MS = "1500";
   try {
     const profile = join(root, "profile");
     const database = join(profile, "cookies.sqlite");
@@ -96,6 +97,10 @@ test("ready/hold/mutate/probe/close protocol keeps an owned context live", async
       profileDir: profile,
       databasePath: database,
     });
+    const settled = protocol.then(
+      () => null,
+      (error) => error,
+    );
     assert.equal((await waitFor(join(control, "ack-0.json"))).phase, "ready");
     assert.equal(closed, false);
     writeCommand(control, 1, "mutate");
@@ -106,9 +111,81 @@ test("ready/hold/mutate/probe/close protocol keeps an owned context live", async
     assert.equal(closed, false);
     writeCommand(control, 3, "close");
     assert.equal((await waitFor(join(control, "ack-3.json"))).phase, "closed");
-    await protocol;
+    assert.equal(await settled, null);
     assert.equal(closed, true);
   } finally {
+    delete process.env.ROOKIE_E2E_ACTIVE_WRITER_TIMEOUT_MS;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("churn failure is reported without waiting for the command timeout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rookie-active-writer-failure-js-"));
+  process.env.ROOKIE_E2E_ACTIVE_WRITER_TIMEOUT_MS = "1500";
+  try {
+    const profile = join(root, "profile");
+    const database = join(profile, "cookies.sqlite");
+    const control = join(root, "control");
+    mkdirSync(profile);
+    writeFileSync(database, "synthetic sqlite placeholder");
+    const state = new Map();
+    const page = {
+      async goto(url) {
+        if (url.includes("baseline")) {
+          state.set("rookie_ci", "before");
+          state.set("rookie_remove", "present");
+        } else if (url.includes("mutate")) {
+          state.set("rookie_ci", "after");
+          state.set("rookie_added", "present");
+          state.delete("rookie_remove");
+        }
+      },
+      async evaluate(callback) {
+        return callback.toString().includes("navigator.userAgent")
+          ? "SyntheticBrowser/1"
+          : "complete";
+      },
+    };
+    const context = {
+      browser: () => ({ version: () => "1.0" }),
+      cookies: async () =>
+        [...state].map(([name, value]) => ({
+          name,
+          value,
+          expires: 4_102_444_800,
+        })),
+      async clearCookies({ name }) {
+        state.delete(name);
+      },
+      async newPage() {
+        return {
+          async goto() {
+            throw new Error("synthetic churn failure");
+          },
+          async close() {},
+        };
+      },
+    };
+
+    const settled = runActiveWriterProtocol({
+      context,
+      page,
+      controlDir: control,
+      baselineUrl: "http://127.0.0.1:9999/active-writer/baseline",
+      engine: "firefox",
+      profileDir: profile,
+      databasePath: database,
+    }).then(
+      () => null,
+      (error) => error,
+    );
+    await waitFor(join(control, "ack-0.json"));
+    writeCommand(control, 1, "mutate");
+    const reported = await waitFor(join(control, "error.json"));
+    assert.match(reported.message, /synthetic churn failure/);
+    assert.match(String(await settled), /synthetic churn failure/);
+  } finally {
+    delete process.env.ROOKIE_E2E_ACTIVE_WRITER_TIMEOUT_MS;
     rmSync(root, { recursive: true, force: true });
   }
 });

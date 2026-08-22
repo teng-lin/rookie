@@ -13,16 +13,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=("chromium", "firefox"), required=True)
     parser.add_argument("--database", required=True)
-    parser.add_argument("--browser-id", default="chromium")
-    parser.add_argument("--local-state-path")
+    credential = parser.add_mutually_exclusive_group()
+    credential.add_argument("--browser-id")
+    credential.add_argument("--local-state-path")
     parser.add_argument(
         "--projection", choices=("unfiltered_flat", "detailed"), required=True
     )
     args = parser.parse_args()
     if args.engine == "chromium":
-        options = {"browser_id": args.browser_id}
-        if args.local_state_path:
-            options = {"local_state_path": args.local_state_path}
+        options = (
+            {"local_state_path": args.local_state_path}
+            if args.local_state_path
+            else {"browser_id": args.browser_id or "chromium"}
+        )
         snapshot = rookie_cookies.from_path(args.database, **options)
     else:
         snapshot = rookie_cookies.from_path(args.database)

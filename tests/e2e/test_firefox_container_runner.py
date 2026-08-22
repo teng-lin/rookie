@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from run_active_writer_e2e import ActiveWriterError
-from run_firefox_container_e2e import write_container_manifest
+from run_firefox_container_e2e import container_cookie_present, write_container_manifest
 
 
 class FirefoxContainerRunnerTests(unittest.TestCase):
@@ -30,6 +30,14 @@ class FirefoxContainerRunnerTests(unittest.TestCase):
         connection.commit()
         connection.close()
         return database
+
+    def test_container_cookie_presence_handles_missing_and_committed_stores(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "cookies.sqlite"
+            self.assertFalse(container_cookie_present(database))
+            database = self.database(root, "^userContextId=7")
+            self.assertTrue(container_cookie_present(database))
 
     def test_raw_container_manifest_preserves_the_complete_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

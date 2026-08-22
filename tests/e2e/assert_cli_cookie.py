@@ -87,10 +87,10 @@ def assert_cli_cookie(
         if not detailed:
             command.extend(("--domains", domain))
         command.extend(("--format", "detailed" if detailed else "json"))
-    if key_path is not None:
-        command.extend(("--local-state-path", str(key_path)))
-    if browser_id is not None:
-        command.extend(("--browser-id", browser_id))
+        if key_path is not None:
+            command.extend(("--local-state-path", str(key_path)))
+        if browser_id is not None:
+            command.extend(("--browser-id", browser_id))
 
     environment = os.environ.copy()
     environment["RUST_LOG"] = "error"

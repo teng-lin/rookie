@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         emit_representative_depth(args.lane, args.capability, args.surface)
-    except (AssertionError, OSError, json.JSONDecodeError) as error:
+    except (AssertionError, KeyError, OSError, TypeError, json.JSONDecodeError) as error:
         print(f"browser depth receipt failed: {error}", file=sys.stderr)
         return 1
     return 0

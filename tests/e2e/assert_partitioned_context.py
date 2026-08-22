@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 from typing import Any, Protocol
 
-from cookie_manifest import load_manifest, verify_records
+from cookie_manifest import ManifestError, load_manifest, verify_records
 
 
 class ContextAssertionError(RuntimeError):
@@ -349,7 +349,7 @@ def main() -> int:
             print(encoded, end="")
         else:
             args.output.write_text(encoded, encoding="utf-8")
-    except (ContextAssertionError, OSError, ValueError) as error:
+    except (ContextAssertionError, ManifestError, OSError, ValueError) as error:
         print(f"partition context assertion failed: {error}", file=sys.stderr)
         return 1
     return 0

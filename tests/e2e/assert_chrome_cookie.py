@@ -53,6 +53,14 @@ def main() -> int:
     expected_value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
     manifest_path = find_manifest(user_data_dir, expected_name=expected_name)
     manifest = load_manifest(manifest_path) if manifest_path else None
+    state_configured = any(
+        name in os.environ
+        for name in (
+            "ROOKIE_E2E_REQUIRED_COOKIES_JSON",
+            "ROOKIE_E2E_FORBIDDEN_COOKIES_JSON",
+            "ROOKIE_E2E_EXACT_COOKIE_STATE",
+        )
+    )
     recommended_snapshot = None
 
     # The explicit allow_elevated_fallback is deliberate and is NOT what the
@@ -222,7 +230,7 @@ def main() -> int:
         )
 
     for surface, result, projection, surface_name, surface_value in results:
-        if manifest is not None:
+        if manifest is not None and not state_configured:
             verify_records(
                 manifest,
                 projection,
@@ -232,20 +240,12 @@ def main() -> int:
             continue
         try:
             required, forbidden = state_from_environment(surface_name, surface_value)
-            if os.environ.get("ROOKIE_E2E_REQUIRED_COOKIES_JSON"):
-                assert_cookie_state(result, required, forbidden, surface=surface)
-            else:
-                assert_cookie_state(
-                    result,
-                    {surface_name: surface_value},
-                    [],
-                    surface=surface,
-                )
+            assert_cookie_state(result, required, forbidden, surface=surface)
         except (AssertionError, ValueError) as error:
             print(error, file=sys.stderr)
             return 1
 
-    if manifest is not None:
+    if manifest is not None and not state_configured:
         verify_records(
             manifest,
             "detailed",

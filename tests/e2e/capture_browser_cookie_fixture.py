@@ -202,9 +202,10 @@ def actual_cookie_rows(
             f"Firefox cookies table is missing {sorted(required - columns)}"
         )
     origin = "originAttributes" if "originAttributes" in columns else "''"
+    origin_expression = quote_identifier(origin) if origin != "''" else origin
     query = (
         "SELECT rowid, host, path, name, "
-        f"COALESCE({quote_identifier(origin) if origin != "''" else origin}, '') "
+        f"COALESCE({origin_expression}, '') "
         "FROM moz_cookies"
     )
     result = []
@@ -276,7 +277,10 @@ def schema_signature(connection: sqlite3.Connection) -> dict[str, Any]:
 def verify_decoded_cookies(manifest_path: Path, decoded_path: Path) -> tuple[int, str]:
     """Require a public decoder's full detailed output to match the manifest."""
 
-    manifest = load_manifest(manifest_path)
+    try:
+        manifest = load_manifest(manifest_path)
+    except ManifestError as error:
+        raise CaptureError(str(error)) from error
     try:
         decoded = json.loads(decoded_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -458,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_representative_depth(
             "manual_fixture_capture", ("browser_launch", "detailed"), ()
         )
-    except (CaptureError, OSError, sqlite3.Error, ValueError) as error:
+    except (AssertionError, CaptureError, OSError, sqlite3.Error, ValueError) as error:
         print(f"browser fixture capture failed: {error}", file=sys.stderr)
         return 1
     return 0

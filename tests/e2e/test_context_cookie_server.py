@@ -92,6 +92,13 @@ class ContextCookieServerTests(unittest.TestCase):
             "top.rookie-a.test", "/top?third_origin=https://attacker.test:8766"
         )
         self.assertEqual(status, 400)
+        status, _, body = self.request(
+            "top.rookie-a.test",
+            f"/top?third_origin=https://{SERVER.ALLOWED_THIRD_HOST}:8766/"
+            "%22%3E%3Cscript%3Ealert(1)%3C/script%3E&engine=chromium",
+        )
+        self.assertEqual(status, 400)
+        self.assertNotIn("<script>alert(1)</script>", body)
         status, _, _ = self.request(
             "attacker.test", "/set-context?partition=a&engine=chromium"
         )

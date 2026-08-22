@@ -41,10 +41,10 @@ class ContextCookieServer(ThreadingHTTPServer):
 class ContextCookieHandler(BaseHTTPRequestHandler):
     server: ContextCookieServer
 
-    def log_message(self, format: str, *args: object) -> None:
+    def log_message(self, message_format: str, *args: object) -> None:
         if args and "/stress/churn?" in str(args[0]):
             return
-        print(f"context-cookie-server: {format % args}", file=sys.stderr)
+        print(f"context-cookie-server: {message_format % args}", file=sys.stderr)
 
     def host(self) -> str:
         return self.headers.get("Host", "").split(":", 1)[0].lower()
@@ -94,10 +94,25 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             third_origin = query.get("third_origin", [""])[0]
             engine = query.get("engine", [""])[0]
-            expected_prefix = f"https://{ALLOWED_THIRD_HOST}:"
-            if not third_origin.startswith(expected_prefix):
+            parsed_third = urlparse(third_origin)
+            try:
+                third_port = parsed_third.port
+            except ValueError:
+                third_port = None
+            if (
+                parsed_third.scheme != "https"
+                or parsed_third.hostname != ALLOWED_THIRD_HOST
+                or parsed_third.username is not None
+                or parsed_third.password is not None
+                or third_port is None
+                or parsed_third.path
+                or parsed_third.params
+                or parsed_third.query
+                or parsed_third.fragment
+            ):
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid third origin\n")
                 return
+            third_origin = f"https://{ALLOWED_THIRD_HOST}:{third_port}"
             if engine not in {"chromium", "firefox"}:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid browser engine\n")
                 return
