@@ -54,8 +54,9 @@ to a fresh GitHub-hosted account and refuses local execution. Its portable
 corpus uses a generated one-day TLS leaf pinned directly into admin trust on the
 disposable hosted VM; its private signing CA is neither trusted nor served. The
 leaf and hostname are checked through macOS Security.framework, and a pinned
-live TLS handshake checks the same certificate. All trust state disappears with
-the VM. This is required because Safari rejects
+live TLS handshake checks the same certificate. Both `127.0.0.1` and `localhost`
+SANs are verified before the cross-host corpus redirect. All trust state
+disappears with the VM. This is required because Safari rejects
 `Secure` cookies from loopback HTTP. Named-site behavior remains a separate
 depth axis: live CHIPS/dFPI and stress lanes use generated TLS certificates and local test
 domains, including exact `source_scheme`, source-port, ancestry, and partition

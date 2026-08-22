@@ -484,8 +484,6 @@ def generate_trusted_safari_certificate(
                 "trustAsRoot",
                 "-p",
                 "ssl",
-                "-s",
-                "127.0.0.1",
                 "-k",
                 "/Library/Keychains/System.keychain",
                 str(certificate),
@@ -496,27 +494,28 @@ def generate_trusted_safari_certificate(
             timeout=30,
         )
         # Safari consumes Security.framework trust, not curl's CA bundle.
-        # Validate the exact leaf and hostname against the same system
-        # Keychain Safari will use before attempting to open the application.
-        subprocess.run(
-            [
-                "/usr/bin/security",
-                "verify-cert",
-                "-c",
-                str(certificate),
-                "-p",
-                "ssl",
-                "-s",
-                "127.0.0.1",
-                "-k",
-                "/Library/Keychains/System.keychain",
-                "-L",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        # The corpus deliberately redirects between both SANs to prove domain
+        # filtering, so validate each hostname against Safari's system trust.
+        for hostname in ("127.0.0.1", "localhost"):
+            subprocess.run(
+                [
+                    "/usr/bin/security",
+                    "verify-cert",
+                    "-c",
+                    str(certificate),
+                    "-p",
+                    "ssl",
+                    "-s",
+                    hostname,
+                    "-k",
+                    "/Library/Keychains/System.keychain",
+                    "-L",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         details = (error.stderr or error.stdout or "").strip()
         if not details:

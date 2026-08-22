@@ -640,14 +640,20 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             "/Library/Keychains/System.keychain",
         )
         self.assertIn("trustAsRoot", trust_command)
+        self.assertNotIn("-s", trust_command)
         self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-localhost.pem"))
-        verify_command = run.call_args_list[4].args[0]
-        self.assertEqual(verify_command[:2], ["/usr/bin/security", "verify-cert"])
+        verify_commands = [call.args[0] for call in run.call_args_list[4:]]
         self.assertEqual(
-            verify_command[verify_command.index("-c") + 1],
-            str(scratch / "tls/rookie-localhost.pem"),
+            [command[command.index("-s") + 1] for command in verify_commands],
+            ["127.0.0.1", "localhost"],
         )
-        self.assertEqual(len(run.call_args_list), 5)
+        for command in verify_commands:
+            self.assertEqual(command[:2], ["/usr/bin/security", "verify-cert"])
+            self.assertEqual(
+                command[command.index("-c") + 1],
+                str(scratch / "tls/rookie-localhost.pem"),
+            )
+        self.assertEqual(len(run.call_args_list), 6)
 
     def test_safari_https_preflight_uses_generated_authority(self) -> None:
         certificate = Path("/tmp/rookie-localhost.pem")
