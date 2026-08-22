@@ -572,6 +572,8 @@ def install_winget(package_id: str) -> None:
         "-e",
         "--id",
         package_id,
+        "--source",
+        "winget",
         "--accept-package-agreements",
         "--accept-source-agreements",
         "--disable-interactivity",
