@@ -899,6 +899,40 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         )
 
 
+def seed_chromium_with_disposable_root_fallback(
+    exe: str,
+    browser: str,
+    platform: str,
+    requested_user_data: Path,
+    registry_user_data: Path,
+    url: str,
+) -> Path:
+    """Seed the first working bounded disposable launch root."""
+
+    candidates = chromium_automation_user_data_candidates(
+        browser, platform, requested_user_data, registry_user_data
+    )
+    for attempt, candidate in enumerate(candidates, start=1):
+        stage_chromium_user_data(candidate)
+        try:
+            seed_chromium_native(exe, candidate, url)
+        except (
+            SystemExit,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            if attempt == len(candidates):
+                raise
+            print(
+                f"native {browser} launch root {candidate} failed; "
+                f"retrying the other disposable root: {error}",
+                flush=True,
+            )
+        else:
+            return candidate
+    raise AssertionError("Chromium launch candidate loop returned without a result")
+
+
 def wait_for_gecko_database(profile: Path, timeout: float = 30) -> None:
     database = profile / "cookies.sqlite"
     deadline = time.time() + timeout
@@ -1534,25 +1568,14 @@ def run() -> int:
             assert_native(cookie_file, browser, user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
-            candidates = chromium_automation_user_data_candidates(
-                browser, platform, requested_user_data, user_data
+            automation_user_data = seed_chromium_with_disposable_root_fallback(
+                exe,
+                browser,
+                platform,
+                requested_user_data,
+                user_data,
+                url,
             )
-            automation_user_data = candidates[0]
-            for attempt, candidate in enumerate(candidates, start=1):
-                stage_chromium_user_data(candidate)
-                try:
-                    seed_chromium_native(exe, candidate, url)
-                except (SystemExit, subprocess.CalledProcessError) as error:
-                    if attempt == len(candidates):
-                        raise
-                    print(
-                        f"native {browser} launch root {candidate} failed; "
-                        f"retrying the other disposable root: {error}",
-                        flush=True,
-                    )
-                else:
-                    automation_user_data = candidate
-                    break
             stage_chromium_discovery_profile(automation_user_data, user_data)
             assert_chromium(user_data, browser)
     finally:

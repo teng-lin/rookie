@@ -159,6 +159,41 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             [requested],
         )
 
+    def test_edge_retries_alternate_disposable_root_after_timeout(self) -> None:
+        requested = Path("/tmp/rookie-ci/edge")
+        registry = Path("/tmp/sandbox/home/.config/microsoft-edge")
+        url = "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0"
+        with (
+            mock.patch.object(hosted, "stage_chromium_user_data") as stage,
+            mock.patch.object(
+                hosted,
+                "seed_chromium_native",
+                side_effect=[hosted.subprocess.TimeoutExpired("browser", 45), None],
+            ) as seed,
+            mock.patch("builtins.print"),
+        ):
+            selected = hosted.seed_chromium_with_disposable_root_fallback(
+                "/usr/bin/microsoft-edge",
+                "edge",
+                "linux",
+                requested,
+                registry,
+                url,
+            )
+
+        self.assertEqual(selected, registry)
+        self.assertEqual(
+            stage.call_args_list,
+            [mock.call(requested), mock.call(registry)],
+        )
+        self.assertEqual(
+            seed.call_args_list,
+            [
+                mock.call("/usr/bin/microsoft-edge", requested, url),
+                mock.call("/usr/bin/microsoft-edge", registry, url),
+            ],
+        )
+
     def test_linux_edge_auxiliary_config_cannot_pollute_discovery_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             user_data = Path(temporary) / "edge-automation"
