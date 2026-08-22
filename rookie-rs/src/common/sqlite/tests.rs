@@ -682,6 +682,62 @@ fn files_are_identical_spans_multiple_chunks() {
 }
 
 #[test]
+fn optional_file_comparison_distinguishes_absence_from_change() {
+  let directory = TempDir::new().expect("temp dir");
+  let source = directory.path().join("source-wal");
+  let copy = directory.path().join("copy-wal");
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+
+  assert!(optional_files_are_identical(&source, &copy, &runtime).expect("both sidecars absent"));
+  fs::write(&source, b"wal").expect("write source WAL");
+  assert!(!optional_files_are_identical(&source, &copy, &runtime).expect("copy sidecar absent"));
+  fs::write(&copy, b"wal").expect("write copied WAL");
+  assert!(optional_files_are_identical(&source, &copy, &runtime).expect("matching WALs"));
+  fs::write(&source, b"new-wal").expect("change source WAL");
+  assert!(!optional_files_are_identical(&source, &copy, &runtime).expect("changed source WAL"));
+}
+
+#[test]
+fn snapshot_retries_when_the_source_wal_changes_after_copy() {
+  let directory = TempDir::new().expect("temp dir");
+  let (path, writer) = checkpointed_database(directory.path());
+  writer
+    .execute("INSERT INTO cookies (name) VALUES ('before-copy')", [])
+    .expect("insert initial WAL row");
+  let snapshot = TempDir::new().expect("snapshot dir");
+  let copies = Cell::new(0_u32);
+  let clock = SystemClock;
+  let runtime = BoundaryRuntime::standard(&clock);
+
+  let copy = snapshot_database_with_after_copy(&path, snapshot.path(), &runtime, |attempt, _| {
+    copies.set(attempt);
+    if attempt == 1 {
+      writer
+        .execute("INSERT INTO cookies (name) VALUES ('after-copy')", [])
+        .expect("change source WAL after first copy");
+    }
+    Ok(())
+  })
+  .expect("moving WAL is retried");
+  let reader = SqliteReader {
+    connection: open_read_only(&copy, "mode=ro").expect("open verified snapshot"),
+    snapshot: Some(snapshot),
+    strategy: DatabaseAcquisitionStrategy::VerifiedWalSnapshot,
+  };
+
+  assert_eq!(
+    copies.get(),
+    2,
+    "the first moving-WAL copy must be rejected"
+  );
+  assert_eq!(
+    cookie_names(&reader),
+    vec!["after-copy", "before-copy", "checkpointed"]
+  );
+}
+
+#[test]
 fn snapshot_of_an_idle_database_succeeds_on_the_first_attempt() {
   let directory = TempDir::new().expect("temp dir");
   let (path, writer) = checkpointed_database(directory.path());
