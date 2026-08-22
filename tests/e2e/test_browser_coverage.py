@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
+import sys
 import unittest
 from pathlib import Path
 
@@ -11,6 +14,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 COVERAGE_PATH = Path(__file__).with_name("browser_coverage.json")
 REGISTRY_PATH = REPOSITORY_ROOT / "rookie-rs" / "browser_registry.json"
 TESTING_MD_PATH = REPOSITORY_ROOT / "docs" / "testing.md"
+sys.path.insert(0, str(Path(__file__).parent))
+
+from browser_coverage_contract import (  # noqa: E402 - local harness path above
+    DEPTH_LEVELS,
+    assert_observed_depth,
+    depth_for,
+    emit_representative_depth,
+)
 
 # docs/testing.md uses the shorter product names readers already know.
 DOC_BROWSER_TITLES = {
@@ -27,6 +38,20 @@ DOC_LANE_CELLS = {
 }
 
 KNOWN_LANES = frozenset({"nightly_hosted", "release_fixture", "manual"})
+COOKIE_CONTEXT_FIELDS = frozenset(
+    {
+        "top_frame_site_key",
+        "has_cross_site_ancestor",
+        "source_scheme",
+        "source_port",
+        "is_persistent",
+        "origin_attributes",
+        "user_context_id",
+        "partition_key",
+        "private_browsing_id",
+    }
+)
+CONTEXT_CLASSIFICATIONS = frozenset({"live", "fixture_only", "non_persistable"})
 NIGHTLY_HOSTED = frozenset(
     {
         ("linux", "brave"),
@@ -120,8 +145,165 @@ class BrowserCoverageTests(unittest.TestCase):
         cls.registry = _load_json(REGISTRY_PATH)
 
     def test_schema_and_lane_docs(self) -> None:
-        self.assertEqual(self.coverage_doc["schema_version"], 1)
+        self.assertEqual(self.coverage_doc["schema_version"], 2)
         self.assertEqual(set(self.coverage_doc["lanes"]), set(KNOWN_LANES))
+
+    def test_depth_profiles_are_complete_and_use_known_levels(self) -> None:
+        capabilities = set(self.coverage_doc["depth_capabilities"])
+        self.assertEqual(set(self.coverage_doc["depth_levels"]), set(DEPTH_LEVELS))
+        self.assertGreaterEqual(len(capabilities), 9)
+        used_profiles = {row["depth_profile"] for row in self.coverage_doc["coverage"]}
+        self.assertEqual(used_profiles, set(self.coverage_doc["depth_profiles"]))
+        for name, profile in self.coverage_doc["depth_profiles"].items():
+            self.assertEqual(set(profile), capabilities, name)
+            for capability, level in profile.items():
+                self.assertIn(level, DEPTH_LEVELS, (name, capability))
+
+    def test_depth_profiles_do_not_overclaim_lane_provenance(self) -> None:
+        for row in self.coverage_doc["coverage"]:
+            depth = depth_for(row, self.coverage_doc)
+            if row["lane"] == "nightly_hosted":
+                self.assertNotIn("fixture", set(depth.values()), row)
+                self.assertEqual(depth["browser_launch"], "live", row)
+            else:
+                self.assertNotIn("live", set(depth.values()), row)
+                self.assertEqual(depth["browser_launch"], "none", row)
+
+    def test_runner_contract_rejects_unobserved_depth_claims(self) -> None:
+        row = next(
+            row
+            for row in self.coverage_doc["coverage"]
+            if row["depth_profile"] == "hosted_chromium"
+        )
+        declared = depth_for(row, self.coverage_doc)
+        observed = {
+            capability: level
+            for capability, level in declared.items()
+            if level != "none"
+        }
+        assert_observed_depth(row, observed, self.coverage_doc)
+        observed.pop("recommended_read")
+        with self.assertRaisesRegex(AssertionError, "recommended_read"):
+            assert_observed_depth(row, observed, self.coverage_doc)
+
+    def test_every_cookie_context_field_has_an_applicability_classification(
+        self,
+    ) -> None:
+        fields = self.coverage_doc["cookie_context_fields"]
+        self.assertEqual(set(fields), set(COOKIE_CONTEXT_FIELDS))
+        for field, contract in fields.items():
+            self.assertEqual(
+                set(contract), {"classification", "engines", "rationale"}, field
+            )
+            self.assertIn(contract["classification"], CONTEXT_CLASSIFICATIONS, field)
+            self.assertTrue(contract["engines"], field)
+            self.assertTrue(set(contract["engines"]) <= {"chromium", "gecko"}, field)
+            self.assertGreaterEqual(len(contract["rationale"].split()), 8, field)
+
+    def test_private_browsing_is_the_only_non_persistable_context_field(self) -> None:
+        fields = self.coverage_doc["cookie_context_fields"]
+        non_persistable = {
+            field
+            for field, contract in fields.items()
+            if contract["classification"] == "non_persistable"
+        }
+        self.assertEqual(non_persistable, {"private_browsing_id"})
+
+    def test_representative_depth_lanes_are_executable_and_complete(self) -> None:
+        lanes = self.coverage_doc["representative_depth_lanes"]
+        self.assertEqual(
+            set(lanes),
+            {
+                "core_chromium",
+                "core_chromium_windows",
+                "core_firefox",
+                "partition_context",
+                "firefox_container",
+                "nightly_stress",
+                "manual_fixture_capture",
+            },
+        )
+        capabilities = set(self.coverage_doc["depth_capabilities"])
+        for name, lane in lanes.items():
+            self.assertEqual(
+                set(lane),
+                {
+                    "workflow",
+                    "runner",
+                    "platforms",
+                    "engines",
+                    "capabilities",
+                    "surfaces",
+                },
+                name,
+            )
+            workflow = REPOSITORY_ROOT / lane["workflow"]
+            runner = REPOSITORY_ROOT / lane["runner"]
+            self.assertTrue(workflow.is_file(), name)
+            self.assertTrue(runner.is_file(), name)
+            self.assertIn(lane["runner"], workflow.read_text(encoding="utf-8"), name)
+            self.assertTrue(set(lane["capabilities"]) <= capabilities, name)
+            self.assertTrue(
+                set(lane["platforms"]) <= {"linux", "macos", "windows"}, name
+            )
+            self.assertTrue(set(lane["engines"]) <= {"chromium", "gecko"}, name)
+            self.assertTrue(
+                set(lane["surfaces"]) <= {"rust", "python", "node", "cli"},
+                name,
+            )
+            self.assertIn(
+                "browser_coverage_contract",
+                runner.read_text(encoding="utf-8"),
+                f"{name} must emit a checked runtime depth receipt",
+            )
+        for core in ("core_firefox",):
+            self.assertEqual(
+                set(lanes[core]["platforms"]), {"linux", "macos", "windows"}
+            )
+            self.assertIn("exact_set", lanes[core]["capabilities"])
+            self.assertIn("active_writer", lanes[core]["capabilities"])
+            self.assertEqual(
+                set(lanes[core]["surfaces"]), {"rust", "python", "node", "cli"}
+            )
+        self.assertEqual(set(lanes["core_chromium"]["platforms"]), {"linux", "macos"})
+        self.assertIn("active_writer", lanes["core_chromium"]["capabilities"])
+        self.assertEqual(set(lanes["core_chromium_windows"]["platforms"]), {"windows"})
+        self.assertIn(
+            "locked_writer_safety",
+            lanes["core_chromium_windows"]["capabilities"],
+        )
+        for core in ("core_chromium", "core_chromium_windows"):
+            self.assertIn("exact_set", lanes[core]["capabilities"])
+            self.assertEqual(
+                set(lanes[core]["surfaces"]), {"rust", "python", "node", "cli"}
+            )
+
+    def test_representative_depth_receipt_rejects_missing_capability(self) -> None:
+        lane = self.coverage_doc["representative_depth_lanes"]["nightly_stress"]
+        with self.assertRaisesRegex(AssertionError, "representative depth mismatch"):
+            emit_representative_depth(
+                "nightly_stress",
+                set(lane["capabilities"]) - {"active_writer"},
+                lane["surfaces"],
+                self.coverage_doc,
+            )
+
+    def test_representative_depth_receipt_is_machine_readable(self) -> None:
+        lane = self.coverage_doc["representative_depth_lanes"]["partition_context"]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            emit_representative_depth(
+                "partition_context",
+                lane["capabilities"],
+                lane["surfaces"],
+                self.coverage_doc,
+            )
+        prefix, payload = output.getvalue().strip().split(" ", 1)
+        self.assertEqual(prefix, "E2E_DEPTH_RECEIPT")
+        receipt = json.loads(payload)
+        self.assertEqual(receipt["lane"], "partition_context")
+        self.assertEqual(receipt["capabilities"], sorted(lane["capabilities"]))
+        self.assertEqual(receipt["surfaces"], sorted(lane["surfaces"]))
 
     def test_every_registry_cell_has_exactly_one_lane(self) -> None:
         expected = {}
@@ -161,6 +343,17 @@ class BrowserCoverageTests(unittest.TestCase):
         for cell, reason in limitations.items():
             self.assertIsInstance(reason, str, cell)
             self.assertGreaterEqual(len(reason.split()), 6, cell)
+
+    def test_every_feasible_fixture_cell_requires_exact_corpus_equality(self) -> None:
+        for row in self.coverage_doc["coverage"]:
+            if row["lane"] != "release_fixture":
+                continue
+            exact_set = depth_for(row, self.coverage_doc)["exact_set"]
+            if row["engine"] in {"chromium", "gecko"}:
+                self.assertEqual(exact_set, "fixture", row)
+            else:
+                self.assertEqual(row["browser"], "internet_explorer", row)
+                self.assertEqual(exact_set, "none", row)
 
     def test_testing_md_matrix_matches_coverage(self) -> None:
         titles: dict[str, str] = {}

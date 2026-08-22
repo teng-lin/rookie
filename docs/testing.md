@@ -120,9 +120,22 @@ logs, errors, help/version, profiles, spaces/Unicode paths).
 `.github/workflows/e2e.yml` gates pull requests with real Ubuntu Chrome and
 Firefox. Pushes to `main`, the nightly schedule, and `workflow_dispatch` also
 run the macOS and Windows jobs. Every job starts a loopback cookie server,
-seeds a disposable profile, then asserts the same cookie through **Rust,
-Python, Node, and CLI**. The elevated Windows App-Bound and shadow-copy jobs
-remain trusted-ref-only.
+seeds a disposable profile with the declarative cookie corpus, and requires
+**Rust, Python, Node, and CLI** to match its independent manifest exactly. The
+portable corpus covers all eight flat fields, host/domain and path collisions,
+session/persistent cookies, SameSite variants, empty/large values, prefix
+rules, expiration boundaries, update/delete behavior, and a second-host decoy
+that the domain filter must exclude.
+
+Each core job then launches a second disposable profile and leaves that browser
+open while the same four surfaces read the browser-owned database. The runner
+replaces one cookie, adds another, deletes a third, requires the complete
+active-writer set (including no excess rows), probes browser liveness, closes
+gracefully, and verifies that the closed snapshot matches the final open state.
+Each checkpoint logs resolved profile/database paths, browser and seeder
+process evidence, browser/schema versions, SQLite journal mode, and sidecar
+presence. The elevated Windows App-Bound and shadow-copy jobs remain
+trusted-ref-only.
 
 | Runner | Browser and crypto | Surfaces |
 | --- | --- | --- |
@@ -133,7 +146,12 @@ remain trusted-ref-only.
 | Windows 2025 | Chrome custom profile, **legacy DPAPI `v10`** (workspace user-data-dir; App-Bound is not expected) | Rust, Python, Node, CLI |
 | Windows 2025 | Firefox | Rust, Python, Node, CLI |
 
-These jobs never inspect the operator’s real default profile.
+These jobs pass explicit workspace-scoped profiles to Playwright and never
+discover or inspect the operator’s real default profile. Exact corpus execution
+is implemented by `tests/e2e/run_exact_corpus_e2e.py`; the open-store protocol
+is implemented by `tests/e2e/run_active_writer_e2e.py` and the two
+`seed_*_cookie.mjs` seeders. Its file-based commands make the same
+ready/hold/mutate/probe/close contract portable across all three runner OSes.
 
 Current CLI job shapes to use when reproducing an E2E assertion:
 
@@ -154,10 +172,80 @@ driver. `ROOKIE_E2E_CLI` points it at a binary outside `target/release`.
 `ROOKIE_E2E_COOKIE_NAME` / `ROOKIE_E2E_COOKIE_VALUE` override the expected
 cookie.
 
+## Partition, fixture provenance, and stress depth
+
+`.github/workflows/e2e-depth.yml` supplies the representative deep lanes that
+would be too expensive or too specialized to repeat across the full installed
+browser matrix:
+
+- Chromium creates two CHIPS rows with the same flat identity under distinct
+  HTTPS top-level sites. Firefox creates the corresponding two dFPI identities.
+  Rust, Python, Node, and CLI assert the browser-produced context strings and
+  prove that `header(SendContext)` selects one partition without merging the
+  other. Omitting the top-level selector must fail.
+- The Firefox half also installs a checked-in test-only WebExtension into the
+  disposable profile. The extension creates a real Multi-Account Container
+  cookie; the runner reads its exact `originAttributes` and positive
+  `userContextId` from `moz_cookies`, verifies detailed output on all four
+  surfaces, and proves matching, mismatched, and missing container selectors.
+- The nightly Chromium/Firefox stress jobs retain 320 cookies across eight
+  registrable test domains in each of two independent Linux profiles,
+  including same-name collisions. A macOS Chrome lane repeats the work through
+  the real Keychain route. They keep the browser open through three
+  add/update/delete rounds while a Set-Cookie loop advances the raw database
+  write generation, launch concurrent extractor processes on every public
+  surface, enforce the exact detailed manifest after every round, and compare
+  the final closed snapshot. A locked rollback-journal copy must produce typed
+  timeout and in-flight cancellation failures, then recover to the exact set
+  after the lock is released.
+
+Both runners fail unless `CI=true` and their marked disposable profiles are
+below `RUNNER_TEMP`. They do not support local/default-profile discovery.
+
+### HTTP, HTTPS, and public-site coverage
+
+The installed browser-by-OS matrix seeds Chromium and Gecko products from
+`http://127.0.0.1` and `http://localhost`. That keeps the broad product matrix
+deterministic and proves host filtering, but loopback is a trustworthy-origin
+exception and is not the HTTPS oracle. Safari is deliberately different: its
+full corpus runs over local HTTPS with a one-day certificate trusted only in
+the disposable hosted VM, because Safari rejects `Secure` cookies delivered
+over loopback HTTP. The runner refuses this trust operation outside a fresh
+GitHub-hosted account and a scratch path below `RUNNER_TEMP`.
+
+HTTPS is exercised independently by the live depth lanes. The partition runner
+uses a generated certificate and three named local sites
+(`top.rookie-a.test`, `other.rookie-c.test`, and `third.rookie-b.test`) to
+produce Secure/SameSite=None CHIPS and dFPI cookies. It asserts Chromium
+`source_scheme=2`, the real source port, cross-site ancestry, two top-frame
+keys, Firefox partition keys, and send-time isolation on Rust, Python, Node,
+and CLI. The 320-cookie active-writer stress lane also uses named local HTTPS
+origins. Thus scheme/context depth and browser-product breadth are orthogonal
+contracts. Safari's HTTPS corpus additionally proves the product-specific
+cookie-acceptance boundary; it does not replace the named-site context lane.
+
+The suite does not seed arbitrary public websites. Extraction never makes an
+origin request, so a public host would not enter a distinct decoder or crypto
+path; it would add DNS, certificate, consent, rate-limit, and third-party state
+failures while making the expected cookie set uncontrollable. Real browser
+schema drift is covered instead by disposable browser-produced profiles and
+the sanitized, versioned fixture-capture workflow.
+
+`.github/workflows/capture-browser-cookie-fixtures.yml` is manual-only and has
+read-only repository permission. It launches a requested Playwright browser in
+a marked temporary profile, sanitizes its cookie database down to the known
+corpus identities with secure deletion and `VACUUM`, and uploads only the
+sanitized database, expected manifest, and provenance JSON. The artifact never
+contains a complete profile, `Local State`, credential material, history,
+cache, or telemetry. The workflow accepts a Playwright version so current and
+previous redistributable schema generations can be captured and reviewed
+without automatically changing committed fixtures.
+
 ## Windows App-Bound v20 (Chrome, Edge, Brave)
 
 Hosted **v20 / App-Bound** coverage is the `windows-chrome-appbound` job in
-`e2e.yml` (`e2e windows × {chrome,edge,brave} (App-Bound v20 canary)`). It is
+`e2e.yml` (`e2e windows × {chrome,edge,brave}` with the
+`App-Bound v20 staged-WAL recovery + liveness` suffix). It is
 **not** a pull-request job.
 
 | When | Browsers |
@@ -191,8 +279,10 @@ It fails closed unless all of this holds:
 - a copy of that v20 row is staged under a new name in a synthetic WAL,
   absent from a main-database-only copy, and checked through a lock-free
   DB+WAL snapshot;
-- explicit-path WAL extraction while the browser is live — Chrome / Edge /
-  Brave must stay alive through Rust, Python, Node, and CLI;
+- explicit-path staged-WAL extraction while the browser is live — Chrome /
+  Edge / Brave must stay alive while Rust, Python, Node, and CLI read the
+  separately staged fixture. This proves recovery and browser liveness, not
+  active-writer behavior against the browser-owned database;
 - after a graceful main-window close, default profile/key discovery works on
   all four surfaces.
 
@@ -214,10 +304,34 @@ A new registry browser missing from that file fails PR metadata tests
 in lockstep with those lanes. Every registered (OS, browser) pair has
 exactly one lane.
 
+The manifest's `depth_profile` is a second, independent contract. It classifies
+each cell's registry identity, browser launch, explicit-path, detailed,
+discovery, recommended-read, crypto, exact-set, active-writer, and partitioned
+coverage as `none`, `fixture`, or `live`. Hosted and fixture runners record a
+capability only after its assertion succeeds and compare that record with the
+declared profile. A new claim therefore fails until its harness assertion
+exists and passes.
+
+`cookie_context_fields` separately classifies all nine `CookieContext` fields
+as `live`, `fixture_only`, or `non_persistable`, with engine applicability and
+a rationale. A detailed-output smoke test therefore cannot be mistaken for
+semantic CHIPS/container coverage. CHIPS keys/ancestry/source metadata and
+Firefox dFPI origin attributes/partition keys and Multi-Account Container IDs
+are live; private-browsing IDs are non-persistable.
+
+`representative_depth_lanes` records the exact-corpus, active-writer,
+partition, stress, and manual-capture runners independently of the broad
+per-browser cells. Metadata tests require each claimed workflow and runner to
+exist, constrain its engine/platform/surface vocabulary, and require the core
+Chrome/Firefox lanes to cover all three desktop OSes and all four public
+surfaces. Each representative runner emits a machine-readable depth receipt
+only after its declared assertions succeed; a missing or excess capability or
+surface fails the job.
+
 | Lane | What it proves | When it runs |
 | --- | --- | --- |
-| **hosted** (`nightly_hosted`) | Real browser, seed `rookie_ci`, extract on Rust / Python / Node / CLI | Chrome/Firefox in `e2e.yml` (push to `main`, nightly, `workflow_dispatch`). Extra products in `e2e-release.yml` (nightly, `v*` tags, GitHub Releases, `workflow_dispatch`, or a PR labeled `e2e-release`). |
-| **fixture** (`release_fixture`) | Deterministic engine checks + `supported_browsers()` identity coverage. **Does not launch a browser.** | `e2e-release.yml` `fixtures` job on `v*` tags, GitHub Releases, `workflow_dispatch`, or a labeled PR. **Skipped on the nightly schedule.** |
+| **hosted** (`nightly_hosted`) | Real browser, seed the complete portable corpus, and require exact filtered/unfiltered/detailed equality on Rust / Python / Node / CLI | Chrome/Firefox in `e2e.yml` (push to `main`, nightly, `workflow_dispatch`). Extra products in `e2e-release.yml` (nightly, `v*` tags, GitHub Releases, `workflow_dispatch`, or a PR labeled `e2e-release`). |
+| **fixture** (`release_fixture`) | Deterministic full portable corpus, exact filtered/unfiltered/detailed equality, registry discovery, and `supported_browsers()` identity coverage for feasible Chromium/Gecko rows. **Does not launch a browser or claim platform crypto.** | `e2e-release.yml` `fixtures` job on `v*` tags, GitHub Releases, `workflow_dispatch`, or a labeled PR. **Skipped on the nightly schedule.** |
 | **manual** | Operator-owned fallback | No current registry cell uses this lane. |
 
 `—` means the browser is not registered on that OS. This table is the live
@@ -254,6 +368,21 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 
 ### How hosted cells actually run
 
+Every installed Chromium-family and Gecko-family cell below uses a newly
+created registry-correct profile below an isolated home. It persists the full
+portable corpus: 19 total Chromium/Safari rows or 20 total Gecko rows, each
+including one second-host decoy. The domain-filtered primary-origin sets are
+therefore 18 Chromium/Safari rows or 19 Gecko rows, and all four public surfaces
+compare the applicable exact set.
+Some products, notably Yandex, preload vendor-domain cookies even in a new
+profile; the manifest records their count but excludes those unowned domains
+from value equality. Missing, duplicate, or excess rows on `127.0.0.1` or
+`localhost` still fail. Safari uses the same 19-row portable contract. Because
+Safari cannot select an arbitrary persistent profile directory, that lane
+refuses to run anywhere except a fresh GitHub-hosted account and keeps all
+harness scratch state below `RUNNER_TEMP`; it must never inspect a developer's
+normal Safari profile.
+
 | Cells | Workflow / job | How the browser gets on the runner |
 | --- | --- | --- |
 | Chrome × Linux / macOS / Windows | `e2e.yml` | Image Chrome, custom profile. Crypto: Ubuntu libsecret, macOS real Keychain, Windows legacy DPAPI `v10`. |
@@ -261,7 +390,7 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 | Chromium × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Official `npx playwright install chromium` distribution, then native DevTools launch. |
 | Edge × Linux / macOS / Windows | `e2e-release.yml` `hosted-claimed` | Runner image Edge; official `npx playwright install msedge` fallback; native DevTools launch. |
 | Brave, Opera, Vivaldi, LibreWolf, Zen on each OS they support; Opera GX and Yandex on macOS and Windows | `e2e-release.yml` `hosted-claimed` | Silent-install catalog: `tests/e2e/install_claimed_browser.py`; native browser launch. Chromium forks publish an explicit DevTools port, then a post-launch CDP client seeds the persistent default context instead of using Playwright's persistent-context launch pipe. |
-| Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari normal application profile; BinaryCookies extraction. SafariDriver is deliberately not used because Apple isolates and destroys its automation-session storage. |
+| Safari × macOS | `e2e-release.yml` `hosted-claimed` | Image Safari normal application store in the one-use hosted account; 19-row exact BinaryCookies extraction. SafariDriver is deliberately not used because Apple isolates and destroys its automation-session storage. |
 
 Chrome and Firefox stay outside that install catalog because `e2e.yml` owns
 them. Playwright remains a distribution mechanism for Chromium and a documented
@@ -298,12 +427,27 @@ The fixture exceptions are deliberate and machine-checked in
 `tests/e2e/run_claimed_browser_fixtures.py` on Ubuntu, macOS, and Windows:
 
 - every claimed id on that OS must appear in `supported_browsers()`;
-- Gecko ids share one generated `cookies.sqlite`;
+- feasible fixture-lane Chromium and Gecko ids get a registry-correct root
+  below a temporary, isolated home;
+- each such id receives the same declarative portable final state as the live
+  lane: 19 total / 18 filtered Chromium rows or 20 total / 19 filtered Gecko
+  rows, including attribute, path-collision, value, expiry, update/delete, and
+  second-host decoy cases;
+- filtered, unfiltered, and detailed Python output must equal the complete
+  manifest; missing, duplicate, excess, or attribute-mismatched rows fail;
+- discovery must identify the exact generated profile and source path;
+- Chromium fixtures exercise plaintext explicit-path and detailed reads;
+- Gecko fixtures additionally exercise a profile-scoped recommended `read`;
 - Windows extracts one current-user DPAPI fixture once (no per-id `browser_id`);
-- Unix Chromium ids only check that `chromium_cookies_from_path` accepts the
-  id (no cookies to decrypt).
+- no generated discovery fixture claims a real platform crypto path;
+- deprecated Internet Explorer remains registry/format coverage only because
+  current hosted Windows cannot produce the legacy ESE store its decoder reads.
 
-That is registry/identity coverage, not crypto coverage.
+The live hosted Chromium/Gecko harness uses the same registry-root discipline:
+it launches the browser only against a profile below an isolated CI home, then
+asserts explicit-path detailed output, discovered browser/profile/source
+identity, and profile-scoped recommended reads. Explicit-path coverage remains
+because it is a separate supported contract.
 
 ### Native hosted constraints
 

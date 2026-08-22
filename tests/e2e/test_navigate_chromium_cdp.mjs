@@ -62,6 +62,23 @@ function successfulResponse(command) {
   return { id: command.id, result };
 }
 
+function portableCorpusCookies() {
+  return [
+    { domain: "127.0.0.1", name: "rookie_ci", value: "bar" },
+    { domain: "127.0.0.1", name: "rookie_updated", value: "final" },
+    {
+      domain: "localhost",
+      name: "rookie_decoy",
+      value: "must-not-pass-filter",
+    },
+    ...Array.from({ length: 16 }, (_, index) => ({
+      domain: "127.0.0.1",
+      name: `portable_${index}`,
+      value: `${index}`,
+    })),
+  ];
+}
+
 test("seeds and closes through the expected browser-level protocol", async () => {
   const methods = [];
   const logs = [];
@@ -84,6 +101,82 @@ test("seeds and closes through the expected browser-level protocol", async () =>
     "Browser.close",
   ]);
   assert.equal(logs.length, 1);
+});
+
+test("waits for the browser-seeded portable corpus without injecting a cookie", async () => {
+  const methods = [];
+  const corpusUrl =
+    "http://127.0.0.1/corpus/run?engine=chromium&tiers=portable_smoke&step=0";
+  await navigateChromiumCdp({
+    port: 9222,
+    url: corpusUrl,
+    fetchImpl: versionResponse(),
+    WebSocketImpl: scriptedWebSocket((command) => {
+      methods.push(command.method);
+      if (command.method === "Target.getTargets") {
+        return {
+          id: command.id,
+          result: {
+            targetInfos: [{ targetId: "startup", type: "page", url: corpusUrl }],
+          },
+        };
+      }
+      if (command.method === "Storage.getCookies") {
+        return { id: command.id, result: { cookies: portableCorpusCookies() } };
+      }
+      return successfulResponse(command);
+    }),
+    settleMs: 0,
+    logger: { log() {}, warn: assert.fail },
+  });
+  assert.deepEqual(methods, [
+    "Target.getTargets",
+    "Target.activateTarget",
+    "Storage.getCookies",
+    "Browser.close",
+  ]);
+});
+
+test("navigates the corpus when a product ignores its startup URL", async () => {
+  const methods = [];
+  let createdUrl;
+  const corpusUrl =
+    "http://127.0.0.1/corpus/run?engine=chromium&tiers=portable_smoke&step=0";
+  await navigateChromiumCdp({
+    port: 9222,
+    url: corpusUrl,
+    fetchImpl: versionResponse(),
+    WebSocketImpl: scriptedWebSocket((command) => {
+      methods.push(command.method);
+      if (command.method === "Target.getTargets") {
+        return {
+          id: command.id,
+          result: {
+            targetInfos: [
+              { targetId: "welcome", type: "page", url: "vivaldi://welcome" },
+            ],
+          },
+        };
+      }
+      if (command.method === "Target.createTarget") {
+        createdUrl = command.params.url;
+      }
+      if (command.method === "Storage.getCookies") {
+        return { id: command.id, result: { cookies: portableCorpusCookies() } };
+      }
+      return successfulResponse(command);
+    }),
+    settleMs: 0,
+    logger: { log() {}, warn: assert.fail },
+  });
+  assert.deepEqual(methods, [
+    "Target.getTargets",
+    "Target.createTarget",
+    "Target.activateTarget",
+    "Storage.getCookies",
+    "Browser.close",
+  ]);
+  assert.equal(createdUrl, corpusUrl);
 });
 
 test("rejects a malformed version response before opening a socket", async () => {

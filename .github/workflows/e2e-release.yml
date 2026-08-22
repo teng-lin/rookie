@@ -74,6 +74,7 @@ jobs:
         shell: bash
         run: |
           echo "ROOKIE_E2E_USER_DATA_DIR=${RUNNER_TEMP}/rookie-ci/${{ matrix.browser }}" >> "$GITHUB_ENV"
+          echo "ROOKIE_E2E_RUNNER_ENVIRONMENT=${{ runner.environment }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -113,7 +114,14 @@ jobs:
         shell: bash
         run: |
           if [ -x .venv/bin/python ]; then py=.venv/bin/python; else py=.venv/Scripts/python; fi
-          "$py" tests/e2e/run_hosted_claimed_e2e.py
+          if [ "${{ matrix.platform }}" = macos ] && [ "${{ matrix.engine }}" = chromium ]; then
+            "$py" tests/e2e/run_with_ephemeral_keychain.py \
+              --service "$ROOKIE_E2E_KEYCHAIN_SERVICE" \
+              --account "$ROOKIE_E2E_KEYCHAIN_ACCOUNT" -- \
+              "$py" tests/e2e/run_hosted_claimed_e2e.py
+          else
+            "$py" tests/e2e/run_hosted_claimed_e2e.py
+          fi
 
   fixtures:
     name: claimed-browser fixtures (${{ matrix.os }})

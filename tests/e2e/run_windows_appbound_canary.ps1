@@ -180,6 +180,7 @@ try {
   # in a WAL. The stager exits without checkpointing, leaving both files
   # unlocked for the product's raw snapshot path.
   $walCookiesDb = Join-Path $walFixtureUserData "Default\Network\Cookies"
+  Write-Host "STAGED_WAL_PROOF: copied synthetic DB+WAL fixture; not the active browser database"
   & .\.venv\Scripts\python.exe tests/e2e/stage_sqlite_wal_fixture.py `
     "$cookiesDb" "$walCookiesDb" --source-cookie rookie_ci `
     --fixture-cookie rookie_wal

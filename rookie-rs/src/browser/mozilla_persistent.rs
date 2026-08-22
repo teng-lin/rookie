@@ -22,6 +22,11 @@ use super::cookie_record::{
 };
 use super::mozilla::{firefox_cookie_context, FIREFOX_MILLISECOND_EXPIRY_SCHEMA_VERSION};
 
+// Firefox writes this sentinel when no SameSite attribute was present. It is
+// not an additional public SameSite mode; compatibility output must use the
+// cross-engine unspecified sentinel instead of leaking the storage bit.
+const FIREFOX_SAME_SITE_UNSPECIFIED: i64 = 256;
+
 pub(crate) struct PersistentCookieQuery {
   pub(crate) records: Vec<CookieRecord>,
   pub(crate) rows_seen: usize,
@@ -292,7 +297,7 @@ pub(crate) fn decode_persistent_cookies(
         continue;
       }
     };
-    let observed_same_site = match optional_sqlite_i64(row, 7, -1..=2) {
+    let observed_same_site = match optional_firefox_same_site(row, 7) {
       Ok(value) => value,
       Err(error) => {
         log::warn!("Failed to read sameSite from Firefox cookie row: {error}");
@@ -411,14 +416,13 @@ fn optional_sqlite_bool(row: &rusqlite::Row<'_>, index: usize) -> Result<Observa
   })
 }
 
-fn optional_sqlite_i64(
-  row: &rusqlite::Row<'_>,
-  index: usize,
-  known: std::ops::RangeInclusive<i64>,
-) -> Result<Observation<i64>> {
+fn optional_firefox_same_site(row: &rusqlite::Row<'_>, index: usize) -> Result<Observation<i64>> {
   Ok(match row.get_ref(index)? {
     rusqlite::types::ValueRef::Null => Observation::Missing,
-    rusqlite::types::ValueRef::Integer(value) if known.contains(&value) => {
+    rusqlite::types::ValueRef::Integer(FIREFOX_SAME_SITE_UNSPECIFIED) => {
+      Observation::Known(SAME_SITE_UNSPECIFIED)
+    }
+    rusqlite::types::ValueRef::Integer(value) if (-1..=2).contains(&value) => {
       Observation::Known(value)
     }
     value => Observation::Unknown(raw_sqlite_value(value)),

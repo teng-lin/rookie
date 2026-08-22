@@ -1,0 +1,18 @@
+{
+  "manifest_version": 2,
+  "name": "Rookie container cookie E2E",
+  "version": "1.0.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "rookie-container-e2e@rookie.test"
+    }
+  },
+  "permissions": [
+    "contextualIdentities",
+    "cookies",
+    "https://container.rookie.test/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  }
+}

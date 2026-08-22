@@ -90,6 +90,17 @@ class InstallCatalogTests(unittest.TestCase):
             cwd=INSTALL.ROOT / "tests/e2e",
         )
 
+    def test_winget_installer_does_not_query_the_region_gated_store(self) -> None:
+        completed = INSTALL.subprocess.CompletedProcess([], 0)
+        with mock.patch.object(
+            INSTALL.subprocess, "run", return_value=completed
+        ) as run:
+            INSTALL.install_winget("Yandex.Browser")
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--source") + 1], "winget")
+        self.assertIn("--accept-source-agreements", command)
+
     def test_find_exe_resolves_globs_and_app_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

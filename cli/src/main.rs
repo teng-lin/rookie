@@ -209,7 +209,8 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       let selection = rookie_cookies::ProfileSelection::from_binding_options(
         profile.as_deref(),
         canonical_select.as_deref(),
-      )?;
+      )
+      .map_err(rookie_cookies::Error::from)?;
       let cancellation = install_cancel_on_signal();
       let control = execution_control(timeout_secs, app_bound, cancellation);
       let mut request = rookie_cookies::ReadRequest::browser(browser)
@@ -250,7 +251,8 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
           let scope = rookie_cookies::ReportScope::from_binding_options(
             profile.as_deref(),
             canonical_select.as_deref(),
-          )?;
+          )
+          .map_err(rookie_cookies::Error::from)?;
           // Mirrors `browser_report`'s own request shape -- that convenience
           // function has no `_with` twin to carry a control, so it is built
           // here directly instead of through it.
@@ -421,15 +423,25 @@ fn path_extract_request(
   })
 }
 
-/// `main`'s `Result` return would otherwise print a failing `Err` via `Debug`
-/// (Rust's `Termination` impl for `Result`), which for the typed
-/// `rookie_cookies::Error` is its raw enum shape (e.g.
-/// `Source(InvalidSource { .. })`) rather than the sanitized, human-readable
-/// message its `Display` impl gives. Printing `Display` here is what an
-/// `anyhow::Error` return used to give for free through its own `Debug` impl.
+/// Preserve the human diagnostic while exposing typed library failures to
+/// scripts through a stable JSON code.
+fn render_cli_error(error: &(dyn std::error::Error + 'static)) -> String {
+  match error.downcast_ref::<rookie_cookies::Error>() {
+    Some(error) => serde_json::json!({
+      "code": error.code(),
+      "message": error.to_string(),
+    })
+    .to_string(),
+    None => error.to_string(),
+  }
+}
+
+/// `main`'s `Result` return would otherwise print a failing `Err` via `Debug`.
+/// Route errors through the explicit renderer so typed library failures expose
+/// their stable code and every other failure retains its `Display` diagnostic.
 fn main() {
   if let Err(error) = run() {
-    eprintln!("{error}");
+    eprintln!("{}", render_cli_error(error.as_ref()));
     std::process::exit(1);
   }
 }
@@ -504,5 +516,14 @@ mod tests {
 
       assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
+  }
+
+  #[test]
+  fn typed_library_errors_render_a_machine_readable_code() {
+    let error = rookie_cookies::Error::from(rookie_cookies::RequestError::MissingBrowser);
+    let rendered = render_cli_error(&error);
+    let document: serde_json::Value = serde_json::from_str(&rendered).expect("JSON error");
+    assert_eq!(document["code"], "missing_browser");
+    assert_eq!(document["message"], error.to_string());
   }
 }

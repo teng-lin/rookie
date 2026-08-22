@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
 
 const browser = process.env.ROOKIE_E2E_BROWSER_ID ?? "";
 const dbPath = process.env.ROOKIE_E2E_COOKIE_DB ?? "";
@@ -17,6 +18,7 @@ if (!["safari", "internet_explorer"].includes(browser) || !existsSync(dbPath)) {
 const domain = process.env.ROOKIE_E2E_DOMAIN ?? "127.0.0.1";
 const expectedName = process.env.ROOKIE_E2E_COOKIE_NAME ?? "rookie_ci";
 const expectedValue = process.env.ROOKIE_E2E_COOKIE_VALUE ?? "bar";
+const manifestPath = findManifest(dbPath, expectedName);
 const explicit = await rookieCookies.extractFromPath(dbPath, {
   domains: [domain],
 });
@@ -25,22 +27,73 @@ if (browser === "safari") {
   surfaces.push([browser, await rookieCookies.safari([domain])]);
 }
 
-for (const [surface, cookies] of surfaces) {
-  const seeded = cookies.find(({ name }) => name === expectedName);
-  if (!seeded) {
-    throw new Error(
-      `${surface}: '${expectedName}' missing from ${cookies.length} cookies`,
+if (manifestPath) {
+  for (const [surface, cookies] of surfaces) {
+    verifyCookieRecords(
+      manifestPath,
+      "filtered_flat",
+      cookies,
+      `Node native ${surface}`,
     );
   }
-  if (seeded.value !== expectedValue) {
-    throw new Error(
-      `${surface}: expected ${expectedName}='${expectedValue}', got '${seeded.value}'`,
+  const snapshot = await rookieCookies.fromPath({ path: dbPath });
+  verifyCookieRecords(
+    manifestPath,
+    "unfiltered_flat",
+    snapshot.cookies,
+    "Node native fromPath cookies",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "detailed",
+    snapshot.detailedCookies,
+    "Node native fromPath.detailedCookies",
+  );
+} else {
+  for (const [surface, cookies] of surfaces) {
+    if (cookies.length !== 1) {
+      throw new Error(
+        `${surface}: expected the exact one-cookie filtered set, got ${cookies.length}`,
+      );
+    }
+    const seeded = cookies.find(({ name }) => name === expectedName);
+    if (!seeded) {
+      throw new Error(
+        `${surface}: '${expectedName}' missing from ${cookies.length} cookies`,
+      );
+    }
+    if (seeded.value !== expectedValue) {
+      throw new Error(
+        `${surface}: expected ${expectedName}='${expectedValue}', got '${seeded.value}'`,
+      );
+    }
+    const expected = {
+      domain: "127.0.0.1",
+      path: "/",
+      secure: false,
+      httpOnly: false,
+      sameSite: -1,
+    };
+    const wrong = Object.entries(expected).filter(
+      ([field, value]) => seeded[field] !== value,
     );
+    const now = Math.trunc(Date.now() / 1000);
+    if (
+      wrong.length > 0 ||
+      !Number.isSafeInteger(seeded.expires) ||
+      seeded.expires < now + 1800 ||
+      seeded.expires > now + 4500
+    ) {
+      throw new Error(
+        `${surface}: native attributes disagreed: wrong=${JSON.stringify(wrong)} ` +
+          `expires=${seeded.expires} now=${now}`,
+      );
+    }
   }
 }
 
 console.log(
-  `rookie-cookies (${process.platform}, ${browser}): ${expectedName}=${expectedValue} verified ` +
+  `rookie-cookies (${process.platform}, ${browser}): ${manifestPath ? "exact cookie corpus" : `${expectedName}=${expectedValue}`} verified ` +
     `(explicit=${explicit.length}` +
     (browser === "safari" ? `, discovered=${surfaces[1][1].length})` : ")"),
 );

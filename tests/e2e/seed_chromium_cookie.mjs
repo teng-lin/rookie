@@ -1,9 +1,9 @@
 // Launches a real Chromium-family browser via Playwright, navigates to the
-// cookie-seeding URL, and closes — leaving a persistent profile that
-// rookie-cookies' tests extract from.
+// declarative cookie-corpus routes and writes an independent manifest. With a
+// control directory, it instead remains open for the active-writer protocol.
 //
 // Usage:
-//   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url>
+//   node tests/e2e/seed_chromium_cookie.mjs <channel> <user-data-dir> <url> [control-dir]
 //
 // channel: "chrome" | "msedge" | "chromium" | "chrome-beta" | etc.
 //   "chromium" uses Playwright's bundled Chromium (no channel).
@@ -19,19 +19,27 @@
 // falling back to older default keys.
 
 import { chromium } from "playwright";
+import { join } from "node:path";
+import { seedCookieCorpus } from "./seed_cookie_corpus.mjs";
 
-const [channelArg, userDataDir, url] = process.argv.slice(2);
+import { runActiveWriterProtocol } from "./active_writer_protocol.mjs";
+
+const [channelArg, userDataDir, url, controlDir] = process.argv.slice(2);
 
 if (!channelArg || !userDataDir || !url) {
   console.error(
-    "usage: node seed_chromium_cookie.mjs <channel> <user-data-dir> <url>",
+    "usage: node seed_chromium_cookie.mjs <channel> <user-data-dir> <url> [control-dir]",
   );
   process.exit(2);
 }
 
 const channel = channelArg === "edge" ? "msedge" : channelArg;
 const linuxArgs =
-  process.platform === "linux" ? ["--password-store=gnome-libsecret"] : [];
+  process.platform === "linux"
+    ? [
+        `--password-store=${process.env.ROOKIE_E2E_PASSWORD_STORE || "gnome-libsecret"}`,
+      ]
+    : [];
 
 const launchOptions = {
   headless: false,
@@ -46,6 +54,15 @@ const launchOptions = {
     ...linuxArgs,
   ],
 };
+if (
+  process.platform === "darwin" &&
+  process.env.ROOKIE_E2E_DISABLE_MOCK_KEYCHAIN === "1"
+) {
+  launchOptions.ignoreDefaultArgs = [
+    "--use-mock-keychain",
+    "--password-store=basic",
+  ];
+}
 if (process.env.ROOKIE_E2E_BROWSER_PATH) {
   launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
 } else if (channel && channel !== "chromium") {
@@ -60,15 +77,32 @@ const context = await chromium.launchPersistentContext(userDataDir, {
 
 try {
   const page = await context.newPage();
-  await page.goto(url, { waitUntil: "networkidle" });
-  const userAgent = await page.evaluate(() => navigator.userAgent);
-  const seeded = (await context.cookies(url)).find(
-    (cookie) => cookie.name === "rookie_ci",
-  );
-  if (!seeded || seeded.value !== "bar") {
-    throw new Error("Chrome did not accept the expected rookie_ci=bar cookie");
+  if (controlDir) {
+    await runActiveWriterProtocol({
+      context,
+      page,
+      controlDir,
+      baselineUrl: url,
+      engine: "chromium",
+      profileDir: userDataDir,
+      databasePath: [
+        join(userDataDir, "Default", "Network", "Cookies"),
+        join(userDataDir, "Default", "Cookies"),
+      ],
+    });
+  } else {
+    const { manifest, manifestPath, userAgent } = await seedCookieCorpus({
+      context,
+      page,
+      engine: "chromium",
+      profileDir: userDataDir,
+      baseUrl: url,
+    });
+    console.log(
+      `seeded ${manifest.expected.unfiltered_flat.length} Chromium corpus cookies; ` +
+        `manifest: ${manifestPath}; user agent: ${userAgent}`,
+    );
   }
-  console.log(`seeded Chrome cookie; user agent: ${userAgent}`);
 } finally {
-  await context.close();
+  await context.close().catch(() => {});
 }

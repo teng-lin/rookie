@@ -1,0 +1,118 @@
+name: Capture sanitized browser cookie fixtures
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Browser engine to capture
+        type: choice
+        options: [firefox, chromium]
+        default: firefox
+      playwright_version:
+        description: Playwright version selecting the browser build
+        type: string
+        default: 1.62.1
+      build_id:
+        description: Optional upstream build ID (browser version is always recorded)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Install the requested disposable browser
+        env:
+          PLAYWRIGHT_VERSION: ${{ inputs.playwright_version }}
+        working-directory: tests/e2e
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb
+          npm install --no-save "playwright@$PLAYWRIGHT_VERSION"
+          npx playwright install --with-deps ${{ inputs.engine }}
+      - name: Seed a synthetic corpus and sanitize the database
+        env:
+          ROOKIE_E2E_PASSWORD_STORE: basic
+          CAPTURE_ENGINE: ${{ inputs.engine }}
+          CAPTURE_BUILD_ID: ${{ inputs.build_id }}
+          CAPTURE_PLAYWRIGHT_VERSION: ${{ inputs.playwright_version }}
+          CAPTURE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          profile="$RUNNER_TEMP/rookie-fixture-source-$CAPTURE_ENGINE"
+          output="$RUNNER_TEMP/rookie-fixture-candidate-$CAPTURE_ENGINE"
+          mkdir -p "$profile" "$output"
+          printf '%s\n' '{"schema_version":1,"kind":"rookie-cookie-fixture-source","source_kind":"disposable_e2e_profile"}' \
+            > "$profile/.rookie-cookie-fixture-source.json"
+          python tests/e2e/cookie_server.py > "$RUNNER_TEMP/cookie-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            curl -fs http://127.0.0.1:8765/ >/dev/null && break
+            sleep 0.25
+          done
+          curl -fs http://127.0.0.1:8765/ >/dev/null
+          if [ "$CAPTURE_ENGINE" = chromium ]; then
+            xvfb-run -a node tests/e2e/seed_chromium_cookie.mjs \
+              chromium "$profile" http://127.0.0.1:8765/
+            database="$profile/Default/Network/Cookies"
+            [ -f "$database" ] || database="$profile/Default/Cookies"
+            browser=Chromium
+          else
+            xvfb-run -a node tests/e2e/seed_firefox_cookie.mjs \
+              "$profile" http://127.0.0.1:8765/
+            database="$profile/cookies.sqlite"
+            browser=Firefox
+          fi
+          manifest="$profile/rookie-e2e-cookie-manifest.json"
+          version="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["browser"]["version"])' "$manifest")"
+          playwright_revision="$(node -e 'const b=require("./tests/e2e/node_modules/playwright-core/browsers.json").browsers.find(x=>x.name===process.env.CAPTURE_ENGINE); if(!b) throw new Error("missing browser revision"); process.stdout.write(String(b.revision))')"
+          build_id="${CAPTURE_BUILD_ID:-playwright-$playwright_revision}"
+          cargo build -p rookie-cookies-cli --locked
+          decoded="$output/decoded-cookies.json"
+          if [ "$CAPTURE_ENGINE" = chromium ]; then
+            target/debug/rookie-cookies from-path "$database" \
+              --browser-id chromium --format detailed > "$decoded"
+          else
+            target/debug/rookie-cookies from-path "$database" \
+              --format detailed > "$decoded"
+          fi
+          python tests/e2e/capture_browser_cookie_fixture.py \
+            --source-root "$profile" \
+            --source-database "$database" \
+            --output-database "$output/cookies.sqlite" \
+            --expected-manifest "$manifest" \
+            --decoded-cookies "$decoded" \
+            --provenance-output "$output/provenance.json" \
+            --engine "$CAPTURE_ENGINE" \
+            --browser "$browser" \
+            --browser-version "$version" \
+            --build-id "$build_id" \
+            --browser-channel playwright-bundled \
+            --browser-source "npm:playwright@$CAPTURE_PLAYWRIGHT_VERSION/$CAPTURE_ENGINE@$playwright_revision" \
+            --capture-command "seed_${CAPTURE_ENGINE}_cookie -> rookie-cookies from-path --format detailed" \
+            --sanitizer-revision "$CAPTURE_REVISION"
+          cp "$manifest" "$output/expected-manifest.json"
+          rm -f "$decoded"
+          find "$output" -maxdepth 1 -type f -print
+      - uses: actions/upload-artifact@65db11d1e295c20f3a35e3cc7e3f24288f5f9a2d # v4
+        with:
+          name: sanitized-${{ inputs.engine }}-cookie-fixture-${{ inputs.playwright_version }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/rookie-fixture-candidate-${{ inputs.engine }}
+          if-no-files-found: error
+          retention-days: 90

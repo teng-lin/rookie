@@ -1499,6 +1499,30 @@ fn firefox_based_defaults_null_and_out_of_range_metadata() {
 }
 
 #[test]
+fn firefox_based_maps_the_browser_unspecified_same_site_sentinel() {
+  let dir = unique_tmpdir("ff-unspecified-same-site");
+  let db = dir.join("cookies.sqlite");
+  let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+  conn
+    .execute_batch(
+      "CREATE TABLE moz_cookies (
+        host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+        name TEXT, value TEXT, isHttpOnly INTEGER, sameSite INTEGER
+      );
+      INSERT INTO moz_cookies VALUES (
+        '.example.com', '/', 0, 4102444800,
+        'unset', 'value', 0, 256
+      );",
+    )
+    .expect("seed Firefox unspecified SameSite sentinel");
+  drop(conn);
+
+  let cookies = firefox_based(db, None).expect("decode browser sentinel");
+  assert_eq!(cookies.len(), 1, "{cookies:?}");
+  assert_eq!(cookies[0].same_site, SAME_SITE_UNSPECIFIED);
+}
+
+#[test]
 fn firefox_based_reads_clean_shutdown_sessionstore() {
   let dir = unique_tmpdir("ff-clean-sessionstore");
   let db = dir.join("cookies.sqlite");

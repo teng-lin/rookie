@@ -33,6 +33,173 @@ class CookieServerTests(unittest.TestCase):
         with mock.patch.dict(SERVER.os.environ, {"ROOKIE_E2E_COOKIE_PORT": "9123"}):
             self.assertEqual(SERVER.listen_port(), 9123)
 
+    def test_corpus_route_emits_attribute_matrix_from_declaration(self) -> None:
+        headers = SERVER.corpus_headers(
+            "/corpus/initial?engine=chromium&tiers=portable_smoke",
+            "127.0.0.1:8765",
+        )
+        self.assertGreater(len(headers), 10)
+        self.assertIn(
+            "rookie_http_only=server-only; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
+            headers,
+        )
+        self.assertIn(
+            "rookie_ss_none=none; Path=/; Max-Age=3600; Secure; SameSite=None",
+            headers,
+        )
+        self.assertTrue(
+            any(header.startswith("rookie_large=" + "x" * 3584) for header in headers)
+        )
+
+    def test_corpus_route_is_engine_tier_phase_and_origin_aware(self) -> None:
+        deep_firefox = SERVER.corpus_headers(
+            "/corpus/initial?engine=firefox&tiers=deep", "127.0.0.1:8765"
+        )
+        self.assertEqual(deep_firefox, [])
+        deep_chromium = SERVER.corpus_headers(
+            "/corpus/initial?engine=chromium&tiers=deep", "127.0.0.1:8765"
+        )
+        self.assertTrue(
+            any(header.startswith("rookie_session=session") for header in deep_chromium)
+        )
+        mutation = SERVER.corpus_headers(
+            "/corpus/mutate?engine=chromium&tiers=portable_smoke",
+            "127.0.0.1:8765",
+        )
+        self.assertEqual(len(mutation), 2)
+        decoy = SERVER.corpus_headers(
+            "/corpus/initial?engine=chromium&tiers=portable_smoke",
+            "localhost:8765",
+        )
+        self.assertEqual(len(decoy), 1)
+        self.assertTrue(decoy[0].startswith("rookie_decoy="))
+
+    def test_corpus_run_redirects_across_every_origin_and_phase(self) -> None:
+        headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
+            "127.0.0.1:8765",
+        )
+        self.assertGreater(len(headers), 10)
+        self.assertEqual(
+            redirect,
+            "http://localhost:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=1",
+        )
+
+        decoy_headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=1",
+            "localhost:8765",
+        )
+        self.assertEqual(len(decoy_headers), 1)
+        self.assertEqual(
+            redirect,
+            "http://127.0.0.1:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=2",
+        )
+
+        mutation_headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=2",
+            "127.0.0.1:8765",
+        )
+        self.assertEqual(len(mutation_headers), 2)
+        self.assertEqual(
+            redirect,
+            "http://localhost:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=3",
+        )
+
+        final_headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=3",
+            "localhost:8765",
+        )
+        self.assertEqual(len(final_headers), 1)
+        self.assertTrue(final_headers[0].startswith("rookie_decoy="))
+        self.assertIsNone(redirect)
+
+    def test_corpus_run_corrects_the_host_before_setting_cookies(self) -> None:
+        headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
+            "localhost:8765",
+        )
+        self.assertEqual(headers, [])
+        self.assertEqual(
+            redirect,
+            "http://127.0.0.1:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
+        )
+
+    def test_corpus_run_preserves_https_across_origins(self) -> None:
+        headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=safari&tiers=portable_smoke&step=0",
+            "127.0.0.1:8765",
+            scheme="https",
+        )
+        self.assertGreater(len(headers), 10)
+        self.assertEqual(
+            redirect,
+            "https://localhost:8765/corpus/run?engine=safari&tiers=portable_smoke&step=1",
+        )
+
+    def test_health_and_browser_subresource_routes_never_seed_legacy_cookies(
+        self,
+    ) -> None:
+        self.assertEqual(SERVER.Handler.cookie_headers("/"), [])
+        self.assertEqual(SERVER.Handler.cookie_headers("/favicon.ico"), [])
+
+    def test_tls_configuration_rejects_mismatched_scheme_and_credentials(self) -> None:
+        SERVER.validate_tls_configuration("http", None, None)
+        SERVER.validate_tls_configuration("https", "chain.pem", "key.pem")
+        invalid = (
+            ("ftp", None, None, "unsupported"),
+            ("https", None, None, "requires a certificate"),
+            ("http", "chain.pem", "key.pem", "must not configure TLS"),
+            ("https", "chain.pem", None, "both .* are required"),
+        )
+        for scheme, certificate, private_key, error in invalid:
+            with self.subTest(scheme=scheme, certificate=certificate):
+                with self.assertRaisesRegex(SystemExit, error):
+                    SERVER.validate_tls_configuration(scheme, certificate, private_key)
+
+    def test_empty_corpus_result_does_not_fall_back_to_the_legacy_cookie(self) -> None:
+        self.assertEqual(
+            SERVER.corpus_headers(
+                "/corpus/mutate?engine=unsupported&tiers=portable_smoke",
+                "localhost:8765",
+            ),
+            [],
+        )
+
+    def test_active_writer_baseline_has_replace_and_delete_subjects(self) -> None:
+        self.assertEqual(
+            SERVER.Handler.cookie_headers("/active-writer/baseline"),
+            [
+                "rookie_ci=before; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_remove=present; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_added=; Path=/; Max-Age=0; SameSite=Lax",
+            ],
+        )
+
+    def test_active_writer_mutation_replaces_adds_and_deletes(self) -> None:
+        self.assertEqual(
+            SERVER.Handler.cookie_headers("/active-writer/mutate"),
+            [
+                "rookie_ci=after; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_added=present; Path=/; Max-Age=3600; SameSite=Lax",
+                "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
+            ],
+        )
+
+    def test_active_writer_churn_rewrites_the_stable_mutated_state(self) -> None:
+        headers = SERVER.Handler.cookie_headers(
+            "/active-writer/churn?expiry=4102444800"
+        )
+        self.assertEqual(len(headers), 2)
+        self.assertIn("rookie_ci=after", headers[0])
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", headers[0])
+        self.assertIn("rookie_added=present", headers[1])
+
+    def test_staged_wal_route_keeps_its_historical_canary_cookie(self) -> None:
+        self.assertIn(
+            "rookie_wal=live; Path=/; Max-Age=3600; SameSite=Lax",
+            SERVER.Handler.cookie_headers("/wal"),
+        )
+
 
 class ClaimedE2eHelperTests(unittest.TestCase):
     def test_keychain_accounts_preserve_configured_vendor_identity(self) -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed an installed claimed browser and extract rookie_ci=bar.
+"""Seed an installed claimed browser and assert its exact portable corpus.
 
 Installed Chromium-family browsers are launched through their native CLI,
 using foreground Xvfb on most Linux images and modern headless mode where the
@@ -20,13 +20,22 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
+from browser_coverage_contract import assert_observed_depth, coverage_row, load_coverage
+from hosted_cookie_corpus import corpus_seed_url, write_hosted_manifest
+from run_exact_corpus_e2e import (
+    configure_isolated_keychain,
+    digest_fields,
+    normalized_path_bytes,
+)
 from webdriver_cookie import (
     WebDriverError,
     file_snapshot,
@@ -37,6 +46,130 @@ from webdriver_cookie import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+REGISTRY_PATH = ROOT / "rookie-rs/browser_registry.json"
+
+
+def current_platform() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+
+def isolated_discovery_environment(root: Path) -> dict[str, str]:
+    """Return registry environment variables that cannot reach a user profile."""
+
+    home = root / "home"
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "LOCALAPPDATA": str(home / "AppData/Local"),
+        "APPDATA": str(home / "AppData/Roaming"),
+    }
+
+
+def registry_browser(platform: str, browser: str) -> dict:
+    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    matches = [
+        item
+        for item in registry["platforms"][platform]
+        if item["canonical_id"] == browser
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected one registry entry for {platform}/{browser}, got {len(matches)}"
+        )
+    return matches[0]
+
+
+def resolve_fixture_root(template: str, environment: dict[str, str]) -> Path:
+    replacements = {
+        "{home}": environment["HOME"],
+        "{config_home}": environment["XDG_CONFIG_HOME"],
+        "{xdg_config_home}": environment["XDG_CONFIG_HOME"],
+        "{local_app_data}": environment["LOCALAPPDATA"],
+        "{roaming_app_data}": environment["APPDATA"],
+    }
+    value = template
+    for placeholder, replacement in replacements.items():
+        value = value.replace(placeholder, replacement)
+    # Some packaged Windows roots contain a package-family glob.  Hosted
+    # cells currently avoid those products, but resolving it keeps this helper
+    # deterministic and makes its unit contract complete.
+    value = value.replace("*", "rookie-fixture")
+    if "{" in value or "}" in value:
+        raise SystemExit(f"unresolved registry root template {template!r}")
+    return Path(value)
+
+
+def prepare_discovered_profile(
+    sandbox: Path, platform: str, browser: str, engine: str
+) -> tuple[Path, dict[str, str]]:
+    """Choose a real registry root below an isolated temporary home."""
+
+    environment = isolated_discovery_environment(sandbox)
+    entry = registry_browser(platform, browser)
+    roots = sorted(entry["roots"], key=lambda root: root["priority"])
+    if not roots:
+        raise SystemExit(f"registry browser {browser!r} has no discovery roots")
+    root = resolve_fixture_root(roots[0]["template"], environment)
+    if engine == "gecko":
+        profile = root / "Profiles/rookie-e2e"
+        profile.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "profiles.ini").write_text(
+            "[Profile0]\nName=rookie-e2e\nIsRelative=1\n"
+            "Path=Profiles/rookie-e2e\nDefault=1\n",
+            encoding="utf-8",
+        )
+        return profile, environment
+    root.mkdir(parents=True, exist_ok=True)
+    return root, environment
+
+
+def canonical_root_digest_path(root: Path, platform: str) -> Path:
+    """Mirror Rust's Windows canonicalize spelling before hashing an ID."""
+
+    value = str(root)
+    if platform == "windows" and not value.startswith("\\\\?\\"):
+        return Path("\\\\?\\" + value)
+    return root
+
+
+def independently_expected_profile_id(
+    platform: str,
+    browser: str,
+    engine: str,
+    profile: Path,
+    environment: dict[str, str],
+) -> str:
+    entry = registry_browser(platform, browser)
+    root_spec = min(entry["roots"], key=lambda root: root["priority"])
+    root = resolve_fixture_root(root_spec["template"], environment).resolve(strict=True)
+    expected_profile = (
+        root / "Profiles/rookie-e2e" if engine == "gecko" else root
+    ).resolve(strict=True)
+    if profile.resolve(strict=True) != expected_profile:
+        raise SystemExit(
+            f"hosted discovery profile was not at its registry root: "
+            f"{profile} != {expected_profile}"
+        )
+    installation_id = digest_fields(
+        b"rookie-install-v1",
+        browser.encode(),
+        root_spec["root_id"].encode(),
+        root_spec["channel"].encode(),
+        normalized_path_bytes(canonical_root_digest_path(root, platform)),
+    )
+    locator = Path("Profiles/rookie-e2e") if engine == "gecko" else Path("Default")
+    return digest_fields(
+        b"rookie-profile-v1",
+        installation_id.encode(),
+        b"relative",
+        normalized_path_bytes(locator),
+    )
 
 
 def pick_cookie_port() -> int:
@@ -52,6 +185,8 @@ def wait_for_server(
     port: int,
     proc: subprocess.Popen[bytes] | subprocess.Popen[str],
     log_path: Path,
+    *,
+    tls: bool = False,
     timeout: float = 45,
 ) -> None:
     deadline = time.time() + timeout
@@ -63,7 +198,13 @@ def wait_for_server(
                 f"127.0.0.1:{port}\n{logs}"
             )
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5) as raw:
+                if tls:
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    with context.wrap_socket(raw, server_hostname="127.0.0.1"):
+                        return
                 return
         except OSError:
             time.sleep(0.25)
@@ -73,11 +214,16 @@ def wait_for_server(
         else ""
     )
     raise SystemExit(
-        f"cookie server did not become ready at http://127.0.0.1:{port}/\n{logs}"
+        f"cookie server did not become ready at "
+        f"{'https' if tls else 'http'}://127.0.0.1:{port}/\n{logs}"
     )
 
 
-def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
+def start_cookie_server(
+    *, tls_cert: Path | None = None, tls_key: Path | None = None
+) -> tuple[subprocess.Popen[str], int, Path, Path]:
+    if (tls_cert is None) != (tls_key is None):
+        raise SystemExit("cookie server TLS requires both certificate and private key")
     port = pick_cookie_port()
     env = os.environ.copy()
     env["ROOKIE_E2E_COOKIE_PORT"] = str(port)
@@ -85,6 +231,10 @@ def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
     request_log = Path(tempfile.gettempdir()) / f"rookie-cookie-requests-{port}.log"
     request_log.write_text("", encoding="utf-8")
     env["ROOKIE_E2E_REQUEST_LOG"] = str(request_log)
+    if tls_cert is not None and tls_key is not None:
+        env["ROOKIE_E2E_COOKIE_SCHEME"] = "https"
+        env["ROOKIE_E2E_COOKIE_TLS_CERT"] = str(tls_cert)
+        env["ROOKIE_E2E_COOKIE_TLS_KEY"] = str(tls_key)
     with log_path.open("w", encoding="utf-8") as log_handle:
         proc = subprocess.Popen(
             [sys.executable, "-u", str(ROOT / "tests/e2e/cookie_server.py")],
@@ -94,7 +244,7 @@ def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
             stderr=subprocess.STDOUT,
             text=True,
         )
-    wait_for_server(port, proc, log_path)
+    wait_for_server(port, proc, log_path, tls=tls_cert is not None)
     return proc, port, log_path, request_log
 
 
@@ -122,17 +272,27 @@ def stop_safari(*, graceful: bool) -> None:
     subprocess.run(["pkill", "-x", "Safari"], check=False, capture_output=True)
 
 
-def wait_for_request(request_log: Path, path: str, timeout: float = 30) -> None:
+def wait_for_request(
+    request_log: Path,
+    path: str,
+    timeout: float = 30,
+    *,
+    query_contains: str | None = None,
+) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             requests = request_log.read_text(encoding="utf-8").splitlines()
         except OSError:
             requests = []
-        if path in requests:
+        if any(
+            urlsplit(request).path == path
+            and (query_contains is None or query_contains in urlsplit(request).query)
+            for request in requests
+        ):
             return
         time.sleep(0.25)
-    raise SystemExit(f"Safari never requested {path}; observed requests: {requests!r}")
+    raise SystemExit(f"browser never requested {path}; observed requests: {requests!r}")
 
 
 def seed_safari_native(
@@ -146,7 +306,16 @@ def seed_safari_native(
     print("+", " ".join(command), flush=True)
     subprocess.run(command, check=True, timeout=30)
     try:
-        wait_for_request(request_log, "/set")
+        parsed_url = urlsplit(url)
+        if parsed_url.path == "/corpus/run":
+            # Four origin/phase responses complete the portable redirect chain.
+            wait_for_request(
+                request_log,
+                "/corpus/run",
+                query_contains="step=3",
+            )
+        else:
+            wait_for_request(request_log, parsed_url.path)
         cookie_file = wait_for_changed_cookie_file("safari", before, timeout=45)
     except WebDriverError:
         # Some Safari releases checkpoint BinaryCookies only on a graceful
@@ -176,6 +345,214 @@ def verify_safari_store_access(cookie_file: Path) -> None:
     print("Safari cookie store readable through runner Full Disk Access", flush=True)
 
 
+def require_disposable_safari_host(scratch_profile: Path) -> None:
+    """Refuse to open Safari's normal store outside a fresh hosted CI account."""
+
+    if (
+        os.environ.get("CI", "").lower() != "true"
+        or os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
+        or os.environ.get("ROOKIE_E2E_RUNNER_ENVIRONMENT", "").lower()
+        != "github-hosted"
+    ):
+        raise SystemExit(
+            "Safari live extraction is restricted to a fresh GitHub-hosted CI "
+            "account; never run it against a local default Safari profile"
+        )
+    runner_temp_raw = os.environ.get("RUNNER_TEMP")
+    if not runner_temp_raw:
+        raise SystemExit("RUNNER_TEMP must identify the disposable Safari job root")
+    runner_temp = Path(runner_temp_raw).resolve(strict=True)
+    try:
+        scratch_profile.resolve().relative_to(runner_temp)
+    except ValueError as error:
+        raise SystemExit(
+            f"Safari scratch profile {scratch_profile} is outside RUNNER_TEMP"
+        ) from error
+
+
+def generate_trusted_safari_certificate(
+    scratch_profile: Path,
+) -> tuple[Path, Path]:
+    """Create and trust a short-lived localhost certificate on a hosted VM."""
+
+    if sys.platform != "darwin":
+        raise SystemExit("Safari HTTPS certificate setup requires macOS")
+    require_disposable_safari_host(scratch_profile)
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise SystemExit("Safari HTTPS requires openssl on PATH")
+    tls_dir = scratch_profile / "tls"
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    authority = tls_dir / "rookie-local-ca.pem"
+    authority_key = tls_dir / "rookie-local-ca-key.pem"
+    certificate = tls_dir / "rookie-localhost.pem"
+    private_key = tls_dir / "rookie-localhost-key.pem"
+    request = tls_dir / "rookie-localhost.csr"
+    extensions = tls_dir / "rookie-localhost.ext"
+    extensions.write_text(
+        "[server]\n"
+        "subjectAltName=IP:127.0.0.1,DNS:localhost\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=Rookie E2E Local CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout",
+                str(authority_key),
+                "-out",
+                str(authority),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-keyout",
+                str(private_key),
+                "-out",
+                str(request),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            [
+                openssl,
+                "x509",
+                "-req",
+                "-in",
+                str(request),
+                "-CA",
+                str(authority),
+                "-CAkey",
+                str(authority_key),
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-sha256",
+                "-extfile",
+                str(extensions),
+                "-extensions",
+                "server",
+                "-out",
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/bin/security",
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustAsRoot",
+                "-p",
+                "ssl",
+                "-k",
+                "/Library/Keychains/System.keychain",
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # Safari consumes Security.framework trust, not curl's CA bundle.
+        # The corpus deliberately redirects between both SANs to prove domain
+        # filtering, so validate each hostname against Safari's system trust.
+        for hostname in ("127.0.0.1", "localhost"):
+            subprocess.run(
+                [
+                    "/usr/bin/security",
+                    "verify-cert",
+                    "-c",
+                    str(certificate),
+                    "-p",
+                    "ssl",
+                    "-s",
+                    hostname,
+                    "-k",
+                    "/Library/Keychains/System.keychain",
+                    "-L",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        details = (error.stderr or error.stdout or "").strip()
+        if not details:
+            command = error.cmd if isinstance(error.cmd, list) else [str(error.cmd)]
+            details = f"command did not complete successfully: {' '.join(command)}"
+        raise SystemExit(
+            "failed to prepare trusted Safari HTTPS certificate on the fresh "
+            f"hosted runner: {details}"
+        ) from error
+    # The explicitly trusted leaf is also the only certificate the test server
+    # presents. The private signing CA is intentionally neither served nor
+    # trusted; both clients pin this exact endpoint certificate as their anchor.
+    return certificate, private_key
+
+
+def verify_safari_https_server(port: int, trusted_certificate: Path) -> None:
+    """Prove the pinned certificate validates the live server and hostname."""
+
+    try:
+        context = ssl.create_default_context(cafile=str(trusted_certificate))
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+        with urlopen(
+            f"https://127.0.0.1:{port}/health",
+            timeout=10,
+            context=context,
+        ) as response:
+            if response.status != 200 or response.read() != b"ok":
+                raise SystemExit(
+                    "Safari HTTPS preflight received an invalid health response"
+                )
+    except (OSError, ValueError) as error:
+        raise SystemExit(
+            "Safari HTTPS preflight could not validate the live disposable "
+            f"origin with its pinned certificate: {error}"
+        ) from error
+
+
 def venv_python() -> Path:
     unix = ROOT / ".venv" / "bin" / "python"
     windows = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -194,6 +571,11 @@ def keychain_accounts() -> list[str]:
 def plant_keychain() -> None:
     service = os.environ.get("ROOKIE_E2E_KEYCHAIN_SERVICE")
     if not service or sys.platform != "darwin":
+        return
+    if os.environ.get("ROOKIE_E2E_EPHEMERAL_KEYCHAIN"):
+        # The wrapper already planted the exact service/account pairs into its
+        # disposable keychain.  Adding them again without an explicit keychain
+        # path would target the runner's normal default keychain.
         return
     for account in keychain_accounts():
         subprocess.run(
@@ -234,6 +616,79 @@ def stage_chromium_user_data(user_data: Path) -> None:
     # search-engine data and crashes after deleting an unsigned `{}` stub.
 
 
+def chromium_automation_user_data(
+    browser: str, platform: str, requested: Path, registry_root: Path
+) -> Path:
+    """Select a fresh browser-launch root without weakening discovery checks."""
+
+    # Chromium 136+ products may suppress remote debugging when --user-data-dir
+    # names their computed default root. Edge and Windows Yandex can enforce
+    # that boundary; launch them in the separately supplied disposable scratch
+    # root, then stage stopped output into the disposable registry root.
+    if (browser, platform) in {
+        ("edge", "linux"),
+        ("edge", "windows"),
+        ("yandex", "windows"),
+    }:
+        return requested
+    return registry_root
+
+
+def chromium_automation_user_data_candidates(
+    browser: str, platform: str, requested: Path, registry_root: Path
+) -> list[Path]:
+    """Return bounded fresh launch roots for vendor startup differences."""
+
+    primary = chromium_automation_user_data(browser, platform, requested, registry_root)
+    # Linux Edge varies between releases: some require a non-default root for
+    # DevTools, while others only complete startup navigation at their isolated
+    # default root. Both are empty disposable paths, and exact extraction after
+    # shutdown remains the success oracle.
+    if (browser, platform) == ("edge", "linux"):
+        return [primary, registry_root]
+    return [primary]
+
+
+def stage_chromium_discovery_profile(source: Path, target: Path) -> None:
+    """Stage stopped browser cookie artifacts into an empty registry root."""
+
+    source = source.resolve(strict=True)
+    target = target.resolve()
+    if source == target:
+        return
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("Chromium launch and discovery roots must not overlap")
+    target.mkdir(parents=True, exist_ok=True)
+    if any(target.iterdir()):
+        raise SystemExit(f"Chromium discovery root was not empty: {target}")
+    databases = chromium_cookie_dbs(source)
+    if not databases:
+        raise SystemExit(f"Chromium automation root had no cookie database: {source}")
+    local_state = source / "Local State"
+    if local_state.is_file():
+        shutil.copy2(local_state, target / local_state.name)
+    for database in databases:
+        relative = database.relative_to(source)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(database, destination)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{database}{suffix}")
+            if sidecar.is_file():
+                shutil.copy2(sidecar, Path(f"{destination}{suffix}"))
+        profile_dir = (
+            database.parent.parent
+            if database.parent.name == "Network"
+            else database.parent
+        )
+        for settings_name in ("Preferences", "Secure Preferences"):
+            settings = profile_dir / settings_name
+            if settings.is_file():
+                destination_settings = target / settings.relative_to(source)
+                destination_settings.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(settings, destination_settings)
+
+
 def chromium_cookie_dbs(user_data: Path) -> list[Path]:
     preferred = [
         user_data / "Default/Network/Cookies",
@@ -266,10 +721,12 @@ def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
     return any(cookie_db_has_name(db, name) for db in chromium_cookie_dbs(user_data))
 
 
-def wait_for_chromium_cookie(user_data: Path, timeout: float) -> bool:
+def wait_for_chromium_cookie(
+    user_data: Path, timeout: float, *, name: str = "rookie_ci"
+) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if cookies_db_has_name(user_data):
+        if cookies_db_has_name(user_data, name):
             return True
         time.sleep(0.5)
     return False
@@ -322,12 +779,26 @@ def pick_devtools_port() -> int:
 
 
 def chromium_startup_timeout(exe: str, *, platform: str | None = None) -> float:
-    """Allow Edge's Linux wrapper enough time to finish first-run startup."""
+    """Allow Edge enough time to finish branded first-run startup."""
 
-    platform = platform or sys.platform
-    if platform.startswith("linux") and "microsoft-edge" in Path(exe).name:
+    executable_name = exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable_name in {"microsoft-edge", "msedge.exe"}:
         return 90
     return 45
+
+
+def chromium_launch_environment(exe: str, user_data: Path) -> dict[str, str]:
+    """Keep Linux Edge auxiliary config out of the discovery destination."""
+
+    env = os.environ.copy()
+    executable_name = Path(exe).name.lower()
+    if sys.platform.startswith("linux") and executable_name.startswith(
+        "microsoft-edge"
+    ):
+        xdg_config = user_data.parent / f"{user_data.name}-xdg-config"
+        xdg_config.mkdir(parents=True, exist_ok=True)
+        env["XDG_CONFIG_HOME"] = str(xdg_config)
+    return env
 
 
 def wait_for_devtools_or_cookie(
@@ -387,7 +858,11 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         exe, user_data, url, remote_debugging_port=devtools_port
     )
     print("+", " ".join(cmd), flush=True)
-    proc = subprocess.Popen(cmd, cwd=str(ROOT))
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        env=chromium_launch_environment(exe, user_data),
+    )
     saw_cookie = False
     try:
         has_devtools = wait_for_devtools_or_cookie(
@@ -398,7 +873,10 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         )
         if has_devtools:
             navigate_chromium_cdp(devtools_port, url)
-        saw_cookie = wait_for_chromium_cookie(user_data, 30)
+        completion_name = (
+            "rookie_decoy" if urlsplit(url).path == "/corpus/run" else "rookie_ci"
+        )
+        saw_cookie = wait_for_chromium_cookie(user_data, 30, name=completion_name)
         if saw_cookie:
             time.sleep(1)
     finally:
@@ -411,29 +889,133 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
     # Windows launchers can outlive the browser process addressed by
     # Browser.close. Do not reject a delayed cookie checkpoint until the
     # launcher has also stopped and released the SQLite store.
-    if not saw_cookie and not wait_for_chromium_cookie(user_data, 15):
+    if not saw_cookie and not wait_for_chromium_cookie(
+        user_data, 15, name=completion_name
+    ):
         candidates = ", ".join(str(path) for path in chromium_cookie_dbs(user_data))
         raise SystemExit(
-            "native Chromium navigation requested rookie_ci but the profile "
+            f"native Chromium navigation requested {completion_name} but the profile "
             f"did not persist it (cookie databases: {candidates or '<none>'})"
         )
 
 
-def seed_gecko(exe: str, profile: Path, url: str) -> None:
+def seed_chromium_with_disposable_root_fallback(
+    exe: str,
+    browser: str,
+    platform: str,
+    requested_user_data: Path,
+    registry_user_data: Path,
+    url: str,
+) -> Path:
+    """Seed the first working bounded disposable launch root."""
+
+    candidates = chromium_automation_user_data_candidates(
+        browser, platform, requested_user_data, registry_user_data
+    )
+    for attempt, candidate in enumerate(candidates, start=1):
+        stage_chromium_user_data(candidate)
+        try:
+            seed_chromium_native(exe, candidate, url)
+        except (
+            SystemExit,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            if attempt == len(candidates):
+                raise
+            print(
+                f"native {browser} launch root {candidate} failed; "
+                f"retrying the other disposable root: {error}",
+                flush=True,
+            )
+        else:
+            return candidate
+    raise AssertionError("Chromium launch candidate loop returned without a result")
+
+
+def wait_for_gecko_database(profile: Path, timeout: float = 30) -> None:
+    database = profile / "cookies.sqlite"
+    deadline = time.time() + timeout
+    last_error: sqlite3.Error | None = None
+    while time.time() < deadline:
+        if database.is_file():
+            try:
+                connection = sqlite3.connect(
+                    database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2
+                )
+                try:
+                    connection.execute("pragma table_info(moz_cookies)").fetchall()
+                finally:
+                    connection.close()
+                return
+            except sqlite3.Error as error:
+                last_error = error
+        time.sleep(0.25)
+    raise SystemExit(
+        f"Gecko cookie database did not become readable at {database}: {last_error}"
+    )
+
+
+def wait_for_gecko_cookie(profile: Path, name: str, timeout: float = 30) -> bool:
+    """Wait until a browser-written Gecko row is visible in persistent SQLite."""
+
+    database = profile / "cookies.sqlite"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            connection = sqlite3.connect(
+                database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2
+            )
+            try:
+                row = connection.execute(
+                    "select 1 from moz_cookies where name = ? limit 1", (name,)
+                ).fetchone()
+            finally:
+                connection.close()
+            if row is not None:
+                return True
+        except (OSError, sqlite3.Error):
+            pass
+        time.sleep(0.25)
+    return False
+
+
+def seed_gecko(exe: str, profile: Path, url: str, request_log: Path) -> None:
     profile.mkdir(parents=True, exist_ok=True)
     cmd = [exe, "--headless", "--no-remote", "--profile", str(profile), url]
-    if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
-        cmd = ["xvfb-run", "-a", *cmd]
     env = os.environ.copy()
     env["MOZ_HEADLESS"] = "1"
     print("+", " ".join(cmd), flush=True)
+    proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env)
+    saw_cookie = False
     try:
-        subprocess.run(cmd, check=False, cwd=str(ROOT), env=env, timeout=90)
-    except subprocess.TimeoutExpired:
-        pass
-    cookies = profile / "cookies.sqlite"
-    if not cookies.is_file():
-        raise SystemExit(f"gecko seed did not write {cookies}")
+        parsed_url = urlsplit(url)
+        corpus_run = parsed_url.path == "/corpus/run"
+        wait_for_request(
+            request_log,
+            parsed_url.path,
+            timeout=90,
+            query_contains="step=3" if corpus_run else None,
+        )
+        if corpus_run:
+            saw_cookie = wait_for_gecko_cookie(profile, "rookie_decoy")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+    wait_for_gecko_database(profile)
+    if (
+        corpus_run
+        and not saw_cookie
+        and not wait_for_gecko_cookie(profile, "rookie_decoy", timeout=15)
+    ):
+        raise SystemExit(
+            f"Gecko did not persist the final corpus cookie under {profile}"
+        )
 
 
 def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
@@ -447,11 +1029,31 @@ def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
     raise SystemExit(f"no Chromium Cookies db under {user_data}")
 
 
+def require_exact_single_cookie(env: dict[str, str]) -> None:
+    """Keep the legacy IE canary exact until a hosted IE cell exists."""
+
+    name = env.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
+    value = env.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
+    env["ROOKIE_E2E_REQUIRED_COOKIES_JSON"] = json.dumps({name: value})
+    env["ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"] = "[]"
+    env["ROOKIE_E2E_EXACT_COOKIE_STATE"] = "1"
+
+
 def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
+    env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
     db = find_chromium_db(user_data, name="rookie_ci")
+    env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
+        write_hosted_manifest(
+            engine="chromium",
+            browser=browser_id,
+            platform=current_platform(),
+            profile=user_data,
+            database=db,
+        )
+    )
     env["ROOKIE_E2E_COOKIE_DB"] = str(db)
     py = venv_python()
     subprocess.run(
@@ -484,11 +1086,36 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     else:
         cli.extend(["--browser-id", browser_id])
     subprocess.run(cli, check=True, env=env)
+    subprocess.run([*cli, "--detailed"], check=True, env=env)
+    subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            "--browser",
+            browser_id,
+            "--profile",
+            env["ROOKIE_E2E_EXPECTED_PROFILE_ID"],
+            "--detailed",
+        ],
+        check=True,
+        env=env,
+    )
 
 
-def assert_gecko(profile: Path) -> None:
+def assert_gecko(profile: Path, browser_id: str) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_FIREFOX_PROFILE"] = str(profile)
+    env["ROOKIE_E2E_BROWSER_ID"] = browser_id
+    env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
+    env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
+        write_hosted_manifest(
+            engine="firefox",
+            browser=browser_id,
+            platform=current_platform(),
+            profile=profile,
+            database=profile / "cookies.sqlite",
+        )
+    )
     py = venv_python()
     subprocess.run(
         [
@@ -511,6 +1138,29 @@ def assert_gecko(profile: Path) -> None:
         env=env,
     )
     subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            str(profile / "cookies.sqlite"),
+            "--detailed",
+        ],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        [
+            str(py),
+            str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+            "--browser",
+            browser_id,
+            "--profile",
+            env["ROOKIE_E2E_EXPECTED_PROFILE_ID"],
+            "--detailed",
+        ],
+        check=True,
+        env=env,
+    )
+    subprocess.run(
         ["node", str(ROOT / "tests/e2e/assert_firefox_cookie.mjs")],
         check=True,
         env=env,
@@ -527,8 +1177,21 @@ def assert_gecko(profile: Path) -> None:
     )
 
 
-def assert_native(cookie_file: Path, browser: str) -> None:
+def assert_native(cookie_file: Path, browser: str, profile: Path) -> None:
     env = os.environ.copy()
+    if browser == "safari":
+        env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
+            write_hosted_manifest(
+                engine="safari",
+                browser=browser,
+                platform=current_platform(),
+                profile=profile,
+                database=cookie_file,
+            )
+        )
+    else:
+        require_exact_single_cookie(env)
+        env["ROOKIE_E2E_EXPECT_NATIVE_FIELDS"] = "1"
     env["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
     env["ROOKIE_E2E_BROWSER_ID"] = browser
     py = venv_python()
@@ -547,6 +1210,18 @@ def assert_native(cookie_file: Path, browser: str) -> None:
         env=env,
         cwd=str(ROOT),
     )
+    if browser == "safari":
+        subprocess.run(
+            [
+                str(py),
+                str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+                str(cookie_file),
+                "--detailed",
+            ],
+            check=True,
+            env=env,
+            cwd=str(ROOT),
+        )
     subprocess.run(
         [str(py), str(ROOT / "tests/e2e/assert_native_cookie.py")],
         check=True,
@@ -808,28 +1483,76 @@ def run() -> int:
             "ROOKIE_E2E_BROWSER_ID and ROOKIE_E2E_BROWSER_PATH must be set"
         )
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", ROOT))
-    user_data = Path(
+    requested_user_data = Path(
         os.environ.get("ROOKIE_E2E_USER_DATA_DIR", workspace / ".rookie-ci" / browser)
     )
-    # Chromium 136+ ignores remote-debugging switches for the product's
-    # default data directory. A non-default profile is therefore required for
-    # browser automation, including branded forks such as Windows Yandex.
+    platform = current_platform()
+    coverage = load_coverage()
+    row = coverage_row(platform, browser, coverage)
+    if row["lane"] != "nightly_hosted" or row["engine"] != engine:
+        raise SystemExit(
+            f"coverage contract disagrees with hosted job: {platform}/{browser}/{engine}"
+        )
+    if engine in {"chromium", "gecko"}:
+        sandbox = requested_user_data.parent / f"{browser}-registry-sandbox"
+        user_data, discovery_environment = prepare_discovered_profile(
+            sandbox, platform, browser, engine
+        )
+        # Discovery must see only the isolated home, while cargo/rustup still
+        # need their already-installed toolchains from the runner account.
+        original_home = Path(os.environ.get("HOME", str(Path.home())))
+        os.environ.setdefault("CARGO_HOME", str(original_home / ".cargo"))
+        os.environ.setdefault("RUSTUP_HOME", str(original_home / ".rustup"))
+        os.environ.update(discovery_environment)
+        configure_isolated_keychain(os.environ)
+        os.environ.pop("CHROME_CONFIG_HOME", None)
+        os.environ["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
+        os.environ["ROOKIE_E2E_EXPECTED_PROFILE_ID"] = (
+            independently_expected_profile_id(
+                platform, browser, engine, user_data, discovery_environment
+            )
+        )
+        print(f"isolated registry profile: {user_data}", flush=True)
+    else:
+        user_data = requested_user_data
+    # Every path here is newly created below RUNNER_TEMP. Some products also
+    # require the automation root to differ from their registry default; that
+    # launch/store distinction is handled explicitly below.
     user_data.mkdir(parents=True, exist_ok=True)
 
-    server, port, _log_path, request_log = start_cookie_server()
+    tls_cert = None
+    tls_key = None
+    safari_trusted_certificate = None
+    if engine == "safari":
+        require_disposable_safari_host(user_data)
+        tls_cert, tls_key = generate_trusted_safari_certificate(user_data)
+        safari_trusted_certificate = tls_cert
+
+    server, port, _log_path, request_log = start_cookie_server(
+        tls_cert=tls_cert, tls_key=tls_key
+    )
     try:
+        if engine == "safari":
+            assert safari_trusted_certificate is not None
+            verify_safari_https_server(port, safari_trusted_certificate)
         plant_keychain()
-        url = f"http://127.0.0.1:{port}/set"
+        url = (
+            f"http://127.0.0.1:{port}/set"
+            if engine == "internet_explorer"
+            else corpus_seed_url(
+                port, engine, scheme="https" if engine == "safari" else "http"
+            )
+        )
         if engine == "gecko":
-            seed_gecko(exe, user_data, url)
-            assert_gecko(user_data)
+            seed_gecko(exe, user_data, url, request_log)
+            assert_gecko(user_data, browser)
         elif engine == "safari":
             before = file_snapshot(engine)
             cookie_file = seed_safari_native(exe, url, before, request_log)
             verify_safari_store_access(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
-            assert_native(cookie_file, browser)
+            assert_native(cookie_file, browser, user_data)
         elif engine == "internet_explorer":
             before = file_snapshot(engine)
             cookie_file = seed_with_startup_retry(engine, exe, url, before)
@@ -842,11 +1565,18 @@ def run() -> int:
             cookie_file = snapshot_internet_explorer_store(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
-            assert_native(cookie_file, browser)
+            assert_native(cookie_file, browser, user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
-            stage_chromium_user_data(user_data)
-            seed_chromium_native(exe, user_data, url)
+            automation_user_data = seed_chromium_with_disposable_root_fallback(
+                exe,
+                browser,
+                platform,
+                requested_user_data,
+                user_data,
+                url,
+            )
+            stage_chromium_discovery_profile(automation_user_data, user_data)
             assert_chromium(user_data, browser)
     finally:
         server.terminate()
@@ -854,7 +1584,35 @@ def run() -> int:
             server.wait(timeout=5)
         except subprocess.TimeoutExpired:
             server.kill()
-    print(f"hosted claimed e2e ok: {browser} ({engine})")
+        # Safari is hard-gated to a fresh GitHub-hosted VM. Its short-lived
+        # leaf trust is discarded with the VM; deleting it through securityd
+        # can trigger an authorization dialog and hang the noninteractive job.
+    observed = {"browser_launch", "explicit_path"}
+    if engine == "chromium":
+        observed.update(
+            {
+                "registry_id",
+                "detailed",
+                "discovery",
+                "recommended_read",
+                "crypto",
+                "exact_set",
+            }
+        )
+    elif engine == "gecko":
+        observed.update(
+            {
+                "registry_id",
+                "detailed",
+                "discovery",
+                "recommended_read",
+                "exact_set",
+            }
+        )
+    elif engine == "safari":
+        observed.update({"detailed", "exact_set"})
+    assert_observed_depth(row, observed, coverage)
+    print(f"hosted claimed e2e ok: {browser} ({engine}); depth={sorted(observed)}")
     return 0
 
 

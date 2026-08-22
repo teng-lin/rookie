@@ -13,6 +13,91 @@ import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
+    def test_legacy_ie_runner_requires_the_exact_single_cookie_set(self) -> None:
+        environment: dict[str, str] = {}
+        hosted.require_exact_single_cookie(environment)
+        self.assertEqual(
+            environment["ROOKIE_E2E_REQUIRED_COOKIES_JSON"],
+            '{"rookie_ci": "bar"}',
+        )
+        self.assertEqual(environment["ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"], "[]")
+        self.assertEqual(environment["ROOKIE_E2E_EXACT_COOKIE_STATE"], "1")
+
+    def test_isolated_discovery_environment_stays_below_sandbox(self) -> None:
+        sandbox = Path("/tmp/rookie-registry-sandbox")
+        environment = hosted.isolated_discovery_environment(sandbox)
+        self.assertTrue(
+            all(Path(value).is_relative_to(sandbox) for value in environment.values())
+        )
+
+    def test_registry_root_template_resolves_only_isolated_placeholders(self) -> None:
+        environment = hosted.isolated_discovery_environment(Path("/tmp/sandbox"))
+        resolved = hosted.resolve_fixture_root(
+            "{local_app_data}/Packages/Browser_*/User Data", environment
+        )
+        self.assertEqual(
+            resolved,
+            Path(
+                "/tmp/sandbox/home/AppData/Local/Packages/Browser_rookie-fixture/User Data"
+            ),
+        )
+
+    def test_gecko_discovery_profile_has_a_profiles_ini(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                hosted,
+                "registry_browser",
+                return_value={
+                    "roots": [
+                        {
+                            "template": "{home}/.fixture-browser",
+                            "priority": 10,
+                        }
+                    ]
+                },
+            ):
+                profile, environment = hosted.prepare_discovered_profile(
+                    Path(tmp), "linux", "fixture", "gecko"
+                )
+
+            self.assertEqual(
+                profile,
+                Path(environment["HOME"]) / ".fixture-browser/Profiles/rookie-e2e",
+            )
+            profiles_ini = profile.parents[1] / "profiles.ini"
+            self.assertIn("Path=Profiles/rookie-e2e", profiles_ini.read_text())
+
+    def test_hosted_profile_id_is_independent_and_registry_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            root = {
+                "template": "{home}/.fixture-browser",
+                "priority": 10,
+                "root_id": "fixture-root",
+                "channel": "stable",
+            }
+            with mock.patch.object(
+                hosted, "registry_browser", return_value={"roots": [root]}
+            ):
+                profile, environment = hosted.prepare_discovered_profile(
+                    sandbox, "linux", "fixture", "chromium"
+                )
+                profile_id = hosted.independently_expected_profile_id(
+                    "linux", "fixture", "chromium", profile, environment
+                )
+            self.assertEqual(len(profile_id), 64)
+            self.assertTrue(
+                all(character in "0123456789abcdef" for character in profile_id)
+            )
+
+    def test_windows_profile_id_hash_uses_rust_verbatim_canonical_path(self) -> None:
+        root = Path(r"D:\a\_temp\rookie\User Data")
+        self.assertEqual(
+            str(hosted.canonical_root_digest_path(root, "windows")),
+            r"\\?\D:\a\_temp\rookie\User Data",
+        )
+        self.assertEqual(hosted.canonical_root_digest_path(root, "macos"), root)
+
     def test_seeded_legacy_chromium_db_wins_over_empty_network_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             user_data = Path(tmp)
@@ -31,6 +116,189 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             self.assertEqual(
                 hosted.find_chromium_db(user_data, name="rookie_ci"), legacy
             )
+
+    def test_windows_yandex_uses_a_non_default_disposable_launch_root(self) -> None:
+        requested = Path(r"D:\a\_temp\rookie-ci\yandex")
+        registry = Path(r"D:\a\_temp\sandbox\Yandex\User Data")
+        self.assertEqual(
+            hosted.chromium_automation_user_data(
+                "yandex", "windows", requested, registry
+            ),
+            requested,
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data(
+                "yandex", "macos", requested, registry
+            ),
+            registry,
+        )
+
+    def test_edge_uses_bounded_disposable_launch_roots(self) -> None:
+        requested = Path("/tmp/rookie-ci/edge")
+        registry = Path("/tmp/sandbox/home/.config/microsoft-edge")
+        self.assertEqual(
+            hosted.chromium_automation_user_data(
+                "edge", "windows", requested, registry
+            ),
+            requested,
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data("edge", "linux", requested, registry),
+            requested,
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data_candidates(
+                "edge", "linux", requested, registry
+            ),
+            [requested, registry],
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data_candidates(
+                "edge", "windows", requested, registry
+            ),
+            [requested],
+        )
+
+    def test_edge_retries_alternate_disposable_root_after_timeout(self) -> None:
+        requested = Path("/tmp/rookie-ci/edge")
+        registry = Path("/tmp/sandbox/home/.config/microsoft-edge")
+        url = "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0"
+        with (
+            mock.patch.object(hosted, "stage_chromium_user_data") as stage,
+            mock.patch.object(
+                hosted,
+                "seed_chromium_native",
+                side_effect=[hosted.subprocess.TimeoutExpired("browser", 45), None],
+            ) as seed,
+            mock.patch("builtins.print"),
+        ):
+            selected = hosted.seed_chromium_with_disposable_root_fallback(
+                "/usr/bin/microsoft-edge",
+                "edge",
+                "linux",
+                requested,
+                registry,
+                url,
+            )
+
+        self.assertEqual(selected, registry)
+        self.assertEqual(
+            stage.call_args_list,
+            [mock.call(requested), mock.call(registry)],
+        )
+        self.assertEqual(
+            seed.call_args_list,
+            [
+                mock.call("/usr/bin/microsoft-edge", requested, url),
+                mock.call("/usr/bin/microsoft-edge", registry, url),
+            ],
+        )
+
+    def test_linux_edge_auxiliary_config_cannot_pollute_discovery_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            user_data = Path(temporary) / "edge-automation"
+            with (
+                mock.patch.object(hosted.sys, "platform", "linux"),
+                mock.patch.dict(
+                    hosted.os.environ,
+                    {"XDG_CONFIG_HOME": "/discovery/.config"},
+                    clear=True,
+                ),
+            ):
+                env = hosted.chromium_launch_environment(
+                    "/usr/bin/microsoft-edge", user_data
+                )
+
+            self.assertEqual(
+                env["XDG_CONFIG_HOME"],
+                str(Path(temporary) / "edge-automation-xdg-config"),
+            )
+            self.assertTrue(Path(env["XDG_CONFIG_HOME"]).is_dir())
+
+    def test_stopped_automation_profile_is_staged_into_empty_registry_root(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "automation"
+            target = root / "registry"
+            database = source / "Default/Network/Cookies"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"browser-generated")
+            preferences = source / "Default/Preferences"
+            preferences.write_text("browser-settings", encoding="utf-8")
+            hosted.stage_chromium_discovery_profile(source, target)
+            self.assertEqual(
+                (target / "Default/Network/Cookies").read_bytes(),
+                b"browser-generated",
+            )
+            self.assertEqual(
+                (target / "Default/Preferences").read_text(), "browser-settings"
+            )
+
+    def test_legacy_chromium_profile_settings_are_staged_beside_database(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "automation"
+            target = root / "registry"
+            database = source / "Default/Cookies"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"legacy-browser-generated")
+            preferences = source / "Default/Preferences"
+            preferences.write_text("legacy-settings", encoding="utf-8")
+
+            hosted.stage_chromium_discovery_profile(source, target)
+
+            self.assertEqual(
+                (target / "Default/Cookies").read_bytes(),
+                b"legacy-browser-generated",
+            )
+            self.assertEqual(
+                (target / "Default/Preferences").read_text(), "legacy-settings"
+            )
+
+    def test_gecko_waits_for_full_corpus_then_closes_before_extraction(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "profile"
+            request_log = Path(temporary) / "requests.log"
+            with (
+                mock.patch.object(
+                    hosted.subprocess, "Popen", return_value=proc
+                ) as popen,
+                mock.patch.object(hosted, "wait_for_request") as wait_for_request,
+                mock.patch.object(
+                    hosted, "wait_for_gecko_database"
+                ) as wait_for_database,
+                mock.patch.object(
+                    hosted, "wait_for_gecko_cookie", side_effect=[False, True]
+                ) as wait_for_cookie,
+            ):
+                hosted.seed_gecko(
+                    "/opt/librewolf",
+                    profile,
+                    "http://127.0.0.1/corpus/run?engine=firefox&step=0",
+                    request_log,
+                )
+
+        self.assertEqual(popen.call_args.args[0][0], "/opt/librewolf")
+        self.assertNotIn("xvfb-run", popen.call_args.args[0])
+        wait_for_request.assert_called_once_with(
+            request_log, "/corpus/run", timeout=90, query_contains="step=3"
+        )
+        proc.terminate.assert_called_once_with()
+        proc.wait.assert_called_once_with(timeout=15)
+        wait_for_database.assert_called_once_with(profile)
+        self.assertEqual(
+            wait_for_cookie.call_args_list,
+            [
+                mock.call(profile, "rookie_decoy"),
+                mock.call(profile, "rookie_decoy", timeout=15),
+            ],
+        )
 
     def test_profile_number_cookie_db_is_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,8 +371,33 @@ class HostedBrowserRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             wait_for_cookie.call_args_list,
-            [mock.call(profile, 30), mock.call(profile, 15)],
+            [
+                mock.call(profile, 30, name="rookie_ci"),
+                mock.call(profile, 15, name="rookie_ci"),
+            ],
         )
+
+    def test_chromium_corpus_waits_for_final_decoy_checkpoint(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        profile = Path("/tmp/profile")
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
+            mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(
+                hosted, "wait_for_chromium_cookie", return_value=True
+            ) as wait_for_cookie,
+            mock.patch.object(hosted.time, "sleep"),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser",
+                profile,
+                "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+            )
+
+        wait_for_cookie.assert_called_once_with(profile, 30, name="rookie_decoy")
 
     def test_chromium_cleanup_kills_launcher_that_ignores_terminate(self) -> None:
         proc = mock.Mock()
@@ -113,7 +406,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         with (
             mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
-            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=False),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
             mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
             mock.patch.object(hosted.time, "sleep"),
         ):
@@ -132,7 +427,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         with (
             mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
-            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=False),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
             mock.patch.object(
                 hosted, "wait_for_chromium_cookie", side_effect=[False, False]
             ),
@@ -170,10 +467,17 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertIn("--headless=new", command)
 
-    def test_linux_edge_gets_extended_startup_budget(self) -> None:
+    def test_edge_gets_extended_startup_budget_on_linux_and_windows(self) -> None:
         self.assertEqual(
             hosted.chromium_startup_timeout(
                 "/usr/bin/microsoft-edge", platform="linux"
+            ),
+            90,
+        )
+        self.assertEqual(
+            hosted.chromium_startup_timeout(
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                platform="win32",
             ),
             90,
         )
@@ -314,6 +618,140 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 "http://127.0.0.1:8765/set",
             ],
         )
+
+    def test_safari_live_run_refuses_a_local_default_profile(self) -> None:
+        with (
+            mock.patch.dict(hosted.os.environ, {}, clear=True),
+            self.assertRaisesRegex(SystemExit, "fresh GitHub-hosted CI account"),
+        ):
+            hosted.require_disposable_safari_host(Path("/tmp/safari"))
+
+    def test_safari_live_run_requires_scratch_below_runner_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runner_temp = Path(temporary)
+            scratch = runner_temp / "rookie-ci/safari"
+            with mock.patch.dict(
+                hosted.os.environ,
+                {
+                    "CI": "true",
+                    "GITHUB_ACTIONS": "true",
+                    "ROOKIE_E2E_RUNNER_ENVIRONMENT": "github-hosted",
+                    "RUNNER_TEMP": str(runner_temp),
+                },
+                clear=False,
+            ):
+                hosted.require_disposable_safari_host(scratch)
+                with self.assertRaisesRegex(SystemExit, "outside RUNNER_TEMP"):
+                    hosted.require_disposable_safari_host(
+                        Path("/tmp/not-runner/safari")
+                    )
+
+    def test_safari_https_certificate_is_installed_in_ephemeral_runner_trust(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary) / "safari"
+
+            def create_mock_openssl_outputs(command: list[str], **_kwargs: object):
+                for flag in ("-keyout", "-out"):
+                    if flag in command:
+                        Path(command[command.index(flag) + 1]).write_text(
+                            f"fixture for {flag}\n", encoding="utf-8"
+                        )
+                return hosted.subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch.object(hosted.sys, "platform", "darwin"),
+                mock.patch.dict(
+                    hosted.os.environ,
+                    {
+                        "CI": "true",
+                        "GITHUB_ACTIONS": "true",
+                        "ROOKIE_E2E_RUNNER_ENVIRONMENT": "github-hosted",
+                        "RUNNER_TEMP": temporary,
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(hosted.shutil, "which", return_value="/opt/openssl"),
+                mock.patch.object(
+                    hosted.subprocess,
+                    "run",
+                    side_effect=create_mock_openssl_outputs,
+                ) as run,
+            ):
+                (
+                    certificate,
+                    private_key,
+                ) = hosted.generate_trusted_safari_certificate(scratch)
+                extensions = (scratch / "tls/rookie-localhost.ext").read_text()
+
+        self.assertEqual(certificate, scratch / "tls/rookie-localhost.pem")
+        self.assertEqual(private_key, scratch / "tls/rookie-localhost-key.pem")
+        openssl_command = run.call_args_list[0].args[0]
+        self.assertEqual(openssl_command[0:3], ["/opt/openssl", "req", "-x509"])
+        sign_command = run.call_args_list[2].args[0]
+        self.assertEqual(sign_command[0:3], ["/opt/openssl", "x509", "-req"])
+        self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", extensions)
+        trust_command = run.call_args_list[3].args[0]
+        self.assertEqual(
+            trust_command[:5],
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/bin/security",
+                "add-trusted-cert",
+                "-d",
+            ],
+        )
+        self.assertEqual(
+            trust_command[trust_command.index("-k") + 1],
+            "/Library/Keychains/System.keychain",
+        )
+        self.assertIn("trustAsRoot", trust_command)
+        self.assertNotIn("-s", trust_command)
+        self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-localhost.pem"))
+        verify_commands = [call.args[0] for call in run.call_args_list[4:]]
+        self.assertEqual(
+            [command[command.index("-s") + 1] for command in verify_commands],
+            ["127.0.0.1", "localhost"],
+        )
+        for command in verify_commands:
+            self.assertEqual(command[:2], ["/usr/bin/security", "verify-cert"])
+            self.assertEqual(
+                command[command.index("-c") + 1],
+                str(scratch / "tls/rookie-localhost.pem"),
+            )
+        self.assertEqual(len(run.call_args_list), 6)
+
+    def test_safari_https_preflight_uses_generated_authority(self) -> None:
+        certificate = Path("/tmp/rookie-localhost.pem")
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b"ok"
+        response.__enter__.return_value = response
+        context = mock.MagicMock()
+        context.verify_flags = 0
+        with (
+            mock.patch.object(
+                hosted.ssl, "create_default_context", return_value=context
+            ) as create_context,
+            mock.patch.object(hosted, "urlopen", return_value=response) as open_url,
+        ):
+            hosted.verify_safari_https_server(9443, certificate)
+
+        create_context.assert_called_once_with(cafile=str(certificate))
+        self.assertEqual(context.verify_flags, hosted.ssl.VERIFY_X509_PARTIAL_CHAIN)
+        open_url.assert_called_once_with(
+            "https://127.0.0.1:9443/health", timeout=10, context=context
+        )
+
+    def test_safari_https_refuses_a_non_hosted_account(self) -> None:
+        with (
+            mock.patch.object(hosted.sys, "platform", "darwin"),
+            mock.patch.dict(hosted.os.environ, {}, clear=True),
+            self.assertRaisesRegex(SystemExit, "GitHub-hosted CI account"),
+        ):
+            hosted.generate_trusted_safari_certificate(Path("/tmp/safari"))
 
     def test_safari_store_access_checks_the_binarycookies_signature(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

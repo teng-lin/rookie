@@ -17,6 +17,12 @@ import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import {
+  findManifest,
+  pathsReferToSameFile,
+  verifyCookieRecords,
+} from "./cookie_manifest.mjs";
+import { assertCookieState, stateFromEnvironment } from "./cookie_state.mjs";
 
 const userDataDir = process.env.ROOKIE_E2E_USER_DATA_DIR;
 if (!userDataDir) {
@@ -26,6 +32,7 @@ if (!userDataDir) {
 const domain = process.env.ROOKIE_E2E_DOMAIN ?? "127.0.0.1";
 const expectedName = process.env.ROOKIE_E2E_COOKIE_NAME ?? "rookie_ci";
 const expectedValue = process.env.ROOKIE_E2E_COOKIE_VALUE ?? "bar";
+const manifestPath = findManifest(userDataDir, expectedName);
 
 let dbPath = process.env.ROOKIE_E2E_COOKIE_DB;
 if (!dbPath) {
@@ -55,6 +62,8 @@ if (!dbPath) {
 // branch remains trusted-ref-only even though Linux Chrome now gates pull
 // requests. See CHANGELOG.md.
 let results;
+let directSnapshot;
+let recommendedSnapshot;
 if (process.platform === "win32") {
   const keyPath = join(userDataDir, "Local State");
   results = [
@@ -65,12 +74,19 @@ if (process.platform === "win32") {
         localStatePath: keyPath,
         appBound: "allow_elevated_fallback",
       }),
+      "filtered_flat",
     ],
     [
       "chromiumBased",
       await rookieCookies.chromiumBased(keyPath, dbPath, [domain]),
+      "filtered_flat",
     ],
   ];
+  directSnapshot = await rookieCookies.fromPath({
+    path: dbPath,
+    localStatePath: keyPath,
+    appBound: "allow_elevated_fallback",
+  });
 } else {
   results = [
     [
@@ -80,6 +96,7 @@ if (process.platform === "win32") {
         browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
         appBound: "allow_elevated_fallback",
       }),
+      "filtered_flat",
     ],
     [
       "chromiumBased",
@@ -88,13 +105,34 @@ if (process.platform === "win32") {
         [domain],
         process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
       ),
+      "filtered_flat",
     ],
   ];
+  directSnapshot = await rookieCookies.fromPath({
+    path: dbPath,
+    browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
+    appBound: "allow_elevated_fallback",
+  });
 }
 
-results = results.map(([surface, cookies]) => [
+if (directSnapshot.browserId !== null || directSnapshot.profileId !== null) {
+  console.error("fromPath unexpectedly reported a discovered identity");
+  process.exit(1);
+}
+if (
+  !directSnapshot.detailedCookies.some(
+    ({ cookie }) => cookie.name === expectedName,
+  )
+) {
+  console.error("fromPath.detailedCookies omitted the seeded cookie");
+  process.exit(1);
+}
+results.push(["fromPath.cookies", directSnapshot.cookies, "unfiltered_flat"]);
+
+results = results.map(([surface, cookies, projection]) => [
   surface,
   cookies,
+  projection,
   expectedName,
   expectedValue,
 ]);
@@ -117,27 +155,104 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
   results.push([
     browserName,
     await browserFn([domain]),
+    "filtered_flat",
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_VALUE ?? expectedValue,
   ]);
 }
 
-for (const [surface, result, surfaceName, surfaceValue] of results) {
-  const seeded = result.find((c) => c.name === surfaceName);
-  if (!seeded) {
+if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
+  const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome";
+  const profiles = await rookieCookies.profiles(browserId);
+  const matchingProfiles = profiles.filter(({ sources }) =>
+    sources.some(({ path }) => pathsReferToSameFile(path, dbPath)),
+  );
+  if (matchingProfiles.length !== 1) {
     console.error(
-      `${surface}: seeded cookie '${surfaceName}' not found among ${result.length} cookies for ${domain}`,
+      `${browserId} discovery found ${matchingProfiles.length} profiles for source ${dbPath}; profiles=${JSON.stringify(profiles)}`,
     );
     process.exit(1);
   }
-  if (seeded.value !== surfaceValue) {
+  const identity = matchingProfiles[0].profile;
+  if (identity.browserId !== browserId) {
     console.error(
-      `${surface}: cookie value mismatch: expected '${surfaceValue}', got '${seeded.value}'`,
+      `discovery returned wrong browser identity: ${JSON.stringify(identity)}`,
     );
     process.exit(1);
+  }
+  const expectedProfileId = process.env.ROOKIE_E2E_EXPECTED_PROFILE_ID;
+  if (expectedProfileId && identity.profileId !== expectedProfileId) {
+    console.error(
+      `discovery returned the wrong independently expected profile ID: expected ${expectedProfileId}, got ${identity.profileId}`,
+    );
+    process.exit(1);
+  }
+  recommendedSnapshot = await rookieCookies.read({
+    browser: browserId,
+    profile: identity.profileId,
+    appBound: "allow_elevated_fallback",
+  });
+  if (
+    recommendedSnapshot.browserId !== browserId ||
+    recommendedSnapshot.profileId !== identity.profileId
+  ) {
+    console.error(
+      "recommended read returned the wrong browser/profile identity",
+    );
+    process.exit(1);
+  }
+  if (
+    !recommendedSnapshot.detailedCookies.some(
+      ({ cookie }) => cookie.name === expectedName,
+    )
+  ) {
+    console.error("recommended read detailed output omitted the seeded cookie");
+    process.exit(1);
+  }
+  results.push([
+    "read(profile).detailedCookies",
+    recommendedSnapshot.cookies,
+    "unfiltered_flat",
+    expectedName,
+    expectedValue,
+  ]);
+}
+
+for (const [
+  surface,
+  result,
+  projection,
+  surfaceName,
+  surfaceValue,
+] of results) {
+  if (manifestPath) {
+    verifyCookieRecords(manifestPath, projection, result, `Node ${surface}`);
+    continue;
+  }
+  const { required, forbidden } = stateFromEnvironment(
+    surfaceName,
+    surfaceValue,
+  );
+  assertCookieState(result, required, forbidden, surface);
+}
+
+if (manifestPath) {
+  verifyCookieRecords(
+    manifestPath,
+    "detailed",
+    directSnapshot.detailedCookies,
+    "Node fromPath.detailedCookies",
+  );
+  if (recommendedSnapshot) {
+    verifyCookieRecords(
+      manifestPath,
+      "detailed",
+      recommendedSnapshot.detailedCookies,
+      "Node read(profile).detailedCookies",
+    );
   }
 }
 
 console.log(
-  `rookie-cookies (${process.platform}): ${expectedName}=${expectedValue} verified (${results[0][1].length} cookies for ${domain}; surfaces: ${results.map(([surface]) => surface).join(", ")})`,
+  `rookie-cookies (${process.platform}): ${manifestPath ? "exact cookie corpus" : `${expectedName}=${expectedValue}`} verified (${results[0][1].length} cookies for ${domain}; surfaces: ${results.map(([surface]) => surface).join(", ")})`,
 );

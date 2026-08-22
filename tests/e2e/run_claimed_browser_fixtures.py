@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Exercise every claimed browser_id on this OS with engine fixtures.
+"""Exercise every claimed browser ID on this OS with isolated fixtures.
 
-Release / manual lane. Does not launch a real browser. Gecko ids share one
-generated cookies.sqlite. Windows Chromium extraction uses one current-user
-DPAPI fixture (not per-id ``browser_id``). Every claimed id must appear in
-``supported_browsers()``.
+Release/manual lane; never launches a browser. Every ID must appear in
+``supported_browsers()``. Feasible fixture-lane Chromium and Gecko cells get a
+registry-correct temporary root, exact profile/source discovery checks, and
+detailed explicit-path extraction. Gecko also exercises profile-scoped
+``read``. Windows retains its separate current-user DPAPI engine fixture; no
+per-ID fixture claims platform crypto coverage.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -19,8 +22,18 @@ from pathlib import Path
 
 import rookie_cookies
 
+from browser_coverage_contract import assert_observed_depth, load_coverage
+from cookie_manifest import (
+    MANIFEST_FILENAME,
+    paths_refer_to_same_file,
+    verify_records,
+)
+from fixture_cookie_corpus import portable_fixture_observations
+from hosted_cookie_corpus import build_manifest, corpus_engine, read_observations
+
 
 COVERAGE_PATH = Path(__file__).with_name("browser_coverage.json")
+REGISTRY_PATH = Path(__file__).resolve().parents[2] / "rookie-rs/browser_registry.json"
 
 
 def this_platform() -> str:
@@ -32,11 +45,65 @@ def this_platform() -> str:
 
 
 def load_rows(platform: str) -> list[dict]:
-    doc = json.loads(COVERAGE_PATH.read_text(encoding="utf-8"))
+    doc = load_coverage()
     return [row for row in doc["coverage"] if row["platform"] == platform]
 
 
-def write_gecko_db(path: Path) -> None:
+def isolated_environment(root: Path) -> dict[str, str]:
+    home = root / "home"
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "LOCALAPPDATA": str(home / "AppData/Local"),
+        "APPDATA": str(home / "AppData/Roaming"),
+    }
+
+
+def registry_entry(platform: str, browser: str) -> dict:
+    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    matches = [
+        entry
+        for entry in registry["platforms"][platform]
+        if entry["canonical_id"] == browser
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected one registry entry for {platform}/{browser}, got {len(matches)}"
+        )
+    return matches[0]
+
+
+def resolve_root(template: str, environment: dict[str, str]) -> Path:
+    replacements = {
+        "{home}": environment["HOME"],
+        "{config_home}": environment["XDG_CONFIG_HOME"],
+        "{xdg_config_home}": environment["XDG_CONFIG_HOME"],
+        "{local_app_data}": environment["LOCALAPPDATA"],
+        "{roaming_app_data}": environment["APPDATA"],
+    }
+    value = template
+    for placeholder, replacement in replacements.items():
+        value = value.replace(placeholder, replacement)
+    value = value.replace("*", "rookie-fixture")
+    if "{" in value or "}" in value:
+        raise SystemExit(f"unresolved registry root template {template!r}")
+    return Path(value)
+
+
+def fixture_root(platform: str, browser: str, environment: dict[str, str]) -> Path:
+    entry = registry_entry(platform, browser)
+    roots = sorted(entry["roots"], key=lambda root: root["priority"])
+    if not roots:
+        raise SystemExit(f"registry browser {browser!r} has no discovery roots")
+    return resolve_root(roots[0]["template"], environment)
+
+
+CHROMIUM_EPOCH_OFFSET_US = 11_644_473_600_000_000
+
+
+def write_gecko_db(path: Path, observations: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
     try:
         connection.execute(
@@ -44,17 +111,270 @@ def write_gecko_db(path: Path) -> None:
             CREATE TABLE moz_cookies (
               host TEXT NOT NULL, path TEXT NOT NULL, isSecure INTEGER NOT NULL,
               expiry INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
-              isHttpOnly INTEGER NOT NULL, sameSite INTEGER NOT NULL
+              isHttpOnly INTEGER NOT NULL, sameSite INTEGER NOT NULL,
+              originAttributes TEXT NOT NULL
             )
             """
         )
-        connection.execute(
-            "INSERT INTO moz_cookies VALUES "
-            "('.example.test', '/', 1, 4102444800, 'rookie_ci', 'bar', 1, 0)"
+        connection.execute("PRAGMA user_version = 15")
+        connection.executemany(
+            "INSERT INTO moz_cookies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    item["domain"],
+                    item["path"],
+                    int(item["secure"]),
+                    item["expires"] or 0,
+                    item["name"],
+                    item["observed_value"],
+                    int(item["http_only"]),
+                    256 if item["same_site"] == -1 else item["same_site"],
+                    item["context"]["origin_attributes"],
+                )
+                for item in observations
+            ],
         )
         connection.commit()
     finally:
         connection.close()
+
+
+def write_chromium_db(path: Path, observations: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO meta VALUES ('version', '23');
+            CREATE TABLE cookies (
+              host_key TEXT NOT NULL, path TEXT NOT NULL,
+              is_secure INTEGER NOT NULL, expires_utc INTEGER NOT NULL,
+              name TEXT NOT NULL, value TEXT NOT NULL,
+              encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+              samesite INTEGER NOT NULL
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO cookies VALUES (?, ?, ?, ?, ?, ?, X'', ?, ?)",
+            [
+                (
+                    item["domain"],
+                    item["path"],
+                    int(item["secure"]),
+                    (
+                        CHROMIUM_EPOCH_OFFSET_US + item["expires"] * 1_000_000
+                        if item["expires"] is not None
+                        else 0
+                    ),
+                    item["name"],
+                    item["observed_value"],
+                    int(item["http_only"]),
+                    item["same_site"],
+                )
+                for item in observations
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def write_fixture_manifest(
+    *,
+    engine: str,
+    browser: str,
+    platform: str,
+    profile: Path,
+    database: Path,
+) -> dict:
+    manifest = build_manifest(
+        engine=engine,
+        browser=browser,
+        platform=platform,
+        observations=read_observations(corpus_engine(engine), database),
+    )
+    (profile / MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
+def assert_discovered_source(browser: str, database: Path) -> dict:
+    profiles = rookie_cookies.browser_profiles(browser)
+    matching = [
+        profile
+        for profile in profiles
+        if any(
+            paths_refer_to_same_file(source["path"], database)
+            for source in profile["sources"]
+        )
+    ]
+    if len(matching) != 1:
+        raise SystemExit(
+            f"{browser} discovery found {len(matching)} profiles for {database}; "
+            f"profiles={profiles!r}"
+        )
+    identity = matching[0]["profile"]
+    if identity["browser_id"] != browser:
+        raise SystemExit(f"{browser} discovery returned {identity!r}")
+    return identity
+
+
+def exercise_fixture_cell(
+    platform: str, row: dict, environment: dict[str, str]
+) -> None:
+    browser = row["browser"]
+    engine = row["engine"]
+    observed = {"registry_id": "fixture"}
+    root = fixture_root(platform, browser, environment)
+
+    if engine == "chromium":
+        observations = portable_fixture_observations(
+            engine=engine, browser=browser, platform=platform
+        )
+        database = root / "Default/Network/Cookies"
+        write_chromium_db(database, observations)
+        (root / "Local State").write_text(
+            json.dumps(
+                {
+                    "profile": {
+                        "last_used": "Default",
+                        "info_cache": {"Default": {"name": "Default"}},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest = write_fixture_manifest(
+            engine=engine,
+            browser=browser,
+            platform=platform,
+            profile=root,
+            database=database,
+        )
+        filtered = rookie_cookies.extract_from_path(
+            str(database),
+            domains=[manifest["domain_filter"]],
+            plaintext_only=True,
+        )
+        snapshot = rookie_cookies.from_path(
+            str(database), include_expired=True, plaintext_only=True
+        )
+        verify_records(
+            manifest,
+            "filtered_flat",
+            filtered,
+            surface=f"{platform}/{browser} Python extract_from_path",
+        )
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            snapshot.as_list(),
+            surface=f"{platform}/{browser} Python from_path",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            snapshot.detailed_cookies(),
+            surface=f"{platform}/{browser} Python from_path.detailed_cookies",
+        )
+        print(
+            f"fixture exact corpus: {platform}/{browser} "
+            f"({len(manifest['expected']['filtered_flat'])} filtered / "
+            f"{len(manifest['expected']['unfiltered_flat'])} total Chromium rows)"
+        )
+        assert_discovered_source(browser, database)
+        observed.update(
+            {
+                "explicit_path": "fixture",
+                "detailed": "fixture",
+                "discovery": "fixture",
+                "exact_set": "fixture",
+            }
+        )
+    elif engine == "gecko":
+        observations = portable_fixture_observations(
+            engine=engine, browser=browser, platform=platform
+        )
+        profile = root / "Profiles/rookie-fixture"
+        database = profile / "cookies.sqlite"
+        write_gecko_db(database, observations)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "profiles.ini").write_text(
+            "[Profile0]\nName=rookie-fixture\nIsRelative=1\n"
+            "Path=Profiles/rookie-fixture\nDefault=1\n",
+            encoding="utf-8",
+        )
+        manifest = write_fixture_manifest(
+            engine=engine,
+            browser=browser,
+            platform=platform,
+            profile=profile,
+            database=database,
+        )
+        filtered = rookie_cookies.cookies_from_path(
+            str(database), [manifest["domain_filter"]]
+        )
+        direct = rookie_cookies.from_path(str(database), include_expired=True)
+        verify_records(
+            manifest,
+            "filtered_flat",
+            filtered,
+            surface=f"{platform}/{browser} Python cookies_from_path",
+        )
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            direct.as_list(),
+            surface=f"{platform}/{browser} Python from_path",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            direct.detailed_cookies(),
+            surface=f"{platform}/{browser} Python from_path.detailed_cookies",
+        )
+        identity = assert_discovered_source(browser, database)
+        recommended = rookie_cookies.read(
+            browser=browser,
+            profile=identity["profile_id"],
+            include_expired=True,
+        )
+        if (
+            recommended.browser_id != browser
+            or recommended.profile_id != identity["profile_id"]
+        ):
+            raise SystemExit(f"{browser} recommended read selected the wrong identity")
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            recommended.as_list(),
+            surface=f"{platform}/{browser} Python read(profile)",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            recommended.detailed_cookies(),
+            surface=f"{platform}/{browser} Python read(profile).detailed_cookies",
+        )
+        print(
+            f"fixture exact corpus: {platform}/{browser} "
+            f"({len(manifest['expected']['filtered_flat'])} filtered / "
+            f"{len(manifest['expected']['unfiltered_flat'])} total Gecko rows)"
+        )
+        observed.update(
+            {
+                "explicit_path": "fixture",
+                "detailed": "fixture",
+                "discovery": "fixture",
+                "recommended_read": "fixture",
+                "exact_set": "fixture",
+            }
+        )
+
+    assert_observed_depth(row, observed)
 
 
 def assert_seeded(cookies: list) -> None:
@@ -74,9 +394,7 @@ def run(platform: str) -> int:
         item if isinstance(item, str) else item["id"]
         for item in rookie_cookies.supported_browsers()
     }
-    missing = sorted(
-        row["browser"] for row in rows if row["browser"] not in supported
-    )
+    missing = sorted(row["browser"] for row in rows if row["browser"] not in supported)
     if missing:
         raise SystemExit(
             f"supported_browsers() is missing claimed ids {missing}; "
@@ -84,8 +402,14 @@ def run(platform: str) -> int:
         )
 
     with tempfile.TemporaryDirectory(prefix="rookie-claimed-") as temp:
+        environment = isolated_environment(Path(temp))
+        os.environ.update(environment)
+        os.environ.pop("CHROME_CONFIG_HOME", None)
         gecko_db = Path(temp) / "cookies.sqlite"
-        write_gecko_db(gecko_db)
+        baseline_observations = portable_fixture_observations(
+            engine="gecko", browser="firefox", platform=platform
+        )
+        write_gecko_db(gecko_db, baseline_observations)
         gecko_cookies = rookie_cookies.from_path(
             str(gecko_db), include_expired=True
         ).as_list()
@@ -152,6 +476,10 @@ def run(platform: str) -> int:
                 },
             )
             assert_seeded(octo_cookies)
+
+        for row in rows:
+            if row["lane"] == "release_fixture":
+                exercise_fixture_cell(platform, row, environment)
 
     print(f"claimed-browser fixtures ok on {platform} ({len(rows)} ids)")
     return 0

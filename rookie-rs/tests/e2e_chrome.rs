@@ -1,8 +1,9 @@
 #![allow(deprecated)]
 
 //! End-to-end test: extracts cookies from a real Chrome profile that was
-//! seeded by `tests/e2e/seed_chromium_cookie.mjs` and asserts the seeded
-//! `rookie_ci=bar` cookie is recovered with the OS-encrypted value intact.
+//! seeded by `tests/e2e/seed_chromium_cookie.mjs`. Ordinary hosted lanes use
+//! an independent manifest to assert the exact flat and detailed corpus;
+//! focused App-Bound/WAL canaries retain their single-cookie assertion.
 //!
 //! Driven by env vars so the seed step can hand the test a non-default
 //! user-data-dir (Chrome refuses CDP/remote-debugging on its default
@@ -24,8 +25,11 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod helpers {
+  use std::collections::BTreeMap;
   use std::env;
+  use std::io::Write;
   use std::path::PathBuf;
+  use std::process::{Command, Stdio};
 
   pub fn resolve_db_path() -> PathBuf {
     if let Some(path) = env::var_os("ROOKIE_E2E_COOKIE_DB") {
@@ -60,26 +64,148 @@ mod helpers {
     env::var("ROOKIE_E2E_DOMAIN").unwrap_or_else(|_| "127.0.0.1".to_string())
   }
 
+  fn manifest_path() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("ROOKIE_E2E_COOKIE_MANIFEST") {
+      return Some(PathBuf::from(path));
+    }
+    if env::var("ROOKIE_E2E_COOKIE_NAME")
+      .as_deref()
+      .unwrap_or("rookie_ci")
+      != "rookie_ci"
+    {
+      return None;
+    }
+    let user_data_dir = env::var_os("ROOKIE_E2E_USER_DATA_DIR")?;
+    let candidate = PathBuf::from(user_data_dir).join("rookie-e2e-cookie-manifest.json");
+    candidate.is_file().then_some(candidate)
+  }
+
+  pub fn corpus_enabled() -> bool {
+    manifest_path().is_some()
+  }
+
+  fn verifier_python(workspace: &std::path::Path) -> PathBuf {
+    if let Some(path) = env::var_os("ROOKIE_E2E_PYTHON") {
+      return PathBuf::from(path);
+    }
+    #[cfg(target_os = "windows")]
+    let candidate = workspace.join(".venv/Scripts/python.exe");
+    #[cfg(not(target_os = "windows"))]
+    let candidate = workspace.join(".venv/bin/python");
+    if candidate.is_file() {
+      candidate
+    } else if cfg!(target_os = "windows") {
+      PathBuf::from("python")
+    } else {
+      PathBuf::from("python3")
+    }
+  }
+
+  pub fn assert_corpus<T: serde::Serialize + ?Sized>(
+    actual: &T,
+    projection: &str,
+    surface: &str,
+  ) -> bool {
+    let Some(manifest) = manifest_path() else {
+      return false;
+    };
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .expect("rookie-rs has workspace parent")
+      .to_path_buf();
+    let verifier = workspace.join("tests/e2e/verify_cookie_manifest.py");
+    let mut child = Command::new(verifier_python(&workspace))
+      .arg(verifier)
+      .arg("--manifest")
+      .arg(manifest)
+      .arg("--projection")
+      .arg(projection)
+      .arg("--surface")
+      .arg(surface)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .expect("launch independent cookie manifest verifier");
+    child
+      .stdin
+      .take()
+      .expect("verifier stdin")
+      .write_all(&serde_json::to_vec(actual).expect("serialize extracted cookies"))
+      .expect("write verifier input");
+    let output = child.wait_with_output().expect("wait for cookie verifier");
+    assert!(
+      output.status.success(),
+      "{surface} failed exact cookie manifest verification: {}{}",
+      String::from_utf8_lossy(&output.stderr),
+      String::from_utf8_lossy(&output.stdout)
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    true
+  }
+
   pub fn assert_seeded(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
+    if assert_corpus(cookies, "filtered_flat", "Rust chromium_based") {
+      return;
+    }
+    assert_state(cookies, domain);
+  }
+
+  pub fn assert_state(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
     let expected_name =
       env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
     let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_string());
-    let seeded = cookies
-      .iter()
-      .find(|c| c.name == expected_name)
-      .unwrap_or_else(|| {
-        panic!(
-          "seeded cookie `{}` not found among {} cookies for domain {}",
-          expected_name,
-          cookies.len(),
-          domain
-        )
-      });
-    assert_eq!(seeded.value, expected_value, "cookie value mismatch");
+    let required = env::var("ROOKIE_E2E_REQUIRED_COOKIES_JSON")
+      .map(|raw| {
+        serde_json::from_str::<BTreeMap<String, String>>(&raw)
+          .expect("ROOKIE_E2E_REQUIRED_COOKIES_JSON must be a string map")
+      })
+      .unwrap_or_else(|_| BTreeMap::from([(expected_name, expected_value)]));
+    let forbidden = env::var("ROOKIE_E2E_FORBIDDEN_COOKIES_JSON")
+      .map(|raw| {
+        serde_json::from_str::<Vec<String>>(&raw)
+          .expect("ROOKIE_E2E_FORBIDDEN_COOKIES_JSON must be a string array")
+      })
+      .unwrap_or_default();
+    for (name, value) in &required {
+      let matches: Vec<_> = cookies
+        .iter()
+        .filter(|cookie| cookie.name == *name)
+        .collect();
+      assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one `{name}` among {} cookies for {domain}",
+        cookies.len()
+      );
+      assert_eq!(&matches[0].value, value, "cookie `{name}` value mismatch");
+    }
+    for name in forbidden {
+      assert!(
+        cookies.iter().all(|cookie| cookie.name != name),
+        "forbidden/deleted cookie `{name}` remained for {domain}"
+      );
+    }
+    if env::var("ROOKIE_E2E_EXACT_COOKIE_STATE").as_deref() == Ok("1") {
+      assert_eq!(
+        cookies.len(),
+        required.len(),
+        "active-writer result contained excess or missing rows for {domain}: {cookies:#?}"
+      );
+      assert!(
+        cookies
+          .iter()
+          .all(|cookie| required.contains_key(&cookie.name)),
+        "active-writer result contained an unexpected cookie for {domain}: {cookies:#?}"
+      );
+    }
   }
 
   #[cfg(target_os = "windows")]
   pub fn assert_discovered(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
+    if assert_corpus(cookies, "filtered_flat", "Rust browser discovery") {
+      return;
+    }
     let expected_name =
       env::var("ROOKIE_E2E_DISCOVERY_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
     let expected_value =
@@ -272,6 +398,11 @@ fn extracts_seeded_cookie_from_chrome_libsecret_profile() {
       });
 
   helpers::assert_seeded(&cookies, &domain);
+  if helpers::corpus_enabled() {
+    let detailed = rookie_cookies::chromium_based_detailed(config, db_path, None, false)
+      .unwrap_or_else(|error| panic!("chromium_based_detailed failed: {error}"));
+    helpers::assert_corpus(&detailed, "detailed", "Rust chromium_based_detailed");
+  }
 }
 
 #[cfg(target_os = "macos")]
@@ -293,6 +424,11 @@ fn extracts_seeded_cookie_through_real_macos_keychain_provider() {
       });
 
   helpers::assert_seeded(&cookies, &domain);
+  if helpers::corpus_enabled() {
+    let detailed = rookie_cookies::chromium_based_detailed(config, db_path, None, false)
+      .unwrap_or_else(|error| panic!("chromium_based_detailed failed: {error}"));
+    helpers::assert_corpus(&detailed, "detailed", "Rust chromium_based_detailed");
+  }
 }
 
 #[cfg(target_os = "windows")]
@@ -303,16 +439,136 @@ fn extracts_seeded_cookie_from_chrome_dpapi_profile() {
   let key_path = helpers::resolve_key_path();
   let domain = helpers::domain();
 
-  let cookies =
-    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]), false)
-      .unwrap_or_else(|e| {
-        panic!(
-          "rookie_cookies::chromium_based({}) failed: {e}",
-          db_path.display()
-        )
-      });
+  let cookies = rookie_cookies::chromium_based(
+    key_path.clone(),
+    db_path.clone(),
+    Some(vec![domain.clone()]),
+    false,
+  )
+  .unwrap_or_else(|e| {
+    panic!(
+      "rookie_cookies::chromium_based({}) failed: {e}",
+      db_path.display()
+    )
+  });
 
   helpers::assert_seeded(&cookies, &domain);
+  if helpers::corpus_enabled() {
+    let detailed = rookie_cookies::chromium_based_detailed(key_path, db_path, None, false)
+      .unwrap_or_else(|error| panic!("chromium_based_detailed failed: {error}"));
+    helpers::assert_corpus(&detailed, "detailed", "Rust chromium_based_detailed");
+  }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+#[ignore]
+fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
+  let db_path = helpers::resolve_db_path();
+  let domain = helpers::domain();
+  let browser_id = std::env::var("ROOKIE_E2E_BROWSER_ID").unwrap_or_else(|_| "chrome".to_owned());
+
+  let direct = rookie_cookies::FromPathRequest::new(&db_path)
+    .app_bound(rookie_cookies::AppBoundPolicy::AllowElevatedFallback);
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let direct = direct.chromium_browser_id(&browser_id);
+  #[cfg(target_os = "windows")]
+  let direct = direct.chromium_local_state(helpers::resolve_key_path());
+  let direct = rookie_cookies::from_path(direct)
+    .unwrap_or_else(|error| panic!("from_path({}) failed: {error}", db_path.display()));
+  assert_eq!(
+    direct.browser_id(),
+    None,
+    "explicit paths do not run discovery"
+  );
+  assert_eq!(
+    direct.profile_id(),
+    None,
+    "explicit paths do not select profiles"
+  );
+  if !helpers::assert_corpus(
+    direct.cookies(),
+    "unfiltered_flat",
+    "Rust from_path cookies",
+  ) {
+    helpers::assert_state(direct.cookies(), &domain);
+  }
+  helpers::assert_corpus(
+    direct.detailed_cookies(),
+    "detailed",
+    "Rust from_path detailed_cookies",
+  );
+  assert!(
+    direct
+      .detailed_cookies()
+      .iter()
+      .any(|record| record.cookie.name
+        == std::env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_owned())),
+    "from_path detailed output omitted the seeded cookie"
+  );
+
+  if std::env::var("ROOKIE_E2E_CHECK_RECOMMENDED_READ").as_deref() != Ok("1") {
+    eprintln!("recommended read/discovery check was not requested");
+    return;
+  }
+  let canonical_db = db_path
+    .canonicalize()
+    .expect("canonical cookie database path");
+  let profiles = rookie_cookies::profiles(&browser_id)
+    .unwrap_or_else(|error| panic!("profiles({browser_id}) failed: {error}"));
+  let mut matching = profiles.iter().filter(|profile| {
+    profile.sources.iter().any(|source| {
+      std::fs::canonicalize(&source.path)
+        .map(|path| path == canonical_db)
+        .unwrap_or(false)
+    })
+  });
+  let profile = matching.next().unwrap_or_else(|| {
+    panic!(
+      "discovery did not report source {}: {profiles:#?}",
+      db_path.display()
+    )
+  });
+  assert!(
+    matching.next().is_none(),
+    "source matched more than one discovered profile"
+  );
+  assert_eq!(profile.profile.browser_id.as_str(), browser_id);
+
+  let profile_id = profile.profile.profile_id.to_string();
+  if let Ok(expected_profile_id) = std::env::var("ROOKIE_E2E_EXPECTED_PROFILE_ID") {
+    assert_eq!(
+      profile_id, expected_profile_id,
+      "discovery returned the wrong independently expected profile ID"
+    );
+  }
+  let snapshot = rookie_cookies::read(
+    rookie_cookies::ReadRequest::browser(&browser_id)
+      .profile(&profile_id)
+      .app_bound(rookie_cookies::AppBoundPolicy::AllowElevatedFallback),
+  )
+  .unwrap_or_else(|error| panic!("read({browser_id}, {profile_id}) failed: {error}"));
+  assert_eq!(snapshot.browser_id(), Some(browser_id.as_str()));
+  assert_eq!(snapshot.profile_id(), Some(profile_id.as_str()));
+  if !helpers::assert_corpus(
+    snapshot.cookies(),
+    "unfiltered_flat",
+    "Rust recommended read cookies",
+  ) {
+    helpers::assert_state(snapshot.cookies(), &domain);
+  }
+  helpers::assert_corpus(
+    snapshot.detailed_cookies(),
+    "detailed",
+    "Rust recommended read detailed_cookies",
+  );
+  assert!(
+    snapshot.detailed_cookies().iter().any(|record| {
+      record.cookie.name
+        == std::env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_owned())
+    }),
+    "recommended read detailed output omitted the seeded cookie"
+  );
 }
 
 #[cfg(target_os = "windows")]
@@ -328,11 +584,20 @@ fn extracts_seeded_cookie_via_injection_only() {
   let key_path = helpers::resolve_key_path();
   let domain = helpers::domain();
 
-  let cookies =
-    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]), false)
-      .unwrap_or_else(|e| panic!("rookie_cookies::chromium_based (injection_only) failed: {e}",));
+  let cookies = rookie_cookies::chromium_based(
+    key_path.clone(),
+    db_path.clone(),
+    Some(vec![domain.clone()]),
+    false,
+  )
+  .unwrap_or_else(|e| panic!("rookie_cookies::chromium_based (injection_only) failed: {e}",));
 
   helpers::assert_seeded(&cookies, &domain);
+  if helpers::corpus_enabled() {
+    let detailed = rookie_cookies::chromium_based_detailed(key_path, db_path, None, false)
+      .unwrap_or_else(|error| panic!("chromium_based_detailed failed: {error}"));
+    helpers::assert_corpus(&detailed, "detailed", "Rust chromium_based_detailed");
+  }
 }
 
 #[cfg(target_os = "windows")]
@@ -344,11 +609,20 @@ fn extracts_seeded_cookie_via_elevated_fallback_only() {
   let key_path = helpers::resolve_key_path();
   let domain = helpers::domain();
 
-  let cookies =
-    rookie_cookies::chromium_based(key_path, db_path.clone(), Some(vec![domain.clone()]), false)
-      .unwrap_or_else(|e| panic!("rookie_cookies::chromium_based (elevated_only) failed: {e}",));
+  let cookies = rookie_cookies::chromium_based(
+    key_path.clone(),
+    db_path.clone(),
+    Some(vec![domain.clone()]),
+    false,
+  )
+  .unwrap_or_else(|e| panic!("rookie_cookies::chromium_based (elevated_only) failed: {e}",));
 
   helpers::assert_seeded(&cookies, &domain);
+  if helpers::corpus_enabled() {
+    let detailed = rookie_cookies::chromium_based_detailed(key_path, db_path, None, false)
+      .unwrap_or_else(|error| panic!("chromium_based_detailed failed: {error}"));
+    helpers::assert_corpus(&detailed, "detailed", "Rust chromium_based_detailed");
+  }
 }
 
 #[cfg(target_os = "windows")]

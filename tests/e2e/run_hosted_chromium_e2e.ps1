@@ -1,4 +1,4 @@
-# Seed a Chromium-family browser and assert rust/python/node/cli on Windows.
+# Exercise an isolated Chromium profile while the real browser owns its DB.
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 
@@ -8,40 +8,25 @@ if ($args.Count -lt 1) {
 $channel = $args[0]
 $userData = $env:ROOKIE_E2E_USER_DATA_DIR
 if (-not $userData) { throw "ROOKIE_E2E_USER_DATA_DIR must be set" }
+$browserId = if ($env:ROOKIE_E2E_BROWSER_ID) { $env:ROOKIE_E2E_BROWSER_ID } else { "chrome" }
 New-Item -ItemType Directory -Force -Path $userData | Out-Null
 
-$server = Start-Process python -ArgumentList "tests/e2e/cookie_server.py" -PassThru
-try {
-    $serverReady = $false
-    for ($i = 1; $i -le 30; $i++) {
-        try {
-            Invoke-WebRequest -Uri http://127.0.0.1:8765/ -UseBasicParsing | Out-Null
-            $serverReady = $true
-            break
-        } catch {
-            Start-Sleep -Milliseconds 500
-        }
-    }
-    if (-not $serverReady) { throw "cookie server did not become ready" }
+& .\.venv\Scripts\python.exe tests/e2e/run_exact_corpus_e2e.py `
+    --engine chromium `
+    --profile $userData `
+    --channel $channel `
+    --browser-id $browserId
+if ($LASTEXITCODE -ne 0) { throw "Chromium exact-corpus E2E failed" }
 
-    node tests/e2e/seed_chromium_cookie.mjs $channel $userData "http://127.0.0.1:8765/set"
+& .\.venv\Scripts\python.exe tests/e2e/run_active_writer_e2e.py `
+    --engine chromium `
+    --profile "${userData}-active-writer" `
+    --channel $channel `
+    --browser-id $browserId
+if ($LASTEXITCODE -ne 0) { throw "Chromium active-writer E2E failed" }
 
-    $cookiesDb = Join-Path $userData "Default\Network\Cookies"
-    if (-not (Test-Path $cookiesDb)) {
-        $cookiesDb = Join-Path $userData "Default\Cookies"
-    }
-    if (-not (Test-Path $cookiesDb)) { throw "missing Cookies database" }
-    $localState = Join-Path $userData "Local State"
-
-    $browserId = $env:ROOKIE_E2E_BROWSER_ID
-    if (-not $browserId) { $browserId = "chrome" }
-    if ($browserId -eq "chrome") {
-        cargo test --test e2e_chrome --locked -- --ignored --nocapture
-    }
-    & .\.venv\Scripts\python.exe tests/e2e/assert_chrome_cookie.py
-    node tests/e2e/assert_chrome_cookie.mjs
-    & .\.venv\Scripts\python.exe tests/e2e/assert_cli_cookie.py `
-        $cookiesDb --local-state-path $localState
-} finally {
-    Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-}
+& .\.venv\Scripts\python.exe tests/e2e/browser_coverage_contract.py core_chromium_windows `
+    --capability exact_set --capability locked_writer_safety `
+    --capability detailed --capability crypto `
+    --surface rust --surface python --surface node --surface cli
+if ($LASTEXITCODE -ne 0) { throw "Chromium depth receipt failed" }

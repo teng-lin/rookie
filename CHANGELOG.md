@@ -6,6 +6,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The CLI documentation now defines its stderr contract: typed library errors
+  emit JSON with stable `code` and human `message` fields, while usage,
+  wrapped, and non-library errors retain human-readable output.
+
 ### Fixed
 
 - Release-control checks no longer let a newer, intentionally skipped copy of

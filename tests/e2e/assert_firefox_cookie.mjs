@@ -12,6 +12,12 @@ import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import {
+  findManifest,
+  pathsReferToSameFile,
+  verifyCookieRecords,
+} from "./cookie_manifest.mjs";
+import { assertCookieState, stateFromEnvironment } from "./cookie_state.mjs";
 
 const profileDir = process.env.ROOKIE_E2E_FIREFOX_PROFILE;
 if (!profileDir) {
@@ -30,43 +36,190 @@ if (!existsSync(dbPath)) {
 
 const cookies = await rookieCookies.cookiesFromPath(dbPath, [domain]);
 const legacy = await rookieCookies.firefoxBased(dbPath, [domain]);
-const detailed = await rookieCookies.firefoxBasedDetailed(dbPath, [domain]);
-
-const seeded = cookies.find((c) => c.name === expectedName);
-if (!seeded) {
-  console.error(
-    `seeded cookie '${expectedName}' not found among ${cookies.length} cookies for ${domain}`,
-  );
-  process.exit(1);
-}
-if (seeded.value !== expectedValue) {
-  console.error(
-    `cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
-  );
-  process.exit(1);
-}
-if (JSON.stringify(legacy) !== JSON.stringify(cookies)) {
-  console.error("legacy firefoxBased disagrees with cookiesFromPath");
-  process.exit(1);
-}
-const now = Math.floor(Date.now() / 1000);
-if (
-  !Number.isInteger(seeded.expires) ||
-  seeded.expires <= now ||
-  seeded.expires > now + 7_200
-) {
-  console.error(
-    `Firefox expiry must be Unix seconds near the seeded Max-Age: got ${seeded.expires} at ${now}`,
-  );
+const detailed = await rookieCookies.firefoxBasedDetailed(dbPath);
+const directSnapshot = await rookieCookies.fromPath({ path: dbPath });
+if (directSnapshot.browserId !== null || directSnapshot.profileId !== null) {
+  console.error("fromPath unexpectedly reported a discovered identity");
   process.exit(1);
 }
 
-const detailedSeeded = detailed.find(({ cookie }) => cookie.name === expectedName);
-if (!detailedSeeded || !("originAttributes" in detailedSeeded.context)) {
-  console.error("detailed Firefox binding omitted the seeded cookie context");
-  process.exit(1);
+const manifestPath = findManifest(profileDir, expectedName);
+let expectedState;
+if (manifestPath) {
+  verifyCookieRecords(
+    manifestPath,
+    "filtered_flat",
+    cookies,
+    "Node cookiesFromPath",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "filtered_flat",
+    legacy,
+    "Node firefoxBased",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "detailed",
+    detailed,
+    "Node firefoxBasedDetailed",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "detailed",
+    directSnapshot.detailedCookies,
+    "Node fromPath.detailedCookies",
+  );
+  verifyCookieRecords(
+    manifestPath,
+    "unfiltered_flat",
+    directSnapshot.cookies,
+    "Node fromPath cookies",
+  );
+} else {
+  const { required, forbidden } = stateFromEnvironment(
+    expectedName,
+    expectedValue,
+  );
+  expectedState = { required, forbidden };
+  assertCookieState(cookies, required, forbidden, "cookiesFromPath");
+  assertCookieState(legacy, required, forbidden, "firefoxBased");
+  assertCookieState(
+    detailed.map(({ cookie }) => cookie),
+    required,
+    forbidden,
+    "firefoxBasedDetailed",
+  );
+  assertCookieState(
+    directSnapshot.detailedCookies.map(({ cookie }) => cookie),
+    required,
+    forbidden,
+    "fromPath.detailedCookies",
+  );
+  assertCookieState(
+    directSnapshot.cookies,
+    required,
+    forbidden,
+    "fromPath cookies",
+  );
+  const seeded = cookies.find((c) => c.name === expectedName);
+  if (!seeded) {
+    console.error(
+      `seeded cookie '${expectedName}' not found among ${cookies.length} cookies for ${domain}`,
+    );
+    process.exit(1);
+  }
+  if (seeded.value !== expectedValue) {
+    console.error(
+      `cookie value mismatch: expected '${expectedValue}', got '${seeded.value}'`,
+    );
+    process.exit(1);
+  }
+  if (JSON.stringify(legacy) !== JSON.stringify(cookies)) {
+    console.error("legacy firefoxBased disagrees with cookiesFromPath");
+    process.exit(1);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (
+    !Number.isInteger(seeded.expires) ||
+    seeded.expires <= now ||
+    seeded.expires > now + 7_200
+  ) {
+    console.error(
+      `Firefox expiry must be Unix seconds near the seeded Max-Age: got ${seeded.expires} at ${now}`,
+    );
+    process.exit(1);
+  }
+
+  const detailedSeeded = detailed.find(
+    ({ cookie }) => cookie.name === expectedName,
+  );
+  if (!detailedSeeded || !("originAttributes" in detailedSeeded.context)) {
+    console.error("detailed Firefox binding omitted the seeded cookie context");
+    process.exit(1);
+  }
+
+  const directSeeded = directSnapshot.detailedCookies.find(
+    ({ cookie }) => cookie.name === expectedName,
+  );
+  if (!directSeeded || directSeeded.cookie.value !== expectedValue) {
+    console.error("fromPath.detailedCookies omitted the seeded cookie");
+    process.exit(1);
+  }
+}
+
+const recommendedChecked =
+  process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1";
+let recommendedSnapshot;
+if (recommendedChecked) {
+  const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "firefox";
+  const profiles = await rookieCookies.profiles(browserId);
+  const matchingProfiles = profiles.filter(({ sources }) =>
+    sources.some(({ path }) => pathsReferToSameFile(path, dbPath)),
+  );
+  if (matchingProfiles.length !== 1) {
+    console.error(
+      `${browserId} discovery found ${matchingProfiles.length} profiles for source ${dbPath}; profiles=${JSON.stringify(profiles)}`,
+    );
+    process.exit(1);
+  }
+  const identity = matchingProfiles[0].profile;
+  const expectedProfileId = process.env.ROOKIE_E2E_EXPECTED_PROFILE_ID;
+  if (expectedProfileId && identity.profileId !== expectedProfileId) {
+    console.error(
+      `discovery returned the wrong independently expected profile ID: expected ${expectedProfileId}, got ${identity.profileId}`,
+    );
+    process.exit(1);
+  }
+  recommendedSnapshot = await rookieCookies.read({
+    browser: browserId,
+    profile: identity.profileId,
+  });
+  if (
+    recommendedSnapshot.browserId !== browserId ||
+    recommendedSnapshot.profileId !== identity.profileId
+  ) {
+    console.error(
+      "recommended read returned the wrong browser/profile identity",
+    );
+    process.exit(1);
+  }
+  const recommended = recommendedSnapshot.detailedCookies.find(
+    ({ cookie }) => cookie.name === expectedName,
+  );
+  if (!recommended || recommended.cookie.value !== expectedValue) {
+    console.error("recommended read detailed output omitted the seeded cookie");
+    process.exit(1);
+  }
+  if (manifestPath) {
+    verifyCookieRecords(
+      manifestPath,
+      "unfiltered_flat",
+      recommendedSnapshot.cookies,
+      "Node read(profile) cookies",
+    );
+    verifyCookieRecords(
+      manifestPath,
+      "detailed",
+      recommendedSnapshot.detailedCookies,
+      "Node read(profile).detailedCookies",
+    );
+  } else {
+    assertCookieState(
+      recommendedSnapshot.cookies,
+      expectedState.required,
+      expectedState.forbidden,
+      "read(profile) cookies",
+    );
+    assertCookieState(
+      recommendedSnapshot.detailedCookies.map(({ cookie }) => cookie),
+      expectedState.required,
+      expectedState.forbidden,
+      "read(profile).detailedCookies",
+    );
+  }
 }
 
 console.log(
-  `rookie-cookies (${process.platform}, firefox): ${expectedName}=${expectedValue} verified (${cookies.length} cookies for ${domain})`,
+  `rookie-cookies (${process.platform}, firefox): ${manifestPath ? "exact cookie corpus" : `${expectedName}=${expectedValue}`} verified (${cookies.length} cookies for ${domain}; explicit detailed verified${recommendedChecked ? "; recommended read verified" : ""})`,
 );
