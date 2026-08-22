@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Sequence
 from urllib.request import urlopen
 
+from cookie_manifest import ManifestError, normalize_detailed
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_REQUIRED = {"rookie_ci": "before", "rookie_remove": "present"}
@@ -160,6 +162,23 @@ def validate_profile_proof(
         )
     if not isinstance(ack.get("liveness"), dict):
         raise ActiveWriterError("ready ack omitted the browser liveness probe")
+    liveness = ack["liveness"]
+    if liveness.get("readyState") != "complete" or not isinstance(
+        liveness.get("cookieCount"), int
+    ):
+        raise ActiveWriterError(f"invalid browser-side liveness proof: {liveness!r}")
+    if expected_phase in {"mutated", "probed"}:
+        churn = liveness.get("writeChurn")
+        expected_active = expected_phase == "mutated"
+        if (
+            not isinstance(churn, dict)
+            or churn.get("active") is not expected_active
+            or not isinstance(churn.get("requests"), int)
+            or churn["requests"] < 2
+        ):
+            raise ActiveWriterError(
+                f"{expected_phase} ack omitted the overlapping browser write proof: {liveness!r}"
+            )
     browser_process_ids = ack.get("browserProcessIds")
     if not isinstance(browser_process_ids, list) or not browser_process_ids:
         raise ActiveWriterError(
@@ -378,6 +397,128 @@ def run_surface_assertions(
         )
 
 
+def detailed_surface_commands(
+    engine: str,
+    profile: Path,
+    database: Path,
+    browser_id: str,
+) -> list[tuple[str, list[str]]]:
+    python_command = [
+        str(venv_python()),
+        "tests/e2e/stress_surface_python.py",
+        "--engine",
+        engine,
+        "--database",
+        str(database),
+        "--browser-id",
+        browser_id,
+        "--projection",
+        "detailed",
+    ]
+    node_command = [
+        "node",
+        "tests/e2e/stress_surface_node.mjs",
+        engine,
+        str(database),
+        browser_id,
+        "detailed",
+    ]
+    rust_command = [
+        str(ROOT / "target/debug/examples/e2e_cookie_surface"),
+        engine,
+        str(database),
+        browser_id,
+        "detailed",
+    ]
+    cli_command = [
+        str(ROOT / "target/release/rookie-cookies"),
+        "from-path",
+        str(database),
+        "--format",
+        "detailed",
+    ]
+    if engine == "chromium":
+        if sys.platform == "win32":
+            local_state = str(profile / "Local State")
+            python_command.extend(["--local-state-path", local_state])
+            node_command.append(local_state)
+            rust_command.append(local_state)
+            cli_command.extend(["--local-state-path", local_state])
+        else:
+            cli_command.extend(["--browser-id", browser_id])
+    return [
+        ("python", python_command),
+        ("node", node_command),
+        ("rust", rust_command),
+        ("cli", cli_command),
+    ]
+
+
+def capture_detailed_surfaces(
+    engine: str,
+    profile: Path,
+    database: Path,
+    browser_id: str,
+    environment: dict[str, str],
+    phase: str,
+) -> dict[str, list[dict[str, Any]]]:
+    snapshots: dict[str, list[dict[str, Any]]] = {}
+    for surface, command in detailed_surface_commands(
+        engine, profile, database, browser_id
+    ):
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=240,
+        )
+        try:
+            decoded = json.loads(completed.stdout)
+            if not isinstance(decoded, list):
+                raise ValueError("snapshot is not an array")
+            normalized = [
+                normalize_detailed(record, label=f"{phase}-{surface}[{index}]")
+                for index, record in enumerate(decoded)
+            ]
+        except (json.JSONDecodeError, ManifestError, ValueError) as error:
+            raise ActiveWriterError(
+                f"{phase} {surface} did not emit canonical detailed cookies: {error}"
+            ) from error
+        snapshots[surface] = sorted(
+            normalized,
+            key=lambda record: json.dumps(
+                record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
+        )
+    reference = snapshots["python"]
+    for surface, records in snapshots.items():
+        if records != reference:
+            raise ActiveWriterError(
+                f"{phase} detailed output disagreed between Python and {surface}"
+            )
+    print(
+        "ACTIVE_WRITER_SNAPSHOT "
+        + json.dumps(
+            {
+                "phase": phase,
+                "rows": len(reference),
+                "surfaces": sorted(snapshots),
+                "context_rows": sum(
+                    any(value is not None for value in record["context"].values())
+                    for record in reference
+                ),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return snapshots
+
+
 def build_seeder_command(
     engine: str,
     profile: Path,
@@ -541,6 +682,35 @@ def run(args: argparse.Namespace) -> None:
             MUTATED_FORBIDDEN,
             "open-mutated",
         )
+        run_checked(
+            [
+                "cargo",
+                "build",
+                "-p",
+                "rookie-cookies",
+                "--example",
+                "e2e_cookie_surface",
+                "--locked",
+            ],
+            os.environ.copy(),
+            "active-writer-snapshot-build",
+        )
+        mutated_environment = assertion_environment(
+            args.engine,
+            profile,
+            database,
+            args.browser_id,
+            MUTATED_REQUIRED,
+            MUTATED_FORBIDDEN,
+        )
+        open_mutated_snapshots = capture_detailed_surfaces(
+            args.engine,
+            profile,
+            database,
+            args.browser_id,
+            mutated_environment,
+            "open-mutated",
+        )
 
         # This browser-side probe occurs after every open-profile extraction,
         # proving the extractor did not terminate or disconnect the writer.
@@ -575,6 +745,18 @@ def run(args: argparse.Namespace) -> None:
             MUTATED_FORBIDDEN,
             "closed-final",
         )
+        closed_snapshots = capture_detailed_surfaces(
+            args.engine,
+            profile,
+            database,
+            args.browser_id,
+            mutated_environment,
+            "closed-final",
+        )
+        if closed_snapshots != open_mutated_snapshots:
+            raise ActiveWriterError(
+                "closed detailed snapshots did not exactly match final open snapshots"
+            )
         print(
             "active-writer transition verified: add + replace + delete while open; "
             "post-extraction liveness probe passed; closed snapshot matched",

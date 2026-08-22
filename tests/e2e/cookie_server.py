@@ -11,6 +11,7 @@ Run from the workspace root: `python3 tests/e2e/cookie_server.py`.
 import os
 import json
 import threading
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -99,6 +100,18 @@ class Handler(BaseHTTPRequestHandler):
             return [
                 f"rookie_ci=after; {attributes}",
                 f"rookie_added=present; {attributes}",
+                "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
+            ]
+        if path.startswith("/active-writer/churn"):
+            query = parse_qs(urlsplit(path).query)
+            try:
+                expiry = int(query.get("expiry", [""])[0])
+            except ValueError:
+                return []
+            fixed = f"Path=/; Expires={formatdate(expiry, usegmt=True)}; SameSite=Lax"
+            return [
+                f"rookie_ci=after; {fixed}",
+                f"rookie_added=present; {fixed}",
                 "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
             ]
 

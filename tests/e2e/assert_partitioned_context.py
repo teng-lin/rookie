@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Protocol
+
+from cookie_manifest import load_manifest, verify_records
 
 
 class ContextAssertionError(RuntimeError):
@@ -36,6 +39,10 @@ def context_value(context: dict[str, Any], snake: str, camel: str) -> Any:
     return context.get(snake, context.get(camel))
 
 
+def header_tokens(header: str) -> list[str]:
+    return sorted(token.strip() for token in header.split(";") if token.strip())
+
+
 def validate_context_snapshot(
     snapshot: Snapshot,
     *,
@@ -44,6 +51,7 @@ def validate_context_snapshot(
     other_top_origin: str,
     third_origin: str,
     expected_source_port: int,
+    raw_manifest: Path | None = None,
 ) -> dict[str, Any]:
     detailed = [
         record
@@ -54,7 +62,7 @@ def validate_context_snapshot(
     for record in detailed:
         by_name.setdefault(record["cookie"]["name"], []).append(record)
 
-    expected_counts = {"rookie_top": 2, "rookie_chips": 2}
+    expected_counts = {"rookie_top": 2, "rookie_chips": 3}
     if engine == "firefox":
         expected_counts["rookie_dfpi"] = 2
     actual_counts = {name: len(records) for name, records in by_name.items()}
@@ -62,11 +70,20 @@ def validate_context_snapshot(
         raise ContextAssertionError(
             f"context corpus mismatch: expected {expected_counts}, got {actual_counts}"
         )
+    manifest = load_manifest(raw_manifest) if raw_manifest is not None else None
+    if manifest is not None:
+        verify_records(
+            manifest,
+            "detailed",
+            detailed,
+            surface=f"Python {engine} raw context",
+        )
 
     for required in ("rookie_top", "rookie_chips"):
-        if len(by_name.get(required, [])) != 2:
+        expected = expected_counts[required]
+        if len(by_name.get(required, [])) != expected:
             raise ContextAssertionError(
-                f"expected exactly two colliding {required} identities, "
+                f"expected exactly {expected} colliding {required} identities, "
                 f"got {len(by_name.get(required, []))}"
             )
 
@@ -78,10 +95,27 @@ def validate_context_snapshot(
             for context in top_contexts
         ):
             raise ContextAssertionError("a first-party top cookie became partitioned")
+        unpartitioned = [
+            record
+            for record in by_name["rookie_chips"]
+            if context_value(
+                record.get("context", {}), "top_frame_site_key", "topFrameSiteKey"
+            )
+            in (None, "")
+        ]
+        if (
+            len(unpartitioned) != 1
+            or unpartitioned[0]["cookie"]["value"] != "unpartitioned"
+        ):
+            raise ContextAssertionError(
+                "Chromium lost the unpartitioned cookie sharing the CHIPS flat identity"
+            )
         keyed: dict[str, dict[str, Any]] = {}
         for record in by_name["rookie_chips"]:
             chips_context = record.get("context", {})
             key = context_value(chips_context, "top_frame_site_key", "topFrameSiteKey")
+            if key in (None, ""):
+                continue
             label = next(
                 (
                     candidate
@@ -111,8 +145,8 @@ def validate_context_snapshot(
                 raise ContextAssertionError(
                     f"CHIPS source port was {context_value(chips_context, 'source_port', 'sourcePort')!r}"
                 )
-            if context_value(chips_context, "source_scheme", "sourceScheme") is None:
-                raise ContextAssertionError("CHIPS source scheme was not observed")
+            if context_value(chips_context, "source_scheme", "sourceScheme") != 2:
+                raise ContextAssertionError("CHIPS HTTPS source scheme was not 2")
             if (
                 context_value(chips_context, "is_persistent", "isPersistent")
                 is not True
@@ -128,6 +162,19 @@ def validate_context_snapshot(
             raise ContextAssertionError(
                 f"expected two Firefox dFPI rows, got {len(by_name.get('rookie_dfpi', []))}"
             )
+        chips_unpartitioned = [
+            record
+            for record in by_name["rookie_chips"]
+            if context_value(record.get("context", {}), "partition_key", "partitionKey")
+            in (None, "")
+        ]
+        if (
+            len(chips_unpartitioned) != 1
+            or chips_unpartitioned[0]["cookie"]["value"] != "unpartitioned"
+        ):
+            raise ContextAssertionError(
+                "Firefox lost the unpartitioned cookie sharing the partitioned flat identity"
+            )
         for name in ("rookie_chips", "rookie_dfpi"):
             labels: set[str] = set()
             for record in by_name[name]:
@@ -136,6 +183,8 @@ def validate_context_snapshot(
                     context, "origin_attributes", "originAttributes"
                 )
                 partition_key = context_value(context, "partition_key", "partitionKey")
+                if name == "rookie_chips" and partition_key in (None, ""):
+                    continue
                 label = next(
                     (
                         candidate
@@ -186,36 +235,30 @@ def validate_context_snapshot(
     other_context = {**matching_context, "top_level_site": other_top_origin}
     matching_header = snapshot.header(matching_context)
     other_header = snapshot.header(other_context)
-    if "rookie_chips=partition-a" not in matching_header:
-        raise ContextAssertionError(
-            f"matching send context omitted CHIPS cookie: {matching_header!r}"
-        )
-    if "rookie_chips=partition-c" in matching_header:
-        raise ContextAssertionError(
-            f"top A received top C CHIPS cookie: {matching_header!r}"
-        )
-    if (
-        "rookie_chips=partition-c" not in other_header
-        or "rookie_chips=partition-a" in other_header
-    ):
-        raise ContextAssertionError(
-            f"top C selected the wrong CHIPS cookie: {other_header!r}"
-        )
+    expected_matching = [
+        "rookie_chips=partition-a",
+        "rookie_chips=unpartitioned",
+    ]
+    expected_other = [
+        "rookie_chips=partition-c",
+        "rookie_chips=unpartitioned",
+    ]
     if engine == "firefox":
-        if (
-            "rookie_dfpi=dfpi-a" not in matching_header
-            or "rookie_dfpi=dfpi-c" in matching_header
-        ):
-            raise ContextAssertionError(
-                f"matching Firefox context omitted dFPI cookie: {matching_header!r}"
-            )
-        if (
-            "rookie_dfpi=dfpi-c" not in other_header
-            or "rookie_dfpi=dfpi-a" in other_header
-        ):
-            raise ContextAssertionError(
-                f"other Firefox context selected the wrong dFPI cookie: {other_header!r}"
-            )
+        expected_matching.append("rookie_dfpi=dfpi-a")
+        expected_other.append("rookie_dfpi=dfpi-c")
+    if manifest is not None:
+        expected_matching = manifest["expected_headers"]["matching"]
+        expected_other = manifest["expected_headers"]["other_top_level_site"]
+    if header_tokens(matching_header) != sorted(expected_matching):
+        raise ContextAssertionError(
+            f"matching header set mismatch: expected {sorted(expected_matching)!r}, "
+            f"got {header_tokens(matching_header)!r}"
+        )
+    if header_tokens(other_header) != sorted(expected_other):
+        raise ContextAssertionError(
+            f"other header set mismatch: expected {sorted(expected_other)!r}, "
+            f"got {header_tokens(other_header)!r}"
+        )
 
     try:
         snapshot.header(
@@ -277,6 +320,11 @@ def main() -> int:
             other_top_origin=args.other_top_origin,
             third_origin=args.third_origin,
             expected_source_port=args.source_port,
+            raw_manifest=(
+                Path(os.environ["ROOKIE_E2E_CONTEXT_MANIFEST"])
+                if os.environ.get("ROOKIE_E2E_CONTEXT_MANIFEST")
+                else None
+            ),
         )
         encoded = (
             json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n"

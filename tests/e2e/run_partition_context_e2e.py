@@ -12,8 +12,11 @@ import ssl
 import subprocess
 import sys
 from typing import Any, Sequence
+from urllib.parse import parse_qsl, urlparse
 from urllib.request import HTTPSHandler, build_opener
+from zipfile import ZIP_DEFLATED, ZipFile
 
+from browser_coverage_contract import emit_representative_depth
 from run_active_writer_e2e import (
     ActiveWriterError,
     ROOT,
@@ -28,6 +31,8 @@ MARKER = {
     "kind": "rookie-cookie-fixture-source",
     "source_kind": "disposable_e2e_profile",
 }
+FIREFOX_CONTAINER_EXTENSION = Path(__file__).with_name("firefox_container_extension")
+FIREFOX_CONTAINER_EXTENSION_ID = "rookie-container-e2e@rookie.test"
 
 
 def require_remote_sandbox(path: Path) -> Path:
@@ -48,6 +53,18 @@ def require_remote_sandbox(path: Path) -> Path:
         raise ActiveWriterError(f"sandbox {sandbox} is outside RUNNER_TEMP") from error
     sandbox.mkdir(parents=True, exist_ok=True)
     return sandbox
+
+
+def stage_firefox_container_extension(profile: Path) -> Path:
+    """Install the checked-in unsigned test extension in a disposable profile."""
+
+    extensions = profile / "extensions"
+    extensions.mkdir(parents=True, exist_ok=True)
+    target = extensions / f"{FIREFOX_CONTAINER_EXTENSION_ID}.xpi"
+    with ZipFile(target, "x", compression=ZIP_DEFLATED) as archive:
+        for name in ("manifest.json", "background.js"):
+            archive.write(FIREFOX_CONTAINER_EXTENSION / name, name)
+    return target
 
 
 def discovery_layout(engine: str, sandbox: Path) -> tuple[Path, dict[str, str]]:
@@ -177,6 +194,198 @@ def schema_metadata(database: Path, engine: str) -> dict[str, Any]:
         connection.close()
 
 
+def _chromium_expiry(raw: object) -> int | None:
+    value = int(raw)
+    offset = 11_644_473_600_000_000
+    return (value - offset) // 1_000_000 if value > offset else None
+
+
+def _unsigned(attributes: dict[str, str], name: str) -> int | None:
+    value = attributes.get(name)
+    return int(value) if value is not None and value.isdigit() else None
+
+
+def write_raw_context_manifest(database: Path, engine: str, output: Path) -> None:
+    """Build an exact oracle directly from the browser's raw SQLite context."""
+
+    table = "cookies" if engine == "chromium" else "moz_cookies"
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        columns = {
+            str(row[1]) for row in connection.execute(f"pragma table_info({table})")
+        }
+        rows = connection.execute(
+            f"select * from {table} where name like 'rookie_%'"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    expected_count = 5 if engine == "chromium" else 7
+    if len(rows) != expected_count:
+        raise ActiveWriterError(
+            f"raw {engine} context store contained {len(rows)} rookie rows; "
+            f"expected {expected_count}"
+        )
+
+    detailed: list[dict[str, Any]] = []
+    for row in rows:
+        if engine == "chromium":
+            top_key_raw = row["top_frame_site_key"]
+            top_key = str(top_key_raw) if top_key_raw not in (None, "") else None
+            name = str(row["name"])
+            host = str(row["host_key"])
+            if name == "rookie_top":
+                labels = {
+                    "top.rookie-a.test": "a",
+                    "other.rookie-c.test": "c",
+                }
+                if host not in labels or top_key is not None:
+                    raise ActiveWriterError(
+                        f"unexpected Chromium top-cookie identity: {host!r}, {top_key!r}"
+                    )
+                label = labels[host]
+                value = f"top-{label}"
+            elif name != "rookie_chips" or host != "third.rookie-b.test":
+                raise ActiveWriterError(
+                    f"unexpected Chromium context identity: {host!r}/{name!r}"
+                )
+            elif top_key is None:
+                value = "unpartitioned"
+            else:
+                top_host = urlparse(top_key).hostname
+                labels = {"rookie-a.test": "a", "rookie-c.test": "c"}
+                if top_host not in labels:
+                    raise ActiveWriterError(
+                        f"unexpected Chromium partition key {top_key!r}"
+                    )
+                label = labels[top_host]
+                value = f"partition-{label}"
+            flat = {
+                "domain": host,
+                "path": str(row["path"]),
+                "secure": bool(row["is_secure"]),
+                "expires": _chromium_expiry(row["expires_utc"]),
+                "name": name,
+                "value": value,
+                "http_only": bool(row["is_httponly"]),
+                "same_site": int(row["samesite"]),
+            }
+            context = {
+                "top_frame_site_key": top_key,
+                "has_cross_site_ancestor": (
+                    bool(row["has_cross_site_ancestor"])
+                    if "has_cross_site_ancestor" in columns
+                    else None
+                ),
+                "source_scheme": (
+                    int(row["source_scheme"])
+                    if "source_scheme" in columns and row["source_scheme"] is not None
+                    else None
+                ),
+                "source_port": (
+                    int(row["source_port"])
+                    if "source_port" in columns and row["source_port"] is not None
+                    else None
+                ),
+                "is_persistent": (
+                    bool(row["is_persistent"]) if "is_persistent" in columns else None
+                ),
+                "origin_attributes": None,
+                "user_context_id": None,
+                "partition_key": None,
+                "private_browsing_id": None,
+            }
+        else:
+            origin_attributes = str(row["originAttributes"] or "")
+            parsed = dict(parse_qsl(origin_attributes.removeprefix("^")))
+            name = str(row["name"])
+            host = str(row["host"])
+            value = str(row["value"])
+            valid_values = {
+                "rookie_top": {"top-a", "top-c"},
+                "rookie_chips": {"unpartitioned", "partition-a", "partition-c"},
+                "rookie_dfpi": {"dfpi-a", "dfpi-c"},
+            }
+            expected_hosts = {
+                "rookie_top": {"top.rookie-a.test", "other.rookie-c.test"},
+                "rookie_chips": {"third.rookie-b.test"},
+                "rookie_dfpi": {"third.rookie-b.test"},
+            }
+            if (
+                name not in valid_values
+                or value not in valid_values[name]
+                or host not in expected_hosts[name]
+            ):
+                raise ActiveWriterError(
+                    f"unexpected Firefox context identity/value: "
+                    f"{host!r}/{name!r}={value!r}"
+                )
+            flat = {
+                "domain": host,
+                "path": str(row["path"]),
+                "secure": bool(row["isSecure"]),
+                "expires": int(row["expiry"]),
+                "name": name,
+                "value": value,
+                "http_only": bool(row["isHttpOnly"]),
+                "same_site": int(row["sameSite"]),
+            }
+            context = {
+                "top_frame_site_key": None,
+                "has_cross_site_ancestor": None,
+                "source_scheme": None,
+                "source_port": None,
+                "is_persistent": None,
+                "origin_attributes": origin_attributes,
+                "user_context_id": _unsigned(parsed, "userContextId"),
+                "partition_key": parsed.get("partitionKey"),
+                "private_browsing_id": _unsigned(parsed, "privateBrowsingId"),
+            }
+        detailed.append({"cookie": flat, "context": context})
+
+    matching = ["rookie_chips=partition-a", "rookie_chips=unpartitioned"]
+    other = ["rookie_chips=partition-c", "rookie_chips=unpartitioned"]
+    if engine == "firefox":
+        matching.append("rookie_dfpi=dfpi-a")
+        other.append("rookie_dfpi=dfpi-c")
+    manifest = {
+        "schema_version": 1,
+        "tiers": ["partition_context"],
+        "identities": {
+            "filtered_flat": ["domain", "path", "name"],
+            "unfiltered_flat": ["domain", "path", "name"],
+            "detailed": [
+                "cookie.domain",
+                "cookie.path",
+                "cookie.name",
+                "context.top_frame_site_key",
+                "context.has_cross_site_ancestor",
+                "context.source_scheme",
+                "context.source_port",
+                "context.is_persistent",
+                "context.origin_attributes",
+                "context.user_context_id",
+                "context.partition_key",
+                "context.private_browsing_id",
+            ],
+        },
+        "expected": {
+            "filtered_flat": [],
+            "unfiltered_flat": [],
+            "detailed": detailed,
+        },
+        "expected_headers": {
+            "matching": sorted(matching),
+            "other_top_level_site": sorted(other),
+        },
+    }
+    output.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     sandbox = require_remote_sandbox(args.sandbox)
     profile, environment = discovery_layout(args.engine, sandbox)
@@ -225,6 +434,8 @@ def run(args: argparse.Namespace) -> None:
                 server.kill()
 
     database = database_for(args.engine, profile)
+    raw_manifest = sandbox / f"{args.engine}-raw-context-manifest.json"
+    write_raw_context_manifest(database, args.engine, raw_manifest)
     os.environ.update(
         {
             key: value
@@ -243,6 +454,7 @@ def run(args: argparse.Namespace) -> None:
             "ROOKIE_E2E_CONTEXT_THIRD_ORIGIN": third_origin,
             "ROOKIE_E2E_CONTEXT_SOURCE_PORT": str(port),
             "ROOKIE_E2E_BROWSER_ID": browser_id,
+            "ROOKIE_E2E_CONTEXT_MANIFEST": str(raw_manifest),
         }
     )
     python = venv_python()
@@ -319,12 +531,18 @@ def run(args: argparse.Namespace) -> None:
                 "profile": str(profile),
                 "database": str(database),
                 "observed_manifest": str(observed),
+                "raw_context_manifest": str(raw_manifest),
                 **schema_metadata(database, args.engine),
                 "surfaces": ["rust", "python", "node", "cli"],
             },
             sort_keys=True,
         ),
         flush=True,
+    )
+    emit_representative_depth(
+        "partition_context",
+        ("partitioned", "detailed", "discovery"),
+        ("rust", "python", "node", "cli"),
     )
 
 

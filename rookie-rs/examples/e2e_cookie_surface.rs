@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let database = arguments.next().ok_or("missing database")?;
   let browser_id = arguments.next().ok_or("missing browser id")?;
   let projection = arguments.next().ok_or("missing projection")?;
+  let local_state = arguments.next();
   if arguments.next().is_some() {
     return Err("unexpected extra argument".into());
   }
@@ -24,10 +25,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let request = {
     let _ = browser_id;
     if engine == "chromium" {
-      return Err("Windows Chromium stress requires an explicit Local State selector".into());
+      request.chromium_local_state(
+        local_state.ok_or("Windows Chromium extraction requires a Local State path")?,
+      )
+    } else {
+      request
     }
-    request
   };
+  #[cfg(not(windows))]
+  let _ = local_state;
   let snapshot = from_path(request)?;
   match projection.as_str() {
     "unfiltered_flat" => println!("{}", serde_json::to_string(snapshot.cookies())?),

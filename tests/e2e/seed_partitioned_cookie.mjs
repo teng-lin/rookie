@@ -108,6 +108,16 @@ if (engine === "chromium") {
 const context = await browserType.launchPersistentContext(profile, launchOptions);
 try {
   const page = await context.newPage();
+  const thirdOrigin = new URL(top.searchParams.get("third_origin"));
+  await page.goto(`${thirdOrigin.origin}/set-unpartitioned?engine=${engine}`, {
+    waitUntil: "domcontentloaded",
+    timeout,
+  });
+  await page.waitForFunction(
+    () => document.title === "unpartitioned-seeded",
+    null,
+    { timeout },
+  );
   for (const target of [topUrl, otherTop.href]) {
     await page.goto(target, { waitUntil: "domcontentloaded", timeout });
     await page.waitForFunction(() => document.title === "partition-seeded", null, {
@@ -119,7 +129,7 @@ try {
     name.startsWith("rookie_"),
   );
   const names = cookies.map(({ name }) => name);
-  for (const [required, minimum] of [["rookie_top", 2], ["rookie_chips", 2]]) {
+  for (const [required, minimum] of [["rookie_top", 2], ["rookie_chips", 3]]) {
     if (names.filter((name) => name === required).length < minimum) {
       throw new Error(
         `${engine} did not expose both ${required} identities; observed ${names.sort().join(", ")}`,

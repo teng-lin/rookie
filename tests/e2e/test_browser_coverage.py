@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
 import sys
 import unittest
@@ -14,7 +16,12 @@ REGISTRY_PATH = REPOSITORY_ROOT / "rookie-rs" / "browser_registry.json"
 TESTING_MD_PATH = REPOSITORY_ROOT / "docs" / "testing.md"
 sys.path.insert(0, str(Path(__file__).parent))
 
-from browser_coverage_contract import DEPTH_LEVELS, assert_observed_depth, depth_for
+from browser_coverage_contract import (  # noqa: E402 - local harness path above
+    DEPTH_LEVELS,
+    assert_observed_depth,
+    depth_for,
+    emit_representative_depth,
+)
 
 # docs/testing.md uses the shorter product names readers already know.
 DOC_BROWSER_TITLES = {
@@ -210,6 +217,7 @@ class BrowserCoverageTests(unittest.TestCase):
                 "core_chromium",
                 "core_firefox",
                 "partition_context",
+                "firefox_container",
                 "nightly_stress",
                 "manual_fixture_capture",
             },
@@ -242,6 +250,11 @@ class BrowserCoverageTests(unittest.TestCase):
                 set(lane["surfaces"]) <= {"rust", "python", "node", "cli"},
                 name,
             )
+            self.assertIn(
+                "browser_coverage_contract",
+                runner.read_text(encoding="utf-8"),
+                f"{name} must emit a checked runtime depth receipt",
+            )
         for core in ("core_chromium", "core_firefox"):
             self.assertEqual(
                 set(lanes[core]["platforms"]), {"linux", "macos", "windows"}
@@ -251,6 +264,33 @@ class BrowserCoverageTests(unittest.TestCase):
             self.assertEqual(
                 set(lanes[core]["surfaces"]), {"rust", "python", "node", "cli"}
             )
+
+    def test_representative_depth_receipt_rejects_missing_capability(self) -> None:
+        lane = self.coverage_doc["representative_depth_lanes"]["nightly_stress"]
+        with self.assertRaisesRegex(AssertionError, "representative depth mismatch"):
+            emit_representative_depth(
+                "nightly_stress",
+                set(lane["capabilities"]) - {"active_writer"},
+                lane["surfaces"],
+                self.coverage_doc,
+            )
+
+    def test_representative_depth_receipt_is_machine_readable(self) -> None:
+        lane = self.coverage_doc["representative_depth_lanes"]["partition_context"]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            emit_representative_depth(
+                "partition_context",
+                lane["capabilities"],
+                lane["surfaces"],
+                self.coverage_doc,
+            )
+        prefix, payload = output.getvalue().strip().split(" ", 1)
+        self.assertEqual(prefix, "E2E_DEPTH_RECEIPT")
+        receipt = json.loads(payload)
+        self.assertEqual(receipt["lane"], "partition_context")
+        self.assertEqual(receipt["capabilities"], sorted(lane["capabilities"]))
+        self.assertEqual(receipt["surfaces"], sorted(lane["surfaces"]))
 
     def test_every_registry_cell_has_exactly_one_lane(self) -> None:
         expected = {}

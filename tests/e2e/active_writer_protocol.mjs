@@ -34,7 +34,7 @@ function atomicWriteJson(path, payload) {
   renameSync(temporary, path);
 }
 
-function processIdsForProfile(profileDir) {
+export function processIdsForProfile(profileDir) {
   try {
     if (process.platform === "win32") {
       const output = execFileSync(
@@ -197,6 +197,34 @@ export async function runActiveWriterProtocol({
       ACTIVE_WRITER_REQUIRED_MUTATED,
       ["rookie_remove"],
     );
+    const mutatedCookies = await context.cookies(origin);
+    const stableExpiry = Math.trunc(
+      Math.min(
+        ...mutatedCookies
+          .filter(({ name }) =>
+            Object.hasOwn(ACTIVE_WRITER_REQUIRED_MUTATED, name),
+          )
+          .map(({ expires }) => expires),
+      ),
+    );
+    if (!Number.isSafeInteger(stableExpiry) || stableExpiry <= 0) {
+      throw new Error(
+        `active-writer cookies lacked a stable expiry: ${stableExpiry}`,
+      );
+    }
+    const churnPage = await context.newPage();
+    const churnUrl = new URL("/active-writer/churn", baselineUrl);
+    churnUrl.searchParams.set("expiry", String(stableExpiry));
+    let keepChurning = true;
+    let churnRequests = 0;
+    const churnPromise = (async () => {
+      while (keepChurning) {
+        await churnPage.goto(churnUrl.href, { waitUntil: "commit" });
+        churnRequests += 1;
+        await delay(20);
+      }
+    })();
+    while (churnRequests < 2) await delay(10);
     atomicWriteJson(
       join(controlDir, "ack-1.json"),
       ackPayload({
@@ -207,7 +235,10 @@ export async function runActiveWriterProtocol({
         databasePath: resolvedDatabase,
         browserVersion,
         userAgent,
-        liveness: mutatedLiveness,
+        liveness: {
+          ...mutatedLiveness,
+          writeChurn: { active: true, requests: churnRequests },
+        },
       }),
     );
 
@@ -215,6 +246,9 @@ export async function runActiveWriterProtocol({
     if (probeCommand.action !== "probe") {
       throw new Error(`expected probe command, got ${probeCommand.action}`);
     }
+    keepChurning = false;
+    await churnPromise;
+    await churnPage.close();
     const probeLiveness = await probe(
       context,
       page,
@@ -232,7 +266,10 @@ export async function runActiveWriterProtocol({
         databasePath: resolvedDatabase,
         browserVersion,
         userAgent,
-        liveness: probeLiveness,
+        liveness: {
+          ...probeLiveness,
+          writeChurn: { active: false, requests: churnRequests },
+        },
       }),
     );
 

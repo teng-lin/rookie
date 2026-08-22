@@ -31,7 +31,7 @@
       "discovery": "live",
       "recommended_read": "live",
       "crypto": "live",
-      "exact_set": "none",
+      "exact_set": "live",
       "active_writer": "none",
       "partitioned": "none"
     },
@@ -43,7 +43,7 @@
       "discovery": "live",
       "recommended_read": "live",
       "crypto": "none",
-      "exact_set": "none",
+      "exact_set": "live",
       "active_writer": "none",
       "partitioned": "none"
     },
@@ -118,13 +118,21 @@
       "runner": "tests/e2e/run_partition_context_e2e.py",
       "platforms": ["linux"],
       "engines": ["chromium", "gecko"],
-      "capabilities": ["partitioned", "detailed", "discovery", "recommended_read"],
+      "capabilities": ["partitioned", "detailed", "discovery"],
+      "surfaces": ["rust", "python", "node", "cli"]
+    },
+    "firefox_container": {
+      "workflow": ".github/workflows/e2e-depth.yml",
+      "runner": "tests/e2e/run_firefox_container_e2e.py",
+      "platforms": ["linux"],
+      "engines": ["gecko"],
+      "capabilities": ["partitioned", "detailed", "discovery"],
       "surfaces": ["rust", "python", "node", "cli"]
     },
     "nightly_stress": {
       "workflow": ".github/workflows/e2e-depth.yml",
       "runner": "tests/e2e/run_browser_cookie_stress_e2e.py",
-      "platforms": ["linux"],
+      "platforms": ["linux", "macos"],
       "engines": ["chromium", "gecko"],
       "capabilities": ["exact_set", "active_writer", "detailed"],
       "surfaces": ["rust", "python", "node", "cli"]
@@ -170,9 +178,9 @@
       "rationale": "The Firefox dFPI lane asserts two complete browser-produced originAttributes strings and their parsed identities."
     },
     "user_context_id": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["gecko"],
-      "rationale": "Firefox container identities require a test container and remain fixture-only."
+      "rationale": "A disposable unsigned test extension creates a real Firefox Multi-Account Container and the workflow asserts its browser-produced userContextId exactly."
     },
     "partition_key": {
       "classification": "live",

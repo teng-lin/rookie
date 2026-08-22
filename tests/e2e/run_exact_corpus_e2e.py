@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Seed and exactly verify the portable real-browser cookie corpus.
 
-The caller supplies an explicit disposable profile. This runner never performs
-browser discovery and never opens an installed user's default profile.
+The caller supplies an explicit disposable profile. After seeding, this runner
+copies that closed profile below a registry-correct root inside a fresh
+isolated home and proves discovery/recommended reads there. It never opens an
+installed user's default profile.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -23,6 +27,124 @@ from run_active_writer_e2e import (
     venv_python,
     wait_for_server,
 )
+
+
+REGISTRY_PATH = ROOT / "rookie-rs/browser_registry.json"
+
+
+def platform_id() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+
+def isolated_environment(root: Path) -> dict[str, str]:
+    home = root / "home"
+    return {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "LOCALAPPDATA": str(home / "AppData/Local"),
+        "APPDATA": str(home / "AppData/Roaming"),
+    }
+
+
+def normalized_path_bytes(path: Path) -> bytes:
+    value = os.fspath(path)
+    if os.name == "nt":
+        value = value.replace("\\", "/")
+        value = "".join(
+            character.lower() if "A" <= character <= "Z" else character
+            for character in value
+        )
+        while len(value) > 1 and value.endswith("/"):
+            value = value[:-1]
+        return value.encode("utf-16-le")
+    encoded = os.fsencode(value)
+    while len(encoded) > 1 and encoded.endswith(b"/"):
+        encoded = encoded[:-1]
+    return encoded
+
+
+def digest_fields(*fields: bytes) -> str:
+    digest = hashlib.sha256()
+    for field in fields:
+        digest.update(len(field).to_bytes(8, "big"))
+        digest.update(field)
+    return digest.hexdigest()
+
+
+def resolve_registry_root(template: str, environment: dict[str, str]) -> Path:
+    replacements = {
+        "{home}": environment["HOME"],
+        "{config_home}": environment["XDG_CONFIG_HOME"],
+        "{xdg_config_home}": environment["XDG_CONFIG_HOME"],
+        "{local_app_data}": environment["LOCALAPPDATA"],
+        "{roaming_app_data}": environment["APPDATA"],
+    }
+    resolved = template
+    for placeholder, value in replacements.items():
+        resolved = resolved.replace(placeholder, value)
+    if "{" in resolved or "}" in resolved or "*" in resolved:
+        raise ActiveWriterError(f"unsupported core discovery root {template!r}")
+    return Path(resolved)
+
+
+def stage_discovered_profile(
+    engine: str, browser_id: str, source: Path
+) -> tuple[Path, dict[str, str], str]:
+    """Copy the closed disposable profile below an isolated registry root."""
+
+    sandbox = source.parent / f"{source.name}-discovery"
+    if sandbox.exists():
+        raise ActiveWriterError(f"discovery sandbox already exists: {sandbox}")
+    environment = isolated_environment(sandbox)
+    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    entries = [
+        entry
+        for entry in registry["platforms"][platform_id()]
+        if entry["canonical_id"] == browser_id
+    ]
+    if len(entries) != 1:
+        raise ActiveWriterError(
+            f"expected one registry entry for {platform_id()}/{browser_id}, got {len(entries)}"
+        )
+    root_spec = min(entries[0]["roots"], key=lambda candidate: candidate["priority"])
+    root = resolve_registry_root(root_spec["template"], environment)
+    if engine == "chromium":
+        root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, root)
+        staged_profile = root
+        locator = Path("Default")
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        staged_profile = root / "Profiles/rookie-e2e"
+        staged_profile.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, staged_profile)
+        (root / "profiles.ini").write_text(
+            "[Profile0]\nName=rookie-e2e\nIsRelative=1\n"
+            "Path=Profiles/rookie-e2e\nDefault=1\n",
+            encoding="utf-8",
+        )
+        locator = Path("Profiles/rookie-e2e")
+
+    canonical_root = root.resolve(strict=True)
+    installation_id = digest_fields(
+        b"rookie-install-v1",
+        browser_id.encode(),
+        root_spec["root_id"].encode(),
+        root_spec["channel"].encode(),
+        normalized_path_bytes(canonical_root),
+    )
+    profile_id = digest_fields(
+        b"rookie-profile-v1",
+        installation_id.encode(),
+        b"relative",
+        normalized_path_bytes(locator),
+    )
+    return staged_profile, environment, profile_id
 
 
 def find_chromium_database(profile: Path) -> Path:
@@ -57,8 +179,8 @@ def seeder_command(args: argparse.Namespace, base_url: str) -> list[str]:
 
 
 def run(args: argparse.Namespace) -> None:
-    profile = args.profile.resolve()
-    profile.mkdir(parents=True, exist_ok=True)
+    seeded_profile = args.profile.resolve()
+    seeded_profile.mkdir(parents=True, exist_ok=True)
     port = pick_port()
     environment = os.environ.copy()
     environment.update(
@@ -67,8 +189,6 @@ def run(args: argparse.Namespace) -> None:
             "ROOKIE_E2E_DOMAIN": "127.0.0.1",
             "ROOKIE_E2E_COOKIE_NAME": "rookie_ci",
             "ROOKIE_E2E_COOKIE_VALUE": "bar",
-            "ROOKIE_E2E_CHECK_BROWSER_DISCOVERY": "0",
-            "ROOKIE_E2E_CHECK_RECOMMENDED_READ": "0",
         }
     )
     server = subprocess.Popen(
@@ -91,9 +211,22 @@ def run(args: argparse.Namespace) -> None:
             except subprocess.TimeoutExpired:
                 server.kill()
 
-    manifest = profile / "rookie-e2e-cookie-manifest.json"
+    manifest = seeded_profile / "rookie-e2e-cookie-manifest.json"
     if not manifest.is_file():
         raise ActiveWriterError(f"browser seeder did not write {manifest}")
+    profile, discovery_environment, expected_profile_id = stage_discovered_profile(
+        args.engine, args.browser_id, seeded_profile
+    )
+    environment.update(discovery_environment)
+    environment.update(
+        {
+            "ROOKIE_E2E_CHECK_BROWSER_DISCOVERY": "1",
+            "ROOKIE_E2E_CHECK_RECOMMENDED_READ": "1",
+            "ROOKIE_E2E_EXPECTED_PROFILE_ID": expected_profile_id,
+            "ROOKIE_E2E_TARGET_BROWSER": args.browser_id,
+        }
+    )
+    manifest = profile / "rookie-e2e-cookie-manifest.json"
     environment["ROOKIE_E2E_COOKIE_MANIFEST"] = str(manifest)
     python = venv_python()
     if args.engine == "chromium":
@@ -133,6 +266,16 @@ def run(args: argparse.Namespace) -> None:
         else:
             cli.extend(["--browser-id", args.browser_id])
         run_checked(cli, environment, "exact-corpus")
+        run_checked(
+            [
+                str(python),
+                "tests/e2e/assert_cli_cookie.py",
+                "--browser",
+                args.browser_id,
+            ],
+            environment,
+            "exact-corpus-recommended",
+        )
     else:
         database = (profile / "cookies.sqlite").resolve(strict=True)
         environment.update(
@@ -169,10 +312,21 @@ def run(args: argparse.Namespace) -> None:
             environment,
             "exact-corpus",
         )
+        run_checked(
+            [
+                str(python),
+                "tests/e2e/assert_cli_cookie.py",
+                "--browser",
+                args.browser_id,
+            ],
+            environment,
+            "exact-corpus-recommended",
+        )
 
     print(
         f"exact real-browser corpus verified on Rust/Python/Node/CLI: "
-        f"engine={args.engine} profile={profile} manifest={manifest}",
+        f"engine={args.engine} profile={profile} profile_id={expected_profile_id} "
+        f"manifest={manifest}",
         flush=True,
     )
 

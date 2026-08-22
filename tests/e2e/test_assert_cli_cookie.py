@@ -86,6 +86,52 @@ class AssertCliCookieTests(unittest.TestCase):
 
         self.assertNotIn("--local-state-path", run.call_args.args[0])
 
+    @mock.patch.object(HARNESS.time, "time", return_value=2_000_000_000)
+    @mock.patch.object(HARNESS.subprocess, "run")
+    def test_native_mode_asserts_every_flat_field(
+        self, run: mock.Mock, _now: mock.Mock
+    ) -> None:
+        cookie = {
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": False,
+            "expires": 2_000_003_600,
+            "name": "rookie_ci",
+            "value": "bar",
+            "http_only": False,
+            "same_site": -1,
+        }
+        run.return_value = subprocess.CompletedProcess([], 0, json.dumps([cookie]), "")
+        with mock.patch.dict(
+            HARNESS.os.environ,
+            {
+                "ROOKIE_E2E_REQUIRED_COOKIES_JSON": '{"rookie_ci":"bar"}',
+                "ROOKIE_E2E_FORBIDDEN_COOKIES_JSON": "[]",
+                "ROOKIE_E2E_EXACT_COOKIE_STATE": "1",
+                "ROOKIE_E2E_EXPECT_NATIVE_FIELDS": "1",
+            },
+        ):
+            self.assertEqual(
+                HARNESS.assert_cli_cookie(
+                    self.cookies,
+                    key_path=None,
+                    domain="127.0.0.1",
+                    cli_path=self.cli,
+                ),
+                1,
+            )
+            cookie["same_site"] = 1
+            run.return_value = subprocess.CompletedProcess(
+                [], 0, json.dumps([cookie]), ""
+            )
+            with self.assertRaisesRegex(HARNESS.HarnessError, "native attributes"):
+                HARNESS.assert_cli_cookie(
+                    self.cookies,
+                    key_path=None,
+                    domain="127.0.0.1",
+                    cli_path=self.cli,
+                )
+
     @mock.patch.object(HARNESS.subprocess, "run")
     def test_manifest_mode_verifies_flat_and_detailed_exact_sets(
         self, run: mock.Mock
@@ -156,6 +202,25 @@ class AssertCliCookieTests(unittest.TestCase):
         )
         self.assertEqual(detailed_command[4], "detailed")
         self.assertNotIn("--domains", detailed_command)
+
+        run.reset_mock()
+        run.side_effect = None
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, json.dumps([detailed]), ""
+        )
+        detailed_count = HARNESS.assert_cli_cookie(
+            self.cookies,
+            key_path=None,
+            domain="127.0.0.1",
+            cli_path=self.cli,
+            detailed=True,
+        )
+        self.assertEqual(detailed_count, 1)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(
+            run.call_args.args[0][1:5],
+            ["from-path", str(self.cookies), "--format", "detailed"],
+        )
 
     @mock.patch.object(HARNESS.subprocess, "run")
     def test_browser_command_uses_profile_discovery(self, run: mock.Mock) -> None:

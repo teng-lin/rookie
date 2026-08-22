@@ -2,11 +2,13 @@
 // The browser profile must be explicitly marked disposable; no discovery is
 // performed and no default profile is ever opened.
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import process from "node:process";
 
 import { chromium, firefox } from "playwright";
+
+import { processIdsForProfile } from "./active_writer_protocol.mjs";
 
 const [
   engine,
@@ -63,21 +65,25 @@ let browserType;
 let launchOptions;
 if (engine === "chromium") {
   browserType = chromium;
+  const chromiumArgs = [
+    "--no-first-run",
+    "--disable-default-apps",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    `--host-resolver-rules=${hostRules}`,
+  ];
+  const passwordStore = process.env.ROOKIE_E2E_PASSWORD_STORE || "basic";
+  if (passwordStore !== "keychain") {
+    chromiumArgs.push(`--password-store=${passwordStore}`);
+  }
   launchOptions = {
     headless: false,
     ignoreHTTPSErrors: true,
     timeout,
-    args: [
-      "--no-first-run",
-      "--disable-default-apps",
-      "--disable-background-networking",
-      "--disable-component-update",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      `--host-resolver-rules=${hostRules}`,
-      `--password-store=${process.env.ROOKIE_E2E_PASSWORD_STORE || "basic"}`,
-    ],
+    args: chromiumArgs,
   };
   if (process.env.ROOKIE_E2E_BROWSER_PATH) {
     launchOptions.executablePath = process.env.ROOKIE_E2E_BROWSER_PATH;
@@ -126,6 +132,103 @@ async function writeControl(name, payload) {
   await rename(temporary, target);
 }
 
+async function databaseForProfile() {
+  const candidates =
+    engine === "firefox"
+      ? [join(profile, "cookies.sqlite")]
+      : [join(profile, "Default", "Network", "Cookies"), join(profile, "Default", "Cookies")];
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    for (const candidate of candidates) {
+      try {
+        await access(candidate);
+        return resolve(candidate);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    await delay(50);
+  }
+  throw new Error(`timed out locating ${engine} cookie database below ${profile}`);
+}
+
+async function browserLiveness(context, page) {
+  const cookieCount = (await context.cookies()).filter(({ name }) =>
+    name.startsWith("stress_"),
+  ).length;
+  if (cookieCount !== 320) {
+    throw new Error(`browser liveness probe saw ${cookieCount} stress cookies, expected 320`);
+  }
+  return {
+    readyState: await page.evaluate(() => document.readyState),
+    cookieCount,
+  };
+}
+
+function acknowledgement({
+  sequence,
+  phase,
+  browserVersion,
+  resolvedProfile,
+  databasePath,
+  manifest,
+  liveness,
+}) {
+  return {
+    protocolVersion: 1,
+    sequence,
+    phase,
+    engine,
+    seederPid: process.pid,
+    browserProcessIds: processIdsForProfile(resolvedProfile),
+    browserVersion,
+    profileDir: resolvedProfile,
+    databasePath,
+    manifest,
+    liveness,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+async function startWriteChurn(context, manifest) {
+  const states = manifest.expected.unfiltered_flat
+    .filter(({ name }) => /^stress_[0-7]_0$/.test(name))
+    .map(({ domain, expires, value }) => ({
+      host: domain.replace(/^\./, ""),
+      expires,
+      value,
+    }))
+    .sort((left, right) => left.host.localeCompare(right.host));
+  if (states.length !== hosts.length) {
+    throw new Error(`write churn expected ${hosts.length} stable rows, got ${states.length}`);
+  }
+  const churnPage = await context.newPage();
+  let active = true;
+  let requests = 0;
+  const work = (async () => {
+    while (active) {
+      for (const state of states) {
+        if (!active) break;
+        const target = new URL(`https://${state.host}:${port}/stress/churn`);
+        target.searchParams.set("value", state.value);
+        target.searchParams.set("expiry", String(state.expires));
+        await churnPage.goto(target.href, { waitUntil: "domcontentloaded", timeout });
+        requests += 1;
+      }
+    }
+  })();
+  while (requests < states.length) await delay(10);
+  return {
+    proof: () => ({ active, requests }),
+    stop: async () => {
+      active = false;
+      await work;
+      await churnPage.close();
+      return { active: false, requests };
+    },
+  };
+}
+
 async function navigateAndCapture(context, page, captureMode, captureRound, output) {
   for (const host of hosts) {
     const target =
@@ -135,18 +238,73 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
     await page.goto(target, { waitUntil: "domcontentloaded", timeout });
   }
 
+  const expected = new Map();
+  for (let hostIndex = 0; hostIndex < hosts.length; hostIndex += 1) {
+    const host = hosts[hostIndex];
+    for (let cookieIndex = 0; cookieIndex < 39; cookieIndex += 1) {
+      if (
+        captureMode === "mutate" &&
+        cookieIndex >= 1 &&
+        cookieIndex <= captureRound + 1
+      ) {
+        continue;
+      }
+      const name = `stress_${hostIndex}_${cookieIndex}`;
+      const value =
+        cookieIndex === 0 && captureMode === "mutate"
+          ? `updated-${captureRound}`
+          : `seed-${hostIndex}-${cookieIndex}`;
+      expected.set(`${host}\0${name}`, value);
+    }
+    expected.set(
+      `${host}\0stress_shared`,
+      `seed-${hostIndex}-39`,
+    );
+    if (captureMode === "mutate") {
+      for (let priorRound = 0; priorRound <= captureRound; priorRound += 1) {
+        expected.set(
+          `${host}\0stress_${hostIndex}_round_${priorRound}`,
+          `added-${priorRound}`,
+        );
+      }
+    }
+  }
+
   const accepted = (await context.cookies())
     .filter(({ name }) => name.startsWith("stress_"))
-    .map((cookie) => ({
-      domain: cookie.domain,
-      path: cookie.path,
-      secure: cookie.secure,
-      expires: cookie.expires < 0 ? null : Math.trunc(cookie.expires),
-      name: cookie.name,
-      value: cookie.value,
-      http_only: cookie.httpOnly,
-      same_site: { None: 0, Lax: 1, Strict: 2 }[cookie.sameSite] ?? -1,
-    }))
+    .map((cookie) => {
+      const host = cookie.domain.replace(/^\./, "");
+      const key = `${host}\0${cookie.name}`;
+      const expectedValue = expected.get(key);
+      if (expectedValue === undefined) {
+        throw new Error(`browser retained an unexpected stress identity ${key}`);
+      }
+      if (cookie.value !== expectedValue) {
+        throw new Error(
+          `${key} expected independent value ${expectedValue}, got ${cookie.value}`,
+        );
+      }
+      if (
+        cookie.path !== "/" ||
+        cookie.secure !== true ||
+        cookie.httpOnly !== true ||
+        cookie.sameSite !== "Lax" ||
+        cookie.expires <= 0
+      ) {
+        throw new Error(`browser attributes disagreed for ${key}: ${JSON.stringify(cookie)}`);
+      }
+      expected.delete(key);
+      return {
+        domain: cookie.domain,
+        path: "/",
+        secure: true,
+        expires: Math.trunc(cookie.expires),
+        name: cookie.name,
+        value: expectedValue,
+        http_only: true,
+        same_site: 1,
+      };
+    })
     .sort((left, right) =>
       `${left.domain}\0${left.path}\0${left.name}`.localeCompare(
         `${right.domain}\0${right.path}\0${right.name}`,
@@ -154,9 +312,10 @@ async function navigateAndCapture(context, page, captureMode, captureRound, outp
     );
 
   const expectedCount = hosts.length * 40;
-  if (accepted.length !== expectedCount) {
+  if (accepted.length !== expectedCount || expected.size !== 0) {
     throw new Error(
-      `${engine} retained ${accepted.length} stress cookies, expected ${expectedCount}`,
+      `${engine} retained ${accepted.length} stress cookies, expected ${expectedCount}; ` +
+        `missing=${JSON.stringify([...expected.keys()].sort())}`,
     );
   }
   const manifest = {
@@ -247,17 +406,25 @@ try {
   const initial = await navigateAndCapture(context, page, mode, round, manifestPath);
   if (controlDir) {
     await mkdir(controlDir, { recursive: true });
-    await writeControl("ack-0.json", {
-      protocol_version: 1,
-      sequence: 0,
-      phase: "ready",
-      engine,
-      seeder_pid: process.pid,
-      profile,
-      browser_version: initial.browser.version,
-      manifest: manifestPath,
-      cookie_count: initial.expected.unfiltered_flat.length,
-    });
+    const resolvedProfile = await realpath(profile);
+    const databasePath = await databaseForProfile();
+    const browserVersion = initial.browser.version;
+    let churn = await startWriteChurn(context, initial);
+    await writeControl(
+      "ack-0.json",
+      acknowledgement({
+        sequence: 0,
+        phase: "ready",
+        browserVersion,
+        resolvedProfile,
+        databasePath,
+        manifest: manifestPath,
+        liveness: {
+          ...(await browserLiveness(context, page)),
+          writeChurn: churn.proof(),
+        },
+      }),
+    );
     let sequence = 1;
     while (true) {
       const command = await waitForCommand(sequence);
@@ -265,18 +432,28 @@ try {
         throw new Error(`stress command sequence mismatch: ${JSON.stringify(command)}`);
       }
       if (command.action === "close") {
-        await writeControl(`ack-${sequence}.json`, {
-          protocol_version: 1,
-          sequence,
-          phase: "closing",
-          engine,
-          seeder_pid: process.pid,
-        });
+        const stoppedChurn = await churn.stop();
+        await writeControl(
+          `ack-${sequence}.json`,
+          acknowledgement({
+            sequence,
+            phase: "closing",
+            browserVersion,
+            resolvedProfile,
+            databasePath,
+            manifest: null,
+            liveness: {
+              ...(await browserLiveness(context, page)),
+              writeChurn: stoppedChurn,
+            },
+          }),
+        );
         break;
       }
       if (command.action !== "mutate" || !Number.isSafeInteger(command.round)) {
         throw new Error(`invalid stress command: ${JSON.stringify(command)}`);
       }
+      await churn.stop();
       const nextManifest = resolve(String(command.manifest));
       if (nextManifest === profile || nextManifest.startsWith(`${profile}/`)) {
         throw new Error("stress mutation manifest must remain outside the profile");
@@ -288,17 +465,22 @@ try {
         command.round,
         nextManifest,
       );
-      await writeControl(`ack-${sequence}.json`, {
-        protocol_version: 1,
-        sequence,
-        phase: "mutated",
-        round: command.round,
-        engine,
-        seeder_pid: process.pid,
-        profile,
-        manifest: nextManifest,
-        cookie_count: captured.expected.unfiltered_flat.length,
-      });
+      churn = await startWriteChurn(context, captured);
+      await writeControl(
+        `ack-${sequence}.json`,
+        acknowledgement({
+          sequence,
+          phase: "mutated",
+          browserVersion,
+          resolvedProfile,
+          databasePath,
+          manifest: nextManifest,
+          liveness: {
+            ...(await browserLiveness(context, page)),
+            writeChurn: churn.proof(),
+          },
+        }),
+      );
       sequence += 1;
     }
   }

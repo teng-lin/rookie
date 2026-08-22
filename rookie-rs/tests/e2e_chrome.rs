@@ -536,6 +536,12 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
   assert_eq!(profile.profile.browser_id.as_str(), browser_id);
 
   let profile_id = profile.profile.profile_id.to_string();
+  if let Ok(expected_profile_id) = std::env::var("ROOKIE_E2E_EXPECTED_PROFILE_ID") {
+    assert_eq!(
+      profile_id, expected_profile_id,
+      "discovery returned the wrong independently expected profile ID"
+    );
+  }
   let snapshot = rookie_cookies::read(
     rookie_cookies::ReadRequest::browser(&browser_id)
       .profile(&profile_id)

@@ -14,6 +14,9 @@ The command fails unless all of the following are true:
 - both outputs are outside the source root and do not already exist;
 - the retained cookie identities exactly match an independent expected
   manifest;
+- a public `rookie-cookies from-path --format detailed` decode of the source
+  exactly matches every manifest cookie field and context field before any
+  artifact is accepted;
 - every cookie not present in the manifest is removed;
 - rows in non-cookie tables are removed, except Chromium's safe schema-version
   metadata;
@@ -70,20 +73,24 @@ directly as well:
 
 Chromium identity additionally includes `top_frame_site_key` and
 `has_cross_site_ancestor`; Firefox identity includes the complete
-`origin_attributes` value. Values remain in the expected manifest for decoder
-verification, but the capture sanitizer does not attempt to decrypt Chromium
-rows.
+`origin_attributes` value. The workflow decrypts the marked disposable source
+through the public CLI and passes that temporary JSON as `--decoded-cookies`.
+The sanitizer requires exact detailed equality, records the decoded-output
+hash, and removes the temporary JSON before artifact upload.
 
 ## Output provenance
 
 The provenance JSON records:
 
-- browser product, version, and build ID;
+- browser product, channel, version, build ID, and exact download source;
 - engine, platform, and architecture;
-- expected-manifest and sanitized-fixture SHA-256 digests;
+- source/fixture byte sizes plus expected-manifest, decoded-output, and
+  sanitized-fixture SHA-256 digests;
 - retained identities and before/after row counts;
-- `sqlite_master` objects and `PRAGMA table_xinfo` results;
+- `sqlite_master` objects, `PRAGMA table_xinfo`, SQLite schema/user versions,
+  and page size;
 - Chromium `version` and `compatible_version` metadata when present.
+- the capture command and sanitizer source revision.
 
 Review the database, provenance JSON, and expected manifest together. A
 committed fixture must also be documented with its capture date and exact
@@ -100,11 +107,16 @@ python3 tests/e2e/capture_browser_cookie_fixture.py \
   --source-database "$DISPOSABLE_PROFILE/cookies.sqlite" \
   --output-database firefox-candidate.sqlite \
   --expected-manifest accepted-cookie-manifest.json \
+  --decoded-cookies decoded-by-rookie.json \
   --provenance-output firefox-candidate.provenance.json \
   --engine firefox \
   --browser Firefox \
   --browser-version 142.0 \
-  --build-id 20250811145442
+  --build-id 20250811145442 \
+  --browser-channel playwright-bundled \
+  --browser-source npm:playwright@1.62.1/firefox@build-id \
+  --capture-command 'seed_firefox_cookie -> rookie-cookies from-path --format detailed' \
+  --sanitizer-revision GIT_SHA
 ```
 
 The capture workflow uploads candidates for review; it never commits them and

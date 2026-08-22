@@ -183,12 +183,21 @@ browser matrix:
   Rust, Python, Node, and CLI assert the browser-produced context strings and
   prove that `header(SendContext)` selects one partition without merging the
   other. Omitting the top-level selector must fail.
+- The Firefox half also installs a checked-in test-only WebExtension into the
+  disposable profile. The extension creates a real Multi-Account Container
+  cookie; the runner reads its exact `originAttributes` and positive
+  `userContextId` from `moz_cookies`, verifies detailed output on all four
+  surfaces, and proves matching, mismatched, and missing container selectors.
 - The nightly Chromium/Firefox stress jobs retain 320 cookies across eight
-  registrable test domains, including same-name collisions. They keep the
-  browser open through three add/update/delete rounds, launch concurrent
-  extractor processes on every public surface, enforce the exact detailed
-  manifest after every round, exercise an immediate timeout boundary, and
-  compare the final closed snapshot.
+  registrable test domains in each of two independent Linux profiles,
+  including same-name collisions. A macOS Chrome lane repeats the work through
+  the real Keychain route. They keep the browser open through three
+  add/update/delete rounds while a Set-Cookie loop advances the raw database
+  write generation, launch concurrent extractor processes on every public
+  surface, enforce the exact detailed manifest after every round, and compare
+  the final closed snapshot. A locked rollback-journal copy must produce typed
+  timeout and in-flight cancellation failures, then recover to the exact set
+  after the lock is released.
 
 Both runners fail unless `CI=true` and their marked disposable profiles are
 below `RUNNER_TEMP`. They do not support local/default-profile discovery.
@@ -278,15 +287,17 @@ exists and passes.
 as `live`, `fixture_only`, or `non_persistable`, with engine applicability and
 a rationale. A detailed-output smoke test therefore cannot be mistaken for
 semantic CHIPS/container coverage. CHIPS keys/ancestry/source metadata and
-Firefox dFPI origin attributes/partition keys are live; Firefox container IDs
-remain fixture-only, and private-browsing IDs are non-persistable.
+Firefox dFPI origin attributes/partition keys and Multi-Account Container IDs
+are live; private-browsing IDs are non-persistable.
 
 `representative_depth_lanes` records the exact-corpus, active-writer,
 partition, stress, and manual-capture runners independently of the broad
 per-browser cells. Metadata tests require each claimed workflow and runner to
 exist, constrain its engine/platform/surface vocabulary, and require the core
 Chrome/Firefox lanes to cover all three desktop OSes and all four public
-surfaces.
+surfaces. Each representative runner emits a machine-readable depth receipt
+only after its declared assertions succeed; a missing or excess capability or
+surface fails the job.
 
 | Lane | What it proves | When it runs |
 | --- | --- | --- |

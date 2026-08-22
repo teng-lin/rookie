@@ -26,6 +26,11 @@ if (browser === "safari") {
 }
 
 for (const [surface, cookies] of surfaces) {
+  if (cookies.length !== 1) {
+    throw new Error(
+      `${surface}: expected the exact one-cookie filtered set, got ${cookies.length}`,
+    );
+  }
   const seeded = cookies.find(({ name }) => name === expectedName);
   if (!seeded) {
     throw new Error(
@@ -35,6 +40,28 @@ for (const [surface, cookies] of surfaces) {
   if (seeded.value !== expectedValue) {
     throw new Error(
       `${surface}: expected ${expectedName}='${expectedValue}', got '${seeded.value}'`,
+    );
+  }
+  const expected = {
+    domain: "127.0.0.1",
+    path: "/",
+    secure: false,
+    httpOnly: false,
+    sameSite: -1,
+  };
+  const wrong = Object.entries(expected).filter(
+    ([field, value]) => seeded[field] !== value,
+  );
+  const now = Math.trunc(Date.now() / 1000);
+  if (
+    wrong.length > 0 ||
+    !Number.isSafeInteger(seeded.expires) ||
+    seeded.expires < now + 1800 ||
+    seeded.expires > now + 4500
+  ) {
+    throw new Error(
+      `${surface}: native attributes disagreed: wrong=${JSON.stringify(wrong)} ` +
+        `expires=${seeded.expires} now=${now}`,
     );
   }
 }

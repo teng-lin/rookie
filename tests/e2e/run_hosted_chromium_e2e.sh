@@ -71,6 +71,11 @@ run_inner() {
     active_args+=(--xvfb)
   fi
   .venv/bin/python "${active_args[@]}"
+
+  .venv/bin/python tests/e2e/browser_coverage_contract.py core_chromium \
+    --capability exact_set --capability active_writer \
+    --capability detailed --capability crypto \
+    --surface rust --surface python --surface node --surface cli
 }
 
 export channel user_data browser_id

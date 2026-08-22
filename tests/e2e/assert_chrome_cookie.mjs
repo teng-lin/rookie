@@ -174,6 +174,13 @@ if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
     console.error(`discovery returned wrong browser identity: ${JSON.stringify(identity)}`);
     process.exit(1);
   }
+  const expectedProfileId = process.env.ROOKIE_E2E_EXPECTED_PROFILE_ID;
+  if (expectedProfileId && identity.profileId !== expectedProfileId) {
+    console.error(
+      `discovery returned the wrong independently expected profile ID: expected ${expectedProfileId}, got ${identity.profileId}`,
+    );
+    process.exit(1);
+  }
   recommendedSnapshot = await rookieCookies.read({
     browser: browserId,
     profile: identity.profileId,

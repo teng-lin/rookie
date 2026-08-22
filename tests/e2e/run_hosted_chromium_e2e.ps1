@@ -24,3 +24,9 @@ if ($LASTEXITCODE -ne 0) { throw "Chromium exact-corpus E2E failed" }
     --channel $channel `
     --browser-id $browserId
 if ($LASTEXITCODE -ne 0) { throw "Chromium active-writer E2E failed" }
+
+& .\.venv\Scripts\python.exe tests/e2e/browser_coverage_contract.py core_chromium `
+    --capability exact_set --capability active_writer `
+    --capability detailed --capability crypto `
+    --surface rust --surface python --surface node --surface cli
+if ($LASTEXITCODE -ne 0) { throw "Chromium depth receipt failed" }

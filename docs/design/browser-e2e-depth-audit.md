@@ -2,7 +2,8 @@
 
 - **Author:** Codex
 - **Date:** 2026-08-21
-- **Status:** Proposed implementation plan
+- **Status:** Implemented in `codex/browser-e2e-depth`; remote browser jobs pending
+  CI execution
 - **Baseline:** `f0df3d1`
 - **Scope:** Browser-generated cookie fixtures, hosted live-browser extraction,
   Rust/Python/Node/CLI assertions, cookie isolation context, discovery, and
@@ -29,7 +30,7 @@ and partition/container tests should follow. Increasing the number of cookies
 or browser cells before exact assertions exist would mostly repeat the current
 weakness at a larger scale.
 
-## Verified current state
+## Verified baseline state
 
 The declarative coverage matrix contains 47 platform-by-browser cells:
 
@@ -406,6 +407,40 @@ Every browser job should log at least:
 - journal mode and live/closed state;
 - context-bearing row count;
 - public surfaces exercised.
+
+## Implementation outcome
+
+The remediation is implemented on the integration branch as executable test
+contracts, not only as additional matrix metadata. No developer-machine
+Chrome, Safari, or Brave profile was opened or extracted while doing this
+work. All browser-launching depth runners refuse to run outside CI and require
+their disposable profile to be rooted below `RUNNER_TEMP`.
+
+| Program | Implemented outcome |
+| --- | --- |
+| PR 1: exact corpus | A declarative portable/deep corpus now covers all eight flat fields, collisions, update/delete, expiration boundaries, large and unusual values, and a second-host decoy. Rust, Python, Node, and CLI compare sorted complete output with an independent manifest; verifier mutation tests prove excess, duplicate, missing, wrong-domain, wrong-attribute, and wrong-context rows fail. |
+| PR 2: public paths and discovery | Core profiles are staged below isolated registry roots. Explicit flat/detailed reads, recommended reads, CLI reads, and discovery assert the independently computed browser/profile/source identity. Broad hosted and fixture lanes validate their declared depth profiles at runtime. |
+| PR 3: active writer | Chrome and Firefox core jobs on Linux, macOS, and Windows run a ready/hold/mutate/probe/close protocol against the exact database owned by a live disposable browser. All surfaces assert complete open states and the final open/closed structural equality while process, schema, journal, and sidecar evidence is logged. |
+| PR 4: isolation context | A local-HTTPS lane creates two Chromium CHIPS and two Firefox dFPI partitions plus colliding unpartitioned rows. Raw SQLite context is the oracle for exact detailed extraction and positive/negative `SendContext` selection. A disposable Firefox WebExtension adds a real Multi-Account Container row and exact `userContextId` checks. All nine context fields are classified; private browsing is explicitly non-persistable. |
+| PR 5: provenance | The manual, read-only capture workflow first decodes the disposable source through the public CLI and exact manifest, then retains only expected rows. Provenance records product/channel/version/build, capture command, sanitizer revision, schema metadata, byte sizes, row counts, and hashes. Full profiles, `Local State`, secrets, and unrelated tables are excluded. |
+| PR 6: stress | Nightly jobs run two Linux profiles per engine plus macOS Chrome through Keychain. Each keeps 320 cookies across eight registrable domains under continual browser writes, mutates state for three rounds, runs four public surfaces concurrently, and exact-checks every completed state. A locked rollback-journal control proves typed request timeout, in-flight cancellation, and exact recovery after unlock. |
+
+Representative lanes now emit a machine-readable `E2E_DEPTH_RECEIPT` only
+after their declared capabilities and surfaces have succeeded. Contract tests
+reject a missing or excess claim, preventing the coverage manifest from
+silently getting ahead of its harness.
+
+### Validation boundary
+
+The repository changes can be syntax-, unit-, compile-, and fixture-tested
+without touching an installed browser profile. Genuine encryption,
+browser-owned database, CHIPS/dFPI/container, and schema-capture assertions are
+deliberately executable only on isolated CI runners. Those jobs still need to
+run on the branch before merge. In particular, the capture workflow and
+sanitizer are complete, but current and previous browser-generated persistent
+cookie candidates cannot honestly be called retained fixtures until the
+manual workflow has run and its artifacts have been reviewed. The workflow
+does not commit or trust those artifacts automatically.
 
 ## Definition of done
 

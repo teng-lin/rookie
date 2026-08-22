@@ -24,6 +24,9 @@ import sys
 import tempfile
 from typing import Any, Iterable
 
+from browser_coverage_contract import emit_representative_depth
+from cookie_manifest import ManifestError, load_manifest, verify_records
+
 
 MARKER_NAME = ".rookie-cookie-fixture-source.json"
 MARKER_KIND = "rookie-cookie-fixture-source"
@@ -256,7 +259,42 @@ def schema_signature(connection: sqlite3.Connection) -> dict[str, Any]:
                 "WHERE key IN ('version', 'compatible_version') ORDER BY key"
             )
         }
-    return {"objects": objects, "columns": columns, "meta": meta}
+    return {
+        "objects": objects,
+        "columns": columns,
+        "meta": meta,
+        "sqlite_schema_version": int(
+            connection.execute("PRAGMA schema_version").fetchone()[0]
+        ),
+        "sqlite_user_version": int(
+            connection.execute("PRAGMA user_version").fetchone()[0]
+        ),
+        "sqlite_page_size": int(connection.execute("PRAGMA page_size").fetchone()[0]),
+    }
+
+
+def verify_decoded_cookies(manifest_path: Path, decoded_path: Path) -> tuple[int, str]:
+    """Require a public decoder's full detailed output to match the manifest."""
+
+    manifest = load_manifest(manifest_path)
+    try:
+        decoded = json.loads(decoded_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CaptureError(
+            f"decoded cookie output is not valid JSON: {error}"
+        ) from error
+    if not isinstance(decoded, list):
+        raise CaptureError("decoded cookie output must be a JSON array")
+    try:
+        count = verify_records(
+            manifest,
+            "detailed",
+            decoded,
+            surface="fixture capture decoded output",
+        )
+    except ManifestError as error:
+        raise CaptureError(str(error)) from error
+    return count, sha256_file(decoded_path)
 
 
 def empty_non_cookie_tables(connection: sqlite3.Connection, engine: str) -> None:
@@ -345,11 +383,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-database", type=Path, required=True)
     parser.add_argument("--output-database", type=Path, required=True)
     parser.add_argument("--expected-manifest", type=Path, required=True)
+    parser.add_argument("--decoded-cookies", type=Path, required=True)
     parser.add_argument("--provenance-output", type=Path, required=True)
     parser.add_argument("--engine", choices=("chromium", "firefox"), required=True)
     parser.add_argument("--browser", required=True)
     parser.add_argument("--browser-version", required=True)
     parser.add_argument("--build-id", required=True)
+    parser.add_argument("--browser-channel", required=True)
+    parser.add_argument("--browser-source", required=True)
+    parser.add_argument("--capture-command", required=True)
+    parser.add_argument("--sanitizer-revision", required=True)
     parser.add_argument("--platform", default=sys.platform)
     parser.add_argument("--architecture", default=host_platform.machine())
     return parser
@@ -378,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
         expected, manifest_digest = load_expected_rows(
             args.expected_manifest, args.engine
         )
+        decoded_count, decoded_digest = verify_decoded_cookies(
+            args.expected_manifest, args.decoded_cookies
+        )
         capture = sanitize_database(
             source_database, output_database, args.engine, expected
         )
@@ -386,12 +432,20 @@ def main(argv: list[str] | None = None) -> int:
             "browser": args.browser,
             "browser_version": args.browser_version,
             "build_id": args.build_id,
+            "browser_channel": args.browser_channel,
+            "browser_source": args.browser_source,
             "engine": args.engine,
             "platform": args.platform,
             "architecture": args.architecture,
             "source_kind": marker.get("source_kind", "disposable_e2e_profile"),
             "expected_manifest_sha256": manifest_digest,
+            "decoded_output_sha256": decoded_digest,
+            "decoded_cookie_rows": decoded_count,
             "fixture_sha256": sha256_file(output_database),
+            "fixture_bytes": output_database.stat().st_size,
+            "source_database_bytes": source_database.stat().st_size,
+            "capture_command": args.capture_command,
+            "sanitizer_revision": args.sanitizer_revision,
             "retained_identities": expected,
             **capture,
         }
@@ -400,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"captured {capture['retained_cookie_rows']} sanitized {args.engine} "
             f"rows in {output_database}; provenance: {provenance_output}"
+        )
+        emit_representative_depth(
+            "manual_fixture_capture", ("browser_launch", "detailed"), ()
         )
     except (CaptureError, OSError, sqlite3.Error, ValueError) as error:
         print(f"browser fixture capture failed: {error}", file=sys.stderr)

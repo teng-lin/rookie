@@ -172,6 +172,17 @@ def main() -> int:
             )
             return 1
         identity = matching_profiles[0]["profile"]
+        expected_profile_id = os.environ.get("ROOKIE_E2E_EXPECTED_PROFILE_ID")
+        if (
+            expected_profile_id is not None
+            and identity["profile_id"] != expected_profile_id
+        ):
+            print(
+                "discovery returned the wrong independently expected profile ID: "
+                f"expected {expected_profile_id}, got {identity['profile_id']}",
+                file=sys.stderr,
+            )
+            return 1
         recommended_snapshot = rookie_cookies.read(
             browser=browser_id, profile=identity["profile_id"]
         )

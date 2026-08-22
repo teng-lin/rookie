@@ -1,13 +1,14 @@
 #[cfg(test)]
 use crate::common::boundary::Acquire;
 #[cfg(test)]
-use crate::common::deadline::{Clock, Deadline};
+use crate::common::deadline::SystemClock;
+use crate::common::deadline::{BoundaryRuntime, Deadline};
 #[cfg(test)]
-use crate::common::deadline::{DeadlineEnforcement, SystemClock};
-use crate::common::{deadline::BoundaryRuntime, diagnostic::REDACTED_PATH};
+use crate::common::deadline::{Clock, DeadlineEnforcement};
+use crate::common::diagnostic::REDACTED_PATH;
 use crate::utils::TempDir;
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::ffi::OsString;
 use std::fmt;
 use std::ops::Deref;
@@ -671,12 +672,57 @@ fn pin_read_snapshot_with_runtime(
   connection
     .execute_batch("BEGIN DEFERRED TRANSACTION;")
     .with_context(|| format!("Can't begin read transaction for {REDACTED_PATH}"))?;
-  runtime.check()?;
-  let _: i64 = connection
-    .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-    .with_context(|| format!("Can't pin database schema for {REDACTED_PATH}"))?;
+  // rusqlite installs a five-second busy timeout on new connections. A
+  // single opaque wait cannot observe this request's shorter deadline or a
+  // cancellation signal, so turn it into bounded polling and checkpoint the
+  // shared runtime between attempts. The independent five-second busy budget
+  // preserves the historical maximum wait when the caller keeps the default
+  // 30-second extraction deadline.
+  connection
+    .busy_timeout(std::time::Duration::ZERO)
+    .with_context(|| format!("Can't configure lock polling for {REDACTED_PATH}"))?;
+  let busy_deadline = Deadline::after(runtime.clock, std::time::Duration::from_secs(5));
+  loop {
+    runtime.check()?;
+    match connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+      row.get::<_, i64>(0)
+    }) {
+      Ok(_) => break,
+      Err(error) if sqlite_is_busy_or_locked(&error) => {
+        runtime.check()?;
+        let busy_remaining = busy_deadline.remaining(runtime.clock);
+        if busy_remaining.is_zero() {
+          return Err(
+            anyhow::Error::new(error)
+              .context(format!("Can't pin database schema for {REDACTED_PATH}")),
+          );
+        }
+        let request_remaining = runtime.deadline.remaining(runtime.clock);
+        let pause = std::time::Duration::from_millis(10)
+          .min(busy_remaining)
+          .min(request_remaining);
+        if pause.is_zero() {
+          runtime.check()?;
+        }
+        runtime.clock.sleep(pause);
+      }
+      Err(error) => {
+        return Err(
+          anyhow::Error::new(error)
+            .context(format!("Can't pin database schema for {REDACTED_PATH}")),
+        )
+      }
+    }
+  }
   runtime.check()?;
   Ok(())
+}
+
+fn sqlite_is_busy_or_locked(error: &rusqlite::Error) -> bool {
+  matches!(
+    error.sqlite_error_code(),
+    Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+  )
 }
 
 /// Rejects sidecars at the immutable boundary even though the opaque proof is

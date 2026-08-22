@@ -1016,6 +1016,59 @@ fn exclusive_rollback_writer_returns_typed_lock_instead_of_immutable_data() {
 }
 
 #[test]
+fn exclusive_rollback_writer_honors_the_request_deadline() {
+  let directory = TempDir::new().expect("temp dir");
+  let (path, writer) = rollback_database(directory.path());
+  writer
+    .execute_batch("BEGIN EXCLUSIVE; UPDATE cookies SET name = 'uncommitted';")
+    .expect("take exclusive rollback-journal lock");
+
+  let clock = ManualClock::default();
+  let runtime = BoundaryRuntime::new(&clock, Deadline::after(&clock, Duration::from_millis(25)));
+  let error =
+    open_live_read_only_with_runtime(&path.canonicalize().expect("canonicalize"), &runtime)
+      .expect_err("the request deadline must stop lock polling");
+  assert_eq!(
+    error.downcast_ref::<BoundaryStop>(),
+    Some(&BoundaryStop::TimedOut),
+    "{error:#}"
+  );
+  writer.execute_batch("ROLLBACK;").expect("release writer");
+}
+
+#[test]
+fn exclusive_rollback_writer_honors_in_flight_cancellation() {
+  let directory = TempDir::new().expect("temp dir");
+  let (path, writer) = rollback_database(directory.path());
+  writer
+    .execute_batch("BEGIN EXCLUSIVE; UPDATE cookies SET name = 'uncommitted';")
+    .expect("take exclusive rollback-journal lock");
+
+  let clock = SystemClock;
+  let token = CancellationToken::default();
+  let canceller = token.clone();
+  let thread = std::thread::spawn(move || {
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(canceller.cancel());
+  });
+  let runtime = BoundaryRuntime::with_stop(
+    &clock,
+    Deadline::after(&clock, Duration::from_secs(5)),
+    token,
+  );
+  let error =
+    open_live_read_only_with_runtime(&path.canonicalize().expect("canonicalize"), &runtime)
+      .expect_err("cancellation must stop an already-blocked lock poll");
+  thread.join().expect("canceller thread");
+  assert_eq!(
+    error.downcast_ref::<BoundaryStop>(),
+    Some(&BoundaryStop::Cancelled),
+    "{error:#}"
+  );
+  writer.execute_batch("ROLLBACK;").expect("release writer");
+}
+
+#[test]
 fn verified_static_single_file_is_the_only_immutable_entry_point() {
   let source_directory = TempDir::new().expect("source dir");
   let (source, writer) = rollback_database(source_directory.path());

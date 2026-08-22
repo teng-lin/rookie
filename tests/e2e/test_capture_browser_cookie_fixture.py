@@ -48,8 +48,56 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
 
     def write_manifest(self, engine: str, cookies: list[dict[str, object]]) -> Path:
         manifest = self.root / f"{engine}-expected.json"
+        detailed = []
+        for record in cookies:
+            raw_cookie = record.get("cookie", record)
+            raw_context = record.get("context", {})
+            cookie = {
+                "domain": raw_cookie["domain"],
+                "path": raw_cookie["path"],
+                "secure": raw_cookie.get("secure", False),
+                "expires": raw_cookie.get("expires", 4_102_444_800),
+                "name": raw_cookie["name"],
+                "value": raw_cookie.get("value", ""),
+                "http_only": raw_cookie.get("http_only", False),
+                "same_site": raw_cookie.get("same_site", 1),
+            }
+            context = {
+                "top_frame_site_key": raw_context.get("top_frame_site_key"),
+                "has_cross_site_ancestor": raw_context.get("has_cross_site_ancestor"),
+                "source_scheme": raw_context.get("source_scheme"),
+                "source_port": raw_context.get("source_port"),
+                "is_persistent": raw_context.get("is_persistent"),
+                "origin_attributes": raw_context.get("origin_attributes"),
+                "user_context_id": raw_context.get("user_context_id"),
+                "partition_key": raw_context.get("partition_key"),
+                "private_browsing_id": raw_context.get("private_browsing_id"),
+            }
+            detailed.append({"cookie": cookie, "context": context})
         manifest.write_text(
-            json.dumps({"schema_version": 1, "engine": engine, "cookies": cookies}),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "engine": engine,
+                    "tiers": ["capture_test"],
+                    "identities": {
+                        "filtered_flat": ["domain", "path", "name"],
+                        "unfiltered_flat": ["domain", "path", "name"],
+                        "detailed": [
+                            "cookie.domain",
+                            "cookie.path",
+                            "cookie.name",
+                            "context.top_frame_site_key",
+                            "context.origin_attributes",
+                        ],
+                    },
+                    "expected": {
+                        "filtered_flat": [record["cookie"] for record in detailed],
+                        "unfiltered_flat": [record["cookie"] for record in detailed],
+                        "detailed": detailed,
+                    },
+                }
+            ),
             encoding="utf-8",
         )
         return manifest
@@ -59,6 +107,11 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
     ) -> tuple[Path, Path]:
         output = self.root / f"{engine}-fixture.sqlite"
         provenance = self.root / f"{engine}-fixture.provenance.json"
+        decoded = self.root / f"{engine}-decoded.json"
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        decoded.write_text(
+            json.dumps(document["expected"]["detailed"]), encoding="utf-8"
+        )
         status = CAPTURE.main(
             [
                 "--source-root",
@@ -69,6 +122,8 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
                 str(output),
                 "--expected-manifest",
                 str(manifest),
+                "--decoded-cookies",
+                str(decoded),
                 "--provenance-output",
                 str(provenance),
                 "--engine",
@@ -79,6 +134,14 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
                 "123.4",
                 "--build-id",
                 "unit-build",
+                "--browser-channel",
+                "unit-channel",
+                "--browser-source",
+                "unit-source",
+                "--capture-command",
+                "unit capture command",
+                "--sanitizer-revision",
+                "unit-revision",
                 "--platform",
                 "unit-os",
                 "--architecture",
@@ -163,6 +226,11 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
         self.assertEqual(provenance["source_cookie_rows"], 3)
         self.assertEqual(provenance["schema"]["meta"]["version"], "24")
         self.assertEqual(len(provenance["fixture_sha256"]), 64)
+        self.assertEqual(provenance["browser_channel"], "unit-channel")
+        self.assertEqual(provenance["browser_source"], "unit-source")
+        self.assertEqual(provenance["decoded_cookie_rows"], 1)
+        self.assertGreater(provenance["fixture_bytes"], 0)
+        self.assertIn("sqlite_user_version", provenance["schema"])
 
     def test_firefox_capture_preserves_origin_attributes_identity(self) -> None:
         database = self.source_root / "cookies.sqlite"
@@ -302,6 +370,31 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(CAPTURE.CaptureError, "do not exactly match"):
             CAPTURE.sanitize_database(database, output, "firefox", expected)
         self.assertFalse(output.exists())
+
+    def test_decoded_cookie_attribute_mismatch_is_refused(self) -> None:
+        manifest = self.write_manifest(
+            "firefox",
+            [
+                {
+                    "cookie": {
+                        "domain": ".example.test",
+                        "path": "/",
+                        "name": "kept",
+                        "value": "synthetic",
+                        "secure": True,
+                    },
+                    "context": {"origin_attributes": ""},
+                }
+            ],
+        )
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        document["expected"]["detailed"][0]["cookie"]["secure"] = False
+        decoded = self.root / "wrong-decoded.json"
+        decoded.write_text(
+            json.dumps(document["expected"]["detailed"]), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "does not exactly match"):
+            CAPTURE.verify_decoded_cookies(manifest, decoded)
 
 
 if __name__ == "__main__":

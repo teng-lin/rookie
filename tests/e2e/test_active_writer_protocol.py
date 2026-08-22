@@ -47,7 +47,7 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 # seeder PID is independently acknowledged and checked alive.
                 "seederPid": os.getpid(),
                 "browserProcessIds": [os.getpid()],
-                "liveness": {"readyState": "complete"},
+                "liveness": {"readyState": "complete", "cookieCount": 2},
             }
             self.assertEqual(
                 active.validate_profile_proof(ack, "chromium", profile, process),
@@ -89,7 +89,7 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 "databasePath": str(database.resolve()),
                 "seederPid": os.getpid(),
                 "browserProcessIds": [],
-                "liveness": {"readyState": "complete"},
+                "liveness": {"readyState": "complete", "cookieCount": 2},
             }
             with self.assertRaisesRegex(
                 active.ActiveWriterError, "browser process owning"

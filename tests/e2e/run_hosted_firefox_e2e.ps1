@@ -17,3 +17,8 @@ if ($LASTEXITCODE -ne 0) { throw "Firefox exact-corpus E2E failed" }
     --profile "${profile}-active-writer" `
     --browser-id "firefox"
 if ($LASTEXITCODE -ne 0) { throw "Firefox active-writer E2E failed" }
+
+& .\.venv\Scripts\python.exe tests/e2e/browser_coverage_contract.py core_firefox `
+    --capability exact_set --capability active_writer --capability detailed `
+    --surface rust --surface python --surface node --surface cli
+if ($LASTEXITCODE -ne 0) { throw "Firefox depth receipt failed" }

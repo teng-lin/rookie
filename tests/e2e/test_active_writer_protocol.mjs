@@ -60,7 +60,17 @@ test("ready/hold/mutate/probe/close protocol keeps an owned context live", async
         return { version: () => "1.0" };
       },
       async cookies() {
-        return [...state].map(([name, value]) => ({ name, value }));
+        return [...state].map(([name, value]) => ({
+          name,
+          value,
+          expires: 4_102_444_800,
+        }));
+      },
+      async newPage() {
+        return {
+          ...page,
+          async close() {},
+        };
       },
       async close() {
         closed = true;

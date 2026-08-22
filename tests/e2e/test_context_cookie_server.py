@@ -108,6 +108,22 @@ class ContextCookieServerTests(unittest.TestCase):
         self.assertEqual(len(cookies), 1)
         self.assertTrue(cookies[0].startswith("rookie_chips=partition-c;"))
 
+    def test_unpartitioned_route_creates_the_same_flat_chips_identity(self) -> None:
+        status, headers, body = self.request(
+            SERVER.ALLOWED_THIRD_HOST,
+            "/set-unpartitioned?engine=chromium",
+        )
+        self.assertEqual(status, 200)
+        cookies = [value for name, value in headers if name.lower() == "set-cookie"]
+        self.assertEqual(
+            cookies,
+            [
+                "rookie_chips=unpartitioned; Secure; HttpOnly; SameSite=Lax; "
+                "Path=/; Max-Age=3600"
+            ],
+        )
+        self.assertIn("unpartitioned-seeded", body)
+
     def test_event_log_records_host_path_and_cookie_header(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
         try:
@@ -172,6 +188,24 @@ class ContextCookieServerTests(unittest.TestCase):
             json.loads(body),
             {"host_index": 5, "round": 7, "deleted_index": 8},
         )
+
+    def test_stress_churn_rewrites_only_the_stable_cookie_state(self) -> None:
+        status, headers, body = self.request(
+            "seed.rookie-2.test",
+            "/stress/churn?value=seed-2-0&expiry=4102444800",
+        )
+        self.assertEqual(status, 200)
+        cookies = [value for name, value in headers if name.lower() == "set-cookie"]
+        self.assertEqual(len(cookies), 1)
+        self.assertTrue(cookies[0].startswith("stress_2_0=seed-2-0;"))
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[0])
+        self.assertEqual(json.loads(body), {"host_index": 2, "churned": True})
+
+        status, _, _ = self.request(
+            "seed.rookie-2.test",
+            "/stress/churn?value=seed-7-0&expiry=4102444800",
+        )
+        self.assertEqual(status, 400)
 
 
 if __name__ == "__main__":

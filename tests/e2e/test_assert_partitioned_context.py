@@ -61,13 +61,13 @@ class FakeSnapshot:
         if top is None:
             raise FakeError("incomplete_send_context")
         if "top.rookie-a.test" in top:
-            values = ["rookie_chips=partition-a"]
+            values = ["rookie_chips=partition-a", "rookie_chips=unpartitioned"]
             if any(
                 record["cookie"]["name"] == "rookie_dfpi" for record in self.records
             ):
                 values.append("rookie_dfpi=dfpi-a")
             return "; ".join(values)
-        values = ["rookie_chips=partition-c"]
+        values = ["rookie_chips=partition-c", "rookie_chips=unpartitioned"]
         if any(record["cookie"]["name"] == "rookie_dfpi" for record in self.records):
             values.append("rookie_dfpi=dfpi-c")
         return "; ".join(values)
@@ -86,6 +86,7 @@ class PartitionContextAssertionTests(unittest.TestCase):
             [
                 cookie("rookie_top", "top-a", {}),
                 cookie("rookie_top", "top-c", {}),
+                cookie("rookie_chips", "unpartitioned", {}),
                 cookie(
                     "rookie_chips",
                     "partition-a",
@@ -114,7 +115,7 @@ class PartitionContextAssertionTests(unittest.TestCase):
             snapshot, engine="chromium", **self.common
         )
         self.assertIn("partition-c", result["headers"]["other_top_level_site"])
-        self.assertEqual(len(result["detailed"]), 4)
+        self.assertEqual(len(result["detailed"]), 5)
 
     def test_valid_firefox_dfpi_context_and_headers(self) -> None:
         attributes_a = "^partitionKey=%28https%2Crookie-a.test%29"
@@ -125,6 +126,11 @@ class PartitionContextAssertionTests(unittest.TestCase):
             [
                 cookie("rookie_top", "top-a", {"origin_attributes": ""}),
                 cookie("rookie_top", "top-c", {"origin_attributes": ""}),
+                cookie(
+                    "rookie_chips",
+                    "unpartitioned",
+                    {"origin_attributes": "", "partition_key": None},
+                ),
                 cookie(
                     "rookie_chips",
                     "partition-a",
@@ -169,6 +175,7 @@ class PartitionContextAssertionTests(unittest.TestCase):
             [
                 cookie("rookie_top", "top-a", {}),
                 cookie("rookie_top", "top-c", {}),
+                cookie("rookie_chips", "unpartitioned", {}),
                 cookie(
                     "rookie_chips",
                     "partition-a",
@@ -207,6 +214,7 @@ class PartitionContextAssertionTests(unittest.TestCase):
             [
                 cookie("rookie_top", "top-a", {}),
                 cookie("rookie_top", "top-c", {}),
+                cookie("rookie_chips", "unpartitioned", {}),
                 cookie(
                     "rookie_chips",
                     "partition-a",
@@ -232,7 +240,7 @@ class PartitionContextAssertionTests(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(
-            ASSERT.ContextAssertionError, "top A received top C"
+            ASSERT.ContextAssertionError, "header set mismatch"
         ):
             ASSERT.validate_context_snapshot(snapshot, engine="chromium", **self.common)
 

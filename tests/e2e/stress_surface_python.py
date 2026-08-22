@@ -14,12 +14,16 @@ def main() -> int:
     parser.add_argument("--engine", choices=("chromium", "firefox"), required=True)
     parser.add_argument("--database", required=True)
     parser.add_argument("--browser-id", default="chromium")
+    parser.add_argument("--local-state-path")
     parser.add_argument(
         "--projection", choices=("unfiltered_flat", "detailed"), required=True
     )
     args = parser.parse_args()
     if args.engine == "chromium":
-        snapshot = rookie_cookies.from_path(args.database, browser_id=args.browser_id)
+        options = {"browser_id": args.browser_id}
+        if args.local_state_path:
+            options = {"local_state_path": args.local_state_path}
+        snapshot = rookie_cookies.from_path(args.database, **options)
     else:
         snapshot = rookie_cookies.from_path(args.database)
     records = (

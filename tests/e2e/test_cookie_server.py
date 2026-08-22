@@ -47,7 +47,9 @@ class CookieServerTests(unittest.TestCase):
             "rookie_ss_none=none; Path=/; Max-Age=3600; Secure; SameSite=None",
             headers,
         )
-        self.assertTrue(any(header.startswith("rookie_large=" + "x" * 3584) for header in headers))
+        self.assertTrue(
+            any(header.startswith("rookie_large=" + "x" * 3584) for header in headers)
+        )
 
     def test_corpus_route_is_engine_tier_phase_and_origin_aware(self) -> None:
         deep_firefox = SERVER.corpus_headers(
@@ -57,7 +59,9 @@ class CookieServerTests(unittest.TestCase):
         deep_chromium = SERVER.corpus_headers(
             "/corpus/initial?engine=chromium&tiers=deep", "127.0.0.1:8765"
         )
-        self.assertTrue(any(header.startswith("rookie_session=session") for header in deep_chromium))
+        self.assertTrue(
+            any(header.startswith("rookie_session=session") for header in deep_chromium)
+        )
         mutation = SERVER.corpus_headers(
             "/corpus/mutate?engine=chromium&tiers=portable_smoke",
             "127.0.0.1:8765",
@@ -89,6 +93,16 @@ class CookieServerTests(unittest.TestCase):
                 "rookie_remove=; Path=/; Max-Age=0; SameSite=Lax",
             ],
         )
+
+    def test_active_writer_churn_rewrites_the_stable_mutated_state(self) -> None:
+        headers = SERVER.Handler.cookie_headers(
+            "/active-writer/churn?expiry=4102444800"
+        )
+        self.assertEqual(len(headers), 3)
+        self.assertIn("rookie_ci=after", headers[0])
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", headers[0])
+        self.assertIn("rookie_added=present", headers[1])
+        self.assertIn("Max-Age=0", headers[2])
 
     def test_staged_wal_route_keeps_its_historical_canary_cookie(self) -> None:
         self.assertIn(

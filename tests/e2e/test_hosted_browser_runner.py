@@ -23,6 +23,75 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         self.assertEqual(environment["ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"], "[]")
         self.assertEqual(environment["ROOKIE_E2E_EXACT_COOKIE_STATE"], "1")
 
+    def test_live_smoke_manifest_covers_all_flat_and_context_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary)
+            database = profile / "Default/Network/Cookies"
+            database.parent.mkdir(parents=True)
+            connection = hosted.sqlite3.connect(database)
+            connection.execute(
+                """
+                create table cookies (
+                  host_key text, path text, is_secure integer, expires_utc integer,
+                  name text, value text, encrypted_value blob, is_httponly integer,
+                  samesite integer, top_frame_site_key text,
+                  has_cross_site_ancestor integer, source_scheme integer,
+                  source_port integer, is_persistent integer
+                )
+                """
+            )
+            connection.execute(
+                "insert into cookies values (?, '/', 0, ?, 'rookie_ci', '', X'01', "
+                "0, 1, '', 0, 1, 8765, 1)",
+                ("127.0.0.1", 11_644_473_600_000_000 + 4_102_444_800_000_000),
+            )
+            connection.commit()
+            connection.close()
+
+            manifest_path = hosted.write_live_smoke_manifest(
+                "chromium", profile, database
+            )
+            manifest = hosted.json.loads(manifest_path.read_text(encoding="utf-8"))
+            flat = manifest["expected"]["filtered_flat"][0]
+            self.assertEqual(
+                set(flat),
+                {
+                    "domain",
+                    "path",
+                    "secure",
+                    "expires",
+                    "name",
+                    "value",
+                    "http_only",
+                    "same_site",
+                },
+            )
+            self.assertEqual(flat["expires"], 4_102_444_800)
+            context = manifest["expected"]["detailed"][0]["context"]
+            self.assertEqual(context["source_port"], 8765)
+            self.assertEqual(context["source_scheme"], 1)
+            self.assertEqual(context["has_cross_site_ancestor"], False)
+
+    def test_live_smoke_manifest_rejects_excess_browser_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary)
+            database = profile / "cookies.sqlite"
+            connection = hosted.sqlite3.connect(database)
+            connection.execute(
+                "create table moz_cookies (host text, path text, isSecure integer, "
+                "expiry integer, name text, value text, isHttpOnly integer, "
+                "sameSite integer, originAttributes text)"
+            )
+            connection.executemany(
+                "insert into moz_cookies values "
+                "('127.0.0.1', '/', 0, 4102444800, ?, ?, 0, 1, '')",
+                [("rookie_ci", "bar"), ("unexpected", "leak")],
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(SystemExit, "exactly rookie_ci"):
+                hosted.write_live_smoke_manifest("gecko", profile, database)
+
     def test_isolated_discovery_environment_stays_below_sandbox(self) -> None:
         sandbox = Path("/tmp/rookie-registry-sandbox")
         environment = hosted.isolated_discovery_environment(sandbox)
@@ -66,6 +135,29 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             )
             profiles_ini = profile.parents[1] / "profiles.ini"
             self.assertIn("Path=Profiles/rookie-e2e", profiles_ini.read_text())
+
+    def test_hosted_profile_id_is_independent_and_registry_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Path(tmp)
+            root = {
+                "template": "{home}/.fixture-browser",
+                "priority": 10,
+                "root_id": "fixture-root",
+                "channel": "stable",
+            }
+            with mock.patch.object(
+                hosted, "registry_browser", return_value={"roots": [root]}
+            ):
+                profile, environment = hosted.prepare_discovered_profile(
+                    sandbox, "linux", "fixture", "chromium"
+                )
+                profile_id = hosted.independently_expected_profile_id(
+                    "linux", "fixture", "chromium", profile, environment
+                )
+            self.assertEqual(len(profile_id), 64)
+            self.assertTrue(
+                all(character in "0123456789abcdef" for character in profile_id)
+            )
 
     def test_seeded_legacy_chromium_db_wins_over_empty_network_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

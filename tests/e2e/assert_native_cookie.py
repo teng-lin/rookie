@@ -6,17 +6,41 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+import time
 
 import rookie_cookies
 
 
 def assert_seeded(surface: str, cookies: list[dict], name: str, value: str) -> None:
+    if len(cookies) != 1:
+        raise RuntimeError(
+            f"{surface}: expected the exact one-cookie filtered set, got {len(cookies)}"
+        )
     seeded = next((cookie for cookie in cookies if cookie["name"] == name), None)
     if seeded is None:
         raise RuntimeError(f"{surface}: {name!r} missing from {len(cookies)} cookies")
     if seeded["value"] != value:
         raise RuntimeError(
             f"{surface}: expected {name}={value!r}, got {seeded['value']!r}"
+        )
+    expected = {
+        "domain": "127.0.0.1",
+        "path": "/",
+        "secure": False,
+        "http_only": False,
+        "same_site": -1,
+    }
+    wrong = {
+        field: (expected_value, seeded.get(field))
+        for field, expected_value in expected.items()
+        if seeded.get(field) != expected_value
+    }
+    expires = seeded.get("expires")
+    now = int(time.time())
+    if wrong or not isinstance(expires, int) or not now + 1800 <= expires <= now + 4500:
+        raise RuntimeError(
+            f"{surface}: native cookie attributes disagreed: wrong={wrong}, "
+            f"expires={expires}, now={now}"
         )
 
 

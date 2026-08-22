@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Prove browser-produced Firefox Multi-Account Container persistence."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+from typing import Sequence
+from urllib.parse import parse_qsl
+
+from browser_coverage_contract import emit_representative_depth
+from cookie_manifest import ManifestError, load_manifest, verify_records
+from run_active_writer_e2e import ActiveWriterError, ROOT, run_checked, venv_python
+from run_partition_context_e2e import (
+    database_for,
+    discovered_profile_id,
+    discovery_layout,
+    require_remote_sandbox,
+    schema_metadata,
+    stage_firefox_container_extension,
+)
+
+
+def write_container_manifest(database: Path, output: Path) -> int:
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "select * from moz_cookies where name = 'rookie_container'"
+        ).fetchall()
+    finally:
+        connection.close()
+    if len(rows) != 1:
+        raise ActiveWriterError(
+            f"Firefox persisted {len(rows)} rookie_container rows, expected one"
+        )
+    row = rows[0]
+    origin_attributes = str(row["originAttributes"] or "")
+    attributes = dict(parse_qsl(origin_attributes.removeprefix("^")))
+    try:
+        user_context_id = int(attributes["userContextId"])
+    except (KeyError, ValueError) as error:
+        raise ActiveWriterError(
+            f"browser container lacked a numeric userContextId: {origin_attributes!r}"
+        ) from error
+    if (
+        user_context_id <= 0
+        or "partitionKey" in attributes
+        or int(attributes.get("privateBrowsingId", "0")) != 0
+    ):
+        raise ActiveWriterError(
+            f"browser container had unexpected isolation attributes: {origin_attributes!r}"
+        )
+    flat = {
+        "domain": str(row["host"]),
+        "path": str(row["path"]),
+        "secure": bool(row["isSecure"]),
+        "expires": int(row["expiry"]),
+        "name": str(row["name"]),
+        "value": str(row["value"]),
+        "http_only": bool(row["isHttpOnly"]),
+        "same_site": int(row["sameSite"]),
+    }
+    expected_flat = {
+        "domain": "container.rookie.test",
+        "path": "/",
+        "secure": True,
+        "name": "rookie_container",
+        "value": "container-1",
+        "http_only": True,
+        "same_site": 1,
+    }
+    wrong = {
+        field: (expected, flat.get(field))
+        for field, expected in expected_flat.items()
+        if flat.get(field) != expected
+    }
+    if wrong or flat["expires"] <= 0:
+        raise ActiveWriterError(
+            f"raw Firefox container cookie disagreed with its seed: {wrong}, "
+            f"expires={flat['expires']}"
+        )
+    detailed = {
+        "cookie": flat,
+        "context": {
+            "top_frame_site_key": None,
+            "has_cross_site_ancestor": None,
+            "source_scheme": None,
+            "source_port": None,
+            "is_persistent": None,
+            "origin_attributes": origin_attributes,
+            "user_context_id": user_context_id,
+            "partition_key": None,
+            "private_browsing_id": (
+                int(attributes["privateBrowsingId"])
+                if "privateBrowsingId" in attributes
+                else None
+            ),
+        },
+    }
+    manifest = {
+        "schema_version": 1,
+        "tiers": ["firefox_container"],
+        "identities": {
+            "filtered_flat": ["domain", "path", "name"],
+            "unfiltered_flat": ["domain", "path", "name"],
+            "detailed": [
+                "cookie.domain",
+                "cookie.path",
+                "cookie.name",
+                "context.top_frame_site_key",
+                "context.has_cross_site_ancestor",
+                "context.source_scheme",
+                "context.source_port",
+                "context.is_persistent",
+                "context.origin_attributes",
+                "context.user_context_id",
+                "context.partition_key",
+                "context.private_browsing_id",
+            ],
+        },
+        "expected": {
+            "filtered_flat": [flat],
+            "unfiltered_flat": [flat],
+            "detailed": [detailed],
+        },
+    }
+    output.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return user_context_id
+
+
+def detailed_commands(database: Path) -> list[tuple[str, list[str]]]:
+    return [
+        (
+            "python",
+            [
+                str(venv_python()),
+                "tests/e2e/stress_surface_python.py",
+                "--engine",
+                "firefox",
+                "--database",
+                str(database),
+                "--browser-id",
+                "firefox",
+                "--projection",
+                "detailed",
+            ],
+        ),
+        (
+            "node",
+            [
+                "node",
+                "tests/e2e/stress_surface_node.mjs",
+                "firefox",
+                str(database),
+                "firefox",
+                "detailed",
+            ],
+        ),
+        (
+            "rust",
+            [
+                str(ROOT / "target/release/examples/e2e_cookie_surface"),
+                "firefox",
+                str(database),
+                "firefox",
+                "detailed",
+            ],
+        ),
+        (
+            "cli",
+            [
+                str(ROOT / "target/release/rookie-cookies"),
+                "from-path",
+                str(database),
+                "--format",
+                "detailed",
+            ],
+        ),
+    ]
+
+
+def verify_detailed_surfaces(
+    database: Path, manifest_path: Path, environment: dict[str, str]
+) -> None:
+    manifest = load_manifest(manifest_path)
+    for surface, command in detailed_commands(database):
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=240,
+        )
+        try:
+            records = json.loads(completed.stdout)
+            verify_records(
+                manifest,
+                "detailed",
+                records,
+                surface=f"{surface} Firefox container",
+            )
+        except (json.JSONDecodeError, ManifestError) as error:
+            raise ActiveWriterError(
+                f"{surface} Firefox container detailed mismatch: {error}"
+            ) from error
+
+
+def verify_cli_headers(
+    *,
+    profile_id: str,
+    user_context_id: int,
+    environment: dict[str, str],
+) -> None:
+    cli = str(ROOT / "target/release/rookie-cookies")
+    base = [
+        cli,
+        "header",
+        "--url",
+        "https://container.rookie.test/",
+        "--browser",
+        "firefox",
+        "--profile",
+        profile_id,
+        "--top-level-site",
+        "https://container.rookie.test/",
+    ]
+    matching = subprocess.run(
+        [*base, "--user-context-id", str(user_context_id)],
+        cwd=str(ROOT),
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if matching.stdout.strip() != "rookie_container=container-1":
+        raise ActiveWriterError(f"CLI container header mismatch: {matching.stdout!r}")
+    other = subprocess.run(
+        [*base, "--user-context-id", str(user_context_id + 1)],
+        cwd=str(ROOT),
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if other.stdout.strip():
+        raise ActiveWriterError(f"CLI leaked another container: {other.stdout!r}")
+    missing = subprocess.run(
+        base,
+        cwd=str(ROOT),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    message = missing.stderr or missing.stdout
+    if missing.returncode == 0 or "user_context_id" not in message:
+        raise ActiveWriterError(
+            f"CLI missing-container selector was not typed: {missing.returncode}: {message}"
+        )
+
+
+def run(args: argparse.Namespace) -> None:
+    sandbox = require_remote_sandbox(args.sandbox)
+    profile, environment = discovery_layout("firefox", sandbox)
+    xpi = stage_firefox_container_extension(profile)
+    observed = sandbox / "firefox-container-browser-observed.json"
+    seed = [
+        "node",
+        "tests/e2e/seed_firefox_container_cookie.mjs",
+        str(profile),
+        str(observed),
+    ]
+    if args.xvfb:
+        seed = ["xvfb-run", "-a", *seed]
+    run_checked(seed, environment, "firefox-container-seed")
+    database = database_for("firefox", profile)
+    manifest = sandbox / "firefox-container-raw-manifest.json"
+    user_context_id = write_container_manifest(database, manifest)
+    os.environ.update(
+        {
+            key: value
+            for key, value in environment.items()
+            if key in {"HOME", "XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA"}
+        }
+    )
+    profile_id = discovered_profile_id("firefox", "firefox", database)
+    environment.update(
+        {
+            "ROOKIE_E2E_CONTEXT_DB": str(database),
+            "ROOKIE_E2E_CONTEXT_MANIFEST": str(manifest),
+            "ROOKIE_E2E_USER_CONTEXT_ID": str(user_context_id),
+        }
+    )
+    verify_detailed_surfaces(database, manifest, environment)
+    run_checked(
+        [
+            str(venv_python()),
+            "tests/e2e/assert_firefox_container.py",
+            str(database),
+            str(user_context_id),
+        ],
+        environment,
+        "firefox-container-python-header",
+    )
+    run_checked(
+        [
+            "node",
+            "tests/e2e/assert_firefox_container.mjs",
+            str(database),
+            str(user_context_id),
+        ],
+        environment,
+        "firefox-container-node-header",
+    )
+    run_checked(
+        [
+            "cargo",
+            "test",
+            "--test",
+            "e2e_context",
+            "browser_produced_firefox_container_survives_snapshot_and_header_filter",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+        environment,
+        "firefox-container-rust-header",
+    )
+    verify_cli_headers(
+        profile_id=profile_id,
+        user_context_id=user_context_id,
+        environment=environment,
+    )
+    print(
+        "FIREFOX_CONTAINER_PROOF "
+        + json.dumps(
+            {
+                "profile": str(profile),
+                "profile_id": profile_id,
+                "database": str(database),
+                "extension": str(xpi),
+                "user_context_id": user_context_id,
+                "raw_manifest": str(manifest),
+                "surfaces": ["rust", "python", "node", "cli"],
+                **schema_metadata(database, "firefox"),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    emit_representative_depth(
+        "firefox_container",
+        ("partitioned", "detailed", "discovery"),
+        ("rust", "python", "node", "cli"),
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sandbox", required=True, type=Path)
+    parser.add_argument("--xvfb", action="store_true")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        run(args)
+    except (
+        ActiveWriterError,
+        OSError,
+        sqlite3.Error,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as error:
+        print(f"Firefox container E2E failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from typing import Optional, Sequence
 
 from cookie_manifest import (
@@ -106,43 +107,56 @@ def assert_cli_cookie(
     if manifest_path is not None:
         try:
             manifest = load_manifest(manifest_path)
-            flat_projection = (
-                "unfiltered_flat" if browser is not None else "filtered_flat"
+            initial_projection = (
+                "detailed"
+                if detailed
+                else ("unfiltered_flat" if browser is not None else "filtered_flat")
             )
             verify_records(
                 manifest,
-                flat_projection,
+                initial_projection,
                 cookies,
-                surface="CLI read" if browser is not None else "CLI from-path json",
+                surface=(
+                    "CLI read detailed"
+                    if browser is not None and detailed
+                    else (
+                        "CLI from-path detailed"
+                        if detailed
+                        else (
+                            "CLI read" if browser is not None else "CLI from-path json"
+                        )
+                    )
+                ),
             )
-            detailed_command = [str(cli_path)]
-            if browser is not None:
-                detailed_command.extend(
-                    ("read", "--browser", browser, "--format", "detailed")
+            if not detailed:
+                detailed_command = [str(cli_path)]
+                if browser is not None:
+                    detailed_command.extend(
+                        ("read", "--browser", browser, "--format", "detailed")
+                    )
+                else:
+                    detailed_command.extend(
+                        ("from-path", str(cookies_path), "--format", "detailed")
+                    )
+                    if key_path is not None:
+                        detailed_command.extend(("--local-state-path", str(key_path)))
+                    if browser_id is not None:
+                        detailed_command.extend(("--browser-id", browser_id))
+                detailed_records = parse_cookie_json(
+                    run_cli(
+                        detailed_command,
+                        cli_path=cli_path,
+                        environment=environment,
+                    )
                 )
-            else:
-                detailed_command.extend(
-                    ("from-path", str(cookies_path), "--format", "detailed")
+                verify_records(
+                    manifest,
+                    "detailed",
+                    detailed_records,
+                    surface="CLI read detailed"
+                    if browser is not None
+                    else "CLI from-path detailed",
                 )
-                if key_path is not None:
-                    detailed_command.extend(("--local-state-path", str(key_path)))
-                if browser_id is not None:
-                    detailed_command.extend(("--browser-id", browser_id))
-            detailed = parse_cookie_json(
-                run_cli(
-                    detailed_command,
-                    cli_path=cli_path,
-                    environment=environment,
-                )
-            )
-            verify_records(
-                manifest,
-                "detailed",
-                detailed,
-                surface="CLI read detailed"
-                if browser is not None
-                else "CLI from-path detailed",
-            )
         except ManifestError as error:
             raise HarnessError(str(error)) from error
         return len(cookies)
@@ -159,6 +173,35 @@ def assert_cli_cookie(
             assert_cookie_state(flat_cookies, required, forbidden, surface="CLI")
         except (AssertionError, ValueError) as error:
             raise HarnessError(str(error)) from error
+        if os.environ.get("ROOKIE_E2E_EXPECT_NATIVE_FIELDS") == "1":
+            if len(flat_cookies) != 1:
+                raise HarnessError(
+                    f"CLI native attribute assertion expected one row, got {len(flat_cookies)}"
+                )
+            cookie = flat_cookies[0]
+            expected_fields = {
+                "domain": "127.0.0.1",
+                "path": "/",
+                "secure": False,
+                "http_only": False,
+                "same_site": -1,
+            }
+            wrong = {
+                field: (expected, cookie.get(field))
+                for field, expected in expected_fields.items()
+                if cookie.get(field) != expected
+            }
+            expires = cookie.get("expires")
+            now = int(time.time())
+            if (
+                wrong
+                or not isinstance(expires, int)
+                or not now + 1800 <= expires <= now + 4500
+            ):
+                raise HarnessError(
+                    f"CLI native attributes disagreed: wrong={wrong}, "
+                    f"expires={expires}, now={now}"
+                )
         return len(cookies)
     if not any(
         cookie.get("name") == expected_name and cookie.get("value") == expected_value

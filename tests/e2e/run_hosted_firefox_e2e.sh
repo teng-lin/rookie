@@ -25,3 +25,7 @@ if command -v xvfb-run >/dev/null 2>&1; then
   active_args+=(--xvfb)
 fi
 .venv/bin/python "${active_args[@]}"
+
+.venv/bin/python tests/e2e/browser_coverage_contract.py core_firefox \
+  --capability exact_set --capability active_writer --capability detailed \
+  --surface rust --surface python --surface node --surface cli

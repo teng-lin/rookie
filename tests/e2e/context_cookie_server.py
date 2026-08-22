@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from email.utils import formatdate
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -150,6 +151,25 @@ addEventListener("message", (event) => {{
             )
             return
 
+        if parsed.path == "/set-unpartitioned":
+            if host != ALLOWED_THIRD_HOST:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid third-party host\n")
+                return
+            engine = parse_qs(parsed.query).get("engine", [""])[0]
+            if engine not in {"chromium", "firefox"}:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid browser engine\n")
+                return
+            self.send_body(
+                HTTPStatus.OK,
+                "<!doctype html><title>unpartitioned-seeded</title>\n",
+                content_type="text/html; charset=utf-8",
+                cookies=(
+                    "rookie_chips=unpartitioned; Secure; HttpOnly; SameSite=Lax; "
+                    "Path=/; Max-Age=3600",
+                ),
+            )
+            return
+
         if parsed.path == "/echo":
             if host != ALLOWED_THIRD_HOST:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid echo host\n")
@@ -222,6 +242,34 @@ addEventListener("message", (event) => {{
                 ),
                 content_type="application/json",
                 cookies=cookies,
+            )
+            return
+
+        if parsed.path == "/stress/churn":
+            if stress_match is None:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress host\n")
+                return
+            query = parse_qs(parsed.query)
+            host_index = int(stress_match.group("index"))
+            value = query.get("value", [""])[0]
+            valid_value = value == f"seed-{host_index}-0" or re.fullmatch(
+                r"updated-[0-9]+", value
+            )
+            try:
+                expiry = int(query.get("expiry", [""])[0])
+            except ValueError:
+                expiry = 0
+            if not valid_value or expiry <= 0:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress churn state\n")
+                return
+            self.send_body(
+                HTTPStatus.OK,
+                json.dumps({"host_index": host_index, "churned": True}),
+                content_type="application/json",
+                cookies=(
+                    f"stress_{host_index}_0={value}; Secure; HttpOnly; "
+                    f"SameSite=Lax; Path=/; Expires={formatdate(expiry, usegmt=True)}",
+                ),
             )
             return
 

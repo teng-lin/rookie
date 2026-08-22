@@ -28,6 +28,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from browser_coverage_contract import assert_observed_depth, coverage_row, load_coverage
+from run_exact_corpus_e2e import digest_fields, normalized_path_bytes
 from webdriver_cookie import (
     WebDriverError,
     file_snapshot,
@@ -119,6 +120,40 @@ def prepare_discovered_profile(
         return profile, environment
     root.mkdir(parents=True, exist_ok=True)
     return root, environment
+
+
+def independently_expected_profile_id(
+    platform: str,
+    browser: str,
+    engine: str,
+    profile: Path,
+    environment: dict[str, str],
+) -> str:
+    entry = registry_browser(platform, browser)
+    root_spec = min(entry["roots"], key=lambda root: root["priority"])
+    root = resolve_fixture_root(root_spec["template"], environment).resolve(strict=True)
+    expected_profile = (
+        root / "Profiles/rookie-e2e" if engine == "gecko" else root
+    ).resolve(strict=True)
+    if profile.resolve(strict=True) != expected_profile:
+        raise SystemExit(
+            f"hosted discovery profile was not at its registry root: "
+            f"{profile} != {expected_profile}"
+        )
+    installation_id = digest_fields(
+        b"rookie-install-v1",
+        browser.encode(),
+        root_spec["root_id"].encode(),
+        root_spec["channel"].encode(),
+        normalized_path_bytes(root),
+    )
+    locator = Path("Profiles/rookie-e2e") if engine == "gecko" else Path("Default")
+    return digest_fields(
+        b"rookie-profile-v1",
+        installation_id.encode(),
+        b"relative",
+        normalized_path_bytes(locator),
+    )
 
 
 def pick_cookie_port() -> int:
@@ -539,6 +574,120 @@ def require_exact_single_cookie(env: dict[str, str]) -> None:
     env["ROOKIE_E2E_EXACT_COOKIE_STATE"] = "1"
 
 
+def write_live_smoke_manifest(engine: str, profile: Path, database: Path) -> Path:
+    """Build a one-row structural oracle from the seed contract plus raw metadata."""
+
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        table = "cookies" if engine == "chromium" else "moz_cookies"
+        columns = {
+            str(row[1]) for row in connection.execute(f"pragma table_info({table})")
+        }
+        rows = connection.execute(f"select * from {table}").fetchall()
+    finally:
+        connection.close()
+    if len(rows) != 1 or rows[0]["name"] != "rookie_ci":
+        names = [row["name"] for row in rows if "name" in row.keys()]
+        raise SystemExit(
+            f"fresh {engine} hosted profile must contain exactly rookie_ci; "
+            f"observed {len(rows)} rows: {names}"
+        )
+    row = rows[0]
+
+    def optional(name: str, default: object = None) -> object:
+        return row[name] if name in columns else default
+
+    if engine == "chromium":
+        raw_expiry = int(row["expires_utc"])
+        expires = (
+            (raw_expiry - 11_644_473_600_000_000) // 1_000_000
+            if raw_expiry > 11_644_473_600_000_000
+            else None
+        )
+        flat = {
+            "domain": str(row["host_key"]),
+            "path": str(row["path"]),
+            "secure": bool(row["is_secure"]),
+            "expires": expires,
+            "name": "rookie_ci",
+            "value": "bar",
+            "http_only": bool(row["is_httponly"]),
+            "same_site": int(row["samesite"]),
+        }
+        top_key = optional("top_frame_site_key")
+        context = {
+            "top_frame_site_key": None if top_key in (None, "") else str(top_key),
+            "has_cross_site_ancestor": (
+                bool(optional("has_cross_site_ancestor"))
+                if "has_cross_site_ancestor" in columns
+                else None
+            ),
+            "source_scheme": (
+                int(optional("source_scheme")) if "source_scheme" in columns else None
+            ),
+            "source_port": (
+                int(optional("source_port")) if "source_port" in columns else None
+            ),
+            "is_persistent": (
+                bool(optional("is_persistent")) if "is_persistent" in columns else None
+            ),
+            "origin_attributes": None,
+            "user_context_id": None,
+            "partition_key": None,
+            "private_browsing_id": None,
+        }
+        manifest_path = profile / "rookie-e2e-cookie-manifest.json"
+    else:
+        flat = {
+            "domain": str(row["host"]),
+            "path": str(row["path"]),
+            "secure": bool(row["isSecure"]),
+            "expires": int(row["expiry"]),
+            "name": "rookie_ci",
+            "value": "bar",
+            "http_only": bool(row["isHttpOnly"]),
+            "same_site": int(row["sameSite"]),
+        }
+        origin_attributes = str(optional("originAttributes", "") or "")
+        context = {
+            "top_frame_site_key": None,
+            "has_cross_site_ancestor": None,
+            "source_scheme": None,
+            "source_port": None,
+            "is_persistent": None,
+            "origin_attributes": origin_attributes,
+            "user_context_id": None,
+            "partition_key": None,
+            "private_browsing_id": None,
+        }
+        manifest_path = profile / "rookie-e2e-cookie-manifest.json"
+    manifest = {
+        "schema_version": 1,
+        "tiers": ["hosted_smoke"],
+        "identities": {
+            "filtered_flat": ["domain", "path", "name"],
+            "unfiltered_flat": ["domain", "path", "name"],
+            "detailed": [
+                "cookie.domain",
+                "cookie.path",
+                "cookie.name",
+                "context.top_frame_site_key",
+                "context.origin_attributes",
+            ],
+        },
+        "expected": {
+            "filtered_flat": [flat],
+            "unfiltered_flat": [flat],
+            "detailed": [{"cookie": flat, "context": context}],
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest_path
+
+
 def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
     require_exact_single_cookie(env)
@@ -546,6 +695,9 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
     db = find_chromium_db(user_data, name="rookie_ci")
+    env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
+        write_live_smoke_manifest("chromium", user_data, db)
+    )
     env["ROOKIE_E2E_COOKIE_DB"] = str(db)
     py = venv_python()
     subprocess.run(
@@ -598,6 +750,9 @@ def assert_gecko(profile: Path, browser_id: str) -> None:
     env["ROOKIE_E2E_FIREFOX_PROFILE"] = str(profile)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
+    env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
+        write_live_smoke_manifest("gecko", profile, profile / "cookies.sqlite")
+    )
     py = venv_python()
     subprocess.run(
         [
@@ -659,6 +814,8 @@ def assert_gecko(profile: Path, browser_id: str) -> None:
 
 def assert_native(cookie_file: Path, browser: str) -> None:
     env = os.environ.copy()
+    require_exact_single_cookie(env)
+    env["ROOKIE_E2E_EXPECT_NATIVE_FIELDS"] = "1"
     env["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
     env["ROOKIE_E2E_BROWSER_ID"] = browser
     py = venv_python()
@@ -961,6 +1118,11 @@ def run() -> int:
         os.environ.update(discovery_environment)
         os.environ.pop("CHROME_CONFIG_HOME", None)
         os.environ["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
+        os.environ["ROOKIE_E2E_EXPECTED_PROFILE_ID"] = (
+            independently_expected_profile_id(
+                platform, browser, engine, user_data, discovery_environment
+            )
+        )
         print(f"isolated registry profile: {user_data}", flush=True)
     else:
         user_data = requested_user_data
@@ -1010,10 +1172,25 @@ def run() -> int:
     observed = {"browser_launch", "explicit_path"}
     if engine == "chromium":
         observed.update(
-            {"registry_id", "detailed", "discovery", "recommended_read", "crypto"}
+            {
+                "registry_id",
+                "detailed",
+                "discovery",
+                "recommended_read",
+                "crypto",
+                "exact_set",
+            }
         )
     elif engine == "gecko":
-        observed.update({"registry_id", "detailed", "discovery", "recommended_read"})
+        observed.update(
+            {
+                "registry_id",
+                "detailed",
+                "discovery",
+                "recommended_read",
+                "exact_set",
+            }
+        )
     assert_observed_depth(row, observed, coverage)
     print(f"hosted claimed e2e ok: {browser} ({engine}); depth={sorted(observed)}")
     return 0
