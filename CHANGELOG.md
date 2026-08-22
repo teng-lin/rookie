@@ -6,14 +6,31 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-rc.1] - 2026-08-22
+
 ### Changed
 
 - The CLI documentation now defines its stderr contract: typed library errors
   emit JSON with stable `code` and human `message` fields, while usage,
   wrapped, and non-library errors retain human-readable output.
+- The Node binding build now uses napi-rs v3 while preserving the existing
+  runtime exports, TypeScript surface, Node-API v4 baseline, and Node.js 22
+  minimum.
+- Real-browser validation now compares complete controlled cookie corpora
+  across Rust, Python, Node, and CLI surfaces, including active stores,
+  partition/container isolation, and concurrent stress cases.
 
 ### Fixed
 
+- Browser profile listing now reports a timeout or cancellation as an error
+  instead of returning a partial Gecko, Safari, or Internet Explorer listing
+  that appears complete.
+- Node structured errors retain their native diagnostic when a decoded payload
+  omits `message`, and the serialization fallback always emits valid JSON.
+- Firefox's stored SameSite sentinel `256` is normalized to the public
+  unspecified value instead of being exposed as an unknown storage value.
+- SQLite live-store lock polling now observes request deadlines and
+  cancellation rather than entering one opaque busy wait.
 - Release-control checks no longer let a newer, intentionally skipped copy of
   a dispatch-only gate mask the successful exact-commit release run.
 
