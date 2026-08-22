@@ -300,7 +300,12 @@ class ActiveWriterProtocolTests(unittest.TestCase):
     def test_windows_chromium_snapshot_uses_only_local_state_credentials(
         self,
     ) -> None:
-        with mock.patch.object(active.sys, "platform", "win32"):
+        with (
+            mock.patch.object(active.sys, "platform", "win32"),
+            mock.patch.object(
+                active, "venv_python", return_value=Path("C:/venv/python.exe")
+            ),
+        ):
             commands = dict(
                 active.detailed_surface_commands(
                     "chromium",
