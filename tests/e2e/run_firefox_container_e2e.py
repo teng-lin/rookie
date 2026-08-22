@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +31,7 @@ from run_exact_corpus_e2e import isolated_environment, stage_discovered_profile
 
 
 FIREFOX_CONTAINER_EXTENSION = Path(__file__).with_name("firefox_container_extension")
-FIREFOX_CONTAINER_NAME = "rookie-e2e-container"
+FIREFOX_CONTAINER_READY_NAME = "rookie-e2e-container-ready"
 
 
 def container_cookie_present(database: Path) -> bool:
@@ -55,6 +56,45 @@ def container_cookie_present(database: Path) -> bool:
         return False
     finally:
         connection.close()
+
+
+def container_seed_ready(containers: Path) -> bool:
+    """Return whether the extension completed its container cookie API call."""
+
+    try:
+        payload = json.loads(containers.read_text(encoding="utf-8"))
+        return any(
+            identity.get("name") == FIREFOX_CONTAINER_READY_NAME
+            and int(identity.get("userContextId", 0)) > 0
+            for identity in payload.get("identities", [])
+        )
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+
+
+def stop_web_ext(process: subprocess.Popen[str]) -> None:
+    """Stop web-ext and its Firefox child, then wait for profile finalization."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        process.terminate()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=5)
 
 
 def seed_container_with_web_ext(
@@ -96,40 +136,37 @@ def seed_container_with_web_ext(
     ]
     if xvfb:
         command = ["xvfb-run", "-a", *command]
-    process = subprocess.Popen(command, cwd=str(ROOT), env=environment, text=True)
+    process = subprocess.Popen(
+        command,
+        cwd=str(ROOT),
+        env=environment,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
     containers = profile / "containers.json"
     deadline = time.monotonic() + timeout
-    observed = False
     try:
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise ActiveWriterError(
                     f"web-ext exited {process.returncode} before creating the container"
                 )
-            try:
-                payload = json.loads(containers.read_text(encoding="utf-8"))
-                observed = any(
-                    identity.get("name") == FIREFOX_CONTAINER_NAME
-                    and int(identity.get("userContextId", 0)) > 0
-                    for identity in payload.get("identities", [])
-                )
-            except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
-                observed = False
-            if observed and container_cookie_present(profile / "cookies.sqlite"):
+            if container_seed_ready(containers):
                 break
             time.sleep(0.1)
-        if not observed:
-            raise ActiveWriterError("Firefox did not create the disposable container")
-        if not container_cookie_present(profile / "cookies.sqlite"):
-            raise ActiveWriterError("Firefox container cookie never reached the store")
+        else:
+            raise ActiveWriterError(
+                "Firefox did not finish seeding the disposable container"
+            )
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        stop_web_ext(process)
+    database = profile / "cookies.sqlite"
+    deadline = time.monotonic() + min(timeout, 30)
+    while time.monotonic() < deadline:
+        if container_cookie_present(database):
+            return
+        time.sleep(0.1)
+    raise ActiveWriterError("Firefox container cookie never reached the finalized store")
 
 
 

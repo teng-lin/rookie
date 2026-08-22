@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import signal
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from run_active_writer_e2e import ActiveWriterError
-from run_firefox_container_e2e import container_cookie_present, write_container_manifest
+from run_firefox_container_e2e import (
+    container_cookie_present,
+    container_seed_ready,
+    stop_web_ext,
+    write_container_manifest,
+)
 
 
 class FirefoxContainerRunnerTests(unittest.TestCase):
@@ -38,6 +46,49 @@ class FirefoxContainerRunnerTests(unittest.TestCase):
             self.assertFalse(container_cookie_present(database))
             database = self.database(root, "^userContextId=7")
             self.assertTrue(container_cookie_present(database))
+
+    def test_container_seed_ready_requires_the_post_cookie_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            containers = Path(temporary) / "containers.json"
+            self.assertFalse(container_seed_ready(containers))
+            containers.write_text(
+                json.dumps(
+                    {
+                        "identities": [
+                            {
+                                "name": "rookie-e2e-container",
+                                "userContextId": 7,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(container_seed_ready(containers))
+            containers.write_text(
+                json.dumps(
+                    {
+                        "identities": [
+                            {
+                                "name": "rookie-e2e-container-ready",
+                                "userContextId": 7,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(container_seed_ready(containers))
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group behavior")
+    def test_stop_web_ext_terminates_the_firefox_process_group(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.pid = 1234
+        with mock.patch("run_firefox_container_e2e.os.killpg") as killpg:
+            stop_web_ext(process)
+        killpg.assert_called_once_with(1234, signal.SIGTERM)
+        process.wait.assert_called_once_with(timeout=15)
 
     def test_raw_container_manifest_preserves_the_complete_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
