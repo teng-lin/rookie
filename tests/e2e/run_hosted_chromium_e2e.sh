@@ -48,7 +48,7 @@ run_inner() {
   fi
 
   args=(
-    tests/e2e/run_active_writer_e2e.py
+    tests/e2e/run_exact_corpus_e2e.py
     --engine chromium
     --profile "$user_data"
     --channel "$channel"
@@ -58,6 +58,19 @@ run_inner() {
     args+=(--xvfb)
   fi
   .venv/bin/python "${args[@]}"
+
+  active_profile="${user_data}-active-writer"
+  active_args=(
+    tests/e2e/run_active_writer_e2e.py
+    --engine chromium
+    --profile "$active_profile"
+    --channel "$channel"
+    --browser-id "$browser_id"
+  )
+  if command -v xvfb-run >/dev/null 2>&1; then
+    active_args+=(--xvfb)
+  fi
+  .venv/bin/python "${active_args[@]}"
 }
 
 export channel user_data browser_id

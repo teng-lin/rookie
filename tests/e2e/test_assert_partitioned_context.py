@@ -25,7 +25,13 @@ def cookie(name: str, value: str, context: dict) -> dict:
     return {
         "cookie": {
             "domain": (
-                "top.rookie-a.test" if name == "rookie_top" else "third.rookie-b.test"
+                (
+                    "other.rookie-c.test"
+                    if name == "rookie_top" and value == "top-c"
+                    else "top.rookie-a.test"
+                )
+                if name == "rookie_top"
+                else "third.rookie-b.test"
             ),
             "path": "/",
             "secure": True,
@@ -55,11 +61,16 @@ class FakeSnapshot:
         if top is None:
             raise FakeError("incomplete_send_context")
         if "top.rookie-a.test" in top:
-            values = ["rookie_chips=partitioned"]
-            if any(record["cookie"]["name"] == "rookie_dfpi" for record in self.records):
-                values.append("rookie_dfpi=partitioned-by-context")
+            values = ["rookie_chips=partition-a"]
+            if any(
+                record["cookie"]["name"] == "rookie_dfpi" for record in self.records
+            ):
+                values.append("rookie_dfpi=dfpi-a")
             return "; ".join(values)
-        return ""
+        values = ["rookie_chips=partition-c"]
+        if any(record["cookie"]["name"] == "rookie_dfpi" for record in self.records):
+            values.append("rookie_dfpi=dfpi-c")
+        return "; ".join(values)
 
 
 class PartitionContextAssertionTests(unittest.TestCase):
@@ -73,12 +84,24 @@ class PartitionContextAssertionTests(unittest.TestCase):
     def test_valid_chromium_context_and_headers(self) -> None:
         snapshot = FakeSnapshot(
             [
-                cookie("rookie_top", "top", {}),
+                cookie("rookie_top", "top-a", {}),
+                cookie("rookie_top", "top-c", {}),
                 cookie(
                     "rookie_chips",
-                    "partitioned",
+                    "partition-a",
                     {
                         "top_frame_site_key": "https://rookie-a.test",
+                        "has_cross_site_ancestor": True,
+                        "source_scheme": 2,
+                        "source_port": 8766,
+                        "is_persistent": True,
+                    },
+                ),
+                cookie(
+                    "rookie_chips",
+                    "partition-c",
+                    {
+                        "top_frame_site_key": "https://rookie-c.test",
                         "has_cross_site_ancestor": True,
                         "source_scheme": 2,
                         "source_port": 8766,
@@ -90,29 +113,48 @@ class PartitionContextAssertionTests(unittest.TestCase):
         result = ASSERT.validate_context_snapshot(
             snapshot, engine="chromium", **self.common
         )
-        self.assertEqual(result["headers"]["other_top_level_site"], "")
-        self.assertEqual(len(result["detailed"]), 2)
+        self.assertIn("partition-c", result["headers"]["other_top_level_site"])
+        self.assertEqual(len(result["detailed"]), 4)
 
     def test_valid_firefox_dfpi_context_and_headers(self) -> None:
-        attributes = "^partitionKey=%28https%2Crookie-a.test%29"
-        partition = "(https,rookie-a.test)"
+        attributes_a = "^partitionKey=%28https%2Crookie-a.test%29"
+        attributes_c = "^partitionKey=%28https%2Crookie-c.test%29"
+        partition_a = "(https,rookie-a.test)"
+        partition_c = "(https,rookie-c.test)"
         snapshot = FakeSnapshot(
             [
-                cookie("rookie_top", "top", {"origin_attributes": ""}),
+                cookie("rookie_top", "top-a", {"origin_attributes": ""}),
+                cookie("rookie_top", "top-c", {"origin_attributes": ""}),
                 cookie(
                     "rookie_chips",
-                    "partitioned",
+                    "partition-a",
                     {
-                        "origin_attributes": attributes,
-                        "partition_key": partition,
+                        "origin_attributes": attributes_a,
+                        "partition_key": partition_a,
+                    },
+                ),
+                cookie(
+                    "rookie_chips",
+                    "partition-c",
+                    {
+                        "origin_attributes": attributes_c,
+                        "partition_key": partition_c,
                     },
                 ),
                 cookie(
                     "rookie_dfpi",
-                    "partitioned-by-context",
+                    "dfpi-a",
                     {
-                        "origin_attributes": attributes,
-                        "partition_key": partition,
+                        "origin_attributes": attributes_a,
+                        "partition_key": partition_a,
+                    },
+                ),
+                cookie(
+                    "rookie_dfpi",
+                    "dfpi-c",
+                    {
+                        "origin_attributes": attributes_c,
+                        "partition_key": partition_c,
                     },
                 ),
             ]
@@ -125,12 +167,24 @@ class PartitionContextAssertionTests(unittest.TestCase):
     def test_wrong_top_level_partition_is_rejected(self) -> None:
         snapshot = FakeSnapshot(
             [
-                cookie("rookie_top", "top", {}),
+                cookie("rookie_top", "top-a", {}),
+                cookie("rookie_top", "top-c", {}),
                 cookie(
                     "rookie_chips",
-                    "partitioned",
+                    "partition-a",
                     {
                         "top_frame_site_key": "https://wrong.test",
+                        "has_cross_site_ancestor": True,
+                        "source_scheme": 2,
+                        "source_port": 8766,
+                        "is_persistent": True,
+                    },
+                ),
+                cookie(
+                    "rookie_chips",
+                    "partition-c",
+                    {
+                        "top_frame_site_key": "https://rookie-c.test",
                         "has_cross_site_ancestor": True,
                         "source_scheme": 2,
                         "source_port": 8766,
@@ -147,14 +201,15 @@ class PartitionContextAssertionTests(unittest.TestCase):
             def header(self, context: dict) -> str:
                 if context.get("top_level_site") is None:
                     raise FakeError("incomplete_send_context")
-                return "rookie_chips=partitioned"
+                return "rookie_chips=partition-a; rookie_chips=partition-c"
 
         snapshot = LeakySnapshot(
             [
-                cookie("rookie_top", "top", {}),
+                cookie("rookie_top", "top-a", {}),
+                cookie("rookie_top", "top-c", {}),
                 cookie(
                     "rookie_chips",
-                    "partitioned",
+                    "partition-a",
                     {
                         "top_frame_site_key": "https://rookie-a.test",
                         "has_cross_site_ancestor": True,
@@ -163,9 +218,22 @@ class PartitionContextAssertionTests(unittest.TestCase):
                         "is_persistent": True,
                     },
                 ),
+                cookie(
+                    "rookie_chips",
+                    "partition-c",
+                    {
+                        "top_frame_site_key": "https://rookie-c.test",
+                        "has_cross_site_ancestor": True,
+                        "source_scheme": 2,
+                        "source_port": 8766,
+                        "is_persistent": True,
+                    },
+                ),
             ]
         )
-        with self.assertRaisesRegex(ASSERT.ContextAssertionError, "different top-level"):
+        with self.assertRaisesRegex(
+            ASSERT.ContextAssertionError, "top A received top C"
+        ):
             ASSERT.validate_context_snapshot(snapshot, engine="chromium", **self.common)
 
 

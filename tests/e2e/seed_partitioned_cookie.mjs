@@ -49,6 +49,11 @@ if (
 ) {
   throw new Error(`unexpected top-level test origin: ${top.origin}`);
 }
+const otherTop = new URL(topUrl);
+otherTop.hostname =
+  top.hostname === "top.rookie-a.test"
+    ? "other.rookie-c.test"
+    : "top.rookie-a.test";
 
 const timeout = Number(process.env.ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS || 120000);
 const hostRules = [
@@ -103,24 +108,29 @@ if (engine === "chromium") {
 const context = await browserType.launchPersistentContext(profile, launchOptions);
 try {
   const page = await context.newPage();
-  await page.goto(topUrl, { waitUntil: "domcontentloaded", timeout });
-  await page.waitForFunction(() => document.title === "partition-seeded", null, {
-    timeout,
-  });
+  for (const target of [topUrl, otherTop.href]) {
+    await page.goto(target, { waitUntil: "domcontentloaded", timeout });
+    await page.waitForFunction(() => document.title === "partition-seeded", null, {
+      timeout,
+    });
+  }
 
   const cookies = (await context.cookies()).filter(({ name }) =>
     name.startsWith("rookie_"),
   );
-  const names = new Set(cookies.map(({ name }) => name));
-  for (const required of ["rookie_top", "rookie_chips"]) {
-    if (!names.has(required)) {
+  const names = cookies.map(({ name }) => name);
+  for (const [required, minimum] of [["rookie_top", 2], ["rookie_chips", 2]]) {
+    if (names.filter((name) => name === required).length < minimum) {
       throw new Error(
-        `${engine} did not expose ${required}; observed ${[...names].sort().join(", ")}`,
+        `${engine} did not expose both ${required} identities; observed ${names.sort().join(", ")}`,
       );
     }
   }
-  if (engine === "firefox" && !names.has("rookie_dfpi")) {
-    throw new Error("Firefox did not expose the dFPI candidate cookie");
+  if (
+    engine === "firefox" &&
+    names.filter((name) => name === "rookie_dfpi").length < 2
+  ) {
+    throw new Error("Firefox did not expose both dFPI partition identities");
   }
 
   let chromiumStorage = [];
@@ -137,7 +147,7 @@ try {
     kind: "browser-observed-cookie-manifest",
     engine,
     browser_version: await context.browser()?.version?.(),
-    top_level_origin: top.origin,
+    top_level_origins: [top.origin, otherTop.origin],
     cookies,
     chromium_storage: chromiumStorage,
   };

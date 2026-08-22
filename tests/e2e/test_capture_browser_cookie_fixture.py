@@ -46,9 +46,7 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def write_manifest(
-        self, engine: str, cookies: list[dict[str, object]]
-    ) -> Path:
+    def write_manifest(self, engine: str, cookies: list[dict[str, object]]) -> Path:
         manifest = self.root / f"{engine}-expected.json"
         manifest.write_text(
             json.dumps({"schema_version": 1, "engine": engine, "cookies": cookies}),
@@ -56,7 +54,9 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
         )
         return manifest
 
-    def run_capture(self, engine: str, database: Path, manifest: Path) -> tuple[Path, Path]:
+    def run_capture(
+        self, engine: str, database: Path, manifest: Path
+    ) -> tuple[Path, Path]:
         output = self.root / f"{engine}-fixture.sqlite"
         provenance = self.root / f"{engine}-fixture.provenance.json"
         status = CAPTURE.main(
@@ -145,7 +145,9 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
                 ).fetchall(),
                 [(".example.test", "/", "kept")],
             )
-            self.assertEqual(connection.execute("SELECT * FROM telemetry").fetchall(), [])
+            self.assertEqual(
+                connection.execute("SELECT * FROM telemetry").fetchall(), []
+            )
             self.assertEqual(
                 connection.execute("SELECT key FROM meta ORDER BY key").fetchall(),
                 [("compatible_version",), ("version",)],
@@ -235,6 +237,47 @@ class CaptureBrowserCookieFixtureTests(unittest.TestCase):
         database.touch()
         with self.assertRaisesRegex(CAPTURE.CaptureError, "inside --source-root"):
             CAPTURE.require_disposable_source(self.source_root, database)
+
+    def test_corpus_manifest_expected_detailed_is_accepted(self) -> None:
+        manifest = self.root / "corpus-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "engine": "chromium",
+                    "expected": {
+                        "detailed": [
+                            {
+                                "cookie": {
+                                    "domain": "127.0.0.1",
+                                    "path": "/",
+                                    "name": "rookie_ci",
+                                },
+                                "context": {
+                                    "top_frame_site_key": None,
+                                    "has_cross_site_ancestor": False,
+                                },
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        rows, digest = CAPTURE.load_expected_rows(manifest, "chromium")
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "domain": "127.0.0.1",
+                    "path": "/",
+                    "name": "rookie_ci",
+                    "partition_key": "",
+                    "has_cross_site_ancestor": 0,
+                }
+            ],
+        )
+        self.assertEqual(len(digest), 64)
 
     def test_manifest_mismatch_leaves_no_output(self) -> None:
         database = self.source_root / "cookies.sqlite"

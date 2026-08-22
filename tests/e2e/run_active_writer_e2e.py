@@ -160,6 +160,19 @@ def validate_profile_proof(
         )
     if not isinstance(ack.get("liveness"), dict):
         raise ActiveWriterError("ready ack omitted the browser liveness probe")
+    browser_process_ids = ack.get("browserProcessIds")
+    if not isinstance(browser_process_ids, list) or not browser_process_ids:
+        raise ActiveWriterError(
+            "ready ack did not identify a browser process owning the supplied profile"
+        )
+    if not all(isinstance(pid, int) and pid > 0 for pid in browser_process_ids):
+        raise ActiveWriterError(
+            f"ready ack contained invalid browser process IDs: {browser_process_ids!r}"
+        )
+    if not any(process_is_alive(pid) for pid in browser_process_ids):
+        raise ActiveWriterError(
+            f"no acknowledged browser process is alive: {browser_process_ids!r}"
+        )
     return database
 
 
@@ -286,6 +299,7 @@ def assertion_environment(
             "ROOKIE_E2E_FORBIDDEN_COOKIES_JSON": json.dumps(
                 forbidden, separators=(",", ":")
             ),
+            "ROOKIE_E2E_EXACT_COOKIE_STATE": "1",
             "ROOKIE_E2E_CHECK_BROWSER_DISCOVERY": "0",
         }
     )

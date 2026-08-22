@@ -11,9 +11,16 @@ if (-not $userData) { throw "ROOKIE_E2E_USER_DATA_DIR must be set" }
 $browserId = if ($env:ROOKIE_E2E_BROWSER_ID) { $env:ROOKIE_E2E_BROWSER_ID } else { "chrome" }
 New-Item -ItemType Directory -Force -Path $userData | Out-Null
 
-& .\.venv\Scripts\python.exe tests/e2e/run_active_writer_e2e.py `
+& .\.venv\Scripts\python.exe tests/e2e/run_exact_corpus_e2e.py `
     --engine chromium `
     --profile $userData `
+    --channel $channel `
+    --browser-id $browserId
+if ($LASTEXITCODE -ne 0) { throw "Chromium exact-corpus E2E failed" }
+
+& .\.venv\Scripts\python.exe tests/e2e/run_active_writer_e2e.py `
+    --engine chromium `
+    --profile "${userData}-active-writer" `
     --channel $channel `
     --browser-id $browserId
 if ($LASTEXITCODE -ne 0) { throw "Chromium active-writer E2E failed" }

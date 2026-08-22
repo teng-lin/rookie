@@ -48,63 +48,92 @@ for (const record of detailed) {
   values.push(record);
   byName.set(record.cookie.name, values);
 }
-
-function exactlyOne(name) {
-  const records = byName.get(name) || [];
-  if (records.length !== 1) {
-    throw new Error(`expected exactly one ${name}, got ${records.length}`);
-  }
-  return records[0];
+const expectedCounts = new Map([
+  ["rookie_top", 2],
+  ["rookie_chips", 2],
+]);
+if (engine === "firefox") expectedCounts.set("rookie_dfpi", 2);
+if (
+  byName.size !== expectedCounts.size ||
+  [...expectedCounts].some(
+    ([name, count]) => (byName.get(name) || []).length !== count,
+  )
+) {
+  throw new Error(
+    `context corpus mismatch: expected ${JSON.stringify(Object.fromEntries(expectedCounts))}, got ${JSON.stringify(Object.fromEntries([...byName].map(([name, records]) => [name, records.length])))}`,
+  );
 }
 
-const top = exactlyOne("rookie_top");
-const chips = exactlyOne("rookie_chips");
+function exactlyTwo(name) {
+  const records = byName.get(name) || [];
+  if (records.length !== 2) {
+    throw new Error(`expected exactly two colliding ${name} identities, got ${records.length}`);
+  }
+  return records;
+}
+
+const top = exactlyTwo("rookie_top");
+const chips = exactlyTwo("rookie_chips");
 if (engine === "chromium") {
-  if (top.context.topFrameSiteKey != null && top.context.topFrameSiteKey !== "") {
+  if (top.some(({ context }) => context.topFrameSiteKey != null && context.topFrameSiteKey !== "")) {
     throw new Error("first-party top cookie became partitioned");
   }
-  if (
-    typeof chips.context.topFrameSiteKey !== "string" ||
-    !chips.context.topFrameSiteKey.includes("rookie-a.test")
-  ) {
-    throw new Error(
-      `unexpected Chromium partition key ${chips.context.topFrameSiteKey}`,
+  const labels = new Set();
+  for (const record of chips) {
+    const key = record.context.topFrameSiteKey;
+    const label = ["a", "c"].find((candidate) =>
+      String(key).includes(`rookie-${candidate}.test`),
     );
-  }
-  if (chips.context.hasCrossSiteAncestor !== true) {
-    throw new Error("CHIPS row lost its cross-site ancestor bit");
-  }
-  if (chips.context.sourcePort !== sourcePort) {
-    throw new Error(`CHIPS source port was ${chips.context.sourcePort}`);
-  }
-  if (chips.context.sourceScheme == null) {
-    throw new Error("CHIPS source scheme was not observed");
-  }
-  if (chips.context.isPersistent !== true) {
-    throw new Error("CHIPS persistence bit was not true");
+    if (!label || labels.has(label)) {
+      throw new Error(`unexpected Chromium partition key ${key}`);
+    }
+    labels.add(label);
+    if (record.cookie.value !== `partition-${label}`) {
+      throw new Error(`Chromium partition ${label} carried ${record.cookie.value}`);
+    }
+    if (record.context.hasCrossSiteAncestor !== true) {
+      throw new Error("CHIPS row lost its cross-site ancestor bit");
+    }
+    if (record.context.sourcePort !== sourcePort) {
+      throw new Error(`CHIPS source port was ${record.context.sourcePort}`);
+    }
+    if (record.context.sourceScheme == null) {
+      throw new Error("CHIPS source scheme was not observed");
+    }
+    if (record.context.isPersistent !== true) {
+      throw new Error("CHIPS persistence bit was not true");
+    }
   }
 } else {
-  const dfpi = exactlyOne("rookie_dfpi");
-  for (const record of [chips, dfpi]) {
-    if (
-      typeof record.context.originAttributes !== "string" ||
-      !record.context.originAttributes.includes("partitionKey=")
-    ) {
-      throw new Error(`${record.cookie.name} lacks partitioned originAttributes`);
-    }
-    if (
-      typeof record.context.partitionKey !== "string" ||
-      !record.context.partitionKey.includes("rookie-a.test")
-    ) {
-      throw new Error(
-        `${record.cookie.name} has unexpected partition key ${record.context.partitionKey}`,
+  const dfpi = exactlyTwo("rookie_dfpi");
+  for (const records of [chips, dfpi]) {
+    const labels = new Set();
+    for (const record of records) {
+      const label = ["a", "c"].find((candidate) =>
+        String(record.context.partitionKey).includes(`rookie-${candidate}.test`),
       );
-    }
-    if (![null, 0].includes(record.context.userContextId)) {
-      throw new Error(`${record.cookie.name} unexpectedly entered a container`);
-    }
-    if (![null, 0].includes(record.context.privateBrowsingId)) {
-      throw new Error(`${record.cookie.name} unexpectedly entered private browsing`);
+      if (!label || labels.has(label)) {
+        throw new Error(
+          `${record.cookie.name} has unexpected partition key ${record.context.partitionKey}`,
+        );
+      }
+      labels.add(label);
+      if (
+        typeof record.context.originAttributes !== "string" ||
+        !record.context.originAttributes.includes("partitionKey=")
+      ) {
+        throw new Error(`${record.cookie.name} lacks partitioned originAttributes`);
+      }
+      if (![null, 0].includes(record.context.userContextId)) {
+        throw new Error(`${record.cookie.name} unexpectedly entered a container`);
+      }
+      if (![null, 0].includes(record.context.privateBrowsingId)) {
+        throw new Error(`${record.cookie.name} unexpectedly entered private browsing`);
+      }
+      const expected = record.cookie.name === "rookie_chips" ? `partition-${label}` : `dfpi-${label}`;
+      if (record.cookie.value !== expected) {
+        throw new Error(`${record.cookie.name} partition ${label} carried ${record.cookie.value}`);
+      }
     }
   }
 }
@@ -120,18 +149,21 @@ const other = snapshot.header({
   ...matchingContext,
   topLevelSite: otherTopOrigin,
 });
-if (!matching.includes("rookie_chips=partitioned")) {
+if (!matching.includes("rookie_chips=partition-a")) {
   throw new Error(`matching context omitted CHIPS cookie: ${matching}`);
 }
-if (other.includes("rookie_chips=partitioned")) {
-  throw new Error(`different top-level site received CHIPS cookie: ${other}`);
+if (matching.includes("rookie_chips=partition-c")) {
+  throw new Error(`top A received top C CHIPS cookie: ${matching}`);
+}
+if (!other.includes("rookie_chips=partition-c") || other.includes("rookie_chips=partition-a")) {
+  throw new Error(`top C selected the wrong CHIPS cookie: ${other}`);
 }
 if (engine === "firefox") {
-  if (!matching.includes("rookie_dfpi=partitioned-by-context")) {
+  if (!matching.includes("rookie_dfpi=dfpi-a") || matching.includes("rookie_dfpi=dfpi-c")) {
     throw new Error(`matching context omitted dFPI cookie: ${matching}`);
   }
-  if (other.includes("rookie_dfpi=partitioned-by-context")) {
-    throw new Error(`different top-level site received dFPI cookie: ${other}`);
+  if (!other.includes("rookie_dfpi=dfpi-c") || other.includes("rookie_dfpi=dfpi-a")) {
+    throw new Error(`other context selected the wrong dFPI cookie: ${other}`);
   }
 }
 

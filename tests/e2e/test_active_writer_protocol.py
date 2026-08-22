@@ -46,6 +46,7 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 # The coordinator may be an xvfb-run wrapper, so the Node
                 # seeder PID is independently acknowledged and checked alive.
                 "seederPid": os.getpid(),
+                "browserProcessIds": [os.getpid()],
                 "liveness": {"readyState": "complete"},
             }
             self.assertEqual(
@@ -69,9 +70,30 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 "profileDir": str(profile.resolve()),
                 "databasePath": str(outside.resolve()),
                 "seederPid": os.getpid(),
+                "browserProcessIds": [os.getpid()],
                 "liveness": {},
             }
             with self.assertRaisesRegex(active.ActiveWriterError, "database mismatch"):
+                active.validate_profile_proof(ack, "chromium", profile, process)
+
+    def test_ready_ack_requires_a_live_browser_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile"
+            database = self.make_chromium_db(profile)
+            process = mock.Mock(spec=subprocess.Popen)
+            process.poll.return_value = None
+            ack = {
+                "engine": "chromium",
+                "phase": "ready",
+                "profileDir": str(profile.resolve()),
+                "databasePath": str(database.resolve()),
+                "seederPid": os.getpid(),
+                "browserProcessIds": [],
+                "liveness": {"readyState": "complete"},
+            }
+            with self.assertRaisesRegex(
+                active.ActiveWriterError, "browser process owning"
+            ):
                 active.validate_profile_proof(ack, "chromium", profile, process)
 
     def test_database_metadata_reports_schema_journal_and_sidecars(self) -> None:
@@ -130,6 +152,19 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 ["rookie_remove"],
                 surface="synthetic",
             )
+
+    def test_exact_cookie_state_rejects_unrelated_rows(self) -> None:
+        with mock.patch.dict(os.environ, {"ROOKIE_E2E_EXACT_COOKIE_STATE": "1"}):
+            with self.assertRaisesRegex(AssertionError, "exact active-writer set"):
+                assert_cookie_state(
+                    [
+                        {"name": "rookie_ci", "value": "after"},
+                        {"name": "unrelated", "value": "leak"},
+                    ],
+                    {"rookie_ci": "after"},
+                    [],
+                    surface="synthetic",
+                )
 
     def test_ack_wait_fails_closed_on_seeder_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

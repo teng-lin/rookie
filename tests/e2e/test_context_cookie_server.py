@@ -50,41 +50,63 @@ class ContextCookieServerTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_top_page_sets_first_party_cookie_and_embeds_only_allowed_origin(self) -> None:
-        target = f"/top?third_origin=https://{SERVER.ALLOWED_THIRD_HOST}:8766"
+    def test_top_page_sets_first_party_cookie_and_embeds_only_allowed_origin(
+        self,
+    ) -> None:
+        target = (
+            f"/top?third_origin=https://{SERVER.ALLOWED_THIRD_HOST}:8766"
+            "&engine=chromium"
+        )
         status, headers, body = self.request("top.rookie-a.test", target)
         self.assertEqual(status, 200)
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         self.assertEqual(
             cookies,
-            ["rookie_top=top; Secure; HttpOnly; SameSite=Lax; Path=/"],
+            ["rookie_top=top-a; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600"],
         )
-        self.assertIn("https://third.rookie-b.test:8766/set-context", body)
+        self.assertIn(
+            "https://third.rookie-b.test:8766/set-context?partition=a&engine=chromium",
+            body,
+        )
         self.assertIn("partition-seeded", body)
 
     def test_third_party_page_sets_chips_and_dfpi_candidates(self) -> None:
         status, headers, body = self.request(
-            SERVER.ALLOWED_THIRD_HOST, "/set-context"
+            SERVER.ALLOWED_THIRD_HOST, "/set-context?partition=a&engine=firefox"
         )
         self.assertEqual(status, 200)
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         self.assertEqual(len(cookies), 2)
         self.assertIn("Partitioned", cookies[0])
+        self.assertIn("partition-a", cookies[0])
         self.assertNotIn("Partitioned", cookies[1])
         self.assertIn("rookie-context-set", body)
 
     def test_host_and_third_origin_are_restricted(self) -> None:
         status, _, _ = self.request(
             "attacker.test",
-            f"/top?third_origin=https://{SERVER.ALLOWED_THIRD_HOST}:8766",
+            f"/top?third_origin=https://{SERVER.ALLOWED_THIRD_HOST}:8766&engine=chromium",
         )
         self.assertEqual(status, 400)
         status, _, _ = self.request(
             "top.rookie-a.test", "/top?third_origin=https://attacker.test:8766"
         )
         self.assertEqual(status, 400)
-        status, _, _ = self.request("attacker.test", "/set-context")
+        status, _, _ = self.request(
+            "attacker.test", "/set-context?partition=a&engine=chromium"
+        )
         self.assertEqual(status, 400)
+        status, _, _ = self.request(SERVER.ALLOWED_THIRD_HOST, "/set-context")
+        self.assertEqual(status, 400)
+
+    def test_chromium_context_route_omits_the_firefox_only_candidate(self) -> None:
+        status, headers, _ = self.request(
+            SERVER.ALLOWED_THIRD_HOST, "/set-context?partition=c&engine=chromium"
+        )
+        self.assertEqual(status, 200)
+        cookies = [value for name, value in headers if name.lower() == "set-cookie"]
+        self.assertEqual(len(cookies), 1)
+        self.assertTrue(cookies[0].startswith("rookie_chips=partition-c;"))
 
     def test_event_log_records_host_path_and_cookie_header(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
@@ -123,7 +145,7 @@ class ContextCookieServerTests(unittest.TestCase):
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         self.assertEqual(len(cookies), 40)
         self.assertTrue(cookies[0].startswith("stress_3_0=seed-3-0;"))
-        self.assertTrue(cookies[-1].startswith("stress_3_39=seed-3-39;"))
+        self.assertTrue(cookies[-1].startswith("stress_shared=seed-3-39;"))
         self.assertEqual(json.loads(body), {"host_index": 3, "seeded": 40})
 
     def test_stress_seed_rejects_unbounded_or_wrong_host_requests(self) -> None:

@@ -35,7 +35,9 @@ if (!channelArg || !userDataDir || !url) {
 
 const channel = channelArg === "edge" ? "msedge" : channelArg;
 const linuxArgs =
-  process.platform === "linux" ? ["--password-store=gnome-libsecret"] : [];
+  process.platform === "linux"
+    ? [`--password-store=${process.env.ROOKIE_E2E_PASSWORD_STORE || "gnome-libsecret"}`]
+    : [];
 
 const launchOptions = {
   headless: false,

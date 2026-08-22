@@ -45,7 +45,8 @@ not opt other profiles on the same machine into capture.
 
 The browser seeder produces or is paired with an independent manifest. A flat
 record is accepted, as is the detailed `{ "cookie": ..., "context": ... }`
-shape:
+shape. The exact corpus manifest's `expected.detailed` array is accepted
+directly as well:
 
 ```json
 {
@@ -107,4 +108,6 @@ python3 tests/e2e/capture_browser_cookie_fixture.py \
 ```
 
 The capture workflow uploads candidates for review; it never commits them and
-has read-only repository permissions.
+has read-only repository permissions. Its `playwright_version` input is the
+version pin for capturing current and previous redistributable browser schema
+generations; each resulting candidate remains a manually reviewed artifact.

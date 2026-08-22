@@ -76,17 +76,15 @@ def main() -> int:
             local_state_path=str(key_path),
             app_bound="allow_elevated_fallback",
         )
-        legacy = rookie_cookies.chromium_based(
-            str(key_path), str(db_path), [domain]
-        )
+        legacy = rookie_cookies.chromium_based(str(key_path), str(db_path), [domain])
         direct_snapshot = rookie_cookies.from_path(
             str(db_path),
             local_state_path=str(key_path),
             app_bound="allow_elevated_fallback",
         )
         results = [
-            ("extract_from_path(LocalStateFile)", canonical),
-            ("chromium_based", legacy),
+            ("extract_from_path(LocalStateFile)", canonical, "filtered_flat"),
+            ("chromium_based", legacy, "filtered_flat"),
         ]
     else:
         browser_id = os.environ.get("ROOKIE_E2E_BROWSER_ID", "chrome")
@@ -103,26 +101,24 @@ def main() -> int:
             app_bound="allow_elevated_fallback",
         )
         results = [
-            ("extract_from_path(BrowserId)", canonical),
-            ("chromium_based", legacy),
+            ("extract_from_path(BrowserId)", canonical, "filtered_flat"),
+            ("chromium_based", legacy, "filtered_flat"),
         ]
 
     if direct_snapshot.browser_id is not None or direct_snapshot.profile_id is not None:
         print("from_path unexpectedly reported a discovered identity", file=sys.stderr)
         return 1
     direct_detailed = direct_snapshot.detailed_cookies()
-    if not any(
-        record["cookie"]["name"]
-        == expected_name
-        for record in direct_detailed
-    ):
+    if not any(record["cookie"]["name"] == expected_name for record in direct_detailed):
         print("from_path.detailed_cookies omitted the seeded cookie", file=sys.stderr)
         return 1
-    results.append(("from_path.detailed_cookies", direct_snapshot.as_list()))
+    results.append(
+        ("from_path.detailed_cookies", direct_snapshot.as_list(), "unfiltered_flat")
+    )
 
     results = [
-        (surface, cookies, expected_name, expected_value)
-        for surface, cookies in results
+        (surface, cookies, projection, expected_name, expected_value)
+        for surface, cookies, projection in results
     ]
     if os.environ.get("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY") == "1":
         discovery_name = os.environ.get(
@@ -147,7 +143,13 @@ def main() -> int:
             )
             return 2
         results.append(
-            (browser_name, browser_fn([domain]), discovery_name, discovery_value)
+            (
+                browser_name,
+                browser_fn([domain]),
+                "filtered_flat",
+                discovery_name,
+                discovery_value,
+            )
         )
 
     if os.environ.get("ROOKIE_E2E_CHECK_RECOMMENDED_READ") == "1":
@@ -170,7 +172,10 @@ def main() -> int:
             return 1
         identity = matching_profiles[0]["profile"]
         if identity["browser_id"] != browser_id:
-            print(f"discovery returned wrong browser identity: {identity!r}", file=sys.stderr)
+            print(
+                f"discovery returned wrong browser identity: {identity!r}",
+                file=sys.stderr,
+            )
             return 1
         recommended_snapshot = rookie_cookies.read(
             browser=browser_id,
@@ -190,22 +195,26 @@ def main() -> int:
             record["cookie"]["name"] == expected_name
             for record in recommended_snapshot.detailed_cookies()
         ):
-            print("recommended read detailed output omitted the seeded cookie", file=sys.stderr)
+            print(
+                "recommended read detailed output omitted the seeded cookie",
+                file=sys.stderr,
+            )
             return 1
         results.append(
             (
                 "read(profile).detailed_cookies",
                 recommended_snapshot.as_list(),
+                "unfiltered_flat",
                 expected_name,
                 expected_value,
             )
         )
 
-    for surface, result, surface_name, surface_value in results:
+    for surface, result, projection, surface_name, surface_value in results:
         if manifest is not None:
             verify_records(
                 manifest,
-                "filtered_flat",
+                projection,
                 result,
                 surface=f"Python {surface}",
             )

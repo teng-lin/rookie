@@ -40,6 +40,7 @@ if (directSnapshot.browserId !== null || directSnapshot.profileId !== null) {
 }
 
 const manifestPath = findManifest(profileDir, expectedName);
+let expectedState;
 if (manifestPath) {
   verifyCookieRecords(
     manifestPath,
@@ -65,11 +66,18 @@ if (manifestPath) {
     directSnapshot.detailedCookies,
     "Node fromPath.detailedCookies",
   );
+  verifyCookieRecords(
+    manifestPath,
+    "unfiltered_flat",
+    directSnapshot.cookies,
+    "Node fromPath cookies",
+  );
 } else {
   const { required, forbidden } = stateFromEnvironment(
     expectedName,
     expectedValue,
   );
+  expectedState = { required, forbidden };
   assertCookieState(cookies, required, forbidden, "cookiesFromPath");
   assertCookieState(legacy, required, forbidden, "firefoxBased");
   assertCookieState(
@@ -83,6 +91,12 @@ if (manifestPath) {
     required,
     forbidden,
     "fromPath.detailedCookies",
+  );
+  assertCookieState(
+    directSnapshot.cookies,
+    required,
+    forbidden,
+    "fromPath cookies",
   );
   const seeded = cookies.find((c) => c.name === expectedName);
   if (!seeded) {
@@ -167,9 +181,28 @@ if (recommendedChecked) {
   if (manifestPath) {
     verifyCookieRecords(
       manifestPath,
+      "unfiltered_flat",
+      recommendedSnapshot.cookies,
+      "Node read(profile) cookies",
+    );
+    verifyCookieRecords(
+      manifestPath,
       "detailed",
       recommendedSnapshot.detailedCookies,
       "Node read(profile).detailedCookies",
+    );
+  } else {
+    assertCookieState(
+      recommendedSnapshot.cookies,
+      expectedState.required,
+      expectedState.forbidden,
+      "read(profile) cookies",
+    );
+    assertCookieState(
+      recommendedSnapshot.detailedCookies.map(({ cookie }) => cookie),
+      expectedState.required,
+      expectedState.forbidden,
+      "read(profile).detailedCookies",
     );
   }
 }

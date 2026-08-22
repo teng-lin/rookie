@@ -27,12 +27,13 @@ jobs:
     name: e2e ubuntu × chrome (libsecret)
     if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       # Chrome refuses CDP/remote-debugging when the user-data-dir is the
       # default profile location (~/.config/google-chrome), so the seed
       # step uses a dedicated dir. The test reads it back via env var.
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
+      ROOKIE_E2E_CORPUS_TIERS: portable_smoke,deep
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -97,7 +98,7 @@ jobs:
     name: e2e ubuntu × firefox
     if: github.event_name != 'workflow_dispatch' || !inputs.appbound_only
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       # Firefox stores cookies unencrypted in cookies.sqlite, so no keyring
       # dance is needed. We still use a workspace-scoped profile dir so the
@@ -162,7 +163,7 @@ jobs:
         # Doubles as a smoke gate for examples drifting away from the
         # public API. Each example expects a cookies.sqlite path as its
         # first argument and prints every cookie it finds; we grep for
-        # the active-writer suite's final `rookie_ci=after` token to confirm
+        # the exact corpus's `rookie_ci=bar` token to confirm
         # the read path is still wired up correctly.
         run: |
           set -euxo pipefail
@@ -172,26 +173,26 @@ jobs:
           cargo run --release --locked --example from_path -p rookie-cookies -- "$DB" \
             | tee /tmp/rookie-example-rust.out
           grep 'rookie_ci' /tmp/rookie-example-rust.out
-          grep '"after"' /tmp/rookie-example-rust.out
+          grep '"bar"' /tmp/rookie-example-rust.out
 
           # Python
           .venv/bin/python examples/python/from_path.py "$DB" \
             | tee /tmp/rookie-example-python.out
           grep 'rookie_ci' /tmp/rookie-example-python.out
-          grep "'after'" /tmp/rookie-example-python.out
+          grep "'bar'" /tmp/rookie-example-python.out
 
           # Node
           cd examples/javascript
           npm install --silent
           node from_path.mjs "$DB" | tee /tmp/rookie-example-node.out
           grep 'rookie_ci' /tmp/rookie-example-node.out
-          grep "'after'" /tmp/rookie-example-node.out
+          grep "'bar'" /tmp/rookie-example-node.out
 
   macos-firefox:
     name: e2e macos × firefox
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       ROOKIE_E2E_FIREFOX_PROFILE: ${{ github.workspace }}/.rookie-ci/firefox
     steps:
@@ -234,13 +235,14 @@ jobs:
     name: e2e macos × chrome (real Keychain lookup)
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 35
     # Playwright keeps Chromium's --use-mock-keychain default on macOS, whose
     # encrypted cookies use `mock_password`. The job seeds that value into an
     # ephemeral real Keychain item, then rookie-cookies must retrieve it through
     # `/usr/bin/security`; no production fallback candidate exists.
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}/.rookie-ci/google-chrome
+      ROOKIE_E2E_CORPUS_TIERS: portable_smoke,deep
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -284,7 +286,7 @@ jobs:
     name: e2e windows × firefox
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 35
     defaults:
       run:
         shell: pwsh
@@ -596,7 +598,7 @@ jobs:
     name: e2e windows × chrome (legacy DPAPI)
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || !inputs.appbound_only)
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 35
     # Hosted CI uses a workspace-scoped user-data-dir, so Chromium's AppBound
     # path is not expected. This job exercises legacy DPAPI v10 cookies and
     # logs non-secret key-shape diagnostics when extraction fails.
@@ -605,6 +607,7 @@ jobs:
         shell: pwsh
     env:
       ROOKIE_E2E_USER_DATA_DIR: ${{ github.workspace }}\.rookie-ci\google-chrome
+      ROOKIE_E2E_CORPUS_TIERS: portable_smoke,deep
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable

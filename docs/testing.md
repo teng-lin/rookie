@@ -120,14 +120,22 @@ logs, errors, help/version, profiles, spaces/Unicode paths).
 `.github/workflows/e2e.yml` gates pull requests with real Ubuntu Chrome and
 Firefox. Pushes to `main`, the nightly schedule, and `workflow_dispatch` also
 run the macOS and Windows jobs. Every job starts a loopback cookie server,
-seeds a disposable profile, then leaves the browser open while **Rust, Python,
-Node, and CLI** read the browser-owned database. The runner replaces one
-cookie, adds another, deletes a third, repeats every extraction, probes browser
-liveness, closes gracefully, and verifies that the closed snapshot matches the
-final open state. Each checkpoint logs the resolved profile/database paths,
-browser and seeder process evidence, browser/schema versions, SQLite journal
-mode, and sidecar presence. The elevated Windows App-Bound and shadow-copy jobs
-remain trusted-ref-only.
+seeds a disposable profile with the declarative cookie corpus, and requires
+**Rust, Python, Node, and CLI** to match its independent manifest exactly. The
+portable corpus covers all eight flat fields, host/domain and path collisions,
+session/persistent cookies, SameSite variants, empty/large values, prefix
+rules, expiration boundaries, update/delete behavior, and a second-host decoy
+that the domain filter must exclude.
+
+Each core job then launches a second disposable profile and leaves that browser
+open while the same four surfaces read the browser-owned database. The runner
+replaces one cookie, adds another, deletes a third, requires the complete
+active-writer set (including no excess rows), probes browser liveness, closes
+gracefully, and verifies that the closed snapshot matches the final open state.
+Each checkpoint logs resolved profile/database paths, browser and seeder
+process evidence, browser/schema versions, SQLite journal mode, and sidecar
+presence. The elevated Windows App-Bound and shadow-copy jobs remain
+trusted-ref-only.
 
 | Runner | Browser and crypto | Surfaces |
 | --- | --- | --- |
@@ -138,10 +146,11 @@ remain trusted-ref-only.
 | Windows 2025 | Chrome custom profile, **legacy DPAPI `v10`** (workspace user-data-dir; App-Bound is not expected) | Rust, Python, Node, CLI |
 | Windows 2025 | Firefox | Rust, Python, Node, CLI |
 
-These jobs pass an explicit workspace-scoped profile to Playwright and never
-discover or inspect the operator’s real default profile. The protocol is
-implemented by `tests/e2e/run_active_writer_e2e.py` and the two
-`seed_*_cookie.mjs` seeders; its file-based commands make the same
+These jobs pass explicit workspace-scoped profiles to Playwright and never
+discover or inspect the operator’s real default profile. Exact corpus execution
+is implemented by `tests/e2e/run_exact_corpus_e2e.py`; the open-store protocol
+is implemented by `tests/e2e/run_active_writer_e2e.py` and the two
+`seed_*_cookie.mjs` seeders. Its file-based commands make the same
 ready/hold/mutate/probe/close contract portable across all three runner OSes.
 
 Current CLI job shapes to use when reproducing an E2E assertion:
@@ -162,6 +171,37 @@ The cross-platform `tests/e2e/assert_cli_cookie.py` wrapper is the CI assertion
 driver. `ROOKIE_E2E_CLI` points it at a binary outside `target/release`.
 `ROOKIE_E2E_COOKIE_NAME` / `ROOKIE_E2E_COOKIE_VALUE` override the expected
 cookie.
+
+## Partition, fixture provenance, and stress depth
+
+`.github/workflows/e2e-depth.yml` supplies the representative deep lanes that
+would be too expensive or too specialized to repeat across the full installed
+browser matrix:
+
+- Chromium creates two CHIPS rows with the same flat identity under distinct
+  HTTPS top-level sites. Firefox creates the corresponding two dFPI identities.
+  Rust, Python, Node, and CLI assert the browser-produced context strings and
+  prove that `header(SendContext)` selects one partition without merging the
+  other. Omitting the top-level selector must fail.
+- The nightly Chromium/Firefox stress jobs retain 320 cookies across eight
+  registrable test domains, including same-name collisions. They keep the
+  browser open through three add/update/delete rounds, launch concurrent
+  extractor processes on every public surface, enforce the exact detailed
+  manifest after every round, exercise an immediate timeout boundary, and
+  compare the final closed snapshot.
+
+Both runners fail unless `CI=true` and their marked disposable profiles are
+below `RUNNER_TEMP`. They do not support local/default-profile discovery.
+
+`.github/workflows/capture-browser-cookie-fixtures.yml` is manual-only and has
+read-only repository permission. It launches a requested Playwright browser in
+a marked temporary profile, sanitizes its cookie database down to the known
+corpus identities with secure deletion and `VACUUM`, and uploads only the
+sanitized database, expected manifest, and provenance JSON. The artifact never
+contains a complete profile, `Local State`, credential material, history,
+cache, or telemetry. The workflow accepts a Playwright version so current and
+previous redistributable schema generations can be captured and reviewed
+without automatically changing committed fixtures.
 
 ## Windows App-Bound v20 (Chrome, Edge, Brave)
 
@@ -237,8 +277,16 @@ exists and passes.
 `cookie_context_fields` separately classifies all nine `CookieContext` fields
 as `live`, `fixture_only`, or `non_persistable`, with engine applicability and
 a rationale. A detailed-output smoke test therefore cannot be mistaken for
-semantic CHIPS/container coverage: those semantics remain fixture-only until a
-browser-produced value is asserted.
+semantic CHIPS/container coverage. CHIPS keys/ancestry/source metadata and
+Firefox dFPI origin attributes/partition keys are live; Firefox container IDs
+remain fixture-only, and private-browsing IDs are non-persistable.
+
+`representative_depth_lanes` records the exact-corpus, active-writer,
+partition, stress, and manual-capture runners independently of the broad
+per-browser cells. Metadata tests require each claimed workflow and runner to
+exist, constrain its engine/platform/surface vocabulary, and require the core
+Chrome/Firefox lanes to cover all three desktop OSes and all four public
+surfaces.
 
 | Lane | What it proves | When it runs |
 | --- | --- | --- |

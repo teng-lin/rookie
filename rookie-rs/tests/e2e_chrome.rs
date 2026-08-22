@@ -148,6 +148,10 @@ mod helpers {
     if assert_corpus(cookies, "filtered_flat", "Rust chromium_based") {
       return;
     }
+    assert_state(cookies, domain);
+  }
+
+  pub fn assert_state(cookies: &[rookie_cookies::enums::Cookie], domain: &str) {
     let expected_name =
       env::var("ROOKIE_E2E_COOKIE_NAME").unwrap_or_else(|_| "rookie_ci".to_string());
     let expected_value = env::var("ROOKIE_E2E_COOKIE_VALUE").unwrap_or_else(|_| "bar".to_string());
@@ -163,10 +167,10 @@ mod helpers {
           .expect("ROOKIE_E2E_FORBIDDEN_COOKIES_JSON must be a string array")
       })
       .unwrap_or_default();
-    for (name, value) in required {
+    for (name, value) in &required {
       let matches: Vec<_> = cookies
         .iter()
-        .filter(|cookie| cookie.name == name)
+        .filter(|cookie| cookie.name == *name)
         .collect();
       assert_eq!(
         matches.len(),
@@ -174,12 +178,25 @@ mod helpers {
         "expected exactly one `{name}` among {} cookies for {domain}",
         cookies.len()
       );
-      assert_eq!(matches[0].value, value, "cookie `{name}` value mismatch");
+      assert_eq!(&matches[0].value, value, "cookie `{name}` value mismatch");
     }
     for name in forbidden {
       assert!(
         cookies.iter().all(|cookie| cookie.name != name),
         "forbidden/deleted cookie `{name}` remained for {domain}"
+      );
+    }
+    if env::var("ROOKIE_E2E_EXACT_COOKIE_STATE").as_deref() == Ok("1") {
+      assert_eq!(
+        cookies.len(),
+        required.len(),
+        "active-writer result contained excess or missing rows for {domain}: {cookies:#?}"
+      );
+      assert!(
+        cookies
+          .iter()
+          .all(|cookie| required.contains_key(&cookie.name)),
+        "active-writer result contained an unexpected cookie for {domain}: {cookies:#?}"
       );
     }
   }
@@ -469,7 +486,18 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
     None,
     "explicit paths do not select profiles"
   );
-  helpers::assert_seeded(direct.cookies(), &domain);
+  if !helpers::assert_corpus(
+    direct.cookies(),
+    "unfiltered_flat",
+    "Rust from_path cookies",
+  ) {
+    helpers::assert_state(direct.cookies(), &domain);
+  }
+  helpers::assert_corpus(
+    direct.detailed_cookies(),
+    "detailed",
+    "Rust from_path detailed_cookies",
+  );
   assert!(
     direct
       .detailed_cookies()
@@ -516,7 +544,18 @@ fn canonical_detailed_and_recommended_reads_keep_the_seeded_profile_identity() {
   .unwrap_or_else(|error| panic!("read({browser_id}, {profile_id}) failed: {error}"));
   assert_eq!(snapshot.browser_id(), Some(browser_id.as_str()));
   assert_eq!(snapshot.profile_id(), Some(profile_id.as_str()));
-  helpers::assert_seeded(snapshot.cookies(), &domain);
+  if !helpers::assert_corpus(
+    snapshot.cookies(),
+    "unfiltered_flat",
+    "Rust recommended read cookies",
+  ) {
+    helpers::assert_state(snapshot.cookies(), &domain);
+  }
+  helpers::assert_corpus(
+    snapshot.detailed_cookies(),
+    "detailed",
+    "Rust recommended read detailed_cookies",
+  );
   assert!(
     snapshot.detailed_cookies().iter().any(|record| {
       record.cookie.name

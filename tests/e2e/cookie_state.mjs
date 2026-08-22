@@ -57,4 +57,16 @@ export function assertCookieState(cookies, required, forbidden, surface) {
       );
     }
   }
+  if (process.env.ROOKIE_E2E_EXACT_COOKIE_STATE === "1") {
+    const actualNames = cookies.map((cookie) => cookie.name);
+    const expectedNames = Object.keys(required);
+    if (
+      cookies.length !== expectedNames.length ||
+      actualNames.some((name) => !Object.hasOwn(required, name))
+    ) {
+      throw new Error(
+        `${surface}: exact active-writer set mismatch; expected ${JSON.stringify(expectedNames.sort())}, got ${JSON.stringify(actualNames.sort())}`,
+      );
+    }
+  }
 }

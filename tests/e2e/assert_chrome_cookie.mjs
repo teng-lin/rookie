@@ -70,10 +70,12 @@ if (process.platform === "win32") {
         localStatePath: keyPath,
         appBound: "allow_elevated_fallback",
       }),
+      "filtered_flat",
     ],
     [
       "chromiumBased",
       await rookieCookies.chromiumBased(keyPath, dbPath, [domain]),
+      "filtered_flat",
     ],
   ];
   directSnapshot = await rookieCookies.fromPath({
@@ -90,6 +92,7 @@ if (process.platform === "win32") {
         browserId: process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
         appBound: "allow_elevated_fallback",
       }),
+      "filtered_flat",
     ],
     [
       "chromiumBased",
@@ -98,6 +101,7 @@ if (process.platform === "win32") {
         [domain],
         process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome",
       ),
+      "filtered_flat",
     ],
   ];
   directSnapshot = await rookieCookies.fromPath({
@@ -119,11 +123,12 @@ if (
   console.error("fromPath.detailedCookies omitted the seeded cookie");
   process.exit(1);
 }
-results.push(["fromPath.detailedCookies", directSnapshot.cookies]);
+results.push(["fromPath.detailedCookies", directSnapshot.cookies, "unfiltered_flat"]);
 
-results = results.map(([surface, cookies]) => [
+results = results.map(([surface, cookies, projection]) => [
   surface,
   cookies,
+  projection,
   expectedName,
   expectedValue,
 ]);
@@ -146,6 +151,7 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
   results.push([
     browserName,
     await browserFn([domain]),
+    "filtered_flat",
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_VALUE ?? expectedValue,
   ]);
@@ -191,16 +197,17 @@ if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
   results.push([
     "read(profile).detailedCookies",
     recommendedSnapshot.cookies,
+    "unfiltered_flat",
     expectedName,
     expectedValue,
   ]);
 }
 
-for (const [surface, result, surfaceName, surfaceValue] of results) {
+for (const [surface, result, projection, surfaceName, surfaceValue] of results) {
   if (manifestPath) {
     verifyCookieRecords(
       manifestPath,
-      "filtered_flat",
+      projection,
       result,
       `Node ${surface}`,
     );

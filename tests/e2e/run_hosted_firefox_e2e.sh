@@ -5,11 +5,23 @@ set -euo pipefail
 profile="${ROOKIE_E2E_FIREFOX_PROFILE:?ROOKIE_E2E_FIREFOX_PROFILE must be set}"
 mkdir -p "$profile"
 args=(
-  tests/e2e/run_active_writer_e2e.py
+  tests/e2e/run_exact_corpus_e2e.py
   --engine firefox
   --profile "$profile"
+  --browser-id "${ROOKIE_E2E_BROWSER_ID:-firefox}"
 )
 if command -v xvfb-run >/dev/null 2>&1; then
   args+=(--xvfb)
 fi
 .venv/bin/python "${args[@]}"
+
+active_args=(
+  tests/e2e/run_active_writer_e2e.py
+  --engine firefox
+  --profile "${profile}-active-writer"
+  --browser-id "${ROOKIE_E2E_BROWSER_ID:-firefox}"
+)
+if command -v xvfb-run >/dev/null 2>&1; then
+  active_args+=(--xvfb)
+fi
+.venv/bin/python "${active_args[@]}"

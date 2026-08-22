@@ -67,10 +67,18 @@ def main() -> int:
             direct_detailed,
             surface="Python from_path.detailed_cookies",
         )
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            direct_snapshot.as_list(),
+            surface="Python from_path cookies",
+        )
     else:
         try:
             required, forbidden = state_from_environment(expected_name, expected_value)
-            assert_cookie_state(cookies, required, forbidden, surface="cookies_from_path")
+            assert_cookie_state(
+                cookies, required, forbidden, surface="cookies_from_path"
+            )
             assert_cookie_state(legacy, required, forbidden, surface="firefox_based")
             assert_cookie_state(
                 [record["cookie"] for record in detailed],
@@ -84,6 +92,12 @@ def main() -> int:
                 forbidden,
                 surface="from_path.detailed_cookies",
             )
+            assert_cookie_state(
+                direct_snapshot.as_list(),
+                required,
+                forbidden,
+                surface="from_path cookies",
+            )
         except (AssertionError, ValueError) as error:
             print(error, file=sys.stderr)
             return 1
@@ -91,7 +105,9 @@ def main() -> int:
         seeded = next(c for c in cookies if c["name"] == expected_name)
 
         if legacy != cookies:
-            print("legacy firefox_based disagrees with cookies_from_path", file=sys.stderr)
+            print(
+                "legacy firefox_based disagrees with cookies_from_path", file=sys.stderr
+            )
             return 1
 
         now = int(time.time())
@@ -105,11 +121,21 @@ def main() -> int:
             return 1
 
         detailed_seeded = next(
-            (record for record in detailed if record["cookie"]["name"] == expected_name),
+            (
+                record
+                for record in detailed
+                if record["cookie"]["name"] == expected_name
+            ),
             None,
         )
-        if detailed_seeded is None or "origin_attributes" not in detailed_seeded["context"]:
-            print("detailed Firefox binding omitted the seeded cookie context", file=sys.stderr)
+        if (
+            detailed_seeded is None
+            or "origin_attributes" not in detailed_seeded["context"]
+        ):
+            print(
+                "detailed Firefox binding omitted the seeded cookie context",
+                file=sys.stderr,
+            )
             return 1
 
         direct_seeded = next(
@@ -121,7 +147,9 @@ def main() -> int:
             None,
         )
         if direct_seeded is None or direct_seeded["cookie"]["value"] != expected_value:
-            print("from_path.detailed_cookies omitted the seeded cookie", file=sys.stderr)
+            print(
+                "from_path.detailed_cookies omitted the seeded cookie", file=sys.stderr
+            )
             return 1
 
     recommended_checked = os.environ.get("ROOKIE_E2E_CHECK_RECOMMENDED_READ") == "1"
@@ -165,15 +193,44 @@ def main() -> int:
             None,
         )
         if recommended is None or recommended["cookie"]["value"] != expected_value:
-            print("recommended read detailed output omitted the seeded cookie", file=sys.stderr)
+            print(
+                "recommended read detailed output omitted the seeded cookie",
+                file=sys.stderr,
+            )
             return 1
         if manifest is not None:
+            verify_records(
+                manifest,
+                "unfiltered_flat",
+                recommended_snapshot.as_list(),
+                surface="Python read(profile) cookies",
+            )
             verify_records(
                 manifest,
                 "detailed",
                 recommended_snapshot.detailed_cookies(),
                 surface="Python read(profile).detailed_cookies",
             )
+        else:
+            try:
+                assert_cookie_state(
+                    recommended_snapshot.as_list(),
+                    required,
+                    forbidden,
+                    surface="read(profile) cookies",
+                )
+                assert_cookie_state(
+                    [
+                        record["cookie"]
+                        for record in recommended_snapshot.detailed_cookies()
+                    ],
+                    required,
+                    forbidden,
+                    surface="read(profile).detailed_cookies",
+                )
+            except AssertionError as error:
+                print(error, file=sys.stderr)
+                return 1
 
     print(
         f"rookie_cookies ({sys.platform}, firefox): "

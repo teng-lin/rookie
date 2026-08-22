@@ -13,6 +13,16 @@ import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
+    def test_live_claimed_runner_requires_the_exact_single_cookie_set(self) -> None:
+        environment: dict[str, str] = {}
+        hosted.require_exact_single_cookie(environment)
+        self.assertEqual(
+            environment["ROOKIE_E2E_REQUIRED_COOKIES_JSON"],
+            '{"rookie_ci": "bar"}',
+        )
+        self.assertEqual(environment["ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"], "[]")
+        self.assertEqual(environment["ROOKIE_E2E_EXACT_COOKIE_STATE"], "1")
+
     def test_isolated_discovery_environment_stays_below_sandbox(self) -> None:
         sandbox = Path("/tmp/rookie-registry-sandbox")
         environment = hosted.isolated_discovery_environment(sandbox)
@@ -27,7 +37,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             resolved,
-            Path("/tmp/sandbox/home/AppData/Local/Packages/Browser_rookie-fixture/User Data"),
+            Path(
+                "/tmp/sandbox/home/AppData/Local/Packages/Browser_rookie-fixture/User Data"
+            ),
         )
 
     def test_gecko_discovery_profile_has_a_profiles_ini(self) -> None:
@@ -49,7 +61,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 )
 
             self.assertEqual(
-                profile, Path(environment["HOME"]) / ".fixture-browser/Profiles/rookie-e2e"
+                profile,
+                Path(environment["HOME"]) / ".fixture-browser/Profiles/rookie-e2e",
             )
             profiles_ini = profile.parents[1] / "profiles.ini"
             self.assertIn("Path=Profiles/rookie-e2e", profiles_ini.read_text())
@@ -154,7 +167,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         with (
             mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
-            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=False),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
             mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
             mock.patch.object(hosted.time, "sleep"),
         ):
@@ -173,7 +188,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         with (
             mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
-            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=False),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
             mock.patch.object(
                 hosted, "wait_for_chromium_cookie", side_effect=[False, False]
             ),

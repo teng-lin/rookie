@@ -121,3 +121,24 @@ test("transition assertion rejects duplicates and deleted state", () => {
     /forbidden\/deleted/,
   );
 });
+
+test("exact transition assertion rejects unrelated rows", () => {
+  process.env.ROOKIE_E2E_EXACT_COOKIE_STATE = "1";
+  try {
+    assert.throws(
+      () =>
+        assertCookieState(
+          [
+            { name: "rookie_ci", value: "after" },
+            { name: "unrelated", value: "leak" },
+          ],
+          { rookie_ci: "after" },
+          [],
+          "synthetic",
+        ),
+      /exact active-writer set/,
+    );
+  } finally {
+    delete process.env.ROOKIE_E2E_EXACT_COOKIE_STATE;
+  }
+});

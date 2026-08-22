@@ -96,36 +96,78 @@
       "partitioned": "none"
     }
   },
+  "representative_depth_lanes": {
+    "core_chromium": {
+      "workflow": ".github/workflows/e2e.yml",
+      "runner": "tests/e2e/run_hosted_chromium_e2e.sh",
+      "platforms": ["linux", "macos", "windows"],
+      "engines": ["chromium"],
+      "capabilities": ["exact_set", "active_writer", "detailed", "crypto"],
+      "surfaces": ["rust", "python", "node", "cli"]
+    },
+    "core_firefox": {
+      "workflow": ".github/workflows/e2e.yml",
+      "runner": "tests/e2e/run_hosted_firefox_e2e.sh",
+      "platforms": ["linux", "macos", "windows"],
+      "engines": ["gecko"],
+      "capabilities": ["exact_set", "active_writer", "detailed"],
+      "surfaces": ["rust", "python", "node", "cli"]
+    },
+    "partition_context": {
+      "workflow": ".github/workflows/e2e-depth.yml",
+      "runner": "tests/e2e/run_partition_context_e2e.py",
+      "platforms": ["linux"],
+      "engines": ["chromium", "gecko"],
+      "capabilities": ["partitioned", "detailed", "discovery", "recommended_read"],
+      "surfaces": ["rust", "python", "node", "cli"]
+    },
+    "nightly_stress": {
+      "workflow": ".github/workflows/e2e-depth.yml",
+      "runner": "tests/e2e/run_browser_cookie_stress_e2e.py",
+      "platforms": ["linux"],
+      "engines": ["chromium", "gecko"],
+      "capabilities": ["exact_set", "active_writer", "detailed"],
+      "surfaces": ["rust", "python", "node", "cli"]
+    },
+    "manual_fixture_capture": {
+      "workflow": ".github/workflows/capture-browser-cookie-fixtures.yml",
+      "runner": "tests/e2e/capture_browser_cookie_fixture.py",
+      "platforms": ["linux"],
+      "engines": ["chromium", "gecko"],
+      "capabilities": ["browser_launch", "detailed"],
+      "surfaces": []
+    }
+  },
   "cookie_context_fields": {
     "top_frame_site_key": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["chromium"],
-      "rationale": "Chromium CHIPS keys are currently asserted only from authored SQLite fixtures."
+      "rationale": "The partition-context workflow asserts two colliding CHIPS keys written by a live Chromium browser."
     },
     "has_cross_site_ancestor": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["chromium"],
-      "rationale": "Chromium cross-site ancestry is currently asserted only from authored SQLite fixtures."
+      "rationale": "The live Chromium partition workflow asserts the cross-site ancestor bit on both CHIPS identities."
     },
     "source_scheme": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["chromium"],
-      "rationale": "Chromium source schemes are currently asserted only from authored SQLite fixtures."
+      "rationale": "The live HTTPS Chromium context lane asserts a browser-produced source scheme for each partition."
     },
     "source_port": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["chromium"],
-      "rationale": "Chromium source ports are currently asserted only from authored SQLite fixtures."
+      "rationale": "The live HTTPS Chromium context lane compares every stored source port with its actual server port."
     },
     "is_persistent": {
-      "classification": "fixture_only",
-      "engines": ["chromium", "gecko"],
-      "rationale": "Live stores expose persistence but the E2E assertions do not verify its semantics."
+      "classification": "live",
+      "engines": ["chromium"],
+      "rationale": "The live Chromium context lane asserts the browser-produced persistence bit. Firefox does not persist a corresponding field in cookies.sqlite, so its absence is not claimed as live field coverage."
     },
     "origin_attributes": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["gecko"],
-      "rationale": "Live Firefox checks key presence while semantic values remain fixture-only."
+      "rationale": "The Firefox dFPI lane asserts two complete browser-produced originAttributes strings and their parsed identities."
     },
     "user_context_id": {
       "classification": "fixture_only",
@@ -133,9 +175,9 @@
       "rationale": "Firefox container identities require a test container and remain fixture-only."
     },
     "partition_key": {
-      "classification": "fixture_only",
+      "classification": "live",
       "engines": ["gecko"],
-      "rationale": "Firefox dynamic partition keys have not been seeded by a live E2E browser."
+      "rationale": "The Firefox dFPI lane asserts two browser-produced partition keys and their send-time isolation."
     },
     "private_browsing_id": {
       "classification": "non_persistable",

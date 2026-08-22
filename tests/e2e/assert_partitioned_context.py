@@ -54,65 +54,128 @@ def validate_context_snapshot(
     for record in detailed:
         by_name.setdefault(record["cookie"]["name"], []).append(record)
 
+    expected_counts = {"rookie_top": 2, "rookie_chips": 2}
+    if engine == "firefox":
+        expected_counts["rookie_dfpi"] = 2
+    actual_counts = {name: len(records) for name, records in by_name.items()}
+    if actual_counts != expected_counts:
+        raise ContextAssertionError(
+            f"context corpus mismatch: expected {expected_counts}, got {actual_counts}"
+        )
+
     for required in ("rookie_top", "rookie_chips"):
-        if len(by_name.get(required, [])) != 1:
+        if len(by_name.get(required, [])) != 2:
             raise ContextAssertionError(
-                f"expected exactly one {required}, got {len(by_name.get(required, []))}"
+                f"expected exactly two colliding {required} identities, "
+                f"got {len(by_name.get(required, []))}"
             )
 
-    top_context = by_name["rookie_top"][0].get("context", {})
+    top_contexts = [record.get("context", {}) for record in by_name["rookie_top"]]
     if engine == "chromium":
-        if context_value(top_context, "top_frame_site_key", "topFrameSiteKey") not in (
-            None,
-            "",
+        if any(
+            context_value(context, "top_frame_site_key", "topFrameSiteKey")
+            not in (None, "")
+            for context in top_contexts
         ):
-            raise ContextAssertionError("first-party top cookie became partitioned")
-        chips_context = by_name["rookie_chips"][0].get("context", {})
-        key = context_value(
-            chips_context, "top_frame_site_key", "topFrameSiteKey"
-        )
-        if not isinstance(key, str) or "rookie-a.test" not in key:
-            raise ContextAssertionError(f"unexpected Chromium partition key {key!r}")
-        if context_value(
-            chips_context, "has_cross_site_ancestor", "hasCrossSiteAncestor"
-        ) is not True:
-            raise ContextAssertionError("CHIPS row lost its cross-site ancestor bit")
-        if context_value(chips_context, "source_port", "sourcePort") != expected_source_port:
-            raise ContextAssertionError(
-                f"CHIPS source port was {context_value(chips_context, 'source_port', 'sourcePort')!r}"
+            raise ContextAssertionError("a first-party top cookie became partitioned")
+        keyed: dict[str, dict[str, Any]] = {}
+        for record in by_name["rookie_chips"]:
+            chips_context = record.get("context", {})
+            key = context_value(chips_context, "top_frame_site_key", "topFrameSiteKey")
+            label = next(
+                (
+                    candidate
+                    for candidate in ("a", "c")
+                    if f"rookie-{candidate}.test" in str(key)
+                ),
+                None,
             )
-        if context_value(chips_context, "source_scheme", "sourceScheme") is None:
-            raise ContextAssertionError("CHIPS source scheme was not observed")
-        if context_value(chips_context, "is_persistent", "isPersistent") is not True:
-            raise ContextAssertionError("CHIPS persistence bit was not true")
+            if label is None or label in keyed:
+                raise ContextAssertionError(
+                    f"unexpected Chromium partition keys: {key!r}"
+                )
+            keyed[label] = record
+            if (
+                context_value(
+                    chips_context, "has_cross_site_ancestor", "hasCrossSiteAncestor"
+                )
+                is not True
+            ):
+                raise ContextAssertionError(
+                    "CHIPS row lost its cross-site ancestor bit"
+                )
+            if (
+                context_value(chips_context, "source_port", "sourcePort")
+                != expected_source_port
+            ):
+                raise ContextAssertionError(
+                    f"CHIPS source port was {context_value(chips_context, 'source_port', 'sourcePort')!r}"
+                )
+            if context_value(chips_context, "source_scheme", "sourceScheme") is None:
+                raise ContextAssertionError("CHIPS source scheme was not observed")
+            if (
+                context_value(chips_context, "is_persistent", "isPersistent")
+                is not True
+            ):
+                raise ContextAssertionError("CHIPS persistence bit was not true")
+        for label, record in keyed.items():
+            if record["cookie"]["value"] != f"partition-{label}":
+                raise ContextAssertionError(
+                    f"Chromium partition {label} carried {record['cookie']['value']!r}"
+                )
     else:
-        if len(by_name.get("rookie_dfpi", [])) != 1:
+        if len(by_name.get("rookie_dfpi", [])) != 2:
             raise ContextAssertionError(
-                f"expected one Firefox dFPI row, got {len(by_name.get('rookie_dfpi', []))}"
+                f"expected two Firefox dFPI rows, got {len(by_name.get('rookie_dfpi', []))}"
             )
         for name in ("rookie_chips", "rookie_dfpi"):
-            context = by_name[name][0].get("context", {})
-            origin_attributes = context_value(
-                context, "origin_attributes", "originAttributes"
-            )
-            partition_key = context_value(context, "partition_key", "partitionKey")
-            if not isinstance(origin_attributes, str) or "partitionKey=" not in origin_attributes:
-                raise ContextAssertionError(
-                    f"{name} lacks complete partitioned originAttributes"
+            labels: set[str] = set()
+            for record in by_name[name]:
+                context = record.get("context", {})
+                origin_attributes = context_value(
+                    context, "origin_attributes", "originAttributes"
                 )
-            if not isinstance(partition_key, str) or "rookie-a.test" not in partition_key:
-                raise ContextAssertionError(
-                    f"{name} has unexpected parsed partition key {partition_key!r}"
+                partition_key = context_value(context, "partition_key", "partitionKey")
+                label = next(
+                    (
+                        candidate
+                        for candidate in ("a", "c")
+                        if f"rookie-{candidate}.test" in str(partition_key)
+                    ),
+                    None,
                 )
-            if context_value(context, "user_context_id", "userContextId") not in (
-                None,
-                0,
-            ):
-                raise ContextAssertionError(f"{name} unexpectedly entered a container")
-            if context_value(
-                context, "private_browsing_id", "privateBrowsingId"
-            ) not in (None, 0):
-                raise ContextAssertionError(f"{name} unexpectedly entered private browsing")
+                if label is None or label in labels:
+                    raise ContextAssertionError(
+                        f"{name} has unexpected parsed partition key {partition_key!r}"
+                    )
+                labels.add(label)
+                if (
+                    not isinstance(origin_attributes, str)
+                    or "partitionKey=" not in origin_attributes
+                ):
+                    raise ContextAssertionError(
+                        f"{name} lacks complete partitioned originAttributes"
+                    )
+                if context_value(context, "user_context_id", "userContextId") not in (
+                    None,
+                    0,
+                ):
+                    raise ContextAssertionError(
+                        f"{name} unexpectedly entered a container"
+                    )
+                if context_value(
+                    context, "private_browsing_id", "privateBrowsingId"
+                ) not in (None, 0):
+                    raise ContextAssertionError(
+                        f"{name} unexpectedly entered private browsing"
+                    )
+                expected_value = (
+                    f"partition-{label}" if name == "rookie_chips" else f"dfpi-{label}"
+                )
+                if record["cookie"]["value"] != expected_value:
+                    raise ContextAssertionError(
+                        f"{name} partition {label} carried {record['cookie']['value']!r}"
+                    )
 
     matching_context = {
         "url": f"{third_origin}/echo",
@@ -123,22 +186,35 @@ def validate_context_snapshot(
     other_context = {**matching_context, "top_level_site": other_top_origin}
     matching_header = snapshot.header(matching_context)
     other_header = snapshot.header(other_context)
-    if "rookie_chips=partitioned" not in matching_header:
+    if "rookie_chips=partition-a" not in matching_header:
         raise ContextAssertionError(
             f"matching send context omitted CHIPS cookie: {matching_header!r}"
         )
-    if "rookie_chips=partitioned" in other_header:
+    if "rookie_chips=partition-c" in matching_header:
         raise ContextAssertionError(
-            f"different top-level site received CHIPS cookie: {other_header!r}"
+            f"top A received top C CHIPS cookie: {matching_header!r}"
+        )
+    if (
+        "rookie_chips=partition-c" not in other_header
+        or "rookie_chips=partition-a" in other_header
+    ):
+        raise ContextAssertionError(
+            f"top C selected the wrong CHIPS cookie: {other_header!r}"
         )
     if engine == "firefox":
-        if "rookie_dfpi=partitioned-by-context" not in matching_header:
+        if (
+            "rookie_dfpi=dfpi-a" not in matching_header
+            or "rookie_dfpi=dfpi-c" in matching_header
+        ):
             raise ContextAssertionError(
                 f"matching Firefox context omitted dFPI cookie: {matching_header!r}"
             )
-        if "rookie_dfpi=partitioned-by-context" in other_header:
+        if (
+            "rookie_dfpi=dfpi-c" not in other_header
+            or "rookie_dfpi=dfpi-a" in other_header
+        ):
             raise ContextAssertionError(
-                f"different top-level site received dFPI cookie: {other_header!r}"
+                f"other Firefox context selected the wrong dFPI cookie: {other_header!r}"
             )
 
     try:
@@ -158,7 +234,9 @@ def validate_context_snapshot(
                 f"missing selector failed with the wrong error: {error!r}"
             ) from error
     else:
-        raise ContextAssertionError("partitioned snapshot accepted an incomplete context")
+        raise ContextAssertionError(
+            "partitioned snapshot accepted an incomplete context"
+        )
 
     return {
         "engine": engine,
@@ -200,7 +278,9 @@ def main() -> int:
             third_origin=args.third_origin,
             expected_source_port=args.source_port,
         )
-        encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        encoded = (
+            json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        )
         if args.output is None:
             print(encoded, end="")
         else:

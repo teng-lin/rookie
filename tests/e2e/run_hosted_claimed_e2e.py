@@ -529,8 +529,19 @@ def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
     raise SystemExit(f"no Chromium Cookies db under {user_data}")
 
 
+def require_exact_single_cookie(env: dict[str, str]) -> None:
+    """Make the broad hosted lane reject every unseeded or duplicate row."""
+
+    name = env.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
+    value = env.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
+    env["ROOKIE_E2E_REQUIRED_COOKIES_JSON"] = json.dumps({name: value})
+    env["ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"] = "[]"
+    env["ROOKIE_E2E_EXACT_COOKIE_STATE"] = "1"
+
+
 def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
+    require_exact_single_cookie(env)
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
@@ -583,6 +594,7 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
 
 def assert_gecko(profile: Path, browser_id: str) -> None:
     env = os.environ.copy()
+    require_exact_single_cookie(env)
     env["ROOKIE_E2E_FIREFOX_PROFILE"] = str(profile)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"

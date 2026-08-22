@@ -11,16 +11,20 @@ fn required(name: &str) -> String {
   env::var(name).unwrap_or_else(|_| panic!("{name} must be set by the context E2E harness"))
 }
 
-fn one<'a>(
+fn exactly_two<'a>(
   records: &'a [rookie_cookies::enums::DetailedCookie],
   name: &str,
-) -> &'a rookie_cookies::enums::DetailedCookie {
+) -> Vec<&'a rookie_cookies::enums::DetailedCookie> {
   let matches = records
     .iter()
     .filter(|record| record.cookie.name == name)
     .collect::<Vec<_>>();
-  assert_eq!(matches.len(), 1, "expected exactly one {name}");
-  matches[0]
+  assert_eq!(
+    matches.len(),
+    2,
+    "expected exactly two colliding {name} identities"
+  );
+  matches
 }
 
 #[test]
@@ -58,50 +62,90 @@ fn browser_produced_partition_context_survives_snapshot_and_header_filter() {
     .filter(|record| record.cookie.name.starts_with("rookie_"))
     .cloned()
     .collect::<Vec<_>>();
-  let top = one(&records, "rookie_top");
-  let chips = one(&records, "rookie_chips");
+  let top = exactly_two(&records, "rookie_top");
+  let chips = exactly_two(&records, "rookie_chips");
+  let expected_names = if engine == "chromium" {
+    vec!["rookie_chips", "rookie_top"]
+  } else {
+    vec!["rookie_chips", "rookie_dfpi", "rookie_top"]
+  };
+  assert_eq!(
+    records.len(),
+    if engine == "chromium" { 4 } else { 6 },
+    "context corpus contained excess or missing records: {records:#?}"
+  );
+  assert!(
+    records
+      .iter()
+      .all(|record| expected_names.contains(&record.cookie.name.as_str())),
+    "context corpus contained an unexpected rookie cookie: {records:#?}"
+  );
 
   if engine == "chromium" {
     assert!(
-      top.context.top_frame_site_key.as_deref().unwrap_or("").is_empty(),
-      "first-party top cookie became partitioned"
-    );
-    assert!(
-      chips
+      top.iter().all(|record| record
         .context
         .top_frame_site_key
         .as_deref()
-        .is_some_and(|key| key.contains("rookie-a.test")),
-      "CHIPS row lost its top-frame site: {:?}",
-      chips.context.top_frame_site_key
+        .unwrap_or("")
+        .is_empty()),
+      "first-party top cookie became partitioned"
     );
-    assert_eq!(chips.context.has_cross_site_ancestor, Some(true));
-    assert_eq!(chips.context.source_port, Some(source_port));
-    assert!(chips.context.source_scheme.is_some());
-    assert_eq!(chips.context.is_persistent, Some(true));
+    for label in ["a", "c"] {
+      let expected_key = format!("rookie-{label}.test");
+      let matches = chips
+        .iter()
+        .filter(|record| {
+          record
+            .context
+            .top_frame_site_key
+            .as_deref()
+            .is_some_and(|key| key.contains(&expected_key))
+        })
+        .collect::<Vec<_>>();
+      assert_eq!(matches.len(), 1, "expected one Chromium partition {label}");
+      let record = matches[0];
+      assert_eq!(record.cookie.value, format!("partition-{label}"));
+      assert_eq!(record.context.has_cross_site_ancestor, Some(true));
+      assert_eq!(record.context.source_port, Some(source_port));
+      assert!(record.context.source_scheme.is_some());
+      assert_eq!(record.context.is_persistent, Some(true));
+    }
   } else {
-    for record in [chips, one(&records, "rookie_dfpi")] {
-      assert!(
-        record
-          .context
-          .origin_attributes
-          .as_deref()
-          .is_some_and(|value| value.contains("partitionKey=")),
-        "{} lost complete originAttributes",
-        record.cookie.name
-      );
-      assert!(
-        record
-          .context
-          .partition_key
-          .as_deref()
-          .is_some_and(|value| value.contains("rookie-a.test")),
-        "{} has an unexpected partition key: {:?}",
-        record.cookie.name,
-        record.context.partition_key
-      );
-      assert!(record.context.user_context_id.is_none_or(|id| id == 0));
-      assert!(record.context.private_browsing_id.is_none_or(|id| id == 0));
+    let dfpi = exactly_two(&records, "rookie_dfpi");
+    for (name, collisions) in [("rookie_chips", chips), ("rookie_dfpi", dfpi)] {
+      for label in ["a", "c"] {
+        let expected_key = format!("rookie-{label}.test");
+        let matches = collisions
+          .iter()
+          .filter(|record| {
+            record
+              .context
+              .partition_key
+              .as_deref()
+              .is_some_and(|value| value.contains(&expected_key))
+          })
+          .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "expected one {name} partition {label}");
+        let record = matches[0];
+        assert!(
+          record
+            .context
+            .origin_attributes
+            .as_deref()
+            .is_some_and(|value| value.contains("partitionKey=")),
+          "{} lost complete originAttributes",
+          record.cookie.name
+        );
+        assert!(record.context.user_context_id.is_none_or(|id| id == 0));
+        assert!(record.context.private_browsing_id.is_none_or(|id| id == 0));
+        let expected_value = if name == "rookie_chips" {
+          format!("partition-{label}")
+        } else {
+          format!("dfpi-{label}")
+        };
+        assert_eq!(record.cookie.value, expected_value);
+      }
     }
   }
 
@@ -120,11 +164,15 @@ fn browser_produced_partition_context_survives_snapshot_and_header_filter() {
         .subresource(),
     )
     .expect("complete non-matching context must build a header");
-  assert!(matching.contains("rookie_chips=partitioned"));
-  assert!(!other.contains("rookie_chips=partitioned"));
+  assert!(matching.contains("rookie_chips=partition-a"));
+  assert!(!matching.contains("rookie_chips=partition-c"));
+  assert!(other.contains("rookie_chips=partition-c"));
+  assert!(!other.contains("rookie_chips=partition-a"));
   if engine == "firefox" {
-    assert!(matching.contains("rookie_dfpi=partitioned-by-context"));
-    assert!(!other.contains("rookie_dfpi=partitioned-by-context"));
+    assert!(matching.contains("rookie_dfpi=dfpi-a"));
+    assert!(!matching.contains("rookie_dfpi=dfpi-c"));
+    assert!(other.contains("rookie_dfpi=dfpi-c"));
+    assert!(!other.contains("rookie_dfpi=dfpi-a"));
   }
 
   let error = snapshot

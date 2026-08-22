@@ -73,7 +73,13 @@ def assert_cli_cookie(
         # `read` is an unfiltered snapshot; domain filtering belongs to
         # `report` and `from-path` in the subcommand-only CLI.
         command.extend(
-            ("read", "--browser", browser, "--format", "detailed" if detailed else "json")
+            (
+                "read",
+                "--browser",
+                browser,
+                "--format",
+                "detailed" if detailed else "json",
+            )
         )
     else:
         command.extend(("from-path", str(cookies_path)))
@@ -100,7 +106,9 @@ def assert_cli_cookie(
     if manifest_path is not None:
         try:
             manifest = load_manifest(manifest_path)
-            flat_projection = "unfiltered_flat" if browser is not None else "filtered_flat"
+            flat_projection = (
+                "unfiltered_flat" if browser is not None else "filtered_flat"
+            )
             verify_records(
                 manifest,
                 flat_projection,
@@ -153,8 +161,7 @@ def assert_cli_cookie(
             raise HarnessError(str(error)) from error
         return len(cookies)
     if not any(
-        cookie.get("name") == expected_name
-        and cookie.get("value") == expected_value
+        cookie.get("name") == expected_name and cookie.get("value") == expected_value
         for cookie in flat_cookies
     ):
         raise HarnessError(

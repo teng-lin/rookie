@@ -1,0 +1,110 @@
+name: E2E browser depth
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '43 6 * * *'
+  workflow_dispatch:
+    inputs:
+      run_stress:
+        description: Run the 320-cookie active-browser stress jobs
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-depth-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  partition-context:
+    name: partition context × ${{ matrix.engine }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Install browser and desktop dependencies
+        working-directory: tests/e2e
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb openssl
+          npm install --no-save playwright@1.62.1
+          npx playwright install --with-deps ${{ matrix.engine }}
+      - name: Build every public surface
+        run: |
+          cargo test --test e2e_context --no-run --locked
+          cargo build -p rookie-cookies-cli --release --locked
+          python -m venv .venv
+          .venv/bin/pip install --quiet maturin==1.14.1
+          .venv/bin/maturin develop --release --locked --manifest-path bindings/python/Cargo.toml
+          (cd bindings/node && npm ci --omit=optional && npm run build -- -- --locked)
+      - name: Seed two real partitions and verify Rust/Python/Node/CLI isolation
+        env:
+          ROOKIE_E2E_PASSWORD_STORE: basic
+        run: |
+          .venv/bin/python tests/e2e/run_partition_context_e2e.py \
+            --engine ${{ matrix.engine }} \
+            --sandbox "$RUNNER_TEMP/rookie-partition-${{ matrix.engine }}" \
+            --xvfb
+
+  active-stress:
+    name: active stress × ${{ matrix.engine }}
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_stress)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - name: Install browser and desktop dependencies
+        working-directory: tests/e2e
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb openssl
+          npm install --no-save playwright@1.62.1
+          npx playwright install --with-deps ${{ matrix.engine }}
+      - name: Build stress emitters and public surfaces
+        run: |
+          cargo build -p rookie-cookies --example e2e_cookie_surface --release --locked
+          cargo build -p rookie-cookies-cli --release --locked
+          python -m venv .venv
+          .venv/bin/pip install --quiet maturin==1.14.1
+          .venv/bin/maturin develop --release --locked --manifest-path bindings/python/Cargo.toml
+          (cd bindings/node && npm ci --omit=optional && npm run build -- -- --locked)
+      - name: Mutate 320 cookies while the browser stays active
+        env:
+          ROOKIE_E2E_PASSWORD_STORE: basic
+        run: |
+          .venv/bin/python tests/e2e/run_browser_cookie_stress_e2e.py \
+            --engine ${{ matrix.engine }} \
+            --sandbox "$RUNNER_TEMP/rookie-stress-${{ matrix.engine }}" \
+            --workers 4 --iterations 3 --rounds 3 --xvfb

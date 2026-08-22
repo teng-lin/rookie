@@ -2,14 +2,21 @@
 // The browser profile must be explicitly marked disposable; no discovery is
 // performed and no default profile is ever opened.
 
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import process from "node:process";
 
 import { chromium, firefox } from "playwright";
 
-const [engine, profileArg, portArg, manifestArg, mode = "seed", roundArg = "0"] =
-  process.argv.slice(2);
+const [
+  engine,
+  profileArg,
+  portArg,
+  manifestArg,
+  mode = "seed",
+  roundArg = "0",
+  controlArg,
+] = process.argv.slice(2);
 if (
   !["chromium", "firefox"].includes(engine) ||
   !profileArg ||
@@ -18,7 +25,7 @@ if (
   !["seed", "mutate"].includes(mode)
 ) {
   console.error(
-    "usage: node seed_cookie_stress.mjs <chromium|firefox> <profile> <https-port> <manifest> [seed|mutate] [round]",
+    "usage: node seed_cookie_stress.mjs <chromium|firefox> <profile> <https-port> <manifest> [seed|mutate] [round] [control-dir]",
   );
   process.exit(2);
 }
@@ -34,6 +41,7 @@ if (!Number.isSafeInteger(round) || round < 0 || round > 38) {
 
 const profile = resolve(profileArg);
 const manifestPath = resolve(manifestArg);
+const controlDir = controlArg ? resolve(controlArg) : null;
 if (manifestPath === profile || manifestPath.startsWith(`${profile}/`)) {
   throw new Error("stress manifest must be outside the disposable profile");
 }
@@ -88,14 +96,42 @@ if (engine === "chromium") {
   };
 }
 
-const context = await browserType.launchPersistentContext(profile, launchOptions);
-try {
-  const page = await context.newPage();
+const delay = (milliseconds) =>
+  new Promise((accept) => setTimeout(accept, milliseconds));
+
+async function waitForCommand(sequence) {
+  const path = join(controlDir, `command-${sequence}.json`);
+  const deadline = Date.now() + Number(
+    process.env.ROOKIE_E2E_STRESS_TIMEOUT_MS || 300000,
+  );
+  while (Date.now() < deadline) {
+    try {
+      return JSON.parse(await readFile(path, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await delay(100);
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
+async function writeControl(name, payload) {
+  const target = join(controlDir, name);
+  const temporary = `${target}.tmp-${process.pid}`;
+  await writeFile(
+    temporary,
+    `${JSON.stringify(payload, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
+  await rename(temporary, target);
+}
+
+async function navigateAndCapture(context, page, captureMode, captureRound, output) {
   for (const host of hosts) {
     const target =
-      mode === "seed"
+      captureMode === "seed"
         ? `https://${host}:${port}/stress/seed?count=40`
-        : `https://${host}:${port}/stress/mutate?round=${round}`;
+        : `https://${host}:${port}/stress/mutate?round=${captureRound}`;
     await page.goto(target, { waitUntil: "domcontentloaded", timeout });
   }
 
@@ -188,20 +224,84 @@ try {
       {
         scenario_id: "distributed_stress",
         stored: true,
-        mode,
-        round: mode === "mutate" ? round : null,
+        mode: captureMode,
+        round: captureMode === "mutate" ? captureRound : null,
         domains: hosts.length,
         cookies: accepted.length,
       },
     ],
   };
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+  await writeFile(output, `${JSON.stringify(manifest, null, 2)}\n`, {
     encoding: "utf8",
     flag: "wx",
   });
   console.log(
-    `${engine} ${mode} retained ${accepted.length} stress cookies across ${hosts.length} registrable domains`,
+    `${engine} ${captureMode} retained ${accepted.length} stress cookies across ${hosts.length} registrable domains`,
   );
+  return manifest;
+}
+
+const context = await browserType.launchPersistentContext(profile, launchOptions);
+try {
+  const page = await context.newPage();
+  const initial = await navigateAndCapture(context, page, mode, round, manifestPath);
+  if (controlDir) {
+    await mkdir(controlDir, { recursive: true });
+    await writeControl("ack-0.json", {
+      protocol_version: 1,
+      sequence: 0,
+      phase: "ready",
+      engine,
+      seeder_pid: process.pid,
+      profile,
+      browser_version: initial.browser.version,
+      manifest: manifestPath,
+      cookie_count: initial.expected.unfiltered_flat.length,
+    });
+    let sequence = 1;
+    while (true) {
+      const command = await waitForCommand(sequence);
+      if (command.sequence !== sequence) {
+        throw new Error(`stress command sequence mismatch: ${JSON.stringify(command)}`);
+      }
+      if (command.action === "close") {
+        await writeControl(`ack-${sequence}.json`, {
+          protocol_version: 1,
+          sequence,
+          phase: "closing",
+          engine,
+          seeder_pid: process.pid,
+        });
+        break;
+      }
+      if (command.action !== "mutate" || !Number.isSafeInteger(command.round)) {
+        throw new Error(`invalid stress command: ${JSON.stringify(command)}`);
+      }
+      const nextManifest = resolve(String(command.manifest));
+      if (nextManifest === profile || nextManifest.startsWith(`${profile}/`)) {
+        throw new Error("stress mutation manifest must remain outside the profile");
+      }
+      const captured = await navigateAndCapture(
+        context,
+        page,
+        "mutate",
+        command.round,
+        nextManifest,
+      );
+      await writeControl(`ack-${sequence}.json`, {
+        protocol_version: 1,
+        sequence,
+        phase: "mutated",
+        round: command.round,
+        engine,
+        seeder_pid: process.pid,
+        profile,
+        manifest: nextManifest,
+        cookie_count: captured.expected.unfiltered_flat.length,
+      });
+      sequence += 1;
+    }
+  }
 } finally {
   await context.close();
 }

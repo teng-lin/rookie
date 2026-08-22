@@ -16,7 +16,6 @@ import argparse
 from collections import Counter
 import hashlib
 import json
-import os
 from pathlib import Path
 import platform as host_platform
 import shutil
@@ -98,8 +97,14 @@ def load_expected_rows(path: Path, engine: str) -> tuple[list[dict[str, Any]], s
             f"expected manifest engine was {manifest_engine!r}, requested {engine!r}"
         )
     records = document.get("cookies")
+    if not isinstance(records, list):
+        expected = document.get("expected")
+        if isinstance(expected, dict):
+            records = expected.get("detailed")
     if not isinstance(records, list) or not records:
-        raise CaptureError("expected manifest must contain a non-empty cookies array")
+        raise CaptureError(
+            "expected manifest must contain a non-empty cookies array or expected.detailed"
+        )
 
     rows: list[dict[str, Any]] = []
     for index, record in enumerate(records):
@@ -120,11 +125,21 @@ def load_expected_rows(path: Path, engine: str) -> tuple[list[dict[str, Any]], s
             "name": cookie["name"],
         }
         if engine == "chromium":
-            row["partition_key"] = context.get("top_frame_site_key") or ""
-            ancestor = context.get("has_cross_site_ancestor")
+            row["partition_key"] = (
+                context.get("top_frame_site_key")
+                or context.get("topFrameSiteKey")
+                or ""
+            )
+            ancestor = context.get(
+                "has_cross_site_ancestor", context.get("hasCrossSiteAncestor")
+            )
             row["has_cross_site_ancestor"] = 0 if ancestor in (None, False) else 1
         else:
-            row["origin_attributes"] = context.get("origin_attributes") or ""
+            row["origin_attributes"] = (
+                context.get("origin_attributes")
+                or context.get("originAttributes")
+                or ""
+            )
         rows.append(row)
     return rows, hashlib.sha256(raw).hexdigest()
 
@@ -146,21 +161,26 @@ def actual_cookie_rows(
     if engine == "chromium":
         required = {"host_key", "path", "name"}
         if not required.issubset(columns):
-            raise CaptureError(f"Chromium cookies table is missing {sorted(required - columns)}")
+            raise CaptureError(
+                f"Chromium cookies table is missing {sorted(required - columns)}"
+            )
         partition = "top_frame_site_key" if "top_frame_site_key" in columns else "''"
         ancestor = (
-            "has_cross_site_ancestor"
-            if "has_cross_site_ancestor" in columns
-            else "0"
+            "has_cross_site_ancestor" if "has_cross_site_ancestor" in columns else "0"
         )
         query = (
             "SELECT rowid, host_key, path, name, "
             f"COALESCE({partition}, ''), COALESCE({ancestor}, 0) FROM cookies"
         )
         result = []
-        for rowid, domain, path, name, partition_key, has_ancestor in connection.execute(
-            query
-        ):
+        for (
+            rowid,
+            domain,
+            path,
+            name,
+            partition_key,
+            has_ancestor,
+        ) in connection.execute(query):
             row = {
                 "domain": str(domain),
                 "path": str(path),
@@ -175,7 +195,9 @@ def actual_cookie_rows(
 
     required = {"host", "path", "name"}
     if not required.issubset(columns):
-        raise CaptureError(f"Firefox cookies table is missing {sorted(required - columns)}")
+        raise CaptureError(
+            f"Firefox cookies table is missing {sorted(required - columns)}"
+        )
     origin = "originAttributes" if "originAttributes" in columns else "''"
     query = (
         "SELECT rowid, host, path, name, "
@@ -215,13 +237,18 @@ def schema_signature(connection: sqlite3.Connection) -> dict[str, Any]:
         )
     ]
     columns = {
-        table: [list(row) for row in connection.execute(
-            f"PRAGMA table_xinfo({quote_identifier(table)})"
-        )]
+        table: [
+            list(row)
+            for row in connection.execute(
+                f"PRAGMA table_xinfo({quote_identifier(table)})"
+            )
+        ]
         for table in user_tables(connection)
     }
     meta: dict[str, str] = {}
-    if "meta" in columns and {"key", "value"}.issubset(table_columns(connection, "meta")):
+    if "meta" in columns and {"key", "value"}.issubset(
+        table_columns(connection, "meta")
+    ):
         meta = {
             str(key): str(value)
             for key, value in connection.execute(
@@ -344,7 +371,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 raise CaptureError("outputs must be outside the disposable source root")
             if destination.exists():
-                raise CaptureError(f"refusing to overwrite existing output: {destination}")
+                raise CaptureError(
+                    f"refusing to overwrite existing output: {destination}"
+                )
 
         expected, manifest_digest = load_expected_rows(
             args.expected_manifest, args.engine

@@ -44,9 +44,7 @@ COOKIE_CONTEXT_FIELDS = frozenset(
         "private_browsing_id",
     }
 )
-CONTEXT_CLASSIFICATIONS = frozenset(
-    {"live", "fixture_only", "non_persistable"}
-)
+CONTEXT_CLASSIFICATIONS = frozenset({"live", "fixture_only", "non_persistable"})
 NIGHTLY_HOSTED = frozenset(
     {
         ("linux", "brave"),
@@ -145,9 +143,7 @@ class BrowserCoverageTests(unittest.TestCase):
 
     def test_depth_profiles_are_complete_and_use_known_levels(self) -> None:
         capabilities = set(self.coverage_doc["depth_capabilities"])
-        self.assertEqual(
-            set(self.coverage_doc["depth_levels"]), set(DEPTH_LEVELS)
-        )
+        self.assertEqual(set(self.coverage_doc["depth_levels"]), set(DEPTH_LEVELS))
         self.assertGreaterEqual(len(capabilities), 9)
         used_profiles = {row["depth_profile"] for row in self.coverage_doc["coverage"]}
         self.assertEqual(used_profiles, set(self.coverage_doc["depth_profiles"]))
@@ -183,20 +179,18 @@ class BrowserCoverageTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "recommended_read"):
             assert_observed_depth(row, observed, self.coverage_doc)
 
-    def test_every_cookie_context_field_has_an_applicability_classification(self) -> None:
+    def test_every_cookie_context_field_has_an_applicability_classification(
+        self,
+    ) -> None:
         fields = self.coverage_doc["cookie_context_fields"]
         self.assertEqual(set(fields), set(COOKIE_CONTEXT_FIELDS))
         for field, contract in fields.items():
             self.assertEqual(
                 set(contract), {"classification", "engines", "rationale"}, field
             )
-            self.assertIn(
-                contract["classification"], CONTEXT_CLASSIFICATIONS, field
-            )
+            self.assertIn(contract["classification"], CONTEXT_CLASSIFICATIONS, field)
             self.assertTrue(contract["engines"], field)
-            self.assertTrue(
-                set(contract["engines"]) <= {"chromium", "gecko"}, field
-            )
+            self.assertTrue(set(contract["engines"]) <= {"chromium", "gecko"}, field)
             self.assertGreaterEqual(len(contract["rationale"].split()), 8, field)
 
     def test_private_browsing_is_the_only_non_persistable_context_field(self) -> None:
@@ -207,6 +201,56 @@ class BrowserCoverageTests(unittest.TestCase):
             if contract["classification"] == "non_persistable"
         }
         self.assertEqual(non_persistable, {"private_browsing_id"})
+
+    def test_representative_depth_lanes_are_executable_and_complete(self) -> None:
+        lanes = self.coverage_doc["representative_depth_lanes"]
+        self.assertEqual(
+            set(lanes),
+            {
+                "core_chromium",
+                "core_firefox",
+                "partition_context",
+                "nightly_stress",
+                "manual_fixture_capture",
+            },
+        )
+        capabilities = set(self.coverage_doc["depth_capabilities"])
+        for name, lane in lanes.items():
+            self.assertEqual(
+                set(lane),
+                {
+                    "workflow",
+                    "runner",
+                    "platforms",
+                    "engines",
+                    "capabilities",
+                    "surfaces",
+                },
+                name,
+            )
+            workflow = REPOSITORY_ROOT / lane["workflow"]
+            runner = REPOSITORY_ROOT / lane["runner"]
+            self.assertTrue(workflow.is_file(), name)
+            self.assertTrue(runner.is_file(), name)
+            self.assertIn(lane["runner"], workflow.read_text(encoding="utf-8"), name)
+            self.assertTrue(set(lane["capabilities"]) <= capabilities, name)
+            self.assertTrue(
+                set(lane["platforms"]) <= {"linux", "macos", "windows"}, name
+            )
+            self.assertTrue(set(lane["engines"]) <= {"chromium", "gecko"}, name)
+            self.assertTrue(
+                set(lane["surfaces"]) <= {"rust", "python", "node", "cli"},
+                name,
+            )
+        for core in ("core_chromium", "core_firefox"):
+            self.assertEqual(
+                set(lanes[core]["platforms"]), {"linux", "macos", "windows"}
+            )
+            self.assertIn("exact_set", lanes[core]["capabilities"])
+            self.assertIn("active_writer", lanes[core]["capabilities"])
+            self.assertEqual(
+                set(lanes[core]["surfaces"]), {"rust", "python", "node", "cli"}
+            )
 
     def test_every_registry_cell_has_exactly_one_lane(self) -> None:
         expected = {}

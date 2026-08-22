@@ -2,7 +2,8 @@
 
 PR 1's exact corpus is the broader semantic oracle. This helper is deliberately
 scoped to PR 3: every public surface must observe one value replacement, one
-addition, and one deletion at each active-writer checkpoint.
+addition, and one deletion at each active-writer checkpoint. The coordinator
+also enables exact-state mode so unrelated or duplicate rows cannot hide.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Any
 
 REQUIRED_ENV = "ROOKIE_E2E_REQUIRED_COOKIES_JSON"
 FORBIDDEN_ENV = "ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"
+EXACT_ENV = "ROOKIE_E2E_EXACT_COOKIE_STATE"
 
 
 def state_from_environment(
@@ -68,4 +70,11 @@ def assert_cookie_state(
         if matches:
             raise AssertionError(
                 f"{surface}: forbidden/deleted cookie {name!r} remained ({len(matches)} row(s))"
+            )
+    if os.environ.get(EXACT_ENV) == "1":
+        actual_names = [cookie.get("name") for cookie in cookies]
+        if len(cookies) != len(required) or set(actual_names) != set(required):
+            raise AssertionError(
+                f"{surface}: exact active-writer set mismatch; "
+                f"expected names {sorted(required)}, got {sorted(map(str, actual_names))}"
             )

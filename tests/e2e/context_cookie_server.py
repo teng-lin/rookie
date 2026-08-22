@@ -85,11 +85,16 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
                 return
             query = parse_qs(parsed.query)
             third_origin = query.get("third_origin", [""])[0]
+            engine = query.get("engine", [""])[0]
             expected_prefix = f"https://{ALLOWED_THIRD_HOST}:"
             if not third_origin.startswith(expected_prefix):
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid third origin\n")
                 return
-            iframe = f"{third_origin}/set-context"
+            if engine not in {"chromium", "firefox"}:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid browser engine\n")
+                return
+            partition = "a" if host == "top.rookie-a.test" else "c"
+            iframe = f"{third_origin}/set-context?partition={partition}&engine={engine}"
             body = f"""<!doctype html>
 <meta charset="utf-8">
 <title>partition-pending</title>
@@ -107,7 +112,7 @@ addEventListener("message", (event) => {{
                 body,
                 content_type="text/html; charset=utf-8",
                 cookies=(
-                    "rookie_top=top; Secure; HttpOnly; SameSite=Lax; Path=/",
+                    f"rookie_top=top-{partition}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600",
                 ),
             )
             return
@@ -116,19 +121,32 @@ addEventListener("message", (event) => {{
             if host != ALLOWED_THIRD_HOST:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid third-party host\n")
                 return
+            query = parse_qs(parsed.query)
+            partition = query.get("partition", [""])[0]
+            engine = query.get("engine", [""])[0]
+            if partition not in {"a", "c"}:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid partition label\n")
+                return
+            if engine not in {"chromium", "firefox"}:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid browser engine\n")
+                return
             body = """<!doctype html>
 <meta charset="utf-8">
 <title>third-party-set</title>
 <script>parent.postMessage("rookie-context-set", "*");</script>
 """
+            cookies = (
+                f"rookie_chips=partition-{partition}; Secure; HttpOnly; SameSite=None; Partitioned; Path=/; Max-Age=3600",
+            )
+            if engine == "firefox":
+                cookies += (
+                    f"rookie_dfpi=dfpi-{partition}; Secure; HttpOnly; SameSite=None; Path=/; Max-Age=3600",
+                )
             self.send_body(
                 HTTPStatus.OK,
                 body,
                 content_type="text/html; charset=utf-8",
-                cookies=(
-                    "rookie_chips=partitioned; Secure; HttpOnly; SameSite=None; Partitioned; Path=/",
-                    "rookie_dfpi=partitioned-by-context; Secure; HttpOnly; SameSite=None; Path=/",
-                ),
+                cookies=cookies,
             )
             return
 
@@ -158,7 +176,8 @@ addEventListener("message", (event) => {{
                 return
             host_index = int(stress_match.group("index"))
             cookies = tuple(
-                f"stress_{host_index}_{cookie_index}=seed-{host_index}-{cookie_index}; "
+                f"{'stress_shared' if cookie_index == count - 1 else f'stress_{host_index}_{cookie_index}'}="
+                f"seed-{host_index}-{cookie_index}; "
                 "Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600"
                 for cookie_index in range(count)
             )
