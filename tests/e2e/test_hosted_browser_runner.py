@@ -614,23 +614,16 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 (
                     certificate,
                     private_key,
-                    authority,
                 ) = hosted.generate_trusted_safari_certificate(scratch)
-                extensions = (scratch / "tls/rookie-localhost.ext").read_text()
-                chain_text = certificate.read_text()
 
-        self.assertEqual(certificate, scratch / "tls/rookie-localhost-chain.pem")
+        self.assertEqual(certificate, scratch / "tls/rookie-localhost.pem")
         self.assertEqual(private_key, scratch / "tls/rookie-localhost-key.pem")
-        self.assertEqual(authority, scratch / "tls/rookie-local-ca.pem")
-        self.assertGreaterEqual(chain_text.count("fixture"), 2)
         openssl_command = run.call_args_list[0].args[0]
         self.assertEqual(openssl_command[0:3], ["/opt/openssl", "req", "-x509"])
-        sign_command = run.call_args_list[2].args[0]
-        self.assertEqual(sign_command[0:3], ["/opt/openssl", "x509", "-req"])
-        self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", extensions)
-        self.assertNotIn("critical", extensions)
+        self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", openssl_command)
+        self.assertIn("basicConstraints=CA:FALSE", openssl_command)
         self.assertNotIn("critical", openssl_command)
-        trust_command = run.call_args_list[3].args[0]
+        trust_command = run.call_args_list[1].args[0]
         self.assertEqual(
             trust_command[:5],
             [
@@ -647,16 +640,16 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertIn("trustAsRoot", trust_command)
         self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-localhost.pem"))
-        verify_command = run.call_args_list[4].args[0]
+        verify_command = run.call_args_list[2].args[0]
         self.assertEqual(verify_command[:2], ["/usr/bin/security", "verify-cert"])
         self.assertEqual(
             verify_command[verify_command.index("-c") + 1],
             str(scratch / "tls/rookie-localhost.pem"),
         )
-        self.assertEqual(len(run.call_args_list), 5)
+        self.assertEqual(len(run.call_args_list), 3)
 
     def test_safari_https_preflight_uses_generated_authority(self) -> None:
-        authority = Path("/tmp/rookie-local-ca.pem")
+        certificate = Path("/tmp/rookie-localhost.pem")
         response = mock.MagicMock()
         response.status = 200
         response.read.return_value = b"ok"
@@ -668,9 +661,9 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             ) as create_context,
             mock.patch.object(hosted, "urlopen", return_value=response) as open_url,
         ):
-            hosted.verify_safari_https_server(9443, authority)
+            hosted.verify_safari_https_server(9443, certificate)
 
-        create_context.assert_called_once_with(cafile=str(authority))
+        create_context.assert_called_once_with(cafile=str(certificate))
         open_url.assert_called_once_with(
             "https://127.0.0.1:9443/health", timeout=10, context=context
         )

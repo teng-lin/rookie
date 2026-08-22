@@ -372,7 +372,7 @@ def require_disposable_safari_host(scratch_profile: Path) -> None:
 
 def generate_trusted_safari_certificate(
     scratch_profile: Path,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path]:
     """Create and trust a short-lived localhost certificate on a hosted VM."""
 
     if sys.platform != "darwin":
@@ -383,21 +383,8 @@ def generate_trusted_safari_certificate(
         raise SystemExit("Safari HTTPS requires openssl on PATH")
     tls_dir = scratch_profile / "tls"
     tls_dir.mkdir(parents=True, exist_ok=True)
-    authority = tls_dir / "rookie-local-ca.pem"
-    authority_key = tls_dir / "rookie-local-ca-key.pem"
     certificate = tls_dir / "rookie-localhost.pem"
-    server_chain = tls_dir / "rookie-localhost-chain.pem"
     private_key = tls_dir / "rookie-localhost-key.pem"
-    request = tls_dir / "rookie-localhost.csr"
-    extensions = tls_dir / "rookie-localhost.ext"
-    extensions.write_text(
-        "[server]\n"
-        "subjectAltName=IP:127.0.0.1,DNS:localhost\n"
-        "basicConstraints=CA:FALSE\n"
-        "keyUsage=digitalSignature,keyEncipherment\n"
-        "extendedKeyUsage=serverAuth\n",
-        encoding="utf-8",
-    )
     try:
         subprocess.run(
             [
@@ -411,61 +398,17 @@ def generate_trusted_safari_certificate(
                 "-days",
                 "1",
                 "-subj",
-                "/CN=Rookie E2E Local CA",
-                "-addext",
-                "basicConstraints=CA:TRUE",
-                "-addext",
-                "keyUsage=keyCertSign,cRLSign",
-                "-keyout",
-                str(authority_key),
-                "-out",
-                str(authority),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        subprocess.run(
-            [
-                openssl,
-                "req",
-                "-new",
-                "-newkey",
-                "rsa:2048",
-                "-sha256",
-                "-nodes",
-                "-subj",
                 "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1,DNS:localhost",
+                "-addext",
+                "basicConstraints=CA:FALSE",
+                "-addext",
+                "keyUsage=digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
                 "-keyout",
                 str(private_key),
-                "-out",
-                str(request),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        subprocess.run(
-            [
-                openssl,
-                "x509",
-                "-req",
-                "-in",
-                str(request),
-                "-CA",
-                str(authority),
-                "-CAkey",
-                str(authority_key),
-                "-CAcreateserial",
-                "-days",
-                "1",
-                "-sha256",
-                "-extfile",
-                str(extensions),
-                "-extensions",
-                "server",
                 "-out",
                 str(certificate),
             ],
@@ -527,19 +470,17 @@ def generate_trusted_safari_certificate(
             "failed to prepare trusted Safari HTTPS certificate on the fresh "
             f"hosted runner: {details}"
         ) from error
-    # ssl.SSLContext sends every PEM certificate in this file. Present the
-    # complete generated chain so the browser never needs issuer discovery.
-    server_chain.write_bytes(
-        certificate.read_bytes().rstrip() + b"\n" + authority.read_bytes()
-    )
-    return server_chain, private_key, authority
+    # The explicitly trusted certificate is also the one the test server
+    # presents. Keeping this one-certificate chain avoids private-issuer
+    # discovery differences between Security.framework and OpenSSL clients.
+    return certificate, private_key
 
 
-def verify_safari_https_server(port: int, authority: Path) -> None:
-    """Prove the generated CA validates the live TLS server and hostname."""
+def verify_safari_https_server(port: int, trusted_certificate: Path) -> None:
+    """Prove the pinned certificate validates the live server and hostname."""
 
     try:
-        context = ssl.create_default_context(cafile=str(authority))
+        context = ssl.create_default_context(cafile=str(trusted_certificate))
         with urlopen(
             f"https://127.0.0.1:{port}/health",
             timeout=10,
@@ -1455,22 +1396,19 @@ def run() -> int:
 
     tls_cert = None
     tls_key = None
-    safari_authority = None
+    safari_trusted_certificate = None
     if engine == "safari":
         require_disposable_safari_host(user_data)
-        (
-            tls_cert,
-            tls_key,
-            safari_authority,
-        ) = generate_trusted_safari_certificate(user_data)
+        tls_cert, tls_key = generate_trusted_safari_certificate(user_data)
+        safari_trusted_certificate = tls_cert
 
     server, port, _log_path, request_log = start_cookie_server(
         tls_cert=tls_cert, tls_key=tls_key
     )
     try:
         if engine == "safari":
-            assert safari_authority is not None
-            verify_safari_https_server(port, safari_authority)
+            assert safari_trusted_certificate is not None
+            verify_safari_https_server(port, safari_trusted_certificate)
         plant_keychain()
         url = (
             f"http://127.0.0.1:{port}/set"
