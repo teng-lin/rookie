@@ -117,6 +117,38 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 hosted.find_chromium_db(user_data, name="rookie_ci"), legacy
             )
 
+    def test_windows_yandex_uses_a_non_default_disposable_launch_root(self) -> None:
+        requested = Path(r"D:\a\_temp\rookie-ci\yandex")
+        registry = Path(r"D:\a\_temp\sandbox\Yandex\User Data")
+        self.assertEqual(
+            hosted.chromium_automation_user_data(
+                "yandex", "windows", requested, registry
+            ),
+            requested,
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data(
+                "yandex", "macos", requested, registry
+            ),
+            registry,
+        )
+
+    def test_stopped_automation_profile_is_staged_into_empty_registry_root(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "automation"
+            target = root / "registry"
+            database = source / "Default/Network/Cookies"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"browser-generated")
+            hosted.stage_chromium_discovery_profile(source, target)
+            self.assertEqual(
+                (target / "Default/Network/Cookies").read_bytes(),
+                b"browser-generated",
+            )
+
     def test_gecko_waits_for_full_corpus_then_closes_before_extraction(self) -> None:
         proc = mock.Mock()
         proc.poll.return_value = None
@@ -476,6 +508,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 {
                     "CI": "true",
                     "GITHUB_ACTIONS": "true",
+                    "ROOKIE_E2E_RUNNER_ENVIRONMENT": "github-hosted",
                     "RUNNER_TEMP": str(runner_temp),
                 },
                 clear=False,
@@ -486,17 +519,22 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                         Path("/tmp/not-runner/safari")
                     )
 
-    def test_safari_https_certificate_is_installed_in_disposable_keychain(
+    def test_safari_https_certificate_is_installed_in_ephemeral_runner_trust(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary) / "safari"
-            keychain = Path(temporary) / "rookie-e2e.keychain-db"
             with (
                 mock.patch.object(hosted.sys, "platform", "darwin"),
                 mock.patch.dict(
                     hosted.os.environ,
-                    {"ROOKIE_E2E_EPHEMERAL_KEYCHAIN": str(keychain)},
+                    {
+                        "CI": "true",
+                        "GITHUB_ACTIONS": "true",
+                        "ROOKIE_E2E_RUNNER_ENVIRONMENT": "github-hosted",
+                        "RUNNER_TEMP": temporary,
+                    },
+                    clear=True,
                 ),
                 mock.patch.object(hosted.shutil, "which", return_value="/opt/openssl"),
                 mock.patch.object(hosted.subprocess, "run") as run,
@@ -515,16 +553,26 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", extensions)
         trust_command = run.call_args_list[3].args[0]
         self.assertEqual(
-            trust_command[0:3], ["/usr/bin/security", "add-trusted-cert", "-r"]
+            trust_command[0:5],
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/bin/security",
+                "add-trusted-cert",
+                "-d",
+            ],
         )
-        self.assertEqual(trust_command[trust_command.index("-k") + 1], str(keychain))
+        self.assertEqual(
+            trust_command[trust_command.index("-k") + 1],
+            "/Library/Keychains/System.keychain",
+        )
         self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
 
-    def test_safari_https_refuses_a_normal_keychain(self) -> None:
+    def test_safari_https_refuses_a_non_hosted_account(self) -> None:
         with (
             mock.patch.object(hosted.sys, "platform", "darwin"),
             mock.patch.dict(hosted.os.environ, {}, clear=True),
-            self.assertRaisesRegex(SystemExit, "disposable Keychain"),
+            self.assertRaisesRegex(SystemExit, "GitHub-hosted CI account"),
         ):
             hosted.generate_trusted_safari_certificate(Path("/tmp/safari"))
 

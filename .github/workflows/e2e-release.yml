@@ -62,6 +62,8 @@ jobs:
       - hosted-matrix
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
+    env:
+      ROOKIE_E2E_RUNNER_ENVIRONMENT: ${{ runner.environment }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,10 +119,6 @@ jobs:
             "$py" tests/e2e/run_with_ephemeral_keychain.py \
               --service "$ROOKIE_E2E_KEYCHAIN_SERVICE" \
               --account "$ROOKIE_E2E_KEYCHAIN_ACCOUNT" -- \
-              "$py" tests/e2e/run_hosted_claimed_e2e.py
-          elif [ "${{ matrix.platform }}" = macos ] && [ "${{ matrix.engine }}" = safari ]; then
-            "$py" tests/e2e/run_with_ephemeral_keychain.py \
-              --service 'Rookie E2E TLS' --account Rookie -- \
               "$py" tests/e2e/run_hosted_claimed_e2e.py
           else
             "$py" tests/e2e/run_hosted_claimed_e2e.py

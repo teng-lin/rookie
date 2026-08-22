@@ -7,11 +7,17 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 
 E2E_DIR = Path(__file__).parent
 sys.path.insert(0, str(E2E_DIR))
-from cookie_manifest import ManifestError, validate_manifest, verify_records  # noqa: E402
+from cookie_manifest import (  # noqa: E402
+    ManifestError,
+    paths_refer_to_same_file,
+    validate_manifest,
+    verify_records,
+)
 
 
 def flat(
@@ -84,6 +90,17 @@ def manifest() -> dict:
 
 
 class CookieManifestVerifierTests(unittest.TestCase):
+    @mock.patch("cookie_manifest.os.path.samefile", return_value=True)
+    def test_path_identity_uses_file_identity_before_path_spelling(
+        self, samefile: mock.Mock
+    ) -> None:
+        self.assertTrue(
+            paths_refer_to_same_file(
+                r"C:\Users\RUNNER~1\Cookies", r"\\?\C:\Users\runneradmin\Cookies"
+            )
+        )
+        samefile.assert_called_once()
+
     def test_accepts_exact_sets_regardless_of_order(self) -> None:
         expected = manifest()
         actual = list(reversed(copy.deepcopy(expected["expected"]["unfiltered_flat"])))

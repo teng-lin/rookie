@@ -44,6 +44,15 @@ class ManifestError(AssertionError):
     """An exact-set contract violation with a surface-oriented message."""
 
 
+def paths_refer_to_same_file(left: Path | str, right: Path | str) -> bool:
+    """Compare file identity across aliases such as Windows verbatim paths."""
+
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return Path(left).resolve() == Path(right).resolve()
+
+
 def _snake_case(name: str) -> str:
     output: list[str] = []
     for char in name:

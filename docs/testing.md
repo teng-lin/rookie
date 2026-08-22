@@ -209,8 +209,9 @@ The installed browser-by-OS matrix seeds Chromium and Gecko products from
 deterministic and proves host filtering, but loopback is a trustworthy-origin
 exception and is not the HTTPS oracle. Safari is deliberately different: its
 full corpus runs over local HTTPS with a one-day certificate trusted only in
-the fresh hosted job and installed in its disposable Keychain, because Safari
-rejects `Secure` cookies delivered over loopback HTTP.
+the disposable hosted VM, because Safari rejects `Secure` cookies delivered
+over loopback HTTP. The runner refuses this trust operation outside a fresh
+GitHub-hosted account and a scratch path below `RUNNER_TEMP`.
 
 HTTPS is exercised independently by the live depth lanes. The partition runner
 uses a generated certificate and three named local sites

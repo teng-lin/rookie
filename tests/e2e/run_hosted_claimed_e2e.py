@@ -351,6 +351,8 @@ def require_disposable_safari_host(scratch_profile: Path) -> None:
     if (
         os.environ.get("CI", "").lower() != "true"
         or os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
+        or os.environ.get("ROOKIE_E2E_RUNNER_ENVIRONMENT", "").lower()
+        != "github-hosted"
     ):
         raise SystemExit(
             "Safari live extraction is restricted to a fresh GitHub-hosted CI "
@@ -369,13 +371,11 @@ def require_disposable_safari_host(scratch_profile: Path) -> None:
 
 
 def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Path]:
-    """Create and trust a short-lived localhost certificate in the test keychain."""
+    """Create and trust a short-lived localhost certificate on a hosted VM."""
 
     if sys.platform != "darwin":
         raise SystemExit("Safari HTTPS certificate setup requires macOS")
-    keychain = os.environ.get("ROOKIE_E2E_EPHEMERAL_KEYCHAIN")
-    if not keychain:
-        raise SystemExit("Safari HTTPS requires the disposable Keychain wrapper")
+    require_disposable_safari_host(scratch_profile)
     openssl = shutil.which("openssl")
     if openssl is None:
         raise SystemExit("Safari HTTPS requires openssl on PATH")
@@ -421,6 +421,7 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         subprocess.run(
             [
@@ -441,6 +442,7 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         subprocess.run(
             [
@@ -467,27 +469,33 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         subprocess.run(
             [
+                "/usr/bin/sudo",
+                "-n",
                 "/usr/bin/security",
                 "add-trusted-cert",
+                "-d",
                 "-r",
                 "trustRoot",
                 "-p",
                 "ssl",
                 "-k",
-                keychain,
+                "/Library/Keychains/System.keychain",
                 str(authority),
             ],
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         )
-    except subprocess.CalledProcessError as error:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         details = (error.stderr or error.stdout or "").strip()
         raise SystemExit(
-            f"failed to prepare trusted Safari HTTPS certificate: {details}"
+            "failed to prepare trusted Safari HTTPS certificate on the fresh "
+            f"hosted runner: {details}"
         ) from error
     return certificate, private_key
 
@@ -553,6 +561,53 @@ def stage_chromium_user_data(user_data: Path) -> None:
     user_data.mkdir(parents=True, exist_ok=True)
     # Do not synthesize vendor first-run JSON here. Vivaldi verifies signed
     # search-engine data and crashes after deleting an unsigned `{}` stub.
+
+
+def chromium_automation_user_data(
+    browser: str, platform: str, requested: Path, registry_root: Path
+) -> Path:
+    """Select a fresh browser-launch root without weakening discovery checks."""
+
+    # Chromium 136+ products may suppress remote debugging when --user-data-dir
+    # names their computed default root. Windows Yandex enforces that boundary;
+    # launch it in the separately supplied disposable scratch root, then stage
+    # the stopped browser output into the equally disposable registry root.
+    if browser == "yandex" and platform == "windows":
+        return requested
+    return registry_root
+
+
+def stage_chromium_discovery_profile(source: Path, target: Path) -> None:
+    """Stage stopped browser cookie artifacts into an empty registry root."""
+
+    source = source.resolve(strict=True)
+    target = target.resolve()
+    if source == target:
+        return
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise SystemExit("Chromium launch and discovery roots must not overlap")
+    target.mkdir(parents=True, exist_ok=True)
+    if any(target.iterdir()):
+        raise SystemExit(f"Chromium discovery root was not empty: {target}")
+    databases = chromium_cookie_dbs(source)
+    if not databases:
+        raise SystemExit(f"Chromium automation root had no cookie database: {source}")
+    local_state = source / "Local State"
+    if local_state.is_file():
+        shutil.copy2(local_state, target / local_state.name)
+    for database in databases:
+        relative = database.relative_to(source)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(database, destination)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{database}{suffix}")
+            if sidecar.is_file():
+                shutil.copy2(sidecar, Path(f"{destination}{suffix}"))
+        for settings_name in ("Preferences", "Secure Preferences"):
+            settings = database.parent.parent / settings_name
+            if settings.is_file():
+                shutil.copy2(settings, target / settings.relative_to(source))
 
 
 def chromium_cookie_dbs(user_data: Path) -> list[Path]:
@@ -1293,9 +1348,9 @@ def run() -> int:
         print(f"isolated registry profile: {user_data}", flush=True)
     else:
         user_data = requested_user_data
-    # Chromium 136+ ignores remote-debugging switches for the product's
-    # default data directory. A non-default profile is therefore required for
-    # browser automation, including branded forks such as Windows Yandex.
+    # Every path here is newly created below RUNNER_TEMP. Some products also
+    # require the automation root to differ from their registry default; that
+    # launch/store distinction is handled explicitly below.
     user_data.mkdir(parents=True, exist_ok=True)
 
     tls_cert = None
@@ -1341,8 +1396,12 @@ def run() -> int:
             assert_native(cookie_file, browser, user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
-            stage_chromium_user_data(user_data)
-            seed_chromium_native(exe, user_data, url)
+            automation_user_data = chromium_automation_user_data(
+                browser, platform, requested_user_data, user_data
+            )
+            stage_chromium_user_data(automation_user_data)
+            seed_chromium_native(exe, automation_user_data, url)
+            stage_chromium_discovery_profile(automation_user_data, user_data)
             assert_chromium(user_data, browser)
     finally:
         server.terminate()

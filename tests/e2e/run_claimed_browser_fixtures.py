@@ -23,6 +23,7 @@ from pathlib import Path
 import rookie_cookies
 
 from browser_coverage_contract import assert_observed_depth, load_coverage
+from cookie_manifest import paths_refer_to_same_file
 
 
 COVERAGE_PATH = Path(__file__).with_name("browser_coverage.json")
@@ -157,7 +158,8 @@ def assert_discovered_source(browser: str, database: Path) -> dict:
         profile
         for profile in profiles
         if any(
-            same_file(Path(source["path"]), database) for source in profile["sources"]
+            paths_refer_to_same_file(source["path"], database)
+            for source in profile["sources"]
         )
     ]
     if len(matching) != 1:
@@ -169,15 +171,6 @@ def assert_discovered_source(browser: str, database: Path) -> dict:
     if identity["browser_id"] != browser:
         raise SystemExit(f"{browser} discovery returned {identity!r}")
     return identity
-
-
-def same_file(left: Path, right: Path) -> bool:
-    """Compare path identity across Windows long-name and 8.3 spellings."""
-
-    try:
-        return os.path.samefile(left, right)
-    except OSError:
-        return left.resolve() == right.resolve()
 
 
 def exercise_fixture_cell(

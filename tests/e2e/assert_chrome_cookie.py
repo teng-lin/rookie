@@ -23,7 +23,12 @@ from pathlib import Path
 
 import rookie_cookies
 
-from cookie_manifest import find_manifest, load_manifest, verify_records
+from cookie_manifest import (
+    find_manifest,
+    load_manifest,
+    paths_refer_to_same_file,
+    verify_records,
+)
 from cookie_state import assert_cookie_state, state_from_environment
 
 
@@ -167,7 +172,7 @@ def main() -> int:
             profile
             for profile in profiles
             if any(
-                Path(source["path"]).resolve() == db_path.resolve()
+                paths_refer_to_same_file(source["path"], db_path)
                 for source in profile["sources"]
             )
         ]

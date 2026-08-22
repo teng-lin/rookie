@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, urlparse
 from urllib.request import HTTPSHandler, build_opener
 
 from browser_coverage_contract import emit_representative_depth
+from cookie_manifest import paths_refer_to_same_file
 from run_active_writer_e2e import (
     ActiveWriterError,
     ROOT,
@@ -37,6 +38,8 @@ MARKER = {
     "kind": "rookie-cookie-fixture-source",
     "source_kind": "disposable_e2e_profile",
 }
+
+
 def require_remote_sandbox(path: Path) -> Path:
     if os.environ.get("CI", "").lower() != "true":
         raise ActiveWriterError(
@@ -173,7 +176,8 @@ def discovered_profile_id(engine: str, browser_id: str, database: Path) -> str:
         profile
         for profile in rookie_cookies.browser_profiles(browser_id)
         if any(
-            Path(source["path"]).resolve() == database for source in profile["sources"]
+            paths_refer_to_same_file(source["path"], database)
+            for source in profile["sources"]
         )
     ]
     if len(matches) != 1:
