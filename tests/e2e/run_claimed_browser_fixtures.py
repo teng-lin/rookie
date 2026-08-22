@@ -144,11 +144,7 @@ def write_chromium_db(path: Path) -> None:
 def assert_detailed(snapshot: object) -> None:
     detailed = snapshot.detailed_cookies()
     match = next(
-        (
-            record
-            for record in detailed
-            if record["cookie"]["name"] == "rookie_ci"
-        ),
+        (record for record in detailed if record["cookie"]["name"] == "rookie_ci"),
         None,
     )
     if match is None or match["cookie"]["value"] != "bar":
@@ -161,8 +157,7 @@ def assert_discovered_source(browser: str, database: Path) -> dict:
         profile
         for profile in profiles
         if any(
-            Path(source["path"]).resolve() == database.resolve()
-            for source in profile["sources"]
+            same_file(Path(source["path"]), database) for source in profile["sources"]
         )
     ]
     if len(matching) != 1:
@@ -176,7 +171,18 @@ def assert_discovered_source(browser: str, database: Path) -> dict:
     return identity
 
 
-def exercise_fixture_cell(platform: str, row: dict, environment: dict[str, str]) -> None:
+def same_file(left: Path, right: Path) -> bool:
+    """Compare path identity across Windows long-name and 8.3 spellings."""
+
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left.resolve() == right.resolve()
+
+
+def exercise_fixture_cell(
+    platform: str, row: dict, environment: dict[str, str]
+) -> None:
     browser = row["browser"]
     engine = row["engine"]
     observed = {"registry_id": "fixture"}
@@ -187,7 +193,12 @@ def exercise_fixture_cell(platform: str, row: dict, environment: dict[str, str])
         write_chromium_db(database)
         (root / "Local State").write_text(
             json.dumps(
-                {"profile": {"last_used": "Default", "info_cache": {"Default": {"name": "Default"}}}}
+                {
+                    "profile": {
+                        "last_used": "Default",
+                        "info_cache": {"Default": {"name": "Default"}},
+                    }
+                }
             ),
             encoding="utf-8",
         )
@@ -219,7 +230,10 @@ def exercise_fixture_cell(platform: str, row: dict, environment: dict[str, str])
             profile=identity["profile_id"],
             include_expired=True,
         )
-        if recommended.browser_id != browser or recommended.profile_id != identity["profile_id"]:
+        if (
+            recommended.browser_id != browser
+            or recommended.profile_id != identity["profile_id"]
+        ):
             raise SystemExit(f"{browser} recommended read selected the wrong identity")
         assert_seeded(recommended.as_list())
         assert_detailed(recommended)
@@ -252,9 +266,7 @@ def run(platform: str) -> int:
         item if isinstance(item, str) else item["id"]
         for item in rookie_cookies.supported_browsers()
     }
-    missing = sorted(
-        row["browser"] for row in rows if row["browser"] not in supported
-    )
+    missing = sorted(row["browser"] for row in rows if row["browser"] not in supported)
     if missing:
         raise SystemExit(
             f"supported_browsers() is missing claimed ids {missing}; "

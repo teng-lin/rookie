@@ -56,13 +56,17 @@ def _snake_case(name: str) -> str:
 
 def _normalize_keys(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {_snake_case(str(key)): _normalize_keys(item) for key, item in value.items()}
+        return {
+            _snake_case(str(key)): _normalize_keys(item) for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_normalize_keys(item) for item in value]
     return value
 
 
-def _require_exact_keys(record: Mapping[str, Any], fields: Sequence[str], label: str) -> None:
+def _require_exact_keys(
+    record: Mapping[str, Any], fields: Sequence[str], label: str
+) -> None:
     actual = set(record)
     expected = set(fields)
     missing = sorted(expected - actual)
@@ -90,7 +94,9 @@ def normalize_flat(record: Any, *, label: str = "cookie") -> dict[str, Any]:
     for field in ("secure", "http_only"):
         if not isinstance(normalized[field], bool):
             raise ManifestError(f"{label}.{field} must be boolean")
-    if isinstance(normalized["same_site"], bool) or not isinstance(normalized["same_site"], int):
+    if isinstance(normalized["same_site"], bool) or not isinstance(
+        normalized["same_site"], int
+    ):
         raise ManifestError(f"{label}.same_site must be an integer")
     for field in ("domain", "path", "name", "value"):
         if not isinstance(normalized[field], str):
@@ -122,7 +128,9 @@ def _path_value(record: Mapping[str, Any], dotted_path: str) -> Any:
     return value
 
 
-def _identity(record: Mapping[str, Any], identity_fields: Sequence[str]) -> tuple[str, ...]:
+def _identity(
+    record: Mapping[str, Any], identity_fields: Sequence[str]
+) -> tuple[str, ...]:
     # JSON encoding makes None/bool/number/string ordering deterministic and
     # avoids Python's refusal to compare unlike scalar types.
     return tuple(
@@ -133,6 +141,11 @@ def _identity(record: Mapping[str, Any], identity_fields: Sequence[str]) -> tupl
 
 def _canonical(record: Mapping[str, Any]) -> str:
     return json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _cookie_domain(record: Mapping[str, Any], projection: str) -> str:
+    cookie = record["cookie"] if projection == "detailed" else record
+    return str(cookie["domain"]).removeprefix(".").lower()
 
 
 def _validate_no_duplicate_identities(
@@ -156,7 +169,9 @@ def load_manifest(path: Path | str) -> dict[str, Any]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ManifestError(f"cannot load cookie manifest {manifest_path}: {error}") from error
+        raise ManifestError(
+            f"cannot load cookie manifest {manifest_path}: {error}"
+        ) from error
     validate_manifest(manifest)
     return manifest
 
@@ -169,22 +184,61 @@ def validate_manifest(manifest: Any) -> None:
             f"unsupported cookie manifest schema_version {manifest.get('schema_version')!r}"
         )
     tiers = manifest.get("tiers")
-    if not isinstance(tiers, list) or not tiers or not all(isinstance(item, str) for item in tiers):
+    if (
+        not isinstance(tiers, list)
+        or not tiers
+        or not all(isinstance(item, str) for item in tiers)
+    ):
         raise ManifestError("cookie manifest tiers must be a non-empty string array")
     identities = manifest.get("identities")
     expected = manifest.get("expected")
     if not isinstance(identities, Mapping) or not isinstance(expected, Mapping):
-        raise ManifestError("cookie manifest must contain identities and expected objects")
+        raise ManifestError(
+            "cookie manifest must contain identities and expected objects"
+        )
     for projection in PROJECTIONS:
         fields = identities.get(projection)
         records = expected.get(projection)
-        if not isinstance(fields, list) or not fields or not all(isinstance(item, str) for item in fields):
-            raise ManifestError(f"manifest identity {projection!r} must be a string array")
+        if (
+            not isinstance(fields, list)
+            or not fields
+            or not all(isinstance(item, str) for item in fields)
+        ):
+            raise ManifestError(
+                f"manifest identity {projection!r} must be a string array"
+            )
         if not isinstance(records, list):
             raise ManifestError(f"manifest expected.{projection} must be an array")
         normalizer = normalize_detailed if projection == "detailed" else normalize_flat
-        normalized = [normalizer(item, label=f"expected.{projection}[{index}]") for index, item in enumerate(records)]
+        normalized = [
+            normalizer(item, label=f"expected.{projection}[{index}]")
+            for index, item in enumerate(records)
+        ]
         _validate_no_duplicate_identities(normalized, fields, f"expected.{projection}")
+    scope = manifest.get("verification_scope")
+    if scope is not None:
+        if not isinstance(scope, Mapping):
+            raise ManifestError("manifest verification_scope must be an object")
+        domains = scope.get("cookie_domains")
+        if (
+            not isinstance(domains, list)
+            or not domains
+            or not all(isinstance(item, str) and item for item in domains)
+        ):
+            raise ManifestError(
+                "manifest verification_scope.cookie_domains must be a non-empty string array"
+            )
+        normalized_domains = {item.removeprefix(".").lower() for item in domains}
+        for projection in PROJECTIONS:
+            normalizer = (
+                normalize_detailed if projection == "detailed" else normalize_flat
+            )
+            for index, item in enumerate(expected[projection]):
+                record = normalizer(item, label=f"expected.{projection}[{index}]")
+                if _cookie_domain(record, projection) not in normalized_domains:
+                    raise ManifestError(
+                        f"expected.{projection}[{index}] falls outside verification_scope"
+                    )
 
 
 def verify_records(
@@ -197,13 +251,24 @@ def verify_records(
     """Assert exact sorted-set equality and return the verified row count."""
     validate_manifest(manifest)
     if projection not in PROJECTIONS:
-        raise ManifestError(f"unknown projection {projection!r}; expected one of {PROJECTIONS}")
+        raise ManifestError(
+            f"unknown projection {projection!r}; expected one of {PROJECTIONS}"
+        )
     if not isinstance(actual, list):
         actual = list(actual)
     normalizer = normalize_detailed if projection == "detailed" else normalize_flat
     actual_normalized = [
-        normalizer(item, label=f"{surface}[{index}]") for index, item in enumerate(actual)
+        normalizer(item, label=f"{surface}[{index}]")
+        for index, item in enumerate(actual)
     ]
+    scope = manifest.get("verification_scope")
+    if scope is not None:
+        domains = {item.removeprefix(".").lower() for item in scope["cookie_domains"]}
+        actual_normalized = [
+            record
+            for record in actual_normalized
+            if _cookie_domain(record, projection) in domains
+        ]
     expected_normalized = [
         normalizer(item, label=f"expected.{projection}[{index}]")
         for index, item in enumerate(manifest["expected"][projection])
@@ -262,7 +327,9 @@ def find_manifest(
     explicit = os.environ.get("ROOKIE_E2E_COOKIE_MANIFEST")
     if explicit:
         return Path(explicit)
-    selected_name = expected_name or os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
+    selected_name = expected_name or os.environ.get(
+        "ROOKIE_E2E_COOKIE_NAME", "rookie_ci"
+    )
     if selected_name != "rookie_ci" or profile_or_db is None:
         return None
     start = Path(profile_or_db)
@@ -273,4 +340,3 @@ def find_manifest(
         if candidate.is_file():
             return candidate
     return None
-

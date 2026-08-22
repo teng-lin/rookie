@@ -88,9 +88,7 @@ class CookieManifestVerifierTests(unittest.TestCase):
         expected = manifest()
         actual = list(reversed(copy.deepcopy(expected["expected"]["unfiltered_flat"])))
         self.assertEqual(
-            verify_records(
-                expected, "unfiltered_flat", actual, surface="unit surface"
-            ),
+            verify_records(expected, "unfiltered_flat", actual, surface="unit surface"),
             2,
         )
 
@@ -111,9 +109,7 @@ class CookieManifestVerifierTests(unittest.TestCase):
         record["context"]["originAttributes"] = record["context"].pop(
             "origin_attributes"
         )
-        record["context"]["userContextId"] = record["context"].pop(
-            "user_context_id"
-        )
+        record["context"]["userContextId"] = record["context"].pop("user_context_id")
         record["context"]["partitionKey"] = record["context"].pop("partition_key")
         record["context"]["privateBrowsingId"] = record["context"].pop(
             "private_browsing_id"
@@ -157,6 +153,23 @@ class CookieManifestVerifierTests(unittest.TestCase):
         record = flat()
         record["raw_value"] = "plaintext sentinel"
         self.assert_mutation_fails([record], "wrong shape.*excess")
+
+    def test_controlled_origin_scope_allows_vendor_rows_but_not_target_excess(
+        self,
+    ) -> None:
+        expected = manifest()
+        expected["verification_scope"] = {
+            "cookie_domains": ["127.0.0.1", "localhost"],
+            "browser_owned_external_rows_observed": 24,
+        }
+        vendor = flat("yp", domain=".yandex.ru", value="browser-owned")
+        actual = [*copy.deepcopy(expected["expected"]["unfiltered_flat"]), vendor]
+        self.assertEqual(
+            verify_records(expected, "unfiltered_flat", actual, surface="Yandex"), 2
+        )
+        actual.append(flat("unexpected_target"))
+        with self.assertRaisesRegex(ManifestError, "excess identities"):
+            verify_records(expected, "unfiltered_flat", actual, surface="Yandex")
 
     def test_real_corpus_declares_extensible_tiers_and_applicability(self) -> None:
         corpus = json.loads(

@@ -1,4 +1,4 @@
-"""Local HTTP server used by browser E2E tests.
+"""Local HTTP/HTTPS server used by browser E2E tests.
 
 The legacy ``/set`` and ``/wal`` routes retain their focused canaries, while
 active-writer routes provide deterministic add/replace/delete transitions.
@@ -10,6 +10,7 @@ Run from the workspace root: `python3 tests/e2e/cookie_server.py`.
 
 import os
 import json
+import ssl
 import threading
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,10 +83,12 @@ def corpus_headers(path: str, host: str, corpus: dict | None = None) -> list[str
 
 
 def corpus_run_response(
-    path: str, host: str, corpus: dict | None = None
+    path: str, host: str, corpus: dict | None = None, *, scheme: str = "http"
 ) -> tuple[list[str], str | None]:
     """Apply one corpus origin/phase and redirect to the next one."""
 
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported corpus URL scheme {scheme!r}")
     corpus = corpus or load_corpus()
     parsed = urlsplit(path)
     query = parse_qs(parsed.query)
@@ -112,7 +115,7 @@ def corpus_run_response(
     def run_url(target_step: int, target_host: str) -> str:
         authority = f"{target_host}:{port}" if port else target_host
         encoded = urlencode({"engine": engine, "tiers": tiers, "step": target_step})
-        return f"http://{authority}/corpus/run?{encoded}"
+        return f"{scheme}://{authority}/corpus/run?{encoded}"
 
     if actual_host.lower() != expected_host.lower():
         return [], run_url(step, expected_host)
@@ -180,7 +183,10 @@ class Handler(BaseHTTPRequestHandler):
         redirect = None
         if request_path == "/corpus/run":
             corpus_cookie_headers, redirect = corpus_run_response(
-                self.path, self.headers.get("Host", ""), corpus
+                self.path,
+                self.headers.get("Host", ""),
+                corpus,
+                scheme=os.environ.get("ROOKIE_E2E_COOKIE_SCHEME", "http"),
             )
         elif is_corpus_route:
             corpus_cookie_headers = corpus_headers(
@@ -216,5 +222,16 @@ if __name__ == "__main__":
     port = listen_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
-    print(f"cookie server listening on 127.0.0.1:{port}", flush=True)
+    scheme = os.environ.get("ROOKIE_E2E_COOKIE_SCHEME", "http")
+    certificate = os.environ.get("ROOKIE_E2E_COOKIE_TLS_CERT")
+    private_key = os.environ.get("ROOKIE_E2E_COOKIE_TLS_KEY")
+    if (certificate is None) != (private_key is None):
+        raise SystemExit("both ROOKIE_E2E_COOKIE_TLS_CERT and _TLS_KEY are required")
+    if certificate is not None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, private_key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    elif scheme != "http":
+        raise SystemExit("HTTPS cookie server requires a certificate and private key")
+    print(f"cookie server listening on {scheme}://127.0.0.1:{port}", flush=True)
     server.serve_forever()

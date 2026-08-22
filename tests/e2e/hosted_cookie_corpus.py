@@ -39,13 +39,15 @@ def corpus_engine(engine: str) -> str:
     return "firefox" if engine == "gecko" else engine
 
 
-def corpus_seed_url(port: int, engine: str) -> str:
+def corpus_seed_url(port: int, engine: str, *, scheme: str = "http") -> str:
     """Return the redirect-chain entry point that applies every corpus phase."""
 
+    if scheme not in {"http", "https"}:
+        raise HostedCorpusError(f"unsupported corpus URL scheme {scheme!r}")
     query = urlencode(
         {"engine": corpus_engine(engine), "tiers": ",".join(TIERS), "step": 0}
     )
-    return f"http://127.0.0.1:{port}/corpus/run?{query}"
+    return f"{scheme}://127.0.0.1:{port}/corpus/run?{query}"
 
 
 def expanded_value(operation: dict[str, Any]) -> str:
@@ -168,6 +170,7 @@ def _firefox_observations(database: Path) -> list[dict[str, Any]]:
     observations = []
     for row in rows:
         origin_attributes = str(_optional(row, columns, "originAttributes") or "")
+        raw_same_site = int(row["sameSite"])
         observations.append(
             {
                 "domain": str(row["host"]),
@@ -176,7 +179,10 @@ def _firefox_observations(database: Path) -> list[dict[str, Any]]:
                 "observed_value": str(row["value"]),
                 "secure": bool(row["isSecure"]),
                 "http_only": bool(row["isHttpOnly"]),
-                "same_site": int(row["sameSite"]),
+                # Current Gecko uses 256 as the raw persisted sentinel for an
+                # unspecified SameSite attribute. The public Cookie contract
+                # normalizes every unknown/raw sentinel to -1.
+                "same_site": raw_same_site if raw_same_site in {0, 1, 2} else -1,
                 "expires": _firefox_expiry(row["expiry"], schema_version),
                 "context": {
                     "top_frame_site_key": None,
@@ -402,9 +408,10 @@ def build_manifest(
     origin_domains = {
         origin["hostname"].lower() for origin in corpus["origins"].values()
     }
+    all_observed = list(observations)
     observed = [
         item
-        for item in observations
+        for item in all_observed
         if _normalized_domain(str(item["domain"])) in origin_domains
     ]
     unmatched = set(range(len(observed)))
@@ -476,6 +483,10 @@ def build_manifest(
         "tiers": list(TIERS),
         "browser": {"id": browser, "source": "hosted-persisted-metadata"},
         "domain_filter": corpus["origins"]["primary"]["hostname"],
+        "verification_scope": {
+            "cookie_domains": sorted(origin_domains),
+            "browser_owned_external_rows_observed": len(all_observed) - len(observed),
+        },
         "identities": corpus["identities"],
         "expected": {
             "filtered_flat": filtered,

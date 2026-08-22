@@ -120,13 +120,37 @@ export async function navigateChromiumCdp({
     // foreground so Windows service sessions do not indefinitely throttle its
     // navigation.
     const corpusMode = new URL(url).pathname === "/corpus/run";
-    const { targetId } = await send("Target.createTarget", {
-      // The native launch already navigates the corpus URL. A second redirect
-      // chain could interleave its initial/update phases and leave stale data.
-      url: corpusMode ? "about:blank" : url,
-      newWindow: true,
-      background: false,
-    });
+    let targetId;
+    if (corpusMode) {
+      // Most products honor the URL passed to their native launch. Reuse that
+      // page so a second redirect chain cannot interleave its initial/mutate
+      // phases. Vivaldi can ignore the startup URL, so explicitly create the
+      // corpus target when no existing page is running it.
+      const { targetInfos = [] } = await send("Target.getTargets");
+      const existing = targetInfos.find(({ type, url: targetUrl }) => {
+        if (type !== "page") return false;
+        try {
+          return new URL(targetUrl).pathname === "/corpus/run";
+        } catch {
+          return false;
+        }
+      });
+      if (existing) {
+        targetId = existing.targetId;
+      } else {
+        ({ targetId } = await send("Target.createTarget", {
+          url,
+          newWindow: true,
+          background: false,
+        }));
+      }
+    } else {
+      ({ targetId } = await send("Target.createTarget", {
+        url,
+        newWindow: true,
+        background: false,
+      }));
+    }
     await send("Target.activateTarget", { targetId });
     if (corpusMode) {
       const deadline = Date.now() + corpusTimeoutMs;

@@ -627,9 +627,18 @@ fn read_select_all_is_a_request_error_not_a_usage_error() {
     String::from_utf8_lossy(&out.stderr)
   );
   assert!(out.stdout.is_empty(), "rejected request wrote stdout");
-  let stderr = String::from_utf8_lossy(&out.stderr);
+  let stderr: serde_json::Value =
+    serde_json::from_slice(&out.stderr).expect("typed CLI failure must be JSON");
+  let fields = stderr
+    .as_object()
+    .expect("typed CLI failure must be an object");
+  assert_eq!(fields.len(), 2, "typed CLI failure added an unstable field");
+  assert_eq!(stderr["code"], "conflicting_profile_selection");
+  let message = stderr["message"]
+    .as_str()
+    .expect("typed CLI failure message must be text");
   assert!(
-    stderr.contains("profile and select"),
+    message.contains("profile and select"),
     "missing conflicting_profile_selection diagnostic: {stderr}"
   );
 }

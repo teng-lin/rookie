@@ -50,6 +50,7 @@ def assert_cli_cookie(
     expected_name: Optional[str] = None,
     expected_value: Optional[str] = None,
     browser: Optional[str] = None,
+    profile: Optional[str] = None,
     browser_id: Optional[str] = None,
     detailed: bool = False,
 ) -> int:
@@ -62,6 +63,8 @@ def assert_cli_cookie(
     )
     if (cookies_path is None) == (browser is None):
         raise HarnessError("provide exactly one cookies path or --browser")
+    if profile is not None and browser is None:
+        raise HarnessError("--profile requires --browser")
     if cookies_path is not None and not cookies_path.is_file():
         raise HarnessError(f"no cookies db at {cookies_path}")
     if key_path is not None and not key_path.is_file():
@@ -82,6 +85,8 @@ def assert_cli_cookie(
                 "detailed" if detailed else "json",
             )
         )
+        if profile is not None:
+            command.extend(("--profile", profile))
     else:
         command.extend(("from-path", str(cookies_path)))
         if not detailed:
@@ -134,6 +139,8 @@ def assert_cli_cookie(
                     detailed_command.extend(
                         ("read", "--browser", browser, "--format", "detailed")
                     )
+                    if profile is not None:
+                        detailed_command.extend(("--profile", profile))
                 else:
                     detailed_command.extend(
                         ("from-path", str(cookies_path), "--format", "detailed")
@@ -266,6 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--browser", help="discover the named browser instead of using an explicit path"
     )
     parser.add_argument(
+        "--profile", help="select one discovered browser profile by opaque profile id"
+    )
+    parser.add_argument(
         "--browser-id",
         help="Chromium credential identity for from-path (unix Keychain / libsecret)",
     )
@@ -310,6 +320,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_name=expected_name,
             expected_value=expected_value,
             browser=args.browser,
+            profile=args.profile,
             browser_id=args.browser_id,
             detailed=args.detailed,
         )

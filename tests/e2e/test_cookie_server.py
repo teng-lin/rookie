@@ -123,6 +123,18 @@ class CookieServerTests(unittest.TestCase):
             "http://127.0.0.1:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
         )
 
+    def test_corpus_run_preserves_https_across_origins(self) -> None:
+        headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=safari&tiers=portable_smoke&step=0",
+            "127.0.0.1:8765",
+            scheme="https",
+        )
+        self.assertGreater(len(headers), 10)
+        self.assertEqual(
+            redirect,
+            "https://localhost:8765/corpus/run?engine=safari&tiers=portable_smoke&step=1",
+        )
+
     def test_health_and_browser_subresource_routes_never_seed_legacy_cookies(
         self,
     ) -> None:

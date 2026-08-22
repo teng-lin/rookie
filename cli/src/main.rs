@@ -209,7 +209,8 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       let selection = rookie_cookies::ProfileSelection::from_binding_options(
         profile.as_deref(),
         canonical_select.as_deref(),
-      )?;
+      )
+      .map_err(rookie_cookies::Error::from)?;
       let cancellation = install_cancel_on_signal();
       let control = execution_control(timeout_secs, app_bound, cancellation);
       let mut request = rookie_cookies::ReadRequest::browser(browser)
@@ -250,7 +251,8 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
           let scope = rookie_cookies::ReportScope::from_binding_options(
             profile.as_deref(),
             canonical_select.as_deref(),
-          )?;
+          )
+          .map_err(rookie_cookies::Error::from)?;
           // Mirrors `browser_report`'s own request shape -- that convenience
           // function has no `_with` twin to carry a control, so it is built
           // here directly instead of through it.

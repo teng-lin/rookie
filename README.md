@@ -208,6 +208,13 @@ subcommands only: `header` takes `--url` rather than a positional, `report`
 takes an optional `--browser` (omitting it means the aggregate report), and
 the old top-level `--path` / `--browser` flags are gone.
 
+Runtime failures from the typed `rookie_cookies::Error` hierarchy are written
+to stderr as one JSON object with exactly `code` and `message` fields. Branch
+on the stable `code`; `message` is a human diagnostic and may change. Clap
+usage errors and wrapped or non-library failures retain their normal human
+`Display` output and are not promised to be JSON. Failed jobs do not write a
+partial cookie result to stdout.
+
 Coming from the legacy named helpers? Each language guide documents the
 compatibility surface and its migration to the recommended 0.6 API:
 [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md).

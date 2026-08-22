@@ -20,6 +20,7 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -128,6 +129,15 @@ def prepare_discovered_profile(
     return root, environment
 
 
+def canonical_root_digest_path(root: Path, platform: str) -> Path:
+    """Mirror Rust's Windows canonicalize spelling before hashing an ID."""
+
+    value = str(root)
+    if platform == "windows" and not value.startswith("\\\\?\\"):
+        return Path("\\\\?\\" + value)
+    return root
+
+
 def independently_expected_profile_id(
     platform: str,
     browser: str,
@@ -151,7 +161,7 @@ def independently_expected_profile_id(
         browser.encode(),
         root_spec["root_id"].encode(),
         root_spec["channel"].encode(),
-        normalized_path_bytes(root),
+        normalized_path_bytes(canonical_root_digest_path(root, platform)),
     )
     locator = Path("Profiles/rookie-e2e") if engine == "gecko" else Path("Default")
     return digest_fields(
@@ -175,6 +185,8 @@ def wait_for_server(
     port: int,
     proc: subprocess.Popen[bytes] | subprocess.Popen[str],
     log_path: Path,
+    *,
+    tls: bool = False,
     timeout: float = 45,
 ) -> None:
     deadline = time.time() + timeout
@@ -186,7 +198,13 @@ def wait_for_server(
                 f"127.0.0.1:{port}\n{logs}"
             )
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5) as raw:
+                if tls:
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    with context.wrap_socket(raw, server_hostname="127.0.0.1"):
+                        return
                 return
         except OSError:
             time.sleep(0.25)
@@ -196,11 +214,16 @@ def wait_for_server(
         else ""
     )
     raise SystemExit(
-        f"cookie server did not become ready at http://127.0.0.1:{port}/\n{logs}"
+        f"cookie server did not become ready at "
+        f"{'https' if tls else 'http'}://127.0.0.1:{port}/\n{logs}"
     )
 
 
-def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
+def start_cookie_server(
+    *, tls_cert: Path | None = None, tls_key: Path | None = None
+) -> tuple[subprocess.Popen[str], int, Path, Path]:
+    if (tls_cert is None) != (tls_key is None):
+        raise SystemExit("cookie server TLS requires both certificate and private key")
     port = pick_cookie_port()
     env = os.environ.copy()
     env["ROOKIE_E2E_COOKIE_PORT"] = str(port)
@@ -208,6 +231,10 @@ def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
     request_log = Path(tempfile.gettempdir()) / f"rookie-cookie-requests-{port}.log"
     request_log.write_text("", encoding="utf-8")
     env["ROOKIE_E2E_REQUEST_LOG"] = str(request_log)
+    if tls_cert is not None and tls_key is not None:
+        env["ROOKIE_E2E_COOKIE_SCHEME"] = "https"
+        env["ROOKIE_E2E_COOKIE_TLS_CERT"] = str(tls_cert)
+        env["ROOKIE_E2E_COOKIE_TLS_KEY"] = str(tls_key)
     with log_path.open("w", encoding="utf-8") as log_handle:
         proc = subprocess.Popen(
             [sys.executable, "-u", str(ROOT / "tests/e2e/cookie_server.py")],
@@ -217,7 +244,7 @@ def start_cookie_server() -> tuple[subprocess.Popen[str], int, Path, Path]:
             stderr=subprocess.STDOUT,
             text=True,
         )
-    wait_for_server(port, proc, log_path)
+    wait_for_server(port, proc, log_path, tls=tls_cert is not None)
     return proc, port, log_path, request_log
 
 
@@ -265,7 +292,7 @@ def wait_for_request(
         ):
             return
         time.sleep(0.25)
-    raise SystemExit(f"Safari never requested {path}; observed requests: {requests!r}")
+    raise SystemExit(f"browser never requested {path}; observed requests: {requests!r}")
 
 
 def seed_safari_native(
@@ -339,6 +366,130 @@ def require_disposable_safari_host(scratch_profile: Path) -> None:
         raise SystemExit(
             f"Safari scratch profile {scratch_profile} is outside RUNNER_TEMP"
         ) from error
+
+
+def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Path]:
+    """Create and trust a short-lived localhost certificate in the test keychain."""
+
+    if sys.platform != "darwin":
+        raise SystemExit("Safari HTTPS certificate setup requires macOS")
+    keychain = os.environ.get("ROOKIE_E2E_EPHEMERAL_KEYCHAIN")
+    if not keychain:
+        raise SystemExit("Safari HTTPS requires the disposable Keychain wrapper")
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise SystemExit("Safari HTTPS requires openssl on PATH")
+    tls_dir = scratch_profile / "tls"
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    authority = tls_dir / "rookie-local-ca.pem"
+    authority_key = tls_dir / "rookie-local-ca-key.pem"
+    certificate = tls_dir / "rookie-localhost.pem"
+    private_key = tls_dir / "rookie-localhost-key.pem"
+    request = tls_dir / "rookie-localhost.csr"
+    extensions = tls_dir / "rookie-localhost.ext"
+    extensions.write_text(
+        "[server]\n"
+        "subjectAltName=IP:127.0.0.1,DNS:localhost\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=Rookie E2E Local CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout",
+                str(authority_key),
+                "-out",
+                str(authority),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-keyout",
+                str(private_key),
+                "-out",
+                str(request),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                openssl,
+                "x509",
+                "-req",
+                "-in",
+                str(request),
+                "-CA",
+                str(authority),
+                "-CAkey",
+                str(authority_key),
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-sha256",
+                "-extfile",
+                str(extensions),
+                "-extensions",
+                "server",
+                "-out",
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "add-trusted-cert",
+                "-r",
+                "trustRoot",
+                "-p",
+                "ssl",
+                "-k",
+                keychain,
+                str(authority),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or error.stdout or "").strip()
+        raise SystemExit(
+            f"failed to prepare trusted Safari HTTPS certificate: {details}"
+        ) from error
+    return certificate, private_key
 
 
 def venv_python() -> Path:
@@ -596,21 +747,53 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         )
 
 
-def seed_gecko(exe: str, profile: Path, url: str) -> None:
+def wait_for_gecko_database(profile: Path, timeout: float = 30) -> None:
+    database = profile / "cookies.sqlite"
+    deadline = time.time() + timeout
+    last_error: sqlite3.Error | None = None
+    while time.time() < deadline:
+        if database.is_file():
+            try:
+                connection = sqlite3.connect(
+                    database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2
+                )
+                try:
+                    connection.execute("pragma table_info(moz_cookies)").fetchall()
+                finally:
+                    connection.close()
+                return
+            except sqlite3.Error as error:
+                last_error = error
+        time.sleep(0.25)
+    raise SystemExit(
+        f"Gecko cookie database did not become readable at {database}: {last_error}"
+    )
+
+
+def seed_gecko(exe: str, profile: Path, url: str, request_log: Path) -> None:
     profile.mkdir(parents=True, exist_ok=True)
     cmd = [exe, "--headless", "--no-remote", "--profile", str(profile), url]
-    if sys.platform.startswith("linux") and shutil.which("xvfb-run"):
-        cmd = ["xvfb-run", "-a", *cmd]
     env = os.environ.copy()
     env["MOZ_HEADLESS"] = "1"
     print("+", " ".join(cmd), flush=True)
+    proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env)
     try:
-        subprocess.run(cmd, check=False, cwd=str(ROOT), env=env, timeout=90)
-    except subprocess.TimeoutExpired:
-        pass
-    cookies = profile / "cookies.sqlite"
-    if not cookies.is_file():
-        raise SystemExit(f"gecko seed did not write {cookies}")
+        parsed_url = urlsplit(url)
+        wait_for_request(
+            request_log,
+            parsed_url.path,
+            timeout=90,
+            query_contains="step=3" if parsed_url.path == "/corpus/run" else None,
+        )
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+    wait_for_gecko_database(profile)
 
 
 def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
@@ -688,6 +871,8 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
             str(ROOT / "tests/e2e/assert_cli_cookie.py"),
             "--browser",
             browser_id,
+            "--profile",
+            env["ROOKIE_E2E_EXPECTED_PROFILE_ID"],
             "--detailed",
         ],
         check=True,
@@ -746,6 +931,8 @@ def assert_gecko(profile: Path, browser_id: str) -> None:
             str(ROOT / "tests/e2e/assert_cli_cookie.py"),
             "--browser",
             browser_id,
+            "--profile",
+            env["ROOKIE_E2E_EXPECTED_PROFILE_ID"],
             "--detailed",
         ],
         check=True,
@@ -1111,19 +1298,28 @@ def run() -> int:
     # browser automation, including branded forks such as Windows Yandex.
     user_data.mkdir(parents=True, exist_ok=True)
 
-    server, port, _log_path, request_log = start_cookie_server()
+    tls_cert = None
+    tls_key = None
+    if engine == "safari":
+        require_disposable_safari_host(user_data)
+        tls_cert, tls_key = generate_trusted_safari_certificate(user_data)
+
+    server, port, _log_path, request_log = start_cookie_server(
+        tls_cert=tls_cert, tls_key=tls_key
+    )
     try:
         plant_keychain()
         url = (
             f"http://127.0.0.1:{port}/set"
             if engine == "internet_explorer"
-            else corpus_seed_url(port, engine)
+            else corpus_seed_url(
+                port, engine, scheme="https" if engine == "safari" else "http"
+            )
         )
         if engine == "gecko":
-            seed_gecko(exe, user_data, url)
+            seed_gecko(exe, user_data, url, request_log)
             assert_gecko(user_data, browser)
         elif engine == "safari":
-            require_disposable_safari_host(user_data)
             before = file_snapshot(engine)
             cookie_file = seed_safari_native(exe, url, before, request_log)
             verify_safari_store_access(cookie_file)

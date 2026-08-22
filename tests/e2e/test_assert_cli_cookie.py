@@ -234,16 +234,28 @@ class AssertCliCookieTests(unittest.TestCase):
             domain="127.0.0.1",
             cli_path=self.cli,
             browser="chrome",
+            profile="profile-123",
             browser_id="chrome",
         )
 
         command = run.call_args.args[0]
         self.assertEqual(command[1], "read")
         self.assertEqual(command[command.index("--browser") + 1], "chrome")
+        self.assertEqual(command[command.index("--profile") + 1], "profile-123")
         self.assertNotIn("from-path", command)
         self.assertNotIn("--domains", command)
         self.assertNotIn("--local-state-path", command)
         self.assertNotIn("--browser-id", command)
+
+    def test_rejects_profile_without_browser(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "requires --browser"):
+            HARNESS.assert_cli_cookie(
+                self.cookies,
+                key_path=None,
+                domain="127.0.0.1",
+                cli_path=self.cli,
+                profile="profile-123",
+            )
 
     @mock.patch.object(HARNESS.subprocess, "run")
     def test_detailed_command_asserts_nested_cookie_without_domain_flattening(

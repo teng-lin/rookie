@@ -90,6 +90,14 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 all(character in "0123456789abcdef" for character in profile_id)
             )
 
+    def test_windows_profile_id_hash_uses_rust_verbatim_canonical_path(self) -> None:
+        root = Path(r"D:\a\_temp\rookie\User Data")
+        self.assertEqual(
+            str(hosted.canonical_root_digest_path(root, "windows")),
+            r"\\?\D:\a\_temp\rookie\User Data",
+        )
+        self.assertEqual(hosted.canonical_root_digest_path(root, "macos"), root)
+
     def test_seeded_legacy_chromium_db_wins_over_empty_network_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             user_data = Path(tmp)
@@ -108,6 +116,37 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             self.assertEqual(
                 hosted.find_chromium_db(user_data, name="rookie_ci"), legacy
             )
+
+    def test_gecko_waits_for_full_corpus_then_closes_before_extraction(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "profile"
+            request_log = Path(temporary) / "requests.log"
+            with (
+                mock.patch.object(
+                    hosted.subprocess, "Popen", return_value=proc
+                ) as popen,
+                mock.patch.object(hosted, "wait_for_request") as wait_for_request,
+                mock.patch.object(
+                    hosted, "wait_for_gecko_database"
+                ) as wait_for_database,
+            ):
+                hosted.seed_gecko(
+                    "/opt/librewolf",
+                    profile,
+                    "http://127.0.0.1/corpus/run?engine=firefox&step=0",
+                    request_log,
+                )
+
+        self.assertEqual(popen.call_args.args[0][0], "/opt/librewolf")
+        self.assertNotIn("xvfb-run", popen.call_args.args[0])
+        wait_for_request.assert_called_once_with(
+            request_log, "/corpus/run", timeout=90, query_contains="step=3"
+        )
+        proc.terminate.assert_called_once_with()
+        proc.wait.assert_called_once_with(timeout=15)
+        wait_for_database.assert_called_once_with(profile)
 
     def test_profile_number_cookie_db_is_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -446,6 +485,48 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                     hosted.require_disposable_safari_host(
                         Path("/tmp/not-runner/safari")
                     )
+
+    def test_safari_https_certificate_is_installed_in_disposable_keychain(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary) / "safari"
+            keychain = Path(temporary) / "rookie-e2e.keychain-db"
+            with (
+                mock.patch.object(hosted.sys, "platform", "darwin"),
+                mock.patch.dict(
+                    hosted.os.environ,
+                    {"ROOKIE_E2E_EPHEMERAL_KEYCHAIN": str(keychain)},
+                ),
+                mock.patch.object(hosted.shutil, "which", return_value="/opt/openssl"),
+                mock.patch.object(hosted.subprocess, "run") as run,
+            ):
+                certificate, private_key = hosted.generate_trusted_safari_certificate(
+                    scratch
+                )
+                extensions = (scratch / "tls/rookie-localhost.ext").read_text()
+
+        self.assertEqual(certificate, scratch / "tls/rookie-localhost.pem")
+        self.assertEqual(private_key, scratch / "tls/rookie-localhost-key.pem")
+        openssl_command = run.call_args_list[0].args[0]
+        self.assertEqual(openssl_command[0:3], ["/opt/openssl", "req", "-x509"])
+        sign_command = run.call_args_list[2].args[0]
+        self.assertEqual(sign_command[0:3], ["/opt/openssl", "x509", "-req"])
+        self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", extensions)
+        trust_command = run.call_args_list[3].args[0]
+        self.assertEqual(
+            trust_command[0:3], ["/usr/bin/security", "add-trusted-cert", "-r"]
+        )
+        self.assertEqual(trust_command[trust_command.index("-k") + 1], str(keychain))
+        self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
+
+    def test_safari_https_refuses_a_normal_keychain(self) -> None:
+        with (
+            mock.patch.object(hosted.sys, "platform", "darwin"),
+            mock.patch.dict(hosted.os.environ, {}, clear=True),
+            self.assertRaisesRegex(SystemExit, "disposable Keychain"),
+        ):
+            hosted.generate_trusted_safari_certificate(Path("/tmp/safari"))
 
     def test_safari_store_access_checks_the_binarycookies_signature(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

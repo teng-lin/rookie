@@ -85,6 +85,10 @@ class HostedCookieCorpusTests(unittest.TestCase):
             hosted.corpus_seed_url(8765, "gecko"),
             "http://127.0.0.1:8765/corpus/run?engine=firefox&tiers=portable_smoke&step=0",
         )
+        self.assertEqual(
+            hosted.corpus_seed_url(9443, "safari", scheme="https"),
+            "https://127.0.0.1:9443/corpus/run?engine=safari&tiers=portable_smoke&step=0",
+        )
 
     def test_every_live_engine_builds_a_full_exact_manifest(self) -> None:
         cells = (
@@ -184,6 +188,26 @@ class HostedCookieCorpusTests(unittest.TestCase):
         self.assertEqual(observation["observed_value"], "visible")
         self.assertEqual(observation["expires"], 4_102_444_800)
         self.assertIn("partitionKey", observation["context"]["origin_attributes"])
+
+    def test_firefox_reader_normalizes_raw_unspecified_same_site_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "cookies.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute("pragma user_version=17")
+            connection.execute(
+                "create table moz_cookies (host text, path text, name text, "
+                "value text, isSecure integer, isHttpOnly integer, sameSite integer, "
+                "expiry integer, originAttributes text)"
+            )
+            connection.execute(
+                "insert into moz_cookies values "
+                "('127.0.0.1', '/', 'rookie_raw', 'visible', 0, 0, 256, "
+                "4102444800, '')"
+            )
+            connection.commit()
+            connection.close()
+            observation = hosted.read_observations("firefox", database)[0]
+        self.assertEqual(observation["same_site"], -1)
 
     def test_safari_binary_parser_reads_flags_strings_and_epoch(self) -> None:
         record = safari_record()

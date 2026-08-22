@@ -204,10 +204,13 @@ below `RUNNER_TEMP`. They do not support local/default-profile discovery.
 
 ### HTTP, HTTPS, and public-site coverage
 
-The installed browser-by-OS matrix intentionally seeds its portable corpus
-from `http://127.0.0.1` and `http://localhost`. That makes all browser products,
-including Safari, deterministic and proves host filtering, but loopback is a
-trustworthy-origin exception and is not the HTTPS oracle.
+The installed browser-by-OS matrix seeds Chromium and Gecko products from
+`http://127.0.0.1` and `http://localhost`. That keeps the broad product matrix
+deterministic and proves host filtering, but loopback is a trustworthy-origin
+exception and is not the HTTPS oracle. Safari is deliberately different: its
+full corpus runs over local HTTPS with a one-day certificate trusted only in
+the fresh hosted job and installed in its disposable Keychain, because Safari
+rejects `Secure` cookies delivered over loopback HTTP.
 
 HTTPS is exercised independently by the live depth lanes. The partition runner
 uses a generated certificate and three named local sites
@@ -217,7 +220,8 @@ produce Secure/SameSite=None CHIPS and dFPI cookies. It asserts Chromium
 keys, Firefox partition keys, and send-time isolation on Rust, Python, Node,
 and CLI. The 320-cookie active-writer stress lane also uses named local HTTPS
 origins. Thus scheme/context depth and browser-product breadth are orthogonal
-contracts rather than one misleading matrix claim.
+contracts. Safari's HTTPS corpus additionally proves the product-specific
+cookie-acceptance boundary; it does not replace the named-site context lane.
 
 The suite does not seed arbitrary public websites. Extraction never makes an
 origin request, so a public host would not enter a distinct decoder or crypto
@@ -366,11 +370,15 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 Every installed Chromium-family and Gecko-family cell below uses a newly
 created registry-correct profile below an isolated home. It persists the full
 portable corpus (19 Chromium rows or 20 Gecko rows, including a second-host
-decoy) and all four public surfaces compare the exact browser-owned set. Safari
-uses the same 19-row portable contract. Because Safari cannot select an
-arbitrary persistent profile directory, that lane refuses to run anywhere
-except a fresh GitHub-hosted account and keeps all harness scratch state below
-`RUNNER_TEMP`; it must never inspect a developer's normal Safari profile.
+decoy) and all four public surfaces compare the exact controlled-origin set.
+Some products, notably Yandex, preload vendor-domain cookies even in a new
+profile; the manifest records their count but excludes those unowned domains
+from value equality. Missing, duplicate, or excess rows on `127.0.0.1` or
+`localhost` still fail. Safari uses the same 19-row portable contract. Because
+Safari cannot select an arbitrary persistent profile directory, that lane
+refuses to run anywhere except a fresh GitHub-hosted account and keeps all
+harness scratch state below `RUNNER_TEMP`; it must never inspect a developer's
+normal Safari profile.
 
 | Cells | Workflow / job | How the browser gets on the runner |
 | --- | --- | --- |
