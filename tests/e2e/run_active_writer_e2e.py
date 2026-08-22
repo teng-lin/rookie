@@ -201,6 +201,19 @@ def validate_profile_proof(
     return database
 
 
+def sqlite_probe_was_blocked_by_browser(database: Path, error: sqlite3.Error) -> bool:
+    """Recognize the platform spellings used for a live browser DB lock."""
+
+    message = str(error).lower()
+    if "locked" in message:
+        return True
+    return (
+        os.name == "nt"
+        and "unable to open database file" in message
+        and database.is_file()
+    )
+
+
 def database_metadata(
     database: Path, engine: str, timeout: float = 10
 ) -> dict[str, Any]:
@@ -233,7 +246,7 @@ def database_metadata(
         except sqlite3.Error as error:
             last_error = error
             if time.monotonic() >= deadline:
-                if "locked" in str(error).lower():
+                if sqlite_probe_was_blocked_by_browser(database, error):
                     return locked_database_header_metadata(database, engine)
                 raise ActiveWriterError(
                     f"could not inspect active database metadata: {last_error}"
@@ -271,19 +284,6 @@ def locked_database_header_metadata(database: Path, engine: str) -> dict[str, An
         "journalPresent": Path(f"{database}-journal").is_file(),
         "sharedMemoryPresent": Path(f"{database}-shm").is_file(),
     }
-
-
-def sqlite_probe_was_blocked_by_browser(database: Path, error: sqlite3.Error) -> bool:
-    """Recognize the platform spellings used for a live browser DB lock."""
-
-    message = str(error).lower()
-    if "locked" in message:
-        return True
-    return (
-        os.name == "nt"
-        and "unable to open database file" in message
-        and database.is_file()
-    )
 
 
 def wait_for_storage_names(
@@ -701,21 +701,6 @@ def run(args: argparse.Namespace) -> None:
             allow_locked_after=lock_probe_grace,
         )
         log_checkpoint("open-baseline", ready, database, args.engine, seeder)
-        if args.engine == "chromium" and sys.platform == "win32":
-            run_checked(
-                [
-                    str(venv_python()),
-                    "tests/e2e/inspect_chromium_profile.py",
-                    str(profile),
-                    "--cookie-name",
-                    "rookie_ci",
-                    "--expected-prefix",
-                    "v10",
-                    "--require-dpapi-key",
-                ],
-                os.environ.copy(),
-                "open-baseline-crypto-proof",
-            )
         run_surface_assertions(
             args.engine,
             profile,
@@ -809,6 +794,25 @@ def run(args: argparse.Namespace) -> None:
             f"ACTIVE_WRITER_PROOF {json.dumps({'checkpoint': 'closed', 'browserState': 'closed', 'databasePath': str(database), 'ack': closed}, sort_keys=True)}",
             flush=True,
         )
+        if args.engine == "chromium" and sys.platform == "win32":
+            # Chrome opens its cookie database without SQLite-compatible sharing
+            # on current Windows runners. Check the raw v10/DPAPI evidence as
+            # soon as that browser-owned store closes; the preceding open-state
+            # assertions still prove every public extractor decrypted it live.
+            run_checked(
+                [
+                    str(venv_python()),
+                    "tests/e2e/inspect_chromium_profile.py",
+                    str(profile),
+                    "--cookie-name",
+                    "rookie_ci",
+                    "--expected-prefix",
+                    "v10",
+                    "--require-dpapi-key",
+                ],
+                os.environ.copy(),
+                "closed-final-crypto-proof",
+            )
         run_surface_assertions(
             args.engine,
             profile,

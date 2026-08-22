@@ -128,6 +128,25 @@ class ActiveWriterProtocolTests(unittest.TestCase):
             self.assertIn(metadata["journalMode"], {"delete", "wal"})
             self.assertTrue(metadata["walPresent"])
 
+    def test_windows_metadata_uses_header_when_sqlite_cannot_open_live_store(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = self.make_chromium_db(Path(tmp))
+            with (
+                mock.patch.object(os, "name", "nt"),
+                mock.patch.object(
+                    active.sqlite3,
+                    "connect",
+                    side_effect=sqlite3.OperationalError(
+                        "unable to open database file"
+                    ),
+                ),
+            ):
+                metadata = active.database_metadata(database, "chromium", timeout=0)
+            self.assertEqual(metadata["metadataSource"], "sqlite-header-while-locked")
+            self.assertGreater(metadata["sqliteSchemaVersion"], 0)
+
     def test_locked_firefox_readiness_defers_to_the_browser_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = Path(tmp) / "cookies.sqlite"
