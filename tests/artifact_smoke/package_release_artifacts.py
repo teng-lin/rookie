@@ -93,8 +93,7 @@ def main() -> int:
     shutil.copy2(built_binding, napi_artifacts / native_filename)
     # Release packaging runs in a clean checkout, where `napi artifacts` also
     # recreates this top-level binding. Remove the local build output after
-    # staging it to match that flow and avoid overwriting a root-owned file
-    # produced by the pinned Linux build container.
+    # staging it so this job takes the same path.
     built_binding.unlink()
     # `napi artifacts` joins --output-dir to its cwd instead of resolving an
     # absolute path. Match the relative directory shape used after release
