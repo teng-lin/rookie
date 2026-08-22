@@ -15,7 +15,10 @@ from run_active_writer_e2e import ActiveWriterError
 from run_firefox_container_e2e import (
     container_cookie_present,
     container_seed_ready,
+    posix_process_group_exists,
+    stop_windows_process_tree,
     stop_web_ext,
+    wait_for_posix_process_group_exit,
     write_container_manifest,
 )
 
@@ -85,9 +88,47 @@ class FirefoxContainerRunnerTests(unittest.TestCase):
         process = mock.Mock()
         process.poll.return_value = None
         process.pid = 1234
-        with mock.patch("run_firefox_container_e2e.os.killpg") as killpg:
+        with (
+            mock.patch("run_firefox_container_e2e.os.killpg") as killpg,
+            mock.patch(
+                "run_firefox_container_e2e.wait_for_posix_process_group_exit",
+                return_value=True,
+            ) as wait_for_group,
+        ):
             stop_web_ext(process)
         killpg.assert_called_once_with(1234, signal.SIGTERM)
+        process.wait.assert_called_once_with(timeout=15)
+        wait_for_group.assert_called_once_with(1234, 15)
+
+    def test_wait_for_posix_process_group_exit_observes_every_member(self) -> None:
+        with (
+            mock.patch(
+                "run_firefox_container_e2e.posix_process_group_exists",
+                side_effect=[True, False],
+            ),
+            mock.patch("run_firefox_container_e2e.time.sleep"),
+        ):
+            self.assertTrue(wait_for_posix_process_group_exit(1234, 5))
+
+    def test_unsignalable_posix_group_has_no_owned_members(self) -> None:
+        with mock.patch(
+            "run_firefox_container_e2e.os.killpg", side_effect=PermissionError
+        ):
+            self.assertFalse(posix_process_group_exists(1234))
+
+    def test_stop_windows_process_tree_includes_firefox_descendants(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.pid = 1234
+        with mock.patch("run_firefox_container_e2e.subprocess.run") as run:
+            stop_windows_process_tree(process)
+        run.assert_called_once_with(
+            ["taskkill", "/PID", "1234", "/T"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
         process.wait.assert_called_once_with(timeout=15)
 
     def test_raw_container_manifest_preserves_the_complete_identity(self) -> None:

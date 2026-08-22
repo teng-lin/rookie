@@ -72,29 +72,77 @@ def container_seed_ready(containers: Path) -> bool:
         return False
 
 
-def stop_web_ext(process: subprocess.Popen[str]) -> None:
-    """Stop web-ext and its Firefox child, then wait for profile finalization."""
+def posix_process_group_exists(process_group_id: int) -> bool:
+    """Return whether any process remains in a POSIX process group."""
+
+    try:
+        os.killpg(process_group_id, 0)
+    except (PermissionError, ProcessLookupError):
+        # The runner owns every process it launched. EPERM therefore means no
+        # signalable member of this disposable process tree remains.
+        return False
+    return True
+
+
+def wait_for_posix_process_group_exit(
+    process_group_id: int, timeout: float
+) -> bool:
+    """Wait until a POSIX process group has no remaining members."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not posix_process_group_exists(process_group_id):
+            return True
+        time.sleep(0.1)
+    return not posix_process_group_exists(process_group_id)
+
+
+def stop_windows_process_tree(process: subprocess.Popen[str]) -> None:
+    """Stop a Windows process and every descendant reported by taskkill."""
 
     if process.poll() is not None:
         return
-    if os.name == "nt":
-        process.terminate()
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    command = ["taskkill", "/PID", str(process.pid), "/T"]
+    subprocess.run(command, check=False, capture_output=True, text=True, timeout=15)
     try:
         process.wait(timeout=15)
     except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(process.pid), "/T"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
         process.wait(timeout=5)
+
+
+def stop_web_ext(process: subprocess.Popen[str]) -> None:
+    """Stop web-ext and its Firefox child, then wait for profile finalization."""
+
+    if os.name == "nt":
+        stop_windows_process_tree(process)
+        return
+    process_group_id = process.pid
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        os.killpg(process_group_id, signal.SIGKILL)
+        process.wait(timeout=5)
+    if wait_for_posix_process_group_exit(process_group_id, 15):
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    if not wait_for_posix_process_group_exit(process_group_id, 5):
+        raise ActiveWriterError(
+            f"web-ext process group {process_group_id} did not terminate"
+        )
 
 
 def seed_container_with_web_ext(
