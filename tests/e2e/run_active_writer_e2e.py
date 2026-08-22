@@ -273,6 +273,19 @@ def locked_database_header_metadata(database: Path, engine: str) -> dict[str, An
     }
 
 
+def sqlite_probe_was_blocked_by_browser(database: Path, error: sqlite3.Error) -> bool:
+    """Recognize the platform spellings used for a live browser DB lock."""
+
+    message = str(error).lower()
+    if "locked" in message:
+        return True
+    return (
+        os.name == "nt"
+        and "unable to open database file" in message
+        and database.is_file()
+    )
+
+
 def wait_for_storage_names(
     database: Path,
     engine: str,
@@ -306,7 +319,7 @@ def wait_for_storage_names(
             last_error = error
             if (
                 allow_locked_after is not None
-                and "locked" in str(error).lower()
+                and sqlite_probe_was_blocked_by_browser(database, error)
                 and time.monotonic() >= deadline - timeout + allow_locked_after
             ):
                 print(
@@ -673,13 +686,19 @@ def run(args: argparse.Namespace) -> None:
         )
         ready = wait_for_ack(control_dir, 0, seeder, args.timeout)
         database = validate_profile_proof(ready, args.engine, profile, seeder)
+        lock_probe_grace = (
+            1.0
+            if args.engine == "firefox"
+            or (args.engine == "chromium" and sys.platform == "win32")
+            else None
+        )
         wait_for_storage_names(
             database,
             args.engine,
             BASELINE_REQUIRED,
             BASELINE_FORBIDDEN,
             args.timeout,
-            allow_locked_after=1.0 if args.engine == "firefox" else None,
+            allow_locked_after=lock_probe_grace,
         )
         log_checkpoint("open-baseline", ready, database, args.engine, seeder)
         if args.engine == "chromium" and sys.platform == "win32":
@@ -724,7 +743,7 @@ def run(args: argparse.Namespace) -> None:
             MUTATED_REQUIRED,
             MUTATED_FORBIDDEN,
             args.timeout,
-            allow_locked_after=1.0 if args.engine == "firefox" else None,
+            allow_locked_after=lock_probe_grace,
         )
         log_checkpoint("open-mutated", mutated, database, args.engine, seeder)
         run_surface_assertions(

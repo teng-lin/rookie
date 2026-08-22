@@ -154,6 +154,22 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 connection.execute("ROLLBACK")
                 connection.close()
 
+    def test_windows_unable_to_open_live_store_is_a_lock_only_if_file_exists(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "Cookies"
+            database.touch()
+            error = sqlite3.OperationalError("unable to open database file")
+            with mock.patch.object(os, "name", "nt"):
+                self.assertTrue(
+                    active.sqlite_probe_was_blocked_by_browser(database, error)
+                )
+                database.unlink()
+                self.assertFalse(
+                    active.sqlite_probe_was_blocked_by_browser(database, error)
+                )
+
     def test_storage_transition_requires_add_replace_subject_and_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database = self.make_chromium_db(Path(tmp))
