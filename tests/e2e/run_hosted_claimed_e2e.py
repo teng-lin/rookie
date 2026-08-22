@@ -425,7 +425,7 @@ def generate_trusted_safari_certificate(
                 "add-trusted-cert",
                 "-d",
                 "-r",
-                "trustAsRoot",
+                "trustRoot",
                 "-p",
                 "ssl",
                 "-s",

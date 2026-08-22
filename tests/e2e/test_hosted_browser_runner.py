@@ -638,7 +638,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             trust_command[trust_command.index("-k") + 1],
             "/Library/Keychains/System.keychain",
         )
-        self.assertIn("trustAsRoot", trust_command)
+        self.assertIn("trustRoot", trust_command)
         self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-localhost.pem"))
         verify_command = run.call_args_list[2].args[0]
         self.assertEqual(verify_command[:2], ["/usr/bin/security", "verify-cert"])
