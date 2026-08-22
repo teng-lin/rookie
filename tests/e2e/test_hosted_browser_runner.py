@@ -347,10 +347,17 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertIn("--headless=new", command)
 
-    def test_linux_edge_gets_extended_startup_budget(self) -> None:
+    def test_edge_gets_extended_startup_budget_on_linux_and_windows(self) -> None:
         self.assertEqual(
             hosted.chromium_startup_timeout(
                 "/usr/bin/microsoft-edge", platform="linux"
+            ),
+            90,
+        )
+        self.assertEqual(
+            hosted.chromium_startup_timeout(
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                platform="win32",
             ),
             90,
         )
@@ -524,6 +531,15 @@ class HostedBrowserRunnerTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary) / "safari"
+
+            def create_mock_openssl_outputs(command: list[str], **_kwargs: object):
+                for flag in ("-keyout", "-out"):
+                    if flag in command:
+                        Path(command[command.index(flag) + 1]).write_text(
+                            f"fixture for {flag}\n", encoding="utf-8"
+                        )
+                return hosted.subprocess.CompletedProcess(command, 0)
+
             with (
                 mock.patch.object(hosted.sys, "platform", "darwin"),
                 mock.patch.dict(
@@ -537,15 +553,21 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                     clear=True,
                 ),
                 mock.patch.object(hosted.shutil, "which", return_value="/opt/openssl"),
-                mock.patch.object(hosted.subprocess, "run") as run,
+                mock.patch.object(
+                    hosted.subprocess,
+                    "run",
+                    side_effect=create_mock_openssl_outputs,
+                ) as run,
             ):
                 certificate, private_key = hosted.generate_trusted_safari_certificate(
                     scratch
                 )
                 extensions = (scratch / "tls/rookie-localhost.ext").read_text()
+                chain_text = certificate.read_text()
 
-        self.assertEqual(certificate, scratch / "tls/rookie-localhost.pem")
+        self.assertEqual(certificate, scratch / "tls/rookie-localhost-chain.pem")
         self.assertEqual(private_key, scratch / "tls/rookie-localhost-key.pem")
+        self.assertGreaterEqual(chain_text.count("fixture"), 2)
         openssl_command = run.call_args_list[0].args[0]
         self.assertEqual(openssl_command[0:3], ["/opt/openssl", "req", "-x509"])
         sign_command = run.call_args_list[2].args[0]
@@ -566,8 +588,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             trust_command[trust_command.index("-k") + 1],
             "/Library/Keychains/System.keychain",
         )
-        self.assertIn("trustAsRoot", trust_command)
-        self.assertEqual(trust_command[-1], str(certificate))
+        self.assertIn("trustRoot", trust_command)
+        self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
         verify_command = run.call_args_list[4].args[0]
         self.assertEqual(
             verify_command[:3],

@@ -384,6 +384,7 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
     authority = tls_dir / "rookie-local-ca.pem"
     authority_key = tls_dir / "rookie-local-ca-key.pem"
     certificate = tls_dir / "rookie-localhost.pem"
+    server_chain = tls_dir / "rookie-localhost-chain.pem"
     private_key = tls_dir / "rookie-localhost-key.pem"
     request = tls_dir / "rookie-localhost.csr"
     extensions = tls_dir / "rookie-localhost.ext"
@@ -479,14 +480,12 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
                 "add-trusted-cert",
                 "-d",
                 "-r",
-                "trustAsRoot",
+                "trustRoot",
                 "-p",
                 "ssl",
-                "-s",
-                "127.0.0.1",
                 "-k",
                 "/Library/Keychains/System.keychain",
-                str(certificate),
+                str(authority),
             ],
             check=True,
             capture_output=True,
@@ -494,14 +493,14 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             timeout=30,
         )
         # Check the same Security.framework trust settings Safari consumes.
-        # Trusting the short-lived leaf directly avoids depending on whether a
-        # browser accepts an omitted locally generated intermediate/root.
         subprocess.run(
             [
                 "/usr/bin/security",
                 "verify-cert",
                 "-c",
                 str(certificate),
+                "-c",
+                str(authority),
                 "-p",
                 "ssl",
                 "-s",
@@ -521,7 +520,13 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             "failed to prepare trusted Safari HTTPS certificate on the fresh "
             f"hosted runner: {details}"
         ) from error
-    return certificate, private_key
+    # ssl.SSLContext sends every PEM certificate in this file. Presenting the
+    # complete chain is required even when the generated root is in the system
+    # Keychain: Safari and /usr/bin/curl do not fetch this private issuer.
+    server_chain.write_bytes(
+        certificate.read_bytes().rstrip() + b"\n" + authority.read_bytes()
+    )
+    return server_chain, private_key
 
 
 def verify_safari_https_server(port: int) -> None:
@@ -753,10 +758,10 @@ def pick_devtools_port() -> int:
 
 
 def chromium_startup_timeout(exe: str, *, platform: str | None = None) -> float:
-    """Allow Edge's Linux wrapper enough time to finish first-run startup."""
+    """Allow Edge enough time to finish branded first-run startup."""
 
-    platform = platform or sys.platform
-    if platform.startswith("linux") and "microsoft-edge" in Path(exe).name:
+    executable_name = exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable_name in {"microsoft-edge", "msedge.exe"}:
         return 90
     return 45
 
