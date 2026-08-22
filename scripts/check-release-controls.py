@@ -80,7 +80,7 @@ REQUIRED_CHECK_RUNS = (
     "e2e macos × firefox",
     "e2e macos × chrome (real Keychain lookup)",
     "e2e windows × firefox",
-    "e2e windows × chrome (App-Bound v20 canary)",
+    "e2e windows × chrome (App-Bound v20 staged-WAL recovery + liveness)",
     "e2e windows × chrome (legacy DPAPI)",
     *(f"{platform} / {sub_job}" for platform in _ARTIFACT_SMOKE_PLATFORMS for sub_job in _ARTIFACT_SMOKE_SUB_JOBS),
     "check (ubuntu-latest)",
