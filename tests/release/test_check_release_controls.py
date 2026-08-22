@@ -142,6 +142,20 @@ class TagRulesetTests(unittest.TestCase):
 
 
 class RequiredChecksTests(unittest.TestCase):
+    def test_appbound_check_name_matches_the_workflow_job(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/e2e.yml").read_text(
+            encoding="utf-8"
+        )
+        template = next(
+            line.strip().removeprefix("name: ")
+            for line in workflow.splitlines()
+            if line.strip().startswith(
+                "name: e2e windows × ${{ matrix.browser }} (App-Bound"
+            )
+        )
+        chrome_check = template.replace("${{ matrix.browser }}", "chrome")
+        self.assertIn(chrome_check, check_release_controls.REQUIRED_CHECK_RUNS)
+
     def test_passes_when_every_required_check_succeeded(self) -> None:
         response = {
             "check_runs": [

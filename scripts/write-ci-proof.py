@@ -96,7 +96,7 @@ _TRUSTED_WORKFLOW_FOR_CHECK: dict[str, str] = {
     "e2e macos × firefox": ".github/workflows/e2e.yml",
     "e2e macos × chrome (real Keychain lookup)": ".github/workflows/e2e.yml",
     "e2e windows × firefox": ".github/workflows/e2e.yml",
-    "e2e windows × chrome (App-Bound v20 canary)": ".github/workflows/e2e.yml",
+    "e2e windows × chrome (App-Bound v20 staged-WAL recovery + liveness)": ".github/workflows/e2e.yml",
     "e2e windows × chrome (legacy DPAPI)": ".github/workflows/e2e.yml",
     "check (ubuntu-latest)": ".github/workflows/test-rust.yml",
     "release gate: full test suite": ".github/workflows/test-rust.yml",
