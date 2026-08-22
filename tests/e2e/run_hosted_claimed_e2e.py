@@ -539,30 +539,20 @@ def verify_safari_https_server(port: int, authority: Path) -> None:
     """Prove the generated CA validates the live TLS server and hostname."""
 
     try:
-        subprocess.run(
-            [
-                "/usr/bin/curl",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--cacert",
-                str(authority),
-                "--connect-timeout",
-                "5",
-                "--max-time",
-                "10",
-                f"https://127.0.0.1:{port}/health",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        details = (error.stderr or error.stdout or "").strip()
+        context = ssl.create_default_context(cafile=str(authority))
+        with urlopen(
+            f"https://127.0.0.1:{port}/health",
+            timeout=10,
+            context=context,
+        ) as response:
+            if response.status != 200 or response.read() != b"ok":
+                raise SystemExit(
+                    "Safari HTTPS preflight received an invalid health response"
+                )
+    except (OSError, ValueError) as error:
         raise SystemExit(
             "Safari HTTPS preflight could not validate the live disposable "
-            f"origin with its generated CA: {details}"
+            f"origin with its generated CA: {error}"
         ) from error
 
 

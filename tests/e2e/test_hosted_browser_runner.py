@@ -657,14 +657,23 @@ class HostedBrowserRunnerTests(unittest.TestCase):
 
     def test_safari_https_preflight_uses_generated_authority(self) -> None:
         authority = Path("/tmp/rookie-local-ca.pem")
-        with mock.patch.object(hosted.subprocess, "run") as run:
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b"ok"
+        response.__enter__.return_value = response
+        context = mock.sentinel.tls_context
+        with (
+            mock.patch.object(
+                hosted.ssl, "create_default_context", return_value=context
+            ) as create_context,
+            mock.patch.object(hosted, "urlopen", return_value=response) as open_url,
+        ):
             hosted.verify_safari_https_server(9443, authority)
 
-        command = run.call_args.args[0]
-        self.assertEqual(command[0], "/usr/bin/curl")
-        self.assertNotIn("--insecure", command)
-        self.assertEqual(command[command.index("--cacert") + 1], str(authority))
-        self.assertEqual(command[-1], "https://127.0.0.1:9443/health")
+        create_context.assert_called_once_with(cafile=str(authority))
+        open_url.assert_called_once_with(
+            "https://127.0.0.1:9443/health", timeout=10, context=context
+        )
 
     def test_safari_https_refuses_a_non_hosted_account(self) -> None:
         with (
