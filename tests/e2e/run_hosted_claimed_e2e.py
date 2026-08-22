@@ -787,6 +787,20 @@ def chromium_startup_timeout(exe: str, *, platform: str | None = None) -> float:
     return 45
 
 
+def chromium_launch_environment(exe: str, user_data: Path) -> dict[str, str]:
+    """Keep Linux Edge auxiliary config out of the discovery destination."""
+
+    env = os.environ.copy()
+    executable_name = Path(exe).name.lower()
+    if sys.platform.startswith("linux") and executable_name.startswith(
+        "microsoft-edge"
+    ):
+        xdg_config = user_data.parent / f"{user_data.name}-xdg-config"
+        xdg_config.mkdir(parents=True, exist_ok=True)
+        env["XDG_CONFIG_HOME"] = str(xdg_config)
+    return env
+
+
 def wait_for_devtools_or_cookie(
     proc: subprocess.Popen[bytes] | subprocess.Popen[str],
     port: int,
@@ -844,7 +858,11 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         exe, user_data, url, remote_debugging_port=devtools_port
     )
     print("+", " ".join(cmd), flush=True)
-    proc = subprocess.Popen(cmd, cwd=str(ROOT))
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        env=chromium_launch_environment(exe, user_data),
+    )
     saw_cookie = False
     try:
         has_devtools = wait_for_devtools_or_cookie(

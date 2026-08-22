@@ -159,6 +159,27 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             [requested],
         )
 
+    def test_linux_edge_auxiliary_config_cannot_pollute_discovery_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            user_data = Path(temporary) / "edge-automation"
+            with (
+                mock.patch.object(hosted.sys, "platform", "linux"),
+                mock.patch.dict(
+                    hosted.os.environ,
+                    {"XDG_CONFIG_HOME": "/discovery/.config"},
+                    clear=True,
+                ),
+            ):
+                env = hosted.chromium_launch_environment(
+                    "/usr/bin/microsoft-edge", user_data
+                )
+
+            self.assertEqual(
+                env["XDG_CONFIG_HOME"],
+                str(Path(temporary) / "edge-automation-xdg-config"),
+            )
+            self.assertTrue(Path(env["XDG_CONFIG_HOME"]).is_dir())
+
     def test_stopped_automation_profile_is_staged_into_empty_registry_root(
         self,
     ) -> None:
