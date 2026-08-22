@@ -191,6 +191,12 @@ export async function runActiveWriterProtocol({
     const userAgent = await page.evaluate(() => navigator.userAgent);
     const browser = context.browser();
     const browserVersion = browser?.version() ?? "unknown";
+    // Firefox can expose the baseline Max-Age=0 row through context.cookies()
+    // briefly after navigation, just as it can retain an expired tombstone in
+    // moz_cookies after the mutation. Rebuild the controlled synthetic jar at
+    // both delete checkpoints so the ready acknowledgement proves physical
+    // absence instead of relying on asynchronous expiry cleanup.
+    await physicallyDeleteCookie(context, origin, "rookie_added");
     const liveness = await probe(
       context,
       page,

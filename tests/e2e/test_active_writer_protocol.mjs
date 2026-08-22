@@ -50,6 +50,8 @@ test("ready/hold/mutate/probe/close protocol keeps an owned context live", async
           state.clear();
           state.set("rookie_ci", "before");
           state.set("rookie_remove", "present");
+          // Model Firefox transiently retaining the Max-Age=0 baseline row.
+          state.set("rookie_added", "");
         } else if (url.includes("mutate")) {
           state.set("rookie_ci", "after");
           state.set("rookie_added", "present");
