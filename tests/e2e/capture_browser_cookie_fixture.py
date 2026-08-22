@@ -367,8 +367,8 @@ def sanitize_database(
                     "sanitized database rows do not exactly match the expected manifest: "
                     f"expected={expected!r}, actual={after!r}"
                 )
-            signature = schema_signature(connection)
             connection.execute("VACUUM")
+            signature = schema_signature(connection)
         finally:
             connection.close()
 

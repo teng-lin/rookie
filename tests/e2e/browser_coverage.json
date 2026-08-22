@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "lanes": {
-    "nightly_hosted": "Real browser seed+extract. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and normal-profile Safari on supported hosted images.",
+    "nightly_hosted": "Real browser full portable-corpus seed+exact extraction. Chrome/Firefox run in e2e.yml. e2e-release.yml installs or enables Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and normal-profile Safari on supported hosted images.",
     "release_fixture": "Deterministic engine checks plus browser-id coverage in e2e-release.yml (tag, release, workflow_dispatch); no browser is launched.",
     "manual": "Operator-owned fallback for a registry cell without a viable hosted runner. No current cells rely on it."
   },
@@ -51,11 +51,11 @@
       "registry_id": "none",
       "browser_launch": "live",
       "explicit_path": "live",
-      "detailed": "none",
+      "detailed": "live",
       "discovery": "none",
       "recommended_read": "none",
       "crypto": "none",
-      "exact_set": "none",
+      "exact_set": "live",
       "active_writer": "none",
       "partitioned": "none"
     },

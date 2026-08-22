@@ -50,6 +50,7 @@ jobs:
       - name: Build every public surface
         run: |
           cargo test --test e2e_context --no-run --locked
+          cargo build -p rookie-cookies --example e2e_cookie_surface --release --locked
           cargo build -p rookie-cookies-cli --release --locked
           python -m venv .venv
           .venv/bin/pip install --quiet maturin==1.14.1

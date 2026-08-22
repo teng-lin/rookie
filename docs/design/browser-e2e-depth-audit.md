@@ -2,8 +2,9 @@
 
 - **Author:** Codex
 - **Date:** 2026-08-21
-- **Status:** Implemented in `codex/browser-e2e-depth`; disposable-profile live
-  validation complete on macOS; remote OS/browser jobs pending CI execution
+- **Status:** Remediation implemented in `codex/browser-e2e-depth`, including
+  the full installed browser-by-OS matrix; disposable-profile live validation
+  complete on macOS; remote OS/browser jobs pending CI execution
 - **Baseline:** `f0df3d1`
 - **Scope:** Browser-generated cookie fixtures, hosted live-browser extraction,
   Rust/Python/Node/CLI assertions, cookie isolation context, discovery, and
@@ -11,26 +12,48 @@
 
 ## Executive conclusion
 
-The browser E2E suite has exceptional platform and decryption breadth, but its
-success predicate is too shallow. It proves that many platform, browser, and
-credential combinations can recover one known encrypted value. It does not yet
+At the audited baseline, the browser E2E suite had exceptional platform and
+decryption breadth, but its success predicate was too shallow. It proved that
+many platform, browser, and credential combinations could recover one known
+encrypted value. It did not yet
 prove that extraction returns the exact cookie set, preserves all cookie
 attributes, preserves partition/container identity, excludes unrelated rows,
 or behaves correctly against a database being actively modified by a browser.
 
-This is a critical test-quality gap, not a claim that the crypto matrix has no
-value. The current suite provides strong confidence in basic discovery and
-decryption reachability. It provides substantially less confidence in semantic
+This was a critical test-quality gap, not a claim that the crypto matrix had no
+value. The baseline suite provided strong confidence in basic discovery and
+decryption reachability, but substantially less confidence in semantic
 correctness and almost no conventional stress coverage such as volume,
 concurrency, mutation, or active-writer recovery.
 
-The highest-priority repair is an independent, manifest-driven cookie corpus
-with exact full-set assertions across all four public surfaces. Active-writer
-and partition/container tests should follow. Increasing the number of cookies
-or browser cells before exact assertions exist would mostly repeat the current
-weakness at a larger scale.
+The implemented remediation combines an independent, manifest-driven cookie
+corpus with exact full-set assertions across all four public surfaces,
+active-writer and stress protocols, browser-produced partition/container
+contexts, and sanitized capture provenance. Exact assertions came first so
+that added cookies and browser cells could not merely repeat the original weak
+predicate at a larger scale.
 
-## Verified baseline state
+### Current remediation status
+
+The ordinary Chrome/Firefox lanes and every installed-browser cell in
+`e2e-release.yml` now seed a full portable corpus rather than `/set`. Chromium,
+Edge, Brave, Opera/Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari all use
+the shared runner on their supported hosted OSes. The browser-owned store must
+contain the exact expected set: 19 rows for Chromium/Safari or 20 for Gecko,
+with one decoy excluded by the domain filter, and no deleted, rejected,
+duplicate, or excess target-origin rows. Rust, Python, Node, and CLI verify
+filtered, unfiltered, and detailed projections.
+
+All Chromium/Gecko profiles are newly created below an isolated home. Safari
+cannot use a custom persistent profile directory, so its runner is hard-gated
+to a fresh GitHub-hosted account and refuses local execution. HTTPS and named
+site behavior remain an explicit depth axis: live CHIPS/dFPI and stress lanes
+use generated TLS certificates and local test domains, including exact
+`source_scheme`, source-port, ancestry, and partition assertions. Public
+websites are intentionally excluded because the extractor does not contact an
+origin and external sites cannot provide a deterministic, owned cookie oracle.
+
+## Verified historical baseline state
 
 The declarative coverage matrix contains 47 platform-by-browser cells:
 
@@ -44,7 +67,7 @@ runner explicitly describes its work as browser-ID/engine coverage rather than
 per-browser crypto coverage in
 [`run_claimed_browser_fixtures.py`](../../tests/e2e/run_claimed_browser_fixtures.py).
 
-The normal hosted seeder returns one cookie:
+At baseline, the normal hosted seeder returned one cookie:
 
 ```text
 rookie_ci=bar; Path=/; Max-Age=3600; SameSite=Lax

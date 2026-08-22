@@ -277,10 +277,10 @@ jobs:
           node -e "const m=require('./index.js'); if (typeof m.read!=='function'||typeof m.ReadResult!=='function') { throw new Error('local Node binding missing job API: read='+typeof m.read+' ReadResult='+typeof m.ReadResult) }"
 
       - name: Seed Chrome profile and run extraction (rust + python + cli + node)
-        env:
-          ROOKIE_E2E_KEYCHAIN_SERVICE: Chrome Safe Storage
-          ROOKIE_E2E_KEYCHAIN_ACCOUNT: Chrome
-        run: bash tests/e2e/run_hosted_chromium_e2e.sh chrome
+        run: |
+          .venv/bin/python tests/e2e/run_with_ephemeral_keychain.py \
+            --service 'Chrome Safe Storage' --account Chrome --account Chromium -- \
+            bash tests/e2e/run_hosted_chromium_e2e.sh chrome
 
   windows-firefox:
     name: e2e windows × firefox

@@ -159,14 +159,22 @@ class CookieManifestVerifierTests(unittest.TestCase):
         self.assert_mutation_fails([record], "wrong shape.*excess")
 
     def test_real_corpus_declares_extensible_tiers_and_applicability(self) -> None:
-        corpus = json.loads((E2E_DIR / "cookie_corpus.json").read_text(encoding="utf-8"))
+        corpus = json.loads(
+            (E2E_DIR / "cookie_corpus.json").read_text(encoding="utf-8")
+        )
         self.assertEqual(corpus["schema_version"], 1)
         self.assertTrue({"portable_smoke", "deep", "stress"} <= set(corpus["tiers"]))
+        scenario_ids = [scenario["id"] for scenario in corpus["scenarios"]]
+        self.assertEqual(len(scenario_ids), len(set(scenario_ids)))
         for scenario in corpus["scenarios"]:
             self.assertTrue(scenario["tiers"])
             self.assertTrue(set(scenario["tiers"]) <= set(corpus["tiers"]))
             self.assertTrue(scenario["applicability"]["engines"])
             self.assertTrue(scenario["applicability"]["platforms"])
+            self.assertEqual(
+                set(scenario["expected"]["same_site"]),
+                set(scenario["applicability"]["engines"]),
+            )
         # The sample manifest also pins schema validation independently of a browser.
         validate_manifest(manifest())
 

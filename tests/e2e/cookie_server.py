@@ -14,7 +14,7 @@ import threading
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 _LOG_LOCK = threading.Lock()
 _CORPUS_PATH = Path(__file__).with_name("cookie_corpus.json")
@@ -81,6 +81,50 @@ def corpus_headers(path: str, host: str, corpus: dict | None = None) -> list[str
     return headers
 
 
+def corpus_run_response(
+    path: str, host: str, corpus: dict | None = None
+) -> tuple[list[str], str | None]:
+    """Apply one corpus origin/phase and redirect to the next one."""
+
+    corpus = corpus or load_corpus()
+    parsed = urlsplit(path)
+    query = parse_qs(parsed.query)
+    engine = query.get("engine", [""])[0]
+    tiers = query.get("tiers", [",".join(corpus["default_tiers"])])[0]
+    try:
+        step = int(query.get("step", ["0"])[0])
+    except ValueError as error:
+        raise ValueError("corpus run step must be an integer") from error
+    sequence = [
+        (phase, origin_name)
+        for phase in corpus["phase_order"]
+        for origin_name in corpus["origins"]
+    ]
+    if step < 0 or step >= len(sequence):
+        raise ValueError(f"corpus run step {step} is outside 0..{len(sequence) - 1}")
+
+    phase, origin_name = sequence[step]
+    expected_host = corpus["origins"][origin_name]["hostname"]
+    actual_host, separator, port = host.rpartition(":")
+    if not separator:
+        actual_host, port = host, ""
+
+    def run_url(target_step: int, target_host: str) -> str:
+        authority = f"{target_host}:{port}" if port else target_host
+        encoded = urlencode({"engine": engine, "tiers": tiers, "step": target_step})
+        return f"http://{authority}/corpus/run?{encoded}"
+
+    if actual_host.lower() != expected_host.lower():
+        return [], run_url(step, expected_host)
+    virtual_path = f"/corpus/{phase}?" + urlencode({"engine": engine, "tiers": tiers})
+    headers = corpus_headers(virtual_path, host, corpus)
+    if step + 1 == len(sequence):
+        return headers, None
+    next_origin = sequence[step + 1][1]
+    next_host = corpus["origins"][next_origin]["hostname"]
+    return headers, run_url(step + 1, next_host)
+
+
 class Handler(BaseHTTPRequestHandler):
     # Browsers preconnect to origins they have already visited, so they open
     # TCP sockets they may never send a request on. Reap those sockets instead
@@ -130,15 +174,29 @@ class Handler(BaseHTTPRequestHandler):
             with _LOG_LOCK, Path(request_log).open("a", encoding="utf-8") as log:
                 log.write(f"{self.path}\n")
 
-        self.send_response(200)
-        is_corpus_route = urlsplit(self.path).path.startswith("/corpus/")
-        corpus_cookie_headers = corpus_headers(self.path, self.headers.get("Host", ""))
+        request_path = urlsplit(self.path).path
+        is_corpus_route = request_path.startswith("/corpus/")
+        corpus = load_corpus() if is_corpus_route else None
+        redirect = None
+        if request_path == "/corpus/run":
+            corpus_cookie_headers, redirect = corpus_run_response(
+                self.path, self.headers.get("Host", ""), corpus
+            )
+        elif is_corpus_route:
+            corpus_cookie_headers = corpus_headers(
+                self.path, self.headers.get("Host", ""), corpus
+            )
+        else:
+            corpus_cookie_headers = []
+        self.send_response(302 if redirect else 200)
         if is_corpus_route:
             for header in corpus_cookie_headers:
                 self.send_header("Set-Cookie", header)
         else:
             for header in self.cookie_headers(self.path):
                 self.send_header("Set-Cookie", header)
+        if redirect:
+            self.send_header("Location", redirect)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"ok")

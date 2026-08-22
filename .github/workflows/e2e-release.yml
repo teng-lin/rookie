@@ -113,7 +113,14 @@ jobs:
         shell: bash
         run: |
           if [ -x .venv/bin/python ]; then py=.venv/bin/python; else py=.venv/Scripts/python; fi
-          "$py" tests/e2e/run_hosted_claimed_e2e.py
+          if [ "${{ matrix.platform }}" = macos ] && [ "${{ matrix.engine }}" = chromium ]; then
+            "$py" tests/e2e/run_with_ephemeral_keychain.py \
+              --service "$ROOKIE_E2E_KEYCHAIN_SERVICE" \
+              --account "$ROOKIE_E2E_KEYCHAIN_ACCOUNT" -- \
+              "$py" tests/e2e/run_hosted_claimed_e2e.py
+          else
+            "$py" tests/e2e/run_hosted_claimed_e2e.py
+          fi
 
   fixtures:
     name: claimed-browser fixtures (${{ matrix.os }})

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed an installed claimed browser and extract rookie_ci=bar.
+"""Seed an installed claimed browser and assert its exact portable corpus.
 
 Installed Chromium-family browsers are launched through their native CLI,
 using foreground Xvfb on most Linux images and modern headless mode where the
@@ -25,11 +25,16 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from browser_coverage_contract import assert_observed_depth, coverage_row, load_coverage
-from run_exact_corpus_e2e import digest_fields, normalized_path_bytes
-from run_partition_context_e2e import _firefox_expiry
+from hosted_cookie_corpus import corpus_seed_url, write_hosted_manifest
+from run_exact_corpus_e2e import (
+    configure_isolated_keychain,
+    digest_fields,
+    normalized_path_bytes,
+)
 from webdriver_cookie import (
     WebDriverError,
     file_snapshot,
@@ -240,14 +245,24 @@ def stop_safari(*, graceful: bool) -> None:
     subprocess.run(["pkill", "-x", "Safari"], check=False, capture_output=True)
 
 
-def wait_for_request(request_log: Path, path: str, timeout: float = 30) -> None:
+def wait_for_request(
+    request_log: Path,
+    path: str,
+    timeout: float = 30,
+    *,
+    query_contains: str | None = None,
+) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             requests = request_log.read_text(encoding="utf-8").splitlines()
         except OSError:
             requests = []
-        if path in requests:
+        if any(
+            urlsplit(request).path == path
+            and (query_contains is None or query_contains in urlsplit(request).query)
+            for request in requests
+        ):
             return
         time.sleep(0.25)
     raise SystemExit(f"Safari never requested {path}; observed requests: {requests!r}")
@@ -264,7 +279,16 @@ def seed_safari_native(
     print("+", " ".join(command), flush=True)
     subprocess.run(command, check=True, timeout=30)
     try:
-        wait_for_request(request_log, "/set")
+        parsed_url = urlsplit(url)
+        if parsed_url.path == "/corpus/run":
+            # Four origin/phase responses complete the portable redirect chain.
+            wait_for_request(
+                request_log,
+                "/corpus/run",
+                query_contains="step=3",
+            )
+        else:
+            wait_for_request(request_log, parsed_url.path)
         cookie_file = wait_for_changed_cookie_file("safari", before, timeout=45)
     except WebDriverError:
         # Some Safari releases checkpoint BinaryCookies only on a graceful
@@ -294,6 +318,29 @@ def verify_safari_store_access(cookie_file: Path) -> None:
     print("Safari cookie store readable through runner Full Disk Access", flush=True)
 
 
+def require_disposable_safari_host(scratch_profile: Path) -> None:
+    """Refuse to open Safari's normal store outside a fresh hosted CI account."""
+
+    if (
+        os.environ.get("CI", "").lower() != "true"
+        or os.environ.get("GITHUB_ACTIONS", "").lower() != "true"
+    ):
+        raise SystemExit(
+            "Safari live extraction is restricted to a fresh GitHub-hosted CI "
+            "account; never run it against a local default Safari profile"
+        )
+    runner_temp_raw = os.environ.get("RUNNER_TEMP")
+    if not runner_temp_raw:
+        raise SystemExit("RUNNER_TEMP must identify the disposable Safari job root")
+    runner_temp = Path(runner_temp_raw).resolve(strict=True)
+    try:
+        scratch_profile.resolve().relative_to(runner_temp)
+    except ValueError as error:
+        raise SystemExit(
+            f"Safari scratch profile {scratch_profile} is outside RUNNER_TEMP"
+        ) from error
+
+
 def venv_python() -> Path:
     unix = ROOT / ".venv" / "bin" / "python"
     windows = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -312,6 +359,11 @@ def keychain_accounts() -> list[str]:
 def plant_keychain() -> None:
     service = os.environ.get("ROOKIE_E2E_KEYCHAIN_SERVICE")
     if not service or sys.platform != "darwin":
+        return
+    if os.environ.get("ROOKIE_E2E_EPHEMERAL_KEYCHAIN"):
+        # The wrapper already planted the exact service/account pairs into its
+        # disposable keychain.  Adding them again without an explicit keychain
+        # path would target the runner's normal default keychain.
         return
     for account in keychain_accounts():
         subprocess.run(
@@ -384,10 +436,12 @@ def cookies_db_has_name(user_data: Path, name: str = "rookie_ci") -> bool:
     return any(cookie_db_has_name(db, name) for db in chromium_cookie_dbs(user_data))
 
 
-def wait_for_chromium_cookie(user_data: Path, timeout: float) -> bool:
+def wait_for_chromium_cookie(
+    user_data: Path, timeout: float, *, name: str = "rookie_ci"
+) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if cookies_db_has_name(user_data):
+        if cookies_db_has_name(user_data, name):
             return True
         time.sleep(0.5)
     return False
@@ -516,7 +570,10 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
         )
         if has_devtools:
             navigate_chromium_cdp(devtools_port, url)
-        saw_cookie = wait_for_chromium_cookie(user_data, 30)
+        completion_name = (
+            "rookie_decoy" if urlsplit(url).path == "/corpus/run" else "rookie_ci"
+        )
+        saw_cookie = wait_for_chromium_cookie(user_data, 30, name=completion_name)
         if saw_cookie:
             time.sleep(1)
     finally:
@@ -529,10 +586,12 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
     # Windows launchers can outlive the browser process addressed by
     # Browser.close. Do not reject a delayed cookie checkpoint until the
     # launcher has also stopped and released the SQLite store.
-    if not saw_cookie and not wait_for_chromium_cookie(user_data, 15):
+    if not saw_cookie and not wait_for_chromium_cookie(
+        user_data, 15, name=completion_name
+    ):
         candidates = ", ".join(str(path) for path in chromium_cookie_dbs(user_data))
         raise SystemExit(
-            "native Chromium navigation requested rookie_ci but the profile "
+            f"native Chromium navigation requested {completion_name} but the profile "
             f"did not persist it (cookie databases: {candidates or '<none>'})"
         )
 
@@ -566,7 +625,7 @@ def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
 
 
 def require_exact_single_cookie(env: dict[str, str]) -> None:
-    """Make the broad hosted lane reject every unseeded or duplicate row."""
+    """Keep the legacy IE canary exact until a hosted IE cell exists."""
 
     name = env.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     value = env.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
@@ -575,130 +634,20 @@ def require_exact_single_cookie(env: dict[str, str]) -> None:
     env["ROOKIE_E2E_EXACT_COOKIE_STATE"] = "1"
 
 
-def write_live_smoke_manifest(engine: str, profile: Path, database: Path) -> Path:
-    """Build a one-row structural oracle from the seed contract plus raw metadata."""
-
-    connection = sqlite3.connect(database)
-    connection.row_factory = sqlite3.Row
-    try:
-        table = "cookies" if engine == "chromium" else "moz_cookies"
-        columns = {
-            str(row[1]) for row in connection.execute(f"pragma table_info({table})")
-        }
-        schema_version = int(connection.execute("pragma user_version").fetchone()[0])
-        rows = connection.execute(f"select * from {table}").fetchall()
-    finally:
-        connection.close()
-    if len(rows) != 1 or rows[0]["name"] != "rookie_ci":
-        names = [row["name"] for row in rows if "name" in row.keys()]
-        raise SystemExit(
-            f"fresh {engine} hosted profile must contain exactly rookie_ci; "
-            f"observed {len(rows)} rows: {names}"
-        )
-    row = rows[0]
-
-    def optional(name: str, default: object = None) -> object:
-        return row[name] if name in columns else default
-
-    if engine == "chromium":
-        raw_expiry = int(row["expires_utc"])
-        expires = (
-            (raw_expiry - 11_644_473_600_000_000) // 1_000_000
-            if raw_expiry > 11_644_473_600_000_000
-            else None
-        )
-        flat = {
-            "domain": str(row["host_key"]),
-            "path": str(row["path"]),
-            "secure": bool(row["is_secure"]),
-            "expires": expires,
-            "name": "rookie_ci",
-            "value": "bar",
-            "http_only": bool(row["is_httponly"]),
-            "same_site": int(row["samesite"]),
-        }
-        top_key = optional("top_frame_site_key")
-        context = {
-            "top_frame_site_key": None if top_key in (None, "") else str(top_key),
-            "has_cross_site_ancestor": (
-                bool(optional("has_cross_site_ancestor"))
-                if "has_cross_site_ancestor" in columns
-                else None
-            ),
-            "source_scheme": (
-                int(optional("source_scheme")) if "source_scheme" in columns else None
-            ),
-            "source_port": (
-                int(optional("source_port")) if "source_port" in columns else None
-            ),
-            "is_persistent": (
-                bool(optional("is_persistent")) if "is_persistent" in columns else None
-            ),
-            "origin_attributes": None,
-            "user_context_id": None,
-            "partition_key": None,
-            "private_browsing_id": None,
-        }
-        manifest_path = profile / "rookie-e2e-cookie-manifest.json"
-    else:
-        flat = {
-            "domain": str(row["host"]),
-            "path": str(row["path"]),
-            "secure": bool(row["isSecure"]),
-            "expires": _firefox_expiry(row["expiry"], schema_version),
-            "name": "rookie_ci",
-            "value": "bar",
-            "http_only": bool(row["isHttpOnly"]),
-            "same_site": int(row["sameSite"]),
-        }
-        origin_attributes = str(optional("originAttributes", "") or "")
-        context = {
-            "top_frame_site_key": None,
-            "has_cross_site_ancestor": None,
-            "source_scheme": None,
-            "source_port": None,
-            "is_persistent": None,
-            "origin_attributes": origin_attributes,
-            "user_context_id": None,
-            "partition_key": None,
-            "private_browsing_id": None,
-        }
-        manifest_path = profile / "rookie-e2e-cookie-manifest.json"
-    manifest = {
-        "schema_version": 1,
-        "tiers": ["hosted_smoke"],
-        "identities": {
-            "filtered_flat": ["domain", "path", "name"],
-            "unfiltered_flat": ["domain", "path", "name"],
-            "detailed": [
-                "cookie.domain",
-                "cookie.path",
-                "cookie.name",
-                "context.top_frame_site_key",
-                "context.origin_attributes",
-            ],
-        },
-        "expected": {
-            "filtered_flat": [flat],
-            "unfiltered_flat": [flat],
-            "detailed": [{"cookie": flat, "context": context}],
-        },
-    }
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return manifest_path
-
-
 def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
-    require_exact_single_cookie(env)
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
     db = find_chromium_db(user_data, name="rookie_ci")
     env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
-        write_live_smoke_manifest("chromium", user_data, db)
+        write_hosted_manifest(
+            engine="chromium",
+            browser=browser_id,
+            platform=current_platform(),
+            profile=user_data,
+            database=db,
+        )
     )
     env["ROOKIE_E2E_COOKIE_DB"] = str(db)
     py = venv_python()
@@ -748,12 +697,17 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
 
 def assert_gecko(profile: Path, browser_id: str) -> None:
     env = os.environ.copy()
-    require_exact_single_cookie(env)
     env["ROOKIE_E2E_FIREFOX_PROFILE"] = str(profile)
     env["ROOKIE_E2E_BROWSER_ID"] = browser_id
     env["ROOKIE_E2E_CHECK_RECOMMENDED_READ"] = "1"
     env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
-        write_live_smoke_manifest("gecko", profile, profile / "cookies.sqlite")
+        write_hosted_manifest(
+            engine="firefox",
+            browser=browser_id,
+            platform=current_platform(),
+            profile=profile,
+            database=profile / "cookies.sqlite",
+        )
     )
     py = venv_python()
     subprocess.run(
@@ -814,10 +768,21 @@ def assert_gecko(profile: Path, browser_id: str) -> None:
     )
 
 
-def assert_native(cookie_file: Path, browser: str) -> None:
+def assert_native(cookie_file: Path, browser: str, profile: Path) -> None:
     env = os.environ.copy()
-    require_exact_single_cookie(env)
-    env["ROOKIE_E2E_EXPECT_NATIVE_FIELDS"] = "1"
+    if browser == "safari":
+        env["ROOKIE_E2E_COOKIE_MANIFEST"] = str(
+            write_hosted_manifest(
+                engine="safari",
+                browser=browser,
+                platform=current_platform(),
+                profile=profile,
+                database=cookie_file,
+            )
+        )
+    else:
+        require_exact_single_cookie(env)
+        env["ROOKIE_E2E_EXPECT_NATIVE_FIELDS"] = "1"
     env["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
     env["ROOKIE_E2E_BROWSER_ID"] = browser
     py = venv_python()
@@ -836,6 +801,18 @@ def assert_native(cookie_file: Path, browser: str) -> None:
         env=env,
         cwd=str(ROOT),
     )
+    if browser == "safari":
+        subprocess.run(
+            [
+                str(py),
+                str(ROOT / "tests/e2e/assert_cli_cookie.py"),
+                str(cookie_file),
+                "--detailed",
+            ],
+            check=True,
+            env=env,
+            cwd=str(ROOT),
+        )
     subprocess.run(
         [str(py), str(ROOT / "tests/e2e/assert_native_cookie.py")],
         check=True,
@@ -1118,6 +1095,7 @@ def run() -> int:
         os.environ.setdefault("CARGO_HOME", str(original_home / ".cargo"))
         os.environ.setdefault("RUSTUP_HOME", str(original_home / ".rustup"))
         os.environ.update(discovery_environment)
+        configure_isolated_keychain(os.environ)
         os.environ.pop("CHROME_CONFIG_HOME", None)
         os.environ["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
         os.environ["ROOKIE_E2E_EXPECTED_PROFILE_ID"] = (
@@ -1136,17 +1114,22 @@ def run() -> int:
     server, port, _log_path, request_log = start_cookie_server()
     try:
         plant_keychain()
-        url = f"http://127.0.0.1:{port}/set"
+        url = (
+            f"http://127.0.0.1:{port}/set"
+            if engine == "internet_explorer"
+            else corpus_seed_url(port, engine)
+        )
         if engine == "gecko":
             seed_gecko(exe, user_data, url)
             assert_gecko(user_data, browser)
         elif engine == "safari":
+            require_disposable_safari_host(user_data)
             before = file_snapshot(engine)
             cookie_file = seed_safari_native(exe, url, before, request_log)
             verify_safari_store_access(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
-            assert_native(cookie_file, browser)
+            assert_native(cookie_file, browser, user_data)
         elif engine == "internet_explorer":
             before = file_snapshot(engine)
             cookie_file = seed_with_startup_retry(engine, exe, url, before)
@@ -1159,7 +1142,7 @@ def run() -> int:
             cookie_file = snapshot_internet_explorer_store(cookie_file)
             os.environ["ROOKIE_E2E_COOKIE_DB"] = str(cookie_file)
             print(f"native cookie store: {cookie_file}", flush=True)
-            assert_native(cookie_file, browser)
+            assert_native(cookie_file, browser, user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
             stage_chromium_user_data(user_data)
@@ -1193,6 +1176,8 @@ def run() -> int:
                 "exact_set",
             }
         )
+    elif engine == "safari":
+        observed.update({"detailed", "exact_set"})
     assert_observed_depth(row, observed, coverage)
     print(f"hosted claimed e2e ok: {browser} ({engine}); depth={sorted(observed)}")
     return 0

@@ -74,6 +74,55 @@ class CookieServerTests(unittest.TestCase):
         self.assertEqual(len(decoy), 1)
         self.assertTrue(decoy[0].startswith("rookie_decoy="))
 
+    def test_corpus_run_redirects_across_every_origin_and_phase(self) -> None:
+        headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
+            "127.0.0.1:8765",
+        )
+        self.assertGreater(len(headers), 10)
+        self.assertEqual(
+            redirect,
+            "http://localhost:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=1",
+        )
+
+        decoy_headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=1",
+            "localhost:8765",
+        )
+        self.assertEqual(len(decoy_headers), 1)
+        self.assertEqual(
+            redirect,
+            "http://127.0.0.1:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=2",
+        )
+
+        mutation_headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=2",
+            "127.0.0.1:8765",
+        )
+        self.assertEqual(len(mutation_headers), 2)
+        self.assertEqual(
+            redirect,
+            "http://localhost:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=3",
+        )
+
+        final_headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=3",
+            "localhost:8765",
+        )
+        self.assertEqual(final_headers, [])
+        self.assertIsNone(redirect)
+
+    def test_corpus_run_corrects_the_host_before_setting_cookies(self) -> None:
+        headers, redirect = SERVER.corpus_run_response(
+            "/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
+            "localhost:8765",
+        )
+        self.assertEqual(headers, [])
+        self.assertEqual(
+            redirect,
+            "http://127.0.0.1:8765/corpus/run?engine=chromium&tiers=portable_smoke&step=0",
+        )
+
     def test_health_and_browser_subresource_routes_never_seed_legacy_cookies(
         self,
     ) -> None:

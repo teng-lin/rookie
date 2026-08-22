@@ -13,6 +13,8 @@ export async function navigateChromiumCdp({
   WebSocketImpl = WebSocket,
   openTimeoutMs = 10_000,
   commandTimeoutMs = 10_000,
+  corpusTimeoutMs = 20_000,
+  pollMs = 100,
   settleMs = 2_000,
   logger = console,
 }) {
@@ -117,33 +119,73 @@ export async function navigateChromiumCdp({
     // the browser-level protocol only, but force the canary target into the
     // foreground so Windows service sessions do not indefinitely throttle its
     // navigation.
+    const corpusMode = new URL(url).pathname === "/corpus/run";
     const { targetId } = await send("Target.createTarget", {
-      url,
+      // The native launch already navigates the corpus URL. A second redirect
+      // chain could interleave its initial/update phases and leave stale data.
+      url: corpusMode ? "about:blank" : url,
       newWindow: true,
       background: false,
     });
     await send("Target.activateTarget", { targetId });
-    await send("Storage.setCookies", {
-      cookies: [
-        {
-          name: "rookie_ci",
-          value: "bar",
-          url,
-          expires: Math.floor(Date.now() / 1000) + 3600,
-          sameSite: "Lax",
-        },
-      ],
-    });
-    const { cookies } = await send("Storage.getCookies");
-    const seeded = cookies?.find(
-      ({ name, value }) => name === "rookie_ci" && value === "bar",
-    );
-    if (!seeded) {
-      throw new Error("native CDP storage did not retain rookie_ci=bar");
+    if (corpusMode) {
+      const deadline = Date.now() + corpusTimeoutMs;
+      let lastCookies = [];
+      let corpusComplete = false;
+      while (Date.now() < deadline) {
+        ({ cookies: lastCookies = [] } = await send("Storage.getCookies"));
+        const targetCookies = lastCookies.filter(({ domain }) =>
+          ["127.0.0.1", "localhost"].includes(domain?.replace(/^\./, "")),
+        );
+        corpusComplete =
+          targetCookies.length >= 19 &&
+          targetCookies.some(
+            ({ name, value }) => name === "rookie_ci" && value === "bar",
+          ) &&
+          targetCookies.some(
+            ({ name, value }) =>
+              name === "rookie_updated" && value === "final",
+          ) &&
+          targetCookies.some(
+            ({ name, value }) =>
+              name === "rookie_decoy" && value === "must-not-pass-filter",
+          ) &&
+          !targetCookies.some(({ name }) => name === "rookie_deleted");
+        if (corpusComplete) break;
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+      const targetCount = lastCookies.filter(({ domain }) =>
+        ["127.0.0.1", "localhost"].includes(domain?.replace(/^\./, "")),
+      ).length;
+      if (!corpusComplete) {
+        throw new Error(
+          `native CDP navigation did not complete the portable corpus ` +
+            `(observed ${targetCount}/19 target-origin cookies)`,
+        );
+      }
+    } else {
+      await send("Storage.setCookies", {
+        cookies: [
+          {
+            name: "rookie_ci",
+            value: "bar",
+            url,
+            expires: Math.floor(Date.now() / 1000) + 3600,
+            sameSite: "Lax",
+          },
+        ],
+      });
+      const { cookies } = await send("Storage.getCookies");
+      const seeded = cookies?.find(
+        ({ name, value }) => name === "rookie_ci" && value === "bar",
+      );
+      if (!seeded) {
+        throw new Error("native CDP storage did not retain rookie_ci=bar");
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, settleMs));
     logger.log(
-      `native CDP foreground target and persistent cookie seeded for ${url}`,
+      `native CDP foreground target and persistent cookie corpus seeded for ${url}`,
     );
   } finally {
     // A protocol-level close gives the native process a chance to checkpoint

@@ -63,6 +63,17 @@
       "user_context_id": null,
       "partition_key": null,
       "private_browsing_id": null
+    },
+    "safari": {
+      "top_frame_site_key": null,
+      "has_cross_site_ancestor": null,
+      "source_scheme": null,
+      "source_port": null,
+      "is_persistent": null,
+      "origin_attributes": null,
+      "user_context_id": null,
+      "partition_key": null,
+      "private_browsing_id": null
     }
   },
   "scenarios": [
@@ -70,7 +81,7 @@
       "id": "baseline",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -86,14 +97,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "secure",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -110,14 +121,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "http_only",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -134,14 +145,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "same_site_unspecified",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -156,14 +167,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": -1, "firefox": -1 }
+        "same_site": { "chromium": -1, "firefox": -1, "safari": -1 }
       }
     },
     {
       "id": "same_site_none",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -180,14 +191,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 0, "firefox": 0 }
+        "same_site": { "chromium": 0, "firefox": 0, "safari": -1 }
       }
     },
     {
       "id": "same_site_lax",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -203,14 +214,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "same_site_strict",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -226,14 +237,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 2, "firefox": 2 }
+        "same_site": { "chromium": 2, "firefox": 2, "safari": -1 }
       }
     },
     {
       "id": "domain_attribute",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -250,14 +261,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "path_collision_root",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -273,14 +284,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "path_collision_nested",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -296,14 +307,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "empty_value",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -319,14 +330,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "equals_in_value",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -342,14 +353,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "percent_encoded_utf8",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -365,14 +376,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "large_portable_value",
       "tiers": ["portable_smoke", "stress"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -388,14 +399,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "expiry_subject_to_400_day_clamp",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -411,7 +422,7 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 },
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 },
         "expiry_seconds_from_now": { "min": 34559900, "max": 34560100 },
         "expiry_seconds_from_now_by_browser": {
           "brave": { "min": 15551900, "max": 15552100 }
@@ -446,7 +457,7 @@
       "id": "past_expiry_rejected",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -462,14 +473,14 @@
       ],
       "expected": {
         "stored": false,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "host_prefix",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -486,14 +497,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "secure_prefix",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -510,14 +521,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "updated_cookie",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -542,14 +553,14 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 2, "firefox": 2 }
+        "same_site": { "chromium": 2, "firefox": 2, "safari": -1 }
       }
     },
     {
       "id": "deleted_cookie",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "primary",
@@ -573,14 +584,14 @@
       ],
       "expected": {
         "stored": false,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {
       "id": "wrong_host_decoy",
       "tiers": ["portable_smoke"],
       "applicability": {
-        "engines": ["chromium", "firefox"],
+        "engines": ["chromium", "firefox", "safari"],
         "platforms": ["linux", "macos", "windows"]
       },
       "origin": "decoy",
@@ -596,7 +607,7 @@
       ],
       "expected": {
         "stored": true,
-        "same_site": { "chromium": 1, "firefox": 1 }
+        "same_site": { "chromium": 1, "firefox": 1, "safari": -1 }
       }
     },
     {

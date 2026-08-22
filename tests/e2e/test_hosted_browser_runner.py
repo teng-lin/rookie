@@ -13,7 +13,7 @@ import webdriver_cookie as webdriver
 
 
 class HostedBrowserRunnerTests(unittest.TestCase):
-    def test_live_claimed_runner_requires_the_exact_single_cookie_set(self) -> None:
+    def test_legacy_ie_runner_requires_the_exact_single_cookie_set(self) -> None:
         environment: dict[str, str] = {}
         hosted.require_exact_single_cookie(environment)
         self.assertEqual(
@@ -22,75 +22,6 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertEqual(environment["ROOKIE_E2E_FORBIDDEN_COOKIES_JSON"], "[]")
         self.assertEqual(environment["ROOKIE_E2E_EXACT_COOKIE_STATE"], "1")
-
-    def test_live_smoke_manifest_covers_all_flat_and_context_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            profile = Path(temporary)
-            database = profile / "Default/Network/Cookies"
-            database.parent.mkdir(parents=True)
-            connection = hosted.sqlite3.connect(database)
-            connection.execute(
-                """
-                create table cookies (
-                  host_key text, path text, is_secure integer, expires_utc integer,
-                  name text, value text, encrypted_value blob, is_httponly integer,
-                  samesite integer, top_frame_site_key text,
-                  has_cross_site_ancestor integer, source_scheme integer,
-                  source_port integer, is_persistent integer
-                )
-                """
-            )
-            connection.execute(
-                "insert into cookies values (?, '/', 0, ?, 'rookie_ci', '', X'01', "
-                "0, 1, '', 0, 1, 8765, 1)",
-                ("127.0.0.1", 11_644_473_600_000_000 + 4_102_444_800_000_000),
-            )
-            connection.commit()
-            connection.close()
-
-            manifest_path = hosted.write_live_smoke_manifest(
-                "chromium", profile, database
-            )
-            manifest = hosted.json.loads(manifest_path.read_text(encoding="utf-8"))
-            flat = manifest["expected"]["filtered_flat"][0]
-            self.assertEqual(
-                set(flat),
-                {
-                    "domain",
-                    "path",
-                    "secure",
-                    "expires",
-                    "name",
-                    "value",
-                    "http_only",
-                    "same_site",
-                },
-            )
-            self.assertEqual(flat["expires"], 4_102_444_800)
-            context = manifest["expected"]["detailed"][0]["context"]
-            self.assertEqual(context["source_port"], 8765)
-            self.assertEqual(context["source_scheme"], 1)
-            self.assertEqual(context["has_cross_site_ancestor"], False)
-
-    def test_live_smoke_manifest_rejects_excess_browser_rows(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            profile = Path(temporary)
-            database = profile / "cookies.sqlite"
-            connection = hosted.sqlite3.connect(database)
-            connection.execute(
-                "create table moz_cookies (host text, path text, isSecure integer, "
-                "expiry integer, name text, value text, isHttpOnly integer, "
-                "sameSite integer, originAttributes text)"
-            )
-            connection.executemany(
-                "insert into moz_cookies values "
-                "('127.0.0.1', '/', 0, 4102444800, ?, ?, 0, 1, '')",
-                [("rookie_ci", "bar"), ("unexpected", "leak")],
-            )
-            connection.commit()
-            connection.close()
-            with self.assertRaisesRegex(SystemExit, "exactly rookie_ci"):
-                hosted.write_live_smoke_manifest("gecko", profile, database)
 
     def test_isolated_discovery_environment_stays_below_sandbox(self) -> None:
         sandbox = Path("/tmp/rookie-registry-sandbox")
@@ -249,8 +180,33 @@ class HostedBrowserRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             wait_for_cookie.call_args_list,
-            [mock.call(profile, 30), mock.call(profile, 15)],
+            [
+                mock.call(profile, 30, name="rookie_ci"),
+                mock.call(profile, 15, name="rookie_ci"),
+            ],
         )
+
+    def test_chromium_corpus_waits_for_final_decoy_checkpoint(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        profile = Path("/tmp/profile")
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
+            mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(
+                hosted, "wait_for_chromium_cookie", return_value=True
+            ) as wait_for_cookie,
+            mock.patch.object(hosted.time, "sleep"),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser",
+                profile,
+                "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+            )
+
+        wait_for_cookie.assert_called_once_with(profile, 30, name="rookie_decoy")
 
     def test_chromium_cleanup_kills_launcher_that_ignores_terminate(self) -> None:
         proc = mock.Mock()
@@ -464,6 +420,32 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 "http://127.0.0.1:8765/set",
             ],
         )
+
+    def test_safari_live_run_refuses_a_local_default_profile(self) -> None:
+        with (
+            mock.patch.dict(hosted.os.environ, {}, clear=True),
+            self.assertRaisesRegex(SystemExit, "fresh GitHub-hosted CI account"),
+        ):
+            hosted.require_disposable_safari_host(Path("/tmp/safari"))
+
+    def test_safari_live_run_requires_scratch_below_runner_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runner_temp = Path(temporary)
+            scratch = runner_temp / "rookie-ci/safari"
+            with mock.patch.dict(
+                hosted.os.environ,
+                {
+                    "CI": "true",
+                    "GITHUB_ACTIONS": "true",
+                    "RUNNER_TEMP": str(runner_temp),
+                },
+                clear=False,
+            ):
+                hosted.require_disposable_safari_host(scratch)
+                with self.assertRaisesRegex(SystemExit, "outside RUNNER_TEMP"):
+                    hosted.require_disposable_safari_host(
+                        Path("/tmp/not-runner/safari")
+                    )
 
     def test_safari_store_access_checks_the_binarycookies_signature(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

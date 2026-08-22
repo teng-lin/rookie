@@ -10,6 +10,8 @@ import time
 
 import rookie_cookies
 
+from cookie_manifest import find_manifest, load_manifest, verify_records
+
 
 def assert_seeded(surface: str, cookies: list[dict], name: str, value: str) -> None:
     if len(cookies) != 1:
@@ -61,14 +63,46 @@ def main() -> int:
     domain = os.environ.get("ROOKIE_E2E_DOMAIN", "127.0.0.1")
     name = os.environ.get("ROOKIE_E2E_COOKIE_NAME", "rookie_ci")
     value = os.environ.get("ROOKIE_E2E_COOKIE_VALUE", "bar")
+    manifest_path = find_manifest(path, expected_name=name)
+    manifest = load_manifest(manifest_path) if manifest_path else None
     explicit = rookie_cookies.extract_from_path(str(path), domains=[domain])
-    assert_seeded("extract_from_path", explicit, name, value)
+    if manifest is not None:
+        verify_records(
+            manifest,
+            "filtered_flat",
+            explicit,
+            surface="Python native extract_from_path",
+        )
+        snapshot = rookie_cookies.from_path(str(path))
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            snapshot.as_list(),
+            surface="Python native from_path",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            snapshot.detailed_cookies(),
+            surface="Python native from_path.detailed_cookies",
+        )
+    else:
+        assert_seeded("extract_from_path", explicit, name, value)
     discovered = []
     if browser == "safari":
         discovered = rookie_cookies.safari([domain])
-        assert_seeded(browser, discovered, name, value)
+        if manifest is not None:
+            verify_records(
+                manifest,
+                "filtered_flat",
+                discovered,
+                surface="Python safari discovery",
+            )
+        else:
+            assert_seeded(browser, discovered, name, value)
     print(
-        f"rookie_cookies ({sys.platform}, {browser}): {name}={value} verified "
+        f"rookie_cookies ({sys.platform}, {browser}): "
+        f"{'exact cookie corpus' if manifest is not None else f'{name}={value}'} verified "
         f"(explicit={len(explicit)}"
         + (f", discovered={len(discovered)})" if browser == "safari" else ")")
     )
