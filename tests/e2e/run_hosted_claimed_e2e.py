@@ -372,7 +372,7 @@ def require_disposable_safari_host(scratch_profile: Path) -> None:
 
 def generate_trusted_safari_certificate(
     scratch_profile: Path,
-) -> tuple[Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path]:
     """Create and trust a short-lived localhost certificate on a hosted VM."""
 
     if sys.platform != "darwin":
@@ -474,32 +474,19 @@ def generate_trusted_safari_certificate(
             text=True,
             timeout=30,
         )
-        default_keychain_result = subprocess.run(
-            [
-                "/usr/bin/security",
-                "default-keychain",
-                "-d",
-                "user",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        keychain_parts = shlex.split(default_keychain_result.stdout)
-        if len(keychain_parts) != 1 or not Path(keychain_parts[0]).is_absolute():
-            raise SystemExit("macOS returned an invalid default user Keychain path")
-        user_keychain = Path(keychain_parts[0])
         subprocess.run(
             [
+                "/usr/bin/sudo",
+                "-n",
                 "/usr/bin/security",
                 "add-trusted-cert",
+                "-d",
                 "-r",
                 "trustRoot",
                 "-p",
                 "ssl",
                 "-k",
-                str(user_keychain),
+                "/Library/Keychains/System.keychain",
                 str(authority),
             ],
             check=True,
@@ -521,7 +508,7 @@ def generate_trusted_safari_certificate(
                 "-s",
                 "127.0.0.1",
                 "-k",
-                str(user_keychain),
+                "/Library/Keychains/System.keychain",
                 "-L",
             ],
             check=True,
@@ -531,6 +518,9 @@ def generate_trusted_safari_certificate(
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         details = (error.stderr or error.stdout or "").strip()
+        if not details:
+            command = error.cmd if isinstance(error.cmd, list) else [str(error.cmd)]
+            details = f"command did not complete successfully: {' '.join(command)}"
         raise SystemExit(
             "failed to prepare trusted Safari HTTPS certificate on the fresh "
             f"hosted runner: {details}"
@@ -541,21 +531,23 @@ def generate_trusted_safari_certificate(
     server_chain.write_bytes(
         certificate.read_bytes().rstrip() + b"\n" + authority.read_bytes()
     )
-    return server_chain, private_key, authority, user_keychain
+    return server_chain, private_key, authority
 
 
-def remove_trusted_safari_certificate(authority: Path, user_keychain: Path) -> None:
-    """Remove the generated CA and its user-domain trust setting after Safari."""
+def remove_trusted_safari_certificate(authority: Path) -> None:
+    """Remove the generated CA and its admin trust setting after Safari."""
 
     try:
         result = subprocess.run(
             [
+                "/usr/bin/sudo",
+                "-n",
                 "/usr/bin/security",
                 "delete-certificate",
                 "-t",
                 "-c",
                 "Rookie E2E Local CA",
-                str(user_keychain),
+                "/Library/Keychains/System.keychain",
             ],
             check=False,
             capture_output=True,
@@ -1501,14 +1493,12 @@ def run() -> int:
     tls_cert = None
     tls_key = None
     safari_authority = None
-    safari_user_keychain = None
     if engine == "safari":
         require_disposable_safari_host(user_data)
         (
             tls_cert,
             tls_key,
             safari_authority,
-            safari_user_keychain,
         ) = generate_trusted_safari_certificate(user_data)
 
     server, port, _log_path, request_log = start_cookie_server(
@@ -1563,8 +1553,8 @@ def run() -> int:
             server.wait(timeout=5)
         except subprocess.TimeoutExpired:
             server.kill()
-        if safari_authority is not None and safari_user_keychain is not None:
-            remove_trusted_safari_certificate(safari_authority, safari_user_keychain)
+        if safari_authority is not None:
+            remove_trusted_safari_certificate(safari_authority)
     observed = {"browser_launch", "explicit_path"}
     if engine == "chromium":
         observed.update(

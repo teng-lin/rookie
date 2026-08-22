@@ -569,7 +569,6 @@ class HostedBrowserRunnerTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary) / "safari"
-            user_keychain = Path(temporary) / "login.keychain-db"
 
             def create_mock_openssl_outputs(command: list[str], **_kwargs: object):
                 for flag in ("-keyout", "-out"):
@@ -577,18 +576,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                         Path(command[command.index(flag) + 1]).write_text(
                             f"fixture for {flag}\n", encoding="utf-8"
                         )
-                stdout = (
-                    f'"{user_keychain}"\n'
-                    if command[:4]
-                    == [
-                        "/usr/bin/security",
-                        "default-keychain",
-                        "-d",
-                        "user",
-                    ]
-                    else ""
-                )
-                return hosted.subprocess.CompletedProcess(command, 0, stdout, "")
+                return hosted.subprocess.CompletedProcess(command, 0, "", "")
 
             with (
                 mock.patch.object(hosted.sys, "platform", "darwin"),
@@ -613,7 +601,6 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                     certificate,
                     private_key,
                     authority,
-                    observed_keychain,
                 ) = hosted.generate_trusted_safari_certificate(scratch)
                 extensions = (scratch / "tls/rookie-localhost.ext").read_text()
                 chain_text = certificate.read_text()
@@ -621,51 +608,51 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         self.assertEqual(certificate, scratch / "tls/rookie-localhost-chain.pem")
         self.assertEqual(private_key, scratch / "tls/rookie-localhost-key.pem")
         self.assertEqual(authority, scratch / "tls/rookie-local-ca.pem")
-        self.assertEqual(observed_keychain, user_keychain)
         self.assertGreaterEqual(chain_text.count("fixture"), 2)
         openssl_command = run.call_args_list[0].args[0]
         self.assertEqual(openssl_command[0:3], ["/opt/openssl", "req", "-x509"])
         sign_command = run.call_args_list[2].args[0]
         self.assertEqual(sign_command[0:3], ["/opt/openssl", "x509", "-req"])
         self.assertIn("subjectAltName=IP:127.0.0.1,DNS:localhost", extensions)
-        default_keychain_command = run.call_args_list[3].args[0]
+        trust_command = run.call_args_list[3].args[0]
         self.assertEqual(
-            default_keychain_command,
+            trust_command[:5],
             [
+                "/usr/bin/sudo",
+                "-n",
                 "/usr/bin/security",
-                "default-keychain",
+                "add-trusted-cert",
                 "-d",
-                "user",
             ],
         )
-        trust_command = run.call_args_list[4].args[0]
-        self.assertEqual(trust_command[:2], ["/usr/bin/security", "add-trusted-cert"])
         self.assertEqual(
             trust_command[trust_command.index("-k") + 1],
-            str(user_keychain),
+            "/Library/Keychains/System.keychain",
         )
         self.assertIn("trustRoot", trust_command)
         self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
-        verify_command = run.call_args_list[5].args[0]
+        verify_command = run.call_args_list[4].args[0]
         self.assertEqual(
             verify_command[:3],
             ["/usr/bin/security", "verify-cert", "-c"],
         )
         self.assertIn("127.0.0.1", verify_command)
-        self.assertIn(str(user_keychain), verify_command)
+        self.assertIn("/Library/Keychains/System.keychain", verify_command)
         self.assertEqual(verify_command[verify_command.index("-r") + 1], str(authority))
 
-    def test_safari_user_trust_is_removed_after_the_run(self) -> None:
+    def test_safari_admin_trust_is_removed_after_the_run(self) -> None:
         authority = Path("/tmp/rookie-local-ca.pem")
-        user_keychain = Path("/tmp/login.keychain-db")
         with mock.patch.object(hosted.subprocess, "run") as run:
             run.return_value.returncode = 0
-            hosted.remove_trusted_safari_certificate(authority, user_keychain)
+            hosted.remove_trusted_safari_certificate(authority)
 
         command = run.call_args.args[0]
-        self.assertEqual(command[:2], ["/usr/bin/security", "delete-certificate"])
+        self.assertEqual(
+            command[:4],
+            ["/usr/bin/sudo", "-n", "/usr/bin/security", "delete-certificate"],
+        )
         self.assertIn("-t", command)
-        self.assertEqual(command[-1], str(user_keychain))
+        self.assertEqual(command[-1], "/Library/Keychains/System.keychain")
 
     def test_safari_https_preflight_uses_system_trust(self) -> None:
         with mock.patch.object(hosted.subprocess, "run") as run:

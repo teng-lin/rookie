@@ -51,8 +51,8 @@ outside controlled-origin value equality.
 All Chromium/Gecko profiles are newly created below an isolated home. Safari
 cannot use a custom persistent profile directory, so its runner is hard-gated
 to a fresh GitHub-hosted account and refuses local execution. Its portable
-corpus uses a generated one-day TLS certificate installed into user trust on
-the disposable hosted account; this is required because Safari rejects `Secure`
+corpus uses a generated one-day TLS certificate installed into admin trust on
+the disposable hosted VM; this is required because Safari rejects `Secure`
 cookies from loopback HTTP. Named-site behavior remains a separate depth axis:
 live
 CHIPS/dFPI and stress lanes use generated TLS certificates and local test
