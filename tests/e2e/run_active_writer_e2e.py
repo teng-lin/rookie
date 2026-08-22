@@ -383,6 +383,51 @@ def run_checked(command: Sequence[str], env: dict[str, str], phase: str) -> None
     )
 
 
+def run_expected_failure(
+    command: Sequence[str],
+    env: dict[str, str],
+    phase: str,
+    surface: str,
+    expected_code: str,
+) -> None:
+    """Require one public surface to reject an unsafe live-store read."""
+
+    print(f"[{phase}-{surface}] + {' '.join(command)}", flush=True)
+    completed = subprocess.run(
+        list(command),
+        cwd=str(ROOT),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=240,
+    )
+    if completed.returncode == 0:
+        raise ActiveWriterError(
+            f"{phase} {surface} unexpectedly read an exclusively locked "
+            "rollback-journal store"
+        )
+    diagnostic = f"{completed.stdout}\n{completed.stderr}"
+    if expected_code not in diagnostic:
+        raise ActiveWriterError(
+            f"{phase} {surface} failed without {expected_code!r}; "
+            f"exit={completed.returncode}"
+        )
+    print(
+        "ACTIVE_WRITER_EXPECTED_FAILURE "
+        + json.dumps(
+            {
+                "code": expected_code,
+                "phase": phase,
+                "surface": surface,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def assertion_environment(
     engine: str,
     profile: Path,
@@ -539,6 +584,32 @@ def detailed_surface_commands(
     ]
 
 
+def run_exclusive_lock_assertions(
+    engine: str,
+    profile: Path,
+    database: Path,
+    browser_id: str,
+    required: dict[str, str],
+    forbidden: list[str],
+    phase: str,
+) -> None:
+    """Prove Windows Chrome fails safely while its rollback DB is exclusive."""
+
+    environment = assertion_environment(
+        engine, profile, database, browser_id, required, forbidden
+    )
+    for surface, command in detailed_surface_commands(
+        engine, profile, database, browser_id
+    ):
+        run_expected_failure(
+            command,
+            environment,
+            phase,
+            surface,
+            "source_inspection_failed",
+        )
+
+
 def capture_detailed_surfaces(
     engine: str,
     profile: Path,
@@ -642,7 +713,8 @@ def log_checkpoint(
     database: Path,
     engine: str,
     seeder: subprocess.Popen[Any],
-) -> None:
+) -> dict[str, Any]:
+    metadata = database_metadata(database, engine)
     proof = {
         "checkpoint": label,
         "browserState": "open" if seeder.poll() is None else "closed",
@@ -652,9 +724,10 @@ def log_checkpoint(
         "profileDir": ack.get("profileDir"),
         "databasePath": str(database),
         "databaseOwnedByAcknowledgedProfile": True,
-        **database_metadata(database, engine),
+        **metadata,
     }
     print(f"ACTIVE_WRITER_PROOF {json.dumps(proof, sort_keys=True)}", flush=True)
+    return metadata
 
 
 def run(args: argparse.Namespace) -> None:
@@ -720,16 +793,47 @@ def run(args: argparse.Namespace) -> None:
             args.timeout,
             allow_locked_after=lock_probe_grace,
         )
-        log_checkpoint("open-baseline", ready, database, args.engine, seeder)
-        run_surface_assertions(
-            args.engine,
-            profile,
-            database,
-            args.browser_id,
-            BASELINE_REQUIRED,
-            BASELINE_FORBIDDEN,
-            "open-baseline",
+        baseline_metadata = log_checkpoint(
+            "open-baseline", ready, database, args.engine, seeder
         )
+        exclusive_windows_chromium = (
+            args.engine == "chromium"
+            and sys.platform == "win32"
+            and baseline_metadata["metadataSource"] == "browser-exclusive-lock"
+        )
+        run_checked(
+            [
+                "cargo",
+                "build",
+                "-p",
+                "rookie-cookies",
+                "--example",
+                "e2e_cookie_surface",
+                "--locked",
+            ],
+            os.environ.copy(),
+            "active-writer-snapshot-build",
+        )
+        if exclusive_windows_chromium:
+            run_exclusive_lock_assertions(
+                args.engine,
+                profile,
+                database,
+                args.browser_id,
+                BASELINE_REQUIRED,
+                BASELINE_FORBIDDEN,
+                "open-baseline",
+            )
+        else:
+            run_surface_assertions(
+                args.engine,
+                profile,
+                database,
+                args.browser_id,
+                BASELINE_REQUIRED,
+                BASELINE_FORBIDDEN,
+                "open-baseline",
+            )
 
         send_command(control_dir, 1, "mutate")
         mutated = wait_for_ack(control_dir, 1, seeder, args.timeout)
@@ -750,29 +854,38 @@ def run(args: argparse.Namespace) -> None:
             args.timeout,
             allow_locked_after=lock_probe_grace,
         )
-        log_checkpoint("open-mutated", mutated, database, args.engine, seeder)
-        run_surface_assertions(
-            args.engine,
-            profile,
-            database,
-            args.browser_id,
-            MUTATED_REQUIRED,
-            MUTATED_FORBIDDEN,
-            "open-mutated",
+        mutated_metadata = log_checkpoint(
+            "open-mutated", mutated, database, args.engine, seeder
         )
-        run_checked(
-            [
-                "cargo",
-                "build",
-                "-p",
-                "rookie-cookies",
-                "--example",
-                "e2e_cookie_surface",
-                "--locked",
-            ],
-            os.environ.copy(),
-            "active-writer-snapshot-build",
+        mutated_is_exclusive = (
+            args.engine == "chromium"
+            and sys.platform == "win32"
+            and mutated_metadata["metadataSource"] == "browser-exclusive-lock"
         )
+        if mutated_is_exclusive != exclusive_windows_chromium:
+            raise ActiveWriterError(
+                "active Chromium lock behavior changed between open checkpoints"
+            )
+        if exclusive_windows_chromium:
+            run_exclusive_lock_assertions(
+                args.engine,
+                profile,
+                database,
+                args.browser_id,
+                MUTATED_REQUIRED,
+                MUTATED_FORBIDDEN,
+                "open-mutated",
+            )
+        else:
+            run_surface_assertions(
+                args.engine,
+                profile,
+                database,
+                args.browser_id,
+                MUTATED_REQUIRED,
+                MUTATED_FORBIDDEN,
+                "open-mutated",
+            )
         mutated_environment = assertion_environment(
             args.engine,
             profile,
@@ -781,14 +894,16 @@ def run(args: argparse.Namespace) -> None:
             MUTATED_REQUIRED,
             MUTATED_FORBIDDEN,
         )
-        open_mutated_snapshots = capture_detailed_surfaces(
-            args.engine,
-            profile,
-            database,
-            args.browser_id,
-            mutated_environment,
-            "open-mutated",
-        )
+        open_mutated_snapshots = None
+        if not exclusive_windows_chromium:
+            open_mutated_snapshots = capture_detailed_surfaces(
+                args.engine,
+                profile,
+                database,
+                args.browser_id,
+                mutated_environment,
+                "open-mutated",
+            )
 
         # This browser-side probe occurs after every open-profile extraction,
         # proving the extractor did not terminate or disconnect the writer.
@@ -824,8 +939,9 @@ def run(args: argparse.Namespace) -> None:
         if args.engine == "chromium" and sys.platform == "win32":
             # Chrome opens its cookie database without SQLite-compatible sharing
             # on current Windows runners. Check the raw v10/DPAPI evidence as
-            # soon as that browser-owned store closes; the preceding open-state
-            # assertions still prove every public extractor decrypted it live.
+            # soon as that browser-owned store closes. When the browser uses a
+            # rollback journal, the preceding open-state assertions prove every
+            # public surface refused an unsafe copy with a typed error.
             run_checked(
                 [
                     str(venv_python()),
@@ -857,15 +973,25 @@ def run(args: argparse.Namespace) -> None:
             mutated_environment,
             "closed-final",
         )
-        if closed_snapshots != open_mutated_snapshots:
+        if (
+            open_mutated_snapshots is not None
+            and closed_snapshots != open_mutated_snapshots
+        ):
             raise ActiveWriterError(
                 "closed detailed snapshots did not exactly match final open snapshots"
             )
-        print(
-            "active-writer transition verified: add + replace + delete while open; "
-            "post-extraction liveness probe passed; closed snapshot matched",
-            flush=True,
-        )
+        if exclusive_windows_chromium:
+            outcome = (
+                "exclusive-lock safety verified on all four surfaces while Chrome "
+                "mutated; post-refusal liveness passed; exact transitioned snapshot "
+                "decoded after close"
+            )
+        else:
+            outcome = (
+                "active-writer transition verified: add + replace + delete while "
+                "open; post-extraction liveness probe passed; closed snapshot matched"
+            )
+        print(outcome, flush=True)
     except Exception:
         server_handle.flush()
         seeder_handle.flush()

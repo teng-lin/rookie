@@ -15,6 +15,7 @@
     "crypto": "A real platform credential path decrypts a browser-produced value.",
     "exact_set": "The complete decoded cookie set is compared with an independent manifest.",
     "active_writer": "Extraction reads the same store while its browser is still writing it.",
+    "locked_writer_safety": "When a browser exclusively owns a rollback-journal store, every public surface refuses an unsafe read with a typed error and succeeds exactly after browser close.",
     "partitioned": "Browser-produced partition or container identity is asserted semantically."
   },
   "depth_levels": {
@@ -33,6 +34,7 @@
       "crypto": "live",
       "exact_set": "live",
       "active_writer": "none",
+      "locked_writer_safety": "none",
       "partitioned": "none"
     },
     "hosted_gecko": {
@@ -45,6 +47,7 @@
       "crypto": "none",
       "exact_set": "live",
       "active_writer": "none",
+      "locked_writer_safety": "none",
       "partitioned": "none"
     },
     "hosted_native": {
@@ -57,6 +60,7 @@
       "crypto": "none",
       "exact_set": "live",
       "active_writer": "none",
+      "locked_writer_safety": "none",
       "partitioned": "none"
     },
     "fixture_chromium": {
@@ -69,6 +73,7 @@
       "crypto": "none",
       "exact_set": "fixture",
       "active_writer": "none",
+      "locked_writer_safety": "none",
       "partitioned": "none"
     },
     "fixture_gecko": {
@@ -81,6 +86,7 @@
       "crypto": "none",
       "exact_set": "fixture",
       "active_writer": "none",
+      "locked_writer_safety": "none",
       "partitioned": "none"
     },
     "fixture_native": {
@@ -93,6 +99,7 @@
       "crypto": "none",
       "exact_set": "none",
       "active_writer": "none",
+      "locked_writer_safety": "none",
       "partitioned": "none"
     }
   },
@@ -100,9 +107,17 @@
     "core_chromium": {
       "workflow": ".github/workflows/e2e.yml",
       "runner": "tests/e2e/run_hosted_chromium_e2e.sh",
-      "platforms": ["linux", "macos", "windows"],
+      "platforms": ["linux", "macos"],
       "engines": ["chromium"],
       "capabilities": ["exact_set", "active_writer", "detailed", "crypto"],
+      "surfaces": ["rust", "python", "node", "cli"]
+    },
+    "core_chromium_windows": {
+      "workflow": ".github/workflows/e2e.yml",
+      "runner": "tests/e2e/run_hosted_chromium_e2e.ps1",
+      "platforms": ["windows"],
+      "engines": ["chromium"],
+      "capabilities": ["exact_set", "locked_writer_safety", "detailed", "crypto"],
       "surfaces": ["rust", "python", "node", "cli"]
     },
     "core_firefox": {

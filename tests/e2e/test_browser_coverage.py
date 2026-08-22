@@ -215,6 +215,7 @@ class BrowserCoverageTests(unittest.TestCase):
             set(lanes),
             {
                 "core_chromium",
+                "core_chromium_windows",
                 "core_firefox",
                 "partition_context",
                 "firefox_container",
@@ -255,12 +256,24 @@ class BrowserCoverageTests(unittest.TestCase):
                 runner.read_text(encoding="utf-8"),
                 f"{name} must emit a checked runtime depth receipt",
             )
-        for core in ("core_chromium", "core_firefox"):
+        for core in ("core_firefox",):
             self.assertEqual(
                 set(lanes[core]["platforms"]), {"linux", "macos", "windows"}
             )
             self.assertIn("exact_set", lanes[core]["capabilities"])
             self.assertIn("active_writer", lanes[core]["capabilities"])
+            self.assertEqual(
+                set(lanes[core]["surfaces"]), {"rust", "python", "node", "cli"}
+            )
+        self.assertEqual(set(lanes["core_chromium"]["platforms"]), {"linux", "macos"})
+        self.assertIn("active_writer", lanes["core_chromium"]["capabilities"])
+        self.assertEqual(set(lanes["core_chromium_windows"]["platforms"]), {"windows"})
+        self.assertIn(
+            "locked_writer_safety",
+            lanes["core_chromium_windows"]["capabilities"],
+        )
+        for core in ("core_chromium", "core_chromium_windows"):
+            self.assertIn("exact_set", lanes[core]["capabilities"])
             self.assertEqual(
                 set(lanes[core]["surfaces"]), {"rust", "python", "node", "cli"}
             )

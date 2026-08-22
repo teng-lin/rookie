@@ -262,6 +262,41 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 surface="synthetic",
             )
 
+    @mock.patch("run_active_writer_e2e.subprocess.run")
+    def test_expected_failure_requires_the_typed_code(self, run: mock.Mock) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            ["surface"], 1, "", "source_inspection_failed"
+        )
+        active.run_expected_failure(
+            ["surface"], {}, "open-mutated", "rust", "source_inspection_failed"
+        )
+
+        run.return_value = subprocess.CompletedProcess(
+            ["surface"], 1, "", "generic failure"
+        )
+        with self.assertRaisesRegex(active.ActiveWriterError, "failed without"):
+            active.run_expected_failure(
+                ["surface"],
+                {},
+                "open-mutated",
+                "rust",
+                "source_inspection_failed",
+            )
+
+    @mock.patch("run_active_writer_e2e.subprocess.run")
+    def test_expected_failure_rejects_an_unexpected_success(
+        self, run: mock.Mock
+    ) -> None:
+        run.return_value = subprocess.CompletedProcess(["surface"], 0, "[]", "")
+        with self.assertRaisesRegex(active.ActiveWriterError, "unexpectedly read"):
+            active.run_expected_failure(
+                ["surface"],
+                {},
+                "open-baseline",
+                "python",
+                "source_inspection_failed",
+            )
+
     def test_exact_cookie_state_rejects_unrelated_rows(self) -> None:
         with mock.patch.dict(os.environ, {"ROOKIE_E2E_EXACT_COOKIE_STATE": "1"}):
             with self.assertRaisesRegex(AssertionError, "exact active-writer set"):

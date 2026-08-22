@@ -100,6 +100,11 @@ async function waitForCommand(controlDir, sequence, timeoutMs, aborted) {
 async function probe(context, page, origin, expected, forbidden) {
   const readyState = await page.evaluate(() => document.readyState);
   const cookies = await context.cookies(origin);
+  if (cookies.length !== Object.keys(expected).length) {
+    throw new Error(
+      `browser state contained excess or missing cookies: expected ${Object.keys(expected).length}, got ${JSON.stringify(cookies)}`,
+    );
+  }
   for (const [name, value] of Object.entries(expected)) {
     const matches = cookies.filter((cookie) => cookie.name === name);
     if (matches.length !== 1 || matches[0].value !== value) {
