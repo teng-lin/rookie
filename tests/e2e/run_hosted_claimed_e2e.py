@@ -622,13 +622,31 @@ def chromium_automation_user_data(
     """Select a fresh browser-launch root without weakening discovery checks."""
 
     # Chromium 136+ products may suppress remote debugging when --user-data-dir
-    # names their computed default root. Windows Edge and Windows Yandex enforce
+    # names their computed default root. Edge and Windows Yandex can enforce
     # that boundary; launch them in the separately supplied disposable scratch
-    # root, then stage stopped output into the disposable registry root. Linux
-    # Edge reliably seeds through its startup URL at the isolated default root.
-    if (browser, platform) in {("edge", "windows"), ("yandex", "windows")}:
+    # root, then stage stopped output into the disposable registry root.
+    if (browser, platform) in {
+        ("edge", "linux"),
+        ("edge", "windows"),
+        ("yandex", "windows"),
+    }:
         return requested
     return registry_root
+
+
+def chromium_automation_user_data_candidates(
+    browser: str, platform: str, requested: Path, registry_root: Path
+) -> list[Path]:
+    """Return bounded fresh launch roots for vendor startup differences."""
+
+    primary = chromium_automation_user_data(browser, platform, requested, registry_root)
+    # Linux Edge varies between releases: some require a non-default root for
+    # DevTools, while others only complete startup navigation at their isolated
+    # default root. Both are empty disposable paths, and exact extraction after
+    # shutdown remains the success oracle.
+    if (browser, platform) == ("edge", "linux"):
+        return [primary, registry_root]
+    return [primary]
 
 
 def stage_chromium_discovery_profile(source: Path, target: Path) -> None:
@@ -1498,11 +1516,25 @@ def run() -> int:
             assert_native(cookie_file, browser, user_data)
         else:
             os.environ["ROOKIE_E2E_BROWSER_PATH"] = exe
-            automation_user_data = chromium_automation_user_data(
+            candidates = chromium_automation_user_data_candidates(
                 browser, platform, requested_user_data, user_data
             )
-            stage_chromium_user_data(automation_user_data)
-            seed_chromium_native(exe, automation_user_data, url)
+            automation_user_data = candidates[0]
+            for attempt, candidate in enumerate(candidates, start=1):
+                stage_chromium_user_data(candidate)
+                try:
+                    seed_chromium_native(exe, candidate, url)
+                except (SystemExit, subprocess.CalledProcessError) as error:
+                    if attempt == len(candidates):
+                        raise
+                    print(
+                        f"native {browser} launch root {candidate} failed; "
+                        f"retrying the other disposable root: {error}",
+                        flush=True,
+                    )
+                else:
+                    automation_user_data = candidate
+                    break
             stage_chromium_discovery_profile(automation_user_data, user_data)
             assert_chromium(user_data, browser)
     finally:

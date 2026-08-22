@@ -133,7 +133,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             registry,
         )
 
-    def test_windows_edge_uses_a_non_default_disposable_launch_root(self) -> None:
+    def test_edge_uses_bounded_disposable_launch_roots(self) -> None:
         requested = Path("/tmp/rookie-ci/edge")
         registry = Path("/tmp/sandbox/home/.config/microsoft-edge")
         self.assertEqual(
@@ -144,7 +144,19 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             hosted.chromium_automation_user_data("edge", "linux", requested, registry),
-            registry,
+            requested,
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data_candidates(
+                "edge", "linux", requested, registry
+            ),
+            [requested, registry],
+        )
+        self.assertEqual(
+            hosted.chromium_automation_user_data_candidates(
+                "edge", "windows", requested, registry
+            ),
+            [requested],
         )
 
     def test_stopped_automation_profile_is_staged_into_empty_registry_root(
