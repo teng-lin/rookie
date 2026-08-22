@@ -540,8 +540,6 @@ def detailed_surface_commands(
         engine,
         "--database",
         str(database),
-        "--browser-id",
-        browser_id,
         "--projection",
         "detailed",
     ]
@@ -575,6 +573,7 @@ def detailed_surface_commands(
             rust_command.append(local_state)
             cli_command.extend(["--local-state-path", local_state])
         else:
+            python_command.extend(["--browser-id", browser_id])
             cli_command.extend(["--browser-id", browser_id])
     return [
         ("python", python_command),

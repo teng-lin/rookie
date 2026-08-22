@@ -297,6 +297,23 @@ class ActiveWriterProtocolTests(unittest.TestCase):
                 "source_inspection_failed",
             )
 
+    def test_windows_chromium_snapshot_uses_only_local_state_credentials(
+        self,
+    ) -> None:
+        with mock.patch.object(active.sys, "platform", "win32"):
+            commands = dict(
+                active.detailed_surface_commands(
+                    "chromium",
+                    Path("C:/profile"),
+                    Path("C:/profile/Default/Network/Cookies"),
+                    "chrome",
+                )
+            )
+        self.assertIn("--local-state-path", commands["python"])
+        self.assertNotIn("--browser-id", commands["python"])
+        self.assertIn("chrome", commands["node"])
+        self.assertIn("chrome", commands["rust"])
+
     def test_exact_cookie_state_rejects_unrelated_rows(self) -> None:
         with mock.patch.dict(os.environ, {"ROOKIE_E2E_EXACT_COOKIE_STATE": "1"}):
             with self.assertRaisesRegex(AssertionError, "exact active-writer set"):
