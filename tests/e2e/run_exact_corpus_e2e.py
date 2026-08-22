@@ -87,7 +87,16 @@ def configure_isolated_keychain(environment: dict[str, str]) -> None:
     )
 
 
-def normalized_path_bytes(path: Path) -> bytes:
+def canonical_root_digest_path(root: Path) -> str:
+    """Mirror Rust's verbatim Windows spelling after canonicalization."""
+
+    value = os.fspath(root)
+    if os.name == "nt" and not value.startswith("\\\\?\\"):
+        return "\\\\?\\" + value
+    return value
+
+
+def normalized_path_bytes(path: Path | str) -> bytes:
     value = os.fspath(path)
     if os.name == "nt":
         value = value.replace("\\", "/")
@@ -152,9 +161,7 @@ def stage_discovered_profile(
     root = resolve_registry_root(root_spec["template"], environment)
     if engine == "chromium":
         root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(
-            source, root, symlinks=True, ignore_dangling_symlinks=True
-        )
+        shutil.copytree(source, root, symlinks=True, ignore_dangling_symlinks=True)
         staged_profile = root
         locator = Path("Default")
     else:
@@ -178,7 +185,7 @@ def stage_discovered_profile(
         )
         locator = Path("Profiles/rookie-e2e")
 
-    canonical_root = root.resolve(strict=True)
+    canonical_root = canonical_root_digest_path(root.resolve(strict=True))
     installation_id = digest_fields(
         b"rookie-install-v1",
         browser_id.encode(),

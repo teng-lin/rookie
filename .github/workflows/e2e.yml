@@ -690,13 +690,13 @@ jobs:
               Kind = 'legacy-schema23'
               Schema = 23
               Name = 'rookie_ci_dpapi_23'
-              Value = 'row DPAPI schema 23'
+              Value = 'row-dpapi-schema-23'
             },
             [PSCustomObject]@{
               Kind = 'legacy-schema24'
               Schema = 24
               Name = 'rookie_ci_dpapi_24'
-              Value = 'row DPAPI schema 24'
+              Value = 'row-dpapi-schema-24'
             }
           )
 

@@ -20,6 +20,7 @@ from run_browser_cookie_stress_e2e import (
 )
 from run_exact_corpus_e2e import (
     REGISTRY_PATH,
+    canonical_root_digest_path,
     find_chromium_database,
     platform_id,
     resolve_registry_root,
@@ -33,6 +34,16 @@ from run_partition_context_e2e import (
 
 
 class IsolatedBrowserRunnerTests(unittest.TestCase):
+    def test_exact_runner_windows_profile_hash_uses_verbatim_canonical_path(
+        self,
+    ) -> None:
+        root = Path(r"D:\a\_temp\rookie\Firefox")
+        with mock.patch.object(os, "name", "nt"):
+            self.assertEqual(
+                canonical_root_digest_path(root),
+                r"\\?\D:\a\_temp\rookie\Firefox",
+            )
+
     def test_partition_runner_refuses_non_ci_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch.dict(os.environ, {}, clear=True):

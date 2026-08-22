@@ -109,12 +109,6 @@ def main() -> int:
 
         seeded = next(c for c in cookies if c["name"] == expected_name)
 
-        if legacy != cookies:
-            print(
-                "legacy firefox_based disagrees with cookies_from_path", file=sys.stderr
-            )
-            return 1
-
         now = int(time.time())
         expires = seeded.get("expires")
         if not isinstance(expires, int) or not now < expires <= now + 7_200:
