@@ -413,8 +413,9 @@ Every browser job should log at least:
 The remediation is implemented on the integration branch as executable test
 contracts, not only as additional matrix metadata. No developer-machine
 Chrome, Safari, or Brave profile was opened or extracted while doing this
-work. All browser-launching depth runners refuse to run outside CI and require
-their disposable profile to be rooted below `RUNNER_TEMP`.
+work. The partition/container and stress runners refuse to run outside CI and
+require their disposable profile below `RUNNER_TEMP`; core runners accept only
+the explicit profile paths supplied by their workflows.
 
 | Program | Implemented outcome |
 | --- | --- |
