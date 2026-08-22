@@ -749,14 +749,15 @@ fn ensure_single_file(database: &Path) -> Result<()> {
   Ok(())
 }
 
-/// How many times a snapshot torn by a concurrent checkpoint is retaken.
+/// How many times a snapshot disturbed by a concurrent WAL write or
+/// checkpoint is retaken.
 const SNAPSHOT_ATTEMPTS: u32 = 3;
 
 /// Multiplied by the attempt number to space out those retakes.
 const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Copies `database` and its write-ahead log into `directory`, retaking the
-/// copy if a checkpoint raced it, and returns the path of the copy.
+/// copy if a database or WAL write raced it, and returns the path of the copy.
 ///
 /// The two files cannot be copied atomically, so a checkpoint landing in the
 /// window can leave the pair incoherent: it moves pages into the main file that
@@ -764,15 +765,13 @@ const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 /// `SQLITE_CORRUPT`. No copy order avoids this, so the result is verified
 /// rather than assumed.
 ///
-/// The main file is copied first and compared against the live source only
-/// after the WAL copy. A checkpoint that completes across that window changes
-/// the source and discards the attempt. A checkpoint paused across both reads
-/// can make them agree on the same partial main file, but its WAL still exists
-/// and is copied beside that file; SQLite replays the copied committed frames
-/// over the partial checkpoint. If no WAL is copied, a checkpoint could not
-/// have remained partial through the WAL-copy step, so an incomplete main copy
-/// cannot pass the later comparison. Query-level corruption/I/O checks remain
-/// the final retry boundary for an incoherent copied pair.
+/// The main file is copied first, followed by the WAL. Verification then
+/// compares main, WAL, and main again. The WAL comparison rejects an append or
+/// reset that crossed the copy window instead of letting SQLite silently use
+/// the last complete commit in a truncated copy. The second main comparison
+/// closes the window in which a checkpoint could land after the first one.
+/// Query-level corruption/I/O checks remain the final retry boundary for an
+/// incoherent copied pair.
 ///
 /// The copied header must remain WAL-mode. This rejects a source that switched
 /// to rollback journaling after routing but before or during copying, because a
@@ -804,9 +803,22 @@ fn snapshot_database_with_runtime(
   directory: &Path,
   runtime: &BoundaryRuntime<'_>,
 ) -> Result<PathBuf> {
+  snapshot_database_with_after_copy(database, directory, runtime, |_, _| Ok(()))
+}
+
+fn snapshot_database_with_after_copy<AfterCopy>(
+  database: &Path,
+  directory: &Path,
+  runtime: &BoundaryRuntime<'_>,
+  mut after_copy: AfterCopy,
+) -> Result<PathBuf>
+where
+  AfterCopy: FnMut(u32, &Path) -> Result<()>,
+{
   for attempt in 1..=SNAPSHOT_ATTEMPTS {
     runtime.check()?;
     let copy = copy_database_with_runtime(database, directory, runtime)?;
+    after_copy(attempt, &copy)?;
     runtime.check()?;
     if !database_uses_wal_with_runtime(&copy, runtime)? {
       return Err(anyhow!(
@@ -814,16 +826,21 @@ fn snapshot_database_with_runtime(
       ));
     }
     runtime.check()?;
-    if files_are_identical(database, &copy, runtime)? {
+    let wal = sidecar(database, "-wal");
+    let wal_copy = sidecar(&copy, "-wal");
+    if files_are_identical(database, &copy, runtime)?
+      && optional_files_are_identical(&wal, &wal_copy, runtime)?
+      && files_are_identical(database, &copy, runtime)?
+    {
       return Ok(copy);
     }
 
     log::debug!(
-      "a checkpoint raced the snapshot of {REDACTED_PATH} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})"
+      "a database or WAL write raced the snapshot of {REDACTED_PATH} (attempt {attempt} of {SNAPSHOT_ATTEMPTS})"
     );
-    // Back off before retaking it. A browser that just checkpointed is likely
-    // mid-burst, and copying straight back into that loses the next attempt to
-    // the same race.
+    // Back off before retaking it. A browser that just wrote or checkpointed
+    // is likely mid-burst, and copying straight back into that loses the next
+    // attempt to the same race.
     let backoff = RETRY_BACKOFF * attempt;
     let remaining = runtime.deadline.remaining(runtime.clock);
     if remaining <= backoff {
@@ -835,8 +852,36 @@ fn snapshot_database_with_runtime(
   }
 
   Err(anyhow!(
-    "Can't take a coherent snapshot of {REDACTED_PATH}: it is being checkpointed repeatedly"
+    "Can't take a coherent snapshot of {REDACTED_PATH}: its database or WAL is changing repeatedly"
   ))
+}
+
+/// Compares sidecars that may legitimately be absent from both source and
+/// snapshot. A one-sided absence means the source changed during acquisition.
+fn optional_files_are_identical(
+  left: &Path,
+  right: &Path,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<bool> {
+  runtime.check()?;
+  let open = |path: &Path| -> Result<Option<io::BufReader<fs::File>>> {
+    runtime.check()?;
+    match fs::File::open(path) {
+      Ok(file) => {
+        runtime.check()?;
+        Ok(Some(io::BufReader::new(file)))
+      }
+      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+      Err(error) => {
+        Err(anyhow::Error::new(error).context(format!("Can't open {REDACTED_PATH} to verify it")))
+      }
+    }
+  };
+  match (open(left)?, open(right)?) {
+    (None, None) => Ok(true),
+    (Some(_), None) | (None, Some(_)) => Ok(false),
+    (Some(left), Some(right)) => readers_are_identical(left, right, runtime),
+  }
 }
 
 /// Compares two files byte for byte.
@@ -857,7 +902,14 @@ pub(crate) fn files_are_identical(
     runtime.check()?;
     Ok(io::BufReader::new(file))
   };
-  let (mut left_file, mut right_file) = (open(left)?, open(right)?);
+  readers_are_identical(open(left)?, open(right)?, runtime)
+}
+
+fn readers_are_identical(
+  mut left_file: io::BufReader<fs::File>,
+  mut right_file: io::BufReader<fs::File>,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<bool> {
   let (mut left_chunk, mut right_chunk) = ([0u8; 8192], [0u8; 8192]);
 
   loop {

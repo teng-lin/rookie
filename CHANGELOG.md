@@ -31,6 +31,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unspecified value instead of being exposed as an unknown storage value.
 - SQLite live-store lock polling now observes request deadlines and
   cancellation rather than entering one opaque busy wait.
+- WAL snapshots now verify the sidecar and recheck the main database before
+  use, preventing a concurrent Firefox write or checkpoint from yielding a
+  stale but otherwise readable cookie snapshot.
 - Release-control checks no longer let a newer, intentionally skipped copy of
   a dispatch-only gate mask the successful exact-commit release run.
 
