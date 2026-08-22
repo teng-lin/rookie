@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -18,7 +18,13 @@ from run_browser_cookie_stress_e2e import (
     wait_for_mutation,
     wait_for_stress_rows,
 )
-from run_exact_corpus_e2e import find_chromium_database, stage_discovered_profile
+from run_exact_corpus_e2e import (
+    REGISTRY_PATH,
+    find_chromium_database,
+    platform_id,
+    resolve_registry_root,
+    stage_discovered_profile,
+)
 from run_partition_context_e2e import (
     _firefox_expiry,
     discovery_layout,
@@ -74,11 +80,18 @@ class IsolatedBrowserRunnerTests(unittest.TestCase):
                 profile, environment = discovery_layout("firefox", sandbox)
             registry_root = profile.parent.parent
             profiles_ini = registry_root / "profiles.ini"
+            registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+            entry = next(
+                entry
+                for entry in registry["platforms"][platform_id()]
+                if entry["canonical_id"] == "firefox"
+            )
+            root_spec = min(entry["roots"], key=lambda candidate: candidate["priority"])
+            expected_root = resolve_registry_root(root_spec["template"], environment)
             self.assertTrue(profiles_ini.is_file())
             self.assertTrue(profile.is_relative_to(Path(environment["HOME"])))
+            self.assertEqual(registry_root, expected_root)
             self.assertEqual(environment["ROOKIE_E2E_BROWSER_PATH"], str(executable))
-            if sys.platform == "linux":
-                self.assertNotIn("snap/firefox", str(profile))
 
     def test_partition_oracle_normalizes_firefox_schema_16_milliseconds(self) -> None:
         self.assertEqual(_firefox_expiry(1_700_000_000, 15), 1_700_000_000)
