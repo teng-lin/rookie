@@ -142,6 +142,20 @@ class CookieServerTests(unittest.TestCase):
         self.assertEqual(SERVER.Handler.cookie_headers("/"), [])
         self.assertEqual(SERVER.Handler.cookie_headers("/favicon.ico"), [])
 
+    def test_tls_configuration_rejects_mismatched_scheme_and_credentials(self) -> None:
+        SERVER.validate_tls_configuration("http", None, None)
+        SERVER.validate_tls_configuration("https", "chain.pem", "key.pem")
+        invalid = (
+            ("ftp", None, None, "unsupported"),
+            ("https", None, None, "requires a certificate"),
+            ("http", "chain.pem", "key.pem", "must not configure TLS"),
+            ("https", "chain.pem", None, "both .* are required"),
+        )
+        for scheme, certificate, private_key, error in invalid:
+            with self.subTest(scheme=scheme, certificate=certificate):
+                with self.assertRaisesRegex(SystemExit, error):
+                    SERVER.validate_tls_configuration(scheme, certificate, private_key)
+
     def test_empty_corpus_result_does_not_fall_back_to_the_legacy_cookie(self) -> None:
         self.assertEqual(
             SERVER.corpus_headers(

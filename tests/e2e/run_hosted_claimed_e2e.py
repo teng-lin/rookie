@@ -370,7 +370,9 @@ def require_disposable_safari_host(scratch_profile: Path) -> None:
         ) from error
 
 
-def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Path]:
+def generate_trusted_safari_certificate(
+    scratch_profile: Path,
+) -> tuple[Path, Path, Path, Path]:
     """Create and trust a short-lived localhost certificate on a hosted VM."""
 
     if sys.platform != "darwin":
@@ -472,19 +474,32 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             text=True,
             timeout=30,
         )
+        default_keychain_result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "default-keychain",
+                "-d",
+                "user",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        keychain_parts = shlex.split(default_keychain_result.stdout)
+        if len(keychain_parts) != 1 or not Path(keychain_parts[0]).is_absolute():
+            raise SystemExit("macOS returned an invalid default user Keychain path")
+        user_keychain = Path(keychain_parts[0])
         subprocess.run(
             [
-                "/usr/bin/sudo",
-                "-n",
                 "/usr/bin/security",
                 "add-trusted-cert",
-                "-d",
                 "-r",
                 "trustRoot",
                 "-p",
                 "ssl",
                 "-k",
-                "/Library/Keychains/System.keychain",
+                str(user_keychain),
                 str(authority),
             ],
             check=True,
@@ -499,14 +514,14 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
                 "verify-cert",
                 "-c",
                 str(certificate),
-                "-c",
+                "-r",
                 str(authority),
                 "-p",
                 "ssl",
                 "-s",
                 "127.0.0.1",
                 "-k",
-                "/Library/Keychains/System.keychain",
+                str(user_keychain),
                 "-L",
             ],
             check=True,
@@ -526,7 +541,36 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
     server_chain.write_bytes(
         certificate.read_bytes().rstrip() + b"\n" + authority.read_bytes()
     )
-    return server_chain, private_key
+    return server_chain, private_key, authority, user_keychain
+
+
+def remove_trusted_safari_certificate(authority: Path, user_keychain: Path) -> None:
+    """Remove the generated CA and its user-domain trust setting after Safari."""
+
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "delete-certificate",
+                "-t",
+                "-c",
+                "Rookie E2E Local CA",
+                str(user_keychain),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"warning: timed out removing Safari test CA {authority}", flush=True)
+        return
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        print(
+            f"warning: could not remove Safari test CA {authority}: {details}",
+            flush=True,
+        )
 
 
 def verify_safari_https_server(port: int) -> None:
@@ -662,10 +706,17 @@ def stage_chromium_discovery_profile(source: Path, target: Path) -> None:
             sidecar = Path(f"{database}{suffix}")
             if sidecar.is_file():
                 shutil.copy2(sidecar, Path(f"{destination}{suffix}"))
+        profile_dir = (
+            database.parent.parent
+            if database.parent.name == "Network"
+            else database.parent
+        )
         for settings_name in ("Preferences", "Secure Preferences"):
-            settings = database.parent.parent / settings_name
+            settings = profile_dir / settings_name
             if settings.is_file():
-                shutil.copy2(settings, target / settings.relative_to(source))
+                destination_settings = target / settings.relative_to(source)
+                destination_settings.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(settings, destination_settings)
 
 
 def chromium_cookie_dbs(user_data: Path) -> list[Path]:
@@ -883,6 +934,30 @@ def wait_for_gecko_database(profile: Path, timeout: float = 30) -> None:
     )
 
 
+def wait_for_gecko_cookie(profile: Path, name: str, timeout: float = 30) -> bool:
+    """Wait until a browser-written Gecko row is visible in persistent SQLite."""
+
+    database = profile / "cookies.sqlite"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            connection = sqlite3.connect(
+                database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2
+            )
+            try:
+                row = connection.execute(
+                    "select 1 from moz_cookies where name = ? limit 1", (name,)
+                ).fetchone()
+            finally:
+                connection.close()
+            if row is not None:
+                return True
+        except (OSError, sqlite3.Error):
+            pass
+        time.sleep(0.25)
+    return False
+
+
 def seed_gecko(exe: str, profile: Path, url: str, request_log: Path) -> None:
     profile.mkdir(parents=True, exist_ok=True)
     cmd = [exe, "--headless", "--no-remote", "--profile", str(profile), url]
@@ -890,14 +965,18 @@ def seed_gecko(exe: str, profile: Path, url: str, request_log: Path) -> None:
     env["MOZ_HEADLESS"] = "1"
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env)
+    saw_cookie = False
     try:
         parsed_url = urlsplit(url)
+        corpus_run = parsed_url.path == "/corpus/run"
         wait_for_request(
             request_log,
             parsed_url.path,
             timeout=90,
-            query_contains="step=3" if parsed_url.path == "/corpus/run" else None,
+            query_contains="step=3" if corpus_run else None,
         )
+        if corpus_run:
+            saw_cookie = wait_for_gecko_cookie(profile, "rookie_decoy")
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -907,6 +986,14 @@ def seed_gecko(exe: str, profile: Path, url: str, request_log: Path) -> None:
                 proc.kill()
                 proc.wait(timeout=10)
     wait_for_gecko_database(profile)
+    if (
+        corpus_run
+        and not saw_cookie
+        and not wait_for_gecko_cookie(profile, "rookie_decoy", timeout=15)
+    ):
+        raise SystemExit(
+            f"Gecko did not persist the final corpus cookie under {profile}"
+        )
 
 
 def find_chromium_db(user_data: Path, *, name: str | None = None) -> Path:
@@ -1413,9 +1500,16 @@ def run() -> int:
 
     tls_cert = None
     tls_key = None
+    safari_authority = None
+    safari_user_keychain = None
     if engine == "safari":
         require_disposable_safari_host(user_data)
-        tls_cert, tls_key = generate_trusted_safari_certificate(user_data)
+        (
+            tls_cert,
+            tls_key,
+            safari_authority,
+            safari_user_keychain,
+        ) = generate_trusted_safari_certificate(user_data)
 
     server, port, _log_path, request_log = start_cookie_server(
         tls_cert=tls_cert, tls_key=tls_key
@@ -1469,6 +1563,8 @@ def run() -> int:
             server.wait(timeout=5)
         except subprocess.TimeoutExpired:
             server.kill()
+        if safari_authority is not None and safari_user_keychain is not None:
+            remove_trusted_safari_certificate(safari_authority, safari_user_keychain)
     observed = {"browser_launch", "explicit_path"}
     if engine == "chromium":
         observed.update(

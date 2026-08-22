@@ -216,6 +216,21 @@ def listen_port() -> int:
     return int(os.environ.get("ROOKIE_E2E_COOKIE_PORT", "8765"))
 
 
+def validate_tls_configuration(
+    scheme: str, certificate: str | None, private_key: str | None
+) -> None:
+    """Reject scheme/credential combinations that would advertise the wrong URL."""
+
+    if scheme not in {"http", "https"}:
+        raise SystemExit(f"unsupported cookie server scheme {scheme!r}")
+    if (certificate is None) != (private_key is None):
+        raise SystemExit("both ROOKIE_E2E_COOKIE_TLS_CERT and _TLS_KEY are required")
+    if scheme == "https" and certificate is None:
+        raise SystemExit("HTTPS cookie server requires a certificate and private key")
+    if scheme == "http" and certificate is not None:
+        raise SystemExit("HTTP cookie server must not configure TLS credentials")
+
+
 if __name__ == "__main__":
     # Threaded: a single-threaded server is wedged permanently by one idle
     # preconnected socket, which silently drops every later request.
@@ -225,13 +240,11 @@ if __name__ == "__main__":
     scheme = os.environ.get("ROOKIE_E2E_COOKIE_SCHEME", "http")
     certificate = os.environ.get("ROOKIE_E2E_COOKIE_TLS_CERT")
     private_key = os.environ.get("ROOKIE_E2E_COOKIE_TLS_KEY")
-    if (certificate is None) != (private_key is None):
-        raise SystemExit("both ROOKIE_E2E_COOKIE_TLS_CERT and _TLS_KEY are required")
-    if certificate is not None:
+    validate_tls_configuration(scheme, certificate, private_key)
+    if scheme == "https":
+        assert certificate is not None and private_key is not None
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certificate, private_key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
-    elif scheme != "http":
-        raise SystemExit("HTTPS cookie server requires a certificate and private key")
     print(f"cookie server listening on {scheme}://127.0.0.1:{port}", flush=True)
     server.serve_forever()

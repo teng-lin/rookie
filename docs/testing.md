@@ -370,8 +370,10 @@ registry, not the shorter README support grid (Avast, Vought, DC, QQ, Sogou,
 
 Every installed Chromium-family and Gecko-family cell below uses a newly
 created registry-correct profile below an isolated home. It persists the full
-portable corpus (19 Chromium rows or 20 Gecko rows, including a second-host
-decoy) and all four public surfaces compare the exact controlled-origin set.
+portable corpus: 19 total Chromium/Safari rows or 20 total Gecko rows, each
+including one second-host decoy. The domain-filtered primary-origin sets are
+therefore 18 Chromium/Safari rows or 19 Gecko rows, and all four public surfaces
+compare the applicable exact set.
 Some products, notably Yandex, preload vendor-domain cookies even in a new
 profile; the manifest records their count but excludes those unowned domains
 from value equality. Missing, duplicate, or excess rows on `127.0.0.1` or

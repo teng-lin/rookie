@@ -38,10 +38,12 @@ predicate at a larger scale.
 The ordinary Chrome/Firefox lanes and every installed-browser cell in
 `e2e-release.yml` now seed a full portable corpus rather than `/set`. Chromium,
 Edge, Brave, Opera/Opera GX, Vivaldi, Yandex, LibreWolf, Zen, and Safari all use
-the shared runner on their supported hosted OSes. The controlled origins must
-contain the exact expected set: 19 rows for Chromium/Safari or 20 for Gecko,
-with one decoy excluded by the domain filter, and no deleted, rejected,
-duplicate, or excess target-origin rows. Rust, Python, Node, and CLI verify
+the shared runner on their supported hosted OSes. The full two-origin corpus
+must contain exactly 19 total rows for Chromium/Safari or 20 total rows for
+Gecko; those totals include one second-host decoy. The domain-filtered primary
+origin must therefore contain exactly 18 Chromium/Safari rows or 19 Gecko rows,
+with no deleted, rejected, duplicate, or excess target-origin rows. Rust,
+Python, Node, and CLI verify
 filtered, unfiltered, and detailed projections. Browser-preloaded vendor-domain
 rows (observed on fresh Yandex profiles) are counted in the manifest but kept
 outside controlled-origin value equality.
@@ -49,8 +51,8 @@ outside controlled-origin value equality.
 All Chromium/Gecko profiles are newly created below an isolated home. Safari
 cannot use a custom persistent profile directory, so its runner is hard-gated
 to a fresh GitHub-hosted account and refuses local execution. Its portable
-corpus uses a generated one-day TLS certificate installed into system trust on
-the disposable hosted VM; this is required because Safari rejects `Secure`
+corpus uses a generated one-day TLS certificate installed into user trust on
+the disposable hosted account; this is required because Safari rejects `Secure`
 cookies from loopback HTTP. Named-site behavior remains a separate depth axis:
 live
 CHIPS/dFPI and stress lanes use generated TLS certificates and local test
