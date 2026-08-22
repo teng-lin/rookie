@@ -40,7 +40,28 @@ export function findManifest(profileOrDb, expectedName = "rookie_ci") {
   }
 }
 
-export function verifyCookieRecords(manifestPath, projection, records, surface) {
+export function recordsForVerifier(projection, records) {
+  return records.map((record) => {
+    const cookie = projection === "detailed" ? record?.cookie : record;
+    if (!cookie || typeof cookie !== "object" || cookie.expires !== undefined) {
+      return record;
+    }
+    // The Node binding intentionally exposes Option<timestamp> as an optional
+    // property. JSON.stringify drops an undefined property, while the shared
+    // semantic manifest represents a session cookie as expires: null.
+    const normalizedCookie = { ...cookie, expires: null };
+    return projection === "detailed"
+      ? { ...record, cookie: normalizedCookie }
+      : normalizedCookie;
+  });
+}
+
+export function verifyCookieRecords(
+  manifestPath,
+  projection,
+  records,
+  surface,
+) {
   const completed = spawnSync(
     pythonExecutable(),
     [
@@ -53,7 +74,7 @@ export function verifyCookieRecords(manifestPath, projection, records, surface) 
       surface,
     ],
     {
-      input: JSON.stringify(records),
+      input: JSON.stringify(recordsForVerifier(projection, records)),
       encoding: "utf8",
       env: process.env,
     },

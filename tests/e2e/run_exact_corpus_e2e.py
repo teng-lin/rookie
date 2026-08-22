@@ -159,7 +159,14 @@ def stage_discovered_profile(
         root.mkdir(parents=True, exist_ok=True)
         staged_profile = root / "Profiles/rookie-e2e"
         staged_profile.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, staged_profile)
+        # Closed Firefox profiles can retain dangling platform-specific lock
+        # symlinks. They are process-ownership markers, not profile data, and
+        # following one makes copytree fail before extraction begins.
+        shutil.copytree(
+            source,
+            staged_profile,
+            ignore=shutil.ignore_patterns("lock", ".parentlock", "parent.lock"),
+        )
         (root / "profiles.ini").write_text(
             "[Profile0]\nName=rookie-e2e\nIsRelative=1\n"
             "Path=Profiles/rookie-e2e\nDefault=1\n",

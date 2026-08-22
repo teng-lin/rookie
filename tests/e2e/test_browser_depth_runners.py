@@ -258,6 +258,21 @@ class IsolatedBrowserRunnerTests(unittest.TestCase):
                 all(character in "0123456789abcdef" for character in profile_id)
             )
 
+    def test_exact_runner_does_not_stage_firefox_process_lock_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "seeded"
+            source.mkdir()
+            (source / "cookies.sqlite").touch()
+            for name in ("lock", ".parentlock", "parent.lock"):
+                (source / name).touch()
+            staged, _environment, profile_id = stage_discovered_profile(
+                "firefox", "firefox", source
+            )
+            self.assertTrue((staged / "cookies.sqlite").is_file())
+            for name in ("lock", ".parentlock", "parent.lock"):
+                self.assertFalse((staged / name).exists())
+            self.assertEqual(len(profile_id), 64)
+
 
 if __name__ == "__main__":
     unittest.main()
