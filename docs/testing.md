@@ -331,7 +331,7 @@ surface fails the job.
 | Lane | What it proves | When it runs |
 | --- | --- | --- |
 | **hosted** (`nightly_hosted`) | Real browser, seed the complete portable corpus, and require exact filtered/unfiltered/detailed equality on Rust / Python / Node / CLI | Chrome/Firefox in `e2e.yml` (push to `main`, nightly, `workflow_dispatch`). Extra products in `e2e-release.yml` (nightly, `v*` tags, GitHub Releases, `workflow_dispatch`, or a PR labeled `e2e-release`). |
-| **fixture** (`release_fixture`) | Deterministic engine checks + `supported_browsers()` identity coverage. **Does not launch a browser.** | `e2e-release.yml` `fixtures` job on `v*` tags, GitHub Releases, `workflow_dispatch`, or a labeled PR. **Skipped on the nightly schedule.** |
+| **fixture** (`release_fixture`) | Deterministic full portable corpus, exact filtered/unfiltered/detailed equality, registry discovery, and `supported_browsers()` identity coverage for feasible Chromium/Gecko rows. **Does not launch a browser or claim platform crypto.** | `e2e-release.yml` `fixtures` job on `v*` tags, GitHub Releases, `workflow_dispatch`, or a labeled PR. **Skipped on the nightly schedule.** |
 | **manual** | Operator-owned fallback | No current registry cell uses this lane. |
 
 `—` means the browser is not registered on that OS. This table is the live
@@ -429,11 +429,19 @@ The fixture exceptions are deliberate and machine-checked in
 - every claimed id on that OS must appear in `supported_browsers()`;
 - feasible fixture-lane Chromium and Gecko ids get a registry-correct root
   below a temporary, isolated home;
+- each such id receives the same declarative portable final state as the live
+  lane: 19 total / 18 filtered Chromium rows or 20 total / 19 filtered Gecko
+  rows, including attribute, path-collision, value, expiry, update/delete, and
+  second-host decoy cases;
+- filtered, unfiltered, and detailed Python output must equal the complete
+  manifest; missing, duplicate, excess, or attribute-mismatched rows fail;
 - discovery must identify the exact generated profile and source path;
 - Chromium fixtures exercise plaintext explicit-path and detailed reads;
 - Gecko fixtures additionally exercise a profile-scoped recommended `read`;
 - Windows extracts one current-user DPAPI fixture once (no per-id `browser_id`);
-- no generated discovery fixture claims a real platform crypto path.
+- no generated discovery fixture claims a real platform crypto path;
+- deprecated Internet Explorer remains registry/format coverage only because
+  current hosted Windows cannot produce the legacy ESE store its decoder reads.
 
 The live hosted Chromium/Gecko harness uses the same registry-root discipline:
 it launches the browser only against a profile below an isolated CI home, then

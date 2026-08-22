@@ -23,7 +23,13 @@ from pathlib import Path
 import rookie_cookies
 
 from browser_coverage_contract import assert_observed_depth, load_coverage
-from cookie_manifest import paths_refer_to_same_file
+from cookie_manifest import (
+    MANIFEST_FILENAME,
+    paths_refer_to_same_file,
+    verify_records,
+)
+from fixture_cookie_corpus import portable_fixture_observations
+from hosted_cookie_corpus import build_manifest, corpus_engine, read_observations
 
 
 COVERAGE_PATH = Path(__file__).with_name("browser_coverage.json")
@@ -93,7 +99,10 @@ def fixture_root(platform: str, browser: str, environment: dict[str, str]) -> Pa
     return resolve_root(roots[0]["template"], environment)
 
 
-def write_gecko_db(path: Path) -> None:
+CHROMIUM_EPOCH_OFFSET_US = 11_644_473_600_000_000
+
+
+def write_gecko_db(path: Path, observations: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
     try:
@@ -102,20 +111,35 @@ def write_gecko_db(path: Path) -> None:
             CREATE TABLE moz_cookies (
               host TEXT NOT NULL, path TEXT NOT NULL, isSecure INTEGER NOT NULL,
               expiry INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
-              isHttpOnly INTEGER NOT NULL, sameSite INTEGER NOT NULL
+              isHttpOnly INTEGER NOT NULL, sameSite INTEGER NOT NULL,
+              originAttributes TEXT NOT NULL
             )
             """
         )
-        connection.execute(
-            "INSERT INTO moz_cookies VALUES "
-            "('.example.test', '/', 1, 4102444800, 'rookie_ci', 'bar', 1, 0)"
+        connection.execute("PRAGMA user_version = 15")
+        connection.executemany(
+            "INSERT INTO moz_cookies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    item["domain"],
+                    item["path"],
+                    int(item["secure"]),
+                    item["expires"] or 0,
+                    item["name"],
+                    item["observed_value"],
+                    int(item["http_only"]),
+                    256 if item["same_site"] == -1 else item["same_site"],
+                    item["context"]["origin_attributes"],
+                )
+                for item in observations
+            ],
         )
         connection.commit()
     finally:
         connection.close()
 
 
-def write_chromium_db(path: Path) -> None:
+def write_chromium_db(path: Path, observations: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(path))
     try:
@@ -132,24 +156,49 @@ def write_chromium_db(path: Path) -> None:
             );
             """
         )
-        connection.execute(
-            "INSERT INTO cookies VALUES "
-            "('.example.test', '/', 1, 13348540800000000, "
-            "'rookie_ci', 'bar', X'', 1, 1)"
+        connection.executemany(
+            "INSERT INTO cookies VALUES (?, ?, ?, ?, ?, ?, X'', ?, ?)",
+            [
+                (
+                    item["domain"],
+                    item["path"],
+                    int(item["secure"]),
+                    (
+                        CHROMIUM_EPOCH_OFFSET_US + item["expires"] * 1_000_000
+                        if item["expires"] is not None
+                        else 0
+                    ),
+                    item["name"],
+                    item["observed_value"],
+                    int(item["http_only"]),
+                    item["same_site"],
+                )
+                for item in observations
+            ],
         )
         connection.commit()
     finally:
         connection.close()
 
 
-def assert_detailed(snapshot: object) -> None:
-    detailed = snapshot.detailed_cookies()
-    match = next(
-        (record for record in detailed if record["cookie"]["name"] == "rookie_ci"),
-        None,
+def write_fixture_manifest(
+    *,
+    engine: str,
+    browser: str,
+    platform: str,
+    profile: Path,
+    database: Path,
+) -> dict:
+    manifest = build_manifest(
+        engine=engine,
+        browser=browser,
+        platform=platform,
+        observations=read_observations(corpus_engine(engine), database),
     )
-    if match is None or match["cookie"]["value"] != "bar":
-        raise SystemExit("detailed fixture output omitted rookie_ci=bar")
+    (profile / MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
 
 
 def assert_discovered_source(browser: str, database: Path) -> dict:
@@ -182,8 +231,11 @@ def exercise_fixture_cell(
     root = fixture_root(platform, browser, environment)
 
     if engine == "chromium":
+        observations = portable_fixture_observations(
+            engine=engine, browser=browser, platform=platform
+        )
         database = root / "Default/Network/Cookies"
-        write_chromium_db(database)
+        write_chromium_db(database, observations)
         (root / "Local State").write_text(
             json.dumps(
                 {
@@ -195,28 +247,95 @@ def exercise_fixture_cell(
             ),
             encoding="utf-8",
         )
+        manifest = write_fixture_manifest(
+            engine=engine,
+            browser=browser,
+            platform=platform,
+            profile=root,
+            database=database,
+        )
+        filtered = rookie_cookies.extract_from_path(
+            str(database),
+            domains=[manifest["domain_filter"]],
+            plaintext_only=True,
+        )
         snapshot = rookie_cookies.from_path(
             str(database), include_expired=True, plaintext_only=True
         )
-        assert_seeded(snapshot.as_list())
-        assert_detailed(snapshot)
+        verify_records(
+            manifest,
+            "filtered_flat",
+            filtered,
+            surface=f"{platform}/{browser} Python extract_from_path",
+        )
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            snapshot.as_list(),
+            surface=f"{platform}/{browser} Python from_path",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            snapshot.detailed_cookies(),
+            surface=f"{platform}/{browser} Python from_path.detailed_cookies",
+        )
+        print(
+            f"fixture exact corpus: {platform}/{browser} "
+            f"({len(manifest['expected']['filtered_flat'])} filtered / "
+            f"{len(manifest['expected']['unfiltered_flat'])} total Chromium rows)"
+        )
         assert_discovered_source(browser, database)
         observed.update(
-            {"explicit_path": "fixture", "detailed": "fixture", "discovery": "fixture"}
+            {
+                "explicit_path": "fixture",
+                "detailed": "fixture",
+                "discovery": "fixture",
+                "exact_set": "fixture",
+            }
         )
     elif engine == "gecko":
+        observations = portable_fixture_observations(
+            engine=engine, browser=browser, platform=platform
+        )
         profile = root / "Profiles/rookie-fixture"
         database = profile / "cookies.sqlite"
-        write_gecko_db(database)
+        write_gecko_db(database, observations)
         root.mkdir(parents=True, exist_ok=True)
         (root / "profiles.ini").write_text(
             "[Profile0]\nName=rookie-fixture\nIsRelative=1\n"
             "Path=Profiles/rookie-fixture\nDefault=1\n",
             encoding="utf-8",
         )
+        manifest = write_fixture_manifest(
+            engine=engine,
+            browser=browser,
+            platform=platform,
+            profile=profile,
+            database=database,
+        )
+        filtered = rookie_cookies.cookies_from_path(
+            str(database), [manifest["domain_filter"]]
+        )
         direct = rookie_cookies.from_path(str(database), include_expired=True)
-        assert_seeded(direct.as_list())
-        assert_detailed(direct)
+        verify_records(
+            manifest,
+            "filtered_flat",
+            filtered,
+            surface=f"{platform}/{browser} Python cookies_from_path",
+        )
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            direct.as_list(),
+            surface=f"{platform}/{browser} Python from_path",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            direct.detailed_cookies(),
+            surface=f"{platform}/{browser} Python from_path.detailed_cookies",
+        )
         identity = assert_discovered_source(browser, database)
         recommended = rookie_cookies.read(
             browser=browser,
@@ -228,14 +347,30 @@ def exercise_fixture_cell(
             or recommended.profile_id != identity["profile_id"]
         ):
             raise SystemExit(f"{browser} recommended read selected the wrong identity")
-        assert_seeded(recommended.as_list())
-        assert_detailed(recommended)
+        verify_records(
+            manifest,
+            "unfiltered_flat",
+            recommended.as_list(),
+            surface=f"{platform}/{browser} Python read(profile)",
+        )
+        verify_records(
+            manifest,
+            "detailed",
+            recommended.detailed_cookies(),
+            surface=f"{platform}/{browser} Python read(profile).detailed_cookies",
+        )
+        print(
+            f"fixture exact corpus: {platform}/{browser} "
+            f"({len(manifest['expected']['filtered_flat'])} filtered / "
+            f"{len(manifest['expected']['unfiltered_flat'])} total Gecko rows)"
+        )
         observed.update(
             {
                 "explicit_path": "fixture",
                 "detailed": "fixture",
                 "discovery": "fixture",
                 "recommended_read": "fixture",
+                "exact_set": "fixture",
             }
         )
 
@@ -271,7 +406,10 @@ def run(platform: str) -> int:
         os.environ.update(environment)
         os.environ.pop("CHROME_CONFIG_HOME", None)
         gecko_db = Path(temp) / "cookies.sqlite"
-        write_gecko_db(gecko_db)
+        baseline_observations = portable_fixture_observations(
+            engine="gecko", browser="firefox", platform=platform
+        )
+        write_gecko_db(gecko_db, baseline_observations)
         gecko_cookies = rookie_cookies.from_path(
             str(gecko_db), include_expired=True
         ).as_list()

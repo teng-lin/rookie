@@ -3,8 +3,8 @@
 - **Author:** Codex
 - **Date:** 2026-08-21
 - **Status:** Remediation implemented in `codex/browser-e2e-depth`, including
-  the full installed browser-by-OS matrix; disposable-profile live validation
-  complete on macOS; remote OS/browser jobs pending CI execution
+  the full installed browser-by-OS matrix and exact portable fixtures for every
+  feasible fixture-only Chromium/Gecko row; final hosted workflows are green
 - **Baseline:** `f0df3d1`
 - **Scope:** Browser-generated cookie fixtures, hosted live-browser extraction,
   Rust/Python/Node/CLI assertions, cookie isolation context, discovery, and
@@ -47,6 +47,16 @@ Python, Node, and CLI verify
 filtered, unfiltered, and detailed projections. Browser-preloaded vendor-domain
 rows (observed on fresh Yandex profiles) are counted in the manifest but kept
 outside controlled-origin value equality.
+
+The 14 fixture-only Chromium/Gecko rows now materialize the same declarative
+portable final state instead of `rookie_ci=bar`: 19 total / 18 filtered
+Chromium rows or 20 total / 19 filtered Gecko rows. Python explicit-path,
+detailed, discovery, and Gecko recommended-read outputs use exact full-set
+equality. These remain synthetic engine fixtures and make no browser-launch or
+platform-crypto claim. The sole native-format exception is deprecated Internet
+Explorer: current hosted Windows images cannot produce the legacy ESE format,
+so that row remains registry/model coverage rather than a fabricated live or
+exact-store claim.
 
 All Chromium/Gecko profiles are newly created below an isolated home. Safari
 cannot use a custom persistent profile directory, so its runner is hard-gated
@@ -455,7 +465,7 @@ runners accept only profile paths supplied by their workflows.
 | Program | Implemented outcome |
 | --- | --- |
 | PR 1: exact corpus | A declarative portable/deep corpus now covers all eight flat fields, collisions, update/delete, expiration boundaries, large and unusual values, and a second-host decoy. Rust, Python, Node, and CLI compare sorted complete output with an independent manifest; verifier mutation tests prove excess, duplicate, missing, wrong-domain, wrong-attribute, and wrong-context rows fail. |
-| PR 2: public paths and discovery | Core profiles are staged below isolated registry roots. Explicit flat/detailed reads, recommended reads, CLI reads, and discovery assert the independently computed browser/profile/source identity. Broad hosted and fixture lanes validate their declared depth profiles at runtime. |
+| PR 2: public paths and discovery | Core profiles are staged below isolated registry roots. Explicit flat/detailed reads, recommended reads, CLI reads, and discovery assert the independently computed browser/profile/source identity. Broad hosted lanes validate their declared depth profiles at runtime. Every feasible fixture-only Chromium/Gecko browser row now materializes the portable corpus and exact-checks filtered, unfiltered, detailed, discovery, and applicable recommended-read output. |
 | PR 3: active writer | Chrome and Firefox core jobs on Linux, macOS, and Windows run a ready/hold/mutate/probe/close protocol against the exact database owned by a live disposable browser. All surfaces assert complete open states and the final open/closed structural equality while process, schema, journal, and sidecar evidence is logged. |
 | PR 4: isolation context | A local-HTTPS lane creates two Chromium CHIPS and two Firefox dFPI partitions plus colliding unpartitioned rows. Raw SQLite context is the oracle for exact detailed extraction and positive/negative `SendContext` selection. A disposable Firefox WebExtension adds a real Multi-Account Container row and exact `userContextId` checks. All nine context fields are classified; private browsing is explicitly non-persistable. |
 | PR 5: provenance | The manual, read-only capture workflow first decodes the disposable source through the public CLI and exact manifest, then retains only expected rows. Provenance records product/channel/version/build, capture command, sanitizer revision, schema metadata, byte sizes, row counts, and hashes. Full profiles, `Local State`, secrets, and unrelated tables are excluded. |

@@ -67,7 +67,7 @@
       "discovery": "fixture",
       "recommended_read": "none",
       "crypto": "none",
-      "exact_set": "none",
+      "exact_set": "fixture",
       "active_writer": "none",
       "partitioned": "none"
     },
@@ -79,7 +79,7 @@
       "discovery": "fixture",
       "recommended_read": "fixture",
       "crypto": "none",
-      "exact_set": "none",
+      "exact_set": "fixture",
       "active_writer": "none",
       "partitioned": "none"
     },

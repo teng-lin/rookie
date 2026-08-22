@@ -331,6 +331,17 @@ class BrowserCoverageTests(unittest.TestCase):
             self.assertIsInstance(reason, str, cell)
             self.assertGreaterEqual(len(reason.split()), 6, cell)
 
+    def test_every_feasible_fixture_cell_requires_exact_corpus_equality(self) -> None:
+        for row in self.coverage_doc["coverage"]:
+            if row["lane"] != "release_fixture":
+                continue
+            exact_set = depth_for(row, self.coverage_doc)["exact_set"]
+            if row["engine"] in {"chromium", "gecko"}:
+                self.assertEqual(exact_set, "fixture", row)
+            else:
+                self.assertEqual(row["browser"], "internet_explorer", row)
+                self.assertEqual(exact_set, "none", row)
+
     def test_testing_md_matrix_matches_coverage(self) -> None:
         titles: dict[str, str] = {}
         for browsers in self.registry["platforms"].values():
