@@ -494,28 +494,6 @@ def generate_trusted_safari_certificate(
             text=True,
             timeout=30,
         )
-        # Check the same Security.framework trust settings Safari consumes.
-        subprocess.run(
-            [
-                "/usr/bin/security",
-                "verify-cert",
-                "-c",
-                str(certificate),
-                "-r",
-                str(authority),
-                "-p",
-                "ssl",
-                "-s",
-                "127.0.0.1",
-                "-k",
-                "/Library/Keychains/System.keychain",
-                "-L",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         details = (error.stderr or error.stdout or "").strip()
         if not details:
@@ -566,7 +544,7 @@ def remove_trusted_safari_certificate(authority: Path) -> None:
 
 
 def verify_safari_https_server(port: int) -> None:
-    """Prove the hosted macOS system trust and TLS server before opening Safari."""
+    """Prove macOS trust with a real TLS handshake before opening Safari."""
 
     try:
         subprocess.run(

@@ -645,14 +645,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
         )
         self.assertIn("trustRoot", trust_command)
         self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
-        verify_command = run.call_args_list[4].args[0]
-        self.assertEqual(
-            verify_command[:3],
-            ["/usr/bin/security", "verify-cert", "-c"],
-        )
-        self.assertIn("127.0.0.1", verify_command)
-        self.assertIn("/Library/Keychains/System.keychain", verify_command)
-        self.assertEqual(verify_command[verify_command.index("-r") + 1], str(authority))
+        self.assertEqual(len(run.call_args_list), 4)
 
     def test_safari_admin_trust_is_removed_after_the_run(self) -> None:
         authority = Path("/tmp/rookie-local-ca.pem")
