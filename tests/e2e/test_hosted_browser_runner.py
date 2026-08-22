@@ -133,15 +133,17 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             registry,
         )
 
-    def test_linux_edge_uses_a_non_default_disposable_launch_root(self) -> None:
+    def test_windows_edge_uses_a_non_default_disposable_launch_root(self) -> None:
         requested = Path("/tmp/rookie-ci/edge")
         registry = Path("/tmp/sandbox/home/.config/microsoft-edge")
         self.assertEqual(
-            hosted.chromium_automation_user_data("edge", "linux", requested, registry),
+            hosted.chromium_automation_user_data(
+                "edge", "windows", requested, registry
+            ),
             requested,
         )
         self.assertEqual(
-            hosted.chromium_automation_user_data("edge", "macos", requested, registry),
+            hosted.chromium_automation_user_data("edge", "linux", requested, registry),
             registry,
         )
 
@@ -643,31 +645,25 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             trust_command[trust_command.index("-k") + 1],
             "/Library/Keychains/System.keychain",
         )
-        self.assertIn("trustRoot", trust_command)
-        self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
-        self.assertEqual(len(run.call_args_list), 4)
+        self.assertIn("trustAsRoot", trust_command)
+        self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-localhost.pem"))
+        verify_command = run.call_args_list[4].args[0]
+        self.assertEqual(verify_command[:2], ["/usr/bin/security", "verify-cert"])
+        self.assertEqual(
+            verify_command[verify_command.index("-c") + 1],
+            str(scratch / "tls/rookie-localhost.pem"),
+        )
+        self.assertEqual(len(run.call_args_list), 5)
 
-    def test_safari_admin_trust_is_removed_after_the_run(self) -> None:
+    def test_safari_https_preflight_uses_generated_authority(self) -> None:
         authority = Path("/tmp/rookie-local-ca.pem")
         with mock.patch.object(hosted.subprocess, "run") as run:
-            run.return_value.returncode = 0
-            hosted.remove_trusted_safari_certificate(authority)
-
-        command = run.call_args.args[0]
-        self.assertEqual(
-            command[:4],
-            ["/usr/bin/sudo", "-n", "/usr/bin/security", "delete-certificate"],
-        )
-        self.assertIn("-t", command)
-        self.assertEqual(command[-1], "/Library/Keychains/System.keychain")
-
-    def test_safari_https_preflight_uses_system_trust(self) -> None:
-        with mock.patch.object(hosted.subprocess, "run") as run:
-            hosted.verify_safari_https_server(9443)
+            hosted.verify_safari_https_server(9443, authority)
 
         command = run.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/curl")
         self.assertNotIn("--insecure", command)
+        self.assertEqual(command[command.index("--cacert") + 1], str(authority))
         self.assertEqual(command[-1], "https://127.0.0.1:9443/health")
 
     def test_safari_https_refuses_a_non_hosted_account(self) -> None:

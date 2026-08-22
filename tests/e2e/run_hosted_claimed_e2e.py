@@ -482,12 +482,36 @@ def generate_trusted_safari_certificate(
                 "add-trusted-cert",
                 "-d",
                 "-r",
-                "trustRoot",
+                "trustAsRoot",
                 "-p",
                 "ssl",
+                "-s",
+                "127.0.0.1",
                 "-k",
                 "/Library/Keychains/System.keychain",
-                str(authority),
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # Safari consumes Security.framework trust, not curl's CA bundle.
+        # Validate the exact leaf and hostname against the same system
+        # Keychain Safari will use before attempting to open the application.
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "verify-cert",
+                "-c",
+                str(certificate),
+                "-p",
+                "ssl",
+                "-s",
+                "127.0.0.1",
+                "-k",
+                "/Library/Keychains/System.keychain",
+                "-L",
             ],
             check=True,
             capture_output=True,
@@ -503,48 +527,16 @@ def generate_trusted_safari_certificate(
             "failed to prepare trusted Safari HTTPS certificate on the fresh "
             f"hosted runner: {details}"
         ) from error
-    # ssl.SSLContext sends every PEM certificate in this file. Presenting the
-    # complete chain is required even when the generated root is in the system
-    # Keychain: Safari and /usr/bin/curl do not fetch this private issuer.
+    # ssl.SSLContext sends every PEM certificate in this file. Present the
+    # complete generated chain so the browser never needs issuer discovery.
     server_chain.write_bytes(
         certificate.read_bytes().rstrip() + b"\n" + authority.read_bytes()
     )
     return server_chain, private_key, authority
 
 
-def remove_trusted_safari_certificate(authority: Path) -> None:
-    """Remove the generated CA and its admin trust setting after Safari."""
-
-    try:
-        result = subprocess.run(
-            [
-                "/usr/bin/sudo",
-                "-n",
-                "/usr/bin/security",
-                "delete-certificate",
-                "-t",
-                "-c",
-                "Rookie E2E Local CA",
-                "/Library/Keychains/System.keychain",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"warning: timed out removing Safari test CA {authority}", flush=True)
-        return
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()
-        print(
-            f"warning: could not remove Safari test CA {authority}: {details}",
-            flush=True,
-        )
-
-
-def verify_safari_https_server(port: int) -> None:
-    """Prove macOS trust with a real TLS handshake before opening Safari."""
+def verify_safari_https_server(port: int, authority: Path) -> None:
+    """Prove the generated CA validates the live TLS server and hostname."""
 
     try:
         subprocess.run(
@@ -553,6 +545,8 @@ def verify_safari_https_server(port: int) -> None:
                 "--fail",
                 "--silent",
                 "--show-error",
+                "--cacert",
+                str(authority),
                 "--connect-timeout",
                 "5",
                 "--max-time",
@@ -567,8 +561,8 @@ def verify_safari_https_server(port: int) -> None:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         details = (error.stderr or error.stdout or "").strip()
         raise SystemExit(
-            "Safari HTTPS preflight could not validate the disposable local "
-            f"origin with macOS system trust: {details}"
+            "Safari HTTPS preflight could not validate the live disposable "
+            f"origin with its generated CA: {details}"
         ) from error
 
 
@@ -641,10 +635,11 @@ def chromium_automation_user_data(
     """Select a fresh browser-launch root without weakening discovery checks."""
 
     # Chromium 136+ products may suppress remote debugging when --user-data-dir
-    # names their computed default root. Linux Edge and Windows Yandex enforce
+    # names their computed default root. Windows Edge and Windows Yandex enforce
     # that boundary; launch them in the separately supplied disposable scratch
-    # root, then stage stopped output into the disposable registry root.
-    if (browser, platform) in {("edge", "linux"), ("yandex", "windows")}:
+    # root, then stage stopped output into the disposable registry root. Linux
+    # Edge reliably seeds through its startup URL at the isolated default root.
+    if (browser, platform) in {("edge", "windows"), ("yandex", "windows")}:
         return requested
     return registry_root
 
@@ -1484,7 +1479,8 @@ def run() -> int:
     )
     try:
         if engine == "safari":
-            verify_safari_https_server(port)
+            assert safari_authority is not None
+            verify_safari_https_server(port, safari_authority)
         plant_keychain()
         url = (
             f"http://127.0.0.1:{port}/set"
@@ -1531,8 +1527,9 @@ def run() -> int:
             server.wait(timeout=5)
         except subprocess.TimeoutExpired:
             server.kill()
-        if safari_authority is not None:
-            remove_trusted_safari_certificate(safari_authority)
+        # Safari is hard-gated to a fresh GitHub-hosted VM. Its short-lived
+        # leaf trust is discarded with the VM; deleting it through securityd
+        # can trigger an authorization dialog and hang the noninteractive job.
     observed = {"browser_launch", "explicit_path"}
     if engine == "chromium":
         observed.update(
