@@ -7,12 +7,16 @@
 //   ROOKIE_E2E_COOKIE_NAME      optional — expected name (default: rookie_ci)
 //   ROOKIE_E2E_COOKIE_VALUE     optional — expected value (default: bar)
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
-import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
+import {
+  findManifest,
+  pathsReferToSameFile,
+  verifyCookieRecords,
+} from "./cookie_manifest.mjs";
 import { assertCookieState, stateFromEnvironment } from "./cookie_state.mjs";
 
 const profileDir = process.env.ROOKIE_E2E_FIREFOX_PROFILE;
@@ -150,15 +154,8 @@ let recommendedSnapshot;
 if (recommendedChecked) {
   const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "firefox";
   const profiles = await rookieCookies.profiles(browserId);
-  const expectedDatabase = realpathSync(dbPath);
   const matchingProfiles = profiles.filter(({ sources }) =>
-    sources.some(({ path }) => {
-      try {
-        return realpathSync(path) === expectedDatabase;
-      } catch {
-        return false;
-      }
-    }),
+    sources.some(({ path }) => pathsReferToSameFile(path, dbPath)),
   );
   if (matchingProfiles.length !== 1) {
     console.error(

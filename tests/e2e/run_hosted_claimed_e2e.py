@@ -479,12 +479,36 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
                 "add-trusted-cert",
                 "-d",
                 "-r",
-                "trustRoot",
+                "trustAsRoot",
                 "-p",
                 "ssl",
+                "-s",
+                "127.0.0.1",
                 "-k",
                 "/Library/Keychains/System.keychain",
-                str(authority),
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # Check the same Security.framework trust settings Safari consumes.
+        # Trusting the short-lived leaf directly avoids depending on whether a
+        # browser accepts an omitted locally generated intermediate/root.
+        subprocess.run(
+            [
+                "/usr/bin/security",
+                "verify-cert",
+                "-c",
+                str(certificate),
+                "-p",
+                "ssl",
+                "-s",
+                "127.0.0.1",
+                "-k",
+                "/Library/Keychains/System.keychain",
+                "-L",
             ],
             check=True,
             capture_output=True,
@@ -498,6 +522,35 @@ def generate_trusted_safari_certificate(scratch_profile: Path) -> tuple[Path, Pa
             f"hosted runner: {details}"
         ) from error
     return certificate, private_key
+
+
+def verify_safari_https_server(port: int) -> None:
+    """Prove the hosted macOS system trust and TLS server before opening Safari."""
+
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "10",
+                f"https://127.0.0.1:{port}/health",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        details = (error.stderr or error.stdout or "").strip()
+        raise SystemExit(
+            "Safari HTTPS preflight could not validate the disposable local "
+            f"origin with macOS system trust: {details}"
+        ) from error
 
 
 def venv_python() -> Path:
@@ -1363,6 +1416,8 @@ def run() -> int:
         tls_cert=tls_cert, tls_key=tls_key
     )
     try:
+        if engine == "safari":
+            verify_safari_https_server(port)
         plant_keychain()
         url = (
             f"http://127.0.0.1:{port}/set"

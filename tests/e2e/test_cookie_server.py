@@ -109,7 +109,8 @@ class CookieServerTests(unittest.TestCase):
             "/corpus/run?engine=chromium&tiers=portable_smoke&step=3",
             "localhost:8765",
         )
-        self.assertEqual(final_headers, [])
+        self.assertEqual(len(final_headers), 1)
+        self.assertTrue(final_headers[0].startswith("rookie_decoy="))
         self.assertIsNone(redirect)
 
     def test_corpus_run_corrects_the_host_before_setting_cookies(self) -> None:
@@ -144,7 +145,7 @@ class CookieServerTests(unittest.TestCase):
     def test_empty_corpus_result_does_not_fall_back_to_the_legacy_cookie(self) -> None:
         self.assertEqual(
             SERVER.corpus_headers(
-                "/corpus/mutate?engine=firefox&tiers=portable_smoke",
+                "/corpus/mutate?engine=unsupported&tiers=portable_smoke",
                 "localhost:8765",
             ),
             [],

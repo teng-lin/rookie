@@ -2,7 +2,7 @@
 // comparison implementation outside the Node binding under test prevents a
 // shared native projection bug from becoming its own expected value.
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import process from "node:process";
@@ -13,6 +13,23 @@ export const MANIFEST_FILENAME = "rookie-e2e-cookie-manifest.json";
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const verifier = join(moduleDir, "verify_cookie_manifest.py");
 const workspaceRoot = dirname(dirname(moduleDir));
+
+export function pathsReferToSameFile(left, right) {
+  try {
+    const leftStat = statSync(left, { bigint: true });
+    const rightStat = statSync(right, { bigint: true });
+    if (leftStat.dev !== 0n || leftStat.ino !== 0n) {
+      return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+    }
+    const normalize = (path) => {
+      const canonical = realpathSync(path).replace(/^\\\\\?\\/, "");
+      return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+    };
+    return normalize(left) === normalize(right);
+  } catch {
+    return false;
+  }
+}
 
 function pythonExecutable() {
   if (process.env.ROOKIE_E2E_PYTHON) return process.env.ROOKIE_E2E_PYTHON;

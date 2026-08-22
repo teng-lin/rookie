@@ -566,7 +566,24 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             trust_command[trust_command.index("-k") + 1],
             "/Library/Keychains/System.keychain",
         )
-        self.assertEqual(trust_command[-1], str(scratch / "tls/rookie-local-ca.pem"))
+        self.assertIn("trustAsRoot", trust_command)
+        self.assertEqual(trust_command[-1], str(certificate))
+        verify_command = run.call_args_list[4].args[0]
+        self.assertEqual(
+            verify_command[:3],
+            ["/usr/bin/security", "verify-cert", "-c"],
+        )
+        self.assertIn("127.0.0.1", verify_command)
+        self.assertIn("/Library/Keychains/System.keychain", verify_command)
+
+    def test_safari_https_preflight_uses_system_trust(self) -> None:
+        with mock.patch.object(hosted.subprocess, "run") as run:
+            hosted.verify_safari_https_server(9443)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/curl")
+        self.assertNotIn("--insecure", command)
+        self.assertEqual(command[-1], "https://127.0.0.1:9443/health")
 
     def test_safari_https_refuses_a_non_hosted_account(self) -> None:
         with (

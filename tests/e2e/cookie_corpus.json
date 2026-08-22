@@ -603,6 +603,14 @@
           "path": "/",
           "max_age": 3600,
           "same_site": "Lax"
+        },
+        {
+          "phase": "mutate",
+          "name": "rookie_decoy",
+          "value": "must-not-pass-filter",
+          "path": "/",
+          "max_age": 3600,
+          "same_site": "Lax"
         }
       ],
       "expected": {

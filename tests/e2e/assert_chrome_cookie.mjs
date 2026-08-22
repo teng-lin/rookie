@@ -12,12 +12,16 @@
 // Requires `npm run build` to have produced the
 // platform-specific .node binary alongside bindings/node/index.js.
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
-import { findManifest, verifyCookieRecords } from "./cookie_manifest.mjs";
+import {
+  findManifest,
+  pathsReferToSameFile,
+  verifyCookieRecords,
+} from "./cookie_manifest.mjs";
 import { assertCookieState, stateFromEnvironment } from "./cookie_state.mjs";
 
 const userDataDir = process.env.ROOKIE_E2E_USER_DATA_DIR;
@@ -160,15 +164,8 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
 if (process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1") {
   const browserId = process.env.ROOKIE_E2E_BROWSER_ID ?? "chrome";
   const profiles = await rookieCookies.profiles(browserId);
-  const expectedDatabase = realpathSync(dbPath);
   const matchingProfiles = profiles.filter(({ sources }) =>
-    sources.some(({ path }) => {
-      try {
-        return realpathSync(path) === expectedDatabase;
-      } catch {
-        return false;
-      }
-    }),
+    sources.some(({ path }) => pathsReferToSameFile(path, dbPath)),
   );
   if (matchingProfiles.length !== 1) {
     console.error(
