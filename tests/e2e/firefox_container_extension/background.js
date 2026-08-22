@@ -1,12 +1,15 @@
 "use strict";
 
 (async () => {
-  const name = "rookie-e2e-container";
-  const existing = await browser.contextualIdentities.query({ name });
+  const pendingName = "rookie-e2e-container";
+  const readyName = "rookie-e2e-container-ready";
+  const existing = (await browser.contextualIdentities.query({})).filter(
+    ({ name }) => name === pendingName || name === readyName,
+  );
   const identity =
     existing[0] ||
     (await browser.contextualIdentities.create({
-      name,
+      name: pendingName,
       color: "blue",
       icon: "fingerprint",
     }));
@@ -20,5 +23,8 @@
     sameSite: "lax",
     expirationDate: Math.trunc(Date.now() / 1000) + 3600,
     storeId: identity.cookieStoreId,
+  });
+  await browser.contextualIdentities.update(identity.cookieStoreId, {
+    name: readyName,
   });
 })().catch((error) => console.error("rookie container setup failed", error));

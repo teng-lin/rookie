@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +31,7 @@ from run_exact_corpus_e2e import isolated_environment, stage_discovered_profile
 
 
 FIREFOX_CONTAINER_EXTENSION = Path(__file__).with_name("firefox_container_extension")
-FIREFOX_CONTAINER_NAME = "rookie-e2e-container"
+FIREFOX_CONTAINER_READY_NAME = "rookie-e2e-container-ready"
 
 
 def container_cookie_present(database: Path) -> bool:
@@ -55,6 +56,93 @@ def container_cookie_present(database: Path) -> bool:
         return False
     finally:
         connection.close()
+
+
+def container_seed_ready(containers: Path) -> bool:
+    """Return whether the extension completed its container cookie API call."""
+
+    try:
+        payload = json.loads(containers.read_text(encoding="utf-8"))
+        return any(
+            identity.get("name") == FIREFOX_CONTAINER_READY_NAME
+            and int(identity.get("userContextId", 0)) > 0
+            for identity in payload.get("identities", [])
+        )
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+
+
+def posix_process_group_exists(process_group_id: int) -> bool:
+    """Return whether any process remains in a POSIX process group."""
+
+    try:
+        os.killpg(process_group_id, 0)
+    except (PermissionError, ProcessLookupError):
+        # The runner owns every process it launched. EPERM therefore means no
+        # signalable member of this disposable process tree remains.
+        return False
+    return True
+
+
+def wait_for_posix_process_group_exit(
+    process_group_id: int, timeout: float
+) -> bool:
+    """Wait until a POSIX process group has no remaining members."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not posix_process_group_exists(process_group_id):
+            return True
+        time.sleep(0.1)
+    return not posix_process_group_exists(process_group_id)
+
+
+def stop_windows_process_tree(process: subprocess.Popen[str]) -> None:
+    """Stop a Windows process and every descendant reported by taskkill."""
+
+    if process.poll() is not None:
+        return
+    command = ["taskkill", "/PID", str(process.pid), "/T"]
+    subprocess.run(command, check=False, capture_output=True, text=True, timeout=15)
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(process.pid), "/T"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        process.wait(timeout=5)
+
+
+def stop_web_ext(process: subprocess.Popen[str]) -> None:
+    """Stop web-ext and its Firefox child, then wait for profile finalization."""
+
+    if os.name == "nt":
+        stop_windows_process_tree(process)
+        return
+    process_group_id = process.pid
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        os.killpg(process_group_id, signal.SIGKILL)
+        process.wait(timeout=5)
+    if wait_for_posix_process_group_exit(process_group_id, 15):
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    if not wait_for_posix_process_group_exit(process_group_id, 5):
+        raise ActiveWriterError(
+            f"web-ext process group {process_group_id} did not terminate"
+        )
 
 
 def seed_container_with_web_ext(
@@ -96,40 +184,37 @@ def seed_container_with_web_ext(
     ]
     if xvfb:
         command = ["xvfb-run", "-a", *command]
-    process = subprocess.Popen(command, cwd=str(ROOT), env=environment, text=True)
+    process = subprocess.Popen(
+        command,
+        cwd=str(ROOT),
+        env=environment,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
     containers = profile / "containers.json"
     deadline = time.monotonic() + timeout
-    observed = False
     try:
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise ActiveWriterError(
                     f"web-ext exited {process.returncode} before creating the container"
                 )
-            try:
-                payload = json.loads(containers.read_text(encoding="utf-8"))
-                observed = any(
-                    identity.get("name") == FIREFOX_CONTAINER_NAME
-                    and int(identity.get("userContextId", 0)) > 0
-                    for identity in payload.get("identities", [])
-                )
-            except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
-                observed = False
-            if observed and container_cookie_present(profile / "cookies.sqlite"):
+            if container_seed_ready(containers):
                 break
             time.sleep(0.1)
-        if not observed:
-            raise ActiveWriterError("Firefox did not create the disposable container")
-        if not container_cookie_present(profile / "cookies.sqlite"):
-            raise ActiveWriterError("Firefox container cookie never reached the store")
+        else:
+            raise ActiveWriterError(
+                "Firefox did not finish seeding the disposable container"
+            )
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        stop_web_ext(process)
+    database = profile / "cookies.sqlite"
+    deadline = time.monotonic() + min(timeout, 30)
+    while time.monotonic() < deadline:
+        if container_cookie_present(database):
+            return
+        time.sleep(0.1)
+    raise ActiveWriterError("Firefox container cookie never reached the finalized store")
 
 
 
