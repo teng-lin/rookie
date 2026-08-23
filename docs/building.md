@@ -113,8 +113,8 @@ Real browsers (libsecret / Keychain / DPAPI `v10`) and the elevated Windows
 [testing.md](testing.md). Do not assume `cargo test` covered them.
 
 The crate **bundles** SQLite (`rusqlite` / `libsqlite3-sys`); it does not use
-the host library. Locked versions, source ID, and the 90-day review policy:
-[sqlite-security.md](sqlite-security.md). Do not change those pins as part of
-an ordinary local build. Other security notes: [security.md](security.md).
+the host library. Locked versions, source ID, and the 90-day review policy are
+in the bundled SQLite inventory in [security.md](security.md). Do not change
+those pins as part of an ordinary local build.
 
 Publish steps: [releasing.md](releasing.md).

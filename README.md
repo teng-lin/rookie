@@ -52,10 +52,10 @@ at Chrome's legacy `v10`/DPAPI cookies. Checked against source on 2026-08-22:
 | --- | --- | --- | --- | --- | --- | --- |
 | Chrome/Edge/Brave **v20 App-Bound** (127+, incl. 133+ flag-3) | ✓ COM injection + elevated DPAPI/CNG fallback | ✗ — no Windows Chromium support at all | ✗ | ✗ — broke outright on Chrome 130/131[¹](https://github.com/bertrandom/chrome-cookies-secure/issues/63) | ✗ | partial — reflective-injection route⁵; 133+ flag-3 elevated fallback unconfirmed |
 | Chrome 130+ schema-24 host hash | ✓ recomputes SHA256(host), typed mismatch/missing errors, fails loudly on mismatch | ✗ unconditional strip, never verified | ✗ version-gated strip, never verified | ✗ same schema-24 change broke it[¹](https://github.com/bertrandom/chrome-cookies-secure/issues/64) | ✗ unconditional strip, never verified | partial — checks SHA256(host) equality but is schema-version-agnostic and degrades silently on mismatch⁶ |
-| CHIPS partition / Firefox container identity | ✓ captured during extraction (`PartitionState`, `userContextId`/`originAttributes`); collapsed before the `header()`/jar projection — a known, documented gap⁷ | not implemented | not implemented — `originAttributes` appears only in a test fixture, never parsed | not implemented | not implemented | not implemented — SQL queries select no partition/`originAttributes` columns |
+| CHIPS partition / Firefox container identity | ✓ captured during extraction (`PartitionState`, `userContextId`/`originAttributes`) and preserved through `read()`/`DetailedCookie`; `header(&SendContext)` fails closed with `IncompleteSendContext` rather than merging isolated cookies⁷ — only the explicit `jar()`/`cookies()` compatibility projection discards it, by documented design | not implemented | not implemented — `originAttributes` appears only in a test fixture, never parsed | not implemented | not implemented | not implemented — SQL queries select no partition/`originAttributes` columns |
 | Windows DPAPI | built in | n/a | requires an optional npm package, throws if absent² | requires a manual `optionalDependencies` install[³](https://github.com/bertrandom/chrome-cookies-secure/issues/57) | built in | built in |
 | Linux KWallet-corruption empty-key fallback | ✓ | ✗ | not implemented | — | ✓ | ✓ |
-| Browsers | 18, incl. Safari, IE, Zen, Cachy, Octo, Cốc Cốc, Yandex, Arc, DuckDuckGo | Chrome family + Firefox only | 11 Chromium/Gecko + Safari | Chrome only | 7 Chromium forks + Firefox + Safari | 19, incl. Safari, QQ, 360, Sogou, DC Browser; no IE, Zen, Cachy, Octo, LibreWolf |
+| Browsers | 25, incl. Safari, IE, Zen, Cachy, Octo, Cốc Cốc, Yandex, Arc, DuckDuckGo, Avast, QQ, 360, Sogou, DC Browser | Chrome family + Firefox only | 11 Chromium/Gecko + Safari | Chrome only | 7 Chromium forks + Firefox + Safari | 19, incl. Safari, QQ, 360, Sogou, DC Browser; no IE, Zen, Cachy, Octo, LibreWolf |
 | Output | structured report with typed issue taxonomy, jar, or list | dict / dataclass list | cookie objects / CLI formats | cookiejar / curl / header formats | `CookieJar`; failed rows silently dropped | CSV/JSON/db file dump via CLI; no structured issue taxonomy |
 | Bindings | Rust, Python, Node, CLI | Python only | Node/TS only | Node only | Python only, and not a published library surface | Go only, CLI binary — not designed for embedding |
 | Testing rigor | 34 real-browser CI combinations: 8 core jobs across Ubuntu/macOS/Windows × Chrome/Firefox (Ubuntu × Chrome/Firefox on every PR, the full 8 on every push to main and nightly, incl. a live Windows App-Bound v20 canary against Chrome/Edge/Brave and a locked-database/VSS-shadow-copy recovery case) plus a 26-combination hosted matrix (Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, Safari across Linux/macOS/Windows) validated nightly and on release — plus 3 continuous fuzz targets, per-file coverage floors, and scheduled OSV dependency scanning⁸ | ~623 lines of tests, no fuzzing, no browser-matrix CI observed | 82 test files, no fuzzing, no browser-matrix CI observed | no fuzzing or test-hardening signal observed in the repo | dedicated cookie unit tests, but folded into yt-dlp's much larger suite; no dedicated browser-cookie CI matrix | Lint/Build/Release/Tests GitHub Actions + codecov, per-package Go tests; no fuzzing or real-browser E2E matrix observed |
@@ -82,13 +82,17 @@ elevated DPAPI/CNG fallback that Chrome 133+'s flag-3 form requires.
 to every schema version and returns the value unchanged (not an error) on a
 mismatch, rather than treating a required-but-missing hash as failure the way
 rookie-cookies does.
-⁷ Tracked as A1 in
-[docs/architecture_api_gap_consolidated.md](docs/architecture_api_gap_consolidated.md);
-`read()` preserves partition/container identity on `DetailedCookie`, but the
-recommended `header()` view and jar projection compress it into the frozen
-eight-field compatibility `Cookie` first. Use `read()` and inspect
-`DetailedCookie.context` directly if partition/container identity matters to
-your call site.
+⁷ Verified directly in source:
+[`ReadResult::detailed_cookies`](rookie-rs/src/read.rs) holds isolation-intact
+`DetailedCookie`s and is "the recommended accessor"; `header()`'s
+[`header_for`](rookie-rs/src/read.rs) matches against that same isolation
+context and returns
+[`RequestError::IncompleteSendContext`](rookie-rs/src/request_error.rs) when a
+selector needed to disambiguate a partition or container is missing, rather
+than guessing. Only `cookies()`/`into_cookies()`/`jar()` — the compatibility
+projection — discard isolation, and say so in their own rustdoc. Use `read()`
+and `detailed_cookies()`/`header(&SendContext)` when partition/container
+identity matters to your call site.
 ⁸ [.github/workflows/e2e.yml](.github/workflows/e2e.yml) defines 8
 real-browser jobs: `ubuntu-chrome`, `ubuntu-firefox`, `macos-chrome`,
 `macos-firefox`, `windows-chrome`, `windows-firefox`,
@@ -110,9 +114,9 @@ ratchets coverage on a schedule; `security.yml` runs a scheduled OSV scan.
 Per-file coverage floors live in [`coverage.toml`](coverage.toml); fuzz
 targets live in [`fuzz/fuzz_targets/`](fuzz/fuzz_targets/).
 
-None of the six track CHIPS partition or Firefox container identity all the
-way through to a send-ready cookie header today (rookie-cookies captures it
-during extraction; the rest never read the columns at all). Four of the five
+rookie-cookies is the only one of the six that tracks CHIPS partition and
+Firefox container identity all the way through to a send-ready cookie header
+— the other five never read those columns at all. Four of the five
 alternatives don't reach Chrome's v20 App-Bound Encryption at all — the
 default since Chrome 127, and the only form some Chrome 133+ installs will
 emit — and where they do touch a platform keystore, it's typically a per-call
@@ -135,12 +139,17 @@ several.
 
 | Browser | Linux | macOS | Windows |
 | --- | :---: | :---: | :---: |
+| 360 Browser | — | — | ✓ |
+| 360X Browser | — | — | ✓ |
 | Arc | — | ✓ | ✓ |
+| Avast Secure Browser | — | — | ✓ |
 | Brave | ✓ | ✓ | ✓ |
+| Browser from Vought | — | — | ✓ |
 | Cachy | ✓ | — | — |
 | Chrome | ✓ | ✓ | ✓ |
 | Chromium | ✓ | ✓ | ✓ |
 | Cốc Cốc | — | ✓ | ✓ |
+| DC Browser | — | — | ✓ |
 | DuckDuckGo | — | — | ✓ |
 | Edge | ✓ | ✓ | ✓ |
 | Firefox | ✓ | ✓ | ✓ |
@@ -149,16 +158,22 @@ several.
 | Octo Browser | — | — | ✓ |
 | Opera | ✓ | ✓ | ✓ |
 | Opera GX | — | ✓ | ✓ |
+| QQ Browser | — | — | ✓ |
 | Safari | — | ✓ | — |
+| Sogou Explorer | — | — | ✓ |
 | Vivaldi | ✓ | ✓ | ✓ |
 | Yandex | — | ✓ | ✓ |
 | Zen | ✓ | ✓ | ✓ |
 
-`supported_browsers()` is the live registration list for the running OS (more
-Windows Chromium forks exist in the registry than this table). Registry-only
-browsers (Cốc Cốc, DuckDuckGo, Yandex, Avast, …) show up through report/profile
-APIs and CLI report mode, not always as a named `coccoc()` helper. `*_based` /
-`any_browser` still exist in 0.6 and are deprecated for 0.7.
+That table is the full registry. `supported_browsers()` is the live
+registration list for the running OS, so it returns the subset above whose
+platform column is checked. Fifteen of the 25 have a named compatibility
+helper (`chrome()`, `firefox()`, `safari()`, …); the other ten — Avast,
+Browser from Vought, Cốc Cốc, DC Browser, DuckDuckGo, QQ Browser, Sogou
+Explorer, 360, 360X, Yandex — are reachable through `read`/`jar`, the
+report/profile APIs, and CLI report mode, but have no named `coccoc()`-style
+function. `*_based` / `any_browser` still exist in 0.6 and are deprecated for
+0.7.
 
 ### Cookie crypto (what `v10` / `v20` mean)
 
@@ -293,6 +308,8 @@ rookie-cookies from-path /path/to/cookies.sqlite
 rookie-cookies from-path /path/to/Cookies --browser-id chrome
 rookie-cookies report --browser chrome
 rookie-cookies report
+rookie-cookies browsers
+rookie-cookies profiles firefox
 ```
 
 Chromium credential flags (`--browser-id`, `--local-state-path`,
@@ -331,10 +348,9 @@ Platform quirks (Keychain prompts, Safari Full Disk Access):
 | --- | --- |
 | Documentation index | [docs/README.md](docs/README.md) |
 | Language guides | [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md) |
-| Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) |
+| Build / test / release | [building](docs/building.md) · [testing](docs/testing.md) · [releasing](docs/releasing.md) · [changelog](CHANGELOG.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
-| Security | [reporting policy](SECURITY.md) · [engineering index](docs/security.md) |
-| Design | [architecture](docs/architecture.md) · [ADR 0004](docs/adr/0004-read-is-the-recommended-entry.md) · [changelog](CHANGELOG.md) |
+| Design | [architecture](docs/architecture.md) |
 | Examples | [python](examples/python) · [javascript](examples/javascript) · [rust](examples/rust) |
 
 

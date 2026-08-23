@@ -4,8 +4,8 @@ Operator runbook for cutting a `rookie-cookies` version. Language guides live
 with the packages ([python](../bindings/python/README.md),
 [javascript](../bindings/node/README.md), [rust](../rookie-rs/README.md)).
 Build and test: [building.md](building.md), [testing.md](testing.md).
-Security record: [security.md](security.md) (re-check
-[sqlite-security.md](sqlite-security.md) before each release).
+Security record: [security.md](security.md) (re-check its bundled SQLite
+inventory before each release).
 
 One version across three ecosystems:
 
@@ -162,7 +162,7 @@ The `pull_request` event intentionally runs only Ubuntu Chrome/Firefox in
 suites against its branch and require every job to pass:
 
 ```console
-export VERSION=0.6.0-beta.3
+export VERSION=0.6.0
 export RELEASE_BRANCH="release/$VERSION"
 gh workflow run e2e.yml --ref "$RELEASE_BRANCH" \
   -f appbound_only=false -f multi_browser=true

@@ -24,8 +24,8 @@ support matrix live in the [root README](../README.md).
 
 ## Security and assurance
 
-[security.md](security.md) is the engineering index for security corrections,
-SQLite inventory, cryptography-review status, and parser/fuzzing boundaries.
+[security.md](security.md) is the engineering record for security
+corrections, the bundled SQLite inventory, and cryptography-review status.
 It complements, but does not replace, the vulnerability-reporting policy in
 [SECURITY.md](../SECURITY.md).
 
@@ -51,8 +51,7 @@ validator in the same change.
 
 ## Historical records
 
-[architecture_api_gap_consolidated.md](architecture_api_gap_consolidated.md)
-and the files under [design/](design/) preserve point-in-time reviews and
+The files under [design/](design/) preserve point-in-time reviews and
 implementation programs. They are useful provenance, not current operating
 guidance. Dates, versions, line numbers, future-tense steps, and intermediate
 API shapes in those files describe the recorded baseline unless a maintained

@@ -376,7 +376,7 @@ pub fn safari(domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
 /// database can crash the whole host process rather than fail as a typed
 /// error. Unlike this crate's bundled SQLite parser — pinned to an exact
 /// version with its own tracked security inventory
-/// (`docs/sqlite-security.md`) — `libesedb` carries no such inventory.
+/// (`docs/security.md`) — `libesedb` carries no such inventory.
 /// Containing that gap would mean running the parser in a sandboxed
 /// subprocess; the Internet Explorer 11 browser app was discontinued in
 /// 2022, and this crate is not planning to build that containment for it.
