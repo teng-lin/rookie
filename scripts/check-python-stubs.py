@@ -29,6 +29,13 @@ which makes the gate symmetric and self-cleaning:
 `--ignore-unused-allowlist` is deliberately not used, and not needed: the stale
 half of the diff above is exactly what that flag would suppress.
 
+Reading someone else's stdout is only safe if you can tell when you have
+misread it, so two things guard the parse: `MYPY_FORCE_COLOR=0` plus escape
+stripping keeps terminal styling out of the headlines, and stubtest's own
+`Found N errors` tally is compared against the number of headlines parsed. Any
+future output change the version pin does not cover surfaces as a count
+mismatch rather than a silently shorter list.
+
     python3 scripts/check-python-stubs.py --python .venv/bin/python
 """
 
@@ -37,6 +44,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -60,6 +68,14 @@ ERROR_PREFIX = "error: "
 # error count that follows is zero, which otherwise reads as "all clear".
 BUILD_ERROR_MARKER = "not checking stubs due to mypy build errors"
 
+# CSI sequences (`\x1b[1m`) and the charset selector mypy's formatter emits
+# alongside them (`\x1b(B`).
+ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\([A-Za-z0-9])")
+
+# stubtest closes with exactly one of these (mypy/stubtest.py:2476-2492).
+FOUND_SUMMARY = re.compile(r"^Found (\d+) errors? \(checked \d+ modules?\)$", re.MULTILINE)
+SUCCESS_SUMMARY = re.compile(r"^Success: no issues found in \d+ modules?$", re.MULTILINE)
+
 
 class AllowlistError(ValueError):
     """The allowlist file does not follow the documented format."""
@@ -71,9 +87,16 @@ def parse_allowlist(text: str) -> dict[str, str]:
     The format is a stubtest error message per line -- verbatim, minus the
     leading ``error: `` -- under a ``#`` comment block that says why the
     divergence is intentional. One comment block covers the run of entries
-    beneath it, so a group of seventeen identical-in-kind divergences is
-    explained once rather than seventeen times, but no entry may appear before
-    any comment: every line in the file has a stated reason above it.
+    directly beneath it, so a group of seventeen identical-in-kind divergences
+    is explained once rather than seventeen times.
+
+    A comment block ends at a blank line or at the entries it introduces,
+    whichever comes first. Both rules matter: the blank line is what stops the
+    file's own explanatory header from being recorded as the reason for the
+    first group, and the entry rule is what stops a later group's comment from
+    inheriting the previous group's text. The reason recorded for an entry is
+    therefore the run of comment lines immediately above it -- and it must say
+    something, since a bare ``#`` is not an explanation.
     """
     entries: dict[str, str] = {}
     justification: list[str] = []
@@ -81,6 +104,8 @@ def parse_allowlist(text: str) -> dict[str, str]:
     for number, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line:
+            justification = []
+            trailing_entries = False
             continue
         if line.startswith("#"):
             if trailing_entries:
@@ -88,17 +113,33 @@ def parse_allowlist(text: str) -> dict[str, str]:
                 trailing_entries = False
             justification.append(line.lstrip("#").strip())
             continue
-        if not justification:
-            raise AllowlistError(f"line {number}: entry has no comment above it: {line}")
         if line in entries:
             raise AllowlistError(f"line {number}: duplicate entry: {line}")
         if line.startswith(ERROR_PREFIX):
             raise AllowlistError(
                 f"line {number}: drop the {ERROR_PREFIX!r} prefix, entries are bare messages: {line}"
             )
-        entries[line] = " ".join(justification)
+        reason = " ".join(part for part in justification if part).strip()
+        if not reason:
+            raise AllowlistError(
+                f"line {number}: no comment above this entry says why it is allowed: {line}"
+            )
+        entries[line] = reason
         trailing_entries = True
     return entries
+
+
+def plain(output: str) -> str:
+    """stubtest's output with any terminal styling removed.
+
+    `capture_output=True` is not enough to get uncolored text: mypy's
+    `should_force_color` honours `MYPY_FORCE_COLOR`/`FORCE_COLOR` *instead of*
+    the isatty check, and CI images set those globally. `subprocess_env` pins
+    the variable off, and this strips whatever styling still arrives, so the
+    parsers below never see `\\x1b[1m\\x1b[31merror: ` and silently match
+    nothing.
+    """
+    return ANSI.sub("", output)
 
 
 def stubtest_headlines(output: str) -> list[str]:
@@ -111,28 +152,59 @@ def stubtest_headlines(output: str) -> list[str]:
     """
     return [
         line[len(ERROR_PREFIX) :].strip()
-        for line in output.splitlines()
+        for line in plain(output).splitlines()
         if line.startswith(ERROR_PREFIX)
     ]
 
 
+def stubtest_error_count(output: str) -> int | None:
+    """The error count stubtest reported for itself, or None if it said nothing.
+
+    This is the cross-check that keeps the headline parser honest. stubtest
+    always closes with `Found N errors (checked M modules)` or `Success: no
+    issues found in M modules`, so comparing N to the number of headlines
+    parsed turns any future change to its output format into a loud mismatch
+    instead of a silently shorter list.
+    """
+    text = plain(output)
+    found = FOUND_SUMMARY.search(text)
+    if found:
+        return int(found.group(1))
+    return 0 if SUCCESS_SUMMARY.search(text) else None
+
+
 def evaluate(allowlist: dict[str, str], output: str) -> list[str]:
     """Failures for one stubtest run: unlisted divergences and stale entries."""
-    if BUILD_ERROR_MARKER in output:
+    if BUILD_ERROR_MARKER in plain(output):
         return [
             "stubtest checked nothing: the stub does not type-check on its own "
             f"({BUILD_ERROR_MARKER}). Fix the stub errors quoted below first."
         ]
     observed = stubtest_headlines(output)
-    failures = [
+    reported = stubtest_error_count(output)
+    failures: list[str] = []
+    if reported is None:
+        failures.append(
+            "stubtest printed neither a 'Found N errors' nor a 'Success' summary; "
+            "its output is not the format this gate parses, so its findings "
+            "cannot be trusted. See its output above."
+        )
+    elif reported != len(observed):
+        failures.append(
+            f"stubtest reported {reported} error(s) but this gate parsed "
+            f"{len(observed)} of them; its output format has changed and "
+            "divergences are going unread. See its output above."
+        )
+    failures.extend(
         f"undocumented stub/runtime divergence: {headline}"
         for headline in observed
         if headline not in allowlist
-    ]
+    )
     seen = set(observed)
     failures.extend(
-        f"stale allowlist entry, this divergence no longer occurs: {entry}"
-        for entry in allowlist
+        f"stale allowlist entry, this divergence no longer occurs: {entry} "
+        f"(it was allowed because: {reason})"
+        for entry, reason in allowlist.items()
         if entry not in seen
     )
     return failures
@@ -146,10 +218,29 @@ def display(path: Path) -> str:
         return str(path)
 
 
+def subprocess_env() -> dict[str, str]:
+    """The ambient environment with mypy's colour forcing pinned off.
+
+    `mypy/util.py::should_force_color` reads `MYPY_FORCE_COLOR` and falls back
+    to `FORCE_COLOR`; either one truthy replaces the isatty check entirely, so
+    capturing the pipe does not keep escape codes out. `MYPY_FORCE_COLOR`
+    is read first, so setting it to "0" overrides an inherited `FORCE_COLOR=1`
+    without having to unset anything the surrounding CI may rely on.
+    """
+    return {**os.environ, "MYPY_FORCE_COLOR": "0"}
+
+
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     printable = " ".join(command)
     print(f"+ {printable}", flush=True)
-    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=subprocess_env(),
+    )
 
 
 def mypy_version(python: Path, requirement: str) -> str:

@@ -208,6 +208,7 @@ def other_platforms_exports_are_hidden() -> None:
         rookie_cookies.safari  # type: ignore[attr-defined]
         rookie_cookies.opera_gx  # type: ignore[attr-defined]
         rookie_cookies.internet_explorer  # type: ignore[attr-defined]
+        rookie_cookies.octo_browser  # type: ignore[attr-defined]
 
 
 def cross_platform_exports() -> None:
@@ -228,3 +229,110 @@ def cross_platform_exports() -> None:
         ),
         http.cookiejar.Cookie,
     )
+
+
+def browser_convenience_exports() -> None:
+    """The one-per-browser wrappers, which all share the same shape."""
+    assert_type(rookie_cookies.arc(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.brave(["example.com"]), List[Dict[str, Any]])
+    assert_type(rookie_cookies.chromium(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.edge(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.librewolf(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.opera(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.vivaldi(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.zen(["example.com"]), List[Dict[str, Any]])
+    assert_type(rookie_cookies.load(["example.com"]), List[Dict[str, Any]])
+
+
+def profile_and_report_entry_points() -> None:
+    """Discovery and reporting, including the Gecko- and Chromium-specific pairs."""
+    assert_type(rookie_cookies.firefox_profiles(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.firefox_profile("default-release"), List[Dict[str, Any]])
+    assert_type(rookie_cookies.firefox_based("/nonexistent/cookies.sqlite"), List[Dict[str, Any]])
+    assert_type(
+        rookie_cookies.firefox_based_detailed("/nonexistent/cookies.sqlite"),
+        List["DetailedCookie"],
+    )
+    # chrome_profiles() lists profiles; chrome_profile() reports on one. The
+    # near-identical names return different shapes, which is exactly the pair
+    # a consumer gets wrong.
+    assert_type(rookie_cookies.chrome_profiles(), List[Dict[str, Any]])
+    assert_type(rookie_cookies.chrome_profile("Default"), Dict[str, Any])
+    assert_type(rookie_cookies.browser_profiles("chrome"), List[Dict[str, Any]])
+    assert_type(rookie_cookies.profiles("chrome"), List[Dict[str, Any]])
+    assert_type(rookie_cookies.browser_report("chrome", "Default"), Dict[str, Any])
+
+
+def deprecated_path_helpers() -> None:
+    """The 0.6 deprecations still have to type-check until they are removed."""
+    assert_type(rookie_cookies.extract_from_path("/nonexistent/Cookies"), List[Dict[str, Any]])
+    assert_type(rookie_cookies.cookies_from_path("/nonexistent/Cookies"), List[Dict[str, Any]])
+    assert_type(
+        rookie_cookies.chromium_cookies_from_path_detailed("/nonexistent/Cookies"),
+        List["DetailedCookie"],
+    )
+    assert_type(
+        rookie_cookies.any_browser("/nonexistent/Cookies", ["example.com"]),
+        List[Dict[str, Any]],
+    )
+
+    # The options dict is a TypedDict, so a checker rejects a misspelled key
+    # and infers each value's type rather than settling for `object`.
+    options: rookie_cookies.ChromiumPathOptions = {
+        "domains": ["example.com"],
+        "timeout": 5.0,
+        "cancellation": rookie_cookies.CancellationHandle(),
+        "app_bound": "disabled",
+    }
+    assert_type(
+        rookie_cookies.chromium_cookies_from_path("/nonexistent/Cookies", options),
+        List[Dict[str, Any]],
+    )
+
+    # This pair is the one export whose *signature* differs by platform, so a
+    # real consumer has to split on it exactly like this.
+    if sys.platform == "win32":
+        assert_type(
+            rookie_cookies.chromium_based("/nonexistent/Local State", "/nonexistent/Cookies"),
+            List[Dict[str, Any]],
+        )
+        assert_type(
+            rookie_cookies.chromium_based_detailed(
+                "/nonexistent/Local State", "/nonexistent/Cookies"
+            ),
+            List["DetailedCookie"],
+        )
+    else:
+        assert_type(
+            rookie_cookies.chromium_based("/nonexistent/Cookies", None, "chrome"),
+            List[Dict[str, Any]],
+        )
+        assert_type(
+            rookie_cookies.chromium_based_detailed("/nonexistent/Cookies", None, "chrome"),
+            List["DetailedCookie"],
+        )
+
+
+def typing_vocabulary() -> None:
+    """The aliases and classes the public signatures are written in.
+
+    These are exported for consumers to *annotate* with, so referencing them
+    in an annotation is the only way to prove they are usable. A `Literal`
+    alias that silently widened to `str` would still resolve here; the
+    rejected-value comment below is what pins it.
+    """
+    policy: rookie_cookies.AppBoundPolicy = "allow_elevated_fallback"
+    single: rookie_cookies.SingleProfileSelection = "legacy_first"
+    every: rookie_cookies.ReportProfileSelection = "all"
+    # `policy = "sometimes"` and `single = "all"` are rejected here; the
+    # aliases are Literals, not open strings.
+    rookie_cookies.read(browser="chrome", select=single, app_bound=policy)
+    rookie_cookies.report("chrome", select=every, app_bound=policy)
+
+    warning: rookie_cookies.ReadWarning = rookie_cookies.read(browser="chrome").warnings[0]
+    assert_type(warning.code, str)
+
+    # The DTO submodule is reachable as an attribute of the package, not only
+    # through `from rookie_cookies import dto`.
+    typed: rookie_cookies.dto.ExtractionReport = rookie_cookies.load_report_dto()
+    assert_type(typed.status, str)
