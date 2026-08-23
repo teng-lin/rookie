@@ -76,6 +76,15 @@ are then held to `coverage.toml`'s `[python-binding-native]` and
 `[python-binding-pure]` floors. Pass `--no-check` to write the reports without
 enforcing them.
 
+One test skips under this command and only under it:
+`test_parallel_extractions_overlap_rather_than_queueing` measures wall-clock
+parallel speedup, and instrumentation replaces every basic block with a shared
+atomic counter increment, so threads on one extraction path contend on the same
+counters and real parallelism reads as ~1x. The assertion keeps its full
+strength in every uninstrumented lane, which is where a binding that held the
+GIL or funnelled extractions through one mutex would be caught. The skip is
+keyed off `LLVM_PROFILE_FILE`.
+
 The floors are single values that must hold on Linux, macOS, and Windows, so
 each sits at the lowest platform's observed value rounded down. Pull requests
 run this on Ubuntu; the nightly schedule runs all three, because a

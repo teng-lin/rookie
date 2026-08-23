@@ -38,6 +38,34 @@ _HEARTBEAT_INTERVAL = 0.001
 _EXPIRED_MS = 1_000_000_000
 _LIVE_MS = 4_102_444_800_000
 
+# `cargo llvm-cov show-env` exports `LLVM_PROFILE_FILE`, and
+# `scripts/run-python-coverage.py` hands that same environment to this suite --
+# it refuses to run at all if the variable is absent -- so its presence here
+# means the extension under test was compiled with `-C instrument-coverage`.
+# Keying off the LLVM variable rather than a marker of our own also covers a
+# developer driving `cargo llvm-cov` by hand, which no repo-private marker
+# would.
+_COVERAGE_INSTRUMENTED = "LLVM_PROFILE_FILE" in os.environ
+
+# Only the *scaling* assertion needs this. Instrumentation turns every basic
+# block into a shared atomic counter increment, so N threads on one extraction
+# path contend on the same counter cache lines and the parallel speedup
+# collapses to roughly 1x -- measured at 0.96x and 1.11x on `Python binding
+# coverage (macos-latest)` while all four uninstrumented `Python build and
+# tests (macos-latest)` jobs passed the same suite (issue #337). The other
+# timing-sensitive tests in this file are not exposed the same way:
+# `GilReleaseTest` asks whether another Python thread runs *at all* during one
+# extraction, which counter contention inside that single thread does not
+# change, and the cancellation and `_sized_store` timings only benefit from
+# instrumentation making an extraction longer.
+_INSTRUMENTED_SKIP_REASON = (
+    "the extension under test is coverage-instrumented (LLVM_PROFILE_FILE is "
+    "set): LLVM's shared atomic per-block counters serialize threads running "
+    "the same code, which flattens real parallelism to about 1x and would make "
+    "this measurement report serialization that is not there. The assertion is "
+    "not disabled -- it runs, and must pass, in every uninstrumented lane"
+)
+
 _UNICODE_DOMAIN = ".юникод.test"
 _UNICODE_NAME = "имя"
 _UNICODE_VALUE = "значение-\U0001f36a"
@@ -265,6 +293,7 @@ class CancellationTest(unittest.TestCase):
 
 
 class SameInterpreterConcurrencyTest(unittest.TestCase):
+    @unittest.skipIf(_COVERAGE_INSTRUMENTED, _INSTRUMENTED_SKIP_REASON)
     def test_parallel_extractions_overlap_rather_than_queueing(self) -> None:
         """Four extractions at once finish faster than four in a row.
 
