@@ -64,9 +64,12 @@ jobs:
             echo 'node_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"macos-latest","node":"24"},{"os":"windows-latest","node":"26"}]' >> "$GITHUB_OUTPUT"
             echo 'python_matrix=[{"os":"ubuntu-latest","python":"3.12"},{"os":"macos-latest","python":"3.13"},{"os":"windows-latest","python":"3.14"}]' >> "$GITHUB_OUTPUT"
             # One OS per PR: instrumenting the extension means a from-scratch
-            # nightly build, and the per-file floors are single values that
-            # must hold everywhere, so one platform proving them is enough to
-            # block a regression on a pull request.
+            # nightly build on every cell. The trade is explicit -- a pull
+            # request that leaves new `#[cfg(target_os = "windows")]` or macOS
+            # lines uncovered does not move the Ubuntu report, so that
+            # regression surfaces at the next nightly rather than on the PR.
+            # Platform-neutral regressions, which are the common case, are
+            # still blocked here.
             echo 'coverage_matrix=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           fi
 

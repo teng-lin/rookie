@@ -1060,13 +1060,17 @@ def binding_discovery_environment(
 
     A browser the manifest excuses - no convenience function, or one whose
     cells are all fixture-only - keeps today's behaviour and is asked for no
-    discovery surface at all.
+    discovery surface at all. That skip is keyed on manifest membership and
+    nothing else: for a browser the manifest DOES declare, a failure to
+    resolve it is a contract inconsistency (a wrong dispatch family, or a
+    platform the entry does not claim) and is raised rather than swallowed
+    into a silently dropped surface.
     """
 
-    try:
-        convenience_function(browser_id, dispatch)
-    except AssertionError:
+    coverage = load_coverage()
+    if browser_id not in coverage["convenience_functions"]:
         return env
+    convenience_function(browser_id, dispatch, coverage)
     discovery = dict(env)
     discovery["ROOKIE_E2E_CHECK_BROWSER_DISCOVERY"] = "1"
     discovery["ROOKIE_E2E_TARGET_BROWSER"] = browser_id

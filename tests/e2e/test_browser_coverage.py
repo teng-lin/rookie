@@ -109,6 +109,14 @@ CONVENIENCE_ENTRY_KEYS = frozenset(
 DISCOVERY_ENV_KEYS = frozenset(
     {"ROOKIE_E2E_CHECK_BROWSER_DISCOVERY", "ROOKIE_E2E_TARGET_BROWSER"}
 )
+# A convenience function reaches its browser through that browser's registry
+# roots, so the assert-script family that can drive it follows from the root
+# discovery kind rather than being a free choice.
+REGISTRY_DISCOVERY_DISPATCHES = {
+    "chromium_user_data": "chromium",
+    "mozilla_profiles_ini": "gecko",
+    "safari_default_profile": "native",
+}
 NODE_EXPORT_PATTERN = re.compile(r"^module\.exports\.(\w+) = ", re.MULTILINE)
 NODE_PLATFORM_EXPORT_PATTERN = re.compile(
     r"^module\.exports\.(?P<name>\w+) = platformNative\("
@@ -253,6 +261,16 @@ def _registry_platforms(registry: dict) -> dict[str, frozenset[str]]:
     return {browser: frozenset(names) for browser, names in platforms.items()}
 
 
+def _registry_discovery_kinds(registry: dict) -> dict[str, frozenset[str]]:
+    kinds: dict[str, set[str]] = {}
+    for browsers in registry["platforms"].values():
+        for browser in browsers:
+            kinds.setdefault(browser["canonical_id"], set()).update(
+                root["discovery"] for root in browser["roots"]
+            )
+    return {browser: frozenset(names) for browser, names in kinds.items()}
+
+
 def _hosted_platforms(coverage_doc: dict) -> dict[str, frozenset[str]]:
     hosted: dict[str, set[str]] = {}
     for row in coverage_doc["coverage"]:
@@ -278,6 +296,7 @@ class BrowserCoverageTests(unittest.TestCase):
         cls.python_exports = _python_export_platforms()
         cls.node_exports = _node_export_platforms()
         cls.registry_platforms = _registry_platforms(cls.registry)
+        cls.registry_discovery_kinds = _registry_discovery_kinds(cls.registry)
         cls.hosted_platforms = _hosted_platforms(cls.coverage_doc)
 
     def test_schema_and_lane_docs(self) -> None:
@@ -533,6 +552,22 @@ class BrowserCoverageTests(unittest.TestCase):
                 f"{browser_id} Node gating",
             )
 
+    def test_convenience_dispatch_matches_the_registry_discovery_kind(self) -> None:
+        # `platforms` is cross-checked against the registry, so `dispatch` is
+        # too: a browser reached through `chromium_user_data` roots can only be
+        # driven by the Chromium assert scripts. Left free, a wrong dispatch
+        # family silently disables the convenience surface at runtime.
+        for browser_id, entry in self.coverage_doc["convenience_functions"].items():
+            kinds = self.registry_discovery_kinds[browser_id]
+            self.assertEqual(len(kinds), 1, f"{browser_id} mixes discovery kinds")
+            kind = next(iter(kinds))
+            self.assertIn(kind, REGISTRY_DISCOVERY_DISPATCHES, browser_id)
+            self.assertEqual(
+                entry["dispatch"],
+                REGISTRY_DISCOVERY_DISPATCHES[kind],
+                f"{browser_id} is discovered via {kind}",
+            )
+
     def test_every_declared_convenience_function_has_a_hosted_lane(self) -> None:
         for browser_id, entry in self.coverage_doc["convenience_functions"].items():
             self.assertEqual(
@@ -681,6 +716,34 @@ class BrowserCoverageTests(unittest.TestCase):
             self.assertEqual(handed.get("cargo"), "env", f"{name} cargo invocation")
             for script in scripts:
                 self.assertEqual(handed.get(script), "discovery", f"{name} {script}")
+
+    def test_claimed_runner_only_skips_discovery_for_manifest_excused_browsers(
+        self,
+    ) -> None:
+        # The skip must be keyed on manifest membership alone. Catching the
+        # resolution failure instead would turn a contract bug - a wrong
+        # dispatch family, or a platform the entry does not claim - into a
+        # silently dropped convenience surface, while the runner still emits a
+        # full depth receipt because `discovery` is earned by the unconditional
+        # recommended-read block rather than by this call.
+        source = CLAIMED_RUNNER_PATH.read_text(encoding="utf-8")
+        module = ast.parse(source)
+        function = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "binding_discovery_environment"
+        )
+        segment = ast.get_source_segment(source, function)
+        self.assertIn('coverage["convenience_functions"]', segment)
+        self.assertIn("convenience_function(browser_id, dispatch", segment)
+        for node in ast.walk(function):
+            self.assertNotIsInstance(
+                node,
+                ast.Try,
+                "binding_discovery_environment must not swallow a resolution "
+                "failure; skip an excused browser by manifest membership",
+            )
 
     def test_testing_md_matrix_matches_coverage(self) -> None:
         titles: dict[str, str] = {}

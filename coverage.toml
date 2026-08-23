@@ -82,4 +82,8 @@ branches = 66.0
 
 [python-binding-pure.files."bindings/python/rookie_cookies/dto.py"]
 lines = 95.0
+# Generated dataclasses branch nowhere today, and check-coverage.py scores an
+# empty branch denominator as 100%, so this floor currently enforces nothing.
+# It is kept rather than deleted because it starts enforcing the moment the
+# generator emits its first conditional.
 branches = 90.0

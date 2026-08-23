@@ -103,6 +103,19 @@ class SectionedFloorTests(unittest.TestCase):
             ["coverage config has no [no-such-lane] table"],
         )
 
+    def test_a_section_that_declares_no_floors_fails_closed(self) -> None:
+        # Otherwise a renamed or emptied section enforces nothing and still
+        # prints "Coverage ratchet passed".
+        failures = coverage.enforce({"lane": {}}, report(ROOT), ROOT, section="lane")
+        self.assertTrue(any("enforce nothing" in failure for failure in failures), failures)
+
+    def test_a_misspelled_aggregate_key_fails_closed(self) -> None:
+        # `total` instead of `totals` parses as valid TOML and would otherwise
+        # contribute no floors at all.
+        config = {"lane": {"total": {"lines": 90.0}}}
+        failures = coverage.enforce(config, report(ROOT), ROOT, section="lane")
+        self.assertTrue(any("unknown key" in failure for failure in failures), failures)
+
     def test_the_root_tables_are_untouched_by_a_section(self) -> None:
         # The workspace lane keeps reading [workspace]/[files] with no section.
         self.assertEqual(coverage.enforce(CONFIG, report(ROOT), ROOT), [])
@@ -162,6 +175,15 @@ class CoveragePyFormatTests(unittest.TestCase):
         # 0/0 must be 100%, not 0%: an unbranching module has covered every
         # branch it has, and reporting 0% would make it impossible to gate.
         self.assertEqual(self.enforce(coverage_py_report(branches=(0, 0))), [])
+
+    def test_a_file_with_no_statements_fails_closed(self) -> None:
+        # A gated Python file always has statements, so a zero denominator
+        # means the report did not describe the file this floor names. Scoring
+        # it 100% would retire the floor silently.
+        failures = self.enforce(coverage_py_report(statements=(0, 0)))
+        self.assertTrue(
+            any("statement counters" in failure for failure in failures), failures
+        )
 
     def test_a_missing_counter_fails_closed(self) -> None:
         payload = coverage_py_report()

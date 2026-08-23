@@ -161,7 +161,13 @@ def mypy_version(python: Path, requirement: str) -> str:
             "or re-run this script with --install-mypy."
         )
     # "mypy 2.3.1 (compiled: yes)" -> "2.3.1"
-    return result.stdout.split()[1]
+    fields = result.stdout.split()
+    if len(fields) < 2:
+        raise SystemExit(
+            f"{python} -m mypy --version printed {result.stdout.strip()!r}, "
+            "which is not a version line this gate can read"
+        )
+    return fields[1]
 
 
 def require_pinned_mypy(python: Path, requirement: str, install: bool) -> None:
@@ -179,9 +185,9 @@ def require_pinned_mypy(python: Path, requirement: str, install: bool) -> None:
         )
 
 
-def run_stubtest(python: Path, module: str) -> str:
+def run_stubtest(python: Path, module: str) -> tuple[int, str]:
     result = run([str(python), "-m", "mypy.stubtest", module])
-    return result.stdout + result.stderr
+    return result.returncode, result.stdout + result.stderr
 
 
 def check_stubs(python: Path, module: str, allowlist_path: Path) -> list[str]:
@@ -189,8 +195,18 @@ def check_stubs(python: Path, module: str, allowlist_path: Path) -> list[str]:
         allowlist = parse_allowlist(allowlist_path.read_text(encoding="utf-8"))
     except AllowlistError as error:
         return [f"{display(allowlist_path)}: {error}"]
-    output = run_stubtest(python, module)
+    returncode, output = run_stubtest(python, module)
     failures = evaluate(allowlist, output)
+    if returncode != 0 and not stubtest_headlines(output):
+        # A crash, a failed extension import, or an interpreter that cannot
+        # find the module all exit non-zero having reported no divergence. The
+        # headline diff alone would read that as "everything the allowlist
+        # names is stale", which both misdiagnoses it and -- once the allowlist
+        # is empty, which is this design's stated goal -- passes outright.
+        failures = [
+            f"stubtest exited {returncode} without reporting a single divergence; "
+            "it did not check the stub. See its output above."
+        ] + failures
     if failures:
         print(output, file=sys.stderr)
     return failures

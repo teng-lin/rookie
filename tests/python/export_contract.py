@@ -166,12 +166,22 @@ def resolve_registry_root(template: str, home: Path) -> Path:
     return Path(resolved)
 
 
-def preferred_root(entry: dict[str, Any], home: Path) -> tuple[Path, str]:
-    """The lowest-priority root the suite can materialize, and its discovery kind."""
+def preferred_root(entry: dict[str, Any], home: Path) -> tuple[Path, str, Optional[str]]:
+    """The lowest-priority root the suite can materialize.
+
+    Returns its path, its discovery kind, and its declared
+    `legacy_profile_layout` -- the last of which decides where inside the root
+    a profile goes, so the seeder cannot quietly cover a layout the root does
+    not claim.
+    """
     failures: list[str] = []
     for root in sorted(entry["roots"], key=lambda item: item["priority"]):
         try:
-            return resolve_registry_root(root["template"], home), root["discovery"]
+            return (
+                resolve_registry_root(root["template"], home),
+                root["discovery"],
+                root.get("legacy_profile_layout"),
+            )
         except UnseedableBrowser as error:
             failures.append(str(error))
     raise UnseedableBrowser(
@@ -179,14 +189,28 @@ def preferred_root(entry: dict[str, Any], home: Path) -> tuple[Path, str]:
     )
 
 
-def seed_chromium_user_data(root: Path) -> None:
+def seed_chromium_user_data(root: Path, layout: Optional[str] = None) -> None:
     """Seed both Chromium profile layouts under one user-data root.
 
     Chrome-shaped browsers keep profiles in `<root>/Default`; Opera and Opera GX
-    make the user-data root itself the profile. Writing both means one seeder
-    covers every `chromium_user_data` root in the registry.
+    make the user-data root itself the profile. Writing both is what lets one
+    seeder cover every `chromium_user_data` root in the registry.
+
+    The cost is that this cannot tell the two layouts apart: a regression that
+    dropped root-as-profile support while keeping ordinary `Default` discovery
+    would still find the seeded cookie here. Seeding only the flat store for
+    roots marked `legacy_profile_layout = "default_and_flat"` was tried and is
+    wrong -- that key is a legacy compatibility hint, not the discovery layout,
+    and macOS Opera needs the flat store while declaring no layout at all.
+    Distinguishing the two is the real-browser exact-corpus lane's job; see
+    `tests/e2e/browser_coverage.json`'s `convenience_functions`, which now
+    exercises `opera()` and `opera_gx()` against an actual install.
     """
-    for database in (root / "Default" / "Network" / "Cookies", root / "Network" / "Cookies"):
+    del layout  # See above: not a reliable discriminator between the layouts.
+    for database in (
+        root / "Default" / "Network" / "Cookies",
+        root / "Network" / "Cookies",
+    ):
         _write_chromium_database(database)
     (root / "Local State").write_text("{}", encoding="utf-8")
 
@@ -221,7 +245,8 @@ def _write_chromium_database(database: Path) -> None:
         connection.close()
 
 
-def seed_mozilla_profiles_ini(root: Path) -> None:
+def seed_mozilla_profiles_ini(root: Path, layout: Optional[str] = None) -> None:
+    del layout  # Gecko roots declare no legacy Chromium profile layout.
     profile = root / "Profiles" / "contract-release"
     profile.mkdir(parents=True, exist_ok=True)
     (root / "profiles.ini").write_text(
@@ -261,7 +286,7 @@ def seed_mozilla_profiles_ini(root: Path) -> None:
         connection.close()
 
 
-SEEDERS: dict[str, Callable[[Path], None]] = {
+SEEDERS: dict[str, Callable[[Path, Optional[str]], None]] = {
     "chromium_user_data": seed_chromium_user_data,
     "mozilla_profiles_ini": seed_mozilla_profiles_ini,
 }
@@ -272,12 +297,12 @@ def seed_browser(home: Path, browser_id: str) -> None:
     entry = registry_entries(current_platform()).get(browser_id)
     if entry is None:
         raise UnseedableBrowser(f"{browser_id!r} is not registered on this platform")
-    root, discovery = preferred_root(entry, home)
+    root, discovery, layout = preferred_root(entry, home)
     seeder = SEEDERS.get(discovery)
     if seeder is None:
         raise UnseedableBrowser(f"no seeder for discovery kind {discovery!r}")
     root.mkdir(parents=True, exist_ok=True)
-    seeder(root)
+    seeder(root, layout)
 
 
 # --------------------------------------------------------------------------
@@ -463,11 +488,33 @@ def _browser_success(browser_id: str) -> Callable[[Path], object]:
 
 
 def _browser_failure(browser_id: str) -> Failure:
-    # With a synthetic home and nothing seeded, discovery finds no store. That
-    # is the classified engine error, not an empty list -- the binding
-    # distinguishes "no browser here" from "browser here, no cookies".
+    """The classified fault this browser's export raises with nothing seeded.
+
+    Which fault it is depends on the registry, and the distinction is the
+    binding's, not this suite's. A browser the registry knows about on this
+    platform but that is not installed is an *engine* fault -- discovery ran
+    and found no store, which is what separates "no browser here" from
+    "browser here, no cookies". A browser the registry does not carry here at
+    all is a *request* fault: the export exists, because it is registered
+    unconditionally, but the id it names is not resolvable on this platform.
+    `arc` on Linux is the live example of the second case.
+
+    Reading this from the registry rather than tabulating it keeps the two in
+    step: a browser that gains a platform root moves to the engine fault on
+    its own.
+    """
+    probe: Callable[[Path], object] = (
+        lambda home: getattr(rookie_cookies, browser_id)()
+    )
+    if browser_id not in registry_entries(current_platform()):
+        return Failure(
+            probe=probe,
+            exception=rookie_cookies.RookieRequestError,
+            kind="request",
+            code="unknown_browser",
+        )
     return Failure(
-        probe=lambda home: getattr(rookie_cookies, browser_id)(),
+        probe=probe,
         exception=rookie_cookies.RookieEngineError,
         kind="engine",
         code="no_discovered_source",
@@ -573,17 +620,21 @@ def _jar_success(home: Path) -> object:
     return rookie_cookies.jar(browser="chrome", include_expired=True)
 
 
+def _chrome_root(home: Path) -> Path:
+    entry = registry_entries(current_platform())["chrome"]
+    root, _discovery, _layout = preferred_root(entry, home)
+    return root
+
+
 def _seeded_chromium_database(home: Path) -> str:
     seed_browser(home, "chrome")
-    entry = registry_entries(current_platform())["chrome"]
-    root, _ = preferred_root(entry, home)
-    return str(root / "Default" / "Network" / "Cookies")
+    return str(_chrome_root(home) / "Default" / "Network" / "Cookies")
 
 
 def _seeded_gecko_database(home: Path) -> str:
     seed_browser(home, "firefox")
     entry = registry_entries(current_platform())["firefox"]
-    root, _ = preferred_root(entry, home)
+    root, _discovery, _layout = preferred_root(entry, home)
     return str(root / "Profiles" / "contract-release" / "cookies.sqlite")
 
 
@@ -777,18 +828,18 @@ CHROMIUM_BASED_SIGNATURE = (
 def _chromium_based_success(home: Path) -> object:
     database = _seeded_chromium_database(home)
     if sys.platform == WINDOWS:
-        entry = registry_entries(current_platform())["chrome"]
-        root, _ = preferred_root(entry, home)
-        return rookie_cookies.chromium_based(str(root / "Local State"), database)
+        return rookie_cookies.chromium_based(
+            str(_chrome_root(home) / "Local State"), database
+        )
     return rookie_cookies.chromium_based(database)
 
 
 def _chromium_based_detailed_success(home: Path) -> object:
     database = _seeded_chromium_database(home)
     if sys.platform == WINDOWS:
-        entry = registry_entries(current_platform())["chrome"]
-        root, _ = preferred_root(entry, home)
-        return rookie_cookies.chromium_based_detailed(str(root / "Local State"), database)
+        return rookie_cookies.chromium_based_detailed(
+            str(_chrome_root(home) / "Local State"), database
+        )
     return rookie_cookies.chromium_based_detailed(database)
 
 
@@ -1168,7 +1219,7 @@ def can_seed(browser_id: str, platform: Optional[str] = None) -> bool:
     if entry is None:
         return False
     try:
-        _, discovery = preferred_root(entry, Path("."))
+        _, discovery, _layout = preferred_root(entry, Path("."))
     except UnseedableBrowser:
         return False
     return discovery in SEEDERS

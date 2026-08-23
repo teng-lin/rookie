@@ -43,6 +43,8 @@ DEFAULT_TOOLCHAIN = "nightly-2025-11-23"
 REQUIRED_MATURIN = "1.14.1"
 DEFAULT_COVERAGE = "coverage==7.15.4"
 
+EXPORT_PREFIX = "export "
+
 PACKAGE = "rookie-cookies-python"
 NATIVE_SECTION = "python-binding-native"
 PURE_SECTION = "python-binding-pure"
@@ -65,6 +67,23 @@ def capture(command: list[str], *, cwd: Path = ROOT) -> str:
     return result.stdout
 
 
+def unquote_sh(value: str) -> str:
+    """Undo the POSIX shell quoting `show-env --sh` applies to a value.
+
+    `str.strip("'")` is not good enough. It leaves a Windows path's
+    backslashes at the mercy of whatever unquotes next, and it silently
+    corrupts a checkout path containing an apostrophe, which sh quotes as the
+    four-character sequence `'\''`. Handling exactly the two shapes this
+    command emits -- bare, or single-quoted with that escape -- keeps
+    backslashes literal in both, which a general-purpose lexer in POSIX mode
+    would not.
+    """
+    if not value.startswith("'") or not value.endswith("'") or len(value) < 2:
+        # Unquoted: sh applies no escaping here, so backslashes are literal.
+        return value
+    return value[1:-1].replace("'\\''", "'")
+
+
 def coverage_environment(toolchain: str) -> dict[str, str]:
     """The instrumentation environment every build and test step must share.
 
@@ -73,12 +92,19 @@ def coverage_environment(toolchain: str) -> dict[str, str]:
     that would otherwise resolve to the default stable toolchain.
     """
     env = dict(os.environ)
-    raw = capture(["cargo", f"+{toolchain}", "llvm-cov", "show-env", "--branch"])
+    raw = capture(["cargo", f"+{toolchain}", "llvm-cov", "show-env", "--sh", "--branch"])
     for line in raw.splitlines():
-        key, separator, value = line.partition("=")
+        if not line.startswith(EXPORT_PREFIX):
+            continue
+        key, separator, value = line[len(EXPORT_PREFIX) :].partition("=")
         if not separator:
             continue
-        env[key.strip()] = value.strip().strip("'")
+        env[key.strip()] = unquote_sh(value.strip())
+    if "LLVM_PROFILE_FILE" not in env:
+        raise SystemExit(
+            "cargo llvm-cov show-env produced no LLVM_PROFILE_FILE; the "
+            "instrumented build would silently write no profile data"
+        )
     env["RUSTUP_TOOLCHAIN"] = toolchain
     return env
 

@@ -10,6 +10,7 @@ logger, and whether Unicode survives both the value path and the path path.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +33,8 @@ _MIN_WINDOW_SECONDS = 0.03
 # Bounded so a pathologically fast machine fails loudly rather than seeding
 # until it runs out of memory.
 _MAX_DOUBLINGS = 3
+# The heartbeat's sleep, and the unit the GIL assertion's bound is in.
+_HEARTBEAT_INTERVAL = 0.001
 _EXPIRED_MS = 1_000_000_000
 _LIVE_MS = 4_102_444_800_000
 
@@ -87,6 +90,14 @@ def _seed_large(path: Path, rows: int = _LARGE_ROWS) -> Path:
     return _seed_gecko(path, _expired_rows(rows))
 
 
+def _rows_in(store: Path) -> int:
+    connection = sqlite3.connect(str(store))
+    try:
+        return int(connection.execute("SELECT count(*) FROM moz_cookies").fetchone()[0])
+    finally:
+        connection.close()
+
+
 def _sized_store(directory: Path) -> tuple[Path, float]:
     """A store one extraction of which takes at least `_MIN_WINDOW_SECONDS`.
 
@@ -115,7 +126,7 @@ def _sized_store(directory: Path) -> tuple[Path, float]:
 class _Heartbeat:
     """A Python thread that can only tick while some other thread frees the GIL."""
 
-    def __init__(self, interval: float = 0.001) -> None:
+    def __init__(self, interval: float = _HEARTBEAT_INTERVAL) -> None:
         self.ticks = 0
         self._interval = interval
         self._stop = threading.Event()
@@ -157,12 +168,19 @@ class GilReleaseTest(unittest.TestCase):
             _MIN_WINDOW_SECONDS / 2,
             f"extraction took {elapsed:.4f}s, too short to prove anything",
         )
-        # Held GIL means exactly zero ticks, whatever the machine: the
-        # heartbeat cannot run a single bytecode without it.
-        self.assertGreater(
+        # A held GIL means exactly zero ticks, whatever the machine: the
+        # heartbeat cannot run a single bytecode without it. But one tick would
+        # also satisfy that, and an extension that released the GIL once in
+        # 500ms has not meaningfully released it -- so require a share of the
+        # ticks the heartbeat could have managed. A quarter leaves ample room
+        # for a loaded or single-core runner while still separating "releases
+        # the GIL" from "released it once".
+        available = elapsed / _HEARTBEAT_INTERVAL
+        self.assertGreaterEqual(
             ticks,
-            0,
-            f"no Python thread ran during a {elapsed:.3f}s extraction; the GIL was held",
+            available / 4,
+            f"only {ticks} of a possible ~{available:.0f} ticks ran during a "
+            f"{elapsed:.3f}s extraction; the GIL was held for most of it",
         )
 
 
@@ -232,6 +250,59 @@ class CancellationTest(unittest.TestCase):
 
 
 class SameInterpreterConcurrencyTest(unittest.TestCase):
+    def test_parallel_extractions_overlap_rather_than_queueing(self) -> None:
+        """Four extractions at once finish faster than four in a row.
+
+        Independent results alone prove nothing about concurrency: a binding
+        that held the GIL, or funnelled every extraction through one mutex,
+        would return the same four correct answers having run them one after
+        another. Wall clock is what separates the two, so this compares the
+        parallel run against a measured serial baseline.
+        """
+        workers = 4
+        if (os.cpu_count() or 1) < 2:
+            self.skipTest("a single-core host cannot overlap CPU-bound work")
+
+        with tempfile.TemporaryDirectory(prefix="rookie-python-overlap-") as temp:
+            directory = Path(temp)
+            baseline_store, serial = _sized_store(directory)
+            stores = [
+                _seed_large(directory / f"worker-{index}.sqlite", _rows_in(baseline_store))
+                for index in range(workers)
+            ]
+
+            barrier = threading.Barrier(workers)
+            failures: list[BaseException] = []
+
+            def extract(index: int) -> None:
+                try:
+                    barrier.wait(timeout=30)
+                    rookie_cookies.from_path(str(stores[index]))
+                except BaseException as error:  # noqa: BLE001 - re-raised below
+                    failures.append(error)
+
+            threads = [
+                threading.Thread(target=extract, args=(index,)) for index in range(workers)
+            ]
+            started = time.perf_counter()
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120)
+            parallel = time.perf_counter() - started
+
+        self.assertEqual(failures, [])
+        self.assertFalse([thread for thread in threads if thread.is_alive()])
+        # Two cores are enough to beat a fully serial run by a clear margin;
+        # the bound is loose so a busy runner does not turn a real overlap into
+        # a red build, while a fully serialized binding still fails it.
+        self.assertLess(
+            parallel,
+            workers * serial * 0.85,
+            f"{workers} extractions took {parallel:.3f}s against a {serial:.3f}s "
+            "serial baseline, which is what fully serialized work looks like",
+        )
+
     def test_parallel_extractions_do_not_interfere(self) -> None:
         workers = 4
         with tempfile.TemporaryDirectory(prefix="rookie-python-parallel-") as temp:
@@ -278,8 +349,19 @@ class SameInterpreterConcurrencyTest(unittest.TestCase):
 
 class LoggingBridgeTest(unittest.TestCase):
     def _capture(self) -> tuple[list[logging.LogRecord], tuple[object, int, object]]:
+        """Record everything an extraction logs, from the root down.
+
+        The handler goes on the ROOT logger, not on `rookie_cookies`. pyo3-log
+        dispatches through `logging.getLogger(target).handle(...)`, so a handler
+        attached to the package logger can only ever receive the package's own
+        records -- asserting they are under `rookie_cookies` would be a
+        tautology. Capturing at the root is what makes a dependency crate's log
+        (zbus, rustls, the SQLite bindings) visible, which is the pollution the
+        `LevelFilter::Off` in `bindings/python/src/lib.rs` exists to prevent.
+        """
         root = logging.getLogger()
         root_state = (list(root.handlers), root.level, list(root.filters))
+        previous_root_level = root.level
 
         package = logging.getLogger("rookie_cookies")
         previous_level = package.level
@@ -290,7 +372,8 @@ class LoggingBridgeTest(unittest.TestCase):
                 captured.append(record)
 
         handler = Capture()
-        package.addHandler(handler)
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
         package.setLevel(logging.DEBUG)
         try:
             with tempfile.TemporaryDirectory(prefix="rookie-python-log-") as temp:
@@ -301,18 +384,27 @@ class LoggingBridgeTest(unittest.TestCase):
                 rookie_cookies.cookies_from_path(str(database))
                 rookie_cookies.cookies_from_path(str(database))
         finally:
-            package.removeHandler(handler)
+            root.removeHandler(handler)
+            root.setLevel(previous_root_level)
             package.setLevel(previous_level)
         return captured, root_state
 
     def test_the_bridge_leaves_the_root_logger_untouched(self) -> None:
         # Unconditional: this half holds whether or not any record is emitted,
-        # so it is kept separate from the half that needs one.
+        # so it is kept separate from the half that needs one. `_capture`
+        # restores what it changed, so the comparison is against the state
+        # before it ran.
         _, root_state = self._capture()
         root = logging.getLogger()
         self.assertEqual((list(root.handlers), root.level, list(root.filters)), root_state)
 
-    def test_records_stay_under_the_package_logger(self) -> None:
+    def test_no_dependency_crate_logs_outside_the_package_logger(self) -> None:
+        """Every record an extraction produces belongs to `rookie_cookies`.
+
+        Captured at the root, so a dependency crate escaping the binding's
+        `LevelFilter::Off` shows up here as a record named `zbus`, `rustls`,
+        or similar rather than being invisible.
+        """
         captured, _ = self._capture()
         if not captured:
             # pyo3-log caches each Rust target's level the first time that
@@ -519,13 +611,43 @@ class UnicodeTest(unittest.TestCase):
 
 
 class RepeatedImportTest(unittest.TestCase):
-    def test_reimporting_the_extension_returns_the_same_objects(self) -> None:
+    def test_the_extension_survives_being_imported_twice(self) -> None:
+        """Import, drop from `sys.modules`, import again -- in a fresh process.
+
+        Doing this in-process would prove nothing: `import` on a loaded module
+        is a `sys.modules` lookup, so the second one never re-runs the
+        extension's initialization. Dropping the entry first is what forces
+        PyO3's module init to execute a second time, which is where a
+        single-initialization assumption would surface.
+        """
+        program = (
+            "import sys\n"
+            "import rookie_cookies\n"
+            "first = rookie_cookies.version()\n"
+            "for name in [n for n in sys.modules if n.startswith('rookie_cookies')]:\n"
+            "    del sys.modules[name]\n"
+            "import rookie_cookies as reloaded\n"
+            "assert reloaded.version() == first\n"
+            "assert reloaded.chrome is not None\n"
+            "print('ok')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", program],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"re-importing the extension failed:\n{result.stderr}",
+        )
+        self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_the_loaded_module_is_the_one_the_package_re_exports(self) -> None:
         import importlib
 
-        first = importlib.import_module("rookie_cookies.rookie_cookies")
-        second = importlib.import_module("rookie_cookies.rookie_cookies")
-        self.assertIs(first, second)
-        self.assertIs(first.ReadResult, rookie_cookies.ReadResult)
+        native = importlib.import_module("rookie_cookies.rookie_cookies")
+        self.assertIs(native.ReadResult, rookie_cookies.ReadResult)
         self.assertIs(sys.modules["rookie_cookies"], rookie_cookies)
 
 

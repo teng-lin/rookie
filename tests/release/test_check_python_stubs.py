@@ -193,8 +193,10 @@ class CheckStubsTests(unittest.TestCase):
         self.allowlist_path = Path(self.directory.name) / "stubtest-allowlist.txt"
         self.allowlist_path.write_text(ALLOWLIST, encoding="utf-8")
 
-    def stub_stubtest(self, output: str) -> None:
-        stubs.run_stubtest = lambda python, module: output
+    def stub_stubtest(self, output: str, returncode: int = 1) -> None:
+        # stubtest exits non-zero whenever it reports anything, so a run with
+        # divergences to compare is the non-zero case, not the zero one.
+        stubs.run_stubtest = lambda python, module: (returncode, output)
 
     def test_recorded_divergences_pass_end_to_end(self) -> None:
         self.stub_stubtest(
@@ -208,8 +210,34 @@ class CheckStubsTests(unittest.TestCase):
             stubs.check_stubs(Path("python"), MODULE, self.allowlist_path), []
         )
 
+    def test_a_crash_that_reports_nothing_is_not_read_as_a_clean_run(self) -> None:
+        # A failed extension import, a segfault, or a bad module name all exit
+        # non-zero having printed no `error:` line. Comparing headlines alone
+        # would call every allowlist entry stale -- and once the allowlist is
+        # empty, which is this design's goal, would pass outright.
+        self.stub_stubtest("Traceback (most recent call last):\nImportError\n", returncode=1)
+        failures = stubs.check_stubs(Path("python"), MODULE, self.allowlist_path)
+        self.assertTrue(
+            any("did not check the stub" in failure for failure in failures), failures
+        )
+
+    def test_an_empty_allowlist_and_a_crash_still_fails(self) -> None:
+        self.allowlist_path.write_text("# nothing allowed\n", encoding="utf-8")
+        self.stub_stubtest("", returncode=2)
+        failures = stubs.check_stubs(Path("python"), MODULE, self.allowlist_path)
+        self.assertTrue(
+            any("did not check the stub" in failure for failure in failures), failures
+        )
+
+    def test_a_clean_run_with_an_empty_allowlist_passes(self) -> None:
+        self.allowlist_path.write_text("# nothing allowed\n", encoding="utf-8")
+        self.stub_stubtest("Success: no issues found\n", returncode=0)
+        self.assertEqual(
+            stubs.check_stubs(Path("python"), MODULE, self.allowlist_path), []
+        )
+
     def test_a_malformed_allowlist_fails_before_stubtest_runs(self) -> None:
-        def explode(python: Path, module: str) -> str:
+        def explode(python: Path, module: str) -> tuple[int, str]:
             raise AssertionError("stubtest must not run on a malformed allowlist")
 
         stubs.run_stubtest = explode

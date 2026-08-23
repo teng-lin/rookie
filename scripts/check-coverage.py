@@ -61,17 +61,22 @@ def normalized_repo_path(filename: str, root: Path) -> str | None:
         return None
 
 
-def ratio(covered: object, total: object, *, context: str) -> float:
+def ratio(covered: object, total: object, *, context: str, empty_is_total: bool) -> float:
     """Percentage for a coverage.py counter pair.
 
-    An empty denominator is 100%, not 0%: a file with no branches has covered
-    every branch it has. Reporting 0% there would make an unbranching module
-    impossible to gate.
+    `empty_is_total` says what a zero denominator means. For branches it is
+    100%: a file with no branches has covered every branch it has, and
+    reporting 0% would make an unbranching module impossible to gate. For
+    statements it is an error -- a gated Python file always has statements, so
+    a zero there means the report did not describe the file this floor names,
+    and scoring it 100% would retire the floor silently.
     """
     if not isinstance(covered, (int, float)) or not isinstance(total, (int, float)):
         raise ReportError(f"coverage report omitted {context}")
     if total == 0:
-        return 100.0
+        if empty_is_total:
+            return 100.0
+        raise ReportError(f"coverage report has no {context} to measure")
     return float(covered) / float(total) * 100.0
 
 
@@ -111,11 +116,13 @@ def coverage_py_metrics(summary: dict[str, object], *, context: str) -> dict[str
             summary.get("covered_lines"),
             summary.get("num_statements"),
             context=f"{context} statement counters",
+            empty_is_total=False,
         ),
         "branches": ratio(
             summary.get("covered_branches"),
             summary.get("num_branches"),
             context=f"{context} branch counters",
+            empty_is_total=True,
         ),
     }
 
@@ -141,12 +148,35 @@ def normalize_coverage_py(report: dict[str, object], root: Path) -> tuple[dict[s
 NORMALIZERS = {LLVM_FORMAT: normalize_llvm, COVERAGE_PY_FORMAT: normalize_coverage_py}
 
 
+SCOPE_KEYS = frozenset({*AGGREGATE_KEYS, "files"})
+
+
 def select_scope(config: dict[str, object], section: str | None) -> dict[str, object]:
+    """The tables holding one lane's floors, verified to hold at least one.
+
+    A scope that declares nothing enforceable is rejected rather than passed:
+    a typo -- `[python-binding-native.total]`, a renamed section -- otherwise
+    parses fine, contributes no floors, and prints "Coverage ratchet passed"
+    having checked nothing at all. Unknown keys are rejected for the same
+    reason, since that is what a misspelled `totals` looks like from here.
+    """
     if section is None:
         return config
     scope = config.get(section)
     if not isinstance(scope, dict):
         raise ReportError(f"coverage config has no [{section}] table")
+    unknown = sorted(set(scope) - SCOPE_KEYS)
+    if unknown:
+        raise ReportError(
+            f"coverage config [{section}] has unknown key(s) {unknown}; "
+            f"expected any of {sorted(SCOPE_KEYS)}"
+        )
+    has_aggregate = any(isinstance(scope.get(key), dict) for key in AGGREGATE_KEYS)
+    if not has_aggregate and not scope.get("files"):
+        raise ReportError(
+            f"coverage config [{section}] declares no floors, so it would "
+            "enforce nothing"
+        )
     return scope
 
 
@@ -161,7 +191,11 @@ def enforce(
     try:
         scope = select_scope(config, section)
         aggregate, summaries = NORMALIZERS[report_format](report, root)
-    except ReportError as error:
+    except ValueError as error:
+        # `ReportError` subclasses `ValueError`, and so does `percentage`'s
+        # complaint about an LLVM summary missing `lines.percent`. Both are the
+        # same thing -- a report this ratchet cannot read -- and both must come
+        # back as a failure rather than a traceback.
         return [str(error)]
 
     prefix = "" if section is None else f"{section} "
