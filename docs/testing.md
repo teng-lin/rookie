@@ -76,6 +76,17 @@ are then held to `coverage.toml`'s `[python-binding-native]` and
 `[python-binding-pure]` floors. Pass `--no-check` to write the reports without
 enforcing them.
 
+This command exports `ROOKIE_COOKIES_INSTRUMENTED=1` to the suite, and one
+measurement stands down when it sees it.
+`test_parallel_extractions_overlap_rather_than_queueing` still runs four
+concurrent extractions and still asserts they all succeed, but skips its
+wall-clock speedup bound: instrumentation replaces every basic block with a
+shared atomic counter increment, so threads on one extraction path contend on
+the same counters and real parallelism reads as ~1x. The bound keeps its full
+strength in every uninstrumented lane, which is where a binding that held the
+GIL or funnelled extractions through one mutex would be caught. Any other lane
+that instruments the extension must export the same variable.
+
 The floors are single values that must hold on Linux, macOS, and Windows, so
 each sits at the lowest platform's observed value rounded down. Pull requests
 run this on Ubuntu; the nightly schedule runs all three, because a
