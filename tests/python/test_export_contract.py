@@ -19,6 +19,7 @@ import rookie_cookies
 from export_contract import (
     ALL_PLATFORMS,
     BROWSER_EXPORTS,
+    seed_browser,
     EXPORTS,
     EXPORTS_BY_NAME,
     Export,
@@ -52,6 +53,25 @@ _CLASS_MEMBERS = {
     },
     "ReadWarning": {"code": None, "count": None},
 }
+
+
+def _stub_typed_dict_keys(name: str) -> set[str]:
+    """The field names a `TypedDict` in `rookie_cookies.pyi` declares.
+
+    Read from the stub rather than imported, because these have no runtime
+    object to import: a compiled PyO3 module defines functions and classes,
+    never TypedDicts, which is why they sit in the stubtest allowlist as "not
+    present at runtime".
+    """
+    module = ast.parse(_STUB.read_text(encoding="utf-8"))
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return {
+                field.target.id
+                for field in node.body
+                if isinstance(field, ast.AnnAssign) and isinstance(field.target, ast.Name)
+            }
+    raise AssertionError(f"rookie_cookies.pyi declares no TypedDict named {name!r}")
 
 
 def _stub_declarations() -> set[str]:
@@ -252,6 +272,68 @@ class ExportContractTest(unittest.TestCase):
                 self.assertNotEqual(
                     export.notes, "", f"{export.name} needs a note explaining the omission"
                 )
+
+
+class DataShapeTest(unittest.TestCase):
+    """The mapping keys the stub promises are the keys extraction emits.
+
+    This is the one contract neither of the other gates can see. `stubtest`
+    does not compare a function's declared return type at all, and it cannot
+    compare `CookieObject` or `CookieContext` to anything because a compiled
+    module has no TypedDict to compare against -- they are in the allowlist
+    for exactly that reason. `consumer.py` cannot see it either: it is
+    type-checked, never run, so `assert_type(row["same_site"], int)` asserts
+    what the stub *says*, not what the extension *returns*.
+
+    So if `to_dict` stopped emitting `same_site`, stubtest would say nothing,
+    the consumer fixture would still type-check, and every downstream caller's
+    `cookie["same_site"]` would start raising `KeyError`. These tests compare
+    the two directly.
+
+    Seeding Chrome alone is enough, and that is a property of the code rather
+    than a sampling shortcut: `bindings/python/src/lib.rs`'s `to_dict` and
+    `detailed_to_dict` `set_item` every key unconditionally -- no `#[cfg]`, no
+    Gecko/Chromium branch -- so a Firefox row on Windows cannot produce a
+    different key set. Equality rather than a subset check is likewise
+    deliberate: all three of these TypedDicts are `total=True`, unlike
+    `SendContextMapping` and `ChromiumPathOptions` beneath them in the stub.
+    """
+
+    def _seeded(self, home: Path) -> object:
+        seed_browser(home, "chrome")
+        return rookie_cookies.read(browser="chrome", include_expired=True)
+
+    def test_flat_cookie_keys_match_the_stubs_cookie_object(self) -> None:
+        with synthetic_home() as home:
+            rows = self._seeded(home).as_list()  # type: ignore[attr-defined]
+        self.assertTrue(rows, "the seeded store produced no cookie to compare")
+        for row in rows:
+            with self.subTest(name=row.get("name")):
+                self.assertEqual(set(row), _stub_typed_dict_keys("CookieObject"))
+
+    def test_detailed_cookie_keys_match_the_stubs_detailed_cookie(self) -> None:
+        with synthetic_home() as home:
+            records = self._seeded(home).detailed_cookies()  # type: ignore[attr-defined]
+        self.assertTrue(records, "the seeded store produced no detailed record")
+        for record in records:
+            with self.subTest(name=record["cookie"].get("name")):
+                self.assertEqual(set(record), _stub_typed_dict_keys("DetailedCookie"))
+                self.assertEqual(
+                    set(record["cookie"]), _stub_typed_dict_keys("CookieObject")
+                )
+                self.assertEqual(
+                    set(record["context"]), _stub_typed_dict_keys("CookieContext")
+                )
+
+    def test_the_stub_still_declares_the_shapes_this_compares(self) -> None:
+        # A guard on the guard: if a TypedDict were renamed away,
+        # `_stub_typed_dict_keys` raises rather than returning an empty set, so
+        # the comparisons above cannot degrade into `set() == set()`.
+        for name in ("CookieObject", "CookieContext", "DetailedCookie"):
+            with self.subTest(typed_dict=name):
+                self.assertTrue(_stub_typed_dict_keys(name))
+        with self.assertRaises(AssertionError):
+            _stub_typed_dict_keys("NotATypedDictInThisStub")
 
 
 class ExportSuccessPathTest(unittest.TestCase):
