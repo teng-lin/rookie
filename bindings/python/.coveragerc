@@ -1,0 +1,28 @@
+# Pure-Python coverage for the binding's hand-written layer.
+#
+# scripts/run-python-coverage.py always invokes coverage from the repository
+# root, so the relative paths below are repository-root relative.
+
+[run]
+branch = True
+# The suite runs once; parallel mode exists so `coverage combine` runs, and
+# combining is what applies the [paths] aliases below.
+parallel = True
+source = rookie_cookies
+
+[paths]
+# tests/python imports the *installed wheel*, so coverage records
+# site-packages paths. Alias them back onto the checked-out sources, which is
+# what coverage.toml's floors are keyed by.
+#
+# One forward-slash pattern covers Windows too: coverage.py compiles a `/` in
+# a path pattern to "either separator" precisely so these aliases need not be
+# written twice.
+package =
+    bindings/python/rookie_cookies
+    */site-packages/rookie_cookies
+
+[report]
+# `if TYPE_CHECKING:` bodies never execute at runtime by construction.
+exclude_also =
+    if TYPE_CHECKING:

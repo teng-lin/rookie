@@ -28,3 +28,65 @@ branches = 70.0
 [files."rookie-rs/src/error.rs"]
 lines = 90.0
 branches = 75.0
+
+# ---------------------------------------------------------------------------
+# Python binding
+#
+# Both lanes are produced by one run of `scripts/run-python-coverage.py`, which
+# instruments the PyO3 extension and then executes the installed-wheel
+# `tests/python` suite against it. That is why these floors are far above what
+# `cargo llvm-cov -p rookie-cookies-python` alone reports: most of the binding
+# only runs when Python calls across the boundary.
+#
+# The floors must hold on Linux, macOS, and Windows, so each is the lowest
+# platform's observed value rounded down -- a `#[cfg]`-gated entry point that
+# only exists on one platform drags that platform's percentage down without the
+# others noticing.
+# ---------------------------------------------------------------------------
+
+[python-binding-native.totals]
+lines = 86.0
+branches = 68.0
+
+[python-binding-native.files."bindings/python/src/browsers.rs"]
+lines = 82.0
+branches = 65.0
+
+[python-binding-native.files."bindings/python/src/errors.rs"]
+lines = 88.0
+# llvm-cov finds exactly two branch points in this file -- `match` arms are
+# regions, not branches -- so the only observable values are 0, 50 and 100.
+# The floor is therefore set *at* the observed 50 rather than below it: a
+# lower number could not fail without the file losing both branches, which is
+# not a ratchet. There is no measurement noise to absorb at this granularity.
+branches = 50.0
+
+[python-binding-native.files."bindings/python/src/job.rs"]
+lines = 88.0
+branches = 72.0
+
+[python-binding-native.files."bindings/python/src/lib.rs"]
+lines = 90.0
+branches = 65.0
+
+[python-binding-native.files."bindings/python/src/report.rs"]
+lines = 90.0
+branches = 85.0
+
+[python-binding-pure.totals]
+lines = 92.0
+branches = 66.0
+
+[python-binding-pure.files."bindings/python/rookie_cookies/__init__.py"]
+# The three `sys.platform` import blocks mean one platform can never execute
+# the other two, which costs roughly seven statements whichever host runs.
+lines = 88.0
+branches = 66.0
+
+[python-binding-pure.files."bindings/python/rookie_cookies/dto.py"]
+lines = 95.0
+# Generated dataclasses branch nowhere today, and check-coverage.py scores an
+# empty branch denominator as 100%, so this floor currently enforces nothing.
+# It is kept rather than deleted because it starts enforcing the moment the
+# generator emits its first conditional.
+branches = 90.0

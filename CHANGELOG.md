@@ -6,6 +6,33 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Python binding coverage is now measured and ratcheted. A pull-request job
+  instruments the extension, runs the installed-wheel suite against it, and
+  holds every `bindings/python/src/*.rs` file plus `__init__.py` and `dto.py`
+  to per-file line and branch floors; the nightly schedule repeats it on
+  Linux, macOS, and Windows.
+- Every public Python export is now held to a declarative contract covering
+  its platform availability, stub presence, parameter shape and defaults, one
+  success path, and one classified-error path.
+- Runtime/stub compatibility is now checked against the installed wheel with
+  `mypy.stubtest` and a type-consumer fixture, against a committed allowlist
+  of the documented divergences.
+- Each browser-specific convenience function now receives an exact-corpus
+  assertion on the platforms where it exists, or a documented exception in
+  `tests/e2e/browser_coverage.json`.
+
+### Fixed
+
+- The Python type stub no longer leaves `jar()` and `ReadResult.as_jar()`
+  returning an unresolvable type, so consumers infer `http.cookiejar.CookieJar`
+  rather than `Any`.
+- Platform-conditional Python exports are now hidden from type checkers on
+  platforms that do not provide them. Calling `cachy()` on macOS, `safari()`
+  on Linux, or `internet_explorer()` anywhere but Windows is now a type error
+  instead of type-checking clean and failing at runtime.
+
 ## [0.6.0] - 2026-08-22
 
 ### Changed

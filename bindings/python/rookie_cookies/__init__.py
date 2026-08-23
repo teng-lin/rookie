@@ -1,5 +1,5 @@
 import http.cookiejar
-from sys import platform
+import sys
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from . import dto as dto
@@ -131,7 +131,7 @@ ExtractionReport = Dict[str, Any]
 
 
 # Windows
-if platform == "win32":
+if sys.platform == "win32":
     from .rookie_cookies import (
         internet_explorer as internet_explorer,
     )
@@ -144,7 +144,7 @@ if platform == "win32":
 
 
 # macOS
-if platform == "darwin":
+if sys.platform == "darwin":
     from .rookie_cookies import opera_gx as opera_gx
     from .rookie_cookies import safari as safari
 
@@ -152,7 +152,7 @@ if platform == "darwin":
 
 
 # Linux
-if platform.startswith("linux"):
+if sys.platform.startswith("linux"):
     from .rookie_cookies import cachy as cachy
 
     __all__.append("cachy")

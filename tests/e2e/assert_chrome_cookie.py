@@ -23,6 +23,7 @@ from pathlib import Path
 
 import rookie_cookies
 
+from browser_coverage_contract import convenience_function
 from cookie_manifest import (
     find_manifest,
     load_manifest,
@@ -141,23 +142,25 @@ def main() -> int:
             "ROOKIE_E2E_DISCOVERY_COOKIE_VALUE", expected_value
         )
         browser_name = os.environ.get("ROOKIE_E2E_TARGET_BROWSER", "chrome").lower()
-        browser_fns = {
-            "chrome": rookie_cookies.chrome,
-            "google-chrome": rookie_cookies.chrome,
-            "edge": rookie_cookies.edge,
-            "msedge": rookie_cookies.edge,
-            "brave": rookie_cookies.brave,
-        }
-        browser_fn = browser_fns.get(browser_name)
+        try:
+            contract = convenience_function(browser_name, "chromium")
+        except (AssertionError, KeyError, OSError, ValueError) as error:
+            print(
+                f"unsupported ROOKIE_E2E_TARGET_BROWSER {browser_name!r}: {error}",
+                file=sys.stderr,
+            )
+            return 2
+        browser_fn = getattr(rookie_cookies, contract["python"], None)
         if browser_fn is None:
             print(
-                f"unsupported ROOKIE_E2E_TARGET_BROWSER {browser_name!r}",
+                f"rookie_cookies does not export {contract['python']!r} "
+                f"on {sys.platform}",
                 file=sys.stderr,
             )
             return 2
         results.append(
             (
-                browser_name,
+                contract["browser_id"],
                 browser_fn([domain]),
                 "filtered_flat",
                 discovery_name,

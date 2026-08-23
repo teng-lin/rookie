@@ -1,0 +1,97 @@
+# Intentional divergences between rookie_cookies.pyi and the compiled
+# rookie_cookies.rookie_cookies module, enforced by
+# scripts/check-python-stubs.py.
+#
+# Each line is one `mypy.stubtest` error message, verbatim, minus its leading
+# "error: ". The comment block above a run of entries says why that kind of
+# divergence is intentional. The gate is symmetric: an unlisted divergence
+# fails, and so does a listed one that no longer occurs -- delete the entry
+# when you fix the underlying difference. Regenerate the raw list with:
+#
+#   python3 scripts/check-python-stubs.py --python <venv>/bin/python \
+#       --skip-consumer
+#
+# and read the printed stubtest output; do not paste in entries you have not
+# justified.
+
+# Typing-only names. A compiled PyO3 module defines functions and classes, not
+# type aliases or TypedDicts, so none of these can exist at runtime by
+# construction. They exist in the stub because they are the vocabulary the
+# public signatures are written in, and because the stub doubles as the
+# package's API reference (scripts/check-doc-snippets.py scrapes it).
+rookie_cookies.rookie_cookies.AppBoundPolicy is not present at runtime
+rookie_cookies.rookie_cookies.BrowserDescriptor is not present at runtime
+rookie_cookies.rookie_cookies.BrowserDescriptorList is not present at runtime
+rookie_cookies.rookie_cookies.ChromiumPathOptions is not present at runtime
+rookie_cookies.rookie_cookies.CookieContext is not present at runtime
+rookie_cookies.rookie_cookies.CookieList is not present at runtime
+rookie_cookies.rookie_cookies.CookieObject is not present at runtime
+rookie_cookies.rookie_cookies.DetailedCookie is not present at runtime
+rookie_cookies.rookie_cookies.DetailedCookieList is not present at runtime
+rookie_cookies.rookie_cookies.ExtractionReport is not present at runtime
+rookie_cookies.rookie_cookies.FirefoxProfile is not present at runtime
+rookie_cookies.rookie_cookies.FirefoxProfileList is not present at runtime
+rookie_cookies.rookie_cookies.ProfileDescriptor is not present at runtime
+rookie_cookies.rookie_cookies.ProfileDescriptorList is not present at runtime
+rookie_cookies.rookie_cookies.ReportProfileSelection is not present at runtime
+rookie_cookies.rookie_cookies.SendContextMapping is not present at runtime
+rookie_cookies.rookie_cookies.SingleProfileSelection is not present at runtime
+
+# The native module declares __all__; the stub does not. Copying it in would
+# be actively wrong here: the stub deliberately declares a superset of the
+# native module (the pure-Python helpers below), so a stub __all__ would
+# either contradict the runtime list or advertise names the native module does
+# not export. The package's real export list is __init__.py's __all__, which
+# is what consumers import from.
+rookie_cookies.rookie_cookies.__all__ is not present in stub
+
+# PyO3 classes cannot be subclassed, and mypy 2.x additionally wants them
+# marked @disjoint_base. Both annotations would be accurate, but neither is
+# understood by older type checkers, and the stub is a public API reference
+# read by humans as much as by mypy. Nothing about this affects call sites:
+# a consumer that never subclasses sees no difference.
+rookie_cookies.rookie_cookies.CancellationHandle cannot be subclassed at runtime, but isn't marked with @final in the stub
+rookie_cookies.rookie_cookies.CancellationHandle is a disjoint base at runtime, but isn't marked with @disjoint_base in the stub
+rookie_cookies.rookie_cookies.ReadResult cannot be subclassed at runtime, but isn't marked with @final in the stub
+rookie_cookies.rookie_cookies.ReadResult is a disjoint base at runtime, but isn't marked with @disjoint_base in the stub
+rookie_cookies.rookie_cookies.ReadWarning cannot be subclassed at runtime, but isn't marked with @final in the stub
+rookie_cookies.rookie_cookies.ReadWarning is a disjoint base at runtime, but isn't marked with @disjoint_base in the stub
+
+# PyO3 renders a default it cannot spell as a Python literal as `...` in the
+# generated __text_signature__. Every entry here is a Rust-expression default
+# -- `app_bound="injection_only".to_string()` and
+# `select="legacy_first".to_string()` in bindings/python/src/job.rs and
+# report.rs -- so the runtime *behaviour* is the value the stub states, and
+# the stub is the accurate description of it. `None` and `false` defaults in
+# the same signatures round-trip fine and are absent from this list.
+rookie_cookies.rookie_cookies.browser_report is inconsistent, runtime parameter "app_bound" has a default value of Ellipsis, which is different from stub parameter default 'injection_only'
+rookie_cookies.rookie_cookies.extract_from_path is inconsistent, runtime parameter "app_bound" has a default value of Ellipsis, which is different from stub parameter default 'injection_only'
+rookie_cookies.rookie_cookies.from_path is inconsistent, runtime parameter "app_bound" has a default value of Ellipsis, which is different from stub parameter default 'injection_only'
+rookie_cookies.rookie_cookies.load_report is inconsistent, runtime parameter "app_bound" has a default value of Ellipsis, which is different from stub parameter default 'injection_only'
+rookie_cookies.rookie_cookies.read is inconsistent, runtime parameter "app_bound" has a default value of Ellipsis, which is different from stub parameter default 'injection_only'
+rookie_cookies.rookie_cookies.read is inconsistent, runtime parameter "select" has a default value of Ellipsis, which is different from stub parameter default 'legacy_first'
+
+# browser_report's runtime default for `select` is None while the stub says
+# "all". This one is a real difference, and it is deliberate: the effective
+# default is "all", but browser_report has to tell an omitted selection apart
+# from an explicit select="all", because the explicit form contradicts
+# `profile` and raises conflicting_profile_selection. Materializing "all" in
+# the runtime signature would make the ordinary
+# report(browser=..., profile=...) call look like that contradiction.
+# rookie_cookies/__init__.py's report() docstring documents the same split.
+rookie_cookies.rookie_cookies.browser_report is inconsistent, runtime parameter "select" has a default value of None, which is different from stub parameter default 'all'
+rookie_cookies.rookie_cookies.browser_report is inconsistent, runtime parameter "select" has a default value of type None, which is incompatible with stub parameter type Literal['legacy_first'] | Literal['all']
+
+# Pure-Python helpers. These live in rookie_cookies/__init__.py, not in the
+# extension, so they are absent from the native module by design. They are
+# declared in this stub -- rather than in a separate __init__.pyi -- because
+# it is the package's single API reference and every public name has to appear
+# in it. A consumer reaches them as `rookie_cookies.jar(...)`, which resolves
+# through __init__.py's own inline annotations.
+rookie_cookies.rookie_cookies.jar is not present at runtime
+rookie_cookies.rookie_cookies.load_report_dto is not present at runtime
+rookie_cookies.rookie_cookies.profiles is not present at runtime
+rookie_cookies.rookie_cookies.profiles_dto is not present at runtime
+rookie_cookies.rookie_cookies.report is not present at runtime
+rookie_cookies.rookie_cookies.report_dto is not present at runtime
+rookie_cookies.rookie_cookies.supported_browsers_dto is not present at runtime

@@ -17,10 +17,58 @@ from typing import Iterable, Mapping
 
 COVERAGE_PATH = Path(__file__).with_name("browser_coverage.json")
 DEPTH_LEVELS = frozenset({"none", "fixture", "live"})
+CONVENIENCE_DISPATCHES = frozenset({"chromium", "gecko", "native"})
 
 
 def load_coverage() -> dict:
     return json.loads(COVERAGE_PATH.read_text(encoding="utf-8"))
+
+
+def platform_id(system: str | None = None) -> str:
+    """Map a ``sys.platform`` string onto a coverage-manifest platform name."""
+
+    system = sys.platform if system is None else system
+    if system == "win32":
+        return "windows"
+    if system == "darwin":
+        return "macos"
+    return "linux"
+
+
+def convenience_function(
+    browser_name: str,
+    dispatch: str,
+    document: dict | None = None,
+    platform: str | None = None,
+) -> dict:
+    """Resolve a target-browser name onto its declared convenience contract.
+
+    ``browser_name`` is whatever ``ROOKIE_E2E_TARGET_BROWSER`` carries: a
+    registry canonical ID or one of the aliases the manifest declares for it.
+    Anything the manifest does not claim raises, which keeps an unrecognised
+    target browser a hard failure in the assert scripts rather than a silently
+    skipped surface.
+    """
+
+    document = document or load_coverage()
+    platform = platform_id() if platform is None else platform
+    wanted = browser_name.strip().lower()
+    for browser_id, entry in document["convenience_functions"].items():
+        if wanted != browser_id and wanted not in entry["aliases"]:
+            continue
+        if entry["dispatch"] != dispatch:
+            raise AssertionError(
+                f"{browser_id} declares the {entry['dispatch']!r} dispatch family, "
+                f"not {dispatch!r}"
+            )
+        if platform not in entry["platforms"]:
+            raise AssertionError(
+                f"{browser_id} declares no convenience function on {platform}"
+            )
+        return {"browser_id": browser_id, **entry}
+    raise AssertionError(
+        f"no convenience function is declared for browser {browser_name!r}"
+    )
 
 
 def coverage_row(platform: str, browser: str, document: dict | None = None) -> dict:

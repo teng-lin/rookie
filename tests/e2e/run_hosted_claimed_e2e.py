@@ -29,7 +29,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from browser_coverage_contract import assert_observed_depth, coverage_row, load_coverage
+from browser_coverage_contract import (
+    assert_observed_depth,
+    convenience_function,
+    coverage_row,
+    load_coverage,
+)
 from hosted_cookie_corpus import corpus_seed_url, write_hosted_manifest
 from run_exact_corpus_e2e import (
     configure_isolated_keychain,
@@ -1039,6 +1044,39 @@ def require_exact_single_cookie(env: dict[str, str]) -> None:
     env["ROOKIE_E2E_EXACT_COOKIE_STATE"] = "1"
 
 
+def binding_discovery_environment(
+    env: dict[str, str], browser_id: str, dispatch: str
+) -> dict[str, str]:
+    """Ask only the Python and Node assert scripts to exercise `browser_id()`.
+
+    Deliberately a copy, and deliberately not the dict handed to `cargo test`:
+    `rookie-rs/tests/e2e_chrome.rs:638` reads ROOKIE_E2E_CHECK_BROWSER_DISCOVERY
+    out of the same environment and matches ROOKIE_E2E_TARGET_BROWSER against
+    its own hardcoded arm list, so it panics on any browser outside that list.
+    The two binding scripts instead dispatch from browser_coverage.json and
+    accept every browser the manifest declares. Do not hoist these two
+    variables onto the shared env until that Rust test dispatches from the
+    manifest too.
+
+    A browser the manifest excuses - no convenience function, or one whose
+    cells are all fixture-only - keeps today's behaviour and is asked for no
+    discovery surface at all. That skip is keyed on manifest membership and
+    nothing else: for a browser the manifest DOES declare, a failure to
+    resolve it is a contract inconsistency (a wrong dispatch family, or a
+    platform the entry does not claim) and is raised rather than swallowed
+    into a silently dropped surface.
+    """
+
+    coverage = load_coverage()
+    if browser_id not in coverage["convenience_functions"]:
+        return env
+    convenience_function(browser_id, dispatch, coverage)
+    discovery = dict(env)
+    discovery["ROOKIE_E2E_CHECK_BROWSER_DISCOVERY"] = "1"
+    discovery["ROOKIE_E2E_TARGET_BROWSER"] = browser_id
+    return discovery
+
+
 def assert_chromium(user_data: Path, browser_id: str) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_USER_DATA_DIR"] = str(user_data)
@@ -1071,13 +1109,16 @@ def assert_chromium(user_data: Path, browser_id: str) -> None:
         env=env,
         cwd=str(ROOT),
     )
+    discovery = binding_discovery_environment(env, browser_id, "chromium")
     subprocess.run(
-        [str(py), str(ROOT / "tests/e2e/assert_chrome_cookie.py")], check=True, env=env
+        [str(py), str(ROOT / "tests/e2e/assert_chrome_cookie.py")],
+        check=True,
+        env=discovery,
     )
     subprocess.run(
         ["node", str(ROOT / "tests/e2e/assert_chrome_cookie.mjs")],
         check=True,
-        env=env,
+        env=discovery,
         cwd=str(ROOT),
     )
     cli = [str(py), str(ROOT / "tests/e2e/assert_cli_cookie.py"), str(db)]
@@ -1132,10 +1173,11 @@ def assert_gecko(profile: Path, browser_id: str) -> None:
         env=env,
         cwd=str(ROOT),
     )
+    discovery = binding_discovery_environment(env, browser_id, "gecko")
     subprocess.run(
         [str(py), str(ROOT / "tests/e2e/assert_firefox_cookie.py")],
         check=True,
-        env=env,
+        env=discovery,
     )
     subprocess.run(
         [
@@ -1163,7 +1205,7 @@ def assert_gecko(profile: Path, browser_id: str) -> None:
     subprocess.run(
         ["node", str(ROOT / "tests/e2e/assert_firefox_cookie.mjs")],
         check=True,
-        env=env,
+        env=discovery,
         cwd=str(ROOT),
     )
     subprocess.run(

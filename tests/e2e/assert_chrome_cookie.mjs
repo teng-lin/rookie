@@ -17,6 +17,7 @@ import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import { convenienceFunction } from "./browser_coverage_contract.mjs";
 import {
   findManifest,
   pathsReferToSameFile,
@@ -140,20 +141,24 @@ if (process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1") {
   const browserName = (
     process.env.ROOKIE_E2E_TARGET_BROWSER ?? "chrome"
   ).toLowerCase();
-  const browserFns = {
-    chrome: rookieCookies.chrome,
-    "google-chrome": rookieCookies.chrome,
-    edge: rookieCookies.edge,
-    msedge: rookieCookies.edge,
-    brave: rookieCookies.brave,
-  };
-  const browserFn = browserFns[browserName];
-  if (!browserFn) {
-    console.error(`unsupported ROOKIE_E2E_TARGET_BROWSER '${browserName}'`);
+  let contract;
+  try {
+    contract = convenienceFunction(browserName, "chromium");
+  } catch (error) {
+    console.error(
+      `unsupported ROOKIE_E2E_TARGET_BROWSER '${browserName}': ${error.message}`,
+    );
+    process.exit(2);
+  }
+  const browserFn = rookieCookies[contract.node];
+  if (typeof browserFn !== "function") {
+    console.error(
+      `rookie-cookies does not export '${contract.node}' on ${process.platform}`,
+    );
     process.exit(2);
   }
   results.push([
-    browserName,
+    contract.browserId,
     await browserFn([domain]),
     "filtered_flat",
     process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
