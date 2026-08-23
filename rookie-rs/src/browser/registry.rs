@@ -232,7 +232,9 @@ struct InstallationRoot {
   /// Compatibility-only ordering from the deleted named-browser path tables.
   /// Generic reports continue to use `priority`.
   legacy_priority: Option<u16>,
-  /// Compatibility-only profile shapes admitted by the deleted path tables.
+  /// Compatibility-only profile shapes and precedence used by the named APIs.
+  /// A fallback may widen the deleted path tables without changing their first
+  /// choice.
   #[serde(default)]
   legacy_profile_layout: chromium::LegacyChromiumProfileLayout,
 }

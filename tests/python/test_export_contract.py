@@ -28,6 +28,8 @@ from export_contract import (
     can_seed,
     current_platform,
     parameter_spec,
+    preferred_root,
+    registry_entries,
     seeding_exception,
     synthetic_home,
 )
@@ -368,6 +370,26 @@ class ExportSuccessPathTest(unittest.TestCase):
                 )
         problem = export.expect(value)
         self.assertIsNone(problem, f"{export.name}: {problem}")
+
+    def test_opera_exports_accept_a_default_only_profile(self) -> None:
+        for name in ("opera", "opera_gx"):
+            export = EXPORTS_BY_NAME[name]
+            if not applicable(export):
+                continue
+            with self.subTest(export=name), synthetic_home() as home:
+                seed_browser(home, name)
+                entry = registry_entries(current_platform())[name]
+                root, _discovery, _layout = preferred_root(entry, home)
+                flat_database = root / "Network" / "Cookies"
+                default_database = root / "Default" / "Network" / "Cookies"
+                self.assertTrue(flat_database.is_file())
+                self.assertTrue(default_database.is_file())
+                flat_database.unlink()
+
+                value = getattr(rookie_cookies, name)()
+
+            assert export.expect is not None
+            self.assertIsNone(export.expect(value), name)
 
 
 class ExportFailurePathTest(unittest.TestCase):

@@ -39,6 +39,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Opera and Opera GX compatibility helpers on macOS and Windows now fall back
+  to a Chromium-style `Default` profile after checking the historical flat
+  profile, and source absence no longer appears as a failed-enumeration error
+  with an empty diagnostic.
 - Browser profile listing now reports a timeout or cancellation as an error
   instead of returning a partial Gecko, Safari, or Internet Explorer listing
   that appears complete.

@@ -196,15 +196,10 @@ def seed_chromium_user_data(root: Path, layout: Optional[str] = None) -> None:
     make the user-data root itself the profile. Writing both is what lets one
     seeder cover every `chromium_user_data` root in the registry.
 
-    The cost is that this cannot tell the two layouts apart: a regression that
-    dropped root-as-profile support while keeping ordinary `Default` discovery
-    would still find the seeded cookie here. Seeding only the flat store for
-    roots marked `legacy_profile_layout = "default_and_flat"` was tried and is
-    wrong -- that key is a legacy compatibility hint, not the discovery layout,
-    and macOS Opera needs the flat store while declaring no layout at all.
-    Distinguishing the two is the real-browser exact-corpus lane's job; see
-    `tests/e2e/browser_coverage.json`'s `convenience_functions`, which now
-    exercises `opera()` and `opera_gx()` against an actual install.
+    The shared fixture cannot tell the two layouts apart. The dedicated Opera
+    export regression removes the flat store and verifies the `Default`
+    fallback; the real-browser exact-corpus lane still verifies the layout
+    emitted by an installed browser.
     """
     del layout  # See above: not a reliable discriminator between the layouts.
     for database in (
