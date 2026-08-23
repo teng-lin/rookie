@@ -50,69 +50,14 @@ at Chrome's legacy `v10`/DPAPI cookies. Checked against source on 2026-08-22:
 
 | | **rookie-cookies** | pycookiecheat | get-cookie | chrome-cookies-secure | yt-dlp `cookies.py` | HackBrowserData |
 | --- | --- | --- | --- | --- | --- | --- |
-| Chrome/Edge/Brave **v20 App-Bound** (127+, incl. 133+ flag-3) | ✓ COM injection + elevated DPAPI/CNG fallback | ✗ — no Windows Chromium support at all | ✗ | ✗ — broke outright on Chrome 130/131[¹](https://github.com/bertrandom/chrome-cookies-secure/issues/63) | ✗ | partial — reflective-injection route⁵; 133+ flag-3 elevated fallback unconfirmed |
-| Chrome 130+ schema-24 host hash | ✓ recomputes SHA256(host), typed mismatch/missing errors, fails loudly on mismatch | ✗ unconditional strip, never verified | ✗ version-gated strip, never verified | ✗ same schema-24 change broke it[¹](https://github.com/bertrandom/chrome-cookies-secure/issues/64) | ✗ unconditional strip, never verified | partial — checks SHA256(host) equality but is schema-version-agnostic and degrades silently on mismatch⁶ |
-| CHIPS partition / Firefox container identity | ✓ captured during extraction (`PartitionState`, `userContextId`/`originAttributes`) and preserved through `read()`/`DetailedCookie`; `header(&SendContext)` fails closed with `IncompleteSendContext` rather than merging isolated cookies⁷ — only the explicit `jar()`/`cookies()` compatibility projection discards it, by documented design | not implemented | not implemented — `originAttributes` appears only in a test fixture, never parsed | not implemented | not implemented | not implemented — SQL queries select no partition/`originAttributes` columns |
-| Windows DPAPI | built in | n/a | requires an optional npm package, throws if absent² | requires a manual `optionalDependencies` install[³](https://github.com/bertrandom/chrome-cookies-secure/issues/57) | built in | built in |
+| Chrome/Edge/Brave **v20 App-Bound** (127+, incl. 133+ flag-3) | ✓ COM injection + elevated DPAPI/CNG fallback | ✗ — no Windows Chromium support at all | ✗ | ✗ — broke outright on Chrome 130/131 | ✗ | partial — reflective-injection route; 133+ flag-3 elevated fallback unconfirmed |
+| CHIPS partition / Firefox container identity | ✓ captured during extraction (`PartitionState`, `userContextId`/`originAttributes`) and preserved through `read()`/`DetailedCookie`; `header(&SendContext)` fails closed with `IncompleteSendContext` rather than merging isolated cookies — only the explicit `jar()`/`cookies()` compatibility projection discards it, by documented design | not implemented | not implemented — `originAttributes` appears only in a test fixture, never parsed | not implemented | not implemented | not implemented — SQL queries select no partition/`originAttributes` columns |
+| Windows DPAPI | built in | n/a | requires an optional npm package, throws if absent | requires a manual `optionalDependencies` install | built in | built in |
 | Linux KWallet-corruption empty-key fallback | ✓ | ✗ | not implemented | — | ✓ | ✓ |
 | Browsers | 25, incl. Safari, IE, Zen, Cachy, Octo, Cốc Cốc, Yandex, Arc, DuckDuckGo, Avast, QQ, 360, Sogou, DC Browser | Chrome family + Firefox only | 11 Chromium/Gecko + Safari | Chrome only | 7 Chromium forks + Firefox + Safari | 19, incl. Safari, QQ, 360, Sogou, DC Browser; no IE, Zen, Cachy, Octo, LibreWolf |
 | Output | structured report with typed issue taxonomy, jar, or list | dict / dataclass list | cookie objects / CLI formats | cookiejar / curl / header formats | `CookieJar`; failed rows silently dropped | CSV/JSON/db file dump via CLI; no structured issue taxonomy |
 | Bindings | Rust, Python, Node, CLI | Python only | Node/TS only | Node only | Python only, and not a published library surface | Go only, CLI binary — not designed for embedding |
-| Testing rigor | 34 real-browser CI combinations: 8 core jobs across Ubuntu/macOS/Windows × Chrome/Firefox (Ubuntu × Chrome/Firefox on every PR, the full 8 on every push to main and nightly, incl. a live Windows App-Bound v20 canary against Chrome/Edge/Brave and a locked-database/VSS-shadow-copy recovery case) plus a 26-combination hosted matrix (Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, Safari across Linux/macOS/Windows) validated nightly and on release — plus 3 continuous fuzz targets, per-file coverage floors, and scheduled OSV dependency scanning⁸ | ~623 lines of tests, no fuzzing, no browser-matrix CI observed | 82 test files, no fuzzing, no browser-matrix CI observed | no fuzzing or test-hardening signal observed in the repo | dedicated cookie unit tests, but folded into yt-dlp's much larger suite; no dedicated browser-cookie CI matrix | Lint/Build/Release/Tests GitHub Actions + codecov, per-package Go tests; no fuzzing or real-browser E2E matrix observed |
-| Maintenance | active | active | active | maintainer requesting co-maintainers[⁴](https://github.com/bertrandom/chrome-cookies-secure/issues/75); 130/131 break still unfixed upstream | very active, but built for a downloader, not for embedding | active |
-
-¹ [#63](https://github.com/bertrandom/chrome-cookies-secure/issues/63),
-[#64](https://github.com/bertrandom/chrome-cookies-secure/issues/64),
-[#65](https://github.com/bertrandom/chrome-cookies-secure/issues/65): broke on
-Chrome 130/131's schema-24 host-hash change; the only fix lives in a community
-fork, not upstream.
-² get-cookie's Windows DPAPI unwrap dynamically imports `@primno/dpapi` (loaded
-via a string-split import) and throws if the optional package isn't installed.
-³ `win-dpapi` and `keytar` are `optionalDependencies`, not installed by
-default; [#57](https://github.com/bertrandom/chrome-cookies-secure/issues/57)
-and [#42](https://github.com/bertrandom/chrome-cookies-secure/issues/42) track
-users hitting missing-module errors from it.
-⁴ [bertrandom/chrome-cookies-secure#75](https://github.com/bertrandom/chrome-cookies-secure/issues/75),
-opened 2026-07-01 and still open.
-⁵ HackBrowserData retrieves the App-Bound key via reflective code injection
-(`masterkey/abe_windows.go`); we could not confirm whether it covers the
-elevated DPAPI/CNG fallback that Chrome 133+'s flag-3 form requires.
-⁶ `stripCookieHash` in `browser/chromium/extract_cookie.go` strips the
-32-byte prefix whenever it equals `SHA256(host_key)`, but applies that check
-to every schema version and returns the value unchanged (not an error) on a
-mismatch, rather than treating a required-but-missing hash as failure the way
-rookie-cookies does.
-⁷ Verified directly in source:
-[`ReadResult::detailed_cookies`](rookie-rs/src/read.rs) holds isolation-intact
-`DetailedCookie`s and is "the recommended accessor"; `header()`'s
-[`header_for`](rookie-rs/src/read.rs) matches against that same isolation
-context and returns
-[`RequestError::IncompleteSendContext`](rookie-rs/src/request_error.rs) when a
-selector needed to disambiguate a partition or container is missing, rather
-than guessing. Only `cookies()`/`into_cookies()`/`jar()` — the compatibility
-projection — discard isolation, and say so in their own rustdoc. Use `read()`
-and `detailed_cookies()`/`header(&SendContext)` when partition/container
-identity matters to your call site.
-⁸ [.github/workflows/e2e.yml](.github/workflows/e2e.yml) defines 8
-real-browser jobs: `ubuntu-chrome`, `ubuntu-firefox`, `macos-chrome`,
-`macos-firefox`, `windows-chrome`, `windows-firefox`,
-`windows-chrome-appbound`, `windows-locked-db-shadow-copy`. `ubuntu-chrome`
-and `ubuntu-firefox` run on every pull request; the full 8 run on every
-push to `main` and nightly on schedule, since the macOS/Windows jobs need
-elevated or Keychain-backed runners a PR shouldn't be trusted with.
-`windows-chrome-appbound` further expands to Chrome, Edge, and Brave on the
-nightly/release run (Chrome only on a plain push to `main`).
-[.github/workflows/e2e-release.yml](.github/workflows/e2e-release.yml)
-adds a `hosted-claimed` job whose matrix is generated by
-[`tests/e2e/install_claimed_browser.py --print-matrix`](tests/e2e/install_claimed_browser.py):
-26 OS × browser combinations (Linux: Brave, Chromium, Edge, LibreWolf,
-Opera, Vivaldi, Zen — 7; macOS: those plus Opera GX, Safari, Yandex — 10;
-Windows: the Linux 7 plus Opera GX and Yandex — 9), run nightly, on a
-tag push, on a GitHub release, or on a pull request labeled
-`e2e-release`. 8 + 26 = the 34 combinations cited above. `assurance.yml`
-ratchets coverage on a schedule; `security.yml` runs a scheduled OSV scan.
-Per-file coverage floors live in [`coverage.toml`](coverage.toml); fuzz
-targets live in [`fuzz/fuzz_targets/`](fuzz/fuzz_targets/).
+| Testing rigor | 34 real-browser CI combinations: 8 core jobs across Ubuntu/macOS/Windows × Chrome/Firefox (Ubuntu × Chrome/Firefox on every PR, the full 8 on every push to main and nightly, incl. a live Windows App-Bound v20 canary against Chrome/Edge/Brave and a locked-database/VSS-shadow-copy recovery case) plus a 26-combination hosted matrix (Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, Safari across Linux/macOS/Windows) validated nightly and on release — plus 3 continuous fuzz targets, per-file coverage floors, and scheduled OSV dependency scanning | ~623 lines of tests, no fuzzing, no browser-matrix CI observed | 82 test files, no fuzzing, no browser-matrix CI observed | no fuzzing or test-hardening signal observed in the repo | dedicated cookie unit tests, but folded into yt-dlp's much larger suite; no dedicated browser-cookie CI matrix | Lint/Build/Release/Tests GitHub Actions + codecov, per-package Go tests; no fuzzing or real-browser E2E matrix observed |
 
 rookie-cookies is the only one of the six that tracks CHIPS partition and
 Firefox container identity all the way through to a send-ready cookie header
