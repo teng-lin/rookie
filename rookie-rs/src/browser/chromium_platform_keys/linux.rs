@@ -110,6 +110,9 @@ where
     .collect();
   candidates.push(create_pbkdf2_key("", salt, 1));
 
+  // A failed lookup keeps its diagnostic on the candidates it produced, so a
+  // value the fallback cannot open is still reported as a provider failure
+  // rather than an anonymous decrypt error.
   let outcome = ChromiumKeyOutcome::success_zeroizing(candidates)
     .expect("the empty-password candidate is always present");
   match (outcome, lookup.failure) {
