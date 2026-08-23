@@ -6,6 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux Chromium v11 cookies now fall back to the empty-password key when the
+  OS keyring yields no usable password. The keyring password, when there is
+  one, is still tried first; the empty-password key is appended as a last
+  candidate so profiles Chromium sealed with its own `BASICTEXT` fallback (no
+  reachable Secret Service or KWallet) and profiles whose keyring entry is
+  stale are decryptable instead of failing the whole v11 tier.
+
 ### Removed
 
 - The `flat_only` value for a browser registry root's `legacy_profile_layout`

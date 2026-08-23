@@ -1,6 +1,6 @@
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 use super::super::chromium_crypto::ChromiumKeyOutcome;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 use anyhow::Result;
 #[cfg(any(
   target_os = "linux",
@@ -29,7 +29,7 @@ pub(crate) fn create_pbkdf2_key(
   output
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 pub(super) fn outcome_from_result(
   result: Result<Vec<Zeroizing<Vec<u8>>>>,
   empty_failure: &'static str,

@@ -1,6 +1,5 @@
 use super::super::chromium_crypto::{ChromiumKeyOutcome, ChromiumKeyOutcomes, KeyProvider};
 use super::create_pbkdf2_key;
-use super::shared::outcome_from_result;
 use super::{ChromiumKeyIdentity, ChromiumKeyRequest};
 use crate::common::deadline::{BoundaryRuntime, DeadlineEnforcement};
 #[cfg(test)]
@@ -35,6 +34,41 @@ fn linux_v10_outcome() -> ChromiumKeyOutcome {
   .expect("Linux v10 has two fixed candidates")
 }
 
+/// Collects the keyring passwords for one crypt name.
+///
+/// A keyring *backend* failure is not propagated: Chromium's own
+/// `KeyStorageLinux::CreateService` silently falls back to `BASICTEXT` (an
+/// empty password) whenever the backend it picked is unavailable, so a wallet
+/// that cannot be reached is indistinguishable from a profile that never had a
+/// keyring entry. Both cases must reach the empty-password candidate.
+///
+/// Runtime stops (deadline exceeded, cancellation) are the one exception: they
+/// are not statements about the keyring, and laundering them into a
+/// "successful" empty-password lookup would report a cancelled run as a
+/// decryption failure. They stay `Err`.
+fn keyring_passwords<B>(
+  crypt_name: &str,
+  backend: &B,
+  runtime: &BoundaryRuntime<'_>,
+) -> Result<Vec<SecretString>>
+where
+  B: LinuxKeyringBackend,
+{
+  runtime.check()?;
+  let passwords = match backend.passwords(crypt_name, runtime) {
+    Ok(passwords) => passwords,
+    Err(error) => {
+      log::warn!(
+        "Linux keyring lookup failed for crypt name '{crypt_name}'; \
+         falling back to the empty-password Chromium v11 key: {error:#}"
+      );
+      Vec::new()
+    }
+  };
+  runtime.check()?;
+  Ok(passwords)
+}
+
 fn retrieve_linux_v11_outcome<B>(
   crypt_name: &str,
   backend: &B,
@@ -44,31 +78,32 @@ where
   B: LinuxKeyringBackend,
 {
   let salt = b"saltysalt";
-  let candidates = runtime
-    .check()
-    .map_err(anyhow::Error::from)
-    .and_then(|()| backend.passwords(crypt_name, runtime))
-    .and_then(|passwords| {
-      runtime.check().map_err(anyhow::Error::from)?;
-      Ok(passwords)
-    })
-    .map(|passwords| {
-      passwords
-        .into_iter()
-        .map(|password| create_pbkdf2_key(&password, salt, 1))
-        .collect()
-    });
-  outcome_from_result(
-    candidates,
-    "Chromium v11 keyring provider returned no key candidates",
-  )
+  let passwords = match keyring_passwords(crypt_name, backend, runtime) {
+    Ok(passwords) => passwords,
+    Err(stop) => return ChromiumKeyOutcome::failure(stop.to_string()),
+  };
+
+  // Keyring-derived keys stay ahead of the fallback so a real OS-keyring
+  // password is always the first candidate tried. The empty-password key is
+  // appended last for the `BASICTEXT` profiles Chromium produces when no
+  // usable wallet exists, and for stale keyring entries left behind by an
+  // earlier profile or browser build.
+  let mut candidates: Vec<_> = passwords
+    .iter()
+    .map(|password| create_pbkdf2_key(password, salt, 1))
+    .collect();
+  candidates.push(create_pbkdf2_key("", salt, 1));
+
+  ChromiumKeyOutcome::success_zeroizing(candidates)
+    .expect("the empty-password candidate is always present")
 }
 
 /// Per-`any_browser` Linux key cache.
 ///
 /// Several browser configurations deliberately share a `unix_crypt_name`.
-/// Caching the typed outcome (including failures) prevents repeated D-Bus
-/// calls and unlock prompts without discarding the diagnostics produced by the
+/// Caching the typed outcome (including failures and the empty-password
+/// fallback taken when the keyring is unusable) prevents repeated D-Bus calls
+/// and unlock prompts without discarding the diagnostics produced by the
 /// hardened keyring provider.
 struct LinuxKeyOutcomeCache {
   v11_by_crypt_name: std::collections::HashMap<String, ChromiumKeyOutcome>,
@@ -285,6 +320,39 @@ mod tests {
   }
 
   #[test]
+  fn cancellation_during_the_linux_keyring_lookup_is_not_an_empty_password_fallback() {
+    struct CancellingBackend {
+      stop: crate::common::deadline::CancellationToken,
+    }
+
+    impl LinuxKeyringBackend for CancellingBackend {
+      fn passwords(
+        &self,
+        _crypt_name: &str,
+        _runtime: &BoundaryRuntime<'_>,
+      ) -> Result<Vec<SecretString>> {
+        self.stop.cancel();
+        anyhow::bail!("interrupted keyring call")
+      }
+    }
+
+    let clock = crate::common::deadline::test_clock::ManualClock::default();
+    let stop = crate::common::deadline::CancellationToken::default();
+    let runtime = BoundaryRuntime::with_stop(
+      &clock,
+      Deadline::after(&clock, std::time::Duration::from_secs(1)),
+      stop.clone(),
+    );
+
+    let outcome = retrieve_linux_v11_outcome("chrome", &CancellingBackend { stop }, &runtime);
+
+    let ChromiumKeyOutcome::Failure(failure) = outcome else {
+      panic!("a cancelled lookup must not be reported as a usable key outcome");
+    };
+    assert!(failure.message().contains("operation cancelled"));
+  }
+
+  #[test]
   fn linux_separates_fixed_v10_from_ordered_keyring_v11_candidates() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
@@ -308,7 +376,9 @@ mod tests {
       vec![
         Vec::from(create_pbkdf2_key("first", b"saltysalt", 1).as_slice()),
         Vec::from(create_pbkdf2_key("second", b"saltysalt", 1).as_slice()),
-      ]
+        Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice()),
+      ],
+      "keyring keys keep their order ahead of the empty-password fallback"
     );
     assert_eq!(
       outcomes.route(ChromiumCipherVersion::V20),
@@ -319,7 +389,7 @@ mod tests {
   }
 
   #[test]
-  fn linux_keyring_failure_preserves_v10_and_is_scoped_to_v11() {
+  fn linux_keyring_backend_error_preserves_v10_and_falls_back_to_the_empty_password_candidate() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("keyring unavailable")),
@@ -334,16 +404,15 @@ mod tests {
         ..
       }
     ));
-    let ChromiumKeyRoute::Failure { tier, failure } = outcomes.route(ChromiumCipherVersion::V11)
-    else {
-      panic!("expected failed v11 keyring route");
-    };
-    assert_eq!(tier, ChromiumKeyTier::V11);
-    assert_eq!(failure.message(), "keyring unavailable");
+    assert_eq!(
+      candidate_bytes(&outcomes, ChromiumCipherVersion::V11),
+      vec![Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice())],
+      "an unusable keyring must still reach Chromium's BASICTEXT key"
+    );
   }
 
   #[test]
-  fn linux_empty_keyring_result_is_a_v11_failure() {
+  fn linux_empty_keyring_result_falls_back_to_empty_password_candidate() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
       result: Ok(vec![]),
@@ -355,13 +424,57 @@ mod tests {
       outcomes.route(ChromiumCipherVersion::V10),
       ChromiumKeyRoute::Candidates { .. }
     ));
-    assert!(matches!(
-      outcomes.route(ChromiumCipherVersion::V11),
-      ChromiumKeyRoute::Failure {
-        tier: ChromiumKeyTier::V11,
-        ..
-      }
-    ));
+    assert_eq!(
+      candidate_bytes(&outcomes, ChromiumCipherVersion::V11),
+      vec![Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice())]
+    );
+  }
+
+  #[test]
+  fn linux_stale_keyring_password_still_reaches_the_empty_password_candidate() {
+    use crate::browser::unseal::decrypt_encrypted_value_with_outcomes;
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    // A profile whose keyring entry is stale: Chromium sealed this value with
+    // the BASICTEXT (empty password) key, but the wallet still holds the
+    // password from an earlier profile or browser build.
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Ok(vec![SecretString::new("stale password".to_string())]),
+    };
+    let outcomes = outcomes_with_backend(&linux_credentials(Some("chrome")), &backend);
+
+    assert_eq!(
+      candidate_bytes(&outcomes, ChromiumCipherVersion::V11),
+      vec![
+        Vec::from(create_pbkdf2_key("stale password", b"saltysalt", 1).as_slice()),
+        Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice()),
+      ],
+      "the keyring password must still be tried before the fallback"
+    );
+
+    let plaintext = b"empty-password cookie";
+    let key = create_pbkdf2_key("", b"saltysalt", 1);
+    let mut ciphertext_buffer = vec![0u8; plaintext.len() + 16];
+    ciphertext_buffer[..plaintext.len()].copy_from_slice(plaintext);
+    let ciphertext = Aes128CbcEnc::new((&key[..]).into(), &[b' '; 16].into())
+      .encrypt_padded_mut::<Pkcs7>(&mut ciphertext_buffer, plaintext.len())
+      .expect("encrypt fixture");
+    let mut encrypted_value = b"v11".to_vec();
+    encrypted_value.extend_from_slice(ciphertext);
+
+    let decrypted = decrypt_encrypted_value_with_outcomes(
+      ".example.com",
+      String::new(),
+      &encrypted_value,
+      &outcomes,
+      23,
+    )
+    .expect("the empty-password candidate must decrypt a BASICTEXT cookie");
+
+    assert_eq!(decrypted, "empty-password cookie");
   }
 
   #[test]
@@ -407,14 +520,15 @@ mod tests {
     );
     assert_eq!(
       candidate_bytes(&brave, ChromiumCipherVersion::V11),
-      vec![Vec::from(
-        create_pbkdf2_key("shared secret", b"saltysalt", 1).as_slice()
-      )]
+      vec![
+        Vec::from(create_pbkdf2_key("shared secret", b"saltysalt", 1).as_slice()),
+        Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice()),
+      ]
     );
   }
 
   #[test]
-  fn linux_any_browser_cache_reuses_explicit_failure_diagnostics() {
+  fn linux_any_browser_cache_reuses_the_keyring_error_fallback() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
       result: Err(anyhow::anyhow!("locked keyring")),
@@ -426,13 +540,16 @@ mod tests {
     let second =
       cached_outcomes_with_backend(&mut cache, &linux_credentials(Some("chromium")), &backend);
 
-    assert_eq!(backend.calls.get(), 1);
+    assert_eq!(
+      backend.calls.get(),
+      1,
+      "a failed lookup must not re-prompt the wallet"
+    );
     for outcomes in [&first, &second] {
-      let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V11)
-      else {
-        panic!("cached keyring failure must stay explicit");
-      };
-      assert_eq!(failure.message(), "locked keyring");
+      assert_eq!(
+        candidate_bytes(outcomes, ChromiumCipherVersion::V11),
+        vec![Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice())]
+      );
     }
   }
 
@@ -468,11 +585,11 @@ mod tests {
     for _ in 0..2 {
       let outcomes =
         failing_session.retrieve_with_backend(request, &failing_backend, &clock, deadline);
-      let ChromiumKeyRoute::Failure { failure, .. } = outcomes.route(ChromiumCipherVersion::V11)
-      else {
-        panic!("failed session lookup must stay typed");
-      };
-      assert_eq!(failure.message(), "session keyring failure");
+      assert_eq!(
+        candidate_bytes(&outcomes, ChromiumCipherVersion::V11),
+        vec![Vec::from(create_pbkdf2_key("", b"saltysalt", 1).as_slice())],
+        "a failed session lookup still yields the empty-password candidate"
+      );
     }
     assert_eq!(
       failing_backend.calls.get(),
