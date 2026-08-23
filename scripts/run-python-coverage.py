@@ -49,6 +49,21 @@ PACKAGE = "rookie-cookies-python"
 NATIVE_SECTION = "python-binding-native"
 PURE_SECTION = "python-binding-pure"
 
+# Told to the suite so it can distinguish "measuring an instrumented build"
+# from an ordinary run. `tests/python/test_binding_runtime.py` uses it to stand
+# down one wall-clock assertion whose premise instrumentation invalidates: LLVM
+# coverage counters are shared atomic increments, so threads on one code path
+# contend on them and real parallelism reads as roughly 1x.
+#
+# A dedicated marker rather than `LLVM_PROFILE_FILE`: that variable only says
+# where an instrumented binary would write its profile, so it can be exported
+# by a developer for an unrelated profiling task and would then stand a test
+# down against an uninstrumented wheel. This is set at the one point that
+# *knows* the wheel under test was built with `-C instrument-coverage` --
+# because this script built it. Any future lane that instruments the extension
+# must set it too.
+INSTRUMENTED_MARKER = "ROOKIE_COOKIES_INSTRUMENTED"
+
 
 def run(command: list[str], *, env: dict[str, str] | None = None, cwd: Path = ROOT) -> None:
     printable = " ".join(command)
@@ -184,6 +199,9 @@ def measure(python: Path, env: dict[str, str], out_dir: Path) -> None:
     # Keep coverage.py's data files out of the working tree; the ratchet only
     # ever reads the JSON this function writes.
     suite_env["COVERAGE_FILE"] = str(out_dir / ".coverage")
+    # Set here rather than in `coverage_environment`, so it describes the wheel
+    # the suite imports rather than the environment a build happened to use.
+    suite_env[INSTRUMENTED_MARKER] = "1"
     rcfile = str(ROOT / "bindings/python/.coveragerc")
 
     for stale in out_dir.glob(".coverage*"):
