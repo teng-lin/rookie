@@ -472,6 +472,34 @@ mod tests {
   }
 
   #[test]
+  fn linux_empty_password_fallback_never_preempts_a_working_keyring_key() {
+    let backend = FakeLinuxBackend {
+      calls: Cell::new(0),
+      result: Ok(vec![SecretString::new("wallet password".to_string())]),
+    };
+    let outcomes = outcomes_with_backend(&linux_credentials(Some("chrome")), &backend);
+    let keyring_key = create_pbkdf2_key("wallet password", b"saltysalt", 1);
+
+    assert_eq!(
+      candidate_bytes(&outcomes, ChromiumCipherVersion::V11).first(),
+      Some(&Vec::from(keyring_key.as_slice())),
+      "the wallet password must remain the first candidate"
+    );
+
+    let sealed = seal_v11(&keyring_key, b"keyring cookie");
+    let decrypted = crate::browser::unseal::decrypt_encrypted_value_with_outcomes(
+      ".example.com",
+      String::new(),
+      &sealed,
+      &outcomes,
+      23,
+    )
+    .expect("a value sealed with the wallet password must still decrypt");
+
+    assert_eq!(decrypted, "keyring cookie");
+  }
+
+  #[test]
   fn linux_keyring_error_fallback_decrypts_a_basictext_profile() {
     let backend = FakeLinuxBackend {
       calls: Cell::new(0),
