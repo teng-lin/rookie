@@ -90,14 +90,6 @@ def _seed_large(path: Path, rows: int = _LARGE_ROWS) -> Path:
     return _seed_gecko(path, _expired_rows(rows))
 
 
-def _rows_in(store: Path) -> int:
-    connection = sqlite3.connect(str(store))
-    try:
-        return int(connection.execute("SELECT count(*) FROM moz_cookies").fetchone()[0])
-    finally:
-        connection.close()
-
-
 def _sized_store(directory: Path) -> tuple[Path, float]:
     """A store one extraction of which takes at least `_MIN_WINDOW_SECONDS`.
 
@@ -287,12 +279,11 @@ class SameInterpreterConcurrencyTest(unittest.TestCase):
             self.skipTest("a single-core host cannot overlap CPU-bound work")
 
         with tempfile.TemporaryDirectory(prefix="rookie-python-overlap-") as temp:
-            directory = Path(temp)
-            baseline_store, serial = _sized_store(directory)
-            stores = [
-                _seed_large(directory / f"worker-{index}.sqlite", _rows_in(baseline_store))
-                for index in range(workers)
-            ]
+            # One store, read by every worker. Distinct stores are what
+            # `test_parallel_extractions_do_not_interfere` is for; here the
+            # question is whether the binding serializes, and four readers on
+            # one file answers it without seeding four large databases.
+            store, serial = _sized_store(Path(temp))
 
             barrier = threading.Barrier(workers)
             failures: list[BaseException] = []
@@ -300,7 +291,7 @@ class SameInterpreterConcurrencyTest(unittest.TestCase):
             def extract(index: int) -> None:
                 try:
                     barrier.wait(timeout=30)
-                    rookie_cookies.from_path(str(stores[index]))
+                    rookie_cookies.from_path(str(store))
                 except BaseException as error:  # noqa: BLE001 - re-raised below
                     failures.append(error)
 
