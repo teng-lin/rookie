@@ -50,14 +50,19 @@ at Chrome's legacy `v10`/DPAPI cookies. Checked against source on 2026-08-22:
 
 | | **rookie-cookies** | pycookiecheat | get-cookie | chrome-cookies-secure | yt-dlp `cookies.py` | HackBrowserData |
 | --- | --- | --- | --- | --- | --- | --- |
+| Browsers | 25, incl. Safari, IE, Zen, Cachy, Octo, Cốc Cốc, Yandex, Arc, DuckDuckGo, Avast, QQ, 360, Sogou, DC Browser | Chrome family + Firefox only | 11 Chromium/Gecko + Safari | Chrome only | 7 Chromium forks + Firefox + Safari | 19, incl. Safari, QQ, 360, Sogou, DC Browser; no IE, Zen, Cachy, Octo, LibreWolf |
+| Bindings | Rust, Python, Node, CLI | Python only | Node/TS only | Node only | Python only, and not a published library surface | Go only, CLI binary — not designed for embedding |
 | Chrome/Edge/Brave **v20 App-Bound** (127+, incl. 133+ flag-3) | ✓ COM injection + elevated DPAPI/CNG fallback | ✗ — no Windows Chromium support at all | ✗ | ✗ — broke outright on Chrome 130/131 | ✗ | partial — reflective-injection route; 133+ flag-3 elevated fallback unconfirmed |
-| CHIPS partition / Firefox container identity | ✓ captured during extraction (`PartitionState`, `userContextId`/`originAttributes`) and preserved through `read()`/`DetailedCookie`; `header(&SendContext)` fails closed with `IncompleteSendContext` rather than merging isolated cookies — only the explicit `jar()`/`cookies()` compatibility projection discards it, by documented design | not implemented | not implemented — `originAttributes` appears only in a test fixture, never parsed | not implemented | not implemented | not implemented — SQL queries select no partition/`originAttributes` columns |
 | Windows DPAPI | built in | n/a | requires an optional npm package, throws if absent | requires a manual `optionalDependencies` install | built in | built in |
 | Linux KWallet-corruption empty-key fallback | ✓ | ✗ | not implemented | — | ✓ | ✓ |
-| Browsers | 25, incl. Safari, IE, Zen, Cachy, Octo, Cốc Cốc, Yandex, Arc, DuckDuckGo, Avast, QQ, 360, Sogou, DC Browser | Chrome family + Firefox only | 11 Chromium/Gecko + Safari | Chrome only | 7 Chromium forks + Firefox + Safari | 19, incl. Safari, QQ, 360, Sogou, DC Browser; no IE, Zen, Cachy, Octo, LibreWolf |
 | Output | structured report with typed issue taxonomy, jar, or list | dict / dataclass list | cookie objects / CLI formats | cookiejar / curl / header formats | `CookieJar`; failed rows silently dropped | CSV/JSON/db file dump via CLI; no structured issue taxonomy |
-| Bindings | Rust, Python, Node, CLI | Python only | Node/TS only | Node only | Python only, and not a published library surface | Go only, CLI binary — not designed for embedding |
-| Testing rigor | 34 real-browser CI combinations: 8 core jobs across Ubuntu/macOS/Windows × Chrome/Firefox (Ubuntu × Chrome/Firefox on every PR, the full 8 on every push to main and nightly, incl. a live Windows App-Bound v20 canary against Chrome/Edge/Brave and a locked-database/VSS-shadow-copy recovery case) plus a 26-combination hosted matrix (Chromium, Edge, Brave, Opera, Opera GX, Vivaldi, Yandex, LibreWolf, Zen, Safari across Linux/macOS/Windows) validated nightly and on release — plus 3 continuous fuzz targets, per-file coverage floors, and scheduled OSV dependency scanning | ~623 lines of tests, no fuzzing, no browser-matrix CI observed | 82 test files, no fuzzing, no browser-matrix CI observed | no fuzzing or test-hardening signal observed in the repo | dedicated cookie unit tests, but folded into yt-dlp's much larger suite; no dedicated browser-cookie CI matrix | Lint/Build/Release/Tests GitHub Actions + codecov, per-package Go tests; no fuzzing or real-browser E2E matrix observed |
+| Testing rigor | 34 real-browser CI combinations, 3 fuzz targets, scheduled OSV scans | ~623 lines of tests, no fuzzing, no browser-matrix CI | 82 test files, no fuzzing, no browser-matrix CI | no fuzzing or hardening signal observed | unit tests folded into yt-dlp's larger suite, no browser-matrix CI | CI + codecov, no fuzzing or real-browser E2E |
+| CHIPS partition / Firefox container identity* | ✓ captured and preserved through `read()`/`DetailedCookie`; only the `jar()`/`cookies()` compatibility projection discards it | not implemented | not implemented | not implemented | not implemented | not implemented |
+
+\* CHIPS partitions a cookie by the top-level site that embedded it, so the
+same third-party cookie doesn't leak across unrelated sites; Firefox
+container identity scopes a cookie to the container tab (`userContextId`)
+that set it. Both isolate cookies that would otherwise collide.
 
 rookie-cookies is the only one of the six that tracks CHIPS partition and
 Firefox container identity all the way through to a send-ready cookie header
