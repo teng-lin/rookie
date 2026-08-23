@@ -153,34 +153,57 @@ class _Heartbeat:
 
 class GilReleaseTest(unittest.TestCase):
     def test_a_long_extraction_lets_other_python_threads_run(self) -> None:
+        """Compare the heartbeat's rate during an extraction to its idle rate.
+
+        A bare `ticks > 0` would pass for an extension that released the GIL
+        once in half a second. Comparing against `elapsed / interval` instead
+        does not work either: `time.sleep(0.001)` does not yield a thousand
+        wake-ups a second on any real OS -- timer granularity and scheduling
+        put the achievable rate well below that, and the shortfall varies by
+        host. So the baseline is measured on the same host, in the same run,
+        over a window of the same length with nothing else going on.
+        """
         with tempfile.TemporaryDirectory(prefix="rookie-python-gil-") as temp:
-            database, _ = _sized_store(Path(temp))
+            database, window = _sized_store(Path(temp))
             with _Heartbeat() as heartbeat:
+                time.sleep(window)
+                idle_ticks = heartbeat.ticks
+
+                heartbeat.ticks = 0
                 started = time.perf_counter()
                 rookie_cookies.from_path(str(database))
                 elapsed = time.perf_counter() - started
-                ticks = heartbeat.ticks
+                busy_ticks = heartbeat.ticks
 
-        # `_sized_store` guarantees the window; assert it again because a
-        # warm page cache can make the second read of the same file faster.
+        # `_sized_store` guarantees the window; assert it again because a warm
+        # page cache can make the second read of the same file faster.
         self.assertGreater(
             elapsed,
             _MIN_WINDOW_SECONDS / 2,
             f"extraction took {elapsed:.4f}s, too short to prove anything",
         )
-        # A held GIL means exactly zero ticks, whatever the machine: the
-        # heartbeat cannot run a single bytecode without it. But one tick would
-        # also satisfy that, and an extension that released the GIL once in
-        # 500ms has not meaningfully released it -- so require a share of the
-        # ticks the heartbeat could have managed. A quarter leaves ample room
-        # for a loaded or single-core runner while still separating "releases
-        # the GIL" from "released it once".
-        available = elapsed / _HEARTBEAT_INTERVAL
+        self.assertGreater(idle_ticks, 0, "the heartbeat never ran while idle")
+        # The hard contract: a held GIL means exactly zero ticks on any
+        # machine, because the heartbeat cannot run a single bytecode without
+        # it.
+        self.assertGreater(
+            busy_ticks,
+            0,
+            f"no Python thread ran during a {elapsed:.3f}s extraction; the GIL "
+            "was held",
+        )
+        # And a loose rate bound on top, so "released it once in half a second"
+        # cannot pass. Deliberately loose: an extraction is CPU-bound and
+        # competes with the heartbeat for cores, so the busy rate is far below
+        # the idle one even when the GIL is fully free -- a macOS CI runner
+        # measured 37 ticks against ~190 idle, a fifth. A twentieth is
+        # therefore the bound; anything tighter is fitted to one host.
         self.assertGreaterEqual(
-            ticks,
-            available / 4,
-            f"only {ticks} of a possible ~{available:.0f} ticks ran during a "
-            f"{elapsed:.3f}s extraction; the GIL was held for most of it",
+            busy_ticks,
+            idle_ticks / 20,
+            f"{busy_ticks} ticks during a {elapsed:.3f}s extraction against "
+            f"{idle_ticks} over an idle {window:.3f}s; the GIL was held for "
+            "nearly all of it",
         )
 
 
