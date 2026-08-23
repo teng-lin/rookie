@@ -359,6 +359,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
             mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
             mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(
                 hosted, "wait_for_chromium_cookie", side_effect=[False, True]
             ) as wait_for_cookie,
@@ -385,7 +386,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
             mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
-            mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(hosted, "navigate_chromium_cdp") as navigate,
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(
                 hosted, "wait_for_chromium_cookie", return_value=True
             ) as wait_for_cookie,
@@ -398,6 +400,11 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             )
 
         wait_for_cookie.assert_called_once_with(profile, 30, name="rookie_decoy")
+        navigate.assert_called_once_with(
+            9222,
+            "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+            corpus_timeout_ms=hosted.CDP_CORPUS_TIMEOUT_MS,
+        )
 
     def test_chromium_cleanup_kills_launcher_that_ignores_terminate(self) -> None:
         proc = mock.Mock()
@@ -409,6 +416,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(
                 hosted, "wait_for_devtools_or_cookie", return_value=False
             ),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
             mock.patch.object(hosted.time, "sleep"),
         ):
@@ -430,15 +438,167 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(
                 hosted, "wait_for_devtools_or_cookie", return_value=False
             ),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(
-                hosted, "wait_for_chromium_cookie", side_effect=[False, False]
-            ),
+                hosted, "wait_for_chromium_cookie", return_value=False
+            ) as wait_for_cookie,
             mock.patch.object(hosted, "chromium_cookie_dbs", return_value=[]),
+            mock.patch("builtins.print"),
             self.assertRaisesRegex(SystemExit, "cookie databases: <none>"),
         ):
             hosted.seed_chromium_native(
                 "/opt/browser", profile, "http://127.0.0.1:8765/set"
             )
+
+        # One in-session window plus every bounded post-shutdown flush window,
+        # and no more: an absent cookie still fails loudly.
+        self.assertEqual(
+            wait_for_cookie.call_args_list,
+            [
+                mock.call(profile, 30, name="rookie_ci"),
+                *(
+                    mock.call(profile, budget, name="rookie_ci")
+                    for budget in hosted.CHROMIUM_COOKIE_FLUSH_BUDGETS
+                ),
+            ],
+        )
+
+    def test_chromium_flush_is_retried_across_a_second_bounded_window(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        profile = Path("/tmp/profile")
+        printed: list[str] = []
+
+        def record(*args: object, **_kwargs: object) -> None:
+            printed.append(" ".join(str(item) for item in args))
+
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
+            mock.patch.object(
+                hosted, "wait_for_chromium_cookie", side_effect=[False, False, True]
+            ) as wait_for_cookie,
+            mock.patch.object(hosted.time, "sleep"),
+            mock.patch("builtins.print", side_effect=record),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser", profile, "http://127.0.0.1:8765/set"
+            )
+
+        self.assertEqual(
+            wait_for_cookie.call_args_list,
+            [
+                mock.call(profile, 30, name="rookie_ci"),
+                mock.call(profile, 15, name="rookie_ci"),
+                mock.call(profile, 30, name="rookie_ci"),
+            ],
+        )
+        self.assertTrue(
+            any("flush window 1/2 (15s)" in line for line in printed), printed
+        )
+        self.assertTrue(
+            any("persisted rookie_ci on flush window 2/2" in line for line in printed),
+            printed,
+        )
+
+    def test_stale_product_processes_are_reaped_before_each_launch(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
+            mock.patch.object(hosted, "reap_stale_browser_processes") as reap,
+            mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
+            mock.patch.object(hosted.time, "sleep"),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser", Path("/tmp/profile"), "http://127.0.0.1:8765/set"
+            )
+
+        reap.assert_called_once_with("/opt/browser")
+        self.assertLess(
+            reap.call_args_list.index(mock.call("/opt/browser")),
+            len(popen.call_args_list),
+        )
+
+    def test_stale_reap_matches_the_product_only(self) -> None:
+        self.assertEqual(
+            hosted.stale_browser_reap_command(
+                "/Applications/Opera GX.app/Contents/MacOS/Opera", platform="darwin"
+            ),
+            ["pkill", "-f", "/Applications/Opera GX.app/"],
+        )
+        self.assertEqual(
+            hosted.stale_browser_reap_command("/opt/vivaldi/vivaldi", platform="linux"),
+            ["pkill", "-f", "/opt/vivaldi/vivaldi"],
+        )
+        self.assertEqual(
+            hosted.stale_browser_reap_command(
+                r"C:\Program Files\Vivaldi\Application\vivaldi.exe", platform="win32"
+            ),
+            ["taskkill", "/F", "/T", "/IM", "vivaldi.exe"],
+        )
+
+    def test_stale_reap_never_fails_the_run(self) -> None:
+        with (
+            mock.patch.object(
+                hosted.subprocess, "run", side_effect=FileNotFoundError("pkill")
+            ),
+            mock.patch("builtins.print"),
+        ):
+            hosted.reap_stale_browser_processes("/opt/browser")
+
+    def test_windows_vivaldi_gets_a_wider_corpus_poll_window(self) -> None:
+        self.assertEqual(
+            hosted.chromium_corpus_timeout_ms(
+                r"C:\Program Files\Vivaldi\Application\vivaldi.exe", platform="win32"
+            ),
+            hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+        )
+        self.assertEqual(
+            hosted.chromium_corpus_timeout_ms("/opt/vivaldi/vivaldi", platform="linux"),
+            hosted.CDP_CORPUS_TIMEOUT_MS,
+        )
+        self.assertEqual(
+            hosted.chromium_corpus_timeout_ms(
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                platform="win32",
+            ),
+            hosted.CDP_CORPUS_TIMEOUT_MS,
+        )
+
+    def test_cdp_helper_receives_bounded_budgets_and_a_clearing_timeout(self) -> None:
+        with mock.patch.object(hosted.subprocess, "run") as run:
+            hosted.navigate_chromium_cdp(
+                9222,
+                "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+                corpus_timeout_ms=hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+            )
+
+        _args, kwargs = run.call_args
+        self.assertEqual(
+            kwargs["env"]["ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS"],
+            str(hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED),
+        )
+        self.assertEqual(
+            kwargs["env"]["ROOKIE_E2E_CDP_CORPUS_ATTEMPTS"],
+            str(hosted.CDP_CORPUS_ATTEMPTS),
+        )
+        # The subprocess ceiling must clear every attempt the helper may spend,
+        # otherwise a legitimate retry surfaces as an opaque harness timeout.
+        self.assertGreater(
+            kwargs["timeout"],
+            hosted.CDP_CORPUS_ATTEMPTS
+            * hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED
+            / 1000,
+        )
 
     def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:
         command = hosted.chromium_native_command(

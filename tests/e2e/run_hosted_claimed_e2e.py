@@ -53,6 +53,18 @@ from webdriver_cookie import (
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = ROOT / "rookie-rs/browser_registry.json"
 
+# Bounded corpus-seeding budgets. Each one is deliberately finite and logged so
+# a genuine breakage still fails the job loudly instead of disappearing into a
+# retry loop.
+CDP_CORPUS_TIMEOUT_MS = 20_000
+CDP_CORPUS_TIMEOUT_MS_THROTTLED = 40_000
+CDP_CORPUS_ATTEMPTS = 3
+# Post-shutdown windows, in seconds, allowed for the browser to flush the
+# completion cookie into persistent SQLite. A contended shutdown (for example a
+# leftover vendor auto-update service holding its mojo pipe) can push the flush
+# past a single fixed window.
+CHROMIUM_COOKIE_FLUSH_BUDGETS = (15, 30)
+
 
 def current_platform() -> str:
     if sys.platform == "win32":
@@ -792,6 +804,62 @@ def chromium_startup_timeout(exe: str, *, platform: str | None = None) -> float:
     return 45
 
 
+def chromium_corpus_timeout_ms(exe: str, *, platform: str | None = None) -> int:
+    """Widen the corpus poll window for products known to throttle navigation.
+
+    Vivaldi under a Windows service session can accept every browser-level
+    DevTools command while never actually servicing the corpus target, so it
+    needs a longer window than the products that navigate immediately.
+    """
+
+    platform = platform or sys.platform
+    executable_name = exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if platform == "win32" and executable_name.startswith("vivaldi"):
+        return CDP_CORPUS_TIMEOUT_MS_THROTTLED
+    return CDP_CORPUS_TIMEOUT_MS
+
+
+def stale_browser_reap_command(exe: str, *, platform: str | None = None) -> list[str]:
+    """Return the command that reaps leftover processes of this product only.
+
+    A previous run of the same browser can leave an auto-update or IPC helper
+    behind (Opera's `oauc_pipe` service is the observed case). The stale helper
+    contends with the launch that follows and can delay its cookie flush past
+    the completion budget, so each launch starts by reaping its own product.
+    """
+
+    platform = platform or sys.platform
+    normalized = exe.replace("\\", "/")
+    if platform == "win32":
+        return ["taskkill", "/F", "/T", "/IM", normalized.rsplit("/", 1)[-1]]
+    bundle, separator, _ = normalized.partition(".app/Contents/MacOS/")
+    # On macOS the vendor helpers live beside the main binary inside the same
+    # bundle, so match the bundle rather than the single executable path.
+    pattern = f"{bundle}.app/" if separator else normalized
+    return ["pkill", "-f", pattern]
+
+
+def reap_stale_browser_processes(exe: str) -> None:
+    """Best-effort reap; nothing here may fail the run on its own."""
+
+    command = stale_browser_reap_command(exe)
+    try:
+        completed = subprocess.run(
+            command, check=False, capture_output=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"stale browser reap could not run: {error}", flush=True)
+        return
+    # pkill exits 1 and taskkill exits 128 when nothing matched, which is the
+    # healthy case for a runner with no leftovers.
+    if completed.returncode not in (0, 1, 128):
+        print(
+            f"stale browser reap ({' '.join(command)}) exited "
+            f"{completed.returncode}; continuing",
+            flush=True,
+        )
+
+
 def chromium_launch_environment(exe: str, user_data: Path) -> dict[str, str]:
     """Keep Linux Edge auxiliary config out of the discovery destination."""
 
@@ -843,7 +911,16 @@ def wait_for_devtools_or_cookie(
     )
 
 
-def navigate_chromium_cdp(port: int, url: str) -> None:
+def navigate_chromium_cdp(
+    port: int,
+    url: str,
+    *,
+    corpus_timeout_ms: int = CDP_CORPUS_TIMEOUT_MS,
+    corpus_attempts: int = CDP_CORPUS_ATTEMPTS,
+) -> None:
+    env = os.environ.copy()
+    env["ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS"] = str(corpus_timeout_ms)
+    env["ROOKIE_E2E_CDP_CORPUS_ATTEMPTS"] = str(corpus_attempts)
     subprocess.run(
         [
             "node",
@@ -853,11 +930,19 @@ def navigate_chromium_cdp(port: int, url: str) -> None:
         ],
         check=True,
         cwd=str(ROOT / "tests/e2e"),
-        timeout=45,
+        # The helper may legitimately spend one poll window per bounded corpus
+        # attempt, so the outer ceiling has to clear the worst case it can
+        # spend or a retry would surface as an opaque harness timeout.
+        timeout=45 + corpus_attempts * corpus_timeout_ms / 1000,
+        env=env,
     )
 
 
 def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
+    # A helper left behind by an earlier launch of this same product contends
+    # with the one about to start and can stall its cookie flush, so clear it
+    # before the profile the extractor will read is written at all.
+    reap_stale_browser_processes(exe)
     devtools_port = pick_devtools_port()
     cmd = chromium_native_command(
         exe, user_data, url, remote_debugging_port=devtools_port
@@ -877,7 +962,11 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
             timeout=chromium_startup_timeout(exe),
         )
         if has_devtools:
-            navigate_chromium_cdp(devtools_port, url)
+            navigate_chromium_cdp(
+                devtools_port,
+                url,
+                corpus_timeout_ms=chromium_corpus_timeout_ms(exe),
+            )
         completion_name = (
             "rookie_decoy" if urlsplit(url).path == "/corpus/run" else "rookie_ci"
         )
@@ -892,11 +981,27 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
     # Windows launchers can outlive the browser process addressed by
-    # Browser.close. Do not reject a delayed cookie checkpoint until the
-    # launcher has also stopped and released the SQLite store.
-    if not saw_cookie and not wait_for_chromium_cookie(
-        user_data, 15, name=completion_name
-    ):
+    # Browser.close, and a contended vendor shutdown can delay the flush well
+    # past any single window. Keep waiting across a small, fixed number of
+    # windows, announcing each one so a genuinely missing cookie is still
+    # visible in the log rather than hidden inside one opaque wait.
+    if not saw_cookie:
+        rounds = len(CHROMIUM_COOKIE_FLUSH_BUDGETS)
+        for attempt, budget in enumerate(CHROMIUM_COOKIE_FLUSH_BUDGETS, start=1):
+            if wait_for_chromium_cookie(user_data, budget, name=completion_name):
+                print(
+                    f"native Chromium persisted {completion_name} on flush "
+                    f"window {attempt}/{rounds} after the launcher stopped",
+                    flush=True,
+                )
+                saw_cookie = True
+                break
+            print(
+                f"native Chromium has not persisted {completion_name} after "
+                f"flush window {attempt}/{rounds} ({budget}s)",
+                flush=True,
+            )
+    if not saw_cookie:
         candidates = ", ".join(str(path) for path in chromium_cookie_dbs(user_data))
         raise SystemExit(
             f"native Chromium navigation requested {completion_name} but the profile "

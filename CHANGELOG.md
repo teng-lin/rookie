@@ -6,6 +6,17 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Hosted claimed-browser cookie seeding no longer loses a run to a single
+  stalled attempt. A branded fork that accepts the DevTools connection but
+  never navigates now gets a bounded number of fresh corpus targets against the
+  same launch root, a partially seeded corpus still fails immediately rather
+  than restarting an interleaving redirect chain, the corpus poll window is
+  overridable per browser, the post-shutdown cookie-flush wait spans bounded
+  logged windows, and each launch first reaps leftover processes of the same
+  product so a stale vendor service cannot contend with it.
+
 ### Removed
 
 - The `flat_only` value for a browser registry root's `legacy_profile_layout`
