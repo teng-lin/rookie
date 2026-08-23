@@ -142,7 +142,7 @@ There is no shared `Installation` / `Profile`. Chromium keeps its own inventory;
 | **ChromiumInstallationDraft** | Chromium extract installation bag. | `registry/chromium.rs` | Decoder scratch |
 | **ChromiumRegistryDraft** | Chromium extract return to `report_build`. Optional rename leftover; not a leak. | `registry/chromium.rs` | Records beside the profile |
 | **SafariProfile** | Private Safari inventory row. | `registry/safari.rs` | BinaryCookies parse |
-| **MozillaProfile** | Public persistent-only Firefox profile projection (`firefox_profiles()`). | `mozilla.rs` | Session-only profiles; registry ids |
+| **MozillaProfile** | Public persistent-only Firefox profile projection (`firefox_profiles()`). | `mozilla_profiles.rs`, re-exported by `mozilla.rs` | Session-only profiles; registry ids |
 | **`registry.rs::ProfileSelection`** | Internal policy applied **before** lookup/acquire: `AllProfiles`, `ProfileId`, `LegacyFirstProfile`. Distinct from the public `selection.rs::ProfileSelection` below, which has a different set of variants; the two share only a name. | `registry.rs` | Opened DBs |
 | **ProfileMatchCandidate** | One row the ADR 0003 matcher compares. There is **no** Rust type named `ProfileQuery`. | `registry/profile_query.rs` | Extraction results |
 
@@ -188,7 +188,7 @@ There is no shared `Installation` / `Profile`. Chromium keeps its own inventory;
 | **SendContext** | View input to `ReadResult::header`: URL, optional top-level site, `ResourceKind`, `MethodClass`, container/private-browsing ids, clock override. Never applied to the stored snapshot. | `send_context.rs` | Stored cookie state |
 | **Site** / **PartitionIdentity** | Crate-private (scheme, host) comparison key `header` uses to match CHIPS/container partitions. No public-suffix list — conservative on purpose (ADR-adjacent; see §4 stated limitations). | `header_filter.rs` | eTLD+1 logic |
 | **Error** | Public result-type error hierarchy: `Request(RequestError)` / `Stopped(StopReason)` / `Source(DirectPathError)` / `Engine(EngineError)`. `code()` and `stop_reason()` are the stable machine contract; deprecated `fault_kind()` remains the coarser two-way FFI split. **Changed in 0.6.0**: `rookie_cookies::Result<T>` is now `Result<T, Error>`, not `anyhow::Result<T>` (the deprecated v0.5.9 bridge functions are unchanged and still return `anyhow::Result`). | `error.rs` | Internal `anyhow` chains |
-| **EngineError** | Stable code (`no_selected_source` / `no_discovered_source` / `discovery_failed` / `engine_failure`) plus a sanitized, redacted-path message. | `error.rs` | Raw paths; key material |
+| **EngineError** | Stable code (`no_selected_source` / `source_extraction_failed` / `no_discovered_source` / `discovery_failed` / `source_inspection_failed` / `engine_failure`) plus a sanitized, redacted-path message. | `error.rs` | Raw paths; key material |
 
 ##### Compatibility and runtime
 
@@ -371,6 +371,7 @@ Features on the core crate (`rookie-rs/Cargo.toml`):
 - `appbound` — empty feature flag; gates `available_decryption_tiers` and the Windows injector.
 - `dto-schema` — `schemars` derives on report DTO types for `generate-dto-schema` only.
 - `e2e-appbound-steering` — empty by default; compiles in `narrow_for_tests`' `ROOKIE_E2E_APPBOUND_MODE` read outside `cfg(test)`, for the Windows App-Bound canary only (`tests/e2e/run_windows_appbound_canary.ps1`). Never enabled in a published build.
+- `fuzzing` — internal libFuzzer entry points (`src/fuzzing.rs`, `fuzz/`). Off by default; exposes no supported consumer API.
 
 Feature graphs differ:
 
@@ -485,7 +486,7 @@ Discovery strategies: `chromium_user_data`, `mozilla_profiles_ini`, `safari_defa
 
 #### Engines
 
-No plugin trait. `report_build::collect_extraction` / `collect_listing` and `legacy::browser_cookies_and_warnings_with_runtime` `match browser.engine`. Chromium and Gecko are portable and stay inline; Safari/IE go through `report_build/dispatch` and `legacy/dispatch` platform leaves.
+No plugin trait. `report_build::collect_extraction` / `collect_listing` and `legacy::browser_cookies_and_warnings_with_stop_projection` (the shared body behind `browser_cookies_with_runtime`, `browser_cookies_for_load_with_runtime`, and `browser_detailed_and_warnings_with_runtime`) `match browser.engine`. Chromium and Gecko are portable and stay inline; Safari/IE go through `report_build/dispatch` and `legacy/dispatch` platform leaves.
 
 **Chromium** (`browser/chromium.rs` + `browser/chromium_projection.rs` + `registry/chromium.rs`):
 
@@ -590,9 +591,9 @@ Every library language exposes warning-discarding `jar` projection sugar over `r
 
 #### Bindings
 
-**Python** (`bindings/python/`): `src/lib.rs` registers named functions, report functions, `read` / `from_path` / `jar`, `CancellationHandle`, and the four-class exception hierarchy. `src/job.rs`: `read` / `jar` take browser/profile, expiry/session policy, timeout, cancellation, and App-Bound policy; `from_path` instead takes path plus mutually exclusive `plaintext_only` / `browser_id` / `local_state_path`. The default App-Bound value is `"injection_only"`; deprecated named helpers retain elevated-fallback behavior. `ReadResult.header` accepts a bare URL or the `top_level_site` / `resource` / `method` / `user_context_id` / `private_browsing_id` / `now` selectors mirroring `SendContext`. `src/report.rs` returns dict-shaped DTOs (Rust field names verbatim). `src/errors.rs` exposes `RookieError`; `RookieRequestError + ValueError`; `RookieSourceError` below request; and `RookieStoppedError` / `RookieEngineError`, both also `RuntimeError`. Every instance carries `kind`, `code`, `stop_reason`, `profile_ids`, `source_kind`, `target_os`, `path_redacted`, and `required`. `rookie_cookies/dto.py` contains generated dataclasses. `as_list()` / `__iter__` emit the frozen eight-key dict; `same_site` stays the raw stored integer.
+**Python** (`bindings/python/`): `src/lib.rs` registers named functions, report functions, `read` / `from_path`, `CancellationHandle`, and the four-class exception hierarchy. `src/job.rs`: `read` takes browser/profile, expiry/session policy, profile `select`, timeout, cancellation, and App-Bound policy; `from_path` instead takes path plus mutually exclusive `plaintext_only` / `browser_id` / `local_state_path`. `jar`, `profiles`, and `report` are Python-level wrappers in `rookie_cookies/__init__.py` over those registered functions, not extra `#[pyfunction]`s. The default App-Bound value is `"injection_only"`; deprecated named helpers retain elevated-fallback behavior. `ReadResult.header` accepts a bare URL or the `top_level_site` / `resource` / `method` / `user_context_id` / `private_browsing_id` / `now` selectors mirroring `SendContext`. `src/report.rs` returns dict-shaped DTOs (Rust field names verbatim). `src/errors.rs` exposes `RookieError`; `RookieRequestError + ValueError`; `RookieSourceError` below request; and `RookieStoppedError` / `RookieEngineError`, both also `RuntimeError`. Every instance carries `kind`, `code`, `stop_reason`, `profile_ids`, `source_kind`, `target_os`, `path_redacted`, and `required`. `rookie_cookies/dto.py` contains generated dataclasses. `as_list()` / `__iter__` emit the frozen eight-key dict; `same_site` stays the raw stored integer.
 
-**Node** (`bindings/node/`): extraction, listing, and report entry points are `AsyncTask` / `Promise` (always `await`). `version()` and `to_netscape()` are synchronous; `CancellationHandle.cancel` / `isCancelled` are synchronous. `CookieObject` camelCase; `expires` is `Option<i64>` (values above `i64::MAX` omitted). Report objects camelCase (`schemaVersion`, `countersSaturated`, …). `read({ browser, profile?, includeExpired?, includeSession?, timeoutMs?, appBound? }, cancellation?)`; `jar` reuses that request construction and resolves to its flat `CookieObject[]` projection. `appBound` is `"disabled" | "injection_only" | "allow_elevated_fallback"`, defaulting to `"injection_only"` on every App-Bound-capable job. `report(options)` is the binding name for `extract_report`; `browserReport` / `loadReport` are the `browser_report` / `load_report` counterparts, each with its own App-Bound options object. `ReadResult.header` takes either a bare URL string or a `SendContextObject` (`url`, `topLevelSite?`, `resource?`, `method?`, `userContextId?`, `privateBrowsingId?`, `nowEpochSeconds?`), the same view `SendContext` is on the Rust side. Schema-parity tests check `#[napi(object)]` structs against `schema/report-dto.schema.json`. Worker panics are caught (`catch_unwind`).
+**Node** (`bindings/node/`): extraction, listing, and report entry points are `AsyncTask` / `Promise` (always `await`). `version()` and `to_netscape()` are synchronous; `CancellationHandle.cancel` / `isCancelled` are synchronous. `CookieObject` camelCase; `expires` is `Option<i64>` (values above `i64::MAX` omitted). Report objects camelCase (`schemaVersion`, `countersSaturated`, …). `read({ browser, profile?, includeExpired?, includeSession?, select?, timeoutMs?, appBound? }, cancellation?)` — `select` accepts only `"legacy_first"`, and `"all"` rejects with `conflicting_profile_selection` before any I/O; `jar` reuses that request construction and resolves to its flat `CookieObject[]` projection. `appBound` is `"disabled" | "injection_only" | "allow_elevated_fallback"`, defaulting to `"injection_only"` on every App-Bound-capable job. `report(options)` is the binding name for `extract_report`; `browserReport` / `loadReport` are the `browser_report` / `load_report` counterparts, each with its own App-Bound options object. `ReadResult.header` takes either a bare URL string or a `SendContextObject` (`url`, `topLevelSite?`, `resource?`, `method?`, `userContextId?`, `privateBrowsingId?`, `nowEpochSeconds?`), the same view `SendContext` is on the Rust side. Schema-parity tests check `#[napi(object)]` structs against `schema/report-dto.schema.json`. Worker panics are caught (`catch_unwind`).
 
 #### CLI
 
@@ -851,7 +852,6 @@ classDiagram
   class ChromiumExtractedProfile {
     +ChromiumProfile profile
     +Vec~Source~ sources
-    +Option~String~ failure
   }
 
   class ChromiumListing {
@@ -894,7 +894,7 @@ classDiagram
   ChromiumInstallationDraft --> ChromiumExtractedProfile
 ```
 
-Empty `ChromiumExtractedProfile.sources` without `failure` is ordinary absence. `failure` is “extraction failed before any source could be named.”
+Empty `ChromiumExtractedProfile.sources` is ordinary absence, and means only that: the type deliberately has **no** profile-level `failure` field, because Chromium lists only databases that exist and a failure that reached a named database lands on that `Source::failure` (the acquisition `Err` arm still pushes a `Source`). This is the opposite polarity from the engine listing, where an empty `sources` is itself the failure.
 
 #### Gecko engine results and public Firefox listing
 
@@ -1191,7 +1191,7 @@ classDiagram
     <<enum>>
     InvalidSource(path, reason)
     InvalidOptions(source, reason)
-    UnsupportedTarget(source, target)
+    UnsupportedTarget(source, target_os, target_arch)
   }
 
   class InvalidCookieSourceReason {
@@ -1342,7 +1342,7 @@ sequenceDiagram
   Eng-->>C: Vec Cookie unsorted
 ```
 
-`load()` runs the same named wrappers in that frozen order, concurrently via `fan_out`, then `aggregate_load_results`: skip missing browsers, warn on other per-browser failures, `Ok` if any succeeded, `Err` only when every attempted installed browser failed. New browsers do not enter this list.
+`load()` fans the same frozen browser-id order out over `legacy::browser_cookies_for_load_with_runtime` (not the named wrappers themselves: it forces `PersistentOnly` and projects under `StopProjection::PreserveCommitted`) via `fan_out`, then `aggregate_load_results`: skip missing browsers, warn on other per-browser failures, `Ok` if any succeeded, `Err` only when every attempted installed browser failed. New browsers do not enter this list.
 
 #### `from_path`
 
@@ -1493,7 +1493,7 @@ Still supported, not the lead:
 
 - `extract(ExtractRequest) -> Result<Vec<Cookie>>`
 - `extract_report(ReportRequest) -> Result<ExtractionReport>`; `ReportRequest: From<ExtractRequest>` narrows, never widens
-- `load_report_with(LoadReportRequest) -> Result<ExtractionReport>`, `browser_profiles_with`, `chrome_profiles_with` — `_with` twins carrying `ExecutionControl` for the signatures below that predate it
+- `load_report_with(LoadReportRequest) -> Result<ExtractionReport>`, `profiles_with`, `browser_profiles_with`, `chrome_profiles_with` — `_with` twins carrying `ExecutionControl` for the signatures below that predate it
 - `supported_browsers`, `browser_profiles`, `browser_report`, `load_report`, `chrome_profiles`, `chrome_profile` (deprecated)
 - `direct_path::{extract_from_path, PathExtractRequest}` — **New in 0.6.0**, replacing the Rust `cookies_from_path` / `chromium_cookies_from_path` / `chromium_cookies_from_path_detailed` functions and the two older request types. Bindings keep deprecated aliases for migration
 - `CancellationHandle`, `ExecutionControl`, `AppBoundPolicy`, `SendContext`, `ProfileSelection`, `ReportScope`, `SessionPolicy`, `Error`, `EngineError`, `version`
@@ -1523,7 +1523,7 @@ See §2 CLI. **Rewritten in 0.6.0**: the top-level flag grammar (`--browser` / `
 
 ### Errors
 
-`Error` (`Request` / `Stopped` / `Source` / `Engine`) is the crate-wide result error as of 0.6.0; `code()` and `stop_reason()` are the stable machine contract, and deprecated `fault_kind()` remains the coarser two-way FFI split for callers not yet migrated. `RequestError::code()` is the stable branch key: `unknown_browser`, `empty_profile_selector`, `unknown_profile`, `ambiguous_profile`, `lossy_profile_path`, `missing_browser`, `invalid_url`, plus 0.6.0's `invalid_top_level_site`, `clock_unrepresentable`, `incomplete_send_context`, `app_bound_unavailable`, `conflicting_credential_selectors`, `conflicting_profile_selection`. Human `Display` is not stable. `DirectPathError` has `kind()` + reason codes, including new `missing_chromium_credentials`; its operational `SourceInspectionFailed` reason maps to `Error::Engine` without removing the public reason variant. `EngineError::code()` is `no_selected_source`, `no_discovered_source`, `discovery_failed`, `source_inspection_failed`, or `engine_failure`. `StopReason` is recovered via `Error::stop_reason()` (or the deprecated free function `stop_reason(&error)` for the `anyhow` bridge) from `BoundaryStop` in the chain.
+`Error` (`Request` / `Stopped` / `Source` / `Engine`) is the crate-wide result error as of 0.6.0; `code()` and `stop_reason()` are the stable machine contract, and deprecated `fault_kind()` remains the coarser two-way FFI split for callers not yet migrated. `RequestError::code()` is the stable branch key: `unknown_browser`, `empty_profile_selector`, `unknown_profile`, `ambiguous_profile`, `lossy_profile_path`, `missing_browser`, `invalid_url`, plus 0.6.0's `invalid_top_level_site`, `clock_unrepresentable`, `incomplete_send_context`, `app_bound_unavailable`, `conflicting_credential_selectors`, `conflicting_profile_selection`. Human `Display` is not stable. `DirectPathError` has `kind()` + reason codes, including new `missing_chromium_credentials`; its operational `SourceInspectionFailed` reason maps to `Error::Engine` without removing the public reason variant. `EngineError::code()` is `no_selected_source`, `source_extraction_failed`, `no_discovered_source`, `discovery_failed`, `source_inspection_failed`, or `engine_failure`. `StopReason` is recovered via `Error::stop_reason()` (or the deprecated free function `stop_reason(&error)` for the `anyhow` bridge) from `BoundaryStop` in the chain.
 
 ---
 
@@ -1589,7 +1589,7 @@ These are alternatives **already recorded** in ADRs, not new hypotheticals.
 
 ## Security & Privacy Considerations
 
-Extracted cookies are credentials. Do not log them, commit them, or paste them into issues. Use only profiles and accounts you are allowed to access. Index: [`docs/security.md`](security.md). Intentional corrections vs ADR 0001: [`docs/security-corrections.md`](security-corrections.md). SQLite amalgamation pin: [`docs/sqlite-security.md`](sqlite-security.md).
+Extracted cookies are credentials. Do not log them, commit them, or paste them into issues. Use only profiles and accounts you are allowed to access. Security corrections vs ADR 0001, the bundled SQLite pin, and cryptography review status: [`docs/security.md`](security.md).
 
 ### Threat model (what this crate does)
 
@@ -1706,7 +1706,7 @@ Only decisions and deferred work already recorded in ADRs or code. Not product b
 - [ADR 0005](adr/0005-stage-boundary-types-and-extraction-vocabulary.md) — stage types, vocabulary, module ownership, fence
 - [Stage-boundary program record](design/stage-boundary-refactor.md) — historical motivation, review reasoning, and PR plan; its progress/line references are preserved rather than maintained
 - [After the type program](design/after-the-type-program.md) — historical follow-up audit; [Language](design/after-the-type-program.md#language) informed this document's catalog, but the current-state names here win
-- [Security](security.md) · [security-corrections](security-corrections.md) · [sqlite-security](sqlite-security.md)
+- [Security](security.md)
 - [Testing](testing.md) · [Building](building.md) · [Troubleshooting](troubleshooting.md)
 - `rookie-rs/src/lib.rs`, `read.rs`, `browser/{source,outcome,registry,report_core,report_build,compatibility,legacy,unseal,cookie_record}.rs`
 - `rookie-rs/browser_registry.json`

@@ -19,6 +19,23 @@ sys.modules[SPEC.name] = bump_version
 SPEC.loader.exec_module(bump_version)
 
 
+def napi_loader(version: str) -> str:
+    """One platform block in the shape napi-rs emits into bindings/node/index.js."""
+    return (
+        "function requireNative() {\n"
+        "  try {\n"
+        "    const binding = require('rookie-cookies-darwin-arm64')\n"
+        "    const bindingPackageVersion = require('rookie-cookies-darwin-arm64/package.json').version\n"
+        f"    if (bindingPackageVersion !== '{version}' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK) {{\n"
+        f"      throw new Error(`Native binding package version mismatch, expected {version} "
+        "but got ${bindingPackageVersion}.`)\n"
+        "    }\n"
+        "    return binding\n"
+        "  } catch (e) {}\n"
+        "}\n"
+    )
+
+
 class VersionValidationTests(unittest.TestCase):
     def test_accepts_semver(self) -> None:
         for version in ("0.5.10", "1.2.3-alpha.1", "1.2.3-rc.1+build.5"):
@@ -166,6 +183,134 @@ version = "0.5.9"
             self.assertEqual(packages[pinned_package], {"version": "0.5.11", "optional": True})
 
 
+class FinalPromotionTests(unittest.TestCase):
+    def test_recognizes_only_a_dropped_prerelease(self) -> None:
+        for current, new, expected in (
+            ("0.6.0-rc.1", "0.6.0", True),
+            ("0.6.0-beta.3", "0.6.0", True),
+            ("0.6.0-rc.1", "0.6.0-rc.2", False),
+            ("0.6.0-rc.1", "0.6.1", False),
+            ("0.6.0-rc.1", "0.7.0", False),
+            ("0.6.0", "0.6.1", False),
+            ("0.6.0", "0.6.0", False),
+        ):
+            with self.subTest(current=current, new=new):
+                self.assertIs(
+                    bump_version.is_final_promotion(current, new), expected
+                )
+
+    def write_changelog(self, directory: str, text: str) -> Path:
+        path = Path(directory) / "CHANGELOG.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_retags_the_prerelease_heading_when_unreleased_is_empty(self) -> None:
+        # The case that used to deadlock: an rc's notes live under the rc
+        # heading, so there is no Unreleased prose to promote.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_changelog(
+                directory,
+                "# Changelog\n\n## [Unreleased]\n\n## [0.6.0-rc.1] - 2026-08-22\n\n- Shipped.\n",
+            )
+            change = bump_version.update_changelog(
+                path, "0.6.0-rc.1", "0.6.0", "2026-09-01", False
+            )
+            self.assertIsNotNone(change)
+            text = path.read_text(encoding="utf-8")
+            # Without an explicit date the pre-release's own date is kept:
+            # promoting does not re-author the notes.
+            self.assertIn("## [0.6.0] - 2026-08-22\n", text)
+            self.assertNotIn("0.6.0-rc.1", text)
+            self.assertIn("- Shipped.", text)
+
+    def test_explicit_date_restamps_the_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_changelog(
+                directory,
+                "# Changelog\n\n## [Unreleased]\n\n## [0.6.0-rc.1] - 2026-08-22\n",
+            )
+            bump_version.update_changelog(
+                path, "0.6.0-rc.1", "0.6.0", "2026-09-01", True
+            )
+            self.assertIn("## [0.6.0] - 2026-09-01\n", path.read_text(encoding="utf-8"))
+
+    def test_rerunning_a_completed_promotion_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_changelog(
+                directory,
+                "# Changelog\n\n## [Unreleased]\n\n## [0.6.0] - 2026-08-22\n",
+            )
+            before = path.read_text(encoding="utf-8")
+            self.assertIsNone(
+                bump_version.update_changelog(
+                    path, "0.6.0-rc.1", "0.6.0", "2026-09-01", False
+                )
+            )
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_refuses_to_promote_over_unreleased_prose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_changelog(
+                directory,
+                "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Newer work.\n\n"
+                "## [0.6.0-rc.1] - 2026-08-22\n",
+            )
+            with self.assertRaisesRegex(bump_version.ReleaseError, "cannot be promoted"):
+                bump_version.update_changelog(
+                    path, "0.6.0-rc.1", "0.6.0", "2026-09-01", False
+                )
+
+    def test_requires_a_dated_prerelease_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_changelog(
+                directory,
+                "# Changelog\n\n## [Unreleased]\n\n## [0.6.0-rc.1]\n",
+            )
+            with self.assertRaisesRegex(bump_version.ReleaseError, "missing its YYYY-MM-DD"):
+                bump_version.update_changelog(
+                    path, "0.6.0-rc.1", "0.6.0", "2026-09-01", False
+                )
+
+
+class NodeLoaderTests(unittest.TestCase):
+    def loader(self, directory: str, version: str) -> Path:
+        path = Path(directory) / "index.js"
+        path.write_text(napi_loader(version), encoding="utf-8")
+        return path
+
+    def test_rewrites_every_napi_version_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.loader(directory, "0.6.0-rc.1")
+            change = bump_version.update_node_loader(path, "0.6.0-rc.1", "0.6.0")
+            self.assertIsNotNone(change)
+            self.assertEqual(
+                path.read_text(encoding="utf-8"), napi_loader("0.6.0")
+            )
+
+    def test_rerun_after_the_rewrite_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.loader(directory, "0.6.0")
+            self.assertIsNone(
+                bump_version.update_node_loader(path, "0.6.0-rc.1", "0.6.0")
+            )
+
+    def test_unchanged_version_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.loader(directory, "0.6.0")
+            self.assertIsNone(
+                bump_version.update_node_loader(path, "0.6.0", "0.6.0")
+            )
+
+    def test_unrecognized_loader_shape_fails_loudly(self) -> None:
+        # A silent skip here is what let a stale loader reach CI in the first
+        # place, so drift must raise rather than pass.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "index.js"
+            path.write_text("module.exports = {}\n", encoding="utf-8")
+            with self.assertRaisesRegex(bump_version.ReleaseError, "no napi version literal"):
+                bump_version.update_node_loader(path, "0.6.0-rc.1", "0.6.0")
+
+
 class ChangelogTests(unittest.TestCase):
     def write_changelog(self, directory: str, text: str) -> Path:
         path = Path(directory) / "CHANGELOG.md"
@@ -295,6 +440,9 @@ default-features = false
                 path.write_text(
                     json.dumps({"version": "0.5.9"}), encoding="utf-8"
                 )
+            (root / bump_version.NODE_LOADER).write_text(
+                napi_loader("0.5.9"), encoding="utf-8"
+            )
             for relative in (
                 Path("Cargo.lock"),
                 Path("bindings/node/package-lock.json"),

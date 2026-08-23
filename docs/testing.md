@@ -73,7 +73,10 @@ Ignored real-browser Rust tests (`rookie-rs/tests/e2e_chrome.rs`,
 `main`. The **nightly** schedule (or `workflow_dispatch` with suite `nightly`)
 expands the language matrix.
 
-**Every pull request** — one `check (${{ os }})` job per OS.
+**Every pull request** — one `check (${{ os }})` job per OS, plus a
+standalone `msrv` job (`cargo check --workspace --all-targets --all-features
+--locked` pinned to Rust 1.88.0 on Ubuntu) that runs unconditionally on every
+trigger, not staggered by OS.
 
 - **fmt**, Clippy (`-D warnings`), workspace tests, **and**
   `--no-default-features` so the non-`appbound` Windows branch cannot rot.

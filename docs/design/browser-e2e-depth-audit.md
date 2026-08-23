@@ -10,6 +10,13 @@
   Rust/Python/Node/CLI assertions, cookie isolation context, discovery, and
   locked-store behavior
 
+> **Historical record.** This document captures the audit findings and
+> remediation plan as they stood during the `codex/browser-e2e-depth` work.
+> The remediation has since landed; "current," "recommended," and future-tense
+> language below describe that point in time, not an open plan. Use
+> [the testing guide](../testing.md) for the current E2E coverage and
+> instructions.
+
 ## Executive conclusion
 
 At the audited baseline, the browser E2E suite had exceptional platform and
