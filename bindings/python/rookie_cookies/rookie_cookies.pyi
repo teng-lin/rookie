@@ -1,4 +1,5 @@
-from sys import platform
+import http.cookiejar
+import sys
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from . import dto as dto
@@ -112,7 +113,12 @@ class RookieSourceError(RookieRequestError):
     ``except RookieRequestError`` or ``except ValueError`` written before
     this class existed keeps catching a direct-path fault.
     """
-    kind: Literal["source"]
+    # Narrowing a base class's Literal is only sound for a read-only member,
+    # and this one is writable: bindings/python/src/errors.rs sets it with
+    # `value.setattr("kind", ...)`, not as a property. The precise Literal is
+    # worth more at a call site than the invariance it violates, so the
+    # override is kept and the ignore is the price.
+    kind: Literal["source"]  # type: ignore[assignment]
 
 class RookieEngineError(RookieError, RuntimeError):
     """Extraction, source inspection, or engine failure unrelated to caller input."""
@@ -328,7 +334,7 @@ def chrome(domains: Optional[List[str]] = None) -> CookieList:
     """
     ...
 
-if platform == "win32":
+if sys.platform == "win32":
     def chromium_based(
         key_path: str, db_path: str, domains: Optional[List[str]] = None
     ) -> CookieList:
@@ -827,7 +833,7 @@ def load_report_dto(
 ) -> dto.ExtractionReport: ...
 
 # Windows
-if platform == "win32":
+if sys.platform == "win32":
     def internet_explorer(domains: Optional[List[str]] = None) -> CookieList:
         """
         Extract Cookies from Internet Explorer
@@ -851,7 +857,7 @@ if platform == "win32":
         ...
 
 # MacOS
-if platform == "darwin":
+if sys.platform == "darwin":
     def opera_gx(domains: Optional[List[str]] = None) -> CookieList:
         """Extract Cookies from Opera GX browser."""
         ...
@@ -866,7 +872,7 @@ if platform == "darwin":
         ...
 
 # Linux
-if platform.startswith("linux"):
+if sys.platform.startswith("linux"):
     def cachy(domains: Optional[List[str]] = None) -> CookieList:
         """Extract Cookies from Cachy Browser."""
         ...

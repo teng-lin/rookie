@@ -225,6 +225,101 @@
     "windows/speed_360": "No stable unattended vendor or package-manager installer is available to the runner.",
     "windows/speed_360x": "No stable unattended vendor or package-manager installer is available to the runner."
   },
+  "convenience_functions": {
+    "brave": {
+      "python": "brave",
+      "node": "brave",
+      "dispatch": "chromium",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    },
+    "chrome": {
+      "python": "chrome",
+      "node": "chrome",
+      "dispatch": "chromium",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": ["google-chrome"]
+    },
+    "chromium": {
+      "python": "chromium",
+      "node": "chromium",
+      "dispatch": "chromium",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    },
+    "edge": {
+      "python": "edge",
+      "node": "edge",
+      "dispatch": "chromium",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": ["msedge"]
+    },
+    "firefox": {
+      "python": "firefox",
+      "node": "firefox",
+      "dispatch": "gecko",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    },
+    "librewolf": {
+      "python": "librewolf",
+      "node": "librewolf",
+      "dispatch": "gecko",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    },
+    "opera": {
+      "python": "opera",
+      "node": "opera",
+      "dispatch": "chromium",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    },
+    "opera_gx": {
+      "python": "opera_gx",
+      "node": "operaGx",
+      "dispatch": "chromium",
+      "platforms": ["macos", "windows"],
+      "aliases": ["opera gx", "opera-gx"]
+    },
+    "safari": {
+      "python": "safari",
+      "node": "safari",
+      "dispatch": "native",
+      "platforms": ["macos"],
+      "aliases": []
+    },
+    "vivaldi": {
+      "python": "vivaldi",
+      "node": "vivaldi",
+      "dispatch": "chromium",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    },
+    "zen": {
+      "python": "zen",
+      "node": "zen",
+      "dispatch": "gecko",
+      "platforms": ["linux", "macos", "windows"],
+      "aliases": []
+    }
+  },
+  "convenience_function_exceptions": {
+    "arc": "Both Arc registry cells are fixture-only, so the arc convenience function has no launchable hosted profile to discover.",
+    "avast": "No binding exports an Avast convenience function; the registry id is reached only through the generic browser APIs.",
+    "browser_from_vought": "No binding exports a Vought convenience function; the registry id is reached only through the generic browser APIs.",
+    "cachy": "The deprecated CachyBrowser cell is fixture-only, so the cachy convenience function has no launchable hosted profile to discover.",
+    "coccoc": "No binding exports a Cốc Cốc convenience function; the registry id is reached only through the generic browser APIs.",
+    "dc_browser": "No binding exports a DC Browser convenience function; the registry id is reached only through the generic browser APIs.",
+    "duckduckgo": "No binding exports a DuckDuckGo convenience function; the registry id is reached only through the generic browser APIs.",
+    "internet_explorer": "The Windows Internet Explorer cell is fixture-only, so the internet_explorer convenience function has no launchable hosted profile.",
+    "octo_browser": "The commercial Octo Browser cell is fixture-only, so the octo_browser convenience function has no launchable hosted profile.",
+    "qq_browser": "No binding exports a QQ Browser convenience function; the registry id is reached only through the generic browser APIs.",
+    "sogou": "No binding exports a Sogou convenience function; the registry id is reached only through the generic browser APIs.",
+    "speed_360": "No binding exports a 360 Speed convenience function; the registry id is reached only through the generic browser APIs.",
+    "speed_360x": "No binding exports a 360 Speed X convenience function; the registry id is reached only through the generic browser APIs.",
+    "yandex": "No binding exports a Yandex convenience function; the registry id is reached only through the generic browser APIs."
+  },
   "coverage": [
     {
       "platform": "linux",

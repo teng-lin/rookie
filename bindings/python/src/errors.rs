@@ -514,4 +514,54 @@ mod tests {
     })
     .expect("classified inspection failure must be an engine runtime error");
   }
+
+  #[test]
+  fn stop_reason_code_names_every_reason_including_the_unreachable_one() {
+    // `timed_out` and `cancelled` are reachable from every binding, and
+    // `tests/python/test_binding_runtime.py` asserts both from Python.
+    // `resource_exhausted` is mapped for the internal
+    // `CancellationToken::exhaust_resources` seam that no public entry point
+    // drives yet, so this is the only place its string is pinned.
+    assert_eq!(
+      stop_reason_code(rookie_core::StopReason::TimedOut),
+      "timed_out"
+    );
+    assert_eq!(
+      stop_reason_code(rookie_core::StopReason::Cancelled),
+      "cancelled"
+    );
+    assert_eq!(
+      stop_reason_code(rookie_core::StopReason::ResourceExhausted),
+      "resource_exhausted"
+    );
+  }
+
+  #[test]
+  fn every_stop_reason_classifies_as_a_stopped_error_carrying_its_reason() {
+    Python::initialize();
+    for (reason, expected) in [
+      (rookie_core::StopReason::TimedOut, "timed_out"),
+      (rookie_core::StopReason::Cancelled, "cancelled"),
+      (
+        rookie_core::StopReason::ResourceExhausted,
+        "resource_exhausted",
+      ),
+    ] {
+      let exception = classify_error(rookie_core::Error::Stopped(reason));
+      Python::attach(|py| -> PyResult<()> {
+        assert!(exception.is_instance_of::<RookieStoppedError>(py));
+        assert!(exception.is_instance_of::<PyRuntimeError>(py));
+        let value = exception.value(py);
+        assert_eq!(value.getattr("kind")?.extract::<String>()?, "stopped");
+        assert_eq!(value.getattr("stop_reason")?.extract::<String>()?, expected);
+        assert!(value.getattr("source_kind")?.is_none());
+        assert!(value
+          .getattr("required")?
+          .extract::<Vec<String>>()?
+          .is_empty());
+        Ok(())
+      })
+      .expect("every stop reason must classify as a stopped runtime error");
+    }
+  }
 }

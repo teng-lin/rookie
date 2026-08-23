@@ -35,6 +35,7 @@ jobs:
       nightly: ${{ steps.decide.outputs.nightly }}
       node_matrix: ${{ steps.decide.outputs.node_matrix }}
       python_matrix: ${{ steps.decide.outputs.python_matrix }}
+      coverage_matrix: ${{ steps.decide.outputs.coverage_matrix }}
     steps:
       - id: decide
         env:
@@ -53,11 +54,20 @@ jobs:
           if [ "$nightly" = true ]; then
             echo 'node_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"ubuntu-latest","node":"24"},{"os":"ubuntu-latest","node":"26"},{"os":"macos-latest","node":"22"},{"os":"macos-latest","node":"24"},{"os":"macos-latest","node":"26"},{"os":"windows-latest","node":"22"},{"os":"windows-latest","node":"24"},{"os":"windows-latest","node":"26"}]' >> "$GITHUB_OUTPUT"
             echo 'python_matrix=[{"os":"ubuntu-latest","python":"3.11"},{"os":"ubuntu-latest","python":"3.12"},{"os":"ubuntu-latest","python":"3.13"},{"os":"ubuntu-latest","python":"3.14"},{"os":"macos-latest","python":"3.11"},{"os":"macos-latest","python":"3.12"},{"os":"macos-latest","python":"3.13"},{"os":"macos-latest","python":"3.14"},{"os":"windows-latest","python":"3.11"},{"os":"windows-latest","python":"3.12"},{"os":"windows-latest","python":"3.13"},{"os":"windows-latest","python":"3.14"}]' >> "$GITHUB_OUTPUT"
+            # Every OS nightly, because the binding's #[cfg]-gated entry points
+            # differ per platform and a Linux-only measurement would let a
+            # Windows-only or macOS-only branch rot behind a green ratchet.
+            echo 'coverage_matrix=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
           else
             # One Node and one CPython per OS, staggered so a PR still
             # compiles and tests every supported runtime without the 3×N product.
             echo 'node_matrix=[{"os":"ubuntu-latest","node":"22"},{"os":"macos-latest","node":"24"},{"os":"windows-latest","node":"26"}]' >> "$GITHUB_OUTPUT"
             echo 'python_matrix=[{"os":"ubuntu-latest","python":"3.12"},{"os":"macos-latest","python":"3.13"},{"os":"windows-latest","python":"3.14"}]' >> "$GITHUB_OUTPUT"
+            # One OS per PR: instrumenting the extension means a from-scratch
+            # nightly build, and the per-file floors are single values that
+            # must hold everywhere, so one platform proving them is enough to
+            # block a regression on a pull request.
+            echo 'coverage_matrix=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           fi
 
   msrv:
@@ -400,6 +410,62 @@ jobs:
           fi
           "$py" -m pip install --quiet "$wheel"
           "$py" -m unittest discover -s tests/python -p 'test_*.py' -v
+          # Reuses the wheel and venv above, so runtime/stub parity is proven
+          # against the installed artifact on every OS and interpreter this
+          # matrix covers rather than on one representative cell.
+          "$py" -m pip install --quiet mypy==2.3.1
+          python scripts/check-python-stubs.py --python "$py"
+
+  python-binding-coverage:
+    # The only lane that measures what tests/python actually reaches inside
+    # bindings/python/src/*.rs. `cargo llvm-cov -p rookie-cookies-python` on
+    # its own sees the crate's own #[test]s and nothing else, because the rest
+    # of the binding only runs when Python calls across the PyO3 boundary.
+    name: Python binding coverage (${{ matrix.os }})
+    needs: decide
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(needs.decide.outputs.coverage_matrix) }}
+    steps:
+      - name: Install Linux packages
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libdbus-1-dev libssl-dev pkg-config dbus at-spi2-core
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: nightly-2025-11-23
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: .
+      - name: Install pinned coverage tool
+        run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+      - name: Install pinned maturin
+        run: python -m pip install --disable-pip-version-check --quiet maturin==1.14.1
+      - name: Measure and ratchet Python binding coverage
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
+        run: python scripts/run-python-coverage.py --out-dir target/python-coverage
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-binding-coverage-${{ matrix.os }}
+          path: |
+            target/python-coverage/native-coverage.json
+            target/python-coverage/pure-coverage.json
+          if-no-files-found: error
 
   linux:
     name: manylinux Python wheel
@@ -505,6 +571,7 @@ jobs:
       - freebsd-native
       - node-tests
       - python-tests
+      - python-binding-coverage
       - linux
       - windows
       - macos
@@ -520,6 +587,7 @@ jobs:
           FREEBSD: ${{ needs.freebsd-native.result }}
           NODE: ${{ needs.node-tests.result }}
           PYTHON: ${{ needs.python-tests.result }}
+          PYTHON_COVERAGE: ${{ needs.python-binding-coverage.result }}
           LINUX_WHEEL: ${{ needs.linux.result }}
           WINDOWS_WHEEL: ${{ needs.windows.result }}
           MACOS_WHEEL: ${{ needs.macos.result }}
@@ -528,7 +596,7 @@ jobs:
           set -euo pipefail
           for result in \
             "$DECIDE" "$MSRV" "$CHECK" "$FREEBSD" "$NODE" "$PYTHON" \
-            "$LINUX_WHEEL" "$WINDOWS_WHEEL" "$MACOS_WHEEL" "$SDIST"
+            "$PYTHON_COVERAGE" "$LINUX_WHEEL" "$WINDOWS_WHEEL" "$MACOS_WHEEL" "$SDIST"
           do
             test "$result" = success
           done

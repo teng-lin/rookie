@@ -6,12 +6,14 @@
 //   ROOKIE_E2E_DOMAIN           optional — default 127.0.0.1
 //   ROOKIE_E2E_COOKIE_NAME      optional — expected name (default: rookie_ci)
 //   ROOKIE_E2E_COOKIE_VALUE     optional — expected value (default: bar)
+//   ROOKIE_E2E_DISCOVERY_*      optional — separate name/value for gecko discovery
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
 import * as rookieCookies from "../../bindings/node/index.js";
+import { convenienceFunction } from "./browser_coverage_contract.mjs";
 import {
   findManifest,
   pathsReferToSameFile,
@@ -148,6 +150,46 @@ if (manifestPath) {
   }
 }
 
+const discoveryChecked =
+  process.env.ROOKIE_E2E_CHECK_BROWSER_DISCOVERY === "1";
+if (discoveryChecked) {
+  const browserName = (
+    process.env.ROOKIE_E2E_TARGET_BROWSER ?? "firefox"
+  ).toLowerCase();
+  let contract;
+  try {
+    contract = convenienceFunction(browserName, "gecko");
+  } catch (error) {
+    console.error(
+      `unsupported ROOKIE_E2E_TARGET_BROWSER '${browserName}': ${error.message}`,
+    );
+    process.exit(2);
+  }
+  const browserFn = rookieCookies[contract.node];
+  if (typeof browserFn !== "function") {
+    console.error(
+      `rookie-cookies does not export '${contract.node}' on ${process.platform}`,
+    );
+    process.exit(2);
+  }
+  const discovered = await browserFn([domain]);
+  const discoverySurface = `${contract.browserId} discovery`;
+  if (manifestPath) {
+    verifyCookieRecords(
+      manifestPath,
+      "filtered_flat",
+      discovered,
+      `Node ${discoverySurface}`,
+    );
+  } else {
+    const { required, forbidden } = stateFromEnvironment(
+      process.env.ROOKIE_E2E_DISCOVERY_COOKIE_NAME ?? expectedName,
+      process.env.ROOKIE_E2E_DISCOVERY_COOKIE_VALUE ?? expectedValue,
+    );
+    assertCookieState(discovered, required, forbidden, discoverySurface);
+  }
+}
+
 const recommendedChecked =
   process.env.ROOKIE_E2E_CHECK_RECOMMENDED_READ === "1";
 let recommendedSnapshot;
@@ -221,5 +263,5 @@ if (recommendedChecked) {
 }
 
 console.log(
-  `rookie-cookies (${process.platform}, firefox): ${manifestPath ? "exact cookie corpus" : `${expectedName}=${expectedValue}`} verified (${cookies.length} cookies for ${domain}; explicit detailed verified${recommendedChecked ? "; recommended read verified" : ""})`,
+  `rookie-cookies (${process.platform}, firefox): ${manifestPath ? "exact cookie corpus" : `${expectedName}=${expectedValue}`} verified (${cookies.length} cookies for ${domain}; explicit detailed verified${discoveryChecked ? "; browser discovery verified" : ""}${recommendedChecked ? "; recommended read verified" : ""})`,
 );

@@ -53,7 +53,34 @@ After `maturin develop --release --locked` in `bindings/python`:
 
 ```console
 python -m unittest discover -s tests/python -p 'test_*.py' -v
+python scripts/check-python-stubs.py --python "$(command -v python)"
 ```
+
+### Python binding coverage
+
+The workspace run above measures `bindings/python/src/*.rs` only through that
+crate's own `#[test]`s, which reach roughly half of it: everything else is
+behind the PyO3 boundary and runs only when Python calls it. One command
+measures what `tests/python` actually reaches, on both sides of the boundary:
+
+```console
+python -m pip install maturin==1.14.1
+python scripts/run-python-coverage.py --out-dir target/python-coverage
+```
+
+It instruments the extension with the pinned nightly, builds a wheel from the
+instrumented objects, installs it into a throwaway venv, and runs the suite
+once under `coverage.py` — so `native-coverage.json` (cargo-llvm-cov) and
+`pure-coverage.json` (coverage.py) always describe the same execution. Both
+are then held to `coverage.toml`'s `[python-binding-native]` and
+`[python-binding-pure]` floors. Pass `--no-check` to write the reports without
+enforcing them.
+
+The floors are single values that must hold on Linux, macOS, and Windows, so
+each sits at the lowest platform's observed value rounded down. Pull requests
+run this on Ubuntu; the nightly schedule runs all three, because a
+`#[cfg]`-gated entry point that exists on one platform cannot be seen by the
+others.
 
 After `npm ci --omit=optional && npm run build` in `bindings/node`
 (omit published platform prebuilds so they cannot shadow the local addon):
@@ -321,6 +348,17 @@ a rationale. A detailed-output smoke test therefore cannot be mistaken for
 semantic CHIPS/container coverage. CHIPS keys/ancestry/source metadata and
 Firefox dFPI origin attributes/partition keys and Multi-Account Container IDs
 are live; private-browsing IDs are non-persistable.
+
+`convenience_functions` maps each registry browser onto the per-browser
+convenience export the Python and Node bindings publish for it — its name in
+each binding, which assert-script family dispatches it, the platforms it
+exists on, and any alternate `ROOKIE_E2E_TARGET_BROWSER` spellings. The
+assert scripts dispatch from this table rather than a hardcoded list, so a
+browser cannot gain a convenience wrapper without also gaining an exact-corpus
+assertion. `convenience_function_exceptions` carries the other direction:
+every registry browser with no such assertion, each with a concrete reason —
+either the binding exports no wrapper, or the browser has only fixture cells.
+The two sets partition the registry, and nothing may appear in both.
 
 `representative_depth_lanes` records the exact-corpus, active-writer,
 partition, stress, and manual-capture runners independently of the broad

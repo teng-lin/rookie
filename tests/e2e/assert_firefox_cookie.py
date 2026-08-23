@@ -5,6 +5,7 @@ Driven by env vars:
   ROOKIE_E2E_DOMAIN           optional — domain filter (default: 127.0.0.1)
   ROOKIE_E2E_COOKIE_NAME      optional — expected name (default: rookie_ci)
   ROOKIE_E2E_COOKIE_VALUE     optional — expected value (default: bar)
+  ROOKIE_E2E_DISCOVERY_*      optional — separate name/value for gecko discovery
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import rookie_cookies
 
+from browser_coverage_contract import convenience_function
 from cookie_manifest import (
     find_manifest,
     load_manifest,
@@ -151,6 +153,55 @@ def main() -> int:
             )
             return 1
 
+    discovery_checked = os.environ.get("ROOKIE_E2E_CHECK_BROWSER_DISCOVERY") == "1"
+    if discovery_checked:
+        browser_name = os.environ.get("ROOKIE_E2E_TARGET_BROWSER", "firefox").lower()
+        try:
+            contract = convenience_function(browser_name, "gecko")
+        except (AssertionError, KeyError, OSError, ValueError) as error:
+            print(
+                f"unsupported ROOKIE_E2E_TARGET_BROWSER {browser_name!r}: {error}",
+                file=sys.stderr,
+            )
+            return 2
+        browser_fn = getattr(rookie_cookies, contract["python"], None)
+        if browser_fn is None:
+            print(
+                f"rookie_cookies does not export {contract['python']!r} "
+                f"on {sys.platform}",
+                file=sys.stderr,
+            )
+            return 2
+        discovered = browser_fn([domain])
+        discovery_surface = f"{contract['browser_id']} discovery"
+        if manifest is not None:
+            verify_records(
+                manifest,
+                "filtered_flat",
+                discovered,
+                surface=f"Python {discovery_surface}",
+            )
+        else:
+            discovery_name = os.environ.get(
+                "ROOKIE_E2E_DISCOVERY_COOKIE_NAME", expected_name
+            )
+            discovery_value = os.environ.get(
+                "ROOKIE_E2E_DISCOVERY_COOKIE_VALUE", expected_value
+            )
+            try:
+                discovery_required, discovery_forbidden = state_from_environment(
+                    discovery_name, discovery_value
+                )
+                assert_cookie_state(
+                    discovered,
+                    discovery_required,
+                    discovery_forbidden,
+                    surface=discovery_surface,
+                )
+            except (AssertionError, ValueError) as error:
+                print(error, file=sys.stderr)
+                return 1
+
     recommended_checked = os.environ.get("ROOKIE_E2E_CHECK_RECOMMENDED_READ") == "1"
     if recommended_checked:
         browser_id = os.environ.get("ROOKIE_E2E_BROWSER_ID", "firefox")
@@ -246,6 +297,7 @@ def main() -> int:
         f"rookie_cookies ({sys.platform}, firefox): "
         f"{'exact cookie corpus' if manifest is not None else f'{expected_name}={expected_value}'} verified "
         f"({len(cookies)} cookies for {domain}; explicit detailed verified"
+        f"{'; browser discovery verified' if discovery_checked else ''}"
         f"{'; recommended read verified' if recommended_checked else ''})"
     )
     return 0

@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Enforce ratcheted workspace and critical-file LLVM coverage floors."""
+"""Enforce ratcheted coverage floors for LLVM and coverage.py reports.
+
+One script serves three lanes because a floor is a floor regardless of which
+instrument measured it:
+
+* the workspace Cargo lane (`cargo llvm-cov --workspace`), which reads the
+  root `[workspace]`/`[files]` tables;
+* the Python binding's native lane (`--section python-binding-native`), whose
+  LLVM report is produced by `scripts/run-python-coverage.py` and includes the
+  installed-wheel suite's calls across the PyO3 boundary;
+* the Python binding's pure-Python lane (`--section python-binding-pure`,
+  `--format coverage-py`), measured by `coverage.py --branch`.
+
+Both report formats are normalized to `{path: {"lines": pct, "branches": pct}}`
+before enforcement, so the floor logic and its failure messages are identical.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +31,18 @@ except ModuleNotFoundError as error:
 
 ROOT = Path(__file__).resolve().parents[1]
 
+LLVM_FORMAT = "llvm"
+COVERAGE_PY_FORMAT = "coverage-py"
+
+# `[workspace]` is the historical name of the root aggregate table; sections
+# added later use `totals`. Both mean "the floors for this report's grand
+# total", and whichever one a scope declares also names it in failure text.
+AGGREGATE_KEYS = ("workspace", "totals")
+
+
+class ReportError(ValueError):
+    """The coverage report is missing something a floor needs to read."""
+
 
 def percentage(summary: dict[str, object], metric: str) -> float:
     value = summary.get(metric)
@@ -26,43 +53,137 @@ def percentage(summary: dict[str, object], metric: str) -> float:
 
 def normalized_repo_path(filename: str, root: Path) -> str | None:
     path = Path(filename)
+    if not path.is_absolute():
+        path = root / path
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return None
 
 
-def enforce(config: dict[str, object], report: dict[str, object], root: Path) -> list[str]:
+def ratio(covered: object, total: object, *, context: str) -> float:
+    """Percentage for a coverage.py counter pair.
+
+    An empty denominator is 100%, not 0%: a file with no branches has covered
+    every branch it has. Reporting 0% there would make an unbranching module
+    impossible to gate.
+    """
+    if not isinstance(covered, (int, float)) or not isinstance(total, (int, float)):
+        raise ReportError(f"coverage report omitted {context}")
+    if total == 0:
+        return 100.0
+    return float(covered) / float(total) * 100.0
+
+
+def normalize_llvm(report: dict[str, object], root: Path) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     data = report.get("data")
     if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
-        return ["coverage report must contain exactly one data object"]
+        raise ReportError("coverage report must contain exactly one data object")
     payload = data[0]
     totals = payload.get("totals")
     files = payload.get("files")
     if not isinstance(totals, dict) or not isinstance(files, list):
-        return ["coverage report omitted totals or files"]
+        raise ReportError("coverage report omitted totals or files")
 
-    failures: list[str] = []
-    workspace = config.get("workspace", {})
-    if not isinstance(workspace, dict):
-        return ["coverage config [workspace] must be a table"]
-    for metric, floor in workspace.items():
-        observed = percentage(totals, metric)
-        if observed < float(floor):
-            failures.append(
-                f"workspace {metric}: {observed:.2f}% is below {float(floor):.2f}%"
-            )
-
-    summaries: dict[str, dict[str, object]] = {}
+    aggregate = {metric: percentage(totals, metric) for metric in ("lines", "branches")}
+    summaries: dict[str, dict[str, float]] = {}
     for entry in files:
         if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str):
             continue
         repo_path = normalized_repo_path(entry["filename"], root)
         summary = entry.get("summary")
         if repo_path is not None and isinstance(summary, dict):
-            summaries[repo_path] = summary
+            summaries[repo_path] = {
+                metric: percentage(summary, metric) for metric in ("lines", "branches")
+            }
+    return aggregate, summaries
 
-    configured_files = config.get("files", {})
+
+def coverage_py_metrics(summary: dict[str, object], *, context: str) -> dict[str, float]:
+    """Derive separate line and branch percentages from a coverage.py summary.
+
+    coverage.py's own `percent_covered` blends statements and branches into a
+    single number once `branch = True`, which cannot express the two floors
+    this ratchet keeps. The underlying counters can, so read those instead.
+    """
+    return {
+        "lines": ratio(
+            summary.get("covered_lines"),
+            summary.get("num_statements"),
+            context=f"{context} statement counters",
+        ),
+        "branches": ratio(
+            summary.get("covered_branches"),
+            summary.get("num_branches"),
+            context=f"{context} branch counters",
+        ),
+    }
+
+
+def normalize_coverage_py(report: dict[str, object], root: Path) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    totals = report.get("totals")
+    files = report.get("files")
+    if not isinstance(totals, dict) or not isinstance(files, dict):
+        raise ReportError("coverage report omitted totals or files")
+
+    aggregate = coverage_py_metrics(totals, context="totals")
+    summaries: dict[str, dict[str, float]] = {}
+    for filename, entry in files.items():
+        if not isinstance(filename, str) or not isinstance(entry, dict):
+            continue
+        summary = entry.get("summary")
+        repo_path = normalized_repo_path(filename, root)
+        if repo_path is not None and isinstance(summary, dict):
+            summaries[repo_path] = coverage_py_metrics(summary, context=repo_path)
+    return aggregate, summaries
+
+
+NORMALIZERS = {LLVM_FORMAT: normalize_llvm, COVERAGE_PY_FORMAT: normalize_coverage_py}
+
+
+def select_scope(config: dict[str, object], section: str | None) -> dict[str, object]:
+    if section is None:
+        return config
+    scope = config.get(section)
+    if not isinstance(scope, dict):
+        raise ReportError(f"coverage config has no [{section}] table")
+    return scope
+
+
+def enforce(
+    config: dict[str, object],
+    report: dict[str, object],
+    root: Path,
+    *,
+    section: str | None = None,
+    report_format: str = LLVM_FORMAT,
+) -> list[str]:
+    try:
+        scope = select_scope(config, section)
+        aggregate, summaries = NORMALIZERS[report_format](report, root)
+    except ReportError as error:
+        return [str(error)]
+
+    prefix = "" if section is None else f"{section} "
+    failures: list[str] = []
+
+    for aggregate_key in AGGREGATE_KEYS:
+        floors = scope.get(aggregate_key)
+        if floors is None:
+            continue
+        if not isinstance(floors, dict):
+            return [f"coverage config {prefix}[{aggregate_key}] must be a table"]
+        for metric, floor in floors.items():
+            if metric not in aggregate:
+                failures.append(f"{prefix}{aggregate_key}: unknown metric {metric!r}")
+                continue
+            observed = aggregate[metric]
+            if observed < float(floor):
+                failures.append(
+                    f"{prefix}{aggregate_key} {metric}: {observed:.2f}% is below {float(floor):.2f}%"
+                )
+
+    configured_files = scope.get("files", {})
     if not isinstance(configured_files, dict):
         return ["coverage config [files] must be a table"]
     for filename, floors in configured_files.items():
@@ -73,7 +194,10 @@ def enforce(config: dict[str, object], report: dict[str, object], root: Path) ->
             failures.append(f"coverage floors for {filename} must be a table")
             continue
         for metric, floor in floors.items():
-            observed = percentage(summaries[filename], metric)
+            if metric not in summaries[filename]:
+                failures.append(f"{filename}: unknown metric {metric!r}")
+                continue
+            observed = summaries[filename][metric]
             if observed < float(floor):
                 failures.append(
                     f"{filename} {metric}: {observed:.2f}% is below {float(floor):.2f}%"
@@ -85,6 +209,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT / "coverage.toml")
+    parser.add_argument(
+        "--section",
+        default=None,
+        help="coverage.toml table holding this lane's floors; the root tables when omitted",
+    )
+    parser.add_argument(
+        "--format",
+        dest="report_format",
+        choices=sorted(NORMALIZERS),
+        default=LLVM_FORMAT,
+        help="report producer: cargo-llvm-cov JSON (default) or coverage.py JSON",
+    )
     return parser.parse_args()
 
 
@@ -93,13 +229,20 @@ def main() -> int:
     with args.config.open("rb") as handle:
         config = tomllib.load(handle)
     report = json.loads(args.report.read_text(encoding="utf-8"))
-    failures = enforce(config, report, ROOT)
+    failures = enforce(
+        config,
+        report,
+        ROOT,
+        section=args.section,
+        report_format=args.report_format,
+    )
+    label = args.section or "workspace"
     if failures:
-        print("Coverage ratchet failed:", file=sys.stderr)
+        print(f"Coverage ratchet failed ({label}):", file=sys.stderr)
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print("Coverage ratchet passed.")
+    print(f"Coverage ratchet passed ({label}).")
     return 0
 
 
