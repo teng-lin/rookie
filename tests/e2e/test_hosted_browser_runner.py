@@ -605,6 +605,46 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             hosted.CDP_CORPUS_TIMEOUT_MS,
         )
 
+    def test_cdp_budget_environment_reaches_the_real_helper(self) -> None:
+        """Close the Python/Node loop with the real helper, not a mock of it.
+
+        The budgets only take effect if the names the harness exports are the
+        names the helper reads. A mocked `subprocess.run` cannot catch a rename
+        on either side, so parse the environment through the shipped helper.
+        """
+
+        if hosted.shutil.which("node") is None:
+            self.skipTest("node is required to check the helper's env contract")
+        with mock.patch.object(hosted.subprocess, "run") as run:
+            hosted.navigate_chromium_cdp(
+                9222,
+                "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+                corpus_timeout_ms=hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+            )
+        _args, kwargs = run.call_args
+
+        script = (
+            "import('./navigate_chromium_cdp.mjs').then(({corpusOptionsFromEnv}) "
+            "=> console.log(JSON.stringify(corpusOptionsFromEnv())))"
+        )
+        completed = hosted.subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=str(hosted.ROOT / "tests/e2e"),
+            env=kwargs["env"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            hosted.json.loads(completed.stdout),
+            {
+                "corpusTimeoutMs": hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+                "corpusAttempts": hosted.CDP_CORPUS_ATTEMPTS,
+                "commandTimeoutMs": hosted.CDP_COMMAND_TIMEOUT_MS,
+            },
+        )
+
     def test_cdp_helper_receives_bounded_budgets_and_a_clearing_timeout(self) -> None:
         with mock.patch.object(hosted.subprocess, "run") as run:
             hosted.navigate_chromium_cdp(
