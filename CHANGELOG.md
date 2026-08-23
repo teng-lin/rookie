@@ -17,6 +17,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   logged windows, and each hosted-CI launch first reaps leftover processes of
   its own launch root and product so a stale vendor service cannot contend
   with it.
+- Linux Chromium v11 cookies now fall back to the empty-password key when the
+  OS keyring yields no usable password. The keyring password, when there is
+  one, is still tried first; the empty-password key is appended as a last
+  candidate so profiles Chromium sealed with its own `BASICTEXT` fallback (no
+  reachable Secret Service or KWallet) and profiles whose keyring entry is
+  stale are decryptable instead of failing the whole v11 tier. A value that
+  the fallback cannot open is still reported with the keyring diagnostic and
+  its retryability, so the fallback adds decryptions without hiding why the
+  keyring lookup failed.
 
 ### Removed
 

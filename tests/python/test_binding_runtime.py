@@ -38,6 +38,35 @@ _HEARTBEAT_INTERVAL = 0.001
 _EXPIRED_MS = 1_000_000_000
 _LIVE_MS = 4_102_444_800_000
 
+# Set by `scripts/run-python-coverage.py` for the suite it runs against the
+# wheel it just built with `-C instrument-coverage`, and by nothing else. Not
+# keyed off `LLVM_PROFILE_FILE`: that only says where an instrumented binary
+# would write its profile, so a developer exporting it for an unrelated
+# profiling task would stand a test down against an uninstrumented wheel. Any
+# future lane that instruments the extension has to set this too.
+_COVERAGE_INSTRUMENTED = os.environ.get("ROOKIE_COOKIES_INSTRUMENTED") == "1"
+
+# Only a *scaling* measurement needs this, and only the measurement -- never a
+# correctness assertion. Instrumentation turns every basic block into a shared
+# atomic counter increment, so N threads on one extraction path contend on the
+# same counter cache lines and the parallel speedup collapses to roughly 1x:
+# measured at 0.96x and 1.11x on `Python binding coverage (macos-latest)` while
+# all four uninstrumented `Python build and tests (macos-latest)` jobs passed
+# the same suite (issue #337). The other timing-sensitive tests in this file
+# are not exposed the same way: `GilReleaseTest` asks whether another Python
+# thread runs *at all* during one extraction, which counter contention inside
+# that single thread does not change, and the cancellation and `_sized_store`
+# timings only benefit from instrumentation making an extraction longer.
+_INSTRUMENTED_SKIP_REASON = (
+    "the extension under test was built with -C instrument-coverage "
+    "(ROOKIE_COOKIES_INSTRUMENTED=1): LLVM's shared atomic per-block counters "
+    "serialize threads running the same code, which flattens real parallelism "
+    "to about 1x and would make this measurement report serialization that is "
+    "not there. Everything above this point still ran and was asserted, and "
+    "the bound itself is not disabled -- it is measured, and must hold, in "
+    "every uninstrumented lane"
+)
+
 _UNICODE_DOMAIN = ".юникод.test"
 _UNICODE_NAME = "имя"
 _UNICODE_VALUE = "значение-\U0001f36a"
@@ -305,8 +334,14 @@ class SameInterpreterConcurrencyTest(unittest.TestCase):
                 thread.join(timeout=120)
             parallel = time.perf_counter() - started
 
+        # Asserted before any instrumentation check, so a coverage lane still
+        # runs four concurrent extractions over one store and still fails on a
+        # crash, an exception, or a thread that never finished. Only the
+        # wall-clock inference below is stood down there.
         self.assertEqual(failures, [])
         self.assertFalse([thread for thread in threads if thread.is_alive()])
+        if _COVERAGE_INSTRUMENTED:
+            self.skipTest(_INSTRUMENTED_SKIP_REASON)
         # Two cores are enough to beat a fully serial run by a clear margin;
         # the bound is loose so a busy runner does not turn a real overlap into
         # a red build, while a fully serialized binding still fails it.
