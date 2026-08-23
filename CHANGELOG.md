@@ -6,6 +6,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- The `flat_only` value for a browser registry root's `legacy_profile_layout`
+  is retired. Opera was its only declarant, and its refusal to fall back to a
+  sibling `Default` profile was the discovery defect fixed in 0.6.0; since
+  `flat_and_default` behaves identically wherever no `Default` directory
+  exists, nothing is left for the name to describe. `browser_registry.json`
+  now fails to load if any root declares it, naming `flat_and_default` as the
+  replacement rather than silently falling back to the default layout.
+
 ## [0.6.0] - 2026-08-22
 
 ### Added
