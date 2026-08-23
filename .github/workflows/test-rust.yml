@@ -465,7 +465,9 @@ jobs:
           path: |
             target/python-coverage/native-coverage.json
             target/python-coverage/pure-coverage.json
-          if-no-files-found: error
+          # A measurement failure already fails the step above; erroring here
+          # too would bury that first failure under a second one.
+          if-no-files-found: warn
 
   linux:
     name: manylinux Python wheel

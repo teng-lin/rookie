@@ -33,7 +33,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import sysconfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,9 +107,14 @@ def require_maturin() -> None:
 
 
 def venv_python(venv: Path) -> Path:
-    # sysconfig knows the layout this interpreter family uses; hard-coding
-    # bin/ vs Scripts/ by platform gets MSYS and friends wrong.
-    scripts = "Scripts" if sysconfig.get_preferred_scheme("prefix") == "nt" else "bin"
+    """The interpreter `python -m venv` just created inside `venv`.
+
+    Keyed off `os.name` rather than `sysconfig.get_preferred_scheme`: that
+    function reports `"venv"`, not `"nt"`, whenever the *running* interpreter
+    is itself inside a virtual environment, which is exactly the case in CI.
+    A venv's layout follows the platform, not the parent interpreter.
+    """
+    scripts = "Scripts" if os.name == "nt" else "bin"
     suffix = ".exe" if os.name == "nt" else ""
     return venv / scripts / f"python{suffix}"
 

@@ -17,9 +17,15 @@ Two deliberate omissions:
   annotation fidelity is `scripts/check-python-stubs.py`'s job. What is pinned
   here is the part a caller writes: names, ordering, keyword-only-ness, and
   defaults.
-* Browsers whose registry root is a glob, or whose store is not a SQLite file
-  this suite can synthesize, carry a `seeding_exception` instead of a success
-  probe. Their success path is the exact-corpus E2E lane; see
+* A browser export can exist on a platform the browser registry does not
+  place that browser on -- `arc` is exported everywhere but only has Windows
+  and macOS roots -- and some stores are not SQLite files this suite can
+  synthesize. Those cells carry a per-platform entry in `seeding_exceptions`
+  instead of a success probe, and
+  `test_seeding_exceptions_match_what_the_registry_can_actually_seed` checks
+  both directions: a missing reason fails, and so does a reason for a cell
+  that *is* seedable. An exception can therefore never be used to silence a
+  real failure. Their success path is the exact-corpus E2E lane; see
   `tests/e2e/browser_coverage.json`.
 """
 
@@ -32,9 +38,9 @@ import os
 import sqlite3
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 from unittest import mock
 
 import rookie_cookies
@@ -301,34 +307,70 @@ def expect_seeded_cookie(value: object) -> Optional[str]:
     return None
 
 
-def expect_cookie_list(value: object) -> Optional[str]:
-    return _is_cookie_list(value)
-
-
 def expect_detailed_cookies(value: object) -> Optional[str]:
     if not isinstance(value, list):
         return f"expected a list, got {type(value).__name__}"
+    if not value:
+        # Every detailed probe runs against a store this suite just seeded, so
+        # an empty list is an extraction that found nothing -- not a shape the
+        # export may legitimately return here.
+        return "expected the seeded store's detailed records, got an empty list"
     for row in value:
         if not isinstance(row, dict) or set(row) != {"cookie", "context"}:
             return f"expected detailed cookie records, got {row!r}"
+    names = [row["cookie"].get("name") for row in value]
+    if SEEDED_NAME not in names:
+        return f"seeded cookie {SEEDED_NAME!r} missing from the detailed records"
     return None
+
+
+def _report_cookie_names(report: object) -> list[str]:
+    """Every cookie name a report emitted, mapping or dataclass alike."""
+
+    def field(node: object, name: str) -> object:
+        return node.get(name, []) if isinstance(node, dict) else getattr(node, name)
+
+    names: list[str] = []
+    for profile in field(report, "profiles"):  # type: ignore[union-attr]
+        for source in field(profile, "sources"):  # type: ignore[union-attr]
+            for cookie in field(source, "cookies"):  # type: ignore[union-attr]
+                names.append(
+                    cookie.get("name") if isinstance(cookie, dict) else cookie.name
+                )
+    return names
 
 
 def expect_report(value: object) -> Optional[str]:
     if not isinstance(value, dict) or "status" not in value:
         return f"expected an extraction report mapping, got {value!r}"
+    # A `status` key alone is satisfied by "no_sources" and by "failed", so a
+    # report that found nothing would pass a probe that had just seeded a store.
+    if SEEDED_NAME not in _report_cookie_names(value):
+        return (
+            f"report status {value['status']!r} emitted no {SEEDED_NAME!r} cookie; "
+            "the seeded store was not extracted"
+        )
     return None
 
 
 def expect_dto_report(value: object) -> Optional[str]:
     if not isinstance(value, rookie_cookies.dto.ExtractionReport):
         return f"expected dto.ExtractionReport, got {type(value).__name__}"
+    if SEEDED_NAME not in _report_cookie_names(value):
+        return (
+            f"dto report status {value.status!r} emitted no {SEEDED_NAME!r} cookie; "
+            "the seeded store was not extracted"
+        )
     return None
 
 
 def expect_descriptor_list(value: object) -> Optional[str]:
     if not isinstance(value, list):
         return f"expected a list, got {type(value).__name__}"
+    if not value:
+        # Each descriptor probe either seeds a profile first or reads the
+        # static registry, so an empty list means discovery found nothing.
+        return "expected at least one descriptor, got an empty list"
     return None
 
 
@@ -336,6 +378,8 @@ def expect_dto_list(kind: type) -> Callable[[object], Optional[str]]:
     def check(value: object) -> Optional[str]:
         if not isinstance(value, list):
             return f"expected a list, got {type(value).__name__}"
+        if not value:
+            return f"expected at least one {kind.__name__}, got an empty list"
         for item in value:
             if not isinstance(item, kind):
                 return f"expected {kind.__name__} items, got {type(item).__name__}"
@@ -397,7 +441,9 @@ class Export:
     success: Optional[Callable[[Path], object]] = None
     expect: Optional[Callable[[object], Optional[str]]] = None
     failure: Optional[Failure] = None
-    seeding_exception: Optional[str] = None
+    # Platform -> why this export has no success probe there. Only browser
+    # exports use it; see this module's docstring.
+    seeding_exceptions: Mapping[str, str] = field(default_factory=dict)
     notes: str = ""
 
 
@@ -432,20 +478,36 @@ def _browser_export(
     name: str,
     platforms: frozenset[str] = ALL_PLATFORMS,
     *,
-    seeding_exception: Optional[str] = None,
+    seeding_exceptions: Optional[Mapping[str, str]] = None,
 ) -> Export:
+    """A per-browser convenience export, seeded at its own registry root.
+
+    The failure probe runs on every platform the export exists on -- an absent
+    browser is a classified engine error, not an empty list. The success probe
+    runs wherever this suite can materialize a store; `seeding_exceptions`
+    names the platforms where it cannot, and why.
+    """
+    exceptions = dict(seeding_exceptions or {})
     return Export(
         name=name,
         kind="function",
         platforms=platforms,
         signature="(domains=None)",
-        success=None if seeding_exception else _browser_success(name),
-        expect=None if seeding_exception else expect_seeded_cookie,
+        success=_browser_success(name),
+        expect=expect_seeded_cookie,
         failure=_browser_failure(name),
-        seeding_exception=seeding_exception,
+        seeding_exceptions=exceptions,
     )
 
 
+_ARC_LINUX_EXCEPTION = (
+    "Arc is exported on every platform but the registry declares no Linux "
+    "root for it, so there is no path here to seed."
+)
+_ARC_WINDOWS_EXCEPTION = (
+    "Arc's Windows root is a glob under the MSIX package directory, whose "
+    "publisher suffix only a real install fixes."
+)
 _SAFARI_EXCEPTION = (
     "Safari stores cookies in a binarycookies container this suite cannot "
     "synthesize; its success path is the macOS native E2E lane."
@@ -460,7 +522,13 @@ _OCTO_EXCEPTION = (
 )
 
 BROWSER_EXPORTS: tuple[Export, ...] = (
-    _browser_export("arc", frozenset({MACOS, WINDOWS})),
+    _browser_export(
+        "arc",
+        seeding_exceptions={
+            LINUX: _ARC_LINUX_EXCEPTION,
+            WINDOWS: _ARC_WINDOWS_EXCEPTION,
+        },
+    ),
     _browser_export("brave"),
     _browser_export("chrome"),
     _browser_export("chromium"),
@@ -472,12 +540,20 @@ BROWSER_EXPORTS: tuple[Export, ...] = (
     _browser_export("zen"),
     _browser_export("cachy", frozenset({LINUX})),
     _browser_export("opera_gx", frozenset({MACOS, WINDOWS})),
-    _browser_export("safari", frozenset({MACOS}), seeding_exception=_SAFARI_EXCEPTION),
     _browser_export(
-        "internet_explorer", frozenset({WINDOWS}), seeding_exception=_IE_EXCEPTION
+        "safari",
+        frozenset({MACOS}),
+        seeding_exceptions={MACOS: _SAFARI_EXCEPTION},
     ),
     _browser_export(
-        "octo_browser", frozenset({WINDOWS}), seeding_exception=_OCTO_EXCEPTION
+        "internet_explorer",
+        frozenset({WINDOWS}),
+        seeding_exceptions={WINDOWS: _IE_EXCEPTION},
+    ),
+    _browser_export(
+        "octo_browser",
+        frozenset({WINDOWS}),
+        seeding_exceptions={WINDOWS: _OCTO_EXCEPTION},
     ),
 )
 
@@ -729,6 +805,16 @@ def _chromium_based_failure(detailed: bool) -> Failure:
             return function(str(home / MISSING / "Local State"), missing)
         return function(missing)
 
+    if sys.platform == WINDOWS:
+        # The Windows overload validates its key_path before it ever opens the
+        # database, so an absent Local State is a source fault rather than the
+        # engine failure the Unix overload reports for a missing database.
+        return Failure(
+            probe=probe,
+            exception=rookie_cookies.RookieSourceError,
+            kind="source",
+            code="not_a_regular_file",
+        )
     return Failure(
         probe=probe,
         exception=rookie_cookies.RookieEngineError,
@@ -1058,3 +1144,31 @@ EXPORTS_BY_NAME: dict[str, Export] = {export.name: export for export in EXPORTS}
 
 def applicable(export: Export) -> bool:
     return current_platform() in export.platforms
+
+
+def seeding_exception(export: Export) -> Optional[str]:
+    """Why this export has no success probe on the platform running the tests."""
+    return export.seeding_exceptions.get(current_platform())
+
+
+def can_seed(browser_id: str, platform: Optional[str] = None) -> bool:
+    """Whether this suite can materialize a store for `browser_id`.
+
+    Answered from the registry, not from a hand-maintained list, so a browser
+    that gains or loses a platform root moves this answer on its own. The
+    `platform` argument exists so one host can check all three: seedability
+    depends only on the registry, and waiting for the other two platforms' CI
+    to disagree is a slow way to find a contradiction.
+
+    The path handed to `preferred_root` is irrelevant here -- what matters is
+    only whether the template still holds a placeholder or a glob after
+    expansion, and whether this suite has a seeder for its discovery kind.
+    """
+    entry = registry_entries(platform or current_platform()).get(browser_id)
+    if entry is None:
+        return False
+    try:
+        _, discovery = preferred_root(entry, Path("."))
+    except UnseedableBrowser:
+        return False
+    return discovery in SEEDERS

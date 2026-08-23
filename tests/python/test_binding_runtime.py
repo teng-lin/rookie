@@ -11,20 +11,27 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Iterator, Optional
 
 import rookie_cookies
 
-# Large enough that the extraction is comfortably longer than a heartbeat
-# thread's tick even in a release build, and every row is already expired so
-# the work happens in Rust without materializing a huge Python list.
-_LARGE_ROWS = 150_000
+# Starting size for `_sized_store`, which grows it until one extraction is
+# long enough to observe. Every row is already expired, so the work happens in
+# Rust without materializing a large Python list on the way out.
+_LARGE_ROWS = 100_000
+# How long an extraction must take before a thread-scheduling assertion about
+# it means anything. Two OS scheduler quanta, with room to spare.
+_MIN_WINDOW_SECONDS = 0.03
+# Bounded so a pathologically fast machine fails loudly rather than seeding
+# until it runs out of memory.
+_MAX_DOUBLINGS = 3
 _EXPIRED_MS = 1_000_000_000
 _LIVE_MS = 4_102_444_800_000
 
@@ -55,7 +62,7 @@ CREATE TABLE moz_cookies (
 """
 
 
-def _seed_gecko(path: Path, rows: list[tuple[str, int, str, str]]) -> Path:
+def _seed_gecko(path: Path, rows: Iterable[tuple[str, int, str, str]]) -> Path:
     connection = sqlite3.connect(str(path))
     try:
         connection.execute("PRAGMA user_version = 16")
@@ -69,13 +76,39 @@ def _seed_gecko(path: Path, rows: list[tuple[str, int, str, str]]) -> Path:
     return path
 
 
-def _seed_large(path: Path) -> Path:
-    return _seed_gecko(
-        path,
-        [
-            (f".host{index % 977}.test", _EXPIRED_MS, f"name{index}", f"value{index}")
-            for index in range(_LARGE_ROWS)
-        ],
+def _expired_rows(count: int) -> Iterator[tuple[str, int, str, str]]:
+    # A generator, not a list: at the sizes `_sized_store` can reach, the
+    # intermediate list costs more memory than the database it produces.
+    for index in range(count):
+        yield (f".host{index % 977}.test", _EXPIRED_MS, f"name{index}", f"value{index}")
+
+
+def _seed_large(path: Path, rows: int = _LARGE_ROWS) -> Path:
+    return _seed_gecko(path, _expired_rows(rows))
+
+
+def _sized_store(directory: Path) -> tuple[Path, float]:
+    """A store one extraction of which takes at least `_MIN_WINDOW_SECONDS`.
+
+    A fixed row count cannot serve both build profiles: these tests were
+    written against a debug wheel where 100k rows take a few hundred
+    milliseconds, while the release wheel CI installs is several times faster,
+    and a window shorter than a scheduler quantum makes any assertion about
+    another thread meaningless. Doubling until the extraction is long enough
+    makes the tests independent of the build profile and of the machine.
+    """
+    rows = _LARGE_ROWS
+    for attempt in range(_MAX_DOUBLINGS + 1):
+        database = _seed_large(directory / f"cookies-{attempt}.sqlite", rows)
+        started = time.perf_counter()
+        rookie_cookies.from_path(str(database))
+        elapsed = time.perf_counter() - started
+        if elapsed >= _MIN_WINDOW_SECONDS:
+            return database, elapsed
+        rows *= 2
+    raise AssertionError(
+        f"{rows // 2} expired rows still extract in under "
+        f"{_MIN_WINDOW_SECONDS}s; raise _MAX_DOUBLINGS"
     )
 
 
@@ -110,18 +143,22 @@ class _Heartbeat:
 class GilReleaseTest(unittest.TestCase):
     def test_a_long_extraction_lets_other_python_threads_run(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rookie-python-gil-") as temp:
-            database = _seed_large(Path(temp) / "cookies.sqlite")
+            database, _ = _sized_store(Path(temp))
             with _Heartbeat() as heartbeat:
                 started = time.perf_counter()
                 rookie_cookies.from_path(str(database))
                 elapsed = time.perf_counter() - started
                 ticks = heartbeat.ticks
 
+        # `_sized_store` guarantees the window; assert it again because a
+        # warm page cache can make the second read of the same file faster.
         self.assertGreater(
             elapsed,
-            0.01,
-            f"{_LARGE_ROWS} rows extracted in {elapsed:.4f}s, too short to prove anything",
+            _MIN_WINDOW_SECONDS / 2,
+            f"extraction took {elapsed:.4f}s, too short to prove anything",
         )
+        # Held GIL means exactly zero ticks, whatever the machine: the
+        # heartbeat cannot run a single bytecode without it.
         self.assertGreater(
             ticks,
             0,
@@ -149,23 +186,45 @@ class CancellationTest(unittest.TestCase):
         self.assertEqual(raised.exception.stop_reason, "cancelled")
 
     def test_a_handle_cancelled_from_another_thread_stops_an_in_flight_read(self) -> None:
-        handle = rookie_cookies.CancellationHandle()
-        with tempfile.TemporaryDirectory(prefix="rookie-python-cancel-") as temp:
-            database = _seed_large(Path(temp) / "cookies.sqlite")
+        """Cancel from a thread that is already running, mid-extraction.
 
-            canceller = threading.Timer(0.005, handle.cancel)
-            canceller.start()
-            try:
+        A `threading.Timer` would race the extraction with its own thread
+        startup, which on a fast release build the extraction can win. Starting
+        the canceller first and waking it through an `Event` leaves only the
+        wake-up itself, and `_sized_store` makes the extraction long enough to
+        absorb that.
+        """
+        handle = rookie_cookies.CancellationHandle()
+        start_cancelling = threading.Event()
+        finished = threading.Event()
+
+        def cancel_when_released() -> None:
+            start_cancelling.wait(timeout=30)
+            while not finished.is_set():
+                if handle.cancel():
+                    return
+                time.sleep(0.001)
+
+        canceller = threading.Thread(target=cancel_when_released, daemon=True)
+        canceller.start()
+        try:
+            with tempfile.TemporaryDirectory(prefix="rookie-python-cancel-") as temp:
+                database, _ = _sized_store(Path(temp))
+                start_cancelling.set()
                 with self.assertRaises(rookie_cookies.RookieStoppedError) as raised:
                     rookie_cookies.cookies_from_path(str(database), None, None, handle)
-            finally:
-                canceller.cancel()
+        finally:
+            finished.set()
+            start_cancelling.set()
+            canceller.join(timeout=5)
 
         self.assertEqual(raised.exception.stop_reason, "cancelled")
 
     def test_an_expired_deadline_reports_a_distinct_stop_reason(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rookie-python-timeout-") as temp:
             database = _seed_large(Path(temp) / "cookies.sqlite")
+            # A zero budget is already expired at the first checkpoint, so this
+            # one needs no window at all.
             with self.assertRaises(rookie_cookies.RookieStoppedError) as raised:
                 rookie_cookies.cookies_from_path(str(database), None, 0.0)
 
@@ -218,7 +277,7 @@ class SameInterpreterConcurrencyTest(unittest.TestCase):
 
 
 class LoggingBridgeTest(unittest.TestCase):
-    def test_records_stay_under_the_package_logger_and_root_is_untouched(self) -> None:
+    def _capture(self) -> tuple[list[logging.LogRecord], tuple[object, int, object]]:
         root = logging.getLogger()
         root_state = (list(root.handlers), root.level, list(root.filters))
 
@@ -239,19 +298,33 @@ class LoggingBridgeTest(unittest.TestCase):
                     Path(temp) / "cookies.sqlite",
                     [(".example.test", _LIVE_MS, "session", "value")],
                 )
-                # Twice, because pyo3-log caches each target's level and the
-                # first call is what populates that cache.
                 rookie_cookies.cookies_from_path(str(database))
                 rookie_cookies.cookies_from_path(str(database))
         finally:
             package.removeHandler(handler)
             package.setLevel(previous_level)
+        return captured, root_state
 
+    def test_the_bridge_leaves_the_root_logger_untouched(self) -> None:
+        # Unconditional: this half holds whether or not any record is emitted,
+        # so it is kept separate from the half that needs one.
+        _, root_state = self._capture()
+        root = logging.getLogger()
         self.assertEqual((list(root.handlers), root.level, list(root.filters)), root_state)
-        self.assertTrue(
-            captured,
-            "the bridge emitted nothing, so this cannot show where it emits",
-        )
+
+    def test_records_stay_under_the_package_logger(self) -> None:
+        captured, _ = self._capture()
+        if not captured:
+            # pyo3-log caches each Rust target's level the first time that
+            # target logs and never revisits it, so this can only observe
+            # records when this module's import-time `setLevel` ran before any
+            # extraction anywhere in the process. Skipping with the reason
+            # beats failing on a true statement about the bridge.
+            self.skipTest(
+                "pyo3-log had already cached this target's level before this "
+                "module was imported; run the whole tests/python suite, or this "
+                "file on its own"
+            )
         for record in captured:
             with self.subTest(logger=record.name):
                 self.assertTrue(
@@ -260,14 +333,29 @@ class LoggingBridgeTest(unittest.TestCase):
                     f"the bridge emitted outside the package logger: {record.name}",
                 )
 
-    def test_the_bridge_does_not_install_a_root_handler_on_import(self) -> None:
-        import importlib
+    def test_importing_the_package_installs_no_root_handler(self) -> None:
+        """Checked in a fresh interpreter, because this one already imported it.
 
-        root = logging.getLogger()
-        before = list(root.handlers)
-        importlib.import_module("rookie_cookies")
-        importlib.import_module("rookie_cookies.rookie_cookies")
-        self.assertEqual(list(root.handlers), before)
+        `importlib.import_module` on an already-loaded module returns it from
+        `sys.modules` without re-running initialization, so an in-process check
+        could not see an import-time side effect at all.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import logging, rookie_cookies;"
+                " root = logging.getLogger();"
+                " print(len(root.handlers), root.level)",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        handlers, level = result.stdout.split()
+        self.assertEqual(handlers, "0", "importing the package installed a root handler")
+        self.assertEqual(level, str(logging.WARNING), "import changed the root level")
 
 
 class DiagnosticAttributeTest(unittest.TestCase):
@@ -356,6 +444,8 @@ class DiagnosticAttributeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rookie-python-exhaust-") as temp:
             database = _seed_large(Path(temp) / "cookies.sqlite")
             observed = set()
+            # Both probes are already terminal at the first checkpoint, so
+            # neither depends on how long the extraction would have taken.
             handle = rookie_cookies.CancellationHandle()
             handle.cancel()
             for probe in (
