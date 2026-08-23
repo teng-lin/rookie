@@ -126,6 +126,15 @@ impl fmt::Debug for KeyCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NonEmptyKeyCandidates {
   candidates: Vec<KeyCandidate>,
+  /// The provider failure that a fallback candidate stands in for.
+  ///
+  /// A provider that answers a failed credential lookup with a fixed fallback
+  /// key (Chromium's own `BASICTEXT` behavior on Linux) still has candidates
+  /// to try, so the tier is not a `Failure`. Keeping the original failure here
+  /// means a row that no candidate can decrypt is still reported with the
+  /// provider diagnostic and retryability that caused the fallback, instead of
+  /// being flattened into an anonymous decrypt error.
+  fallback_failure: Option<ChromiumKeyFailure>,
 }
 
 impl NonEmptyKeyCandidates {
@@ -134,7 +143,18 @@ impl NonEmptyKeyCandidates {
     if candidates.is_empty() {
       return None;
     }
-    Some(Self { candidates })
+    Some(Self {
+      candidates,
+      fallback_failure: None,
+    })
+  }
+
+  /// Marks these candidates as a fallback for `failure`.
+  // Only the Linux keyring provider currently needs a fallback tier.
+  #[allow(dead_code)]
+  pub(crate) fn with_fallback_failure(mut self, failure: ChromiumKeyFailure) -> Self {
+    self.fallback_failure = Some(failure);
+    self
   }
 
   #[cfg_attr(
@@ -303,6 +323,7 @@ impl ChromiumKeyOutcomes {
       ChromiumKeyOutcome::Success(candidates) => ChromiumKeyRoute::Candidates {
         tier,
         candidates: candidates.as_slice(),
+        fallback_failure: candidates.fallback_failure.as_ref(),
       },
       ChromiumKeyOutcome::NotApplicable => ChromiumKeyRoute::NotApplicable { tier },
       ChromiumKeyOutcome::Failure(failure) => ChromiumKeyRoute::Failure { tier, failure },
@@ -322,6 +343,9 @@ pub(crate) enum ChromiumKeyRoute<'a> {
   Candidates {
     tier: ChromiumKeyTier,
     candidates: &'a [KeyCandidate],
+    /// Present when these candidates are a provider fallback; the row loop
+    /// reports this failure when no candidate decrypts the value.
+    fallback_failure: Option<&'a ChromiumKeyFailure>,
   },
   NotApplicable {
     tier: ChromiumKeyTier,
@@ -338,10 +362,15 @@ pub(crate) enum ChromiumKeyRoute<'a> {
 impl fmt::Debug for ChromiumKeyRoute<'_> {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Candidates { tier, candidates } => formatter
+      Self::Candidates {
+        tier,
+        candidates,
+        fallback_failure,
+      } => formatter
         .debug_struct("Candidates")
         .field("tier", tier)
         .field("candidates", candidates)
+        .field("fallback_failure", fallback_failure)
         .finish(),
       Self::NotApplicable { tier } => formatter
         .debug_struct("NotApplicable")
@@ -500,7 +529,10 @@ mod tests {
       (ChromiumCipherVersion::V11, ChromiumKeyTier::V11, 0x11),
       (ChromiumCipherVersion::V20, ChromiumKeyTier::V20, 0x20),
     ] {
-      let ChromiumKeyRoute::Candidates { tier, candidates } = outcomes.route(cipher) else {
+      let ChromiumKeyRoute::Candidates {
+        tier, candidates, ..
+      } = outcomes.route(cipher)
+      else {
         panic!("expected candidate route for {cipher:?}");
       };
       assert_eq!(tier, expected_tier);

@@ -238,8 +238,12 @@ where
     }
   };
 
-  let (key_type, candidates) = match outcomes.route(cipher_version) {
-    ChromiumKeyRoute::Candidates { tier, candidates } => {
+  let (key_type, candidates, provider_fallback) = match outcomes.route(cipher_version) {
+    ChromiumKeyRoute::Candidates {
+      tier,
+      candidates,
+      fallback_failure,
+    } => {
       log::debug!("Chromium cipher tier: {tier}");
       let prefix = match cipher_version {
         super::chromium_crypto::ChromiumCipherVersion::V10 => b"v10",
@@ -247,7 +251,11 @@ where
         super::chromium_crypto::ChromiumCipherVersion::V20 => b"v20",
         _ => unreachable!("candidate routes are only emitted for keyed tiers"),
       };
-      (prefix.as_slice(), candidates)
+      (
+        prefix.as_slice(),
+        candidates,
+        fallback_failure.map(|failure| (tier, failure)),
+      )
     }
     ChromiumKeyRoute::NotApplicable { tier } => {
       return Err(ChromiumCookieValueError::ProviderUnavailable(anyhow!(
@@ -309,6 +317,16 @@ where
       },
       Err(error) => log::debug!("Failed to decrypt with a key: {error}"),
     }
+  }
+
+  // Every candidate was a stand-in for a failed credential lookup, so the
+  // provider failure is the actionable diagnostic rather than the decrypt or
+  // decode error the substitute key happened to produce.
+  if let Some((tier, failure)) = provider_fallback {
+    return Err(ChromiumCookieValueError::ProviderFailed {
+      error: anyhow!("Chromium {tier} key provider failed: {}", failure.message()),
+      retryability: failure.retryability(),
+    });
   }
 
   match last_decode_error {
@@ -388,6 +406,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::browser::chromium_crypto::{ChromiumKeyFailure, ChromiumKeyOutcome};
   #[cfg(unix)]
   use crate::browser::chromium_platform_keys::create_pbkdf2_key;
   #[cfg(target_os = "windows")]
@@ -832,6 +851,77 @@ mod tests {
     let error = decrypt_encrypted_value(".example.com", "orig".to_string(), b"v1", &[], 23)
       .expect_err("malformed ciphertext must not expose the plaintext column");
     assert!(error.to_string().contains("shorter than the 3-byte"));
+  }
+
+  /// Builds candidates that stand in for a failed credential lookup.
+  fn fallback_outcome(candidate: Vec<u8>, message: &str) -> ChromiumKeyOutcome {
+    let outcome = ChromiumKeyOutcome::success(vec![candidate]).expect("nonempty candidate");
+    let ChromiumKeyOutcome::Success(candidates) = outcome else {
+      panic!("success fixture must be a candidate outcome");
+    };
+    ChromiumKeyOutcome::Success(candidates.with_fallback_failure(
+      ChromiumKeyFailure::new_with_retryability(message, Retryability::Retryable),
+    ))
+  }
+
+  #[test]
+  fn provider_fallback_candidates_keep_the_provider_failure_when_none_decrypt() {
+    let outcomes = ChromiumKeyOutcomes {
+      v10: ChromiumKeyOutcome::NotApplicable,
+      v11: fallback_outcome(vec![0x11; 4], "all Linux keyring backends failed: locked"),
+      v20: ChromiumKeyOutcome::NotApplicable,
+    };
+
+    let error = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v11payload",
+      &outcomes,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| Ok(()),
+        decrypt_candidate: |_: &[u8], _: &[u8]| Err(anyhow!("candidate rejected")),
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect_err("a fallback that decrypts nothing must not hide why the provider failed");
+
+    assert!(matches!(
+      error,
+      ChromiumCookieValueError::ProviderFailed { .. }
+    ));
+    assert_eq!(error.retryability(), Retryability::Retryable);
+    assert_eq!(
+      error.to_string(),
+      "Chromium v11 key provider failed: all Linux keyring backends failed: locked"
+    );
+  }
+
+  #[test]
+  fn provider_fallback_candidates_that_decrypt_are_not_a_failure() {
+    let outcomes = ChromiumKeyOutcomes {
+      v10: ChromiumKeyOutcome::NotApplicable,
+      v11: fallback_outcome(vec![0x11; 4], "all Linux keyring backends failed: locked"),
+      v20: ChromiumKeyOutcome::NotApplicable,
+    };
+
+    let decrypted = decrypt_encrypted_value_with_cipher_adapter(
+      ".example.com",
+      String::new(),
+      b"v11payload",
+      &outcomes,
+      23,
+      CipherAdapter {
+        candidate_key_length: Some(4),
+        validate_keyed_envelope: |_: &[u8]| Ok(()),
+        decrypt_candidate: |_: &[u8], _: &[u8]| Ok(SecretBytes::new(b"fallback value".to_vec())),
+        decrypt_legacy: |_: &[u8]| panic!("keyed route must not call legacy decryption"),
+      },
+    )
+    .expect("a fallback key that decrypts the value is a success");
+
+    assert_eq!(decrypted, "fallback value");
   }
 
   #[cfg(unix)]
