@@ -484,7 +484,7 @@
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-next-local",
@@ -492,7 +492,7 @@
             "channel": "next",
             "discovery": "chromium_user_data",
             "priority": 20,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-developer-local",
@@ -500,7 +500,7 @@
             "channel": "developer",
             "discovery": "chromium_user_data",
             "priority": 30,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-stable-roaming",
@@ -508,7 +508,7 @@
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 40,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-next-roaming",
@@ -516,7 +516,7 @@
             "channel": "next",
             "discovery": "chromium_user_data",
             "priority": 50,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-developer-roaming",
@@ -524,7 +524,7 @@
             "channel": "developer",
             "discovery": "chromium_user_data",
             "priority": 60,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           }
         ],
         "capabilities": {
@@ -553,7 +553,7 @@
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-gx-stable-roaming",
@@ -561,7 +561,7 @@
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 20,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           }
         ],
         "capabilities": {
@@ -1150,7 +1150,7 @@
             "discovery": "chromium_user_data",
             "priority": 10,
             "legacy_priority": 0,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-next",
@@ -1159,7 +1159,7 @@
             "discovery": "chromium_user_data",
             "priority": 20,
             "legacy_priority": 1,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           },
           {
             "root_id": "opera-developer",
@@ -1168,7 +1168,7 @@
             "discovery": "chromium_user_data",
             "priority": 30,
             "legacy_priority": 2,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           }
         ],
         "capabilities": {
@@ -1202,7 +1202,7 @@
             "channel": "stable",
             "discovery": "chromium_user_data",
             "priority": 10,
-            "legacy_profile_layout": "flat_only"
+            "legacy_profile_layout": "flat_and_default"
           }
         ],
         "capabilities": {

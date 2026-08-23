@@ -62,19 +62,24 @@ fn compatibility_disposition(
     .iter()
     .find(|(profile, _)| &profile.browser_id == browser_id)
   else {
-    let failures = outcome.failure_ledger.as_slice().iter().filter(|failure| {
-      failure_browser_id(failure) == Some(browser_id)
-        && !registry::is_informational_discovery_issue(failure.code.as_str())
-    });
+    let failures = outcome
+      .failure_ledger
+      .as_slice()
+      .iter()
+      .filter(|failure| {
+        failure_browser_id(failure) == Some(browser_id)
+          && !registry::is_informational_discovery_issue(failure.code.as_str())
+      })
+      .collect::<Vec<_>>();
     if family == CompatibilityFamily::Chromium {
       let diagnostics = failures
-        .clone()
+        .iter()
         .map(|failure| failure.diagnostic.as_str())
         .take(MAX_ISSUE_SAMPLES)
         .collect::<Vec<_>>()
         .join("; ");
       if failures
-        .clone()
+        .iter()
         .any(|failure| failure.code.as_str().starts_with("profile_"))
       {
         return CompatibilityDisposition::Failed(Diagnostic::new_with_secrets(
@@ -85,7 +90,11 @@ fn compatibility_disposition(
           &[],
         ));
       }
-      if outcome.counters.browsers_detected > 0 {
+      // A detected root with no selected compatibility profile is ordinary
+      // source absence unless discovery recorded a real failure. In
+      // particular, an informational profile issue or a legacy-layout miss
+      // must not be relabeled as failed enumeration with an empty diagnostic.
+      if outcome.counters.browsers_detected > 0 && !failures.is_empty() {
         return CompatibilityDisposition::Failed(Diagnostic::new_with_secrets(
           format!(
             "every detected {} installation failed profile enumeration: {diagnostics}",
@@ -95,7 +104,7 @@ fn compatibility_disposition(
         ));
       }
     }
-    if let Some(failure) = failures.into_iter().next() {
+    if let Some(failure) = failures.first() {
       return CompatibilityDisposition::Failed(failure.diagnostic.clone());
     }
     return CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase);
@@ -291,5 +300,85 @@ fn failure_browser_id(failure: &Failure) -> Option<&BrowserId> {
     FailureScope::Browser { browser_id }
     | FailureScope::Profile { browser_id, .. }
     | FailureScope::Source { browser_id, .. } => Some(browser_id),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::browser::outcome::{FailureLedger, Termination};
+  use crate::browser::report_core::{issue, ExtractionStageCode};
+
+  fn empty_chromium_outcome(failures: FailureLedger) -> Outcome {
+    let mut outcome = Outcome::finalize(
+      Vec::new(),
+      Vec::new(),
+      failures,
+      false,
+      Termination::Completed,
+    );
+    outcome.counters.browsers_detected = 1;
+    outcome
+  }
+
+  fn chromium_disposition(outcome: &Outcome) -> CompatibilityDisposition {
+    compatibility_decision(
+      outcome,
+      &BTreeMap::new(),
+      BrowserId::known("opera"),
+      CompatibilityFamily::Chromium,
+    )
+    .disposition
+  }
+
+  #[test]
+  fn detected_chromium_without_a_scoped_failure_is_source_absence() {
+    assert_eq!(
+      chromium_disposition(&empty_chromium_outcome(FailureLedger::default())),
+      CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase)
+    );
+
+    let browser_id = BrowserId::known("opera");
+    let mut informational = FailureLedger::default();
+    informational.push(Failure::from_issue(
+      issue(
+        "profile_has_no_cookie_source",
+        ExtractionStageCode::discovery(),
+        IssueSeverityCode::info(),
+        "profile marker has no Chromium cookie source",
+      ),
+      FailureScope::Browser { browser_id },
+      &[],
+    ));
+    assert_eq!(
+      chromium_disposition(&empty_chromium_outcome(informational)),
+      CompatibilityDisposition::Absent(CompatibilityAbsence::CookieDatabase)
+    );
+  }
+
+  #[test]
+  fn actual_chromium_enumeration_failure_keeps_a_nonempty_diagnostic() {
+    let browser_id = BrowserId::known("opera");
+    let mut failures = FailureLedger::default();
+    failures.push(Failure::from_issue(
+      issue(
+        "installation_enumeration_failed",
+        ExtractionStageCode::discovery(),
+        IssueSeverityCode::error(),
+        "permission denied",
+      ),
+      FailureScope::Browser { browser_id },
+      &[],
+    ));
+
+    let CompatibilityDisposition::Failed(diagnostic) =
+      chromium_disposition(&empty_chromium_outcome(failures))
+    else {
+      panic!("a real enumeration failure must remain failed");
+    };
+    assert_eq!(
+      diagnostic.as_str(),
+      "every detected opera installation failed profile enumeration: permission denied"
+    );
   }
 }

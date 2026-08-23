@@ -2285,51 +2285,68 @@ fn legacy_chromium_profile_fallback_uses_directory_not_display_order() {
 }
 
 #[test]
-fn legacy_opera_wrappers_use_flat_roots_on_macos_and_windows() {
+fn legacy_opera_wrappers_prefer_flat_roots_and_fallback_to_default() {
   for (platform, browser_id, root_id) in [
     (PlatformId::Macos, "opera", "opera-stable"),
     (PlatformId::Macos, "opera_gx", "opera-gx-stable"),
     (PlatformId::Windows, "opera", "opera-stable-local"),
     (PlatformId::Windows, "opera_gx", "opera-gx-stable-local"),
   ] {
-    let temp = TempDir::new(&format!("legacy-{browser_id}-{platform:?}"));
-    let home = temp.path().join("home");
-    let local = home.join("LocalAppData");
-    let roaming = home.join("AppData/Roaming");
-    let context = context_for(
-      platform,
-      home,
-      [("LOCALAPPDATA", local), ("APPDATA", roaming)],
-    );
-    let root = browser_root(&context, browser_id, root_id);
-    seed_cookie(&root, true, "flat", "value");
-    seed_cookie(&root.join("Default"), true, "default", "value");
-    if platform == PlatformId::Windows {
-      write_local_state(&root, serde_json::json!({}));
+    for (case, seed_flat, seed_default, expected_directory, expected_cookie) in [
+      ("flat-only", true, false, ".", "flat"),
+      ("default-only", false, true, "Default", "default"),
+      ("both", true, true, ".", "flat"),
+    ] {
+      let temp = TempDir::new(&format!("legacy-{browser_id}-{platform:?}-{case}"));
+      let home = temp.path().join("home");
+      let local = home.join("LocalAppData");
+      let roaming = home.join("AppData/Roaming");
+      let context = context_for(
+        platform,
+        home,
+        [("LOCALAPPDATA", local), ("APPDATA", roaming)],
+      );
+      let root = browser_root(&context, browser_id, root_id);
+      if seed_flat {
+        seed_cookie(&root, true, "flat", "value");
+      }
+      if seed_default {
+        seed_cookie(&root.join("Default"), true, "default", "value");
+      }
+      if platform == PlatformId::Windows {
+        write_local_state(&root, serde_json::json!({}));
+      }
+
+      let generic = discover_browser_with_context(&context, browser_id).expect("generic discovery");
+      assert_eq!(generic.profiles().len(), 1, "{browser_id} {case}");
+      assert_eq!(
+        generic.profiles()[0].directory_name,
+        if seed_default { "Default" } else { "." },
+        "generic {browser_id} {case}"
+      );
+
+      let provider = CountingProvider::default();
+      let report = extract_chromium_with_provider_and_selection(
+        &context,
+        browser_id,
+        ProfileSelection::LegacyFirstProfile,
+        None,
+        &provider,
+      )
+      .expect("legacy extraction");
+      let selected = report
+        .installations
+        .iter()
+        .flat_map(|installation| &installation.profiles)
+        .next()
+        .expect("selected compatibility profile");
+      assert_eq!(
+        selected.profile.directory_name, expected_directory,
+        "legacy {browser_id} {case}"
+      );
+      assert_eq!(selected.cookies()[0].name, expected_cookie);
+      assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
     }
-
-    let generic = discover_browser_with_context(&context, browser_id).expect("generic discovery");
-    assert_eq!(generic.profiles().len(), 1);
-    assert_eq!(generic.profiles()[0].directory_name, "Default");
-
-    let provider = CountingProvider::default();
-    let report = extract_chromium_with_provider_and_selection(
-      &context,
-      browser_id,
-      ProfileSelection::LegacyFirstProfile,
-      None,
-      &provider,
-    )
-    .expect("legacy extraction");
-    let selected = report
-      .installations
-      .iter()
-      .flat_map(|installation| &installation.profiles)
-      .next()
-      .expect("flat profile");
-    assert_eq!(selected.profile.directory_name, ".");
-    assert_eq!(selected.cookies()[0].name, "flat");
-    assert_eq!(provider.calls.borrow().values().copied().sum::<usize>(), 1);
   }
 
   let temp = TempDir::new("legacy-macos-opera-root-order");

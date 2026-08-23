@@ -37,6 +37,7 @@ pub(super) enum LegacyChromiumProfileLayout {
   DefaultAndProfiles,
   DefaultOnly,
   FlatOnly,
+  FlatAndDefault,
   DefaultAndFlat,
 }
 
@@ -172,7 +173,10 @@ fn legacy_chromium_profile_group(
     (LegacyChromiumProfileLayout::DefaultAndProfiles, name) if name.starts_with("Profile ") => {
       Some(1)
     }
-    (LegacyChromiumProfileLayout::FlatOnly, ".") => Some(0),
+    (LegacyChromiumProfileLayout::FlatOnly | LegacyChromiumProfileLayout::FlatAndDefault, ".") => {
+      Some(0)
+    }
+    (LegacyChromiumProfileLayout::FlatAndDefault, "Default") => Some(1),
     (LegacyChromiumProfileLayout::DefaultAndFlat, ".") => Some(1),
     _ => None,
   }
@@ -185,7 +189,9 @@ fn add_legacy_flat_chromium_profiles<F: DiscoveryFs>(
   for installation in &mut discovery.installations {
     if !matches!(
       installation.legacy_profile_layout,
-      LegacyChromiumProfileLayout::FlatOnly | LegacyChromiumProfileLayout::DefaultAndFlat
+      LegacyChromiumProfileLayout::FlatOnly
+        | LegacyChromiumProfileLayout::FlatAndDefault
+        | LegacyChromiumProfileLayout::DefaultAndFlat
     ) || installation
       .profiles
       .iter()
