@@ -537,8 +537,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 platform="darwin",
             ),
             [
-                ["pkill", "-f", f"--user-data-dir={root}"],
-                ["pkill", "-f", "/Applications/Opera GX.app/"],
+                ["pkill", "-f", "--", f"--user-data-dir={root}"],
+                ["pkill", "-f", "--", "/Applications/Opera GX.app/"],
             ],
         )
         self.assertEqual(
@@ -546,8 +546,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 "/opt/vivaldi/vivaldi", root, platform="linux"
             ),
             [
-                ["pkill", "-f", f"--user-data-dir={root}"],
-                ["pkill", "-f", "/opt/vivaldi/vivaldi"],
+                ["pkill", "-f", "--", f"--user-data-dir={root}"],
+                ["pkill", "-f", "--", "/opt/vivaldi/vivaldi"],
             ],
         )
         self.assertEqual(
@@ -558,6 +558,29 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             ),
             [["taskkill", "/F", "/T", "/IM", "vivaldi.exe"]],
         )
+
+    def test_stale_reap_commands_are_actually_runnable_on_this_platform(self) -> None:
+        """Run the built command for real; a usage error is a silent no-op.
+
+        The launch-root pattern starts with `--`, which pkill parses as an
+        option unless the `--` separator precedes it. That mistake exits 2
+        without matching anything, so the reap looks like it ran while doing
+        nothing at all. Only executing the command catches it.
+        """
+
+        if hosted.sys.platform == "win32":
+            self.skipTest("taskkill has no non-destructive dry run to check here")
+        root = Path("/tmp/rookie-ci/nonexistent-reap-probe")
+        for command in hosted.stale_browser_reap_commands(
+            "/tmp/rookie-ci/nonexistent-browser-probe", root
+        ):
+            with self.subTest(command=command):
+                completed = hosted.subprocess.run(
+                    command, capture_output=True, text=True, timeout=30
+                )
+                # 1 is pkill's "no processes matched", the only healthy outcome
+                # for patterns that deliberately cannot match anything.
+                self.assertEqual(completed.returncode, 1, completed.stderr)
 
     def test_stale_reap_never_fails_the_run(self) -> None:
         with (

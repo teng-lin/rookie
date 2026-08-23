@@ -866,9 +866,12 @@ def stale_browser_reap_commands(
         return [["taskkill", "/F", "/T", "/IM", normalized.rsplit("/", 1)[-1]]]
     bundle, separator, _ = normalized.partition(".app/Contents/MacOS/")
     product = f"{bundle}.app/" if separator else normalized
+    # `--` is mandatory, not decorative: the launch-root pattern starts with
+    # `--`, and without the separator pkill parses it as an option and exits 2
+    # without matching anything, turning the whole reap into a silent no-op.
     return [
-        ["pkill", "-f", f"--user-data-dir={user_data}"],
-        ["pkill", "-f", product],
+        ["pkill", "-f", "--", f"--user-data-dir={user_data}"],
+        ["pkill", "-f", "--", product],
     ]
 
 
