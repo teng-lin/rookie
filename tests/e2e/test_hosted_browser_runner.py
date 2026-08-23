@@ -359,6 +359,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
             mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
             mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(
                 hosted, "wait_for_chromium_cookie", side_effect=[False, True]
             ) as wait_for_cookie,
@@ -385,7 +386,8 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
             mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
             mock.patch.object(hosted, "wait_for_devtools_or_cookie", return_value=True),
-            mock.patch.object(hosted, "navigate_chromium_cdp"),
+            mock.patch.object(hosted, "navigate_chromium_cdp") as navigate,
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(
                 hosted, "wait_for_chromium_cookie", return_value=True
             ) as wait_for_cookie,
@@ -398,6 +400,11 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             )
 
         wait_for_cookie.assert_called_once_with(profile, 30, name="rookie_decoy")
+        navigate.assert_called_once_with(
+            9222,
+            "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+            corpus_timeout_ms=hosted.CDP_CORPUS_TIMEOUT_MS,
+        )
 
     def test_chromium_cleanup_kills_launcher_that_ignores_terminate(self) -> None:
         proc = mock.Mock()
@@ -409,6 +416,7 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(
                 hosted, "wait_for_devtools_or_cookie", return_value=False
             ),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
             mock.patch.object(hosted.time, "sleep"),
         ):
@@ -430,15 +438,338 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             mock.patch.object(
                 hosted, "wait_for_devtools_or_cookie", return_value=False
             ),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
             mock.patch.object(
-                hosted, "wait_for_chromium_cookie", side_effect=[False, False]
-            ),
+                hosted, "wait_for_chromium_cookie", return_value=False
+            ) as wait_for_cookie,
             mock.patch.object(hosted, "chromium_cookie_dbs", return_value=[]),
+            mock.patch("builtins.print"),
             self.assertRaisesRegex(SystemExit, "cookie databases: <none>"),
         ):
             hosted.seed_chromium_native(
                 "/opt/browser", profile, "http://127.0.0.1:8765/set"
             )
+
+        # One in-session window plus every bounded post-shutdown flush window,
+        # and no more: an absent cookie still fails loudly.
+        self.assertEqual(
+            wait_for_cookie.call_args_list,
+            [
+                mock.call(profile, 30, name="rookie_ci"),
+                *(
+                    mock.call(profile, budget, name="rookie_ci")
+                    for budget in hosted.CHROMIUM_COOKIE_FLUSH_BUDGETS
+                ),
+            ],
+        )
+
+    def test_chromium_flush_is_retried_across_a_second_bounded_window(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        profile = Path("/tmp/profile")
+        printed: list[str] = []
+
+        def record(*args: object, **_kwargs: object) -> None:
+            printed.append(" ".join(str(item) for item in args))
+
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc),
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
+            mock.patch.object(hosted, "reap_stale_browser_processes"),
+            mock.patch.object(
+                hosted, "wait_for_chromium_cookie", side_effect=[False, False, True]
+            ) as wait_for_cookie,
+            mock.patch.object(hosted.time, "sleep"),
+            mock.patch("builtins.print", side_effect=record),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser", profile, "http://127.0.0.1:8765/set"
+            )
+
+        self.assertEqual(
+            wait_for_cookie.call_args_list,
+            [
+                mock.call(profile, 30, name="rookie_ci"),
+                mock.call(profile, 15, name="rookie_ci"),
+                mock.call(profile, 30, name="rookie_ci"),
+            ],
+        )
+        self.assertTrue(
+            any("flush window 1/2 (15s)" in line for line in printed), printed
+        )
+        self.assertTrue(
+            any("persisted rookie_ci on flush window 2/2" in line for line in printed),
+            printed,
+        )
+
+    def test_stale_product_processes_are_reaped_before_each_launch(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        with (
+            mock.patch.object(hosted.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(hosted, "pick_devtools_port", return_value=9222),
+            mock.patch.object(
+                hosted, "wait_for_devtools_or_cookie", return_value=False
+            ),
+            mock.patch.object(hosted, "reap_stale_browser_processes") as reap,
+            mock.patch.object(hosted, "wait_for_chromium_cookie", return_value=True),
+            mock.patch.object(hosted.time, "sleep"),
+        ):
+            hosted.seed_chromium_native(
+                "/opt/browser", Path("/tmp/profile"), "http://127.0.0.1:8765/set"
+            )
+
+        reap.assert_called_once_with("/opt/browser", Path("/tmp/profile"))
+        self.assertLess(
+            reap.call_args_list.index(mock.call("/opt/browser", Path("/tmp/profile"))),
+            len(popen.call_args_list),
+        )
+
+    def test_stale_reap_matches_the_launch_root_and_then_the_product(self) -> None:
+        root = Path("/tmp/rookie-ci/opera_gx")
+        self.assertEqual(
+            hosted.stale_browser_reap_commands(
+                "/Applications/Opera GX.app/Contents/MacOS/Opera",
+                root,
+                platform="darwin",
+            ),
+            [
+                ["pkill", "-f", "--", f"--user-data-dir={root}"],
+                ["pkill", "-f", "--", "/Applications/Opera GX.app/"],
+            ],
+        )
+        self.assertEqual(
+            hosted.stale_browser_reap_commands(
+                "/opt/vivaldi/vivaldi", root, platform="linux"
+            ),
+            [
+                ["pkill", "-f", "--", f"--user-data-dir={root}"],
+                ["pkill", "-f", "--", "/opt/vivaldi/vivaldi"],
+            ],
+        )
+        self.assertEqual(
+            hosted.stale_browser_reap_commands(
+                r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+                root,
+                platform="win32",
+            ),
+            [["taskkill", "/F", "/T", "/IM", "vivaldi.exe"]],
+        )
+
+    def test_stale_reap_commands_are_actually_runnable_on_this_platform(self) -> None:
+        """Run the built command for real; a usage error is a silent no-op.
+
+        The launch-root pattern starts with `--`, which pkill parses as an
+        option unless the `--` separator precedes it. That mistake exits 2
+        without matching anything, so the reap looks like it ran while doing
+        nothing at all. Only executing the command catches it.
+        """
+
+        if hosted.sys.platform == "win32":
+            self.skipTest("taskkill has no non-destructive dry run to check here")
+        root = Path("/tmp/rookie-ci/nonexistent-reap-probe")
+        for command in hosted.stale_browser_reap_commands(
+            "/tmp/rookie-ci/nonexistent-browser-probe", root
+        ):
+            with self.subTest(command=command):
+                completed = hosted.subprocess.run(
+                    command, capture_output=True, text=True, timeout=30
+                )
+                # 1 is pkill's "no processes matched", the only healthy outcome
+                # for patterns that deliberately cannot match anything.
+                self.assertEqual(completed.returncode, 1, completed.stderr)
+
+    def test_stale_reap_never_fails_the_run(self) -> None:
+        with (
+            mock.patch.dict(
+                hosted.os.environ,
+                {
+                    "CI": "true",
+                    "GITHUB_ACTIONS": "true",
+                    "ROOKIE_E2E_RUNNER_ENVIRONMENT": "github-hosted",
+                },
+            ),
+            mock.patch.object(
+                hosted.subprocess, "run", side_effect=FileNotFoundError("pkill")
+            ),
+            mock.patch("builtins.print"),
+        ):
+            hosted.reap_stale_browser_processes("/opt/browser", Path("/tmp/profile"))
+
+    def test_stale_reap_refuses_to_kill_browsers_outside_hosted_ci(self) -> None:
+        # A self-hosted runner sets CI and GITHUB_ACTIONS too, but it is a
+        # persistent machine that may carry an operator's browser session, so
+        # the environment marker has to be checked as well.
+        for environment in (
+            {"CI": "", "GITHUB_ACTIONS": "", "ROOKIE_E2E_RUNNER_ENVIRONMENT": ""},
+            {
+                "CI": "true",
+                "GITHUB_ACTIONS": "true",
+                "ROOKIE_E2E_RUNNER_ENVIRONMENT": "self-hosted",
+            },
+        ):
+            with self.subTest(environment=environment):
+                with (
+                    mock.patch.dict(hosted.os.environ, environment, clear=False),
+                    mock.patch.object(hosted.subprocess, "run") as run,
+                    mock.patch("builtins.print"),
+                ):
+                    hosted.reap_stale_browser_processes(
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                        Path("/tmp/profile"),
+                    )
+
+                run.assert_not_called()
+
+    def test_reap_waits_for_signaled_processes_then_escalates_once(self) -> None:
+        pattern = "--user-data-dir=/tmp/rookie-ci/opera_gx"
+        # pgrep keeps reporting a match, so the wait must escalate to SIGKILL
+        # and then give up rather than blocking the launch indefinitely.
+        with (
+            mock.patch.object(
+                hosted,
+                "run_reap_command",
+                return_value=mock.Mock(returncode=0, stderr=b""),
+            ) as run_command,
+            mock.patch.object(hosted.time, "sleep"),
+            mock.patch("builtins.print"),
+        ):
+            hosted.await_reaped_processes(
+                ["pkill", "-f", "--", pattern], timeout=0.0
+            )
+
+        self.assertEqual(
+            run_command.call_args_list,
+            [
+                mock.call(["pgrep", "-f", "--", pattern]),
+                mock.call(["pkill", "-KILL", "-f", "--", pattern]),
+                mock.call(["pgrep", "-f", "--", pattern]),
+            ],
+        )
+
+    def test_reap_stops_waiting_as_soon_as_the_processes_are_gone(self) -> None:
+        pattern = "/opt/vivaldi/vivaldi"
+        with (
+            mock.patch.object(
+                hosted,
+                "run_reap_command",
+                return_value=mock.Mock(returncode=1, stderr=b""),
+            ) as run_command,
+            mock.patch.object(hosted.time, "sleep") as sleep,
+            mock.patch("builtins.print", side_effect=AssertionError("unexpected log")),
+        ):
+            hosted.await_reaped_processes(["pkill", "-f", "--", pattern])
+
+        run_command.assert_called_once_with(["pgrep", "-f", "--", pattern])
+        sleep.assert_not_called()
+
+    def test_windows_vivaldi_gets_a_wider_corpus_poll_window(self) -> None:
+        self.assertEqual(
+            hosted.chromium_corpus_timeout_ms(
+                r"C:\Program Files\Vivaldi\Application\vivaldi.exe", platform="win32"
+            ),
+            hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+        )
+        self.assertEqual(
+            hosted.chromium_corpus_timeout_ms("/opt/vivaldi/vivaldi", platform="linux"),
+            hosted.CDP_CORPUS_TIMEOUT_MS,
+        )
+        self.assertEqual(
+            hosted.chromium_corpus_timeout_ms(
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                platform="win32",
+            ),
+            hosted.CDP_CORPUS_TIMEOUT_MS,
+        )
+
+    def test_cdp_budget_environment_reaches_the_real_helper(self) -> None:
+        """Close the Python/Node loop with the real helper, not a mock of it.
+
+        The budgets only take effect if the names the harness exports are the
+        names the helper reads. A mocked `subprocess.run` cannot catch a rename
+        on either side, so parse the environment through the shipped helper.
+        """
+
+        if hosted.shutil.which("node") is None:
+            self.skipTest("node is required to check the helper's env contract")
+        with mock.patch.object(hosted.subprocess, "run") as run:
+            hosted.navigate_chromium_cdp(
+                9222,
+                "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+                corpus_timeout_ms=hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+            )
+        _args, kwargs = run.call_args
+
+        script = (
+            "import('./navigate_chromium_cdp.mjs').then(({corpusOptionsFromEnv}) "
+            "=> console.log(JSON.stringify(corpusOptionsFromEnv())))"
+        )
+        completed = hosted.subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=str(hosted.ROOT / "tests/e2e"),
+            env=kwargs["env"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            hosted.json.loads(completed.stdout),
+            {
+                "corpusTimeoutMs": hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+                "corpusAttempts": hosted.CDP_CORPUS_ATTEMPTS,
+                "commandTimeoutMs": hosted.CDP_COMMAND_TIMEOUT_MS,
+            },
+        )
+
+    def test_cdp_helper_receives_bounded_budgets_and_a_clearing_timeout(self) -> None:
+        with mock.patch.object(hosted.subprocess, "run") as run:
+            hosted.navigate_chromium_cdp(
+                9222,
+                "http://127.0.0.1:8765/corpus/run?engine=chromium&step=0",
+                corpus_timeout_ms=hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED,
+            )
+
+        _args, kwargs = run.call_args
+        self.assertEqual(
+            kwargs["env"]["ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS"],
+            str(hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED),
+        )
+        self.assertEqual(
+            kwargs["env"]["ROOKIE_E2E_CDP_CORPUS_ATTEMPTS"],
+            str(hosted.CDP_CORPUS_ATTEMPTS),
+        )
+        self.assertEqual(
+            kwargs["env"]["ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS"],
+            str(hosted.CDP_COMMAND_TIMEOUT_MS),
+        )
+        self.assertEqual(
+            kwargs["timeout"],
+            hosted.cdp_helper_timeout(
+                hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED, hosted.CDP_CORPUS_ATTEMPTS
+            ),
+        )
+
+    def test_cdp_ceiling_clears_the_helper_command_bounds_it_sets(self) -> None:
+        # Reconstruct the helper's worst case independently of the production
+        # formula: an attempt can spend a full poll window plus the DevTools
+        # commands that set it up, each bounded by the command timeout the
+        # harness itself hands the helper. A ceiling below this would cut a
+        # legitimate retry short and hide the helper's attempt diagnostics.
+        window_ms, attempts, command_ms = 40_000, 3, 10_000
+        worst_case_seconds = attempts * (window_ms + 3 * command_ms) / 1000
+        self.assertGreater(
+            hosted.cdp_helper_timeout(window_ms, attempts, command_ms),
+            worst_case_seconds,
+        )
+        # A wider command bound must widen the ceiling, not be ignored by it.
+        self.assertGreater(
+            hosted.cdp_helper_timeout(window_ms, attempts, 20_000),
+            hosted.cdp_helper_timeout(window_ms, attempts, command_ms),
+        )
 
     def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:
         command = hosted.chromium_native_command(

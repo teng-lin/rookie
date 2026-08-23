@@ -8,6 +8,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Hosted claimed-browser cookie seeding no longer loses a run to a single
+  stalled attempt. A branded fork that accepts the DevTools connection but
+  never navigates now gets a bounded number of fresh corpus targets against the
+  same launch root, a partially seeded corpus still fails immediately rather
+  than restarting an interleaving redirect chain, the corpus poll window is
+  overridable per browser, the post-shutdown cookie-flush wait spans bounded
+  logged windows, and each hosted-CI launch first reaps leftover processes of
+  its own launch root and product so a stale vendor service cannot contend
+  with it.
 - Linux Chromium v11 cookies now fall back to the empty-password key when the
   OS keyring yields no usable password. The keyring password, when there is
   one, is still tried first; the empty-password key is appended as a last

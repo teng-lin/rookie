@@ -6,18 +6,93 @@
 
 import { pathToFileURL } from "node:url";
 
+const TARGET_ORIGIN_HOSTS = ["127.0.0.1", "localhost"];
+const PORTABLE_CORPUS_SIZE = 19;
+
+export const DEFAULT_CORPUS_TIMEOUT_MS = 20_000;
+export const DEFAULT_CORPUS_ATTEMPTS = 3;
+export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+
+function targetOriginCookies(cookies) {
+  return cookies.filter(({ domain }) =>
+    TARGET_ORIGIN_HOSTS.includes(domain?.replace(/^\./, "")),
+  );
+}
+
+function corpusIsComplete(targetCookies) {
+  return (
+    targetCookies.length >= PORTABLE_CORPUS_SIZE &&
+    targetCookies.some(
+      ({ name, value }) => name === "rookie_ci" && value === "bar",
+    ) &&
+    targetCookies.some(
+      ({ name, value }) => name === "rookie_updated" && value === "final",
+    ) &&
+    targetCookies.some(
+      ({ name, value }) =>
+        name === "rookie_decoy" && value === "must-not-pass-filter",
+    ) &&
+    !targetCookies.some(({ name }) => name === "rookie_deleted")
+  );
+}
+
+function positiveIntegerFromEnv(env, name) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `${name} must be a positive integer, received ${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Per-browser overrides for the corpus poll window, its bounded retry count,
+ * and the per-command ceiling. Vivaldi under a Windows service session is a
+ * known slow case, so the Python harness widens the window for it rather than
+ * hard-coding one budget for every product. The harness sets these explicitly
+ * so it can derive its own subprocess ceiling from every bound in force here.
+ */
+export function corpusOptionsFromEnv(env = process.env) {
+  const options = {};
+  const corpusTimeoutMs = positiveIntegerFromEnv(
+    env,
+    "ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS",
+  );
+  if (corpusTimeoutMs !== undefined) options.corpusTimeoutMs = corpusTimeoutMs;
+  const corpusAttempts = positiveIntegerFromEnv(
+    env,
+    "ROOKIE_E2E_CDP_CORPUS_ATTEMPTS",
+  );
+  if (corpusAttempts !== undefined) options.corpusAttempts = corpusAttempts;
+  const commandTimeoutMs = positiveIntegerFromEnv(
+    env,
+    "ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS",
+  );
+  if (commandTimeoutMs !== undefined) {
+    options.commandTimeoutMs = commandTimeoutMs;
+  }
+  return options;
+}
+
 export async function navigateChromiumCdp({
   port,
   url,
   fetchImpl = fetch,
   WebSocketImpl = WebSocket,
   openTimeoutMs = 10_000,
-  commandTimeoutMs = 10_000,
-  corpusTimeoutMs = 20_000,
+  commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
+  corpusTimeoutMs = DEFAULT_CORPUS_TIMEOUT_MS,
+  corpusAttempts = DEFAULT_CORPUS_ATTEMPTS,
   pollMs = 100,
   settleMs = 2_000,
   logger = console,
 }) {
+  if (!Number.isInteger(corpusAttempts) || corpusAttempts < 1) {
+    throw new Error("corpusAttempts must be a positive integer");
+  }
   const versionResponse = await fetchImpl(
     `http://127.0.0.1:${port}/json/version`,
   );
@@ -114,80 +189,140 @@ export async function navigateChromiumCdp({
     });
   }
 
+  function createTargetFor(targetUrl) {
+    return send("Target.createTarget", {
+      url: targetUrl,
+      newWindow: true,
+      background: false,
+    }).then(({ targetId }) => targetId);
+  }
+
+  function createUrlTarget() {
+    return createTargetFor(url);
+  }
+
+  /**
+   * Close a target and refuse to continue unless it is really gone. Chromium
+   * answers with `{success: false}` rather than a protocol error when the
+   * close does not happen, so the result has to be inspected — a resolved
+   * promise alone does not mean the page went away.
+   */
+  async function closeTargetOrThrow(targetId, context) {
+    let result;
+    try {
+      result = await send("Target.closeTarget", { targetId });
+    } catch (error) {
+      throw new Error(`${context}: ${error.message}`);
+    }
+    if (result?.success === false) {
+      throw new Error(`${context}: Target.closeTarget reported success=false`);
+    }
+  }
+
+  async function resolveCorpusTarget() {
+    // Most products honor the URL passed to their native launch. Reuse that
+    // page so a second redirect chain cannot interleave its initial/mutate
+    // phases. Vivaldi can ignore the startup URL, so explicitly create the
+    // corpus target when no existing page is running it.
+    const { targetInfos = [] } = await send("Target.getTargets");
+    const existing = targetInfos.find(({ type, url: targetUrl }) => {
+      if (type !== "page") return false;
+      try {
+        return new URL(targetUrl).pathname === "/corpus/run";
+      } catch {
+        return false;
+      }
+    });
+    return existing ? existing.targetId : createUrlTarget();
+  }
+
+  /** Poll one bounded window and report how far the corpus actually got. */
+  async function pollCorpusWindow() {
+    const deadline = Date.now() + corpusTimeoutMs;
+    let targetCookies = [];
+    for (;;) {
+      const { cookies = [] } = await send("Storage.getCookies");
+      targetCookies = targetOriginCookies(cookies);
+      if (corpusIsComplete(targetCookies)) {
+        return { complete: true, count: targetCookies.length };
+      }
+      if (Date.now() >= deadline) {
+        return { complete: false, count: targetCookies.length };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  // A target that never navigated is safe to replace: the corpus server is
+  // stateless and drives its redirect chain purely from the `step` query
+  // parameter, so a fresh target restarts the chain from the beginning. A
+  // partially seeded corpus is NOT retried this way — a second chain would
+  // interleave its initial/mutate phases with the one already in flight, so
+  // that outcome fails the root immediately and stays diagnosable.
+  async function seedPortableCorpus() {
+    let targetId = await resolveCorpusTarget();
+    let keepAliveTargetId;
+    for (let attempt = 1; ; attempt += 1) {
+      await send("Target.activateTarget", { targetId });
+      const { complete, count } = await pollCorpusWindow();
+      if (complete) return;
+      const attemptsWord = attempt === 1 ? "attempt" : "attempts";
+      if (count > 0) {
+        throw new Error(
+          `native CDP navigation did not complete the portable corpus ` +
+            `(observed ${count}/${PORTABLE_CORPUS_SIZE} target-origin cookies ` +
+            `after ${attempt} ${attemptsWord}; the corpus navigated but ` +
+            `stalled partway, which is never retried in place)`,
+        );
+      }
+      if (attempt >= corpusAttempts) {
+        throw new Error(
+          `native CDP navigation did not complete the portable corpus ` +
+            `(observed 0/${PORTABLE_CORPUS_SIZE} target-origin cookies ` +
+            `after ${attempt} ${attemptsWord}; the corpus target never ` +
+            `navigated)`,
+        );
+      }
+      logger.warn(
+        `native CDP corpus attempt ${attempt}/${corpusAttempts} observed no ` +
+          `target-origin cookies after ${corpusTimeoutMs}ms; re-creating and ` +
+          `re-activating the corpus target`,
+      );
+      // Two constraints pull against each other here. A Chromium browser left
+      // with no page can quit, which would end the run instead of retrying it;
+      // but no second corpus URL may be loading while the stalled target is
+      // still open, or a target that unthrottles mid-retry runs its redirect
+      // chain against the replacement's. A blank keep-alive page satisfies
+      // both: it holds the browser open, and it seeds nothing.
+      if (keepAliveTargetId === undefined) {
+        keepAliveTargetId = await createTargetFor("about:blank");
+      }
+      // Closing the stalled target is not optional. If it survives, a
+      // late-unthrottled navigation can re-add rookie_deleted or roll
+      // rookie_updated off `final` after the completion check has already
+      // passed — a seeding flake laundered into an unexplained extraction
+      // failure downstream. Fail the root loudly instead.
+      await closeTargetOrThrow(
+        targetId,
+        `native CDP could not close the stalled corpus target after attempt ` +
+          `${attempt}/${corpusAttempts}, so a retry would risk two ` +
+          `interleaved redirect chains`,
+      );
+      targetId = await createUrlTarget();
+    }
+  }
+
   try {
     // Vivaldi's page-session commands can hang even for a fresh target. Keep
     // the browser-level protocol only, but force the canary target into the
     // foreground so Windows service sessions do not indefinitely throttle its
     // navigation.
     const corpusMode = new URL(url).pathname === "/corpus/run";
-    let targetId;
     if (corpusMode) {
-      // Most products honor the URL passed to their native launch. Reuse that
-      // page so a second redirect chain cannot interleave its initial/mutate
-      // phases. Vivaldi can ignore the startup URL, so explicitly create the
-      // corpus target when no existing page is running it.
-      const { targetInfos = [] } = await send("Target.getTargets");
-      const existing = targetInfos.find(({ type, url: targetUrl }) => {
-        if (type !== "page") return false;
-        try {
-          return new URL(targetUrl).pathname === "/corpus/run";
-        } catch {
-          return false;
-        }
-      });
-      if (existing) {
-        targetId = existing.targetId;
-      } else {
-        ({ targetId } = await send("Target.createTarget", {
-          url,
-          newWindow: true,
-          background: false,
-        }));
-      }
+      await seedPortableCorpus();
     } else {
-      ({ targetId } = await send("Target.createTarget", {
-        url,
-        newWindow: true,
-        background: false,
-      }));
-    }
-    await send("Target.activateTarget", { targetId });
-    if (corpusMode) {
-      const deadline = Date.now() + corpusTimeoutMs;
-      let lastCookies = [];
-      let corpusComplete = false;
-      while (Date.now() < deadline) {
-        ({ cookies: lastCookies = [] } = await send("Storage.getCookies"));
-        const targetCookies = lastCookies.filter(({ domain }) =>
-          ["127.0.0.1", "localhost"].includes(domain?.replace(/^\./, "")),
-        );
-        corpusComplete =
-          targetCookies.length >= 19 &&
-          targetCookies.some(
-            ({ name, value }) => name === "rookie_ci" && value === "bar",
-          ) &&
-          targetCookies.some(
-            ({ name, value }) =>
-              name === "rookie_updated" && value === "final",
-          ) &&
-          targetCookies.some(
-            ({ name, value }) =>
-              name === "rookie_decoy" && value === "must-not-pass-filter",
-          ) &&
-          !targetCookies.some(({ name }) => name === "rookie_deleted");
-        if (corpusComplete) break;
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
-      }
-      const targetCount = lastCookies.filter(({ domain }) =>
-        ["127.0.0.1", "localhost"].includes(domain?.replace(/^\./, "")),
-      ).length;
-      if (!corpusComplete) {
-        throw new Error(
-          `native CDP navigation did not complete the portable corpus ` +
-            `(observed ${targetCount}/19 target-origin cookies)`,
-        );
-      }
-    } else {
+      const targetId = await createUrlTarget();
+      await send("Target.activateTarget", { targetId });
       await send("Storage.setCookies", {
         cookies: [
           {
@@ -228,7 +363,7 @@ async function main() {
   if (!port || !url) {
     throw new Error("usage: navigate_chromium_cdp.mjs PORT URL");
   }
-  await navigateChromiumCdp({ port, url });
+  await navigateChromiumCdp({ port, url, ...corpusOptionsFromEnv() });
 }
 
 if (

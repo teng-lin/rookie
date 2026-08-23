@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { navigateChromiumCdp } from "./navigate_chromium_cdp.mjs";
+import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  DEFAULT_CORPUS_ATTEMPTS,
+  DEFAULT_CORPUS_TIMEOUT_MS,
+  corpusOptionsFromEnv,
+  navigateChromiumCdp,
+} from "./navigate_chromium_cdp.mjs";
 
 function messageEvent(data) {
   const event = new Event("message");
@@ -177,6 +183,233 @@ test("navigates the corpus when a product ignores its startup URL", async () => 
     "Browser.close",
   ]);
   assert.equal(createdUrl, corpusUrl);
+});
+
+const CORPUS_URL =
+  "http://127.0.0.1/corpus/run?engine=chromium&tiers=portable_smoke&step=0";
+
+function corpusStartupTarget(command) {
+  return {
+    id: command.id,
+    result: {
+      targetInfos: [{ targetId: "startup", type: "page", url: CORPUS_URL }],
+    },
+  };
+}
+
+test("retries the corpus target in place when navigation never started", async () => {
+  const methods = [];
+  const created = [];
+  const warnings = [];
+  let windows = 0;
+  await navigateChromiumCdp({
+    port: 9222,
+    url: CORPUS_URL,
+    fetchImpl: versionResponse(),
+    WebSocketImpl: scriptedWebSocket((command) => {
+      methods.push(command.method);
+      if (command.method === "Target.getTargets") {
+        return corpusStartupTarget(command);
+      }
+      if (command.method === "Target.createTarget") {
+        created.push(command.params.url);
+      }
+      if (command.method === "Storage.getCookies") {
+        windows += 1;
+        return {
+          id: command.id,
+          result: { cookies: windows === 1 ? [] : portableCorpusCookies() },
+        };
+      }
+      return successfulResponse(command);
+    }),
+    corpusTimeoutMs: 0,
+    settleMs: 0,
+    logger: { log() {}, warn: (line) => warnings.push(line) },
+  });
+  assert.deepEqual(methods, [
+    "Target.getTargets",
+    "Target.activateTarget",
+    "Storage.getCookies",
+    // A blank keep-alive page holds the browser open, so the stalled target
+    // can be closed BEFORE a second corpus URL starts loading. The two chains
+    // therefore never overlap, and the browser is never left without a page.
+    "Target.createTarget",
+    "Target.closeTarget",
+    "Target.createTarget",
+    "Target.activateTarget",
+    "Storage.getCookies",
+    "Browser.close",
+  ]);
+  assert.deepEqual(created, ["about:blank", CORPUS_URL]);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /corpus attempt 1\/3 observed no target-origin/);
+});
+
+test("a closeTarget that reports success=false fails the root", async () => {
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: scriptedWebSocket((command) => {
+        if (command.method === "Target.getTargets") {
+          return corpusStartupTarget(command);
+        }
+        if (command.method === "Storage.getCookies") {
+          return { id: command.id, result: { cookies: [] } };
+        }
+        if (command.method === "Target.closeTarget") {
+          // A protocol success carrying a failed close: the page is still
+          // there, so resolving alone must not be read as "it is gone".
+          return { id: command.id, result: { success: false } };
+        }
+        return successfulResponse(command);
+      }),
+      corpusTimeoutMs: 0,
+      settleMs: 0,
+      logger: { log: assert.fail, warn() {} },
+    }),
+    /could not close the stalled corpus target.*Target\.closeTarget reported success=false/s,
+  );
+});
+
+test("a partially seeded corpus fails the root instead of restarting the chain", async () => {
+  const methods = [];
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: scriptedWebSocket((command) => {
+        methods.push(command.method);
+        if (command.method === "Target.getTargets") {
+          return corpusStartupTarget(command);
+        }
+        if (command.method === "Storage.getCookies") {
+          return {
+            id: command.id,
+            result: { cookies: portableCorpusCookies().slice(0, 4) },
+          };
+        }
+        return successfulResponse(command);
+      }),
+      corpusTimeoutMs: 0,
+      settleMs: 0,
+      logger: { log: assert.fail, warn: assert.fail },
+    }),
+    /observed 4\/19 target-origin cookies after 1 attempt; the corpus navigated but stalled partway, which is never retried in place/,
+  );
+  assert.deepEqual(methods, [
+    "Target.getTargets",
+    "Target.activateTarget",
+    "Storage.getCookies",
+    "Browser.close",
+  ]);
+});
+
+test("in-root retries stay bounded and report the exhausted attempt count", async () => {
+  const created = [];
+  const warnings = [];
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: scriptedWebSocket((command) => {
+        if (command.method === "Target.getTargets") {
+          return corpusStartupTarget(command);
+        }
+        if (command.method === "Target.createTarget") {
+          created.push(command.params.url);
+        }
+        if (command.method === "Storage.getCookies") {
+          return { id: command.id, result: { cookies: [] } };
+        }
+        return successfulResponse(command);
+      }),
+      corpusTimeoutMs: 0,
+      corpusAttempts: 2,
+      settleMs: 0,
+      logger: { log: assert.fail, warn: (line) => warnings.push(line) },
+    }),
+    /observed 0\/19 target-origin cookies after 2 attempts; the corpus target never navigated/,
+  );
+  // One keep-alive page and one replacement corpus target for the single
+  // retry the budget allows, and nothing beyond it.
+  assert.deepEqual(created, ["about:blank", CORPUS_URL]);
+  assert.equal(warnings.length, 1);
+});
+
+test("a stalled target that will not close fails the root instead of racing it", async () => {
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: scriptedWebSocket((command) => {
+        if (command.method === "Target.getTargets") {
+          return corpusStartupTarget(command);
+        }
+        if (command.method === "Storage.getCookies") {
+          return { id: command.id, result: { cookies: [] } };
+        }
+        if (command.method === "Target.closeTarget") {
+          return {
+            id: command.id,
+            error: { code: -32000, message: "No target with given id" },
+          };
+        }
+        return successfulResponse(command);
+      }),
+      corpusTimeoutMs: 0,
+      settleMs: 0,
+      logger: { log: assert.fail, warn() {} },
+    }),
+    /could not close the stalled corpus target after attempt 1\/3, so a retry would risk two interleaved redirect chains/,
+  );
+});
+
+test("a non-positive attempt budget is rejected rather than skipping the corpus", async () => {
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: class MustNotConstruct {
+        constructor() {
+          assert.fail("socket constructed for an invalid attempt budget");
+        }
+      },
+      corpusAttempts: 0,
+    }),
+    /corpusAttempts must be a positive integer/,
+  );
+});
+
+test("corpus budgets are overridable per browser through the environment", () => {
+  assert.deepEqual(corpusOptionsFromEnv({}), {});
+  assert.deepEqual(
+    corpusOptionsFromEnv({
+      ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS: "40000",
+      ROOKIE_E2E_CDP_CORPUS_ATTEMPTS: "2",
+      ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS: "12000",
+    }),
+    { corpusTimeoutMs: 40_000, corpusAttempts: 2, commandTimeoutMs: 12_000 },
+  );
+  assert.throws(
+    () => corpusOptionsFromEnv({ ROOKIE_E2E_CDP_CORPUS_ATTEMPTS: "0" }),
+    /ROOKIE_E2E_CDP_CORPUS_ATTEMPTS must be a positive integer/,
+  );
+  assert.throws(
+    () => corpusOptionsFromEnv({ ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS: "soon" }),
+    /ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS must be a positive integer/,
+  );
+  assert.equal(DEFAULT_CORPUS_TIMEOUT_MS, 20_000);
+  assert.equal(DEFAULT_CORPUS_ATTEMPTS, 3);
+  // The harness derives its subprocess ceiling from this bound, so the two
+  // sides have to agree on it.
+  assert.equal(DEFAULT_COMMAND_TIMEOUT_MS, 10_000);
 });
 
 test("rejects a malformed version response before opening a socket", async () => {
