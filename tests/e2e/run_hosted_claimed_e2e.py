@@ -63,14 +63,18 @@ CDP_CORPUS_ATTEMPTS = 3
 # left to the helper's own default so the outer subprocess ceiling can be
 # derived from every bound the helper actually honors.
 CDP_COMMAND_TIMEOUT_MS = 10_000
-# Commands a retry adds beyond the poll window itself: create the replacement
-# target, close the stalled one, and activate the replacement.
-CDP_COMMANDS_PER_ATTEMPT = 3
+# DevTools commands an attempt can spend on top of its poll window: the
+# keep-alive page, closing the stalled target, creating the replacement,
+# activating it, and one final Storage.getCookies, because the poll deadline is
+# only checked after that command returns and so can overrun by one of them.
+CDP_COMMANDS_PER_ATTEMPT = 5
 # Post-shutdown windows, in seconds, allowed for the browser to flush the
 # completion cookie into persistent SQLite. A contended shutdown (for example a
 # leftover vendor auto-update service holding its mojo pipe) can push the flush
 # past a single fixed window.
 CHROMIUM_COOKIE_FLUSH_BUDGETS = (15, 30)
+# Seconds allowed for signaled processes to actually exit, per escalation step.
+REAP_EXIT_TIMEOUT = 10
 
 
 def current_platform() -> str:
@@ -827,11 +831,19 @@ def chromium_corpus_timeout_ms(exe: str, *, platform: str | None = None) -> int:
 
 
 def on_disposable_ci_host() -> bool:
-    """True only on a hosted runner whose whole machine is discarded after."""
+    """True only on a hosted runner whose whole machine is discarded after.
+
+    `CI` and `GITHUB_ACTIONS` are both true on a self-hosted runner too, and
+    that machine is persistent and may carry an operator's own browser session.
+    The workflow exports `runner.environment`, so require it explicitly, the
+    same way `require_disposable_safari_host` does.
+    """
 
     return (
         os.environ.get("CI", "").lower() == "true"
         and os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        and os.environ.get("ROOKIE_E2E_RUNNER_ENVIRONMENT", "").lower()
+        == "github-hosted"
     )
 
 
@@ -875,6 +887,50 @@ def stale_browser_reap_commands(
     ]
 
 
+def run_reap_command(command: list[str]) -> subprocess.CompletedProcess[bytes] | None:
+    """Run one reap command, returning None when it could not run at all."""
+
+    try:
+        return subprocess.run(command, check=False, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"stale browser reap could not run: {error}", flush=True)
+        return None
+
+
+def await_reaped_processes(
+    pkill_command: list[str], timeout: float = REAP_EXIT_TIMEOUT
+) -> None:
+    """Wait, then escalate once, for processes that were signaled to exit."""
+
+    pattern = pkill_command[-1]
+    probe = ["pgrep", "-f", "--", pattern]
+    for escalated in (False, True):
+        deadline = time.time() + timeout
+        while True:
+            # Probe before consulting the deadline: an already-expired budget
+            # must still answer whether the processes are gone rather than
+            # escalating against processes that already exited.
+            completed = run_reap_command(probe)
+            # pgrep exits 1 when nothing matches: everything signaled is gone.
+            if completed is None or completed.returncode == 1:
+                return
+            if time.time() >= deadline:
+                break
+            time.sleep(0.25)
+        if escalated:
+            break
+        print(
+            f"stale browser reap ({pattern}) did not exit within {timeout}s; "
+            "escalating to SIGKILL",
+            flush=True,
+        )
+        run_reap_command(["pkill", "-KILL", "-f", "--", pattern])
+    print(
+        f"stale browser reap ({pattern}) survived SIGKILL; continuing anyway",
+        flush=True,
+    )
+
+
 def reap_stale_browser_processes(exe: str, user_data: Path) -> None:
     """Best-effort reap; nothing here may fail the run on its own.
 
@@ -890,12 +946,8 @@ def reap_stale_browser_processes(exe: str, user_data: Path) -> None:
         )
         return
     for command in stale_browser_reap_commands(exe, user_data):
-        try:
-            completed = subprocess.run(
-                command, check=False, capture_output=True, timeout=30
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            print(f"stale browser reap could not run: {error}", flush=True)
+        completed = run_reap_command(command)
+        if completed is None:
             continue
         # pkill exits 1 and taskkill exits 128 when nothing matched, which is
         # the healthy case for a runner with no leftovers.
@@ -906,6 +958,13 @@ def reap_stale_browser_processes(exe: str, user_data: Path) -> None:
                 f"{completed.returncode}; continuing: {detail or '<no stderr>'}",
                 flush=True,
             )
+            continue
+        if completed.returncode == 0 and command[0] == "pkill":
+            # pkill returns as soon as the signal is delivered, so the targets
+            # can still hold their pipes and profile locks while the
+            # replacement browser starts. Wait for them to actually go, then
+            # escalate once. Reaping that has not finished is not a reap.
+            await_reaped_processes(command)
 
 
 def chromium_launch_environment(exe: str, user_data: Path) -> dict[str, str]:

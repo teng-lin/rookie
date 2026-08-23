@@ -585,7 +585,12 @@ class HostedBrowserRunnerTests(unittest.TestCase):
     def test_stale_reap_never_fails_the_run(self) -> None:
         with (
             mock.patch.dict(
-                hosted.os.environ, {"CI": "true", "GITHUB_ACTIONS": "true"}
+                hosted.os.environ,
+                {
+                    "CI": "true",
+                    "GITHUB_ACTIONS": "true",
+                    "ROOKIE_E2E_RUNNER_ENVIRONMENT": "github-hosted",
+                },
             ),
             mock.patch.object(
                 hosted.subprocess, "run", side_effect=FileNotFoundError("pkill")
@@ -595,19 +600,71 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             hosted.reap_stale_browser_processes("/opt/browser", Path("/tmp/profile"))
 
     def test_stale_reap_refuses_to_kill_browsers_outside_hosted_ci(self) -> None:
+        # A self-hosted runner sets CI and GITHUB_ACTIONS too, but it is a
+        # persistent machine that may carry an operator's browser session, so
+        # the environment marker has to be checked as well.
+        for environment in (
+            {"CI": "", "GITHUB_ACTIONS": "", "ROOKIE_E2E_RUNNER_ENVIRONMENT": ""},
+            {
+                "CI": "true",
+                "GITHUB_ACTIONS": "true",
+                "ROOKIE_E2E_RUNNER_ENVIRONMENT": "self-hosted",
+            },
+        ):
+            with self.subTest(environment=environment):
+                with (
+                    mock.patch.dict(hosted.os.environ, environment, clear=False),
+                    mock.patch.object(hosted.subprocess, "run") as run,
+                    mock.patch("builtins.print"),
+                ):
+                    hosted.reap_stale_browser_processes(
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                        Path("/tmp/profile"),
+                    )
+
+                run.assert_not_called()
+
+    def test_reap_waits_for_signaled_processes_then_escalates_once(self) -> None:
+        pattern = "--user-data-dir=/tmp/rookie-ci/opera_gx"
+        # pgrep keeps reporting a match, so the wait must escalate to SIGKILL
+        # and then give up rather than blocking the launch indefinitely.
         with (
-            mock.patch.dict(
-                hosted.os.environ, {"CI": "", "GITHUB_ACTIONS": ""}, clear=False
-            ),
-            mock.patch.object(hosted.subprocess, "run") as run,
+            mock.patch.object(
+                hosted,
+                "run_reap_command",
+                return_value=mock.Mock(returncode=0, stderr=b""),
+            ) as run_command,
+            mock.patch.object(hosted.time, "sleep"),
             mock.patch("builtins.print"),
         ):
-            hosted.reap_stale_browser_processes(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                Path("/tmp/profile"),
+            hosted.await_reaped_processes(
+                ["pkill", "-f", "--", pattern], timeout=0.0
             )
 
-        run.assert_not_called()
+        self.assertEqual(
+            run_command.call_args_list,
+            [
+                mock.call(["pgrep", "-f", "--", pattern]),
+                mock.call(["pkill", "-KILL", "-f", "--", pattern]),
+                mock.call(["pgrep", "-f", "--", pattern]),
+            ],
+        )
+
+    def test_reap_stops_waiting_as_soon_as_the_processes_are_gone(self) -> None:
+        pattern = "/opt/vivaldi/vivaldi"
+        with (
+            mock.patch.object(
+                hosted,
+                "run_reap_command",
+                return_value=mock.Mock(returncode=1, stderr=b""),
+            ) as run_command,
+            mock.patch.object(hosted.time, "sleep") as sleep,
+            mock.patch("builtins.print", side_effect=AssertionError("unexpected log")),
+        ):
+            hosted.await_reaped_processes(["pkill", "-f", "--", pattern])
+
+        run_command.assert_called_once_with(["pgrep", "-f", "--", pattern])
+        sleep.assert_not_called()
 
     def test_windows_vivaldi_gets_a_wider_corpus_poll_window(self) -> None:
         self.assertEqual(

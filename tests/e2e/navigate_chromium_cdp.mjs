@@ -189,12 +189,34 @@ export async function navigateChromiumCdp({
     });
   }
 
-  function createUrlTarget() {
+  function createTargetFor(targetUrl) {
     return send("Target.createTarget", {
-      url,
+      url: targetUrl,
       newWindow: true,
       background: false,
     }).then(({ targetId }) => targetId);
+  }
+
+  function createUrlTarget() {
+    return createTargetFor(url);
+  }
+
+  /**
+   * Close a target and refuse to continue unless it is really gone. Chromium
+   * answers with `{success: false}` rather than a protocol error when the
+   * close does not happen, so the result has to be inspected — a resolved
+   * promise alone does not mean the page went away.
+   */
+  async function closeTargetOrThrow(targetId, context) {
+    let result;
+    try {
+      result = await send("Target.closeTarget", { targetId });
+    } catch (error) {
+      throw new Error(`${context}: ${error.message}`);
+    }
+    if (result?.success === false) {
+      throw new Error(`${context}: Target.closeTarget reported success=false`);
+    }
   }
 
   async function resolveCorpusTarget() {
@@ -239,6 +261,7 @@ export async function navigateChromiumCdp({
   // that outcome fails the root immediately and stays diagnosable.
   async function seedPortableCorpus() {
     let targetId = await resolveCorpusTarget();
+    let keepAliveTargetId;
     for (let attempt = 1; ; attempt += 1) {
       await send("Target.activateTarget", { targetId });
       const { complete, count } = await pollCorpusWindow();
@@ -265,26 +288,27 @@ export async function navigateChromiumCdp({
           `target-origin cookies after ${corpusTimeoutMs}ms; re-creating and ` +
           `re-activating the corpus target`,
       );
-      // Create the replacement before discarding the stalled target: a
-      // Chromium browser with no remaining page can quit, which would end the
-      // run instead of retrying it.
-      const stalledTargetId = targetId;
-      targetId = await createUrlTarget();
-      // Closing the stalled target is not optional. If it survives, a
-      // late-unthrottled navigation can run a second redirect chain against
-      // the retry's, re-adding rookie_deleted or rolling rookie_updated off
-      // `final` after the completion check has already passed — a seeding
-      // flake laundered into an unexplained extraction failure downstream.
-      // Fail the root loudly instead.
-      try {
-        await send("Target.closeTarget", { targetId: stalledTargetId });
-      } catch (error) {
-        throw new Error(
-          `native CDP could not close the stalled corpus target after ` +
-            `attempt ${attempt}/${corpusAttempts}, so a retry would risk two ` +
-            `interleaved redirect chains: ${error.message}`,
-        );
+      // Two constraints pull against each other here. A Chromium browser left
+      // with no page can quit, which would end the run instead of retrying it;
+      // but no second corpus URL may be loading while the stalled target is
+      // still open, or a target that unthrottles mid-retry runs its redirect
+      // chain against the replacement's. A blank keep-alive page satisfies
+      // both: it holds the browser open, and it seeds nothing.
+      if (keepAliveTargetId === undefined) {
+        keepAliveTargetId = await createTargetFor("about:blank");
       }
+      // Closing the stalled target is not optional. If it survives, a
+      // late-unthrottled navigation can re-add rookie_deleted or roll
+      // rookie_updated off `final` after the completion check has already
+      // passed — a seeding flake laundered into an unexplained extraction
+      // failure downstream. Fail the root loudly instead.
+      await closeTargetOrThrow(
+        targetId,
+        `native CDP could not close the stalled corpus target after attempt ` +
+          `${attempt}/${corpusAttempts}, so a retry would risk two ` +
+          `interleaved redirect chains`,
+      );
+      targetId = await createUrlTarget();
     }
   }
 

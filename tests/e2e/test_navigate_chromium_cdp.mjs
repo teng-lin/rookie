@@ -199,6 +199,7 @@ function corpusStartupTarget(command) {
 
 test("retries the corpus target in place when navigation never started", async () => {
   const methods = [];
+  const created = [];
   const warnings = [];
   let windows = 0;
   await navigateChromiumCdp({
@@ -209,6 +210,9 @@ test("retries the corpus target in place when navigation never started", async (
       methods.push(command.method);
       if (command.method === "Target.getTargets") {
         return corpusStartupTarget(command);
+      }
+      if (command.method === "Target.createTarget") {
+        created.push(command.params.url);
       }
       if (command.method === "Storage.getCookies") {
         windows += 1;
@@ -227,16 +231,47 @@ test("retries the corpus target in place when navigation never started", async (
     "Target.getTargets",
     "Target.activateTarget",
     "Storage.getCookies",
-    // The replacement target exists before the stalled one is discarded, so
-    // the browser is never left without a page to keep it alive.
+    // A blank keep-alive page holds the browser open, so the stalled target
+    // can be closed BEFORE a second corpus URL starts loading. The two chains
+    // therefore never overlap, and the browser is never left without a page.
     "Target.createTarget",
     "Target.closeTarget",
+    "Target.createTarget",
     "Target.activateTarget",
     "Storage.getCookies",
     "Browser.close",
   ]);
+  assert.deepEqual(created, ["about:blank", CORPUS_URL]);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /corpus attempt 1\/3 observed no target-origin/);
+});
+
+test("a closeTarget that reports success=false fails the root", async () => {
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: scriptedWebSocket((command) => {
+        if (command.method === "Target.getTargets") {
+          return corpusStartupTarget(command);
+        }
+        if (command.method === "Storage.getCookies") {
+          return { id: command.id, result: { cookies: [] } };
+        }
+        if (command.method === "Target.closeTarget") {
+          // A protocol success carrying a failed close: the page is still
+          // there, so resolving alone must not be read as "it is gone".
+          return { id: command.id, result: { success: false } };
+        }
+        return successfulResponse(command);
+      }),
+      corpusTimeoutMs: 0,
+      settleMs: 0,
+      logger: { log: assert.fail, warn() {} },
+    }),
+    /could not close the stalled corpus target.*Target\.closeTarget reported success=false/s,
+  );
 });
 
 test("a partially seeded corpus fails the root instead of restarting the chain", async () => {
@@ -300,7 +335,9 @@ test("in-root retries stay bounded and report the exhausted attempt count", asyn
     }),
     /observed 0\/19 target-origin cookies after 2 attempts; the corpus target never navigated/,
   );
-  assert.deepEqual(created, [CORPUS_URL]);
+  // One keep-alive page and one replacement corpus target for the single
+  // retry the budget allows, and nothing beyond it.
+  assert.deepEqual(created, ["about:blank", CORPUS_URL]);
   assert.equal(warnings.length, 1);
 });
 
