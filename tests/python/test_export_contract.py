@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import inspect
 import unittest
+from typing import Callable
 from pathlib import Path
 
 import rookie_cookies
@@ -138,11 +139,36 @@ class ExportContractTest(unittest.TestCase):
                         continue
                     self.assertEqual(parameter_spec(getattr(cls, member)), signature)
 
-    def test_kinds_are_from_the_known_set(self) -> None:
-        self.assertEqual(
-            {export.kind for export in EXPORTS},
-            {"function", "class", "constant", "alias", "module"},
-        )
+    def test_each_row_declares_what_its_export_actually_is(self) -> None:
+        """Per row, not per set.
+
+        Comparing the set of kinds in use against the known set cannot fail on
+        a row that names the wrong one -- `Export("version", kind="class")`
+        passes as long as some other row still says "function". This checks
+        each row against the object it names.
+        """
+        checks: dict[str, Callable[[object], bool]] = {
+            "function": lambda value: callable(value) and not inspect.isclass(value),
+            "class": inspect.isclass,
+            "module": inspect.ismodule,
+            "constant": lambda value: isinstance(value, (int, float, str)),
+            # `Literal[...]` aliases and `TypedDict`s are neither plain values
+            # nor ordinary classes; what they share is that no caller invokes
+            # them, which is what separates them from "function".
+            "alias": lambda value: value is not None,
+        }
+        self.assertEqual(set(checks), {export.kind for export in EXPORTS})
+        for export in EXPORTS:
+            if not applicable(export):
+                continue
+            with self.subTest(export=export.name, kind=export.kind):
+                self.assertIn(export.kind, checks, export.name)
+                value = getattr(rookie_cookies, export.name)
+                self.assertTrue(
+                    checks[export.kind](value),
+                    f"{export.name} is declared {export.kind!r} but is a "
+                    f"{type(value).__name__}",
+                )
 
     def test_seeding_exceptions_match_what_the_registry_can_actually_seed(self) -> None:
         """Both directions, so an exception cannot silence a real failure.

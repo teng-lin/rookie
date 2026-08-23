@@ -419,11 +419,21 @@ def expect_nonempty_string(value: object) -> Optional[str]:
     return None
 
 
-def expect_cookiejar(value: object) -> Optional[str]:
+def expect_seeded_cookiejar(value: object) -> Optional[str]:
+    """A jar that actually carries the seeded cookie, not merely a jar.
+
+    A type check alone is the same hole the list expectations had: `jar()`
+    seeds a store first, so an empty `CookieJar` means the
+    `ReadResult` -> `CookieJar` projection dropped everything -- exactly the
+    miswiring these probes exist to catch.
+    """
     import http.cookiejar
 
     if not isinstance(value, http.cookiejar.CookieJar):
         return f"expected a CookieJar, got {type(value).__name__}"
+    names = [cookie.name for cookie in value]
+    if SEEDED_NAME not in names:
+        return f"seeded cookie {SEEDED_NAME!r} missing from the jar; it holds {names!r}"
     return None
 
 
@@ -667,7 +677,7 @@ JOB_EXPORTS: tuple[Export, ...] = (
             "app_bound='injection_only')"
         ),
         success=_jar_success,
-        expect=expect_cookiejar,
+        expect=expect_seeded_cookiejar,
         failure=Failure(
             probe=lambda home: rookie_cookies.jar(browser=UNKNOWN_BROWSER),
             exception=rookie_cookies.RookieRequestError,
@@ -1144,7 +1154,7 @@ HELPER_EXPORTS: tuple[Export, ...] = (
         signature="(cookies)",
         in_stub=False,
         success=lambda home: rookie_cookies.to_cookiejar([dict(_SAMPLE_COOKIE)]),
-        expect=expect_cookiejar,
+        expect=expect_seeded_cookiejar,
         failure=Failure(
             probe=lambda home: rookie_cookies.to_cookiejar([{"domain": SEEDED_DOMAIN}]),
             exception=KeyError,

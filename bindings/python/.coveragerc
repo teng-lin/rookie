@@ -14,10 +14,13 @@ source = rookie_cookies
 # tests/python imports the *installed wheel*, so coverage records
 # site-packages paths. Alias them back onto the checked-out sources, which is
 # what coverage.toml's floors are keyed by.
+#
+# One forward-slash pattern covers Windows too: coverage.py compiles a `/` in
+# a path pattern to "either separator" precisely so these aliases need not be
+# written twice.
 package =
     bindings/python/rookie_cookies
     */site-packages/rookie_cookies
-    *\site-packages\rookie_cookies
 
 [report]
 # `if TYPE_CHECKING:` bodies never execute at runtime by construction.

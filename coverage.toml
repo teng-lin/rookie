@@ -54,9 +54,12 @@ branches = 65.0
 
 [python-binding-native.files."bindings/python/src/errors.rs"]
 lines = 88.0
-# llvm-cov counts only two branch points in this file -- `match` arms are
-# regions, not branches -- so this floor is coarse by construction.
-branches = 45.0
+# llvm-cov finds exactly two branch points in this file -- `match` arms are
+# regions, not branches -- so the only observable values are 0, 50 and 100.
+# The floor is therefore set *at* the observed 50 rather than below it: a
+# lower number could not fail without the file losing both branches, which is
+# not a ratchet. There is no measurement noise to absorb at this granularity.
+branches = 50.0
 
 [python-binding-native.files."bindings/python/src/job.rs"]
 lines = 88.0

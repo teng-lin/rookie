@@ -424,6 +424,12 @@ jobs:
     # bindings/python/src/*.rs. `cargo llvm-cov -p rookie-cookies-python` on
     # its own sees the crate's own #[test]s and nothing else, because the rest
     # of the binding only runs when Python calls across the PyO3 boundary.
+    #
+    # This runs on every pull request and reports there, but merging is only
+    # actually blocked once branch protection requires the check name
+    # "Python binding coverage (ubuntu-latest)" -- a repository setting, not
+    # something this file can assert. `release gate: full test suite` already
+    # requires it for the nightly aggregation below.
     name: Python binding coverage (${{ matrix.os }})
     needs: decide
     runs-on: ${{ matrix.os }}
