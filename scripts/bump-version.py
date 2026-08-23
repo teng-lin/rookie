@@ -33,6 +33,12 @@ NATIVE_MANIFESTS = tuple(
     / "package.json"
     for package_name in NATIVE_PACKAGES
 )
+# napi-rs generates bindings/node/index.js and bakes the package version into
+# its native-binding version check, once per supported platform triple. The file
+# is committed, and CI regenerates it and diffs the result (test-rust.yml,
+# "Verify committed loader matches freshly patched output"), so a bump that
+# leaves it stale fails there instead of here.
+NODE_LOADER = Path("bindings/node/index.js")
 MANAGED_PATHS = (
     Path("Cargo.toml"),
     Path("Cargo.lock"),
@@ -41,6 +47,7 @@ MANAGED_PATHS = (
     *NATIVE_MANIFESTS,
     Path("bindings/node/package-lock.json"),
     Path("examples/javascript/package-lock.json"),
+    NODE_LOADER,
 )
 SEMVER_PATTERN = re.compile(
     r"^(0|[1-9][0-9]*)\."
@@ -75,6 +82,22 @@ def validate_semver(version: str) -> str:
                     f"invalid SemVer release version (numeric pre-release identifier has a leading zero): {version!r}"
                 )
     return version
+
+
+def is_final_promotion(current_version: str, new_version: str) -> bool:
+    """True when `new_version` is `current_version` with its pre-release dropped.
+
+    `0.6.0-rc.1` -> `0.6.0` is a promotion; `0.6.0` -> `0.6.1`, `0.6.0-rc.1` ->
+    `0.6.0-rc.2`, and `0.6.0-rc.1` -> `0.7.0` are all ordinary bumps. The
+    distinction matters because a promotion's release notes already exist under
+    the pre-release heading, so there is nothing in `## [Unreleased]` to promote.
+    """
+    current = SEMVER_PATTERN.fullmatch(current_version)
+    new = SEMVER_PATTERN.fullmatch(new_version)
+    if current is None or new is None:
+        return False
+    same_core = current.group(1, 2, 3) == new.group(1, 2, 3)
+    return same_core and current.group(4) is not None and new.group(4) is None
 
 
 def validate_date(value: str) -> str:
@@ -201,6 +224,42 @@ def update_json_strings(
     return changes
 
 
+def update_node_loader(
+    path: Path, current_version: str, new_version: str
+) -> FieldChange | None:
+    """Rewrites the version literal napi-rs bakes into the generated loader.
+
+    Regenerating the file properly means a full `napi build`, which a metadata
+    bump has no reason to require. The version literal is the only thing a bump
+    changes in it, so rewrite exactly that and let CI's regenerate-and-diff step
+    stay the check that the loader's shape is still what patch-loader.js expects.
+    """
+    if current_version == new_version:
+        return None
+    text = path.read_text(encoding="utf-8")
+    replacements = (
+        (f"!== '{current_version}'", f"!== '{new_version}'"),
+        (f"expected {current_version} but got", f"expected {new_version} but got"),
+    )
+    updated = text
+    replaced = 0
+    for before, after in replacements:
+        replaced += updated.count(before)
+        updated = updated.replace(before, after)
+    if replaced == 0:
+        # Either the bump already ran, or napi-rs changed the shape it emits.
+        # Only the first is benign, so tell those two cases apart.
+        if f"'{new_version}'" in text:
+            return None
+        raise ReleaseError(
+            f"{path}: found no napi version literal for {current_version}; the generated "
+            "loader's shape may have changed, so rerun `npm run build` in bindings/node "
+            "and update this script's replacement patterns"
+        )
+    path.write_text(updated, encoding="utf-8")
+    return FieldChange(path, "napi binding version check", current_version, new_version)
+
+
 def unreleased_body(changelog: str, heading_end: int) -> str:
     next_heading = re.search(r"^## ", changelog[heading_end:], flags=re.MULTILINE)
     end = heading_end + next_heading.start() if next_heading else len(changelog)
@@ -247,6 +306,45 @@ def update_changelog(
                 f"{path}: version {new_version} is already released but Unreleased contains new prose"
             )
         return None
+
+    if is_final_promotion(current_version, new_version):
+        # A pre-release's notes already sit under its own heading, leaving
+        # `## [Unreleased]` empty, so the promote-Unreleased path below can
+        # never apply. Retag the existing heading instead of demanding prose
+        # that legitimately is not there.
+        if releases:
+            # The heading was already retagged (a rerun, or a hand-edit before
+            # the manifests caught up). Leave it and let the manifests sync.
+            return None
+        promoted_pattern = re.compile(
+            rf"^## \[{re.escape(current_version)}\]"
+            rf"(?: - (?P<date>\d{{4}}-\d{{2}}-\d{{2}}))?[ \t]*$",
+            flags=re.MULTILINE,
+        )
+        promoting = list(promoted_pattern.finditer(changelog))
+        if len(promoting) != 1:
+            raise ReleaseError(
+                f"{path}: promoting {current_version} to {new_version} requires exactly "
+                f"one '## [{current_version}]' heading, found {len(promoting)}"
+            )
+        existing_date = promoting[0].group("date")
+        if existing_date is None:
+            raise ReleaseError(
+                f"{path}: release heading for {current_version} is missing its YYYY-MM-DD date"
+            )
+        if unreleased_body(changelog, unreleased[0].end()).strip():
+            raise ReleaseError(
+                f"{path}: Unreleased contains prose, so {current_version} cannot be promoted "
+                f"to {new_version}; release that prose as its own version first"
+            )
+        # An explicit --date re-stamps the promotion; otherwise the pre-release's
+        # own date is kept, because promoting does not re-author the notes.
+        promoted_date = release_date if explicit_date else existing_date
+        before = changelog[promoting[0].start() : promoting[0].end()]
+        after = f"## [{new_version}] - {promoted_date}"
+        updated = changelog[: promoting[0].start()] + after + changelog[promoting[0].end() :]
+        path.write_text(updated, encoding="utf-8")
+        return FieldChange(path, "release heading", before, after)
 
     if releases:
         raise ReleaseError(f"{path}: release heading for {new_version} already exists")
@@ -427,6 +525,12 @@ def bump_version(
             changes.extend(
                 update_json_strings(root / relative_path, {("version",): new_version})
             )
+
+        loader_change = update_node_loader(
+            root / NODE_LOADER, current_version, new_version
+        )
+        if loader_change is not None:
+            changes.append(loader_change)
 
         changelog_change = update_changelog(
             root / "CHANGELOG.md",

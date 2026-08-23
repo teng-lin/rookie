@@ -128,6 +128,27 @@ release verifier fails. An exact rerun of an already prepared version is a
 no-op; an ambiguous changelog or a pre-existing target release heading fails
 without creating another release section.
 
+### Promoting a pre-release to final
+
+Dropping a pre-release suffix (`0.6.0-rc.1` → `0.6.0`) is the same command:
+
+```console
+python3 scripts/bump-version.py 0.6.0
+```
+
+It is handled as its own mode, because a pre-release's notes already sit under
+the pre-release heading and `## [Unreleased]` is therefore empty — there is
+nothing to promote in the ordinary sense. The existing
+`## [0.6.0-rc.1] - <date>` heading is retagged to `## [0.6.0] - <date>` in
+place, keeping the pre-release's own date unless you pass `--date`, since
+promoting does not re-author the notes. Prose sitting in `## [Unreleased]` is
+refused: that is newer work than the pre-release, and it needs its own version
+rather than being folded silently into the promotion.
+
+Only a dropped suffix counts. `0.6.0-rc.1` → `0.6.0-rc.2`, `0.6.0-rc.1` →
+`0.6.1`, and `0.6.0-rc.1` → `0.7.0` are ordinary bumps and still require
+authored `## [Unreleased]` prose.
+
 Review the resulting release notes and generated metadata, then run the full
 release checks. `check-release.py` reads `workspace.package.version` when no
 argument is supplied; release workflows still pass an explicit version to bind
