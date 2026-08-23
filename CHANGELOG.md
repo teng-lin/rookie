@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-22
+
 ### Added
 
 - Python binding coverage is now measured and ratcheted. A pull-request job
@@ -22,18 +24,6 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each browser-specific convenience function now receives an exact-corpus
   assertion on the platforms where it exists, or a documented exception in
   `tests/e2e/browser_coverage.json`.
-
-### Fixed
-
-- The Python type stub no longer leaves `jar()` and `ReadResult.as_jar()`
-  returning an unresolvable type, so consumers infer `http.cookiejar.CookieJar`
-  rather than `Any`.
-- Platform-conditional Python exports are now hidden from type checkers on
-  platforms that do not provide them. Calling `cachy()` on macOS, `safari()`
-  on Linux, or `internet_explorer()` anywhere but Windows is now a type error
-  instead of type-checking clean and failing at runtime.
-
-## [0.6.0] - 2026-08-22
 
 ### Changed
 
@@ -63,6 +53,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stale but otherwise readable cookie snapshot.
 - Release-control checks no longer let a newer, intentionally skipped copy of
   a dispatch-only gate mask the successful exact-commit release run.
+- The Python type stub no longer leaves `jar()` and `ReadResult.as_jar()`
+  returning an unresolvable type, so consumers infer `http.cookiejar.CookieJar`
+  rather than `Any`.
+- Platform-conditional Python exports are now hidden from type checkers on
+  platforms that do not provide them. Calling `cachy()` on macOS, `safari()`
+  on Linux, or `internet_explorer()` anywhere but Windows is now a type error
+  instead of type-checking clean and failing at runtime.
 
 ## [0.6.0-beta.3] - 2026-08-21
 
