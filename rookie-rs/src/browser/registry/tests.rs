@@ -329,6 +329,105 @@ fn declared_tiers_require_non_blank_credentials() {
   .contains("blank linux_crypt_name"));
 }
 
+/// A one-root Chromium registry declaring `layout`, or omitting
+/// `legacy_profile_layout` entirely when `layout` is `None`.
+fn registry_with_layout(layout: Option<&str>) -> String {
+  let declaration = layout
+    .map(|layout| format!(r#", "legacy_profile_layout": "{layout}""#))
+    .unwrap_or_default();
+  format!(
+    r#"{{
+      "schema_version": 1,
+      "platforms": {{
+        "linux": [
+          {{
+            "canonical_id": "probe",
+            "aliases": [],
+            "display_name": "Probe",
+            "engine": "chromium",
+            "roots": [
+              {{
+                "root_id": "probe-root",
+                "template": "{{home}}/probe",
+                "channel": "stable",
+                "discovery": "chromium_user_data",
+                "priority": 10{declaration}
+              }}
+            ],
+            "capabilities": {{
+              "declared_persistent_formats": ["chromium_sqlite"],
+              "declared_session_formats": [],
+              "declared_decryption_tiers": []
+            }}
+          }}
+        ]
+      }}
+    }}"#
+  )
+}
+
+fn parse_layout(
+  layout: Option<&str>,
+) -> std::result::Result<chromium::LegacyChromiumProfileLayout, String> {
+  serde_json::from_str::<Registry>(&registry_with_layout(layout))
+    .map(|registry| registry.platforms["linux"][0].roots[0].legacy_profile_layout)
+    .map_err(|error| error.to_string())
+}
+
+#[test]
+fn every_supported_legacy_profile_layout_name_parses() {
+  use chromium::LegacyChromiumProfileLayout as Layout;
+  for (name, expected) in [
+    ("default_and_profiles", Layout::DefaultAndProfiles),
+    ("default_only", Layout::DefaultOnly),
+    ("flat_and_default", Layout::FlatAndDefault),
+    ("default_and_flat", Layout::DefaultAndFlat),
+  ] {
+    assert_eq!(parse_layout(Some(name)), Ok(expected), "{name}");
+  }
+
+  // Absence is the only path to the default layout; see the unknown-name test.
+  assert_eq!(parse_layout(None), Ok(Layout::DefaultAndProfiles));
+}
+
+#[test]
+fn retired_flat_only_layout_is_rejected_with_a_migration_pointer() {
+  let error = parse_layout(Some("flat_only")).expect_err("flat_only must not parse");
+  assert!(error.contains("flat_only"), "{error}");
+  assert!(error.contains("was retired"), "{error}");
+  assert!(error.contains("flat_and_default"), "{error}");
+}
+
+#[test]
+fn unknown_legacy_profile_layout_names_fail_rather_than_defaulting() {
+  // The field carries `#[serde(default)]`, so the failure mode worth pinning is
+  // a bad value silently becoming `DefaultAndProfiles` instead of erroring.
+  let error = parse_layout(Some("flat_and_profiles")).expect_err("unknown name must not parse");
+  assert!(error.contains("unknown variant"), "{error}");
+  assert!(error.contains("flat_and_profiles"), "{error}");
+}
+
+#[test]
+fn embedded_registry_uses_the_migration_target_and_not_the_retired_name() {
+  // Reintroducing `flat_only` would fail every registry-backed test at once
+  // through the `Lazy` load; naming it here turns that cascade into one
+  // readable failure. The paired assertion keeps the migration target live, so
+  // this cannot pass by the layout vocabulary quietly going unused.
+  assert!(
+    !include_str!("../../../browser_registry.json").contains("flat_only"),
+    "browser_registry.json declares the retired flat_only layout"
+  );
+  let registry = embedded_registry().expect("registry");
+  assert!(registry
+    .platforms
+    .values()
+    .flatten()
+    .flat_map(|definition| &definition.roots)
+    .any(|root| {
+      root.legacy_profile_layout == chromium::LegacyChromiumProfileLayout::FlatAndDefault
+    }));
+}
+
 #[test]
 fn registry_rejects_engine_discovery_strategy_mismatches() {
   for (engine, discovery) in [

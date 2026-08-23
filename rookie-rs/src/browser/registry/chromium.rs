@@ -30,15 +30,60 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum LegacyChromiumProfileLayout {
   #[default]
   DefaultAndProfiles,
   DefaultOnly,
-  FlatOnly,
   FlatAndDefault,
   DefaultAndFlat,
+}
+
+/// The `legacy_profile_layout` names a registry root may declare.
+const LEGACY_PROFILE_LAYOUT_NAMES: &[&str] = &[
+  "default_and_profiles",
+  "default_only",
+  "flat_and_default",
+  "default_and_flat",
+];
+
+/// Retired in favour of `flat_and_default`.
+///
+/// `flat_only` and `flat_and_default` rank the flat installation root
+/// identically; they differ only in that `flat_only` refuses to fall back to a
+/// sibling `Default` directory. Opera was the sole declarant, and that refusal
+/// was exactly the discovery defect `e72304b` fixed -- Opera does keep a
+/// `Default` profile. Because `flat_and_default` behaves identically to
+/// `flat_only` whenever no `Default` directory exists, the only shape the two
+/// disagree about is the one shown to be wrong, so the name is rejected rather
+/// than silently accepted or silently defaulted.
+const RETIRED_FLAT_ONLY: &str = "flat_only";
+
+impl<'de> Deserialize<'de> for LegacyChromiumProfileLayout {
+  fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    // Hand-written rather than derived so the retired name gets a migration
+    // pointer instead of serde's bare unknown-variant list. Every other
+    // unrecognized name still fails, so no value can silently become the
+    // `#[serde(default)]` layout -- absence is the only path to that default.
+    let name = String::deserialize(deserializer)?;
+    match name.as_str() {
+      "default_and_profiles" => Ok(Self::DefaultAndProfiles),
+      "default_only" => Ok(Self::DefaultOnly),
+      "flat_and_default" => Ok(Self::FlatAndDefault),
+      "default_and_flat" => Ok(Self::DefaultAndFlat),
+      RETIRED_FLAT_ONLY => Err(serde::de::Error::custom(format!(
+        "legacy_profile_layout {RETIRED_FLAT_ONLY:?} was retired; declare \"flat_and_default\", \
+         which ranks the flat installation root first and then falls back to \"Default\""
+      ))),
+      other => Err(serde::de::Error::unknown_variant(
+        other,
+        LEGACY_PROFILE_LAYOUT_NAMES,
+      )),
+    }
+  }
 }
 
 /// Enforces the Section 5.9 credential rules.
@@ -173,9 +218,7 @@ fn legacy_chromium_profile_group(
     (LegacyChromiumProfileLayout::DefaultAndProfiles, name) if name.starts_with("Profile ") => {
       Some(1)
     }
-    (LegacyChromiumProfileLayout::FlatOnly | LegacyChromiumProfileLayout::FlatAndDefault, ".") => {
-      Some(0)
-    }
+    (LegacyChromiumProfileLayout::FlatAndDefault, ".") => Some(0),
     (LegacyChromiumProfileLayout::FlatAndDefault, "Default") => Some(1),
     (LegacyChromiumProfileLayout::DefaultAndFlat, ".") => Some(1),
     _ => None,
@@ -189,9 +232,7 @@ fn add_legacy_flat_chromium_profiles<F: DiscoveryFs>(
   for installation in &mut discovery.installations {
     if !matches!(
       installation.legacy_profile_layout,
-      LegacyChromiumProfileLayout::FlatOnly
-        | LegacyChromiumProfileLayout::FlatAndDefault
-        | LegacyChromiumProfileLayout::DefaultAndFlat
+      LegacyChromiumProfileLayout::FlatAndDefault | LegacyChromiumProfileLayout::DefaultAndFlat
     ) || installation
       .profiles
       .iter()
