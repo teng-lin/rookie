@@ -522,38 +522,69 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 "/opt/browser", Path("/tmp/profile"), "http://127.0.0.1:8765/set"
             )
 
-        reap.assert_called_once_with("/opt/browser")
+        reap.assert_called_once_with("/opt/browser", Path("/tmp/profile"))
         self.assertLess(
-            reap.call_args_list.index(mock.call("/opt/browser")),
+            reap.call_args_list.index(mock.call("/opt/browser", Path("/tmp/profile"))),
             len(popen.call_args_list),
         )
 
-    def test_stale_reap_matches_the_product_only(self) -> None:
+    def test_stale_reap_matches_the_launch_root_and_then_the_product(self) -> None:
+        root = Path("/tmp/rookie-ci/opera_gx")
         self.assertEqual(
-            hosted.stale_browser_reap_command(
-                "/Applications/Opera GX.app/Contents/MacOS/Opera", platform="darwin"
+            hosted.stale_browser_reap_commands(
+                "/Applications/Opera GX.app/Contents/MacOS/Opera",
+                root,
+                platform="darwin",
             ),
-            ["pkill", "-f", "/Applications/Opera GX.app/"],
+            [
+                ["pkill", "-f", f"--user-data-dir={root}"],
+                ["pkill", "-f", "/Applications/Opera GX.app/"],
+            ],
         )
         self.assertEqual(
-            hosted.stale_browser_reap_command("/opt/vivaldi/vivaldi", platform="linux"),
-            ["pkill", "-f", "/opt/vivaldi/vivaldi"],
+            hosted.stale_browser_reap_commands(
+                "/opt/vivaldi/vivaldi", root, platform="linux"
+            ),
+            [
+                ["pkill", "-f", f"--user-data-dir={root}"],
+                ["pkill", "-f", "/opt/vivaldi/vivaldi"],
+            ],
         )
         self.assertEqual(
-            hosted.stale_browser_reap_command(
-                r"C:\Program Files\Vivaldi\Application\vivaldi.exe", platform="win32"
+            hosted.stale_browser_reap_commands(
+                r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+                root,
+                platform="win32",
             ),
-            ["taskkill", "/F", "/T", "/IM", "vivaldi.exe"],
+            [["taskkill", "/F", "/T", "/IM", "vivaldi.exe"]],
         )
 
     def test_stale_reap_never_fails_the_run(self) -> None:
         with (
+            mock.patch.dict(
+                hosted.os.environ, {"CI": "true", "GITHUB_ACTIONS": "true"}
+            ),
             mock.patch.object(
                 hosted.subprocess, "run", side_effect=FileNotFoundError("pkill")
             ),
             mock.patch("builtins.print"),
         ):
-            hosted.reap_stale_browser_processes("/opt/browser")
+            hosted.reap_stale_browser_processes("/opt/browser", Path("/tmp/profile"))
+
+    def test_stale_reap_refuses_to_kill_browsers_outside_hosted_ci(self) -> None:
+        with (
+            mock.patch.dict(
+                hosted.os.environ, {"CI": "", "GITHUB_ACTIONS": ""}, clear=False
+            ),
+            mock.patch.object(hosted.subprocess, "run") as run,
+            mock.patch("builtins.print"),
+        ):
+            hosted.reap_stale_browser_processes(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                Path("/tmp/profile"),
+            )
+
+        run.assert_not_called()
 
     def test_windows_vivaldi_gets_a_wider_corpus_poll_window(self) -> None:
         self.assertEqual(
@@ -591,13 +622,33 @@ class HostedBrowserRunnerTests(unittest.TestCase):
             kwargs["env"]["ROOKIE_E2E_CDP_CORPUS_ATTEMPTS"],
             str(hosted.CDP_CORPUS_ATTEMPTS),
         )
-        # The subprocess ceiling must clear every attempt the helper may spend,
-        # otherwise a legitimate retry surfaces as an opaque harness timeout.
-        self.assertGreater(
+        self.assertEqual(
+            kwargs["env"]["ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS"],
+            str(hosted.CDP_COMMAND_TIMEOUT_MS),
+        )
+        self.assertEqual(
             kwargs["timeout"],
-            hosted.CDP_CORPUS_ATTEMPTS
-            * hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED
-            / 1000,
+            hosted.cdp_helper_timeout(
+                hosted.CDP_CORPUS_TIMEOUT_MS_THROTTLED, hosted.CDP_CORPUS_ATTEMPTS
+            ),
+        )
+
+    def test_cdp_ceiling_clears_the_helper_command_bounds_it_sets(self) -> None:
+        # Reconstruct the helper's worst case independently of the production
+        # formula: an attempt can spend a full poll window plus the DevTools
+        # commands that set it up, each bounded by the command timeout the
+        # harness itself hands the helper. A ceiling below this would cut a
+        # legitimate retry short and hide the helper's attempt diagnostics.
+        window_ms, attempts, command_ms = 40_000, 3, 10_000
+        worst_case_seconds = attempts * (window_ms + 3 * command_ms) / 1000
+        self.assertGreater(
+            hosted.cdp_helper_timeout(window_ms, attempts, command_ms),
+            worst_case_seconds,
+        )
+        # A wider command bound must widen the ceiling, not be ignored by it.
+        self.assertGreater(
+            hosted.cdp_helper_timeout(window_ms, attempts, 20_000),
+            hosted.cdp_helper_timeout(window_ms, attempts, command_ms),
         )
 
     def test_linux_chromium_uses_native_devtools_and_libsecret(self) -> None:

@@ -11,6 +11,7 @@ const PORTABLE_CORPUS_SIZE = 19;
 
 export const DEFAULT_CORPUS_TIMEOUT_MS = 20_000;
 export const DEFAULT_CORPUS_ATTEMPTS = 3;
+export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
 
 function targetOriginCookies(cookies) {
   return cookies.filter(({ domain }) =>
@@ -48,10 +49,11 @@ function positiveIntegerFromEnv(env, name) {
 }
 
 /**
- * Per-browser overrides for the corpus poll window and its bounded retry
- * count. Vivaldi under a Windows service session is a known slow case, so the
- * Python harness widens the window for it rather than hard-coding one budget
- * for every product.
+ * Per-browser overrides for the corpus poll window, its bounded retry count,
+ * and the per-command ceiling. Vivaldi under a Windows service session is a
+ * known slow case, so the Python harness widens the window for it rather than
+ * hard-coding one budget for every product. The harness sets these explicitly
+ * so it can derive its own subprocess ceiling from every bound in force here.
  */
 export function corpusOptionsFromEnv(env = process.env) {
   const options = {};
@@ -65,6 +67,13 @@ export function corpusOptionsFromEnv(env = process.env) {
     "ROOKIE_E2E_CDP_CORPUS_ATTEMPTS",
   );
   if (corpusAttempts !== undefined) options.corpusAttempts = corpusAttempts;
+  const commandTimeoutMs = positiveIntegerFromEnv(
+    env,
+    "ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS",
+  );
+  if (commandTimeoutMs !== undefined) {
+    options.commandTimeoutMs = commandTimeoutMs;
+  }
   return options;
 }
 
@@ -74,7 +83,7 @@ export async function navigateChromiumCdp({
   fetchImpl = fetch,
   WebSocketImpl = WebSocket,
   openTimeoutMs = 10_000,
-  commandTimeoutMs = 10_000,
+  commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
   corpusTimeoutMs = DEFAULT_CORPUS_TIMEOUT_MS,
   corpusAttempts = DEFAULT_CORPUS_ATTEMPTS,
   pollMs = 100,
@@ -240,7 +249,7 @@ export async function navigateChromiumCdp({
           `native CDP navigation did not complete the portable corpus ` +
             `(observed ${count}/${PORTABLE_CORPUS_SIZE} target-origin cookies ` +
             `after ${attempt} ${attemptsWord}; the corpus navigated but ` +
-            `stalled partway, so it was not retried)`,
+            `stalled partway, which is never retried in place)`,
         );
       }
       if (attempt >= corpusAttempts) {
@@ -258,15 +267,23 @@ export async function navigateChromiumCdp({
       );
       // Create the replacement before discarding the stalled target: a
       // Chromium browser with no remaining page can quit, which would end the
-      // run instead of retrying it. Closing the stalled target afterwards
-      // keeps a late-unthrottled navigation from interleaving a second
-      // redirect chain with the retry.
+      // run instead of retrying it.
       const stalledTargetId = targetId;
       targetId = await createUrlTarget();
+      // Closing the stalled target is not optional. If it survives, a
+      // late-unthrottled navigation can run a second redirect chain against
+      // the retry's, re-adding rookie_deleted or rolling rookie_updated off
+      // `final` after the completion check has already passed — a seeding
+      // flake laundered into an unexplained extraction failure downstream.
+      // Fail the root loudly instead.
       try {
         await send("Target.closeTarget", { targetId: stalledTargetId });
       } catch (error) {
-        logger.warn(`Target.closeTarget did not complete: ${error.message}`);
+        throw new Error(
+          `native CDP could not close the stalled corpus target after ` +
+            `attempt ${attempt}/${corpusAttempts}, so a retry would risk two ` +
+            `interleaved redirect chains: ${error.message}`,
+        );
       }
     }
   }

@@ -59,6 +59,13 @@ REGISTRY_PATH = ROOT / "rookie-rs/browser_registry.json"
 CDP_CORPUS_TIMEOUT_MS = 20_000
 CDP_CORPUS_TIMEOUT_MS_THROTTLED = 40_000
 CDP_CORPUS_ATTEMPTS = 3
+# Ceiling on a single DevTools command inside the helper. Set here rather than
+# left to the helper's own default so the outer subprocess ceiling can be
+# derived from every bound the helper actually honors.
+CDP_COMMAND_TIMEOUT_MS = 10_000
+# Commands a retry adds beyond the poll window itself: create the replacement
+# target, close the stalled one, and activate the replacement.
+CDP_COMMANDS_PER_ATTEMPT = 3
 # Post-shutdown windows, in seconds, allowed for the browser to flush the
 # completion cookie into persistent SQLite. A contended shutdown (for example a
 # leftover vendor auto-update service holding its mojo pipe) can push the flush
@@ -819,45 +826,83 @@ def chromium_corpus_timeout_ms(exe: str, *, platform: str | None = None) -> int:
     return CDP_CORPUS_TIMEOUT_MS
 
 
-def stale_browser_reap_command(exe: str, *, platform: str | None = None) -> list[str]:
-    """Return the command that reaps leftover processes of this product only.
+def on_disposable_ci_host() -> bool:
+    """True only on a hosted runner whose whole machine is discarded after."""
 
-    A previous run of the same browser can leave an auto-update or IPC helper
-    behind (Opera's `oauc_pipe` service is the observed case). The stale helper
-    contends with the launch that follows and can delay its cookie flush past
-    the completion budget, so each launch starts by reaping its own product.
+    return (
+        os.environ.get("CI", "").lower() == "true"
+        and os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    )
+
+
+def stale_browser_reap_commands(
+    exe: str, user_data: Path, *, platform: str | None = None
+) -> list[list[str]]:
+    """Return the commands that reap leftovers of this launch, most-specific first.
+
+    A previous launch of the same browser can leave processes behind that
+    contend with the one about to start and delay its cookie flush past the
+    completion budget (Opera's `oauc_pipe` service is the observed case).
+
+    What each pattern actually reaches, stated precisely so nobody assumes more:
+
+    - The launch root is harness-owned and appears in the command line of every
+      Chromium process started against it, so it reaps this harness's own
+      leftovers exactly and nothing else. It does not reach a vendor service
+      launched without the flag.
+    - The product pattern additionally reaches vendor helpers that share the
+      main binary's path prefix: on macOS the whole `.app` bundle, elsewhere the
+      executable path. A helper installed outside the bundle, or launched
+      through a wrapper script whose path never appears in the child's command
+      line, is not reached — the bounded flush retry, not this reap, is what
+      covers that residual case.
     """
 
     platform = platform or sys.platform
     normalized = exe.replace("\\", "/")
     if platform == "win32":
-        return ["taskkill", "/F", "/T", "/IM", normalized.rsplit("/", 1)[-1]]
+        # Windows has no command-line matcher in the base image, so the image
+        # name is the only available discriminator here.
+        return [["taskkill", "/F", "/T", "/IM", normalized.rsplit("/", 1)[-1]]]
     bundle, separator, _ = normalized.partition(".app/Contents/MacOS/")
-    # On macOS the vendor helpers live beside the main binary inside the same
-    # bundle, so match the bundle rather than the single executable path.
-    pattern = f"{bundle}.app/" if separator else normalized
-    return ["pkill", "-f", pattern]
+    product = f"{bundle}.app/" if separator else normalized
+    return [
+        ["pkill", "-f", f"--user-data-dir={user_data}"],
+        ["pkill", "-f", product],
+    ]
 
 
-def reap_stale_browser_processes(exe: str) -> None:
-    """Best-effort reap; nothing here may fail the run on its own."""
+def reap_stale_browser_processes(exe: str, user_data: Path) -> None:
+    """Best-effort reap; nothing here may fail the run on its own.
 
-    command = stale_browser_reap_command(exe)
-    try:
-        completed = subprocess.run(
-            command, check=False, capture_output=True, timeout=30
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        print(f"stale browser reap could not run: {error}", flush=True)
-        return
-    # pkill exits 1 and taskkill exits 128 when nothing matched, which is the
-    # healthy case for a runner with no leftovers.
-    if completed.returncode not in (0, 1, 128):
+    Restricted to a hosted runner. The patterns match every instance of the
+    product, not only the ones this harness started, so a local developer run
+    must never force-kill the browser they are using.
+    """
+
+    if not on_disposable_ci_host():
         print(
-            f"stale browser reap ({' '.join(command)}) exited "
-            f"{completed.returncode}; continuing",
+            "skipping the stale browser reap outside a hosted CI runner",
             flush=True,
         )
+        return
+    for command in stale_browser_reap_commands(exe, user_data):
+        try:
+            completed = subprocess.run(
+                command, check=False, capture_output=True, timeout=30
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"stale browser reap could not run: {error}", flush=True)
+            continue
+        # pkill exits 1 and taskkill exits 128 when nothing matched, which is
+        # the healthy case for a runner with no leftovers.
+        if completed.returncode not in (0, 1, 128):
+            detail = completed.stderr.decode("utf-8", "replace").strip()
+            print(
+                f"stale browser reap ({' '.join(command)}) exited "
+                f"{completed.returncode}; continuing: {detail or '<no stderr>'}",
+                flush=True,
+            )
 
 
 def chromium_launch_environment(exe: str, user_data: Path) -> dict[str, str]:
@@ -911,16 +956,37 @@ def wait_for_devtools_or_cookie(
     )
 
 
+def cdp_helper_timeout(
+    corpus_timeout_ms: int,
+    corpus_attempts: int,
+    command_timeout_ms: int = CDP_COMMAND_TIMEOUT_MS,
+) -> float:
+    """Bound the helper above every budget it is allowed to spend.
+
+    Each corpus attempt can spend one full poll window plus the DevTools
+    commands that set it up, and each of those is separately bounded by the
+    command timeout. A ceiling that ignores the command bounds would cut a
+    legitimate retry short and re-surface it as an opaque harness timeout,
+    losing the helper's own attempt-count diagnostics.
+    """
+
+    per_attempt_ms = corpus_timeout_ms + CDP_COMMANDS_PER_ATTEMPT * command_timeout_ms
+    # Fixed overhead: socket open, the settle pause, and Browser.close.
+    return 45 + corpus_attempts * per_attempt_ms / 1000
+
+
 def navigate_chromium_cdp(
     port: int,
     url: str,
     *,
     corpus_timeout_ms: int = CDP_CORPUS_TIMEOUT_MS,
     corpus_attempts: int = CDP_CORPUS_ATTEMPTS,
+    command_timeout_ms: int = CDP_COMMAND_TIMEOUT_MS,
 ) -> None:
     env = os.environ.copy()
     env["ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS"] = str(corpus_timeout_ms)
     env["ROOKIE_E2E_CDP_CORPUS_ATTEMPTS"] = str(corpus_attempts)
+    env["ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS"] = str(command_timeout_ms)
     subprocess.run(
         [
             "node",
@@ -930,10 +996,9 @@ def navigate_chromium_cdp(
         ],
         check=True,
         cwd=str(ROOT / "tests/e2e"),
-        # The helper may legitimately spend one poll window per bounded corpus
-        # attempt, so the outer ceiling has to clear the worst case it can
-        # spend or a retry would surface as an opaque harness timeout.
-        timeout=45 + corpus_attempts * corpus_timeout_ms / 1000,
+        timeout=cdp_helper_timeout(
+            corpus_timeout_ms, corpus_attempts, command_timeout_ms
+        ),
         env=env,
     )
 
@@ -942,7 +1007,7 @@ def seed_chromium_native(exe: str, user_data: Path, url: str) -> None:
     # A helper left behind by an earlier launch of this same product contends
     # with the one about to start and can stall its cookie flush, so clear it
     # before the profile the extractor will read is written at all.
-    reap_stale_browser_processes(exe)
+    reap_stale_browser_processes(exe, user_data)
     devtools_port = pick_devtools_port()
     cmd = chromium_native_command(
         exe, user_data, url, remote_debugging_port=devtools_port

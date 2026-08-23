@@ -14,8 +14,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same launch root, a partially seeded corpus still fails immediately rather
   than restarting an interleaving redirect chain, the corpus poll window is
   overridable per browser, the post-shutdown cookie-flush wait spans bounded
-  logged windows, and each launch first reaps leftover processes of the same
-  product so a stale vendor service cannot contend with it.
+  logged windows, and each hosted-CI launch first reaps leftover processes of
+  its own launch root and product so a stale vendor service cannot contend
+  with it.
 
 ### Removed
 

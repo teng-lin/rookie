@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEFAULT_COMMAND_TIMEOUT_MS,
   DEFAULT_CORPUS_ATTEMPTS,
   DEFAULT_CORPUS_TIMEOUT_MS,
   corpusOptionsFromEnv,
@@ -262,7 +263,7 @@ test("a partially seeded corpus fails the root instead of restarting the chain",
       settleMs: 0,
       logger: { log: assert.fail, warn: assert.fail },
     }),
-    /observed 4\/19 target-origin cookies after 1 attempt; the corpus navigated but stalled partway/,
+    /observed 4\/19 target-origin cookies after 1 attempt; the corpus navigated but stalled partway, which is never retried in place/,
   );
   assert.deepEqual(methods, [
     "Target.getTargets",
@@ -303,6 +304,35 @@ test("in-root retries stay bounded and report the exhausted attempt count", asyn
   assert.equal(warnings.length, 1);
 });
 
+test("a stalled target that will not close fails the root instead of racing it", async () => {
+  await assert.rejects(
+    navigateChromiumCdp({
+      port: 9222,
+      url: CORPUS_URL,
+      fetchImpl: versionResponse(),
+      WebSocketImpl: scriptedWebSocket((command) => {
+        if (command.method === "Target.getTargets") {
+          return corpusStartupTarget(command);
+        }
+        if (command.method === "Storage.getCookies") {
+          return { id: command.id, result: { cookies: [] } };
+        }
+        if (command.method === "Target.closeTarget") {
+          return {
+            id: command.id,
+            error: { code: -32000, message: "No target with given id" },
+          };
+        }
+        return successfulResponse(command);
+      }),
+      corpusTimeoutMs: 0,
+      settleMs: 0,
+      logger: { log: assert.fail, warn() {} },
+    }),
+    /could not close the stalled corpus target after attempt 1\/3, so a retry would risk two interleaved redirect chains/,
+  );
+});
+
 test("a non-positive attempt budget is rejected rather than skipping the corpus", async () => {
   await assert.rejects(
     navigateChromiumCdp({
@@ -326,8 +356,9 @@ test("corpus budgets are overridable per browser through the environment", () =>
     corpusOptionsFromEnv({
       ROOKIE_E2E_CDP_CORPUS_TIMEOUT_MS: "40000",
       ROOKIE_E2E_CDP_CORPUS_ATTEMPTS: "2",
+      ROOKIE_E2E_CDP_COMMAND_TIMEOUT_MS: "12000",
     }),
-    { corpusTimeoutMs: 40_000, corpusAttempts: 2 },
+    { corpusTimeoutMs: 40_000, corpusAttempts: 2, commandTimeoutMs: 12_000 },
   );
   assert.throws(
     () => corpusOptionsFromEnv({ ROOKIE_E2E_CDP_CORPUS_ATTEMPTS: "0" }),
@@ -339,6 +370,9 @@ test("corpus budgets are overridable per browser through the environment", () =>
   );
   assert.equal(DEFAULT_CORPUS_TIMEOUT_MS, 20_000);
   assert.equal(DEFAULT_CORPUS_ATTEMPTS, 3);
+  // The harness derives its subprocess ceiling from this bound, so the two
+  // sides have to agree on it.
+  assert.equal(DEFAULT_COMMAND_TIMEOUT_MS, 10_000);
 });
 
 test("rejects a malformed version response before opening a socket", async () => {
