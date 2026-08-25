@@ -196,6 +196,7 @@ class ContextCookieServerTests(unittest.TestCase):
         self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[0])
         self.assertIn("stress_5_8=deleted", cookies[1])
         self.assertIn("Max-Age=0", cookies[1])
+        self.assertIn("Expires=Thu, 01 Jan 1970 00:00:00 GMT", cookies[1])
         self.assertIn("stress_5_round_7=added-7", cookies[2])
         self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[2])
         self.assertEqual(

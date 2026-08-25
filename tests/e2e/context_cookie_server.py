@@ -68,7 +68,7 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
         try:
             self.end_headers()
             self.wfile.write(encoded)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
             # A browser navigation may replace the churn page immediately
             # after headers are accepted; the Set-Cookie write already landed.
             pass
@@ -270,7 +270,7 @@ addEventListener("message", (event) => {{
                 f"stress_{host_index}_0=updated-{round_number}; Secure; HttpOnly; "
                 f"SameSite=Lax; Path=/; {expires_header}",
                 f"stress_{host_index}_{delete_index}=deleted; Secure; HttpOnly; SameSite=Lax; "
-                "Path=/; Max-Age=0",
+                "Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
                 f"stress_{host_index}_round_{round_number}=added-{round_number}; "
                 f"Secure; HttpOnly; SameSite=Lax; Path=/; {expires_header}",
             )
