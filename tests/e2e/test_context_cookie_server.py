@@ -162,14 +162,19 @@ class ContextCookieServerTests(unittest.TestCase):
 
     def test_stress_seed_distributes_a_bounded_cookie_batch(self) -> None:
         status, headers, body = self.request(
-            "seed.rookie-3.test", "/stress/seed?count=40"
+            "seed.rookie-3.test", "/stress/seed?count=40&expiry=4102444800"
         )
         self.assertEqual(status, 200)
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         self.assertEqual(len(cookies), 40)
         self.assertTrue(cookies[0].startswith("stress_3_0=seed-3-0;"))
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[0])
         self.assertTrue(cookies[-1].startswith("stress_shared=seed-3-39;"))
-        self.assertEqual(json.loads(body), {"host_index": 3, "seeded": 40})
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[-1])
+        self.assertEqual(
+            json.loads(body),
+            {"host_index": 3, "seeded": 40, "expiry": 4102444800},
+        )
 
     def test_stress_seed_rejects_unbounded_or_wrong_host_requests(self) -> None:
         status, _, _ = self.request(
@@ -182,18 +187,25 @@ class ContextCookieServerTests(unittest.TestCase):
 
     def test_stress_mutation_updates_deletes_and_adds(self) -> None:
         status, headers, body = self.request(
-            "seed.rookie-5.test", "/stress/mutate?round=7"
+            "seed.rookie-5.test", "/stress/mutate?round=7&expiry=4102444800"
         )
         self.assertEqual(status, 200)
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         self.assertEqual(len(cookies), 3)
         self.assertIn("stress_5_0=updated-7", cookies[0])
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[0])
         self.assertIn("stress_5_8=deleted", cookies[1])
         self.assertIn("Max-Age=0", cookies[1])
         self.assertIn("stress_5_round_7=added-7", cookies[2])
+        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[2])
         self.assertEqual(
             json.loads(body),
-            {"host_index": 5, "round": 7, "deleted_index": 8},
+            {
+                "host_index": 5,
+                "round": 7,
+                "deleted_index": 8,
+                "expiry": 4102444800,
+            },
         )
 
     def test_stress_churn_rewrites_only_the_stable_cookie_state(self) -> None:

@@ -283,11 +283,12 @@ async function navigateAndCapture(
   captureRound,
   output,
 ) {
+  const roundExpiry = Math.trunc(Date.now() / 1000) + 1209600;
   for (const host of hosts) {
     const target =
       captureMode === "seed"
-        ? `https://${host}:${port}/stress/seed?count=40`
-        : `https://${host}:${port}/stress/mutate?round=${captureRound}`;
+        ? `https://${host}:${port}/stress/seed?count=40&expiry=${roundExpiry}`
+        : `https://${host}:${port}/stress/mutate?round=${captureRound}&expiry=${roundExpiry}`;
     await page.goto(target, { waitUntil: "domcontentloaded", timeout });
   }
 

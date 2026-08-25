@@ -13,6 +13,7 @@ import re
 import ssl
 import sys
 import threading
+import time
 from urllib.parse import parse_qs, urlparse
 
 
@@ -216,16 +217,29 @@ addEventListener("message", (event) => {{
             if not 1 <= count <= MAX_STRESS_COOKIES_PER_HOST:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress count\n")
                 return
+            try:
+                expiry = int(query.get("expiry", ["0"])[0])
+            except ValueError:
+                expiry = 0
+            if expiry <= 0:
+                expiry = int(time.time()) + 1209600
+            expires_header = f"Expires={formatdate(expiry, usegmt=True)}"
             host_index = int(stress_match.group("index"))
             cookies = tuple(
                 f"{'stress_shared' if cookie_index == count - 1 else f'stress_{host_index}_{cookie_index}'}="
                 f"seed-{host_index}-{cookie_index}; "
-                "Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600"
+                f"Secure; HttpOnly; SameSite=Lax; Path=/; {expires_header}"
                 for cookie_index in range(count)
             )
             self.send_body(
                 HTTPStatus.OK,
-                json.dumps({"host_index": host_index, "seeded": count}),
+                json.dumps(
+                    {
+                        "host_index": host_index,
+                        "seeded": count,
+                        "expiry": expiry,
+                    }
+                ),
                 content_type="application/json",
                 cookies=cookies,
             )
@@ -243,15 +257,22 @@ addEventListener("message", (event) => {{
             if not 0 <= round_number <= 999:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid mutation round\n")
                 return
+            try:
+                expiry = int(query.get("expiry", ["0"])[0])
+            except ValueError:
+                expiry = 0
+            if expiry <= 0:
+                expiry = int(time.time()) + 1209600
+            expires_header = f"Expires={formatdate(expiry, usegmt=True)}"
             host_index = int(stress_match.group("index"))
             delete_index = round_number + 1
             cookies = (
                 f"stress_{host_index}_0=updated-{round_number}; Secure; HttpOnly; "
-                "SameSite=Lax; Path=/; Max-Age=1209600",
+                f"SameSite=Lax; Path=/; {expires_header}",
                 f"stress_{host_index}_{delete_index}=deleted; Secure; HttpOnly; SameSite=Lax; "
                 "Path=/; Max-Age=0",
                 f"stress_{host_index}_round_{round_number}=added-{round_number}; "
-                "Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600",
+                f"Secure; HttpOnly; SameSite=Lax; Path=/; {expires_header}",
             )
             self.send_body(
                 HTTPStatus.OK,
@@ -260,6 +281,7 @@ addEventListener("message", (event) => {{
                         "host_index": host_index,
                         "round": round_number,
                         "deleted_index": delete_index,
+                        "expiry": expiry,
                     }
                 ),
                 content_type="application/json",
