@@ -282,6 +282,7 @@ async function navigateAndCapture(
   captureMode,
   captureRound,
   output,
+  priorManifest = null,
 ) {
   const roundExpiry = Math.trunc(Date.now() / 1000) + 1209600;
   for (const host of hosts) {
@@ -291,6 +292,13 @@ async function navigateAndCapture(
         : `https://${host}:${port}/stress/mutate?round=${captureRound}&expiry=${roundExpiry}`;
     await page.goto(target, { waitUntil: "domcontentloaded", timeout });
   }
+
+  const priorExpiries = new Map(
+    priorManifest?.expected?.unfiltered_flat?.map((cookie) => [
+      `${cookie.domain.replace(/^\./, "")}\0${cookie.name}`,
+      cookie.expires,
+    ]) ?? [],
+  );
 
   const expected = new Map();
   for (let hostIndex = 0; hostIndex < hosts.length; hostIndex += 1) {
@@ -304,19 +312,35 @@ async function navigateAndCapture(
         continue;
       }
       const name = `stress_${hostIndex}_${cookieIndex}`;
-      const value =
-        cookieIndex === 0 && captureMode === "mutate"
-          ? `updated-${captureRound}`
-          : `seed-${hostIndex}-${cookieIndex}`;
-      expected.set(`${host}\0${name}`, value);
+      const isUpdated = cookieIndex === 0 && captureMode === "mutate";
+      const value = isUpdated
+        ? `updated-${captureRound}`
+        : `seed-${hostIndex}-${cookieIndex}`;
+      const expires =
+        captureMode === "seed" || isUpdated
+          ? roundExpiry
+          : (priorExpiries.get(`${host}\0${name}`) ?? roundExpiry);
+      expected.set(`${host}\0${name}`, { value, expires });
     }
-    expected.set(`${host}\0stress_shared`, `seed-${hostIndex}-39`);
+    const sharedExpires =
+      captureMode === "seed"
+        ? roundExpiry
+        : (priorExpiries.get(`${host}\0stress_shared`) ?? roundExpiry);
+    expected.set(`${host}\0stress_shared`, {
+      value: `seed-${hostIndex}-39`,
+      expires: sharedExpires,
+    });
     if (captureMode === "mutate") {
       for (let priorRound = 0; priorRound <= captureRound; priorRound += 1) {
-        expected.set(
-          `${host}\0stress_${hostIndex}_round_${priorRound}`,
-          `added-${priorRound}`,
-        );
+        const name = `stress_${hostIndex}_round_${priorRound}`;
+        const isNewThisRound = priorRound === captureRound;
+        const expires = isNewThisRound
+          ? roundExpiry
+          : (priorExpiries.get(`${host}\0${name}`) ?? roundExpiry);
+        expected.set(`${host}\0${name}`, {
+          value: `added-${priorRound}`,
+          expires,
+        });
       }
     }
   }
@@ -326,15 +350,15 @@ async function navigateAndCapture(
     .map((cookie) => {
       const host = cookie.domain.replace(/^\./, "");
       const key = `${host}\0${cookie.name}`;
-      const expectedValue = expected.get(key);
-      if (expectedValue === undefined) {
+      const expectedRecord = expected.get(key);
+      if (expectedRecord === undefined) {
         throw new Error(
           `browser retained an unexpected stress identity ${key}`,
         );
       }
-      if (cookie.value !== expectedValue) {
+      if (cookie.value !== expectedRecord.value) {
         throw new Error(
-          `${key} expected independent value ${expectedValue}, got ${cookie.value}`,
+          `${key} expected independent value ${expectedRecord.value}, got ${cookie.value}`,
         );
       }
       if (
@@ -353,9 +377,9 @@ async function navigateAndCapture(
         domain: cookie.domain,
         path: "/",
         secure: true,
-        expires: Math.trunc(cookie.expires),
+        expires: expectedRecord.expires,
         name: cookie.name,
-        value: expectedValue,
+        value: expectedRecord.value,
         http_only: true,
         same_site: 1,
       };
@@ -497,7 +521,7 @@ async function writeQuiescentManifest(context, template, output) {
         domain: cookie.domain,
         path: cookie.path,
         secure: true,
-        expires: Math.trunc(cookie.expires),
+        expires: prior.expires,
         name: cookie.name,
         value: cookie.value,
         http_only: true,
@@ -624,6 +648,7 @@ try {
         "mutate",
         command.round,
         nextManifest,
+        currentManifest,
       );
       currentManifest = captured;
       churn = await startWriteChurn(context, captured);
