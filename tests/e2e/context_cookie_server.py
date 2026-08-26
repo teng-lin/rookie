@@ -56,9 +56,13 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
         *,
         content_type: str = "text/plain; charset=utf-8",
         cookies: tuple[str, ...] = (),
+        send_date: bool = True,
     ) -> None:
         encoded = body.encode("utf-8")
-        self.send_response(status)
+        if send_date:
+            self.send_response(status)
+        else:
+            self.send_response_only(status)
         for cookie in cookies:
             self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Type", content_type)
@@ -292,6 +296,11 @@ addEventListener("message", (event) => {{
                     f"stress_{host_index}_0={value}; Secure; HttpOnly; "
                     f"SameSite=Lax; Path=/; Expires={formatdate(expiry, usegmt=True)}",
                 ),
+                # Chromium and Firefox compensate Expires for server clock skew
+                # using Date. Around a one-second boundary that can turn this
+                # fixed timestamp into expiry - 1 and invalidate the exact
+                # manifest while the cookie is otherwise unchanged.
+                send_date=False,
             )
             return
 
