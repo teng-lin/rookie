@@ -14,6 +14,12 @@ if (-not $script:processNames.ContainsKey($script:targetBrowser)) {
 }
 $script:browserProcess = $script:processNames[$script:targetBrowser]
 $script:browserPath = if ($env:ROOKIE_E2E_BROWSER_PATH) { $env:ROOKIE_E2E_BROWSER_PATH } else { $env:ROOKIE_E2E_CHROME_PATH }
+$script:appPathRegistrationActive = $false
+$script:appPathKey = $null
+$script:appPathKeyExisted = $false
+$script:appPathDefaultExisted = $false
+$script:appPathDefaultValue = $null
+$script:appPathDefaultKind = $null
 
 function Get-RequestLogSnapshot {
   if (-not (Test-Path $env:ROOKIE_E2E_REQUEST_LOG)) { return "<no request log>" }
@@ -93,6 +99,58 @@ function Assert-BrowserAlive {
     throw "rookie-cookies terminated the live $script:targetBrowser browser process"
   }
   Write-Host "$script:targetBrowser browser remains alive (pid: $($script:liveBrowserPid))"
+}
+
+function Register-AppBoundHostPath {
+  if (-not (Test-Path -LiteralPath $script:browserPath -PathType Leaf)) {
+    throw "App-Bound host executable disappeared after $script:targetBrowser teardown"
+  }
+  # Injection resolves its signed host through the standard App Paths registry
+  # before known install directories. Reassert the independently validated
+  # executable after first-run teardown, which can rewrite Brave registration.
+  $exeName = Split-Path -Leaf $script:browserPath
+  $script:appPathKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\$exeName"
+  $script:appPathKeyExisted = Test-Path -LiteralPath $script:appPathKey
+  if ($script:appPathKeyExisted) {
+    $registryKey = Get-Item -LiteralPath $script:appPathKey
+    $script:appPathDefaultExisted = @($registryKey.GetValueNames()) -contains ""
+    if ($script:appPathDefaultExisted) {
+      $script:appPathDefaultValue = $registryKey.GetValue(
+        "", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      $script:appPathDefaultKind = $registryKey.GetValueKind("")
+    }
+  }
+
+  # Set this before the first mutation so finally restores the prior state even
+  # when registry creation or verification fails partway through.
+  $script:appPathRegistrationActive = $true
+  New-Item -Path $script:appPathKey -Force | Out-Null
+  Set-Item -Path $script:appPathKey -Value $script:browserPath
+  if ((Get-Item -LiteralPath $script:appPathKey).GetValue("") -ne $script:browserPath) {
+    throw "could not register App-Bound host path for $script:targetBrowser"
+  }
+  Write-Host "Registered App-Bound host: $script:browserPath"
+}
+
+function Restore-AppBoundHostPath {
+  if (-not $script:appPathRegistrationActive) { return }
+  try {
+    if ($script:appPathKeyExisted) {
+      New-Item -Path $script:appPathKey -Force | Out-Null
+      $registryKey = Get-Item -LiteralPath $script:appPathKey
+      if ($script:appPathDefaultExisted) {
+        $registryKey.SetValue(
+          "", $script:appPathDefaultValue, $script:appPathDefaultKind)
+      } else {
+        $registryKey.DeleteValue("", $false)
+      }
+    } elseif (Test-Path -LiteralPath $script:appPathKey) {
+      Remove-Item -LiteralPath $script:appPathKey -Force
+    }
+    Write-Host "Restored prior App-Bound host registration"
+  } finally {
+    $script:appPathRegistrationActive = $false
+  }
 }
 
 foreach ($requiredVariable in @(
@@ -281,6 +339,7 @@ try {
   # Close browser through its window only after every surface has proved
   # the WAL fixture can be read without killing the live browser.
   Close-BrowserGracefully
+  Register-AppBoundHostPath
   Remove-Item Env:\ROOKIE_E2E_COOKIE_DB
   $env:ROOKIE_E2E_COOKIE_NAME = "rookie_ci"
   $env:ROOKIE_E2E_COOKIE_VALUE = "bar"
@@ -306,4 +365,5 @@ try {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
   }
   Remove-Item $walFixtureUserData -Recurse -Force -ErrorAction SilentlyContinue
+  Restore-AppBoundHostPath
 }

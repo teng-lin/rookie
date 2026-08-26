@@ -206,6 +206,7 @@ class ContextCookieServerTests(unittest.TestCase):
         self.assertEqual(len(cookies), 1)
         self.assertTrue(cookies[0].startswith("stress_2_0=seed-2-0;"))
         self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[0])
+        self.assertNotIn("date", {name.lower() for name, _ in headers})
         self.assertEqual(json.loads(body), {"host_index": 2, "churned": True})
 
         status, _, _ = self.request(
