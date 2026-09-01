@@ -562,6 +562,18 @@ def librewolf_latest_version() -> str:
     return version
 
 
+def remove_app_bundle(target: Path) -> None:
+    """Clear an installed .app, following no symlink on the way out.
+
+    exists() follows symlinks, so a linked bundle would reach rmtree as a
+    non-directory, and a dangling link would survive to confuse ditto.
+    """
+    if target.is_symlink():
+        target.unlink()
+    elif target.exists():
+        shutil.rmtree(target)
+
+
 def install_librewolf_dmg() -> None:
     version = librewolf_latest_version()
     arch = "arm64" if os.uname().machine == "arm64" else "x86_64"
@@ -589,8 +601,7 @@ def install_librewolf_dmg() -> None:
             if not bundle.is_dir():
                 raise SystemExit(f"{url} did not contain LibreWolf.app")
             target = Path("/Applications/LibreWolf.app")
-            if target.exists():
-                shutil.rmtree(target)
+            remove_app_bundle(target)
             # ditto preserves the bundle's symlinks, extended attributes, and
             # executable bits; a naive copytree produces a bundle that will
             # not run.

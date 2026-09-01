@@ -210,6 +210,30 @@ class InstallCatalogTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 INSTALL.librewolf_latest_version()
 
+    def test_remove_app_bundle_never_follows_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            installed = root / "real" / "Contents"
+            installed.mkdir(parents=True)
+            (installed / "Info.plist").write_bytes(b"<plist/>\n")
+
+            linked = root / "Linked.app"
+            linked.symlink_to(installed.parent)
+            INSTALL.remove_app_bundle(linked)
+            self.assertFalse(linked.is_symlink())
+            # Only the link goes; whatever it pointed at is not ours to delete.
+            self.assertTrue((installed / "Info.plist").is_file())
+
+            dangling = root / "Dangling.app"
+            dangling.symlink_to(root / "gone")
+            INSTALL.remove_app_bundle(dangling)
+            self.assertFalse(dangling.is_symlink())
+
+            INSTALL.remove_app_bundle(installed.parent)
+            self.assertFalse(installed.parent.exists())
+
+            INSTALL.remove_app_bundle(root / "Missing.app")
+
     def librewolf_staging(self) -> set[str]:
         return set(glob.glob(f"{tempfile.gettempdir()}/rookie-librewolf-*"))
 
