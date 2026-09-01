@@ -276,6 +276,70 @@ async function startWriteChurn(context, manifest) {
   };
 }
 
+function captureStressJar(context, expected) {
+  return context.cookies().then((cookies) => {
+    const outstanding = new Map(expected);
+    const problems = [];
+    const accepted = [];
+    for (const cookie of cookies) {
+      if (!cookie.name.startsWith("stress_")) continue;
+      const host = cookie.domain.replace(/^\./, "");
+      const key = `${host}\0${cookie.name}`;
+      const expectedValue = outstanding.get(key);
+      if (expectedValue === undefined) {
+        problems.push(
+          expected.has(key)
+            ? `duplicate stress identity ${key}=${cookie.value}`
+            : `unexpected stress identity ${key}=${cookie.value}`,
+        );
+        continue;
+      }
+      if (cookie.value !== expectedValue) {
+        problems.push(
+          `${key} expected independent value ${expectedValue}, got ${cookie.value}`,
+        );
+        continue;
+      }
+      if (
+        cookie.path !== "/" ||
+        cookie.secure !== true ||
+        cookie.httpOnly !== true ||
+        cookie.sameSite !== "Lax" ||
+        cookie.expires <= 0
+      ) {
+        problems.push(
+          `browser attributes disagreed for ${key}: ${JSON.stringify(cookie)}`,
+        );
+        continue;
+      }
+      outstanding.delete(key);
+      accepted.push({
+        domain: cookie.domain,
+        path: "/",
+        secure: true,
+        expires: Math.trunc(cookie.expires),
+        name: cookie.name,
+        value: expectedValue,
+        http_only: true,
+        same_site: 1,
+      });
+    }
+    const expectedCount = hosts.length * 40;
+    if (accepted.length !== expectedCount || outstanding.size !== 0) {
+      problems.push(
+        `retained ${accepted.length} stress cookies, expected ${expectedCount}; ` +
+          `missing=${JSON.stringify([...outstanding.keys()].sort())}`,
+      );
+    }
+    accepted.sort((left, right) =>
+      `${left.domain}\0${left.path}\0${left.name}`.localeCompare(
+        `${right.domain}\0${right.path}\0${right.name}`,
+      ),
+    );
+    return { accepted, problems };
+  });
+}
+
 async function navigateAndCapture(
   context,
   page,
@@ -320,58 +384,24 @@ async function navigateAndCapture(
     }
   }
 
-  const accepted = (await context.cookies())
-    .filter(({ name }) => name.startsWith("stress_"))
-    .map((cookie) => {
-      const host = cookie.domain.replace(/^\./, "");
-      const key = `${host}\0${cookie.name}`;
-      const expectedValue = expected.get(key);
-      if (expectedValue === undefined) {
-        throw new Error(
-          `browser retained an unexpected stress identity ${key}`,
-        );
-      }
-      if (cookie.value !== expectedValue) {
-        throw new Error(
-          `${key} expected independent value ${expectedValue}, got ${cookie.value}`,
-        );
-      }
-      if (
-        cookie.path !== "/" ||
-        cookie.secure !== true ||
-        cookie.httpOnly !== true ||
-        cookie.sameSite !== "Lax" ||
-        cookie.expires <= 0
-      ) {
-        throw new Error(
-          `browser attributes disagreed for ${key}: ${JSON.stringify(cookie)}`,
-        );
-      }
-      expected.delete(key);
-      return {
-        domain: cookie.domain,
-        path: "/",
-        secure: true,
-        expires: Math.trunc(cookie.expires),
-        name: cookie.name,
-        value: expectedValue,
-        http_only: true,
-        same_site: 1,
-      };
-    })
-    .sort((left, right) =>
-      `${left.domain}\0${left.path}\0${left.name}`.localeCompare(
-        `${right.domain}\0${right.path}\0${right.name}`,
-      ),
-    );
-
-  const expectedCount = hosts.length * 40;
-  if (accepted.length !== expectedCount || expected.size !== 0) {
+  // page.goto resolves on the content process' DOMContentLoaded, which is not
+  // ordered against the parent process committing that response's Set-Cookie
+  // headers. Reading the jar once therefore observes a torn state now and then
+  // - a deleted identity still present, most often. Poll until the jar matches
+  // the postcondition exactly, then keep the strict assertion.
+  const settleDeadline =
+    Date.now() + Number(process.env.ROOKIE_E2E_STRESS_SETTLE_MS || 15000);
+  let capture = await captureStressJar(context, expected);
+  while (capture.problems.length > 0 && Date.now() < settleDeadline) {
+    await delay(100);
+    capture = await captureStressJar(context, expected);
+  }
+  if (capture.problems.length > 0) {
     throw new Error(
-      `${engine} retained ${accepted.length} stress cookies, expected ${expectedCount}; ` +
-        `missing=${JSON.stringify([...expected.keys()].sort())}`,
+      `${engine} ${captureMode} stress jar never settled: ${capture.problems.join("; ")}`,
     );
   }
+  const { accepted } = capture;
   const manifest = {
     schema_version: 1,
     corpus_schema_version: 1,

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
+import io
 import stat
 import tempfile
 import unittest
@@ -17,6 +20,33 @@ SPEC = importlib.util.spec_from_file_location("install_claimed_browser", MODULE_
 assert SPEC is not None and SPEC.loader is not None
 INSTALL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(INSTALL)
+
+# Read the branches install_spec() dispatches on straight out of its source so
+# this stays in step with the installer. A catalog entry naming a kind the
+# dispatch does not know fails to install and only surfaces as a red nightly
+# cell.
+def install_kinds() -> frozenset[str]:
+    tree = ast.parse(inspect.getsource(INSTALL.install_spec))
+    kinds = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        for comparator in node.comparators:
+            operands = (
+                comparator.elts
+                if isinstance(comparator, ast.Tuple)
+                else [comparator]
+            )
+            kinds.update(
+                operand.value
+                for operand in operands
+                if isinstance(operand, ast.Constant)
+                and isinstance(operand.value, str)
+            )
+    return frozenset(kinds)
+
+
+INSTALL_KINDS = install_kinds()
 
 # Seeded by e2e.yml without this installer. The claimed-browser workflow now
 # owns every other real-browser cell, including Playwright-distributed
@@ -148,6 +178,47 @@ class InstallCatalogTests(unittest.TestCase):
         self.assertNotIn(("macos", "arc"), catalog)
         self.assertNotIn(("windows", "arc"), catalog)
         self.assertNotIn(("windows", "duckduckgo"), catalog)
+
+    def test_macos_librewolf_bypasses_the_disabled_homebrew_cask(self) -> None:
+        # Homebrew disabled the cask on 2026-09-01 over the Gatekeeper check,
+        # so the macOS cell must install the published DMG directly.
+        spec = INSTALL.HOSTS["librewolf"]["macos"]
+        self.assertEqual(spec["kind"], "librewolf_dmg")
+        self.assertIn(
+            "/Applications/LibreWolf.app/Contents/MacOS/librewolf", spec["exe"]
+        )
+
+    def test_librewolf_version_comes_from_the_release_feed(self) -> None:
+        payload = io.BytesIO(b'{"tag_name": "155.0-1"}')
+        with mock.patch.object(
+            INSTALL.urllib.request, "urlopen", return_value=payload
+        ):
+            self.assertEqual(INSTALL.librewolf_latest_version(), "155.0-1")
+        self.assertEqual(
+            INSTALL.LIBREWOLF_MACOS_DMG.format(version="155.0-1", arch="arm64"),
+            "https://dl.librewolf.net/librewolf/155.0-1/"
+            "librewolf-155.0-1-macos-arm64-package.dmg",
+        )
+
+    def test_librewolf_version_rejects_an_unusable_release_tag(self) -> None:
+        payload = io.BytesIO(b'{"tag_name": "nightly"}')
+        with mock.patch.object(
+            INSTALL.urllib.request, "urlopen", return_value=payload
+        ):
+            with self.assertRaises(SystemExit):
+                INSTALL.librewolf_latest_version()
+
+    def test_every_catalog_kind_has_an_installer_branch(self) -> None:
+        for browser, meta in INSTALL.HOSTS.items():
+            for platform in INSTALL.RUNNERS:
+                spec = meta.get(platform)
+                if spec is None:
+                    continue
+                self.assertIn(
+                    spec["kind"],
+                    INSTALL_KINDS,
+                    f"{browser}/{platform}",
+                )
 
     def test_vivaldi_and_yandex_are_real_hosted_cells(self) -> None:
         catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}
