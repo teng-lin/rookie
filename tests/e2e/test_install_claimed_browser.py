@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ast
+import glob
 import importlib.util
 import inspect
 import io
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -207,6 +209,47 @@ class InstallCatalogTests(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit):
                 INSTALL.librewolf_latest_version()
+
+    def librewolf_staging(self) -> set[str]:
+        return set(glob.glob(f"{tempfile.gettempdir()}/rookie-librewolf-*"))
+
+    def test_librewolf_dmg_clears_staging_when_the_download_fails(self) -> None:
+        before = self.librewolf_staging()
+        with (
+            mock.patch.object(INSTALL, "librewolf_latest_version", return_value="1-1"),
+            mock.patch.object(
+                INSTALL.urllib.request, "urlretrieve", side_effect=OSError("boom")
+            ),
+            self.assertRaises(OSError),
+        ):
+            INSTALL.install_librewolf_dmg()
+        self.assertEqual(self.librewolf_staging() - before, set())
+
+    def test_librewolf_dmg_detach_does_not_mask_the_install_failure(self) -> None:
+        # A wedged disk image must not decide what the caller sees, and it must
+        # not keep the download around either.
+        before = self.librewolf_staging()
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ditto" or cmd[:2] == ["hdiutil", "detach"]:
+                raise subprocess.CalledProcessError(1, cmd)
+
+        with (
+            mock.patch.object(INSTALL, "librewolf_latest_version", return_value="1-1"),
+            mock.patch.object(INSTALL.urllib.request, "urlretrieve"),
+            mock.patch.object(INSTALL, "run", side_effect=fake_run),
+            mock.patch.object(INSTALL.Path, "is_dir", return_value=True),
+            mock.patch.object(
+                INSTALL.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1),
+            ),
+            self.assertRaises(subprocess.CalledProcessError) as raised,
+        ):
+            INSTALL.install_librewolf_dmg()
+
+        self.assertEqual(raised.exception.cmd[0], "ditto")
+        self.assertEqual(self.librewolf_staging() - before, set())
 
     def test_every_catalog_kind_has_an_installer_branch(self) -> None:
         for browser, meta in INSTALL.HOSTS.items():

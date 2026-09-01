@@ -567,34 +567,42 @@ def install_librewolf_dmg() -> None:
     arch = "arm64" if os.uname().machine == "arm64" else "x86_64"
     url = LIBREWOLF_MACOS_DMG.format(version=version, arch=arch)
     staging = Path(tempfile.mkdtemp(prefix="rookie-librewolf-"))
-    archive = staging / f"librewolf-{version}-{arch}.dmg"
-    mountpoint = staging / "mnt"
-    mountpoint.mkdir()
-    print("+ download", url, flush=True)
-    urllib.request.urlretrieve(url, archive)
-    run(
-        [
-            "hdiutil",
-            "attach",
-            str(archive),
-            "-nobrowse",
-            "-readonly",
-            "-mountpoint",
-            str(mountpoint),
-        ]
-    )
     try:
-        bundle = mountpoint / "LibreWolf.app"
-        if not bundle.is_dir():
-            raise SystemExit(f"{url} did not contain LibreWolf.app")
-        target = Path("/Applications/LibreWolf.app")
-        if target.exists():
-            shutil.rmtree(target)
-        # ditto preserves the bundle's symlinks, extended attributes, and
-        # executable bits; a naive copytree produces a bundle that will not run.
-        run(["ditto", str(bundle), str(target)])
+        archive = staging / f"librewolf-{version}-{arch}.dmg"
+        mountpoint = staging / "mnt"
+        mountpoint.mkdir()
+        print("+ download", url, flush=True)
+        urllib.request.urlretrieve(url, archive)
+        run(
+            [
+                "hdiutil",
+                "attach",
+                str(archive),
+                "-nobrowse",
+                "-readonly",
+                "-mountpoint",
+                str(mountpoint),
+            ]
+        )
+        try:
+            bundle = mountpoint / "LibreWolf.app"
+            if not bundle.is_dir():
+                raise SystemExit(f"{url} did not contain LibreWolf.app")
+            target = Path("/Applications/LibreWolf.app")
+            if target.exists():
+                shutil.rmtree(target)
+            # ditto preserves the bundle's symlinks, extended attributes, and
+            # executable bits; a naive copytree produces a bundle that will
+            # not run.
+            run(["ditto", str(bundle), str(target)])
+        finally:
+            # Report a stuck image, but never let detach mask why the install
+            # failed. The runner is ephemeral, so a leftover mount is inert.
+            detach = ["hdiutil", "detach", str(mountpoint), "-force"]
+            print("+", " ".join(detach), flush=True)
+            if subprocess.run(detach, check=False).returncode != 0:
+                print(f"could not detach {mountpoint}", flush=True)
     finally:
-        run(["hdiutil", "detach", str(mountpoint), "-force"])
         shutil.rmtree(staging, ignore_errors=True)
 
 

@@ -124,6 +124,18 @@ if (process.env.ROOKIE_E2E_BROWSER_PATH) {
 const delay = (milliseconds) =>
   new Promise((accept) => setTimeout(accept, milliseconds));
 
+// Number("30s") is NaN, and a NaN deadline compares false against every clock
+// reading - it would disarm the poll below without a word. Take the default
+// when the override is absent, and refuse a value that is not a duration.
+function durationSetting(raw, fallback) {
+  if (raw === undefined || raw === "") return fallback;
+  const milliseconds = Number(raw);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    throw new Error(`invalid duration ${raw}; expected milliseconds`);
+  }
+  return milliseconds;
+}
+
 async function waitForCommand(sequence) {
   const path = join(controlDir, `command-${sequence}.json`);
   const deadline =
@@ -390,7 +402,8 @@ async function navigateAndCapture(
   // - a deleted identity still present, most often. Poll until the jar matches
   // the postcondition exactly, then keep the strict assertion.
   const settleDeadline =
-    Date.now() + Number(process.env.ROOKIE_E2E_STRESS_SETTLE_MS || 15000);
+    Date.now() +
+    durationSetting(process.env.ROOKIE_E2E_STRESS_SETTLE_MS, 15000);
   let capture = await captureStressJar(context, expected);
   while (capture.problems.length > 0 && Date.now() < settleDeadline) {
     await delay(100);
