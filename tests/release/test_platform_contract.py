@@ -569,7 +569,14 @@ class DiffCellsCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("error:", result.stderr)
 
-    def test_diff_cells_rejects_a_ref_that_looks_like_an_option(self) -> None:
+    def test_diff_cells_fails_closed_on_a_ref_that_looks_like_an_option(self) -> None:
+        # Which layer rejects this depends on the interpreter, so assert only
+        # that one of them does. argparse decides whether an option-looking
+        # token may fill a nargs=2 slot at all, and that changed across 3.12
+        # patch releases: Ubuntu 24.04's system 3.12.3 refuses it outright
+        # ("expected 2 arguments"), while 3.12.12 and newer hand it through to
+        # the guard below. Pinning either wording makes this test fail on
+        # whichever interpreter CI happens to hand it.
         root = self._init_repo()
         head_sha = self._commit_contract(
             root, {"cells": [base_cell(artifact_id="cli")]}, "head"
@@ -589,7 +596,18 @@ class DiffCellsCliTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("looks like an option", result.stderr)
+        self.assertIn("error:", result.stderr)
+
+    def test_loading_a_ref_that_looks_like_an_option_is_refused(self) -> None:
+        # The guard's own wording belongs here, where no argparse version sits
+        # between the ref and the check.
+        root = self._init_repo()
+        contract = root / "release" / "platform-contract.json"
+        contract.write_text(json.dumps({"cells": []}), encoding="utf-8")
+
+        with self.assertRaises(platform_contract.ContractError) as raised:
+            platform_contract._load_contract_at_ref("--not-a-real-ref", contract)
+        self.assertIn("looks like an option", str(raised.exception))
 
 
 if __name__ == "__main__":
