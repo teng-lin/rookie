@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import ast
+import glob
 import importlib.util
+import inspect
+import io
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +22,33 @@ SPEC = importlib.util.spec_from_file_location("install_claimed_browser", MODULE_
 assert SPEC is not None and SPEC.loader is not None
 INSTALL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(INSTALL)
+
+# Read the branches install_spec() dispatches on straight out of its source so
+# this stays in step with the installer. A catalog entry naming a kind the
+# dispatch does not know fails to install and only surfaces as a red nightly
+# cell.
+def install_kinds() -> frozenset[str]:
+    tree = ast.parse(inspect.getsource(INSTALL.install_spec))
+    kinds = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        for comparator in node.comparators:
+            operands = (
+                comparator.elts
+                if isinstance(comparator, ast.Tuple)
+                else [comparator]
+            )
+            kinds.update(
+                operand.value
+                for operand in operands
+                if isinstance(operand, ast.Constant)
+                and isinstance(operand.value, str)
+            )
+    return frozenset(kinds)
+
+
+INSTALL_KINDS = install_kinds()
 
 # Seeded by e2e.yml without this installer. The claimed-browser workflow now
 # owns every other real-browser cell, including Playwright-distributed
@@ -148,6 +180,112 @@ class InstallCatalogTests(unittest.TestCase):
         self.assertNotIn(("macos", "arc"), catalog)
         self.assertNotIn(("windows", "arc"), catalog)
         self.assertNotIn(("windows", "duckduckgo"), catalog)
+
+    def test_macos_librewolf_bypasses_the_disabled_homebrew_cask(self) -> None:
+        # Homebrew disabled the cask on 2026-09-01 over the Gatekeeper check,
+        # so the macOS cell must install the published DMG directly.
+        spec = INSTALL.HOSTS["librewolf"]["macos"]
+        self.assertEqual(spec["kind"], "librewolf_dmg")
+        self.assertIn(
+            "/Applications/LibreWolf.app/Contents/MacOS/librewolf", spec["exe"]
+        )
+
+    def test_librewolf_version_comes_from_the_release_feed(self) -> None:
+        payload = io.BytesIO(b'{"tag_name": "155.0-1"}')
+        with mock.patch.object(
+            INSTALL.urllib.request, "urlopen", return_value=payload
+        ):
+            self.assertEqual(INSTALL.librewolf_latest_version(), "155.0-1")
+        self.assertEqual(
+            INSTALL.LIBREWOLF_MACOS_DMG.format(version="155.0-1", arch="arm64"),
+            "https://dl.librewolf.net/librewolf/155.0-1/"
+            "librewolf-155.0-1-macos-arm64-package.dmg",
+        )
+
+    def test_librewolf_version_rejects_an_unusable_release_tag(self) -> None:
+        payload = io.BytesIO(b'{"tag_name": "nightly"}')
+        with mock.patch.object(
+            INSTALL.urllib.request, "urlopen", return_value=payload
+        ):
+            with self.assertRaises(SystemExit):
+                INSTALL.librewolf_latest_version()
+
+    def test_remove_app_bundle_never_follows_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            installed = root / "real" / "Contents"
+            installed.mkdir(parents=True)
+            (installed / "Info.plist").write_bytes(b"<plist/>\n")
+
+            linked = root / "Linked.app"
+            linked.symlink_to(installed.parent)
+            INSTALL.remove_app_bundle(linked)
+            self.assertFalse(linked.is_symlink())
+            # Only the link goes; whatever it pointed at is not ours to delete.
+            self.assertTrue((installed / "Info.plist").is_file())
+
+            dangling = root / "Dangling.app"
+            dangling.symlink_to(root / "gone")
+            INSTALL.remove_app_bundle(dangling)
+            self.assertFalse(dangling.is_symlink())
+
+            INSTALL.remove_app_bundle(installed.parent)
+            self.assertFalse(installed.parent.exists())
+
+            INSTALL.remove_app_bundle(root / "Missing.app")
+
+    def librewolf_staging(self) -> set[str]:
+        return set(glob.glob(f"{tempfile.gettempdir()}/rookie-librewolf-*"))
+
+    def test_librewolf_dmg_clears_staging_when_the_download_fails(self) -> None:
+        before = self.librewolf_staging()
+        with (
+            mock.patch.object(INSTALL, "librewolf_latest_version", return_value="1-1"),
+            mock.patch.object(
+                INSTALL.urllib.request, "urlretrieve", side_effect=OSError("boom")
+            ),
+            self.assertRaises(OSError),
+        ):
+            INSTALL.install_librewolf_dmg()
+        self.assertEqual(self.librewolf_staging() - before, set())
+
+    def test_librewolf_dmg_detach_does_not_mask_the_install_failure(self) -> None:
+        # A wedged disk image must not decide what the caller sees, and it must
+        # not keep the download around either.
+        before = self.librewolf_staging()
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ditto" or cmd[:2] == ["hdiutil", "detach"]:
+                raise subprocess.CalledProcessError(1, cmd)
+
+        with (
+            mock.patch.object(INSTALL, "librewolf_latest_version", return_value="1-1"),
+            mock.patch.object(INSTALL.urllib.request, "urlretrieve"),
+            mock.patch.object(INSTALL, "run", side_effect=fake_run),
+            mock.patch.object(INSTALL.Path, "is_dir", return_value=True),
+            mock.patch.object(
+                INSTALL.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1),
+            ),
+            self.assertRaises(subprocess.CalledProcessError) as raised,
+        ):
+            INSTALL.install_librewolf_dmg()
+
+        self.assertEqual(raised.exception.cmd[0], "ditto")
+        self.assertEqual(self.librewolf_staging() - before, set())
+
+    def test_every_catalog_kind_has_an_installer_branch(self) -> None:
+        for browser, meta in INSTALL.HOSTS.items():
+            for platform in INSTALL.RUNNERS:
+                spec = meta.get(platform)
+                if spec is None:
+                    continue
+                self.assertIn(
+                    spec["kind"],
+                    INSTALL_KINDS,
+                    f"{browser}/{platform}",
+                )
 
     def test_vivaldi_and_yandex_are_real_hosted_cells(self) -> None:
         catalog = {(row["platform"], row["browser"]) for row in INSTALL.matrix()}

@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -212,8 +213,7 @@ HOSTS: dict[str, dict] = {
             "exe": ["librewolf", "/usr/bin/librewolf"],
         },
         "macos": {
-            "kind": "brew",
-            "cask": "librewolf",
+            "kind": "librewolf_dmg",
             "exe": ["/Applications/LibreWolf.app/Contents/MacOS/librewolf"],
         },
         "windows": {
@@ -537,6 +537,86 @@ def install_librewolf_extrepo() -> None:
     run(["sudo", "apt-get", "install", "-y", "librewolf"])
 
 
+# Homebrew disabled the librewolf cask on 2026-09-01 because the upstream build
+# is unsigned and fails the macOS Gatekeeper check, so `brew install --cask
+# librewolf` now refuses and leaves nothing on disk. The DMG the cask pointed at
+# is still published, and a plain download carries no com.apple.quarantine
+# attribute, so the app still launches on a runner. Track the same release feed
+# the cask's livecheck used rather than pinning a version that goes stale.
+LIBREWOLF_RELEASE_API = (
+    "https://librewolf.dev/api/v1/repos/librewolf/bsys6/releases/latest"
+)
+LIBREWOLF_MACOS_DMG = (
+    "https://dl.librewolf.net/librewolf/{version}/"
+    "librewolf-{version}-macos-{arch}-package.dmg"
+)
+
+
+def librewolf_latest_version() -> str:
+    print("+ GET", LIBREWOLF_RELEASE_API, flush=True)
+    with urllib.request.urlopen(LIBREWOLF_RELEASE_API, timeout=120) as response:
+        release = json.load(response)
+    version = str(release.get("tag_name", "")).lstrip("vV")
+    if not re.fullmatch(r"\d+(?:\.\d+)*-\d+", version):
+        raise SystemExit(f"unexpected LibreWolf release tag {version!r}")
+    return version
+
+
+def remove_app_bundle(target: Path) -> None:
+    """Clear an installed .app, following no symlink on the way out.
+
+    exists() follows symlinks, so a linked bundle would reach rmtree as a
+    non-directory, and a dangling link would survive to confuse ditto.
+    """
+    if target.is_symlink():
+        target.unlink()
+    elif target.exists():
+        shutil.rmtree(target)
+
+
+def install_librewolf_dmg() -> None:
+    version = librewolf_latest_version()
+    arch = "arm64" if os.uname().machine == "arm64" else "x86_64"
+    url = LIBREWOLF_MACOS_DMG.format(version=version, arch=arch)
+    staging = Path(tempfile.mkdtemp(prefix="rookie-librewolf-"))
+    try:
+        archive = staging / f"librewolf-{version}-{arch}.dmg"
+        mountpoint = staging / "mnt"
+        mountpoint.mkdir()
+        print("+ download", url, flush=True)
+        urllib.request.urlretrieve(url, archive)
+        run(
+            [
+                "hdiutil",
+                "attach",
+                str(archive),
+                "-nobrowse",
+                "-readonly",
+                "-mountpoint",
+                str(mountpoint),
+            ]
+        )
+        try:
+            bundle = mountpoint / "LibreWolf.app"
+            if not bundle.is_dir():
+                raise SystemExit(f"{url} did not contain LibreWolf.app")
+            target = Path("/Applications/LibreWolf.app")
+            remove_app_bundle(target)
+            # ditto preserves the bundle's symlinks, extended attributes, and
+            # executable bits; a naive copytree produces a bundle that will
+            # not run.
+            run(["ditto", str(bundle), str(target)])
+        finally:
+            # Report a stuck image, but never let detach mask why the install
+            # failed. The runner is ephemeral, so a leftover mount is inert.
+            detach = ["hdiutil", "detach", str(mountpoint), "-force"]
+            print("+", " ".join(detach), flush=True)
+            if subprocess.run(detach, check=False).returncode != 0:
+                print(f"could not detach {mountpoint}", flush=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def install_zen_tarball() -> None:
     dest = Path.home() / "rookie-e2e-zen"
     dest.mkdir(parents=True, exist_ok=True)
@@ -708,6 +788,8 @@ def install_spec(spec: dict) -> None:
         install_vivaldi_apt()
     elif kind == "librewolf_extrepo":
         install_librewolf_extrepo()
+    elif kind == "librewolf_dmg":
+        install_librewolf_dmg()
     elif kind == "zen_tarball":
         install_zen_tarball()
     elif kind == "brew":
