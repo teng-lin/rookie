@@ -36,19 +36,29 @@ from export_contract import (
 
 _STUB = Path(rookie_cookies.__file__).with_name("rookie_cookies.pyi")
 
+_SEND_CONTEXT_PARAMETERS = (
+    "(self, context=None, /, *, url=None, top_level_site=None, resource=None, "
+    "method=None, user_context_id=None, private_browsing_id=None, now=None, "
+    "ancestor_chain=None, first_party_domain=None, "
+    "gecko_view_session_context_id=None, origin_attributes=None)"
+)
+
 _CLASS_MEMBERS = {
     "CancellationHandle": {
         "cancel": "(self, /)",
         "is_cancelled": "(self, /)",
     },
     "ReadResult": {
-        "as_jar": "(self)",
+        "as_jar": "(self, *, allow_isolation_loss=False)",
         "as_list": "(self, /)",
+        "compatibility_cookies": "(self, /, *, allow_isolation_loss=False)",
         "detailed_cookies": "(self, /)",
-        "header": (
-            "(self, context=None, /, *, url=None, top_level_site=None, resource=None, "
-            "method=None, user_context_id=None, private_browsing_id=None, now=None)"
-        ),
+        # `header` and `send_view` take the same arguments in the same order,
+        # and the four isolation selectors are appended after `now` rather
+        # than sorted in: the order is the published contract, so a future
+        # selector goes on the end of both.
+        "header": _SEND_CONTEXT_PARAMETERS,
+        "send_view": _SEND_CONTEXT_PARAMETERS,
         "browser_id": None,
         "profile_id": None,
         "warnings": None,

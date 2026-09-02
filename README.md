@@ -204,7 +204,12 @@ returns `http.cookiejar.CookieJar`; Node returns `CookieObject[]`; Rust returns
 import rookie_cookies as cookies
 
 session_jar = cookies.jar(
-    browser="firefox", profile="default-release", include_session=True
+    browser="firefox",
+    profile="default-release",
+    include_session=True,
+    # A jar cannot hold a partition key, so it refuses an isolated snapshot
+    # unless the loss is accepted explicitly. See ReadResult.send_view.
+    allow_isolation_loss=True,
 )
 rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```

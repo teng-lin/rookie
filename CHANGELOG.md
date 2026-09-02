@@ -27,6 +27,31 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A new `unknown_ancestor_chain` read warning counts partitioned Chromium rows
   whose store predates the `has_cross_site_ancestor` column, mirroring the
   existing `unparsable_partition_key` warning.
+- **Python:** `ReadResult.send_view(...)` takes exactly `header`'s arguments
+  and returns the same selection before it is flattened into a string — a dict
+  of `"cookies"` (the selected records in header order, each the
+  isolation-intact shape `detailed_cookies()` returns), `"header"` (those
+  records rendered, byte-identical to `header(...)` for the same context,
+  because both delegate to one core selection), and `"omitted"` (a count under
+  each of the seven reasons, every key present with a zero when nothing failed
+  for it, so indexing one needs no guard). An empty `"cookies"` is a
+  legitimate answer, and `"omitted"` is what tells "this context has no
+  cookies" apart from "everything was excluded, and here is what excluded it".
+- **Python:** `ReadResult.header` and `send_view` gained four selector keyword
+  arguments — `ancestor_chain` (`"same_site"` or `"cross_site"`),
+  `first_party_domain`, `gecko_view_session_context_id`, and
+  `origin_attributes` — appended after `now` rather than reordering the
+  existing ones. Each is equally a key of the mapping form of `context`, and
+  an unrecognized `ancestor_chain` spelling is a request error rather than a
+  silent fall back to the derived chain. `origin_attributes` names a raw
+  Firefox suffix verbatim and is the only way to reach a row carrying an
+  attribute this build does not recognize.
+- **Python:** `ReadResult.compatibility_cookies(*, allow_isolation_loss=False)`
+  is the named escape hatch for the eight-field projection: the same rows and
+  the same bytes as `as_list()` whenever it succeeds, but it refuses an
+  isolated snapshot instead of flattening it. The stubs gained an
+  `AncestorChain` literal alias and `SendOmissions` / `SendView` TypedDicts, so
+  a typed consumer can name what `send_view` returns.
 
 - The CLI gained a `send-view` subcommand, printing the whole selection behind
   `header` as one JSON object: `cookies` (the selected records, in the same
@@ -131,6 +156,26 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and no ancestor is cross-site, so the new `ancestor_chain` selector set to
   `CrossSite` withholds `Lax` and `Strict` even on a first-party URL, which is
   how a browser treats an `A -> B -> A` frame.
+- **Python:** `ReadResult.as_jar()` and the free `jar(...)` fail closed on
+  isolation loss, the same policy the Rust `jar` gained. An
+  `http.cookiejar.CookieJar` has no field for a CHIPS partition key, a Firefox
+  `partitionKey` tuple, or container identity, so a snapshot holding any
+  isolated row now raises `RookieRequestError` with
+  `code == "isolation_loss_refused"` rather than returning a jar that looks
+  correct and holds credentials scoped to a context the caller never named.
+  Both gained `allow_isolation_loss: bool = False`; passing `True` produces
+  byte-for-byte what they returned before. Nothing is renamed, and a snapshot
+  with no isolated rows is unaffected. `as_list()` is also unaffected and stays
+  infallible — it is the inventory projection, for looking at raw rows rather
+  than sending them — and `to_cookiejar` / `to_netscape` remain pure functions
+  with no policy of their own.
+- **Python:** the `required` attribute on `RookieRequestError` is now
+  populated for `isolation_loss_refused` as well as `incomplete_send_context`,
+  drawing on one selector vocabulary. For the former it names the selectors a
+  `send_view()` / `header()` call would need for that snapshot; for the latter,
+  the ones the call did not receive. Code that already branches on one's
+  `required` needs no second vocabulary, and the attribute stays present and
+  empty on every other error.
 
 ### Fixed
 

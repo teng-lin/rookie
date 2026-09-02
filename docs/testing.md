@@ -176,6 +176,18 @@ partition/container coverage is the `e2e-depth.yml` lane described below.
 python3 -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
 ```
 
+Each language binding drives the same corpus from its own suite, so a
+selector that answers differently in one language fails there rather than in
+review. Python's side is `tests/python/test_isolation_corpus.py`, which builds
+every store with the generator above and asserts the ordered selected set, the
+header, the full omission map, and each store's `jar` verdict — plus
+`header(ctx) == send_view(ctx)["header"]` for every case. It runs with the rest
+of `tests/python`, so it needs the wheel installed. A corpus case that no
+implementation of ADR 0006 can satisfy is excluded there by id, with the
+reason recorded beside it and a test that fails if the excluded id ever stops
+existing; the exclusion is never a way to paper over a binding that disagrees
+with the corpus.
+
 ## Real-browser E2E (PR subset / nightly / main)
 
 `.github/workflows/e2e.yml` gates pull requests with real Ubuntu Chrome and

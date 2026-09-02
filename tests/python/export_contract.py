@@ -669,7 +669,7 @@ JOB_EXPORTS: tuple[Export, ...] = (
         signature=(
             "(*, browser, profile=None, include_expired=False, include_session=False, "
             "select='legacy_first', timeout=None, cancellation=None, "
-            "app_bound='injection_only')"
+            "app_bound='injection_only', allow_isolation_loss=False)"
         ),
         success=_jar_success,
         expect=expect_seeded_cookiejar,

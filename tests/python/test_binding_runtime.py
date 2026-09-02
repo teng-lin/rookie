@@ -551,6 +551,66 @@ class DiagnosticAttributeTest(unittest.TestCase):
                             f"{expected.__name__} is missing {attribute}",
                         )
 
+    def test_required_is_populated_for_both_codes_that_define_it(self) -> None:
+        """`required` is a shared vocabulary, not an incomplete-context field.
+
+        Every error carries the attribute (the test above), but only two codes
+        ever fill it: `incomplete_send_context` and, from 0.7,
+        `isolation_loss_refused`. A caller that already branches on one's
+        `required` must not need a second vocabulary for the other, so this
+        pins that both are non-empty and that they agree.
+        """
+        with tempfile.TemporaryDirectory(prefix="rookie-python-required-") as temp:
+            database = Path(temp) / "cookies.sqlite"
+            connection = sqlite3.connect(str(database))
+            try:
+                connection.execute("PRAGMA user_version = 16")
+                connection.execute(
+                    """
+                    CREATE TABLE moz_cookies (
+                      host TEXT NOT NULL,
+                      name TEXT NOT NULL,
+                      value TEXT NOT NULL,
+                      path TEXT NOT NULL,
+                      isSecure INTEGER NOT NULL,
+                      isHttpOnly INTEGER NOT NULL,
+                      sameSite INTEGER NOT NULL,
+                      expiry INTEGER NOT NULL,
+                      originAttributes TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO moz_cookies VALUES"
+                    " ('embedded.example.test', 'chips', 'value', '/', 1, 0, 0, ?, ?)",
+                    (
+                        _LIVE_MS,
+                        "^partitionKey=%28https%2Ctop.example.test%29",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            snapshot = rookie_cookies.from_path(str(database), include_expired=True)
+
+        with self.assertRaises(rookie_cookies.RookieRequestError) as refused:
+            snapshot.as_jar()
+        self.assertEqual(refused.exception.code, "isolation_loss_refused")
+        self.assertEqual(list(refused.exception.required), ["top_level_site"])
+
+        with self.assertRaises(rookie_cookies.RookieRequestError) as incomplete:
+            snapshot.header("https://embedded.example.test/")
+        self.assertEqual(incomplete.exception.code, "incomplete_send_context")
+        self.assertEqual(
+            list(incomplete.exception.required), list(refused.exception.required)
+        )
+
+        # An unrelated request error keeps the attribute and leaves it empty,
+        # so `if error.required:` is a safe way to branch.
+        with self.assertRaises(rookie_cookies.RookieRequestError) as unrelated:
+            rookie_cookies.read(browser="not-a-registered-browser")
+        self.assertEqual(list(unrelated.exception.required), [])
+
     def test_the_hierarchy_keeps_its_pre_existing_builtin_bases(self) -> None:
         self.assertTrue(issubclass(rookie_cookies.RookieError, Exception))
         for cls in (

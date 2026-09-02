@@ -19,6 +19,7 @@
 # construction. They exist in the stub because they are the vocabulary the
 # public signatures are written in, and because the stub doubles as the
 # package's API reference (scripts/check-doc-snippets.py scrapes it).
+rookie_cookies.rookie_cookies.AncestorChain is not present at runtime
 rookie_cookies.rookie_cookies.AppBoundPolicy is not present at runtime
 rookie_cookies.rookie_cookies.BrowserDescriptor is not present at runtime
 rookie_cookies.rookie_cookies.BrowserDescriptorList is not present at runtime
@@ -35,6 +36,8 @@ rookie_cookies.rookie_cookies.ProfileDescriptor is not present at runtime
 rookie_cookies.rookie_cookies.ProfileDescriptorList is not present at runtime
 rookie_cookies.rookie_cookies.ReportProfileSelection is not present at runtime
 rookie_cookies.rookie_cookies.SendContextMapping is not present at runtime
+rookie_cookies.rookie_cookies.SendOmissions is not present at runtime
+rookie_cookies.rookie_cookies.SendView is not present at runtime
 rookie_cookies.rookie_cookies.SingleProfileSelection is not present at runtime
 
 # The native module declares __all__; the stub does not. Copying it in would
