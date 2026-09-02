@@ -765,6 +765,62 @@ mod tests {
   }
 
   #[test]
+  fn every_send_context_key_lets_an_explicit_kwarg_win_over_the_mapping() {
+    // The precedence rule is per key, and a key wired into the mapping reader
+    // but not into the `.or(default_*)` chain (or vice versa) would still pass
+    // the narrower test above. This drives all eleven at once: every mapping
+    // entry names a value that must lose.
+    Python::initialize();
+    Python::attach(|py| {
+      let mapping = PyDict::new(py);
+      for (key, value) in [
+        ("url", "https://mapping.example/"),
+        ("top_level_site", "https://mapping-top.example/"),
+        ("resource", "subresource"),
+        ("method", "safe"),
+        ("ancestor_chain", "same_site"),
+        ("first_party_domain", "mapping.example"),
+        ("gecko_view_session_context_id", "mapping-session"),
+        ("origin_attributes", "^userContextId=9"),
+      ] {
+        mapping.set_item(key, value).unwrap();
+      }
+      mapping.set_item("user_context_id", 9u32).unwrap();
+      mapping.set_item("private_browsing_id", 9u32).unwrap();
+      mapping.set_item("now", 1.0f64).unwrap();
+
+      let context = build_send_context(SendContextArgs {
+        context: Some(mapping.into_any()),
+        url: Some("https://kwarg.example/".to_owned()),
+        top_level_site: Some("https://kwarg-top.example/".to_owned()),
+        resource: Some("navigation".to_owned()),
+        method: Some("unsafe".to_owned()),
+        user_context_id: Some(2),
+        private_browsing_id: Some(1),
+        now: Some(1_000.0),
+        ancestor_chain: Some("cross_site".to_owned()),
+        first_party_domain: Some("kwarg.example".to_owned()),
+        gecko_view_session_context_id: Some("kwarg-session".to_owned()),
+        origin_attributes: Some("^userContextId=2".to_owned()),
+      })
+      .expect("every key must accept an overriding kwarg");
+
+      let expected = rookie_core::SendContext::url("https://kwarg.example/")
+        .top_level_site("https://kwarg-top.example/")
+        .navigation()
+        .method(rookie_core::MethodClass::Unsafe)
+        .user_context_id(2)
+        .private_browsing_id(1)
+        .now(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000))
+        .ancestor_chain(rookie_core::AncestorChain::CrossSite)
+        .first_party_domain("kwarg.example")
+        .gecko_view_session_context_id("kwarg-session")
+        .origin_attributes("^userContextId=2");
+      assert_eq!(context, expected);
+    });
+  }
+
+  #[test]
   fn build_send_context_requires_a_url_from_somewhere() {
     Python::initialize();
     Python::attach(|py| {

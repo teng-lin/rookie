@@ -11,8 +11,8 @@ for each store.
 Three properties are checked that no single case can express on its own:
 
 * `header(ctx)` equals `send_view(ctx)["header"]` for every case, including the
-  error cases (both must raise the same code). Two ways to ask the same
-  question must not answer differently.
+  error cases (both must raise the same code and the same `required`). Two
+  ways to ask the same question must not answer differently.
 * Every omission reason is present in `omitted` with a zero count when the
   corpus does not list it, so a consumer can index one without a guard.
 * `as_jar(allow_isolation_loss=True)` equals `to_cookiejar(as_list())`
@@ -40,9 +40,19 @@ if str(_CORPUS_DIR) not in sys.path:
 
 import build_isolation_corpus  # noqa: E402  (path is set up immediately above)
 
+# The stub reader lives beside the other contract tests; reusing it keeps one
+# parser for "what does rookie_cookies.pyi declare", rather than a second
+# regex here that could disagree with it.
+from test_export_contract import _stub_typed_dict_keys  # noqa: E402
+
 # Every omission reason `SendOmissions::entries()` yields, in its declared
 # order. A case lists only the non-zero ones; the rest must still be present
 # and zero, which is what makes the serialized shape fixed across releases.
+#
+# Spelled out rather than derived from the stub, because the *order* is part
+# of the contract and a set cannot carry it.
+# `test_the_omission_vocabulary_matches_the_stub` cross-asserts the membership
+# against `rookie_cookies.pyi`, so the two cannot drift apart.
 _OMISSION_CODES = (
     "expired",
     "not_applicable",
@@ -52,41 +62,6 @@ _OMISSION_CODES = (
     "unparsable_partition_key",
     "origin",
 )
-
-# Corpus cases this binding deliberately does not assert, because the case
-# itself cannot be satisfied by any implementation of ADR 0006 -- not because
-# the binding disagrees with it. The corpus is owned elsewhere; these entries
-# come out the moment the cases are fixed there, and `test_every_excluded_case
-# _still_exists` fails if one is silently renamed away instead.
-#
-# Each value is the reason, kept here so a reader does not have to reconstruct
-# the analysis from a bare id.
-_UNSATISFIABLE_CASES = {
-    "chromium_site_ipv4_exact_host_equality_required": (
-        "The case's request URL, https://7.198.51.100.7/, has no parseable "
-        "host: all five labels are numeric, so the WHATWG URL parser runs its "
-        "IPv4 parser and rejects more than four parts. `url::Url::parse` "
-        "implements that spec, so the context is rejected with `invalid_url` "
-        "before any matching happens -- which ADR 0006 requires ('an "
-        "unparseable ... is rejected rather than dropped'). The IP-literal "
-        "exact-equality rule the case exists for is still covered by "
-        "chromium_site_ipv6_exact_host_equality_required, which passes."
-    ),
-    "firefox_unknown_attr_partitioned_row_survives_raw_selector": (
-        "The `firefox_unknown_partitioned` row this case expects is "
-        "unreachable by any context in its store. Its partitionKey is "
-        "(https,rookie-a.test) with no `,f`, and the row is a host-only "
-        "Secure cookie on unknown.rookie-a.test -- a subdomain of the "
-        "top-level site. So sites_match is always true, an explicit "
-        "ancestor_chain=cross_site makes foreignByAncestorContext true (which "
-        "demands a `,f` tuple), and ancestor_chain=same_site instead trips "
-        "ADR 0006's 'a partitioned Firefox row never matches a first-party "
-        "context' guard. The raw-selector property the case exists for -- an "
-        "exact `origin_attributes` does not filter non-opaque rows -- is still "
-        "covered by firefox_unknown_attr_exact_future_suffix, which selects a "
-        "non-opaque row alongside the opaque one."
-    ),
-}
 
 
 def _selected_values(view: dict) -> list[str]:
@@ -129,17 +104,34 @@ class IsolationCorpusTest(unittest.TestCase):
         cls._temp.cleanup()
 
     def _snapshot(self, store: str) -> rookie_cookies.ReadResult:
-        # include_expired keeps the snapshot's inventory whole; send-time
-        # expiry is applied by send_view regardless, and is what the corpus's
-        # `expired` omission count measures.
-        return rookie_cookies.from_path(str(self._paths[store]), include_expired=True)
+        """Opens one store the way the corpus says it must be opened.
+
+        `include_expired` defaults to false and is a per-store declaration,
+        not a blanket convenience: read-time expiry decides whether a row
+        reaches the snapshot at all, while send-time expiry drops it again
+        regardless -- which is what the `expired` omission count measures. A
+        store that declares the flag is making a statement about its own rows,
+        so honouring it (rather than passing `True` everywhere) is what keeps
+        this suite's counts the same ones the Rust and CLI consumers assert.
+        """
+        description = self._corpus["stores"][store]
+        snapshot = rookie_cookies.from_path(
+            str(self._paths[store]),
+            include_expired=description.get("include_expired", False),
+        )
+        # A store whose flag is wrong loses rows silently, and every later
+        # count would then be off by that much. Fail here instead.
+        self.assertEqual(
+            len(snapshot.detailed_cookies()),
+            len(description["rows"]),
+            f"store {store} lost rows between the corpus and the snapshot",
+        )
+        return snapshot
 
     # -- cases ---------------------------------------------------------------
 
     def test_every_case_selects_exactly_what_the_corpus_lists(self) -> None:
         for case in self._corpus["cases"]:
-            if case["id"] in _UNSATISFIABLE_CASES:
-                continue
             with self.subTest(case=case["id"]):
                 snapshot = self._snapshot(case["store"])
                 context = dict(case["context"])
@@ -170,17 +162,20 @@ class IsolationCorpusTest(unittest.TestCase):
 
     def test_header_is_exactly_the_send_view_header_for_every_case(self) -> None:
         for case in self._corpus["cases"]:
-            if case["id"] in _UNSATISFIABLE_CASES:
-                continue
             with self.subTest(case=case["id"]):
                 snapshot = self._snapshot(case["store"])
                 context = dict(case["context"])
                 if "error" in case["expect"]:
-                    # The two entry points must also fail identically.
+                    # The two entry points must also fail identically -- same
+                    # code and the same tokens, not merely both raising.
                     with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
                         snapshot.header(context)
                     self.assertEqual(
                         raised.exception.code, case["expect"]["error"]["code"]
+                    )
+                    self.assertEqual(
+                        list(raised.exception.required),
+                        case["expect"]["error"]["required"],
                     )
                     continue
                 self.assertEqual(
@@ -190,7 +185,7 @@ class IsolationCorpusTest(unittest.TestCase):
     def test_send_view_accepts_the_same_context_as_keyword_arguments(self) -> None:
         """The mapping and keyword forms are one vocabulary, not two."""
         for case in self._corpus["cases"]:
-            if case["id"] in _UNSATISFIABLE_CASES or "error" in case["expect"]:
+            if "error" in case["expect"]:
                 continue
             with self.subTest(case=case["id"]):
                 snapshot = self._snapshot(case["store"])
@@ -201,17 +196,113 @@ class IsolationCorpusTest(unittest.TestCase):
                     case["expect"]["header"],
                 )
 
-    def test_every_excluded_case_still_exists(self) -> None:
-        """An exclusion must name a real case, so a fix cannot go unnoticed."""
-        ids = {case["id"] for case in self._corpus["cases"]}
-        for excluded in _UNSATISFIABLE_CASES:
-            with self.subTest(case=excluded):
-                self.assertIn(
-                    excluded,
-                    ids,
-                    "this exclusion names no corpus case -- delete it, and "
-                    "stop skipping a case that no longer exists",
-                )
+    def _case(self, case_id: str) -> dict:
+        for case in self._corpus["cases"]:
+            if case["id"] == case_id:
+                return case
+        raise AssertionError(f"the corpus declares no case {case_id!r}")
+
+    def test_an_explicit_selector_kwarg_overrides_the_same_mapping_key(self) -> None:
+        """Precedence is observable through the selection, not just the build.
+
+        The Rust unit tests compare the built `SendContext`; these two go
+        through a real store, so a key wired into the merge but dropped before
+        matching would still be caught. Each asserts both directions: the
+        kwarg wins, and the mapping's own value would have produced something
+        different -- otherwise "the kwarg won" proves nothing.
+        """
+        chain = self._case("chromium_ancestor_explicit_cross_site_a_to_b_to_a")
+        snapshot = self._snapshot(chain["store"])
+        wrong = dict(chain["context"], ancestor_chain="same_site")
+        self.assertEqual(
+            snapshot.send_view(wrong, ancestor_chain="cross_site")["header"],
+            chain["expect"]["header"],
+        )
+        self.assertNotEqual(
+            snapshot.send_view(wrong)["header"], chain["expect"]["header"]
+        )
+
+        suffix = self._case("firefox_unknown_attr_exact_future_suffix")
+        snapshot = self._snapshot(suffix["store"])
+        wrong = dict(suffix["context"], origin_attributes="")
+        self.assertEqual(
+            snapshot.send_view(wrong, origin_attributes="^futureAttr=1")["header"],
+            suffix["expect"]["header"],
+        )
+        self.assertNotEqual(
+            snapshot.send_view(wrong)["header"], suffix["expect"]["header"]
+        )
+
+    def test_a_malformed_selector_is_a_request_error_not_a_silent_default(
+        self,
+    ) -> None:
+        """A typo in the caller's isolation intent must not be answered.
+
+        An unrecognized `ancestor_chain` spelling falling back to the derived
+        chain would answer a question the caller did not ask, and an unknown
+        mapping key would let a misspelled selector be silently ignored.
+        """
+        snapshot = self._snapshot("chromium_isolated")
+        probes = {
+            "unknown ancestor_chain": lambda: snapshot.send_view(
+                "https://nested.rookie-a.test/",
+                top_level_site="https://rookie-a.test",
+                ancestor_chain="samesite",
+            ),
+            "unknown mapping key": lambda: snapshot.send_view(
+                {"url": "https://nested.rookie-a.test/", "ancestorChain": "same_site"}
+            ),
+        }
+        for label, probe in probes.items():
+            with self.subTest(probe=label):
+                with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
+                    probe()
+                self.assertEqual(raised.exception.kind, "request")
+                # `code` is None for a fault raised on the binding's own side
+                # of the boundary: these never reach a core `RequestError`, so
+                # there is no typed code to report. This is the same shape the
+                # pre-existing `resource` / `method` rejections have always
+                # had, and it is pinned here so a later change to give them
+                # codes is a deliberate one rather than a silent break for a
+                # caller matching on `code is None`.
+                self.assertIsNone(raised.exception.code)
+                self.assertEqual(list(raised.exception.required), [])
+
+    def test_the_corpus_this_suite_drives_has_not_collapsed(self) -> None:
+        """A guard on every loop above, all of which are `for case in ...`.
+
+        Each of those passes trivially over an empty list, so a corpus that
+        failed to load, or one whose cases moved under a different key, would
+        report a green suite having asserted nothing at all. The floors are
+        deliberately loose -- this catches collapse, not growth.
+        """
+        cases = self._corpus["cases"]
+        self.assertGreater(len(cases), 25, "the corpus case set collapsed")
+        self.assertGreater(len(self._corpus["stores"]), 3, "the store set collapsed")
+        self.assertEqual(
+            len({case["id"] for case in cases}),
+            len(cases),
+            "two corpus cases share an id",
+        )
+        for case in cases:
+            with self.subTest(case=case["id"]):
+                self.assertIn(case["store"], self._corpus["stores"])
+
+    def test_the_omission_vocabulary_matches_the_stub(self) -> None:
+        """This module's ordered list and the stub's TypedDict are one set.
+
+        The order lives here because a `TypedDict`'s keys do not carry it;
+        the membership lives in the stub. Cross-asserting is what stops a
+        reason added to one from being missed by the other.
+        """
+        self.assertEqual(
+            set(_OMISSION_CODES), _stub_typed_dict_keys("SendOmissions")
+        )
+        self.assertEqual(
+            len(_OMISSION_CODES),
+            len(set(_OMISSION_CODES)),
+            "an omission reason is listed twice",
+        )
 
     # -- per-store jar verdicts ----------------------------------------------
 
@@ -221,14 +312,34 @@ class IsolationCorpusTest(unittest.TestCase):
             with self.subTest(store=store):
                 snapshot = self._snapshot(store)
                 if expect == "ok":
-                    self.assertIsInstance(snapshot.as_jar(), http.cookiejar.CookieJar)
+                    jar = snapshot.as_jar()
+                    self.assertIsInstance(jar, http.cookiejar.CookieJar)
+                    # A jar that quietly dropped rows would still be a jar.
+                    self.assertEqual(len(list(jar)), len(snapshot))
+                    self.assertEqual(
+                        len(snapshot.compatibility_cookies()), len(snapshot)
+                    )
                     continue
-                with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
-                    snapshot.as_jar()
-                self.assertEqual(raised.exception.code, expect["error"]["code"])
-                self.assertEqual(
-                    list(raised.exception.required), expect["error"]["required"]
-                )
+                # Both send-safe names refuse, with the same code and the same
+                # tokens: `as_jar` is sugar over `compatibility_cookies`, and
+                # a caller who avoids the jar shape must not thereby avoid the
+                # policy.
+                for name, probe in (
+                    ("as_jar", snapshot.as_jar),
+                    ("compatibility_cookies", snapshot.compatibility_cookies),
+                ):
+                    with self.subTest(projection=name):
+                        with self.assertRaises(
+                            rookie_cookies.RookieRequestError
+                        ) as raised:
+                            probe()
+                        self.assertEqual(
+                            raised.exception.code, expect["error"]["code"]
+                        )
+                        self.assertEqual(
+                            list(raised.exception.required),
+                            expect["error"]["required"],
+                        )
 
     def test_the_opt_in_jar_matches_the_inventory_projection_cookie_for_cookie(
         self,

@@ -10,6 +10,13 @@ from pathlib import Path
 
 import rookie_cookies
 
+from export_contract import (
+    SEEDED_DOMAIN,
+    current_platform,
+    preferred_root,
+    registry_entries,
+    seed_browser,
+)
 from test_report_api import (
     _UNDECRYPTABLE,
     _chrome_root,
@@ -87,6 +94,40 @@ def _seed_partitioned_gecko(path: Path) -> Path:
     finally:
         connection.close()
     return path
+
+
+def _partition_a_seeded_gecko_profile(home: Path) -> Path:
+    """Seed Firefox where discovery expects it, then isolate one row.
+
+    `export_contract.seed_browser` writes the profile the registry points at,
+    which is what makes `jar(browser="firefox")` -- the whole discovery path,
+    not just `from_path` -- reachable. Its schema predates
+    `originAttributes`, so the column is added here rather than in the shared
+    seeder: every other test that consumes that seeder wants an *unisolated*
+    snapshot, and giving them a partitioned row would make them all start
+    refusing.
+    """
+    seed_browser(home, "firefox")
+    entry = registry_entries(current_platform())["firefox"]
+    root, _discovery, _layout = preferred_root(entry, home)
+    database = root / "Profiles" / "contract-release" / "cookies.sqlite"
+    connection = sqlite3.connect(str(database))
+    try:
+        connection.execute(
+            "ALTER TABLE moz_cookies "
+            "ADD COLUMN originAttributes TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "INSERT INTO moz_cookies"
+            " (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite,"
+            "  originAttributes)"
+            " VALUES (?, '/', 1, 4102444800000, 'chips', 'partitioned', 0, 0, ?)",
+            (SEEDED_DOMAIN, "^partitionKey=%28https%2Ctop.example.test%29"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return database
 
 
 class JobApiTest(unittest.TestCase):
@@ -296,6 +337,32 @@ class JobApiTest(unittest.TestCase):
         opted_in = snapshot.as_jar(allow_isolation_loss=True)
         self.assertIsInstance(opted_in, http.cookiejar.CookieJar)
         self.assertEqual(len(list(opted_in)), len(snapshot.as_list()))
+
+    def test_the_free_jar_function_fails_closed_and_takes_the_opt_in(self) -> None:
+        """`jar(...)` is sugar over `as_jar()`, including the refusal.
+
+        `as_jar()` is covered above through `from_path`; this drives the whole
+        discovery path instead, because `jar(...)` is the call most existing
+        code makes and the one where a forgotten keyword would silently
+        restore the old flattening.
+        """
+        with _synthetic_home() as home:
+            _partition_a_seeded_gecko_profile(home)
+
+            with self.assertRaises(rookie_cookies.RookieRequestError) as raised:
+                rookie_cookies.jar(browser="firefox", include_expired=True)
+            self.assertEqual(raised.exception.code, "isolation_loss_refused")
+            self.assertEqual(list(raised.exception.required), ["top_level_site"])
+
+            opted_in = rookie_cookies.jar(
+                browser="firefox", include_expired=True, allow_isolation_loss=True
+            )
+            self.assertIsInstance(opted_in, http.cookiejar.CookieJar)
+            # Both rows: the opt-in changes whether the jar is built, never
+            # which rows reach it.
+            self.assertEqual(
+                {cookie.name for cookie in opted_in}, {"contract", "chips"}
+            )
 
     def test_profiles_aliases_browser_profiles(self) -> None:
         with _synthetic_home() as home:
