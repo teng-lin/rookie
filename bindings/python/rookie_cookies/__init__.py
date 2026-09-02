@@ -201,8 +201,25 @@ def create_cookie(
     )
 
 
-def _read_result_as_jar(self: ReadResult) -> http.cookiejar.CookieJar:
-    return to_cookiejar(self.as_list())
+def _read_result_as_jar(
+    self: ReadResult, *, allow_isolation_loss: bool = False
+) -> http.cookiejar.CookieJar:
+    """Load this snapshot into an ``http.cookiejar.CookieJar``.
+
+    Routed through ``compatibility_cookies`` rather than ``as_list()``: a
+    ``CookieJar`` has no field for a CHIPS partition key, a Firefox
+    ``partitionKey`` tuple, or container identity, so building one from an
+    isolated snapshot would turn context-scoped credentials into unscoped
+    ones with no error and no visible difference. It refuses instead, with
+    ``code == "isolation_loss_refused"`` and a ``required`` list naming the
+    selectors a ``send_view()`` / ``header()`` call would need.
+
+    :param allow_isolation_loss: Build the jar anyway. Output is identical to
+        what this returned before the refusal existed.
+    """
+    return to_cookiejar(
+        self.compatibility_cookies(allow_isolation_loss=allow_isolation_loss)
+    )
 
 
 ReadResult.as_jar = _read_result_as_jar  # type: ignore[method-assign]
@@ -218,9 +235,19 @@ def jar(
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
     app_bound: AppBoundPolicy = "injection_only",
+    allow_isolation_loss: bool = False,
 ) -> http.cookiejar.CookieJar:
     """
     Sugar: ``read(...).as_jar()``. Warnings are discarded; use ``read()`` if you need them.
+
+    **Fails closed on isolation loss (0.7).** A ``CookieJar`` cannot represent
+    a CHIPS partition key or a Firefox container identity, so a snapshot that
+    holds any isolated cookie raises ``RookieRequestError`` with
+    ``code == "isolation_loss_refused"`` rather than flattening it. The error's
+    ``required`` list names the selectors ``ReadResult.send_view()`` /
+    ``header()`` would need for that snapshot. Pass
+    ``allow_isolation_loss=True`` to accept the loss; an unisolated snapshot
+    is unaffected and keeps working exactly as before.
 
     **Migration trap:** ``include_session`` defaults to ``False``. In 0.6-beta,
     ``jar(profile="Default")`` imported that profile's session cookies too;
@@ -244,7 +271,7 @@ def jar(
         timeout=timeout,
         cancellation=cancellation,
         app_bound=app_bound,
-    ).as_jar()
+    ).as_jar(allow_isolation_loss=allow_isolation_loss)
 
 
 def profiles(
@@ -351,6 +378,12 @@ def to_cookiejar(cookies: CookieList) -> http.cookiejar.CookieJar:
     """
     Convert a list of dictionaries representing cookies to a CookieJar.
 
+    A pure function over rows you already hold; it applies no isolation
+    policy of its own. The fail-closed paths are ``ReadResult.as_jar()`` and
+    ``ReadResult.compatibility_cookies()`` — reach for those when the rows
+    come from a snapshot, since only they know whether the snapshot held
+    isolated cookies a ``CookieJar`` cannot represent.
+
     :param cookies: A list of dictionaries representing cookies
     :return: A CookieJar containing the converted cookies
     """
@@ -377,6 +410,12 @@ def to_netscape(cookies: CookieList) -> str:
     Tabs, carriage returns, and line feeds in cookie-controlled fields are
     percent-encoded. Hash signs are encoded only in the domain field, where a
     leading ``#`` would become a comment or forged HttpOnly marker.
+
+    A pure function over rows you already hold; it applies no isolation
+    policy of its own. A Netscape file has no column for a partition key, so
+    feed it ``ReadResult.compatibility_cookies()`` (which refuses, or takes
+    an explicit ``allow_isolation_loss=True``) rather than ``as_list()``
+    when the rows come from a possibly-isolated snapshot.
 
     :param cookies: A list of dictionaries representing cookies
     :return: A string containing the converted cookies

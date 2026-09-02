@@ -197,15 +197,30 @@ boundaries. There is no top-level binding `header()`, and no crate-root Rust
 `jar` is warning-discarding projection sugar over the same `read` job. Python
 returns `http.cookiejar.CookieJar`; Node returns `CookieObject[]`; Rust returns
 `Vec<Cookie>`. Use `read` when warnings or partition/container context matter.
+From 0.7 `jar` also fails closed on an isolated snapshot: a flat cookie list
+has no field for a CHIPS partition key or a container id, so it raises
+`isolation_loss_refused` rather than silently merging two browsing contexts,
+and accepting that loss is an explicit opt-in (`allow_isolation_loss=True` in
+Python).
 
 ### Python
 
 ```python
 import rookie_cookies as cookies
 
-session_jar = cookies.jar(
+# Gecko session import — profile selection and session policy are independent
+snapshot = cookies.read(
     browser="firefox", profile="default-release", include_session=True
 )
+
+# A browsing context in; the cookies it selects, the header, and a count of
+# what was left out and why.
+view = snapshot.send_view(
+    "https://app.example.com/",
+    top_level_site="https://example.com",
+)
+print(view["header"], view["omitted"]["partition"])
+
 rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```
 

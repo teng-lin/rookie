@@ -27,7 +27,12 @@ if TYPE_CHECKING:
     # for documentation and precision, and a compiled PyO3 module has no such
     # object at runtime. Importing it under TYPE_CHECKING is how a real
     # consumer names it without an ImportError.
-    from rookie_cookies.rookie_cookies import CookieContext, CookieObject, DetailedCookie
+    from rookie_cookies.rookie_cookies import (
+        CookieContext,
+        CookieObject,
+        DetailedCookie,
+        SendView,
+    )
 
 
 def snapshot_reading() -> None:
@@ -51,6 +56,13 @@ def snapshot_reading() -> None:
     # is unresolvable for every downstream consumer.
     jar = result.as_jar()
     assert_type(jar, http.cookiejar.CookieJar)
+    # The opt-in keyword is part of the published shape, not an
+    # implementation detail of __init__.py's monkeypatch.
+    assert_type(result.as_jar(allow_isolation_loss=True), http.cookiejar.CookieJar)
+    assert_type(
+        result.compatibility_cookies(allow_isolation_loss=True),
+        List[Dict[str, Any]],
+    )
 
     assert_type(result.browser_id, "str | None")
     assert_type(result.profile_id, "str | None")
@@ -103,8 +115,39 @@ def request_header_views() -> None:
             user_context_id=1,
             private_browsing_id=0,
             now=1_700_000_000.0,
+            ancestor_chain="cross_site",
+            first_party_domain="example.com",
+            gecko_view_session_context_id="session-7",
+            origin_attributes="^userContextId=1",
         ),
         str,
+    )
+
+
+def send_views() -> None:
+    """`send_view` returns the selected set, the header, and the counts."""
+    result = rookie_cookies.from_path("/nonexistent/Cookies")
+
+    view = result.send_view("https://example.com")
+    assert_type(view, "SendView")
+    assert_type(view["cookies"], List["DetailedCookie"])
+    assert_type(view["header"], str)
+    # Every omission reason is a plain int and always present, so a consumer
+    # can index one without a `.get` guard.
+    assert_type(view["omitted"]["origin"], int)
+    assert_type(view["omitted"]["ancestor_chain_unknown"], int)
+
+    # The same selector vocabulary `header` takes, in mapping form.
+    assert_type(
+        result.send_view(
+            {
+                "url": "https://example.com",
+                "top_level_site": "https://example.com",
+                "ancestor_chain": "same_site",
+                "origin_attributes": "^userContextId=2",
+            }
+        ),
+        "SendView",
     )
 
 

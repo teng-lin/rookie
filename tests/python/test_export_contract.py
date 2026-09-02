@@ -19,6 +19,7 @@ import rookie_cookies
 from export_contract import (
     ALL_PLATFORMS,
     BROWSER_EXPORTS,
+    SEEDED_DOMAIN,
     seed_browser,
     EXPORTS,
     EXPORTS_BY_NAME,
@@ -36,19 +37,29 @@ from export_contract import (
 
 _STUB = Path(rookie_cookies.__file__).with_name("rookie_cookies.pyi")
 
+_SEND_CONTEXT_PARAMETERS = (
+    "(self, context=None, /, *, url=None, top_level_site=None, resource=None, "
+    "method=None, user_context_id=None, private_browsing_id=None, now=None, "
+    "ancestor_chain=None, first_party_domain=None, "
+    "gecko_view_session_context_id=None, origin_attributes=None)"
+)
+
 _CLASS_MEMBERS = {
     "CancellationHandle": {
         "cancel": "(self, /)",
         "is_cancelled": "(self, /)",
     },
     "ReadResult": {
-        "as_jar": "(self)",
+        "as_jar": "(self, *, allow_isolation_loss=False)",
         "as_list": "(self, /)",
+        "compatibility_cookies": "(self, /, *, allow_isolation_loss=False)",
         "detailed_cookies": "(self, /)",
-        "header": (
-            "(self, context=None, /, *, url=None, top_level_site=None, resource=None, "
-            "method=None, user_context_id=None, private_browsing_id=None, now=None)"
-        ),
+        # `header` and `send_view` take the same arguments in the same order,
+        # and the four isolation selectors are appended after `now` rather
+        # than sorted in: the order is the published contract, so a future
+        # selector goes on the end of both.
+        "header": _SEND_CONTEXT_PARAMETERS,
+        "send_view": _SEND_CONTEXT_PARAMETERS,
         "browser_id": None,
         "profile_id": None,
         "warnings": None,
@@ -327,11 +338,40 @@ class DataShapeTest(unittest.TestCase):
                     set(record["context"]), _stub_typed_dict_keys("CookieContext")
                 )
 
+    def test_send_view_keys_match_the_stubs_send_view(self) -> None:
+        """The dict `send_view` builds is the dict the stub promises.
+
+        `send_view` assembles its three keys and its seven omission counts by
+        hand in `job.rs`, so nothing but this compares them against the
+        TypedDicts the stub publishes. A renamed key would leave stubtest
+        silent (a compiled module has no TypedDict to compare against) and
+        `consumer.py` type-checking happily against the stub's claim.
+        """
+        with synthetic_home() as home:
+            snapshot = self._seeded(home)
+            view = snapshot.send_view(  # type: ignore[attr-defined]
+                f"https://{SEEDED_DOMAIN.lstrip('.')}/"
+            )
+        self.assertEqual(set(view), _stub_typed_dict_keys("SendView"))
+        self.assertEqual(set(view["omitted"]), _stub_typed_dict_keys("SendOmissions"))
+        # Not vacuous: the seeded row is selected, so `cookies` also carries
+        # the record shape `detailed_cookies()` returns.
+        self.assertTrue(view["cookies"], "the seeded store selected nothing")
+        for record in view["cookies"]:
+            with self.subTest(name=record["cookie"].get("name")):
+                self.assertEqual(set(record), _stub_typed_dict_keys("DetailedCookie"))
+
     def test_the_stub_still_declares_the_shapes_this_compares(self) -> None:
         # A guard on the guard: if a TypedDict were renamed away,
         # `_stub_typed_dict_keys` raises rather than returning an empty set, so
         # the comparisons above cannot degrade into `set() == set()`.
-        for name in ("CookieObject", "CookieContext", "DetailedCookie"):
+        for name in (
+            "CookieObject",
+            "CookieContext",
+            "DetailedCookie",
+            "SendView",
+            "SendOmissions",
+        ):
             with self.subTest(typed_dict=name):
                 self.assertTrue(_stub_typed_dict_keys(name))
         with self.assertRaises(AssertionError):
