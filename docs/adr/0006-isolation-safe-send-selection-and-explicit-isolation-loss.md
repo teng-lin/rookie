@@ -144,8 +144,11 @@ attribute name: an unrecognized name can only be reached by the exact
 five typed fields. Call such a row *opaque* (an unrecognized name, an
 unreadable value under a known name, or — for the partition gate below — an
 unparsable `partitionKey`). The raw selector governs opaque rows only: an
-opaque row is selected iff the supplied `origin_attributes` equals its
-stored suffix byte-for-byte, and is otherwise omitted; a non-opaque row
+opaque row is omitted unless the supplied `origin_attributes` equals its
+stored suffix byte-for-byte, and an exact match is necessary, not
+sufficient — the row still passes through the partition gate and the typed
+selectors (an unparsable partition is the one gate the exact match itself
+satisfies), so the raw selector is never a bypass; a non-opaque row
 ignores the raw selector and is governed by the typed selectors and the
 partition verdict alone. Scoping it this way keeps one future-Firefox row
 from collapsing every header in that store to a single stored suffix, which
