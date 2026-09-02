@@ -270,12 +270,29 @@ browser matrix:
   HTTPS top-level sites. Firefox creates the corresponding two dFPI identities.
   Rust, Python, Node, and CLI assert the browser-produced context strings and
   prove that `header(SendContext)` selects one partition without merging the
-  other. Omitting the top-level selector must fail.
+  other. Omitting the top-level selector must fail, and the reported `required`
+  tokens are compared exactly, not just the error code.
+- The same page also seeds one host of the A site through both an `A -> A`
+  frame chain and an `A -> B -> A` one, so two rows share a name, host, and
+  path and differ only in the ancestor chain that produced them: Chromium's
+  `has_cross_site_ancestor` bit and Firefox's foreign-by-ancestor `,f`
+  `partitionKey` field. The runner builds its expected send sets directly from
+  the browser's own SQLite rows -- never from the library under test -- and
+  every surface's `send_view` selection is compared against that oracle as an
+  exact set, together with the header it renders and its omission counters.
+  The contexts cover the derived ancestor chain, both explicit selectors, and
+  a first-party request re-declared cross-site, which must withhold its
+  `SameSite=Lax` rows. A browser that collapses the two chains into one row, or
+  that records no foreign-ancestor marker, fails the lane by name and version
+  rather than skipping.
 - The Firefox half also installs a checked-in test-only WebExtension into the
   disposable profile. The extension creates a real Multi-Account Container
   cookie; the runner reads its exact `originAttributes` and positive
   `userContextId` from `moz_cookies`, verifies detailed output on all four
   surfaces, and proves matching, mismatched, and missing container selectors.
+  Each surface additionally selects the container row through `send-view` and
+  repeats the call with the verbatim stored `originAttributes` suffix, which
+  must land on the same single record rather than widening the set.
 - The nightly Chromium/Firefox stress jobs retain 320 cookies across eight
   registrable test domains in each of two independent Linux profiles,
   including same-name collisions. A macOS Chrome lane repeats the work through
@@ -302,12 +319,14 @@ over loopback HTTP. The runner refuses this trust operation outside a fresh
 GitHub-hosted account and a scratch path below `RUNNER_TEMP`.
 
 HTTPS is exercised independently by the live depth lanes. The partition runner
-uses a generated certificate and three named local sites
-(`top.rookie-a.test`, `other.rookie-c.test`, and `third.rookie-b.test`) to
-produce Secure/SameSite=None CHIPS and dFPI cookies. It asserts Chromium
-`source_scheme=2`, the real source port, cross-site ancestry, two top-frame
-keys, Firefox partition keys, and send-time isolation on Rust, Python, Node,
-and CLI. The 320-cookie active-writer stress lane also uses named local HTTPS
+uses a generated certificate and four named local sites
+(`top.rookie-a.test`, `other.rookie-c.test`, `third.rookie-b.test`, and
+`nested.rookie-a.test`, which shares a registrable site with `top` so an
+`A -> B -> A` chain is expressible) to produce Secure/SameSite=None CHIPS and
+dFPI cookies. It asserts Chromium `source_scheme=2`, the real source port, both
+values of the cross-site ancestor bit, two top-frame keys, Firefox partition
+keys including the foreign-by-ancestor tuple, and send-time isolation on Rust,
+Python, Node, and CLI. The 320-cookie active-writer stress lane also uses named local HTTPS
 origins. Thus scheme/context depth and browser-product breadth are orthogonal
 contracts. Safari's HTTPS corpus additionally proves the product-specific
 cookie-acceptance boundary; it does not replace the named-site context lane.

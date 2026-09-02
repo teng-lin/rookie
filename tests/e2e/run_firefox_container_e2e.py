@@ -219,7 +219,14 @@ def seed_container_with_web_ext(
 
 
 
-def write_container_manifest(database: Path, output: Path) -> int:
+def write_container_manifest(database: Path, output: Path) -> tuple[int, str]:
+    """Return the browser-produced container id and its verbatim suffix.
+
+    The suffix is returned as well as parsed because ADR 0006's raw
+    `origin_attributes` selector compares byte-for-byte against what the
+    browser stored: rebuilding it from the parsed fields would test the test.
+    """
+
     connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -327,7 +334,7 @@ def write_container_manifest(database: Path, output: Path) -> int:
     output.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    return user_context_id
+    return user_context_id, origin_attributes
 
 
 def detailed_commands(database: Path) -> list[tuple[str, list[str]]]:
@@ -414,12 +421,11 @@ def verify_cli_headers(
     *,
     profile_id: str,
     user_context_id: int,
+    origin_attributes: str,
     environment: dict[str, str],
 ) -> None:
     cli = str(ROOT / "target/release/rookie-cookies")
-    base = [
-        cli,
-        "header",
+    selector = [
         "--url",
         "https://container.rookie.test/",
         "--browser",
@@ -429,6 +435,7 @@ def verify_cli_headers(
         "--top-level-site",
         "https://container.rookie.test/",
     ]
+    base = [cli, "header", *selector]
     matching = subprocess.run(
         [*base, "--user-context-id", str(user_context_id)],
         cwd=str(ROOT),
@@ -465,6 +472,91 @@ def verify_cli_headers(
         raise ActiveWriterError(
             f"CLI missing-container selector was not typed: {missing.returncode}: {message}"
         )
+    document = None
+    for line in reversed(message.strip().splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and isinstance(candidate.get("code"), str):
+            document = candidate
+            break
+    # ADR 0006 Decision 6: `required` is defined for exactly the two selector
+    # codes, and it draws on the same token vocabulary the Python and Node
+    # bindings expose, so the tokens are asserted rather than just the code.
+    if document is None or document.get("code") != "incomplete_send_context":
+        raise ActiveWriterError(f"CLI missing-container error was not JSON: {message}")
+    if document.get("required") != ["user_context_id"]:
+        raise ActiveWriterError(
+            f"CLI named the wrong required selectors: {document.get('required')!r}"
+        )
+    verify_cli_send_views(
+        cli=cli,
+        selector=selector,
+        user_context_id=user_context_id,
+        origin_attributes=origin_attributes,
+        environment=environment,
+    )
+
+
+def verify_cli_send_views(
+    *,
+    cli: str,
+    selector: list[str],
+    user_context_id: int,
+    origin_attributes: str,
+    environment: dict[str, str],
+) -> None:
+    """Prove `send-view` selects the container row exactly, twice over.
+
+    Once through the typed container selector, and once with the verbatim
+    `originAttributes` suffix the browser wrote added on top. The raw selector
+    is never a bypass -- the typed selector still has to match -- so the second
+    call must land on the same single record rather than widening the set.
+    """
+
+    def selected(extra: list[str]) -> dict[str, object]:
+        completed = subprocess.run(
+            [cli, "send-view", *selector, *extra],
+            cwd=str(ROOT),
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        document = json.loads(completed.stdout)
+        if not isinstance(document, dict) or set(document) != {
+            "cookies",
+            "header",
+            "omitted",
+        }:
+            raise ActiveWriterError(
+                f"CLI send-view emitted an unexpected shape: {completed.stdout!r}"
+            )
+        return document
+
+    container = ["--user-context-id", str(user_context_id)]
+    typed = selected(container)
+    identities = [
+        (record["cookie"]["name"], record["cookie"]["value"])
+        for record in typed["cookies"]
+    ]
+    if identities != [("rookie_container", "container-1")]:
+        raise ActiveWriterError(f"CLI send-view selected {identities!r}")
+    if typed["header"] != "rookie_container=container-1":
+        raise ActiveWriterError(f"CLI send-view header was {typed['header']!r}")
+    round_trip = selected([*container, "--origin-attributes", origin_attributes])
+    if round_trip["cookies"] != typed["cookies"]:
+        raise ActiveWriterError(
+            f"the raw origin-attribute selector {origin_attributes!r} changed the "
+            f"selected set: {round_trip['cookies']!r}"
+        )
+    other = selected(["--user-context-id", str(user_context_id + 1)])
+    if other["cookies"]:
+        raise ActiveWriterError(
+            f"CLI send-view leaked another container: {other['cookies']!r}"
+        )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -489,7 +581,9 @@ def run(args: argparse.Namespace) -> None:
     environment.update(discovery_environment)
     database = database_for("firefox", profile)
     manifest = sandbox / "firefox-container-raw-manifest.json"
-    user_context_id = write_container_manifest(database, manifest)
+    user_context_id, origin_attributes = write_container_manifest(
+        database, manifest
+    )
     os.environ.update(
         {
             key: value
@@ -507,6 +601,7 @@ def run(args: argparse.Namespace) -> None:
             "ROOKIE_E2E_CONTEXT_DB": str(database),
             "ROOKIE_E2E_CONTEXT_MANIFEST": str(manifest),
             "ROOKIE_E2E_USER_CONTEXT_ID": str(user_context_id),
+            "ROOKIE_E2E_ORIGIN_ATTRIBUTES": origin_attributes,
         }
     )
     verify_detailed_surfaces(database, manifest, environment)
@@ -516,6 +611,7 @@ def run(args: argparse.Namespace) -> None:
             "tests/e2e/assert_firefox_container.py",
             str(database),
             str(user_context_id),
+            origin_attributes,
         ],
         environment,
         "firefox-container-python-header",
@@ -526,6 +622,7 @@ def run(args: argparse.Namespace) -> None:
             "tests/e2e/assert_firefox_container.mjs",
             str(database),
             str(user_context_id),
+            origin_attributes,
         ],
         environment,
         "firefox-container-node-header",
@@ -548,6 +645,7 @@ def run(args: argparse.Namespace) -> None:
     verify_cli_headers(
         profile_id=profile_id,
         user_context_id=user_context_id,
+        origin_attributes=origin_attributes,
         environment=environment,
     )
     print(
@@ -560,6 +658,7 @@ def run(args: argparse.Namespace) -> None:
                 "extension": str(FIREFOX_CONTAINER_EXTENSION),
                 "extension_install": "web-ext-temporary",
                 "user_context_id": user_context_id,
+                "origin_attributes": origin_attributes,
                 "raw_manifest": str(manifest),
                 "surfaces": ["rust", "python", "node", "cli"],
                 **schema_metadata(database, "firefox"),
@@ -570,7 +669,7 @@ def run(args: argparse.Namespace) -> None:
     )
     emit_representative_depth(
         "firefox_container",
-        ("partitioned", "detailed", "discovery"),
+        ("partitioned", "detailed", "discovery", "send_selection"),
         ("rust", "python", "node", "cli"),
     )
 

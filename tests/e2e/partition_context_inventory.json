@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "kind": "partition-context-row-inventory",
+  "comment": "The single expected-row table for the partition-context lane. The raw-store oracle (run_partition_context_e2e.write_raw_context_manifest), every public-surface assertion (assert_partitioned_context.py/.mjs, rookie-rs/tests/e2e_context.rs, assert_partitioned_context_cli.py), and the browser seeder (seed_partitioned_cookie.mjs) all read these counts so a corpus change cannot be applied to some of them and forgotten in the rest. raw_rows_by_name counts rows in the browser's own SQLite store; browser_visible_minimums is the weaker lower bound Playwright's context.cookies() can be held to, because a Playwright cookie list does not always separate two rows that differ only in their partition ancestor bit.",
+  "engines": {
+    "chromium": {
+      "raw_row_total": 7,
+      "raw_rows_by_name": {
+        "rookie_top": 2,
+        "rookie_chips": 3,
+        "rookie_ancestor": 2
+      },
+      "browser_visible_minimums": {
+        "rookie_top": 2,
+        "rookie_chips": 3,
+        "rookie_ancestor": 1
+      }
+    },
+    "firefox": {
+      "raw_row_total": 9,
+      "raw_rows_by_name": {
+        "rookie_top": 2,
+        "rookie_chips": 3,
+        "rookie_dfpi": 2,
+        "rookie_ancestor": 2
+      },
+      "browser_visible_minimums": {
+        "rookie_top": 2,
+        "rookie_chips": 3,
+        "rookie_dfpi": 2,
+        "rookie_ancestor": 1
+      }
+    }
+  }
+}

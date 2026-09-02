@@ -136,7 +136,9 @@ class FirefoxContainerRunnerTests(unittest.TestCase):
             root = Path(temporary)
             database = self.database(root, "^userContextId=7")
             output = root / "manifest.json"
-            self.assertEqual(write_container_manifest(database, output), 7)
+            self.assertEqual(
+                write_container_manifest(database, output), (7, "^userContextId=7")
+            )
             document = json.loads(output.read_text(encoding="utf-8"))
             record = document["expected"]["detailed"][0]
             self.assertEqual(record["context"]["origin_attributes"], "^userContextId=7")
