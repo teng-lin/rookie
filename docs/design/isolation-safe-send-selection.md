@@ -2,7 +2,7 @@
 
 - **Author:** maintainers
 - **Date:** 2026-09-01
-- **Status:** Active program record (PR 0 of 7 landed; PRs 1–6 open)
+- **Status:** Active program record (PR 0 of 7 in review; PRs 1–6 open)
 - **Crate/packages:** `rookie-rs`, `bindings/python` (`rookie_cookies`),
   `bindings/node` (`rookie-cookies`), `cli`
 - **Release context:** 0.7
@@ -372,7 +372,7 @@ with its own CLI test.
 - [ ] **PR 1** — Rust core: `isolation.rs`, `send_view.rs`, `SendContext`
       selector fields, `ReadResult::send_view`, `header()` delegation,
       `unknown_ancestor_chain` warning, public-API snapshots, unit and
-      collision tests.
+      collision tests, `CHANGELOG.md`.
 - [ ] **PR 2** — Rust jar policy: `IsolationLoss`, `jar`/`into_jar`/
       `jar_with`/`into_jar_with`, `RequestError::IsolationLossRefused`.
 - [ ] **PR 3** — Isolation collision corpus, `rookie-rs/tests/isolation_corpus.rs`,
@@ -387,6 +387,20 @@ with its own CLI test.
 - [ ] **PR 6** — E2E depth extension, `browser_coverage.json` contract,
       final docs sweep (README/architecture/testing finalization beyond the
       PR 0 prose corrections).
+
+## Acceptance mapping (issue #331 checklist → PR)
+
+- Docs no longer claim `header()` collapses through `Cookie` → PR 0.
+- Chromium ancestor bit gated; Firefox scheme/base domain/port/foreign bit;
+  all Firefox `OriginAttributes` equality fields; unknown attributes fail
+  closed → PR 1.
+- One core selection producing both the detailed set and the header → PR 1.
+- Equivalent selector semantics and structured failures on Rust/Python/
+  Node/CLI → PRs 3–5 (the corpus asserts identical selected sets and
+  identical `code`/`required`).
+- `jar`/`as_jar` cannot silently flatten; eight-field output byte-stable
+  behind opt-in → PRs 2, 4, 5, and 3 (CLI).
+- Synthetic collision tests and real-browser context tests green → PRs 3, 6.
 
 ## Open questions
 

@@ -149,6 +149,14 @@ existence rather than letting it disappear into a context it does not
 belong to. Any unrecognized attribute name demands `origin_attributes` on
 the same logic.
 
+**A supplied selector that matches nothing omits; it never errors.** Once
+every demanded token is present in the context, `send_view`/`header` never
+fail on account of the selector's values — a `first_party_domain` that
+matches no stored row simply results in those rows being omitted (counted
+`origin`), the same as any other non-matching context. Only a *missing*
+demanded selector produces `IncompleteSendContext`/`IsolationLossRefused`;
+a present-but-non-matching one is an ordinary, silent miss.
+
 **Ancestor chain when the caller does not supply one.** Derived as: the
 request host equals or is a subdomain of the caller-normalized top-level
 site host, on the same scheme, is `SameSite`; otherwise `CrossSite`. **IP
@@ -156,12 +164,22 @@ literals are exempt from the subdomain rule.** When either the request host
 or the top-level site host is an IPv4 or IPv6 literal, site membership is
 exact host equality, never a subdomain check — an IPv6 host is compared
 without its brackets, the form `site_from_url` already normalizes to. An
-explicit `ancestor_chain` selector overrides this derivation, which is what
-lets a caller express an A→B→A embed (browser-observed same-site host,
-cross-site ancestry) that the derivation alone cannot distinguish. The same
-subdomain rule (with the same IP-literal exemption) now governs
-`same_site_context`, the SameSite=Strict/Lax gate `header()` already applied
-before this ADR — previously a literal host comparison. This is the one
+explicit `ancestor_chain` selector overrides this derivation only —
+`ancestor_chain` and `same_site_context` are independent terms, and
+supplying one never changes the other. This is what lets a caller express an
+A→B→A embed: the request host is browser-observed same-site with the
+top-level site (so `same_site_context` is derived `true` from host
+comparison, unaffected by any explicit `ancestor_chain`), but the ancestry
+that produced the partition is cross-site. Concretely, when `top_level_site`
+is absent the request is treated as first-party
+(`same_site_context == true`, by the existing no-top-level-site default), and
+an explicit `ancestor_chain(CrossSite)` selects exactly the A→B→A rows: for
+Chromium, rows whose partition site equals the request site with
+`has_cross_site_ancestor == true`; for Firefox, rows whose `partitionKey`
+tuple is `(scheme,site,f)` with `site` equal to the request site and `f ==
+true`. The same subdomain rule (with the same IP-literal exemption) now
+governs `same_site_context`, the SameSite=Strict/Lax gate `header()` already
+applied before this ADR — previously a literal host comparison. This is the one
 semantic change to already-shipped SameSite behavior this ADR makes: a
 request to `www.example.com` with `top_level_site=https://example.com` was
 `CrossSite` before this ADR and is `SameSite` after it; two sibling
@@ -255,13 +273,25 @@ lane's own context construction already normalizes `top_level_site` to a
 schemeful site before calling in
 (`tests/e2e/assert_partitioned_context.py:46`), which is the shape this
 decision formalizes as the contract rather than an incidental test detail:
-the caller supplies an already-normalized site, and the library never
-attempts to infer a registrable boundary from a bare hostname. This keeps
-`SameSite` conservative in the direction that matters for a security-facing
-crate — Decision 1's subdomain widening only ever adds matches a
-caller-normalized site says are legitimately same-site, and a caller who
-under-normalizes (passes a host one level too specific) gets *fewer* matches,
-never more.
+the caller must supply `top_level_site` as an already-normalized registrable
+site, and the library never attempts to infer a registrable boundary from a
+bare hostname. This keeps `SameSite` conservative in the direction that
+matters for a security-facing crate — Decision 1's subdomain widening only
+ever adds matches a caller-normalized site says are legitimately same-site,
+and a caller who under-normalizes (passes a host one level too specific)
+gets *fewer* matches, never more.
+
+This is the cost this decision accepts, stated plainly: without a
+public-suffix list, the library cannot itself tell a registrable domain
+(`example.com`) from a public suffix (`github.io`, `co.uk`). If a caller
+passes a public suffix as `top_level_site`, Decision 1's subdomain rule
+treats every host under it as same-site — `a.github.io` and `b.github.io`
+would both derive `SameSite` against `top_level_site=https://github.io`,
+which is wrong for two unrelated GitHub Pages sites. This is not a defect
+this ADR closes; it is the caller-normalization contract's known failure
+mode, and it is why `top_level_site` must be the actual registrable site a
+caller controls, never an unvalidated hostname passed through from a
+request.
 
 ### 5. Stable token vocabulary and canonical order
 
@@ -343,6 +373,16 @@ isolation loss is acceptable.
 - `from-path --domains`: it stays a flat, compatibility-only route and is not
   extended with the new selector surface. Whether it should gain one is an
   open question in the program record, not a decision this ADR makes.
+- Redesigning `CookieContext` extraction. Issue #177 already covers what
+  `CookieContext` captures and how; this ADR only adds crate-internal
+  selection logic (`StoredIsolation`) over the fields #177 already delivers,
+  and Rejected alternatives 3 and 4 above are why no new public field is
+  added to `CookieContext` itself.
+- Changing the report schema. Report schema v1 stays the frozen eight-field
+  diagnostic DTO; nothing in this ADR touches `schema/report-dto.schema.json`
+  or `ExtractionReport` (see "Does not amend" above). A schema-version
+  change, if one is ever needed to carry isolation identity through the
+  report path, is a separate proposal.
 
 ## Rejected alternatives
 
