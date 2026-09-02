@@ -112,10 +112,15 @@ disagree.
   bracket, a non-numeric port — is `Unparsable`, not "ignore the tail and
   match on scheme+host" (the behavior this ADR retires). A partitioned
   Firefox row (non-empty `partitionKey`) never matches a first-party context
-  (`same_site_context && ancestor_chain == SameSite`) — a partition, by
+  (`same_site_context`, i.e. `sites_match && resolved_ancestor == SameSite`) — a partition, by
   construction, is not the unpartitioned default context. Otherwise the row
   matches when `site == top_level_site`, `port == derived top-level port`,
-  and `f == (same_site_context && ancestor_chain == CrossSite)`.
+  and `f == (sites_match && resolved_ancestor == CrossSite)` — the
+  foreign-by-ancestor bit is set exactly for the A→B→A shape, where the
+  request and top-level sites match but the resolved chain is cross-site
+  (`sites_match` and the resolved chain are defined under "Ancestor chain"
+  below; the first term is the raw site comparison, not the narrower
+  SameSite gate, which is false whenever the chain is cross-site).
 - **Firefox `OriginAttributes` equality.** Every field Mozilla's
   `OriginAttributes` includes in equality is represented:
   `userContextId`, `privateBrowsingId`, `partitionKey` (via the partition

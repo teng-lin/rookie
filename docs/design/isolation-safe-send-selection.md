@@ -160,8 +160,8 @@ never prevents unpartitioned and partitioned rows from combining.
 `Unparsable`. Verdict, given a parsed tuple:
 
 - A non-empty `partitionKey` never matches a first-party context
-  (`same_site_context && ancestor_chain == SameSite`).
-- Otherwise: `site == top_level_site && port == derived_port(top_level_site) && f == (same_site_context && ancestor_chain == CrossSite)`.
+  (`same_site_context`, i.e. `sites_match && resolved_ancestor == SameSite`).
+- Otherwise: `site == top_level_site && port == derived_port(top_level_site) && f == (sites_match && resolved_ancestor == CrossSite)` — the `f` bit marks the A→B→A shape (sites match, chain cross-site); note the first term is the raw site comparison, not the SameSite gate, which is false whenever the chain is cross-site.
 
 `derived_port` is `Url::port()` on the caller's `top_level_site` — `None` for
 the scheme's default port, matching how Firefox omits the port field for a
