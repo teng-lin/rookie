@@ -65,8 +65,10 @@ isolation-aware records, or the built-in header view.
 
 `snapshot.warnings` items carry a stable `code`: `decrypt_failed`,
 `row_read_failed`, `invalid_octets`, `malformed_host_identity` (a row's host
-could not be parsed as a valid domain), and `unparsable_partition_key` (a
-Firefox `partitionKey` value did not match the expected shape). Branch on
+could not be parsed as a valid domain), `unparsable_partition_key` (a
+Firefox `partitionKey` value did not match the expected shape), and, from
+0.7, `unknown_ancestor_chain` (a partitioned Chromium row whose
+`has_cross_site_ancestor` bit the store did not record). Branch on
 `code`, not `message`, which is diagnostic text only.
 
 Named helpers (`chrome()`, `brave()`, `load()`) still work and also return

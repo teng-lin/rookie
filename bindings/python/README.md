@@ -87,8 +87,11 @@ never exposed it (not that the cookie has some default value).
 Snapshot warnings (`ReadResult.warnings`, each `{"code": ..., "count": ...}`)
 include two isolation-related codes: `malformed_host_identity` (a row whose
 host did not survive decode was omitted from the snapshot, not emitted as
-`domain: ""`) and `unparsable_partition_key` (retained in the snapshot, but
-never matched by `header()` since its partition can't be identified).
+`domain: ""`), `unparsable_partition_key` (retained in the snapshot, but
+never matched by `header()` since its partition can't be identified), and,
+from 0.7, `unknown_ancestor_chain` (a partitioned Chromium row whose
+`has_cross_site_ancestor` bit the store did not record; retained, never
+matched).
 
 ## Sending cookies (`header`)
 
