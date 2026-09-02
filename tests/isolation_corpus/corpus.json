@@ -333,18 +333,6 @@
           "originAttributes": "^geckoViewSessionContextId=session-1"
         },
         {
-          "id": "firefox_attr_future",
-          "host": "attrs.rookie-a.test",
-          "name": "f_future",
-          "value": "firefox_attr_future",
-          "path": "/",
-          "isSecure": 1,
-          "isHttpOnly": 0,
-          "sameSite": 0,
-          "expiry": 4102444800000,
-          "originAttributes": "^futureAttr=1"
-        },
-        {
           "id": "firefox_port_default",
           "host": "third.rookie-b.test",
           "name": "chips_port",
@@ -402,7 +390,46 @@
               "user_context_id",
               "private_browsing_id",
               "first_party_domain",
-              "gecko_view_session_context_id",
+              "gecko_view_session_context_id"
+            ]
+          }
+        }
+      }
+    },
+    "firefox_unknown_attr": {
+      "schema_version": 1,
+      "engine": "firefox",
+      "rows": [
+        {
+          "id": "firefox_unknown_default",
+          "host": "unknown.rookie-a.test",
+          "name": "u_default",
+          "value": "firefox_unknown_default",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": ""
+        },
+        {
+          "id": "firefox_unknown_future",
+          "host": "unknown.rookie-a.test",
+          "name": "u_future",
+          "value": "firefox_unknown_future",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^futureAttr=1"
+        }
+      ],
+      "jar": {
+        "expect": {
+          "error": {
+            "code": "isolation_loss_refused",
+            "required": [
               "origin_attributes"
             ]
           }
@@ -670,8 +697,7 @@
             "user_context_id",
             "private_browsing_id",
             "first_party_domain",
-            "gecko_view_session_context_id",
-            "origin_attributes"
+            "gecko_view_session_context_id"
           ]
         }
       }
@@ -684,9 +710,8 @@
         "top_level_site": "https://attrs.rookie-a.test",
         "user_context_id": 2,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
@@ -696,7 +721,7 @@
         "header": "b_usercontext=firefox_attr_usercontext",
         "omitted": {
           "not_applicable": 4,
-          "origin": 5
+          "origin": 4
         }
       }
     },
@@ -708,9 +733,8 @@
         "top_level_site": "https://attrs.rookie-a.test",
         "user_context_id": 0,
         "private_browsing_id": 1,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
@@ -720,7 +744,7 @@
         "header": "c_privatebrowsing=firefox_attr_privatebrowsing",
         "omitted": {
           "not_applicable": 4,
-          "origin": 5
+          "origin": 4
         }
       }
     },
@@ -733,19 +757,38 @@
         "user_context_id": 0,
         "private_browsing_id": 0,
         "first_party_domain": "rookie-a.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
         "selected": [
-          "firefox_attr_default",
           "firefox_attr_firstparty"
         ],
-        "header": "a_default=firefox_attr_default; d_firstparty=firefox_attr_firstparty",
+        "header": "d_firstparty=firefox_attr_firstparty",
         "omitted": {
           "not_applicable": 4,
           "origin": 4
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_first_party_domain_no_match_selects_nothing",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "no-match.test",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [],
+        "header": "",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 5
         }
       }
     },
@@ -757,17 +800,15 @@
         "top_level_site": "https://attrs.rookie-a.test",
         "user_context_id": 0,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
+        "first_party_domain": "",
         "gecko_view_session_context_id": "session-1",
-        "origin_attributes": "no-match",
         "now": 1893456000
       },
       "expect": {
         "selected": [
-          "firefox_attr_default",
           "firefox_attr_geckoview"
         ],
-        "header": "a_default=firefox_attr_default; e_geckoview=firefox_attr_geckoview",
+        "header": "e_geckoview=firefox_attr_geckoview",
         "omitted": {
           "not_applicable": 4,
           "origin": 4
@@ -775,16 +816,15 @@
       }
     },
     {
-      "id": "firefox_attr_default_context_excludes_unknown_row",
+      "id": "firefox_attr_default_context_selects_default_row",
       "store": "firefox_isolated",
       "context": {
         "url": "https://attrs.rookie-a.test/",
         "top_level_site": "https://attrs.rookie-a.test",
         "user_context_id": 0,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
@@ -792,31 +832,6 @@
           "firefox_attr_default"
         ],
         "header": "a_default=firefox_attr_default",
-        "omitted": {
-          "not_applicable": 4,
-          "origin": 5
-        }
-      }
-    },
-    {
-      "id": "firefox_attr_unknown_row_requires_exact_origin_attributes",
-      "store": "firefox_isolated",
-      "context": {
-        "url": "https://attrs.rookie-a.test/",
-        "top_level_site": "https://attrs.rookie-a.test",
-        "user_context_id": 0,
-        "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "^futureAttr=1",
-        "now": 1893456000
-      },
-      "expect": {
-        "selected": [
-          "firefox_attr_default",
-          "firefox_attr_future"
-        ],
-        "header": "a_default=firefox_attr_default; f_future=firefox_attr_future",
         "omitted": {
           "not_applicable": 4,
           "origin": 4
@@ -831,9 +846,8 @@
         "top_level_site": "https://rookie-a.test",
         "user_context_id": 0,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
@@ -842,7 +856,7 @@
         ],
         "header": "chips_port=firefox_port_default",
         "omitted": {
-          "not_applicable": 8,
+          "not_applicable": 7,
           "partition": 1
         }
       }
@@ -855,9 +869,8 @@
         "top_level_site": "https://rookie-a.test:8443",
         "user_context_id": 0,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
@@ -866,7 +879,7 @@
         ],
         "header": "chips_port=firefox_port_8443",
         "omitted": {
-          "not_applicable": 8,
+          "not_applicable": 7,
           "partition": 1
         }
       }
@@ -877,12 +890,11 @@
       "context": {
         "url": "https://rookie-a.test/",
         "top_level_site": "https://rookie-a.test",
-        "ancestor_chain": "cross_site",
         "user_context_id": 0,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "ancestor_chain": "cross_site",
         "now": 1893456000
       },
       "expect": {
@@ -891,7 +903,7 @@
         ],
         "header": "chips_ancestor=firefox_foreign_true",
         "omitted": {
-          "not_applicable": 9
+          "not_applicable": 8
         }
       }
     },
@@ -903,9 +915,8 @@
         "top_level_site": "https://rookie-a.test",
         "user_context_id": 0,
         "private_browsing_id": 0,
-        "first_party_domain": "no-match.test",
-        "gecko_view_session_context_id": "no-match",
-        "origin_attributes": "no-match",
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
         "now": 1893456000
       },
       "expect": {
@@ -914,7 +925,59 @@
         ],
         "header": "chips_ancestor=firefox_foreign_false",
         "omitted": {
-          "not_applicable": 9
+          "not_applicable": 8
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_missing_selector",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "now": 1893456000
+      },
+      "expect": {
+        "error": {
+          "code": "incomplete_send_context",
+          "required": [
+            "origin_attributes"
+          ]
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_exact_future_suffix",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "origin_attributes": "^futureAttr=1",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_unknown_future"
+        ],
+        "header": "u_future=firefox_unknown_future",
+        "omitted": {
+          "origin": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_exact_empty_suffix",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "origin_attributes": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_unknown_default"
+        ],
+        "header": "u_default=firefox_unknown_default",
+        "omitted": {
+          "origin": 1
         }
       }
     },
@@ -940,9 +1003,10 @@
     "chromium_site_stored_key_with_port stores top_frame_site_key with an origin-style port suffix ('https://rookie-a.test:8443'); Chromium's site comparison strips the port, so it still matches a portless top_level_site.",
     "A Chromium partitioned row whose has_cross_site_ancestor column is NULL (chromium_ancestor_unknown) is omitted from every context regardless of the selector supplied, and is counted under ancestor_chain_unknown, never partition.",
     "Sibling subdomains (a.rookie-a.test under top-level b.rookie-a.test) stay cross-site because neither host is a subdomain of the other; a child subdomain (sub.rookie-a.test under top-level rookie-a.test) is same-site under the same rule.",
-    "The demand for a selector token is computed once over the whole snapshot (every row in the store), not per case. Every case against firefox_isolated must supply all six tokens even when it targets a single dimension, because the store's other row groups collectively observe every token at least once.",
-    "Firefox user_context_id/private_browsing_id default to 0 whenever the originAttributes suffix is present at all (including the empty '' suffix), but first_party_domain/gecko_view_session_context_id have no default: a row lacking them never conflicts with a supplied selector for those two fields. That is why firefox_attr_default (the '' row) is also selected whenever a first_party_domain or gecko_view_session_context_id selector is supplied alongside user_context_id=0/private_browsing_id=0 -- it has no first_party_domain/gecko_view_session_context_id of its own to disagree with the request.",
-    "firefox_attr_future (originAttributes '^futureAttr=1') is only reachable via an exact origin_attributes raw-suffix selector; it is excluded from the five-typed-field match entirely, including by a context that otherwise supplies every default value.",
+    "The demand for a selector token is computed once over the whole snapshot (every row in the store), not per case. Every case against firefox_isolated must supply all five typed tokens even when it targets a single dimension, because the store's other row groups (containers, first-party domain, gecko view session, the partition rows) collectively observe every typed token at least once.",
+    "Firefox default fill applies to all four typed OriginAttributes fields whenever originAttributes is present at all (including the empty '' suffix), because Firefox omits default-valued attributes from the suffix: user_context_id=0, private_browsing_id=0, first_party_domain=\"\", gecko_view_session_context_id=\"\". A supplied selector must equal the stored value exactly, so first_party_domain=\"\" (not an omitted selector) is how a caller selects the default rows, and first_party_domain=\"no-match.test\" omits every row including the default one (firefox_attr_first_party_domain_no_match_selects_nothing).",
+    "origin_attributes performs an exact match against a row's full raw originAttributes string and is ANDed with any typed selectors also supplied; it is not scoped to rows with an unrecognized attribute name. firefox_isolated never demands it (every row there has only recognized attribute names), so its cases never supply it.",
+    "firefox_unknown_attr isolates the one case origin_attributes exists for: firefox_unknown_future's typed projection (uc=0, pb=0, fpd=\"\", gvscid=\"\") is identical to firefox_unknown_default's, so no combination of the five typed selectors can tell them apart or select either one specifically -- only the exact raw origin_attributes selector can, which is why this store demands exactly [\"origin_attributes\"] and nothing else.",
     "The omitted counts in every case include every row in the store, not just the rows conceptually 'in scope': a row hosted at a different domain than the request is counted not_applicable (it fails the GetFilter domain check) regardless of its isolation identity.",
     "Firefox partitionKey has no separate selector or demand token for its port or foreign-ancestor ('f') fields; both are derived from top_level_site (port) and from same_site_context + ancestor_chain (f). firefox_port_8443 and firefox_port_default differ only in the derived port; firefox_foreign_true and firefox_foreign_false differ only in the derived f bit.",
     "firefox_foreign_true requires an explicit ancestor_chain=cross_site: with the request and top-level site both being 'rookie-a.test', the derived ancestor_chain would be same_site, and a non-empty partitionKey never matches a first-party context (same_site_context && ancestor_chain==same_site) regardless of the stored f bit.",

@@ -176,7 +176,14 @@ def build_all_stores(corpus: dict[str, Any], out_dir: Path) -> dict[str, Path]:
     return paths
 
 
-def write_node_fixture(chromium_path: Path, firefox_path: Path, fixtures_dir: Path) -> None:
+NODE_FIXTURE_STORES = {
+    "chromium_isolated": "isolation-corpus-chromium.sqlite.base64",
+    "firefox_isolated": "isolation-corpus-firefox.sqlite.base64",
+    "firefox_unknown_attr": "isolation-corpus-firefox-unknown-attr.sqlite.base64",
+}
+
+
+def write_node_fixture(paths: dict[str, Path], fixtures_dir: Path) -> None:
     """Writes the base64 fixtures `bindings/node/__test__` tests consume.
 
     Matches `installDatabaseFixture` in `bindings/node/__test__/index.spec.mjs`:
@@ -184,8 +191,8 @@ def write_node_fixture(chromium_path: Path, firefox_path: Path, fixtures_dir: Pa
     and whitespace stripped before decoding, so line-wrapping is cosmetic only.
     """
     fixtures_dir.mkdir(parents=True, exist_ok=True)
-    _write_base64(chromium_path, fixtures_dir / "isolation-corpus-chromium.sqlite.base64")
-    _write_base64(firefox_path, fixtures_dir / "isolation-corpus-firefox.sqlite.base64")
+    for store_name, filename in NODE_FIXTURE_STORES.items():
+        _write_base64(paths[store_name], fixtures_dir / filename)
 
 
 def _write_base64(source: Path, dest: Path) -> None:
@@ -211,7 +218,7 @@ def main() -> None:
     if args.write_node_fixtures:
         repo_root = Path(__file__).resolve().parents[2]
         fixtures_dir = repo_root / "bindings" / "node" / "__test__" / "fixtures"
-        write_node_fixture(paths["chromium_isolated"], paths["firefox_isolated"], fixtures_dir)
+        write_node_fixture(paths, fixtures_dir)
         print(f"wrote node fixtures to {fixtures_dir}")
 
     for name, path in paths.items():

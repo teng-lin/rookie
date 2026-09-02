@@ -114,7 +114,13 @@ class CorpusShapeTests(unittest.TestCase):
     def test_expected_stores_present(self) -> None:
         self.assertEqual(
             set(self.corpus["stores"].keys()),
-            {"chromium_isolated", "chromium_plain", "firefox_isolated", "firefox_plain"},
+            {
+                "chromium_isolated",
+                "chromium_plain",
+                "firefox_isolated",
+                "firefox_unknown_attr",
+                "firefox_plain",
+            },
         )
 
     def test_every_row_value_equals_its_id_and_ids_are_unique(self) -> None:
@@ -226,7 +232,11 @@ class GeneratorDeterminismTests(unittest.TestCase):
             self.skipTest(f"{NODE_FIXTURES_DIR} does not exist; nothing to compare against")
         chromium_fixture = NODE_FIXTURES_DIR / "isolation-corpus-chromium.sqlite.base64"
         firefox_fixture = NODE_FIXTURES_DIR / "isolation-corpus-firefox.sqlite.base64"
-        if not chromium_fixture.exists() or not firefox_fixture.exists():
+        firefox_unknown_attr_fixture = (
+            NODE_FIXTURES_DIR / "isolation-corpus-firefox-unknown-attr.sqlite.base64"
+        )
+        fixtures = (chromium_fixture, firefox_fixture, firefox_unknown_attr_fixture)
+        if not all(fixture.exists() for fixture in fixtures):
             self.skipTest("committed Node isolation-corpus fixtures are absent; run with --write-node-fixtures")
 
         with tempfile.TemporaryDirectory() as raw_out_dir:
@@ -241,6 +251,9 @@ class GeneratorDeterminismTests(unittest.TestCase):
             )
             self._assert_same_content(
                 out_dir / "firefox_isolated.sqlite", firefox_fixture, "moz_cookies"
+            )
+            self._assert_same_content(
+                out_dir / "firefox_unknown_attr.sqlite", firefox_unknown_attr_fixture, "moz_cookies"
             )
 
     def _assert_same_content(self, fresh_db: Path, fixture_base64: Path, table: str) -> None:
