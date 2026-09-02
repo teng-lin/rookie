@@ -260,7 +260,7 @@ const view = snapshot.sendView({
 });
 console.log(view.header, view.omitted.partition);
 
-// `snapshot.cookies` is the inventory projection. The flat `jar(...)` job is
+// `snapshot.cookies` is the inventory projection. The flat jar job is
 // compatibility only: it cannot carry a partition or a container, so it
 // refuses an isolated snapshot unless `allowIsolationLoss: true` names the loss.
 console.log(snapshot.cookies.length);
