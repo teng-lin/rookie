@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 CORPUS_PATH = Path(__file__).resolve().parent / "corpus.json"
+SCHEMA_PATH = Path(__file__).resolve().parent / "schema.json"
 
 CHROMIUM_SCHEMA_VERSION = 24
 CHROMIUM_LAST_COMPATIBLE_VERSION = 24
@@ -66,6 +67,38 @@ FIREFOX_COLUMNS = [
 
 def load_corpus() -> dict[str, Any]:
     return json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+
+
+def schema_document() -> dict[str, Any]:
+    """The store shape every consumer must build identically.
+
+    The Rust corpus tests restate these `CREATE TABLE`s in Rust so their lane
+    needs no Python. That duplication is only safe if it is checked, so this
+    is written next to `corpus.json` and asserted against by all three
+    consumers -- a column added here and forgotten there fails loudly instead
+    of producing a store that quietly reads back short.
+    """
+    return {
+        "schema_version": 1,
+        "kind": "isolation-corpus-store-schema",
+        "chromium": {
+            "table": "cookies",
+            "meta_version": CHROMIUM_SCHEMA_VERSION,
+            "meta_last_compatible_version": CHROMIUM_LAST_COMPATIBLE_VERSION,
+            "columns": CHROMIUM_COLUMNS,
+        },
+        "firefox": {
+            "table": "moz_cookies",
+            "user_version": FIREFOX_USER_VERSION,
+            "columns": FIREFOX_COLUMNS,
+        },
+    }
+
+
+def write_schema() -> None:
+    SCHEMA_PATH.write_text(
+        json.dumps(schema_document(), indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def build_chromium_store(store: dict[str, Any], path: Path) -> None:
@@ -215,6 +248,7 @@ def main() -> None:
 
     corpus = load_corpus()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    write_schema()
     paths = build_all_stores(corpus, args.out_dir)
 
     if args.write_node_fixtures:

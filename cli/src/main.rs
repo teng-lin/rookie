@@ -104,11 +104,7 @@ fn print_read_result(
   result: rookie_cookies::ReadResult,
   allow_isolation_loss: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-  let loss = if allow_isolation_loss {
-    rookie_cookies::IsolationLoss::Allow
-  } else {
-    rookie_cookies::IsolationLoss::Refuse
-  };
+  let loss = isolation_loss(allow_isolation_loss);
   match format {
     "json" => print_line_or_exit(&format::json(result.into_jar_with(loss)?)),
     "netscape" => print_line_or_exit(&format::netscape(result.into_jar_with(loss)?)),
@@ -116,6 +112,19 @@ fn print_read_result(
     _ => {}
   }
   Ok(())
+}
+
+/// Maps `--allow-isolation-loss` to the typed policy.
+///
+/// `Refuse` is the default in the crate and here: a flat projection of an
+/// isolated snapshot is wrong in a way a successful call cannot show, so the
+/// opt-in has to be affirmative.
+fn isolation_loss(allow: bool) -> rookie_cookies::IsolationLoss {
+  if allow {
+    rookie_cookies::IsolationLoss::Allow
+  } else {
+    rookie_cookies::IsolationLoss::Refuse
+  }
 }
 
 /// Maps a validated `--resource` value to its typed kind. See
@@ -197,7 +206,9 @@ fn read_snapshot(
 ) -> Result<rookie_cookies::ReadResult, Box<dyn std::error::Error>> {
   let cancellation = install_cancel_on_signal();
   let control = execution_control(snapshot.timeout_secs, snapshot.app_bound, cancellation);
-  let mut request = rookie_cookies::ReadRequest::browser(snapshot.browser).execution(control);
+  let mut request = rookie_cookies::ReadRequest::browser(snapshot.browser)
+    .include_expired(snapshot.include_expired)
+    .execution(control);
   if snapshot.include_session {
     request = request.include_session();
   }
@@ -385,17 +396,43 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
         )));
       }
       let cancellation = install_cancel_on_signal();
-      let control = execution_control(timeout_secs, app_bound, cancellation);
       let credentials = chromium_credential_selector(local_state_path, browser_id, plaintext_only)?;
       match domains {
         Some(domains) => {
+          // `--domains` runs `extract_from_path`, which returns the flat
+          // eight-field projection directly -- there is no snapshot in that
+          // job for the fail-closed jar to refuse from. Rather than leave a
+          // route where an isolated store prints a merged list, the same
+          // path is opened a second time through `from_path` purely to ask
+          // the policy question, and that snapshot is discarded. The double
+          // open is deliberate and confined to this compatibility-only
+          // route; the printed bytes still come from the flat job, so the
+          // output is unchanged from before the gate existed.
+          //
+          // The gate reads with `include_expired(true)` regardless of the
+          // flag: `extract_from_path` never filters by expiry, so anything
+          // less would let an *expired* isolated row slip past a gate that
+          // could not see it.
+          let mut gate = rookie_cookies::FromPathRequest::new(path.clone())
+            .include_expired(true)
+            .execution(execution_control(
+              timeout_secs,
+              app_bound.clone(),
+              cancellation.clone(),
+            ));
+          if let Some(credentials) = credentials.clone() {
+            gate = gate.chromium_credentials(credentials);
+          }
+          rookie_cookies::from_path(gate)?.into_jar_with(isolation_loss(allow_isolation_loss))?;
+
           let request = path_extract_request(path, credentials)?
             .domains(Some(domains))
-            .execution(control);
+            .execution(execution_control(timeout_secs, app_bound, cancellation));
           let cookies = extract_from_path(request)?;
           print_flat_cookies(&format, cookies);
         }
         None => {
+          let control = execution_control(timeout_secs, app_bound, cancellation);
           let mut request = rookie_cookies::FromPathRequest::new(path)
             .include_expired(include_expired)
             .execution(control);
@@ -631,5 +668,43 @@ mod tests {
     let document: serde_json::Value = serde_json::from_str(&rendered).expect("JSON error");
     assert_eq!(document["code"], "missing_browser");
     assert_eq!(document["message"], error.to_string());
+    // `required` belongs to the two selector codes only. Emitting it
+    // everywhere would tell a consumer that every failure names selectors,
+    // when most name nothing of the sort.
+    assert_eq!(
+      document.as_object().expect("error object").len(),
+      2,
+      "a non-selector code carries only code and message: {document}"
+    );
+    assert!(document.get("required").is_none(), "{document}");
+  }
+
+  #[test]
+  fn the_two_selector_errors_render_their_required_tokens() {
+    for error in [
+      rookie_cookies::RequestError::IncompleteSendContext {
+        display: "https://example.com/".to_owned(),
+        required: vec!["top_level_site".to_owned(), "user_context_id".to_owned()],
+      },
+      rookie_cookies::RequestError::IsolationLossRefused {
+        isolated_rows: 3,
+        required: vec!["top_level_site".to_owned(), "user_context_id".to_owned()],
+      },
+    ] {
+      let error = rookie_cookies::Error::from(error);
+      let rendered = render_cli_error(&error);
+      let document: serde_json::Value = serde_json::from_str(&rendered).expect("JSON error");
+      assert_eq!(
+        document.as_object().expect("error object").len(),
+        3,
+        "a selector code adds exactly one documented field: {document}"
+      );
+      assert_eq!(document["code"], error.code());
+      assert_eq!(
+        document["required"],
+        serde_json::json!(["top_level_site", "user_context_id"]),
+        "{document}"
+      );
+    }
   }
 }

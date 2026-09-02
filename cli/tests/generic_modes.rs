@@ -317,6 +317,55 @@ fn a_missing_send_selector_names_the_tokens_it_needs() {
 }
 
 #[test]
+fn an_out_of_range_now_is_a_usage_error_before_any_io() {
+  // `UNIX_EPOCH + Duration::from_secs(n)` panics past `i64::MAX`, and it is
+  // reached only after the snapshot has been read -- so the range has to be
+  // enforced at parse time, where it costs a usage error rather than a
+  // process that already touched the profile and then aborted.
+  for subcommand in ["header", "send-view"] {
+    let stderr = assert_usage_error(
+      &run_rookie(&[
+        subcommand,
+        "--url",
+        "https://example.com/",
+        "--browser",
+        "firefox",
+        "--now",
+        "9223372036854775808",
+      ]),
+      &format!("{subcommand} --now 2^63"),
+    );
+    assert!(
+      stderr.contains("--now") || stderr.contains("now"),
+      "{stderr}"
+    );
+  }
+
+  // The largest in-range value stays accepted: the bound is `i64::MAX`
+  // itself, not one below it. Discovery finds nothing under the empty root,
+  // so this fails on the browser, never on the flag.
+  let root = unique_tmpdir("now-max");
+  let out = run_isolated(
+    root.path(),
+    &[
+      "header",
+      "--url",
+      "https://example.com/",
+      "--browser",
+      "firefox",
+      "--now",
+      "9223372036854775807",
+    ],
+  );
+  assert_ne!(
+    out.status.code(),
+    Some(USAGE_ERROR_EXIT_CODE),
+    "i64::MAX must be in range: {}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+}
+
+#[test]
 fn a_refused_flat_projection_names_the_tokens_it_needs() {
   let root = unique_tmpdir("read-isolation-loss");
   seed_partitioned_firefox(root.path());

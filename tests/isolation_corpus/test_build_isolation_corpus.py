@@ -145,6 +145,16 @@ class CorpusShapeTests(unittest.TestCase):
                     f"{store_name}/{row.get('id')}: unexpected column set",
                 )
 
+    def test_store_include_expired_is_boolean_when_present(self) -> None:
+        for store_name, store in self.corpus["stores"].items():
+            if "include_expired" not in store:
+                continue
+            self.assertIsInstance(
+                store["include_expired"],
+                bool,
+                f"{store_name}: include_expired must be a boolean",
+            )
+
     def test_every_store_has_a_jar_verdict(self) -> None:
         for store_name, store in self.corpus["stores"].items():
             self.assertIn("jar", store, f"{store_name} missing jar verdict")
@@ -230,15 +240,25 @@ class GeneratorDeterminismTests(unittest.TestCase):
     def test_fresh_build_matches_committed_node_fixtures(self) -> None:
         if not NODE_FIXTURES_DIR.exists():
             self.skipTest(f"{NODE_FIXTURES_DIR} does not exist; nothing to compare against")
-        chromium_fixture = NODE_FIXTURES_DIR / "isolation-corpus-chromium.sqlite.base64"
-        firefox_fixture = NODE_FIXTURES_DIR / "isolation-corpus-firefox.sqlite.base64"
-        firefox_unknown_attr_fixture = (
-            NODE_FIXTURES_DIR / "isolation-corpus-firefox-unknown-attr.sqlite.base64"
-        )
-        fixtures = (chromium_fixture, firefox_fixture, firefox_unknown_attr_fixture)
-        if not all(fixture.exists() for fixture in fixtures):
-            self.skipTest("committed Node isolation-corpus fixtures are absent; run with --write-node-fixtures")
 
+        # Driven off the generator's own mapping rather than a hand-written
+        # list: a store added to NODE_FIXTURE_STORES and forgotten here would
+        # otherwise ship a fixture nothing ever compares.
+        import build_isolation_corpus as build_module
+
+        corpus = load_corpus()
+        fixtures = {
+            store_name: NODE_FIXTURES_DIR / filename
+            for store_name, filename in build_module.NODE_FIXTURE_STORES.items()
+        }
+        self.assertGreater(len(fixtures), 0)
+        if not all(fixture.exists() for fixture in fixtures.values()):
+            self.skipTest(
+                "committed Node isolation-corpus fixtures are absent; "
+                "run with --write-node-fixtures"
+            )
+
+        tables = {"chromium": "cookies", "firefox": "moz_cookies"}
         with tempfile.TemporaryDirectory() as raw_out_dir:
             out_dir = Path(raw_out_dir)
             subprocess.run(
@@ -246,15 +266,25 @@ class GeneratorDeterminismTests(unittest.TestCase):
                 check=True,
                 cwd=ROOT,
             )
-            self._assert_same_content(
-                out_dir / "chromium_isolated.sqlite", chromium_fixture, "cookies"
-            )
-            self._assert_same_content(
-                out_dir / "firefox_isolated.sqlite", firefox_fixture, "moz_cookies"
-            )
-            self._assert_same_content(
-                out_dir / "firefox_unknown_attr.sqlite", firefox_unknown_attr_fixture, "moz_cookies"
-            )
+            for store_name, fixture in fixtures.items():
+                table = tables[corpus["stores"][store_name]["engine"]]
+                self._assert_same_content(
+                    out_dir / f"{store_name}.sqlite", fixture, table
+                )
+
+    def test_committed_schema_matches_the_generator(self) -> None:
+        """`schema.json` is generated, and the two Rust consumers assert their
+        restated column lists against it. A stale committed copy would let
+        them agree with each other and disagree with the generator."""
+        import build_isolation_corpus as build_module
+
+        committed = json.loads(build_module.SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(
+            committed,
+            build_module.schema_document(),
+            "tests/isolation_corpus/schema.json is stale; regenerate it with "
+            "`python3 build_isolation_corpus.py --out-dir <dir>` and commit the result",
+        )
 
     def _assert_same_content(self, fresh_db: Path, fixture_base64: Path, table: str) -> None:
         fresh_rows = _select_all_rows(fresh_db, table)

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "kind": "isolation-corpus-store-schema",
+  "chromium": {
+    "table": "cookies",
+    "meta_version": 24,
+    "meta_last_compatible_version": 24,
+    "columns": [
+      "host_key",
+      "name",
+      "value",
+      "path",
+      "is_secure",
+      "is_httponly",
+      "samesite",
+      "expires_utc",
+      "top_frame_site_key",
+      "has_cross_site_ancestor",
+      "source_scheme",
+      "source_port",
+      "is_persistent",
+      "encrypted_value"
+    ]
+  },
+  "firefox": {
+    "table": "moz_cookies",
+    "user_version": 16,
+    "columns": [
+      "host",
+      "name",
+      "value",
+      "path",
+      "isSecure",
+      "isHttpOnly",
+      "sameSite",
+      "expiry",
+      "originAttributes"
+    ]
+  }
+}

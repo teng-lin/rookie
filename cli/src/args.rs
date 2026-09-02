@@ -74,8 +74,11 @@ pub struct SendContextArgs {
   /// the typed selectors or the partition key
   #[arg(long)]
   pub origin_attributes: Option<String>,
-  /// Send-time expiry clock, in Unix epoch seconds. Defaults to now
-  #[arg(long)]
+  /// Send-time expiry clock, in Unix epoch seconds. Defaults to now.
+  /// Capped at `i64::MAX` because `SystemTime` addition panics past it --
+  /// clap rejects an out-of-range value as a usage error before any I/O,
+  /// rather than after the snapshot has already been read
+  #[arg(long, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
   pub now: Option<u64>,
 }
 
@@ -89,6 +92,11 @@ pub struct SnapshotArgs {
   /// Profile id, display name, directory, or path
   #[arg(short, long)]
   pub profile: Option<String>,
+  /// Keep expired cookies in the snapshot. They are still never selected --
+  /// send-time expiry applies regardless -- so this only changes what the
+  /// `expired` omission count can see
+  #[arg(long)]
+  pub include_expired: bool,
   /// Also acquire the browser's declared session store
   #[arg(long)]
   pub include_session: bool,

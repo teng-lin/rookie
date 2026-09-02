@@ -11,7 +11,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 lazy_static = "1.4.0"
 rookie-cookies.workspace = true
-serde_json = "1.0.107"
+# `preserve_order` is what keeps the `send-view` object's `omitted` map in
+# `SendOmissions::entries()` order instead of sorting it alphabetically.
+# rookie-cookies already enables it, so cargo would unify the feature in
+# anyway; declaring it here means this crate's own output does not depend
+# on a dependency's feature choice.
+serde_json = { version = "1.0.107", features = ["preserve_order"] }
 
 [dev-dependencies]
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "fallible_uint"] }

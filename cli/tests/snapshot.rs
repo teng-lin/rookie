@@ -675,6 +675,7 @@ fn help_and_version_are_successful_stdout_contracts() {
       "--now",
       "--browser",
       "--profile",
+      "--include-expired",
       "--include-session",
       "--timeout-secs",
       "--app-bound",

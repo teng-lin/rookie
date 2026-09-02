@@ -40,6 +40,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seconds>` -- so a context expressed for one command is expressible for the
   other. `from-path --domains` stays a flat, compatibility-only route and
   takes none of this surface.
+- Read-warning text now reads `N rows affected (code)` rather than
+  `skipped N rows (code)`, in Rust and Python alike. Not every warning code
+  drops a row: `unparsable_partition_key` and `unknown_ancestor_chain` count
+  rows the snapshot keeps and no send context can select, so "skipped" was
+  wrong for them. The `code` and `count` fields are unchanged and remain the
+  thing to branch on; this text has never been a stable contract.
 - CLI error objects may now carry a third field. The rule is unchanged in
   shape -- every object has `code` and `message`, a given `code` may define
   further documented fields, and a consumer must ignore keys it does not
@@ -106,6 +112,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--allow-isolation-loss` flag: it produces byte-for-byte what the command
   printed before. `--format detailed` carries the context and is never
   refused, so it needs no flag.
+
+  `from-path --domains` is covered by the same policy. That route runs a job
+  which returns cookies directly, with no snapshot for the jar to refuse
+  from, so the CLI opens the path a second time purely to ask the policy
+  question and discards the result. The flat job itself is untouched and its
+  output is byte-identical; what changes is that an isolated store now
+  refuses there too, instead of leaving one route where a merged list still
+  printed.
 - Same-site now means that the request host equals the top-level site's host or
   is a subdomain of it, on the same scheme. It previously meant literal host
   equality. A request to `www.example.com` under a `https://example.com`

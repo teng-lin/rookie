@@ -282,7 +282,11 @@ no column for a partition key or a container identity, so a snapshot holding
 isolated cookies is refused (`isolation_loss_refused`) until that named
 opt-in says the loss is acceptable. `--format detailed` carries the context
 and never needs it. `from-path --domains` stays a flat, compatibility-only
-route and takes none of the selector surface.
+route and takes none of the selector surface, but it is not a way around the
+refusal: because its job returns cookies with no snapshot to refuse from, the
+CLI opens the same path a second time purely to ask the policy question, then
+runs the flat job unchanged. The extra open is confined to that route, and
+the printed bytes are exactly what the flat job has always produced.
 
 Runtime failures from the typed `rookie_cookies::Error` hierarchy are written
 to stderr as one JSON object. Every such object carries `code` and `message`;

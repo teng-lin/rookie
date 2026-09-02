@@ -40,6 +40,53 @@ const OMISSION_ORDER: [&str; 7] = [
   "origin",
 ];
 
+/// Chromium store columns, mirroring `build_isolation_corpus.py`. Checked
+/// against the generator's own `schema.json` by
+/// `assert_store_schema_matches_generator`.
+const CHROMIUM_COLUMNS: [&str; 13] = [
+  "host_key",
+  "name",
+  "value",
+  "path",
+  "is_secure",
+  "is_httponly",
+  "samesite",
+  "expires_utc",
+  "top_frame_site_key",
+  "has_cross_site_ancestor",
+  "source_scheme",
+  "source_port",
+  "is_persistent",
+];
+
+/// Firefox store columns, likewise generator-checked.
+const FIREFOX_COLUMNS: [&str; 9] = [
+  "host",
+  "name",
+  "value",
+  "path",
+  "isSecure",
+  "isHttpOnly",
+  "sameSite",
+  "expiry",
+  "originAttributes",
+];
+
+/// Every key a case's `context` may set, and the flags this file maps them
+/// to. An unhandled key must fail rather than be silently dropped: a case
+/// that quietly loses a selector still passes, against the wrong context.
+const HANDLED_CONTEXT_KEYS: [&str; 9] = [
+  "url",
+  "top_level_site",
+  "ancestor_chain",
+  "user_context_id",
+  "private_browsing_id",
+  "first_party_domain",
+  "gecko_view_session_context_id",
+  "origin_attributes",
+  "now",
+];
+
 struct TestDir(PathBuf);
 
 impl TestDir {
@@ -67,16 +114,61 @@ fn unique_tmpdir(tag: &str) -> TestDir {
   TestDir(dir)
 }
 
-fn load_corpus() -> Value {
-  let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+fn corpus_dir() -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR"))
     .parent()
     .expect("cli has a workspace parent")
     .join("tests")
     .join("isolation_corpus")
-    .join("corpus.json");
-  let text = std::fs::read_to_string(&path)
+}
+
+fn read_json(path: &Path) -> Value {
+  let text = std::fs::read_to_string(path)
     .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
   serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
+fn load_corpus() -> Value {
+  read_json(&corpus_dir().join("corpus.json"))
+}
+
+/// Asserts the schemas restated in this file still match the generator's.
+///
+/// Two Rust consumers each duplicate `build_isolation_corpus.py`'s
+/// `CREATE TABLE`s so neither needs Python at test time. `schema.json` is
+/// what makes that duplication checkable: a column added to the generator
+/// and forgotten here fails loudly instead of producing a store that reads
+/// back short.
+fn assert_store_schema_matches_generator() {
+  let schema = read_json(&corpus_dir().join("schema.json"));
+
+  // The generator lists `encrypted_value`; this file appends it by hand as an
+  // empty blob, so it is appended for the comparison too.
+  let mut chromium = CHROMIUM_COLUMNS.map(str::to_owned).to_vec();
+  chromium.push("encrypted_value".to_owned());
+  assert_eq!(
+    schema["chromium"]["columns"],
+    serde_json::json!(chromium),
+    "Chromium columns drifted from build_isolation_corpus.py"
+  );
+  assert_eq!(schema["chromium"]["table"], "cookies");
+  assert_eq!(schema["chromium"]["meta_version"], 24);
+
+  assert_eq!(
+    schema["firefox"]["columns"],
+    serde_json::json!(FIREFOX_COLUMNS.map(str::to_owned).to_vec()),
+    "Firefox columns drifted from build_isolation_corpus.py"
+  );
+  assert_eq!(schema["firefox"]["table"], "moz_cookies");
+  assert_eq!(schema["firefox"]["user_version"], 16);
+}
+
+/// Whether the named store must be read with expired rows retained.
+fn include_expired(store: &Value) -> bool {
+  store
+    .get("include_expired")
+    .map(|flag| flag.as_bool().expect("include_expired must be a boolean"))
+    .unwrap_or(false)
 }
 
 /// Binds one corpus row cell, keeping a JSON null a genuine SQL `NULL`.
@@ -141,26 +233,7 @@ fn build_chromium_store(rows: &[Value], path: &Path) {
        INSERT INTO meta (key, value) VALUES ('last_compatible_version', '24');",
     )
     .expect("create chromium schema");
-  insert_rows(
-    &connection,
-    "cookies",
-    &[
-      "host_key",
-      "name",
-      "value",
-      "path",
-      "is_secure",
-      "is_httponly",
-      "samesite",
-      "expires_utc",
-      "top_frame_site_key",
-      "has_cross_site_ancestor",
-      "source_scheme",
-      "source_port",
-      "is_persistent",
-    ],
-    rows,
-  );
+  insert_rows(&connection, "cookies", &CHROMIUM_COLUMNS, rows);
 }
 
 /// Writes a Firefox `cookies.sqlite` database (`user_version` 16).
@@ -182,22 +255,7 @@ fn build_firefox_store(rows: &[Value], path: &Path) {
        );",
     )
     .expect("create firefox schema");
-  insert_rows(
-    &connection,
-    "moz_cookies",
-    &[
-      "host",
-      "name",
-      "value",
-      "path",
-      "isSecure",
-      "isHttpOnly",
-      "sameSite",
-      "expiry",
-      "originAttributes",
-    ],
-    rows,
-  );
+  insert_rows(&connection, "moz_cookies", &FIREFOX_COLUMNS, rows);
 }
 
 fn build_store(store: &Value, path: &Path) {
@@ -309,6 +367,13 @@ fn assert_selector_error(
 
 /// Maps a corpus case context onto the `send-view`/`header` selector flags.
 fn selector_args(context: &Value) -> Vec<String> {
+  for key in context.as_object().expect("context object").keys() {
+    assert!(
+      HANDLED_CONTEXT_KEYS.contains(&key.as_str()),
+      "context key {key} is not one this consumer maps to a flag; \
+       a dropped selector would make the case pass against the wrong context"
+    );
+  }
   let mut args = vec![
     "--url".to_owned(),
     context["url"].as_str().expect("case url").to_owned(),
@@ -346,6 +411,19 @@ fn selector_args(context: &Value) -> Vec<String> {
   args
 }
 
+/// The `SnapshotArgs` half both send-selecting subcommands flatten.
+///
+/// A store declaring `include_expired` must be read that way for its expired
+/// rows to reach the snapshot at all -- send selection then drops them again
+/// and counts them, which is what the `expired` omission asserts.
+fn snapshot_args(include_expired: bool) -> Vec<String> {
+  let mut args = vec!["--browser".to_owned(), "firefox".to_owned()];
+  if include_expired {
+    args.push("--include-expired".to_owned());
+  }
+  args
+}
+
 fn expected_ids(expect: &Value, field: &str) -> Vec<String> {
   expect[field]
     .as_array()
@@ -375,12 +453,12 @@ fn expected_omissions(expect: &Value) -> BTreeMap<String, u64> {
     .collect()
 }
 
-fn assert_send_view(case_id: &str, home: &Path, case: &Value) {
+fn assert_send_view(case_id: &str, home: &Path, case: &Value, include_expired: bool) {
   let context = &case["context"];
   let expect = &case["expect"];
   let mut args = vec!["send-view".to_owned()];
   args.extend(selector_args(context));
-  args.extend(["--browser".to_owned(), "firefox".to_owned()]);
+  args.extend(snapshot_args(include_expired));
   let out = run(&mut isolated_command(home), &args);
 
   if let Some(error) = expect.get("error") {
@@ -436,11 +514,11 @@ fn assert_send_view(case_id: &str, home: &Path, case: &Value) {
   );
 }
 
-fn assert_header(case_id: &str, home: &Path, case: &Value) {
+fn assert_header(case_id: &str, home: &Path, case: &Value, include_expired: bool) {
   let expect = &case["expect"];
   let mut args = vec!["header".to_owned()];
   args.extend(selector_args(&case["context"]));
-  args.extend(["--browser".to_owned(), "firefox".to_owned()]);
+  args.extend(snapshot_args(include_expired));
   let out = run(&mut isolated_command(home), &args);
 
   if let Some(error) = expect.get("error") {
@@ -463,6 +541,7 @@ fn assert_header(case_id: &str, home: &Path, case: &Value) {
 #[test]
 fn send_view_and_header_reproduce_the_corpus_for_every_firefox_case() {
   let corpus = load_corpus();
+  assert_store_schema_matches_generator();
   let stores = corpus["stores"].as_object().expect("corpus.stores");
   let mut ran = 0usize;
 
@@ -478,8 +557,8 @@ fn send_view_and_header_reproduce_the_corpus_for_every_firefox_case() {
         continue;
       }
       let case_id = case["id"].as_str().expect("case id");
-      assert_send_view(case_id, home.path(), case);
-      assert_header(case_id, home.path(), case);
+      assert_send_view(case_id, home.path(), case, include_expired(store));
+      assert_header(case_id, home.path(), case, include_expired(store));
       ran += 1;
     }
   }
@@ -493,7 +572,9 @@ fn send_view_and_header_reproduce_the_corpus_for_every_firefox_case() {
 #[test]
 fn flat_formats_fail_closed_and_opt_in_per_store() {
   let corpus = load_corpus();
+  assert_store_schema_matches_generator();
   let dir = unique_tmpdir("flat");
+  let mut checked = 0usize;
 
   for (name, store) in corpus["stores"].as_object().expect("corpus.stores") {
     let path = dir.path().join(format!("{name}.sqlite"));
@@ -505,69 +586,124 @@ fn flat_formats_fail_closed_and_opt_in_per_store() {
       .iter()
       .map(|row| row["value"].as_str().expect("row value").to_owned())
       .collect::<Vec<_>>();
+    let expect = &store["jar"]["expect"];
+    let refuses = expect != "ok";
 
-    for format in ["json", "netscape"] {
-      let base = vec![
-        "from-path".to_owned(),
-        path.clone(),
-        "--format".to_owned(),
-        format.to_owned(),
-      ];
-      let refused = run(&mut Command::new(ROOKIE_BIN), &base);
-      let expect = &store["jar"]["expect"];
+    // Both from-path routes: the portable snapshot job, and the flat
+    // `--domains` job that has no snapshot of its own. The second is the one
+    // that used to slip past the policy entirely, so it is checked at the
+    // same strength as the first.
+    for route in [FlatRoute::Snapshot, FlatRoute::Domains] {
+      for format in ["json", "netscape"] {
+        let mut base = vec![
+          "from-path".to_owned(),
+          path.clone(),
+          "--format".to_owned(),
+          format.to_owned(),
+        ];
+        if include_expired(store) {
+          base.push("--include-expired".to_owned());
+        }
+        base.extend(route.args());
+        let context = format!("{name} {format} {route:?}");
 
-      if expect == "ok" {
-        // Nothing isolated: the flat projection is already send-safe, so the
-        // default must succeed without the opt-in.
-        let text = stdout_of(&format!("{name} {format}"), &refused);
-        for value in &values {
-          assert!(
-            text.contains(value),
-            "{name} {format}: missing {value} in {text}"
+        let default_run = run(&mut Command::new(ROOKIE_BIN), &base);
+        if refuses {
+          let error = &expect["error"];
+          assert_selector_error(
+            &context,
+            &default_run,
+            error["code"].as_str().expect("jar error code"),
+            &expected_ids(error, "required"),
+          );
+        } else {
+          // Nothing isolated: the flat projection is already send-safe, so
+          // the default must succeed without the opt-in.
+          assert_rows_present(&context, &stdout_of(&context, &default_run), &values);
+        }
+
+        // The named opt-in always succeeds and always holds every row: ADR
+        // 0006 Decision 3 changes when a flat projection can fail, never what
+        // a successful one contains.
+        let mut allowed_args = base.clone();
+        allowed_args.push("--allow-isolation-loss".to_owned());
+        let allowed = run(&mut Command::new(ROOKIE_BIN), &allowed_args);
+        let allowed_context = format!("{context} --allow-isolation-loss");
+        let opted_in = stdout_of(&allowed_context, &allowed);
+        assert_rows_present(&allowed_context, &opted_in, &values);
+
+        // The gate decides whether the job runs; it never edits the bytes.
+        // On a store with nothing to refuse, the flag is therefore a no-op,
+        // which pins that the opted-in output is the pre-gate output.
+        if !refuses {
+          assert_eq!(
+            opted_in,
+            stdout_of(&context, &default_run),
+            "{allowed_context}: the opt-in changed output on an unisolated store"
           );
         }
-      } else {
-        let error = &expect["error"];
-        assert_selector_error(
-          &format!("{name} {format}"),
-          &refused,
-          error["code"].as_str().expect("jar error code"),
-          &expected_ids(error, "required"),
-        );
-      }
-
-      // The named opt-in always succeeds, and always holds every row: ADR
-      // 0006 Decision 3 changes when a flat projection can fail, never what
-      // a successful one contains.
-      let mut allowed_args = base.clone();
-      allowed_args.push("--allow-isolation-loss".to_owned());
-      let allowed = run(&mut Command::new(ROOKIE_BIN), &allowed_args);
-      let text = stdout_of(&format!("{name} {format} --allow-isolation-loss"), &allowed);
-      for value in &values {
-        assert!(
-          text.contains(value),
-          "{name} {format} --allow-isolation-loss: missing {value} in {text}"
-        );
+        checked += 1;
       }
     }
 
     // `detailed` carries the isolation the flat formats cannot, so it is
     // never refused and never needs the flag.
-    let detailed = run(
-      &mut Command::new(ROOKIE_BIN),
-      &[
-        "from-path".to_owned(),
-        path.clone(),
-        "--format".to_owned(),
-        "detailed".to_owned(),
-      ],
-    );
-    let text = stdout_of(&format!("{name} detailed"), &detailed);
-    for value in &values {
-      assert!(
-        text.contains(value),
-        "{name} detailed: missing {value} in {text}"
-      );
+    let mut detailed_args = vec![
+      "from-path".to_owned(),
+      path.clone(),
+      "--format".to_owned(),
+      "detailed".to_owned(),
+    ];
+    if include_expired(store) {
+      detailed_args.push("--include-expired".to_owned());
     }
+    let detailed = run(&mut Command::new(ROOKIE_BIN), &detailed_args);
+    let context = format!("{name} detailed");
+    assert_rows_present(&context, &stdout_of(&context, &detailed), &values);
+  }
+
+  assert!(
+    checked > 0,
+    "the corpus declares no stores; this test would pass vacuously"
+  );
+}
+
+/// The two `from-path` routes to a flat projection.
+///
+/// `Domains` runs `extract_from_path`, which returns the eight-field list
+/// directly and has no snapshot to refuse from -- the CLI gates it by opening
+/// the same path a second time. Both must reach the same verdict, or the
+/// compatibility route is a way around the policy.
+#[derive(Clone, Copy, Debug)]
+enum FlatRoute {
+  Snapshot,
+  Domains,
+}
+
+impl FlatRoute {
+  fn args(self) -> Vec<String> {
+    match self {
+      Self::Snapshot => Vec::new(),
+      // Every host the corpus uses, so the filter never narrows the result
+      // and the two routes stay comparable.
+      Self::Domains => [
+        "rookie-a.test",
+        "rookie-b.test",
+        "rookie-c.test",
+        "198.51.100.7",
+        "198.51.100.77",
+        "ffff::1",
+        "xn--mnchen-3ya.rookie-a.test",
+      ]
+      .iter()
+      .flat_map(|domain| ["--domains".to_owned(), (*domain).to_owned()])
+      .collect(),
+    }
+  }
+}
+
+fn assert_rows_present(context: &str, text: &str, values: &[String]) {
+  for value in values {
+    assert!(text.contains(value), "{context}: missing {value} in {text}");
   }
 }

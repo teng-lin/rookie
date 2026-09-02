@@ -63,6 +63,24 @@ const FIREFOX_COLUMNS: [&str; 9] = [
 const CHROMIUM_SCHEMA_VERSION: i64 = 24;
 const FIREFOX_USER_VERSION: i64 = 16;
 
+/// Every key a case's `context` may set.
+///
+/// A case naming anything else is a corpus this consumer does not fully
+/// understand, and silently dropping the key would make the case pass while
+/// testing the wrong context -- the exact failure a shared oracle exists to
+/// prevent.
+const HANDLED_CONTEXT_KEYS: [&str; 9] = [
+  "url",
+  "top_level_site",
+  "ancestor_chain",
+  "user_context_id",
+  "private_browsing_id",
+  "first_party_domain",
+  "gecko_view_session_context_id",
+  "origin_attributes",
+  "now",
+];
+
 /// A temp directory removed when the test that made it ends.
 struct TestDir(PathBuf);
 
@@ -100,11 +118,54 @@ fn corpus_path() -> PathBuf {
     .join("corpus.json")
 }
 
-fn load_corpus() -> Value {
-  let path = corpus_path();
-  let text = std::fs::read_to_string(&path)
+fn read_json(path: &Path) -> Value {
+  let text = std::fs::read_to_string(path)
     .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
   serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
+fn load_corpus() -> Value {
+  read_json(&corpus_path())
+}
+
+/// Asserts the schemas restated above still match the generator's.
+///
+/// `build_isolation_corpus.py` writes `schema.json` next to the corpus; the
+/// Rust lane duplicates those `CREATE TABLE`s so it needs no Python, and this
+/// is what keeps the duplicate honest. A column added to the generator and
+/// forgotten here would otherwise produce a store that reads back short
+/// rather than a failure that names the drift.
+fn assert_store_schema_matches_generator() {
+  let schema = read_json(
+    &corpus_path()
+      .parent()
+      .expect("corpus.json has a parent")
+      .join("schema.json"),
+  );
+
+  // The generator lists `encrypted_value` with the rest; this file binds it
+  // by hand as an empty blob, so it is appended for the comparison.
+  let mut chromium = CHROMIUM_COLUMNS.map(str::to_owned).to_vec();
+  chromium.push("encrypted_value".to_owned());
+  assert_eq!(
+    schema["chromium"]["columns"],
+    serde_json::json!(chromium),
+    "Chromium columns drifted from build_isolation_corpus.py"
+  );
+  assert_eq!(schema["chromium"]["table"], "cookies");
+  assert_eq!(schema["chromium"]["meta_version"], CHROMIUM_SCHEMA_VERSION);
+  assert_eq!(
+    schema["chromium"]["meta_last_compatible_version"],
+    CHROMIUM_SCHEMA_VERSION
+  );
+
+  assert_eq!(
+    schema["firefox"]["columns"],
+    serde_json::json!(FIREFOX_COLUMNS.map(str::to_owned).to_vec()),
+    "Firefox columns drifted from build_isolation_corpus.py"
+  );
+  assert_eq!(schema["firefox"]["table"], "moz_cookies");
+  assert_eq!(schema["firefox"]["user_version"], FIREFOX_USER_VERSION);
 }
 
 /// Binds one corpus row cell, preserving the JSON null that makes a Chromium
@@ -239,11 +300,13 @@ fn build_stores(corpus: &Value, dir: &Path) -> BTreeMap<String, PathBuf> {
 
 /// Reads one materialized store back through the public portable entry point.
 ///
-/// Every corpus row is unexpired at `clock_epoch_seconds`, so the default
-/// (drop-expired) read is the faithful one: the corpus never asks for an
-/// expired row to be retained, and the row count is asserted to prove it.
-fn open_store(name: &str, path: &Path, expected_rows: usize) -> ReadResult {
-  let result = from_path(FromPathRequest::new(path))
+/// A store declaring `include_expired` is opened that way, because its rows
+/// are the point: expiry at *read* time is what decides whether a row reaches
+/// the snapshot, and expiry at *send* time drops it again regardless. The row
+/// count is asserted so a store whose flag is wrong fails here rather than
+/// silently short.
+fn open_store(name: &str, path: &Path, expected_rows: usize, include_expired: bool) -> ReadResult {
+  let result = from_path(FromPathRequest::new(path).include_expired(include_expired))
     .unwrap_or_else(|error| panic!("read corpus store {name}: {error}"));
   assert_eq!(
     result.detailed_cookies().len(),
@@ -253,20 +316,52 @@ fn open_store(name: &str, path: &Path, expected_rows: usize) -> ReadResult {
   result
 }
 
+/// Whether the named store must be read with expired rows retained.
+fn include_expired(corpus: &Value, name: &str) -> bool {
+  corpus["stores"][name]
+    .get("include_expired")
+    .map(|flag| {
+      flag
+        .as_bool()
+        .unwrap_or_else(|| panic!("store {name}: include_expired must be a boolean"))
+    })
+    .unwrap_or(false)
+}
+
+fn store_rows(corpus: &Value, name: &str) -> usize {
+  corpus["stores"][name]["rows"]
+    .as_array()
+    .expect("store rows")
+    .len()
+}
+
 fn open_stores(corpus: &Value, paths: &BTreeMap<String, PathBuf>) -> BTreeMap<String, ReadResult> {
   paths
     .iter()
     .map(|(name, path)| {
-      let rows = corpus["stores"][name]["rows"]
-        .as_array()
-        .expect("store rows")
-        .len();
-      (name.clone(), open_store(name, path, rows))
+      let result = open_store(
+        name,
+        path,
+        store_rows(corpus, name),
+        include_expired(corpus, name),
+      );
+      (name.clone(), result)
     })
     .collect()
 }
 
 fn send_context(case_id: &str, context: &Value) -> SendContext {
+  for key in context
+    .as_object()
+    .unwrap_or_else(|| panic!("case {case_id}: context must be an object"))
+    .keys()
+  {
+    assert!(
+      HANDLED_CONTEXT_KEYS.contains(&key.as_str()),
+      "case {case_id}: context key {key} is not one this consumer applies; \
+       a dropped selector would make the case pass against the wrong context"
+    );
+  }
   let url = context["url"]
     .as_str()
     .unwrap_or_else(|| panic!("case {case_id} has no url"));
@@ -545,6 +640,7 @@ fn corpus_cases_select_exactly_what_the_oracle_declares() {
     corpus["kind"], "isolation-collision-corpus",
     "corpus.json is not the isolation corpus"
   );
+  assert_store_schema_matches_generator();
   let dir = unique_tmpdir("cases");
   let paths = build_stores(&corpus, dir.path());
   let stores = open_stores(&corpus, &paths);
@@ -572,6 +668,33 @@ fn corpus_cases_select_exactly_what_the_oracle_declares() {
     cases.len(),
     failed.join(", ")
   );
+
+  // Every omission reason must be non-zero somewhere in the corpus. A reason
+  // no case ever reaches is a reason no consumer is actually checked against,
+  // so the oracle would keep passing if that bucket were mis-attributed.
+  let mut seen = BTreeMap::new();
+  for case in cases {
+    for (reason, count) in
+      expected_omissions(case["id"].as_str().unwrap_or("<unnamed>"), &case["expect"])
+    {
+      *seen.entry(reason).or_insert(0u64) += count;
+    }
+  }
+  for reason in [
+    "expired",
+    "not_applicable",
+    "same_site",
+    "partition",
+    "ancestor_chain_unknown",
+    "unparsable_partition_key",
+    "origin",
+  ] {
+    assert!(
+      seen.get(reason).copied().unwrap_or(0) > 0,
+      "no corpus case exercises the {reason} omission; \
+       that bucket is unverified in every language"
+    );
+  }
 }
 
 #[test]
@@ -583,8 +706,12 @@ fn corpus_stores_agree_on_the_jar_verdict() {
 
   for (name, store) in corpus["stores"].as_object().expect("corpus.stores") {
     let result = stores.get(name).expect("every store was opened");
-    let rows = store["rows"].as_array().expect("store rows").len();
-    let consuming = open_store(name, &paths[name], rows);
+    let consuming = open_store(
+      name,
+      &paths[name],
+      store_rows(&corpus, name),
+      include_expired(&corpus, name),
+    );
     assert_jar(name, store, result, consuming);
   }
 }
