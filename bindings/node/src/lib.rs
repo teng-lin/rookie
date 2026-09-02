@@ -21,9 +21,10 @@ use rookie_cookies::report::{
   ProfileIdentity, ReportStats, SourceExtraction,
 };
 use rookie_cookies::{
-  AppBoundPolicy, CancellationHandle, ExecutionControl, ExtractRequest, FromPathRequest,
-  LoadReportRequest, MethodClass, MozillaProfile, ProfileSelection, ReadRequest, ReadResult,
-  ReportRequest, ReportScope, RequestError, ResourceKind, SendContext,
+  AncestorChain, AppBoundPolicy, CancellationHandle, ExecutionControl, ExtractRequest,
+  FromPathRequest, IsolationLoss, LoadReportRequest, MethodClass, MozillaProfile, ProfileSelection,
+  ReadRequest, ReadResult, ReportRequest, ReportScope, RequestError, ResourceKind, SendContext,
+  SendView,
 };
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -276,7 +277,66 @@ pub struct SendContextObject {
   pub method: Option<String>,
   pub user_context_id: Option<u32>,
   pub private_browsing_id: Option<u32>,
+  /// `"same_site" | "cross_site"`. Omitted means *derived*: same-site when
+  /// the request site is within `topLevelSite`, cross-site otherwise. Set it
+  /// explicitly to describe an `A -> B -> A` embed, whose request site and
+  /// top-level site are equal even though an ancestor frame is cross-site.
+  #[napi(ts_type = "AncestorChain")]
+  pub ancestor_chain: Option<String>,
+  /// Selects a Firefox `firstPartyDomain` origin attribute. Once supplied, a
+  /// row that does not carry this attribute is not a match.
+  pub first_party_domain: Option<String>,
+  /// Selects a Firefox `geckoViewSessionContextId` origin attribute.
+  pub gecko_view_session_context_id: Option<String>,
+  /// Selects **opaque** rows by their verbatim Firefox `originAttributes`
+  /// suffix -- rows carrying an attribute name this build does not know, or a
+  /// `partitionKey` it cannot parse. Such a row is omitted from every send
+  /// view, and naming its stored value exactly is the only way to select it.
+  /// Pass the value from `context.originAttributes` rather than rebuilding
+  /// it: the comparison is byte equality against what the browser stored.
+  pub origin_attributes: Option<String>,
   pub now_epoch_seconds: Option<i64>,
+}
+
+/// Rows a send view left out, counted by the first reason each failed.
+///
+/// Every reason is always present, zeroes included, so the shape is fixed
+/// across releases. A row is counted exactly once, under the first stage it
+/// failed.
+#[napi(object)]
+pub struct SendOmissionsObject {
+  /// Rows whose expiry had passed at the send-time clock. Applied regardless
+  /// of `includeExpired`: retaining an expired cookie in an inventory is not
+  /// a licence to send it.
+  pub expired: u32,
+  /// Rows the RFC 6265 domain, path, `Secure`, or octet rules excluded.
+  pub not_applicable: u32,
+  /// Rows a `SameSite` attribute excluded for this context.
+  pub same_site: u32,
+  /// Rows whose partition key or ancestor bit named a different context.
+  pub partition: u32,
+  /// Partitioned Chromium rows whose store predates `has_cross_site_ancestor`.
+  /// The bit is part of partition-key equality, so a row that never recorded
+  /// it is omitted rather than assumed.
+  pub ancestor_chain_unknown: u32,
+  /// Rows whose partition key no parser in this build understood.
+  pub unparsable_partition_key: u32,
+  /// Rows excluded by a container or origin-attribute selector, including
+  /// rows carrying an origin attribute this build does not recognize.
+  pub origin: u32,
+}
+
+/// The cookies one `SendContext` selects, before they are flattened into a
+/// header string.
+#[napi(object)]
+pub struct SendViewObject {
+  /// The selected records, in the order `header` renders them: longest path
+  /// first, then by name.
+  pub cookies: Vec<DetailedCookieObject>,
+  /// The same selection rendered as a `Cookie` request-header value.
+  pub header: String,
+  /// What was left out, and why.
+  pub omitted: SendOmissionsObject,
 }
 
 /// Cross-platform options for explicit Chromium cookie databases.
@@ -543,6 +603,48 @@ fn detailed_cookies_to_js(cookies: Vec<DetailedCookie>) -> Result<Vec<DetailedCo
       })
     })
     .collect()
+}
+
+/// Projects `SendOmissions` onto its JS object, reading the counts through
+/// `entries()` rather than the individual getters.
+///
+/// `entries()` is the core's declared vocabulary. A reason added there and not
+/// given a field here is caught two ways rather than silently dropped:
+/// `every_send_omission_code_lands_in_a_field` pins the exact code list, and
+/// the fallthrough arm panics in a debug build.
+///
+/// The counts saturate at `u32::MAX`: a `u64` past `2^53` is not exactly
+/// representable as a JavaScript number, and an omission count that large
+/// means the snapshot is pathological rather than that the extra precision
+/// matters.
+fn send_omissions_to_js(omitted: &rookie_cookies::SendOmissions) -> SendOmissionsObject {
+  let mut object = SendOmissionsObject {
+    expired: 0,
+    not_applicable: 0,
+    same_site: 0,
+    partition: 0,
+    ancestor_chain_unknown: 0,
+    unparsable_partition_key: 0,
+    origin: 0,
+  };
+  for (code, count) in omitted.entries() {
+    let count = u32::try_from(count).unwrap_or(u32::MAX);
+    match code {
+      "expired" => object.expired = count,
+      "not_applicable" => object.not_applicable = count,
+      "same_site" => object.same_site = count,
+      "partition" => object.partition = count,
+      "ancestor_chain_unknown" => object.ancestor_chain_unknown = count,
+      "unparsable_partition_key" => object.unparsable_partition_key = count,
+      "origin" => object.origin = count,
+      // A code this build has no field for. Dropping it silently would make
+      // `omitted`'s counts stop summing to the rows the snapshot held, which
+      // is exactly the arithmetic a caller uses to tell "nothing matched"
+      // apart from "everything was excluded".
+      unknown => debug_assert!(false, "unhandled send-omission code: {unknown}"),
+    }
+  }
+  object
 }
 
 /// Serialize cookies in Netscape cookie-file format.
@@ -813,6 +915,23 @@ fn parse_method_class(class: Option<&str>) -> Result<MethodClass> {
   }
 }
 
+/// Parses a `SendContextObject.ancestorChain`. `None` leaves the chain
+/// *derived* from the request site and top-level site, which is not the same
+/// as either literal value, so there is no default to fall back on here --
+/// unlike `parse_resource_kind`/`parse_method_class`, whose absent values do
+/// have conservative defaults.
+fn parse_ancestor_chain(chain: Option<&str>) -> Result<Option<AncestorChain>> {
+  match chain {
+    None => Ok(None),
+    Some("same_site") => Ok(Some(AncestorChain::SameSite)),
+    Some("cross_site") => Ok(Some(AncestorChain::CrossSite)),
+    Some(other) => Err(napi::Error::new(
+      Status::InvalidArg,
+      format!("unknown ancestor chain: {other}"),
+    )),
+  }
+}
+
 /// Converts a caller-supplied `nowEpochSeconds` into a `SystemTime`. `None`
 /// on overflow (a caller-chosen second count so large `UNIX_EPOCH` can't
 /// represent it) leaves `SendContext::now` unset, which falls back to the
@@ -839,6 +958,18 @@ fn send_context_from_object(object: SendContextObject) -> Result<SendContext> {
   }
   if let Some(id) = object.private_browsing_id {
     context = context.private_browsing_id(id);
+  }
+  if let Some(chain) = parse_ancestor_chain(object.ancestor_chain.as_deref())? {
+    context = context.ancestor_chain(chain);
+  }
+  if let Some(domain) = object.first_party_domain {
+    context = context.first_party_domain(domain);
+  }
+  if let Some(id) = object.gecko_view_session_context_id {
+    context = context.gecko_view_session_context_id(id);
+  }
+  if let Some(attributes) = object.origin_attributes {
+    context = context.origin_attributes(attributes);
   }
   if let Some(seconds) = object.now_epoch_seconds {
     if let Some(now) = system_time_from_epoch_seconds(seconds) {
@@ -1580,6 +1711,45 @@ pub struct ReadOptions {
   pub select: Option<String>,
 }
 
+/// `ReadOptions` plus the one field only `jar` can honour.
+///
+/// `allowIsolationLoss` is deliberately **not** on `ReadOptions`: `read`
+/// returns a snapshot that keeps every isolated identity, so the flag would
+/// have nothing to act on there and would be silently ignored by every
+/// non-jar call that passed it.
+#[napi(object)]
+pub struct JarOptions {
+  pub browser: String,
+  pub profile: Option<String>,
+  pub include_expired: Option<bool>,
+  /// Also includes the browser's declared session store (Gecko only; a
+  /// no-op elsewhere). Defaults to `false` -- **unlike 0.6-beta**, naming a
+  /// `profile` alone no longer imports session cookies. Omitting this on a
+  /// migrated 0.6-beta caller fails silently: a smaller snapshot, no error.
+  pub include_session: Option<bool>,
+  pub timeout_ms: Option<u32>,
+  /// `"disabled" | "injection_only" | "allow_elevated_fallback"`. Omitted
+  /// means `"injection_only"`, which recovers Chrome v20 App-Bound keys
+  /// without elevation. Pass `"disabled"` to skip v20 rows instead.
+  pub app_bound: Option<String>,
+  /// Only `"legacy_first"` (the default) is representable here: a snapshot
+  /// or flat extract returns one answer, so there is no "every profile" for
+  /// `select` to name. Passing `"all"` rejects with
+  /// `conflicting_profile_selection` before any I/O; use `report`/
+  /// `browserReport` for every profile.
+  pub select: Option<String>,
+  /// Produce the flat list even when the snapshot holds isolated rows.
+  ///
+  /// Defaults to `false`, which rejects with `isolation_loss_refused`. A flat
+  /// `CookieObject[]` has no cell for a CHIPS partition key, a Firefox
+  /// `partitionKey`, or container identity, so flattening an isolated
+  /// snapshot turns cookies scoped to one browsing context into cookies that
+  /// look like they belong everywhere. Setting this to `true` is the named
+  /// decision that the loss is acceptable; the output is byte-for-byte what
+  /// `read(...).cookies` returns.
+  pub allow_isolation_loss: Option<bool>,
+}
+
 #[napi(object)]
 pub struct ReportOptions {
   pub browser: String,
@@ -1729,25 +1899,61 @@ impl JsReadResult {
     self.inner.profile_id().map(str::to_owned)
   }
 
+  /// Selects the cookies `context` would send, without flattening them.
+  ///
+  /// This is **the** send-selection operation. `header` is a thin renderer
+  /// over it, so a collision case cannot be decided one way by `header` and
+  /// another way here. The returned `cookies` keep their full
+  /// `DetailedCookieObject` identity, and `omitted` explains what was left
+  /// out and why. An empty selection is a legitimate answer, not an error:
+  /// `omitted` is how a caller tells "no cookies at all" apart from
+  /// "everything was excluded".
+  ///
+  /// Throws synchronously (it reads an already-loaded snapshot) with the same
+  /// structured errors `header` throws.
+  #[napi(js_name = "sendView")]
+  pub fn send_view(
+    &self,
+    env: Env,
+    context: Either<String, SendContextObject>,
+  ) -> Result<SendViewObject> {
+    let view = self.view_for(env, context)?;
+    Ok(SendViewObject {
+      cookies: detailed_cookies_to_js(view.to_detailed_cookies())?,
+      header: view.header(),
+      omitted: send_omissions_to_js(view.omitted()),
+    })
+  }
+
   /// Derives a legacy `Cookie` request-header value for `context`. A bare
   /// string is sugar for `{ url: context }`: the conservative
   /// (`Subresource`/`Safe`) defaults, no top-level site, no container/
   /// partition selector.
   ///
+  /// Exactly `sendView(context).header`; use `sendView` when the selected
+  /// records or the omission counts matter.
+  ///
   /// A snapshot holding a CHIPS-partitioned or Firefox-container cookie
   /// rejects with `incomplete_send_context` (its `required` selector names on
   /// the error object) rather than silently merging isolated cookies into one
-  /// answer -- pass `topLevelSite` / `userContextId` / `privateBrowsingId`
+  /// answer -- pass `topLevelSite` / `userContextId` / `privateBrowsingId` /
+  /// `firstPartyDomain` / `geckoViewSessionContextId` / `originAttributes`
   /// to disambiguate.
   #[napi]
   pub fn header(&self, env: Env, context: Either<String, SendContextObject>) -> Result<String> {
+    Ok(self.view_for(env, context)?.header())
+  }
+
+  /// The one place a `SendContextObject` becomes a selection, shared by
+  /// `sendView` and `header` so neither can drift from the other.
+  fn view_for(&self, env: Env, context: Either<String, SendContextObject>) -> Result<SendView<'_>> {
     let context = match context {
       Either::A(url) => SendContext::url(url),
       Either::B(object) => send_context_from_object(object)?,
     };
     self
       .inner
-      .header(&context)
+      .send_view(&context)
       .map_err(|error| structured_error_with_env(env, &error))
   }
 }
@@ -1826,6 +2032,7 @@ fn prepare_read_task(
 
 pub struct JarTask {
   read: ReadTask,
+  loss: IsolationLoss,
 }
 
 impl Task for JarTask {
@@ -1837,22 +2044,53 @@ impl Task for JarTask {
   }
 
   fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
-    cookies_to_js(output.into_cookies())
+    // `into_jar_with` is the refusal, so it must run here and not in
+    // `compute`: `compute` produces the snapshot, and a snapshot is a
+    // perfectly valid thing to have built. The rejection travels the same
+    // `classify_fault` route every other async failure takes, so the JS
+    // loader's `decorateNativeError` attaches `rookieCode` and `required`
+    // exactly as it does for a `read` failure.
+    cookies_to_js(output.into_jar_with(self.loss).map_err(classify_fault)?)
   }
 }
 
-/// Convenience sugar for `read(options).cookies`.
+/// Convenience sugar for `read(options).cookies`, refusing when that flat
+/// shape would silently discard isolation.
 ///
-/// Warnings and isolation context are discarded; use `read` when either
-/// matters. JavaScript has no standard cookie-jar type, so this returns the
-/// binding's language-native flat `CookieObject[]` projection.
+/// Warnings are discarded; use `read` when they matter. JavaScript has no
+/// standard cookie-jar type, so this returns the binding's language-native
+/// flat `CookieObject[]` projection.
+///
+/// A snapshot holding a CHIPS-partitioned or Firefox-container cookie rejects
+/// with `isolation_loss_refused`, whose `required` names the same selector
+/// tokens `sendView`/`header` would demand. Either name a context with
+/// `read(...).sendView(...)`, or pass `allowIsolationLoss: true` to state
+/// that a flat list is acceptable anyway. A snapshot with no isolated rows
+/// resolves exactly as before.
 #[napi(js_name = "jar", ts_return_type = "Promise<Array<CookieObject>>")]
 pub fn jar(
-  options: ReadOptions,
+  options: JarOptions,
   cancellation: Option<&JsCancellationHandle>,
 ) -> Result<AsyncTask<JarTask>> {
+  let loss = if options.allow_isolation_loss == Some(true) {
+    IsolationLoss::Allow
+  } else {
+    IsolationLoss::Refuse
+  };
   Ok(AsyncTask::new(JarTask {
-    read: prepare_read_task(options, cancellation)?,
+    read: prepare_read_task(
+      ReadOptions {
+        browser: options.browser,
+        profile: options.profile,
+        include_expired: options.include_expired,
+        include_session: options.include_session,
+        timeout_ms: options.timeout_ms,
+        app_bound: options.app_bound,
+        select: options.select,
+      },
+      cancellation,
+    )?,
+    loss,
   }))
 }
 
@@ -2308,6 +2546,68 @@ mod tests {
       assert_eq!(error.status, Status::InvalidArg);
       assert_eq!(error.reason, "selectors are mutually exclusive");
     }
+  }
+
+  #[test]
+  fn ancestor_chain_accepts_only_the_two_documented_spellings() {
+    assert_eq!(parse_ancestor_chain(None).unwrap(), None);
+    assert_eq!(
+      parse_ancestor_chain(Some("same_site")).unwrap(),
+      Some(AncestorChain::SameSite)
+    );
+    assert_eq!(
+      parse_ancestor_chain(Some("cross_site")).unwrap(),
+      Some(AncestorChain::CrossSite)
+    );
+
+    // An unknown spelling must not fall through to the derived chain: the two
+    // values select different partitioned rows, so a silently ignored typo
+    // answers a different question than the caller asked.
+    for rejected in ["same-site", "SameSite", "crosssite", ""] {
+      let error = parse_ancestor_chain(Some(rejected))
+        .expect_err("an unknown ancestor chain must be rejected, not derived");
+      assert_eq!(error.status, Status::InvalidArg);
+      assert!(error.reason.contains("unknown ancestor chain"));
+    }
+  }
+
+  /// The omission projection reads its counts through `SendOmissions::entries`,
+  /// which is the core's declared vocabulary. This pins that every code it
+  /// yields lands in a field: a reason added to the core and not here would
+  /// otherwise vanish, and the counts would stop summing to the rows the
+  /// snapshot held.
+  #[test]
+  fn every_send_omission_code_lands_in_a_field() {
+    let omitted = rookie_cookies::SendOmissions::default();
+    let object = send_omissions_to_js(&omitted);
+
+    let codes: Vec<&'static str> = omitted.entries().map(|(code, _)| code).collect();
+    assert_eq!(
+      codes,
+      vec![
+        "expired",
+        "not_applicable",
+        "same_site",
+        "partition",
+        "ancestor_chain_unknown",
+        "unparsable_partition_key",
+        "origin",
+      ],
+      "the JS object's fields are this list, in this order"
+    );
+    assert_eq!(
+      (
+        object.expired,
+        object.not_applicable,
+        object.same_site,
+        object.partition,
+        object.ancestor_chain_unknown,
+        object.unparsable_partition_key,
+        object.origin
+      ),
+      (0, 0, 0, 0, 0, 0, 0),
+      "a default view reports every reason as zero, not as absent"
+    );
   }
 
   #[test]

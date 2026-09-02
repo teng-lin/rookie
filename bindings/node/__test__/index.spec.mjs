@@ -22,6 +22,13 @@ import rookieCookies, {
 
 const execFileAsync = promisify(execFile);
 
+// The cross-language isolation oracle. `__test__/isolation-corpus.spec.mjs`
+// drives the whole thing; the one case here reads its selector-token list from
+// the same file so the two cannot drift.
+const corpus = JSON.parse(
+  readFileSync(new URL("../../../tests/isolation_corpus/corpus.json", import.meta.url), "utf8"),
+);
+
 // Every function the loader (bindings/node/index.js) is expected to export
 // after patch-loader.js runs, per bindings/node/index.d.ts. Required native
 // functions are validated while the facade is constructed; this list also
@@ -366,6 +373,38 @@ test("ReadResult.header exposes structured synchronous request errors", async (t
     t.is(error.rookieCode, "invalid_url");
     t.is(error.stopReason, null);
     t.deepEqual(error.profileIds, []);
+    t.deepEqual(error.required, [], "a malformed URL demands no selector");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a synchronous incomplete_send_context names the selectors it wants", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rookie-node-header-required-"));
+  const dbPath = join(dir, "cookies.sqlite");
+  try {
+    // The isolation corpus store: every row carries a Firefox origin-attribute
+    // or partition identity, so a bare URL cannot say which one it means.
+    installDatabaseFixture(
+      dbPath,
+      new URL("fixtures/isolation-corpus-firefox.sqlite.base64", import.meta.url),
+    );
+    const snapshot = await rookieCookies.fromPath({ path: dbPath, includeExpired: true });
+
+    // The token list, its spelling, and its order are the corpus's, not this
+    // file's: `required` is a vocabulary a caller branches on, and the same
+    // list reaches Rust, Python, and the CLI.
+    const expected =
+      corpus.stores.firefox_isolated.jar.expect.error.required;
+
+    for (const call of [() => snapshot.header("https://attrs.rookie-a.test/"),
+                        () => snapshot.sendView("https://attrs.rookie-a.test/")]) {
+      const error = t.throws(call);
+      t.is(error.kind, "request");
+      t.is(error.code, "InvalidArg");
+      t.is(error.rookieCode, "incomplete_send_context");
+      t.deepEqual(error.required, expected);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

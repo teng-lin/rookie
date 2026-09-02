@@ -33,15 +33,34 @@ export declare class ReadResult {
   get browserId(): string | null
   get profileId(): string | null
   /**
+   * Selects the cookies `context` would send, without flattening them.
+   *
+   * This is **the** send-selection operation. `header` is a thin renderer
+   * over it, so a collision case cannot be decided one way by `header` and
+   * another way here. The returned `cookies` keep their full
+   * `DetailedCookieObject` identity, and `omitted` explains what was left
+   * out and why. An empty selection is a legitimate answer, not an error:
+   * `omitted` is how a caller tells "no cookies at all" apart from
+   * "everything was excluded".
+   *
+   * Throws synchronously (it reads an already-loaded snapshot) with the same
+   * structured errors `header` throws.
+   */
+  sendView(context: string | SendContextObject): SendViewObject
+  /**
    * Derives a legacy `Cookie` request-header value for `context`. A bare
    * string is sugar for `{ url: context }`: the conservative
    * (`Subresource`/`Safe`) defaults, no top-level site, no container/
    * partition selector.
    *
+   * Exactly `sendView(context).header`; use `sendView` when the selected
+   * records or the omission counts matter.
+   *
    * A snapshot holding a CHIPS-partitioned or Firefox-container cookie
    * rejects with `incomplete_send_context` (its `required` selector names on
    * the error object) rather than silently merging isolated cookies into one
-   * answer -- pass `topLevelSite` / `userContextId` / `privateBrowsingId`
+   * answer -- pass `topLevelSite` / `userContextId` / `privateBrowsingId` /
+   * `firstPartyDomain` / `geckoViewSessionContextId` / `originAttributes`
    * to disambiguate.
    */
   header(context: string | SendContextObject): string
@@ -327,13 +346,69 @@ export interface FromPathOptions {
 }
 
 /**
- * Convenience sugar for `read(options).cookies`.
+ * Convenience sugar for `read(options).cookies`, refusing when that flat
+ * shape would silently discard isolation.
  *
- * Warnings and isolation context are discarded; use `read` when either
- * matters. JavaScript has no standard cookie-jar type, so this returns the
- * binding's language-native flat `CookieObject[]` projection.
+ * Warnings are discarded; use `read` when they matter. JavaScript has no
+ * standard cookie-jar type, so this returns the binding's language-native
+ * flat `CookieObject[]` projection.
+ *
+ * A snapshot holding a CHIPS-partitioned or Firefox-container cookie rejects
+ * with `isolation_loss_refused`, whose `required` names the same selector
+ * tokens `sendView`/`header` would demand. Either name a context with
+ * `read(...).sendView(...)`, or pass `allowIsolationLoss: true` to state
+ * that a flat list is acceptable anyway. A snapshot with no isolated rows
+ * resolves exactly as before.
  */
-export declare function jar(options: ReadOptions, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+export declare function jar(options: JarOptions, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
+
+/**
+ * `ReadOptions` plus the one field only `jar` can honour.
+ *
+ * `allowIsolationLoss` is deliberately **not** on `ReadOptions`: `read`
+ * returns a snapshot that keeps every isolated identity, so the flag would
+ * have nothing to act on there and would be silently ignored by every
+ * non-jar call that passed it.
+ */
+export interface JarOptions {
+  browser: string
+  profile?: string
+  includeExpired?: boolean
+  /**
+   * Also includes the browser's declared session store (Gecko only; a
+   * no-op elsewhere). Defaults to `false` -- **unlike 0.6-beta**, naming a
+   * `profile` alone no longer imports session cookies. Omitting this on a
+   * migrated 0.6-beta caller fails silently: a smaller snapshot, no error.
+   */
+  includeSession?: boolean
+  timeoutMs?: number
+  /**
+   * `"disabled" | "injection_only" | "allow_elevated_fallback"`. Omitted
+   * means `"injection_only"`, which recovers Chrome v20 App-Bound keys
+   * without elevation. Pass `"disabled"` to skip v20 rows instead.
+   */
+  appBound?: AppBoundPolicy
+  /**
+   * Only `"legacy_first"` (the default) is representable here: a snapshot
+   * or flat extract returns one answer, so there is no "every profile" for
+   * `select` to name. Passing `"all"` rejects with
+   * `conflicting_profile_selection` before any I/O; use `report`/
+   * `browserReport` for every profile.
+   */
+  select?: 'legacy_first'
+  /**
+   * Produce the flat list even when the snapshot holds isolated rows.
+   *
+   * Defaults to `false`, which rejects with `isolation_loss_refused`. A flat
+   * `CookieObject[]` has no cell for a CHIPS partition key, a Firefox
+   * `partitionKey`, or container identity, so flattening an isolated
+   * snapshot turns cookies scoped to one browsing context into cookies that
+   * look like they belong everywhere. Setting this to `true` is the named
+   * decision that the loss is acceptable; the output is byte-for-byte what
+   * `read(...).cookies` returns.
+   */
+  allowIsolationLoss?: boolean
+}
 
 export declare function librewolf(domains?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, cancellation?: CancellationHandle | undefined | null): Promise<Array<CookieObject>>
 
@@ -515,7 +590,81 @@ export interface SendContextObject {
   method?: MethodClass
   userContextId?: number
   privateBrowsingId?: number
+  /**
+   * `"same_site" | "cross_site"`. Omitted means *derived*: same-site when
+   * the request site is within `topLevelSite`, cross-site otherwise. Set it
+   * explicitly to describe an `A -> B -> A` embed, whose request site and
+   * top-level site are equal even though an ancestor frame is cross-site.
+   */
+  ancestorChain?: AncestorChain
+  /**
+   * Selects a Firefox `firstPartyDomain` origin attribute. Once supplied, a
+   * row that does not carry this attribute is not a match.
+   */
+  firstPartyDomain?: string
+  /** Selects a Firefox `geckoViewSessionContextId` origin attribute. */
+  geckoViewSessionContextId?: string
+  /**
+   * Selects **opaque** rows by their verbatim Firefox `originAttributes`
+   * suffix -- rows carrying an attribute name this build does not know, or a
+   * `partitionKey` it cannot parse. Such a row is omitted from every send
+   * view, and naming its stored value exactly is the only way to select it.
+   * Pass the value from `context.originAttributes` rather than rebuilding
+   * it: the comparison is byte equality against what the browser stored.
+   */
+  originAttributes?: string
   nowEpochSeconds?: number
+}
+
+/**
+ * Rows a send view left out, counted by the first reason each failed.
+ *
+ * Every reason is always present, zeroes included, so the shape is fixed
+ * across releases. A row is counted exactly once, under the first stage it
+ * failed.
+ */
+export interface SendOmissionsObject {
+  /**
+   * Rows whose expiry had passed at the send-time clock. Applied regardless
+   * of `includeExpired`: retaining an expired cookie in an inventory is not
+   * a licence to send it.
+   */
+  expired: number
+  /** Rows the RFC 6265 domain, path, `Secure`, or octet rules excluded. */
+  notApplicable: number
+  /** Rows a `SameSite` attribute excluded for this context. */
+  sameSite: number
+  /** Rows whose partition key or ancestor bit named a different context. */
+  partition: number
+  /**
+   * Partitioned Chromium rows whose store predates `has_cross_site_ancestor`.
+   * The bit is part of partition-key equality, so a row that never recorded
+   * it is omitted rather than assumed.
+   */
+  ancestorChainUnknown: number
+  /** Rows whose partition key no parser in this build understood. */
+  unparsablePartitionKey: number
+  /**
+   * Rows excluded by a container or origin-attribute selector, including
+   * rows carrying an origin attribute this build does not recognize.
+   */
+  origin: number
+}
+
+/**
+ * The cookies one `SendContext` selects, before they are flattened into a
+ * header string.
+ */
+export interface SendViewObject {
+  /**
+   * The selected records, in the order `header` renders them: longest path
+   * first, then by name.
+   */
+  cookies: Array<DetailedCookieObject>
+  /** The same selection rendered as a `Cookie` request-header value. */
+  header: string
+  /** What was left out, and why. */
+  omitted: SendOmissionsObject
 }
 
 /**
@@ -562,6 +711,7 @@ export declare function zen(domains?: Array<string> | undefined | null, timeoutM
 export type AppBoundPolicy = 'disabled' | 'injection_only' | 'allow_elevated_fallback'
 export type ResourceKind = 'navigation' | 'subresource'
 export type MethodClass = 'safe' | 'unsafe'
+export type AncestorChain = 'same_site' | 'cross_site'
 // napi-rs v2 generated these public aliases; retain them across the v3
 // generator migration so existing TypeScript imports remain source-compatible.
 export type JsCancellationHandle = CancellationHandle
@@ -577,7 +727,11 @@ export interface RookieError extends Error {
   sourceKind: string | null
   targetOs: string | null
   pathRedacted: boolean
-  /** The SendContext selectors incomplete_send_context says are missing. Empty otherwise. */
+  /**
+   * Selector tokens the snapshot demands: the ones incomplete_send_context
+   * says a SendContext did not supply, and the ones isolation_loss_refused
+   * says a flat projection would have needed. Empty for every other code.
+   */
   required: string[]
 }
 /** Linux-only browsers */

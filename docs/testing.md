@@ -99,7 +99,14 @@ After `npm ci --omit=optional && npm run build` in `bindings/node`
 ```console
 npm test
 npm run typecheck
+npm run test:worker-panic
 ```
+
+`npm test` includes `__test__/isolation-corpus.spec.mjs`, which drives
+`sendView`, `header`, and `jar` against `tests/isolation_corpus/corpus.json`
+(see below) using the committed base64 stores, so no Python is needed at test
+time. `test:worker-panic` needs the `test-support` feature, so build with
+`npm run build:test` when running it.
 
 Ignored real-browser Rust tests (`rookie-rs/tests/e2e_chrome.rs`,
 `e2e_firefox.rs`) only run when CI (or you) seeds a profile and passes

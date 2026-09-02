@@ -663,6 +663,9 @@ function retypeSelect(interfaceName, literalType) {
 }
 
 retypeSelect('ReadOptions', "'legacy_first'")
+// JarOptions repeats ReadOptions' fields (allowIsolationLoss is deliberately
+// not on ReadOptions), so it repeats the same finite `select` too.
+retypeSelect('JarOptions', "'legacy_first'")
 retypeSelect('ReportOptions', "'legacy_first' | 'all'")
 
 // NAPI-RS emits declarations for the platform doing the build. Remove only
@@ -701,6 +704,7 @@ ${facadeMarker}
 export type AppBoundPolicy = 'disabled' | 'injection_only' | 'allow_elevated_fallback'
 export type ResourceKind = 'navigation' | 'subresource'
 export type MethodClass = 'safe' | 'unsafe'
+export type AncestorChain = 'same_site' | 'cross_site'
 // napi-rs v2 generated these public aliases; retain them across the v3
 // generator migration so existing TypeScript imports remain source-compatible.
 export type JsCancellationHandle = CancellationHandle
@@ -716,7 +720,11 @@ export interface RookieError extends Error {
   sourceKind: string | null
   targetOs: string | null
   pathRedacted: boolean
-  /** The SendContext selectors incomplete_send_context says are missing. Empty otherwise. */
+  /**
+   * Selector tokens the snapshot demands: the ones incomplete_send_context
+   * says a SendContext did not supply, and the ones isolation_loss_refused
+   * says a flat projection would have needed. Empty for every other code.
+   */
   required: string[]
 }
 ${legacyPlatformDeclarations()}
