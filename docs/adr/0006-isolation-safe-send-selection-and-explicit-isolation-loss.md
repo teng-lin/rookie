@@ -141,10 +141,17 @@ selector, never a default. A stored `None` (unknown) never matches a supplied
 selector, and a supplied selector never matches a stored unrecognized
 attribute name: an unrecognized name can only be reached by the exact
 `origin_attributes` raw-suffix selector (Decision 5), never inferred from the
-five typed fields. The raw selector is an exact string comparison against
-every row's stored suffix, ANDed with the typed selectors — so `""` and `"^"`
-are distinct selectors even though both count as "present" for the default
-fill.
+five typed fields. Call such a row *opaque* (an unrecognized name, an
+unreadable value under a known name, or — for the partition gate below — an
+unparsable `partitionKey`). The raw selector governs opaque rows only: an
+opaque row is selected iff the supplied `origin_attributes` equals its
+stored suffix byte-for-byte, and is otherwise omitted; a non-opaque row
+ignores the raw selector and is governed by the typed selectors and the
+partition verdict alone. Scoping it this way keeps one future-Firefox row
+from collapsing every header in that store to a single stored suffix, which
+would make unpartitioned and partitioned rows unable to combine. `""` and
+`"^"` are distinct raw selectors even though both count as "present" for the
+default fill.
 
 **Missing selector is demanded only when observed.** A token is added to
 `required` if and only if some row in the snapshot positively observes a

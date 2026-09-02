@@ -149,10 +149,12 @@ Known keys and their selector mapping:
 | `partitionKey` | derived into `PartitionIdentity` (see below) | none (unpartitioned) |
 | any other key, or an unreadable value under a known key | only reachable via the raw `origin_attributes` selector | fails closed — never treated as default |
 
-The raw `origin_attributes` selector is an exact comparison against every
-row's stored suffix, ANDed with the typed selectors. For Firefox rows it also
-satisfies the partition gate when the stored `partitionKey` is unparsable,
-because the suffix names the partition verbatim.
+The raw `origin_attributes` selector governs only *opaque* rows (an
+unrecognized attribute name, an unreadable value under a known name, or an
+unparsable `partitionKey`): such a row is selected iff the selector equals
+its stored suffix byte-for-byte. Non-opaque rows ignore it and are governed
+by the typed selectors and the partition verdict, so one future-Firefox row
+never prevents unpartitioned and partitioned rows from combining.
 
 `partitionKey` grammar: `(scheme,host[,port][,f])`, strict. Anything else is
 `Unparsable`. Verdict, given a parsed tuple:
