@@ -6,15 +6,34 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+This release closes the two isolation gaps issue #331 tracked: send selection
+now matches the complete partition and origin identity both engines persist,
+and no projection that cannot represent that identity produces one silently.
+See [ADR 0006](docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)
+for the decisions and
+[the program record](docs/design/isolation-safe-send-selection.md) for how
+they were implemented.
+
+**Nothing is renamed.** `read`, `header`, `cookies`, `jar`, `as_jar`,
+`as_list`, `detailed_cookies`, and every named compatibility helper keep their
+names in every language, and every 0.6 call site still compiles: the opt-in
+arrives as a defaulted keyword (`allow_isolation_loss`), a new options type
+that is a superset of the old one (Node's `JarOptions`), or a separate method
+(`jar_with`/`into_jar_with`). What changes is that some calls that always
+succeeded can now fail, and that an explicit, named opt-in exists for the
+caller who has already decided isolation loss is acceptable.
+
 ### Added
 
 - `ReadResult::send_view` returns the cookies a `SendContext` selects, before
   they are flattened into a header string. It borrows the snapshot, so the
   selected rows keep their full `DetailedCookie` identity, and
   `SendView::omitted` reports how many rows were left out under each of seven
-  stable reasons, in a fixed order. `header` is now a thin renderer over this
-  one operation, so no binding and no command can grow its own copy of the
-  send-match predicate.
+  stable reasons (`expired`, `not_applicable`, `same_site`, `partition`,
+  `ancestor_chain_unknown`, `unparsable_partition_key`, `origin`), in a fixed
+  serialization order, each row counted exactly once under the first stage it
+  failed. `header` is now a thin renderer over this one operation, so no
+  binding and no command can grow its own copy of the send-match predicate.
 - `SendContext` gained four selectors: `ancestor_chain`, `first_party_domain`,
   `gecko_view_session_context_id`, and `origin_attributes`. `AncestorChain` is
   a new public `SameSite`/`CrossSite` enum. Without an explicit
@@ -23,7 +42,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caller describes a nested `A -> B -> A` embed, which the derivation alone
   cannot see. The selector-token vocabulary gained `first_party_domain`,
   `gecko_view_session_context_id`, and `origin_attributes`, appended after the
-  three tokens 0.6 defined rather than reordering them.
+  three tokens 0.6 defined rather than reordering them. `ancestor_chain` and
+  the Firefox partition port are never demanded, because both are derived.
+- `ReadResult::jar`, `into_jar`, `jar_with`, and `into_jar_with` are new
+  methods, together with the public `IsolationLoss` enum (`Refuse` by default,
+  `Allow` for the opt-in) and the new `RequestError::IsolationLossRefused`
+  variant, code `isolation_loss_refused`, carrying `isolated_rows` and the
+  same `required` selector tokens `IncompleteSendContext` uses. Today's
+  infallible flatten is unchanged and still reached through
+  `cookies()`/`into_cookies()`.
 - A new `unknown_ancestor_chain` read warning counts partitioned Chromium rows
   whose store predates the `has_cross_site_ancestor` column, mirroring the
   existing `unparsable_partition_key` warning.
@@ -52,84 +79,93 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolated snapshot instead of flattening it. The stubs gained an
   `AncestorChain` literal alias and `SendOmissions` / `SendView` TypedDicts, so
   a typed consumer can name what `send_view` returns.
-
-- The CLI gained a `send-view` subcommand, printing the whole selection behind
-  `header` as one JSON object: `cookies` (the selected records, in the same
+- **Node:** `ReadResult.sendView(context)` returns the selected
+  `DetailedCookieObject[]` in header order, the rendered `header` string, and
+  an `omitted` object carrying all seven omission reasons as numbers
+  (`expired`, `notApplicable`, `sameSite`, `partition`, `ancestorChainUnknown`,
+  `unparsablePartitionKey`, `origin`), zeroes included. `ReadResult.header` now
+  renders from it rather than repeating the match. `SendContextObject` gained
+  `ancestorChain` (typed as the new `AncestorChain` union,
+  `'same_site' | 'cross_site'`; any other string rejects with `InvalidArg`),
+  `firstPartyDomain`, `geckoViewSessionContextId`, and `originAttributes`.
+  `RookieError.required` is now documented as covering `isolation_loss_refused`
+  as well as `incomplete_send_context`.
+- **CLI:** a `send-view` subcommand prints the whole selection behind `header`
+  as one JSON object: `cookies` (the selected records, in the same
   serialization `--format detailed` emits), `header` (the string `header`
   would print), and `omitted` (every omission reason with its count, zeroes
   included, in the stable declared order). `header` and `send-view` share one
-  flat selector -- the existing `--url`, `--top-level-site`, `--resource`,
+  flat selector — the existing `--url`, `--top-level-site`, `--resource`,
   `--method`, `--user-context-id` and `--private-browsing-id`, joined by the
   new `--ancestor-chain same-site|cross-site`, `--first-party-domain`,
   `--gecko-view-session-context-id`, `--origin-attributes`, and `--now <epoch
-  seconds>` -- so a context expressed for one command is expressible for the
-  other. `from-path --domains` stays a flat, compatibility-only route and
-  takes none of this surface.
-- Read-warning text now reads `N rows affected (code)` rather than
-  `skipped N rows (code)`, in Rust and Python alike. Not every warning code
-  drops a row: `unparsable_partition_key` and `unknown_ancestor_chain` count
-  rows the snapshot keeps and no send context can select, so "skipped" was
-  wrong for them. The `code` and `count` fields are unchanged and remain the
-  thing to branch on; this text has never been a stable contract.
-- CLI error objects may now carry a third field. The rule is unchanged in
-  shape -- every object has `code` and `message`, a given `code` may define
+  seconds>` — so a context expressed for one command is expressible for the
+  other. `from-path --domains` stays a flat, compatibility-only route and takes
+  none of this surface.
+- **CLI:** error objects may now carry a third field. The rule is unchanged in
+  shape — every object has `code` and `message`, a given `code` may define
   further documented fields, and a consumer must ignore keys it does not
-  recognize -- and `required` is the first such field, defined for exactly
-  `incomplete_send_context` and `isolation_loss_refused`. It lists the
-  selector tokens the call is missing, drawing on the same vocabulary the
-  Python and Node bindings already expose.
-- The Node binding gained `ReadResult.sendView(context)`, returning the
-  selected `DetailedCookieObject[]` in header order, the rendered `header`
-  string, and an `omitted` object carrying all seven omission reasons as
-  numbers (`expired`, `notApplicable`, `sameSite`, `partition`,
-  `ancestorChainUnknown`, `unparsablePartitionKey`, `origin`), zeroes
-  included. `ReadResult.header` now renders from it rather than repeating the
-  match. `SendContextObject` gained `ancestorChain` (typed as the new
-  `AncestorChain` union, `'same_site' | 'cross_site'`; any other string
-  rejects with `InvalidArg`), `firstPartyDomain`,
-  `geckoViewSessionContextId`, and `originAttributes`. `RookieError.required`
-  is now documented as covering `isolation_loss_refused` as well as
-  `incomplete_send_context`.
+  recognize — and `required` is the first such field, defined for exactly
+  `incomplete_send_context` and `isolation_loss_refused`. It lists the selector
+  tokens the call is missing, drawing on the same vocabulary the Python and
+  Node bindings already expose.
 
 ### Changed
 
-- `header` now matches the full partition identity both engines actually use,
-  instead of reducing each engine's key to a scheme and a host. Chromium's
-  `has_cross_site_ancestor` bit is part of the comparison, so two rows that
-  differ only by ancestor chain no longer both match one context. Firefox's
-  `partitionKey` is parsed strictly as `(scheme,host[,port][,f])`, so partitions
-  differing only by port or by the foreign-ancestor bit are distinct
+- **Breaking.** `header` now matches the full partition identity both engines
+  actually use, instead of reducing each engine's key to a scheme and a host.
+  Chromium's `has_cross_site_ancestor` bit is part of the comparison, so two
+  rows that differ only by ancestor chain no longer both match one context.
+  Firefox's `partitionKey` is parsed strictly as `(scheme,host[,port][,f])`, so
+  partitions differing only by port or by the foreign-ancestor bit are distinct
   identities, and a tuple in any other shape now matches nothing rather than
   matching on whichever leading fields happened to parse. All five Firefox
   `OriginAttributes` equality fields are compared, and a row carrying an
-  attribute name this build does not recognize is omitted from every send view
-  until a caller names its `origin_attributes` value verbatim.
-- Two send-match outcomes change for Firefox rows that 0.6 got wrong in
-  opposite directions. `user_context_id(0)` and `private_browsing_id(0)` now
-  select rows whose stored suffix omits the attribute, where 0.6 matched
-  nothing at all: Firefox omits a default-valued attribute, so an empty suffix
-  is a positive statement that the row is in the default container. And a
-  partitioned Firefox row is no longer sent to a first-party context, where 0.6
-  sent it: a partition is by construction not the unpartitioned default.
-- A Chromium partition key that names an explicit port is no longer matched
-  against a top-level site that does not. 0.6 stripped any trailing port from
-  the key, which was the one step in the comparison that widened it. Chromium
-  serializes a site without a port, so no key a current browser writes is
-  affected.
-- A partitioned Chromium row whose store never recorded the ancestor bit is
-  omitted from every send view rather than sent to any context whose key
-  otherwise matches. Only stores written before 2024 lack that column. The row
-  stays in the snapshot inventory, and the loss is counted both per view and as
-  a read warning, so it is visible rather than silent.
-- `jar` fails closed. The free `jar` function, `ReadResult::jar`, and
-  `ReadResult::into_jar` now refuse a snapshot that holds a partitioned,
+  attribute name this build does not recognize — or an unreadable value under
+  one it does — is omitted from every send view until a caller names its
+  `origin_attributes` value verbatim. That exact match is necessary, not
+  sufficient: such a row still passes through the partition gate and the typed
+  selectors.
+- **Breaking.** A Chromium partition key that names an explicit port is no
+  longer matched against a top-level site that does not. 0.6 stripped any
+  trailing port from the key, which was the one step in the comparison that
+  widened it. Chromium serializes a site without a port, so no key a current
+  browser writes is affected.
+- **Breaking.** A partitioned Chromium row whose store never recorded the
+  ancestor bit is omitted from every send view rather than sent to any context
+  whose key otherwise matches. Only stores written before 2024 lack that
+  column. The row stays in the snapshot inventory, and the loss is counted both
+  per view (`ancestor_chain_unknown`) and as the `unknown_ancestor_chain` read
+  warning, so it is visible rather than silent.
+- **Breaking.** Two send-match outcomes change for Firefox rows that 0.6 got
+  wrong in opposite directions. `user_context_id(0)` and
+  `private_browsing_id(0)` now select rows whose stored suffix omits the
+  attribute, where 0.6 matched nothing at all: Firefox omits a default-valued
+  attribute, so a present suffix is a positive statement that the row is in the
+  default container. And a partitioned Firefox row is no longer sent to a
+  first-party context, where 0.6 sent it: a partition is by construction not
+  the unpartitioned default.
+- **Breaking.** Same-site now means that the request host equals the top-level
+  site's host or is a subdomain of it, on the same scheme. It previously meant
+  literal host equality. A request to `www.example.com` under a
+  `https://example.com` top-level site is therefore same-site where it used to
+  be cross-site. Sibling subdomains remain cross-site, because neither is a
+  subdomain of the other, and an IPv4 or IPv6 literal on either side requires
+  exact host equality — which is what keeps this sound without a public-suffix
+  list. The rule only widens what `SameSite=Lax` and `SameSite=Strict` admit;
+  nothing that was sent before is withheld now. A request is same-site only
+  when the two sites match and no ancestor is cross-site, so the new
+  `ancestor_chain` selector set to `CrossSite` withholds `Lax` and `Strict`
+  even on a first-party URL, which is how a browser treats an `A -> B -> A`
+  frame.
+- **Breaking.** `jar` fails closed. The free `jar` function, `ReadResult::jar`,
+  and `ReadResult::into_jar` refuse a snapshot that holds a partitioned,
   containered, or otherwise isolated cookie, returning the new
   `isolation_loss_refused` request error rather than a flat list that has
   silently merged two browsing contexts. The eight-field shape has no cell for
   a partition key or a container id, so a successful call used to be
   indistinguishable from one that dropped scoped credentials into an unscoped
-  bag. Nothing is renamed, and a snapshot with no isolated rows returns `Ok`
-  exactly as before.
+  bag. A snapshot with no isolated rows returns `Ok` exactly as before.
 
   To keep the previous behavior, say so: `ReadResult::jar_with` and
   `ReadResult::into_jar_with` take the new `IsolationLoss` enum, and
@@ -140,6 +176,38 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cookies()` and `into_cookies()` are unaffected and stay infallible. They are
   the inventory projection, for seeing what the browser stored; `jar` is the
   one that promises the result is safe to send.
+- **Breaking (Python).** `ReadResult.as_jar()` and the free `jar(...)` fail
+  closed on isolation loss, the same policy the Rust `jar` gained. An
+  `http.cookiejar.CookieJar` has no field for a CHIPS partition key, a Firefox
+  `partitionKey` tuple, or container identity, so a snapshot holding any
+  isolated row now raises `RookieRequestError` with
+  `code == "isolation_loss_refused"` rather than returning a jar that looks
+  correct and holds credentials scoped to a context the caller never named.
+  Both gained `allow_isolation_loss: bool = False`; passing `True` produces
+  byte-for-byte what they returned before, and a snapshot with no isolated rows
+  is unaffected. `as_list()` is also unaffected and stays infallible — it is
+  the inventory projection, for looking at raw rows rather than sending them —
+  and `to_cookiejar` / `to_netscape` remain pure functions with no policy of
+  their own.
+- **Python:** the `required` attribute on `RookieRequestError` is now
+  populated for `isolation_loss_refused` as well as `incomplete_send_context`,
+  drawing on one selector vocabulary. For the former it names the selectors a
+  `send_view()` / `header()` call would need for that snapshot; for the latter,
+  the ones the call did not receive. Code that already branches on one's
+  `required` needs no second vocabulary, and the attribute stays present and
+  empty on every other error.
+- **Breaking (Node).** `jar` fails closed and takes a new `JarOptions`. Against
+  a snapshot holding a partitioned or containered cookie it now rejects with
+  `rookieCode === "isolation_loss_refused"`, whose `required` names the same
+  selector tokens `sendView`/`header` demand, instead of resolving a flat
+  `CookieObject[]` that has silently merged two browsing contexts. Pass
+  `allowIsolationLoss: true` to opt in; the resolved value is then
+  byte-for-byte `read(...).cookies`, and a snapshot with no isolated rows
+  resolves either way exactly as before. `JarOptions` is every `ReadOptions`
+  field plus that flag — deliberately not on `ReadOptions` itself, where a
+  non-jar call would have silently ignored it; `read` and `fromPath` reject
+  the flag by name, before any I/O, rather than accepting and dropping it.
+  `snapshot.cookies` and `snapshot.detailedCookies` are unaffected.
 - **Breaking (CLI).** `read` and `from-path` now route `--format json` and
   `--format netscape` through the fail-closed jar, so a snapshot holding
   isolated cookies exits 1 with `isolation_loss_refused` instead of printing a
@@ -151,56 +219,17 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused, so it needs no flag.
 
   `from-path --domains` is covered by the same policy. That route runs a job
-  which returns cookies directly, with no snapshot for the jar to refuse
-  from, so the CLI opens the path a second time purely to ask the policy
-  question and discards the result. The flat job itself is untouched and its
-  output is byte-identical; what changes is that an isolated store now
-  refuses there too, instead of leaving one route where a merged list still
-  printed.
-- Same-site now means that the request host equals the top-level site's host or
-  is a subdomain of it, on the same scheme. It previously meant literal host
-  equality. A request to `www.example.com` under a `https://example.com`
-  top-level site is therefore same-site where it used to be cross-site. Sibling
-  subdomains remain cross-site, because neither is a subdomain of the other,
-  which is what keeps this sound without a public-suffix list. The rule only
-  widens what `SameSite=Lax` and `SameSite=Strict` admit; nothing that was sent
-  before is withheld now. A request is same-site only when the two sites match
-  and no ancestor is cross-site, so the new `ancestor_chain` selector set to
-  `CrossSite` withholds `Lax` and `Strict` even on a first-party URL, which is
-  how a browser treats an `A -> B -> A` frame.
-- **Python:** `ReadResult.as_jar()` and the free `jar(...)` fail closed on
-  isolation loss, the same policy the Rust `jar` gained. An
-  `http.cookiejar.CookieJar` has no field for a CHIPS partition key, a Firefox
-  `partitionKey` tuple, or container identity, so a snapshot holding any
-  isolated row now raises `RookieRequestError` with
-  `code == "isolation_loss_refused"` rather than returning a jar that looks
-  correct and holds credentials scoped to a context the caller never named.
-  Both gained `allow_isolation_loss: bool = False`; passing `True` produces
-  byte-for-byte what they returned before. Nothing is renamed, and a snapshot
-  with no isolated rows is unaffected. `as_list()` is also unaffected and stays
-  infallible — it is the inventory projection, for looking at raw rows rather
-  than sending them — and `to_cookiejar` / `to_netscape` remain pure functions
-  with no policy of their own.
-- **Python:** the `required` attribute on `RookieRequestError` is now
-  populated for `isolation_loss_refused` as well as `incomplete_send_context`,
-  drawing on one selector vocabulary. For the former it names the selectors a
-  `send_view()` / `header()` call would need for that snapshot; for the latter,
-  the ones the call did not receive. Code that already branches on one's
-  `required` needs no second vocabulary, and the attribute stays present and
-  empty on every other error.
-
-- The Node `jar` fails closed and takes a new `JarOptions`. Against a snapshot
-  holding a partitioned or containered cookie it now rejects with
-  `rookieCode === "isolation_loss_refused"`, whose `required` names the same
-  selector tokens `sendView`/`header` demand, instead of resolving a flat
-  `CookieObject[]` that has silently merged two browsing contexts. Pass
-  `allowIsolationLoss: true` to opt in; the resolved value is then
-  byte-for-byte `read(...).cookies`, and a snapshot with no isolated rows
-  resolves either way exactly as before. `JarOptions` is every `ReadOptions`
-  field plus that flag -- deliberately not on `ReadOptions` itself, where a
-  non-jar call would have silently ignored it; `read` and `fromPath` reject
-  the flag by name, before any I/O, rather than accepting and dropping it.
-  `snapshot.cookies` and `snapshot.detailedCookies` are unaffected.
+  which returns cookies directly, with no snapshot for the jar to refuse from,
+  so the CLI opens the path a second time purely to ask the policy question and
+  discards the result. The flat job itself is untouched and its output is
+  byte-identical; what changes is that an isolated store now refuses there too,
+  instead of leaving one route where a merged list still printed.
+- Read-warning text now reads `N rows affected (code)` rather than
+  `skipped N rows (code)`, in Rust, Python, and Node alike. Not every warning
+  code drops a row: `unparsable_partition_key` and `unknown_ancestor_chain`
+  count rows the snapshot keeps and no send context can select, so "skipped"
+  was wrong for them. The `code` and `count` fields are unchanged and remain
+  the thing to branch on; this text has never been a stable contract.
 
 ### Fixed
 

@@ -30,6 +30,7 @@ cargo run -p xtask --locked -- check-cfg-locations
 cargo run -p xtask --locked -- check-stage-boundary
 
 python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
+python3 -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
 python3 -m unittest discover -s tests/release -p 'test_*.py' -v
 python3 scripts/check-doc-snippets.py
 python3 scripts/check-release.py
@@ -55,6 +56,20 @@ After `maturin develop --release --locked` in `bindings/python`:
 python -m unittest discover -s tests/python -p 'test_*.py' -v
 python scripts/check-python-stubs.py --python "$(command -v python)"
 ```
+
+`check-python-stubs.py` does two things against the *installed* extension.
+`mypy.stubtest` compares `rookie_cookies.rookie_cookies.pyi` to the compiled
+module, with the deliberate divergences held as whole messages in
+`bindings/python/stubtest-allowlist.txt`. Then mypy type-checks
+`tests/python_typing/consumer.py`, a consumer-perspective fixture no runtime
+suite executes: it is where `assert_type` pins what `send_view` returns, what
+`as_jar(allow_isolation_loss=...)` and
+`compatibility_cookies(allow_isolation_loss=...)` accept, and that
+`RookieRequestError.required` is `list[str]`. It is the Python counterpart of Node's
+`__test__/typing/consumer.ts` below. CI runs this script in the same job as
+the wheel's unit tests, on every OS and interpreter in the Python matrix, so
+runtime and stub parity are proven against the shipped artifact rather than a
+representative cell.
 
 ### Python binding coverage
 
@@ -175,10 +190,13 @@ logs, errors, help/version, profiles, spaces/Unicode paths).
 
 `tests/isolation_corpus/` (top level, deliberately not under `tests/e2e/`) is
 a hand-authored oracle for the isolation-safe send-selection semantics ADR
-0006 defines: `corpus.json` names four synthetic stores (Chromium/Firefox,
-isolated/plain) and a set of `SendContext` cases, each with an expected
-selected set, header, omission counts, or a structured `incomplete_send_context`
-error, plus a per-store `jar` verdict. `build_isolation_corpus.py` (stdlib
+0006 defines: `corpus.json` names five synthetic stores (`chromium_isolated`,
+`chromium_plain`, `firefox_isolated`, `firefox_unknown_attr`,
+`firefox_plain`) and a set of `SendContext` cases, each with an expected
+selected set, header, and omission counts, or a structured error with its
+`code` and `required` tokens (`incomplete_send_context` or
+`isolation_loss_refused`), plus a per-store `jar` verdict covering both the
+refusal and the byte-identity of the opted-in output. `build_isolation_corpus.py` (stdlib
 only) materializes the stores as real Chromium `Cookies`/Firefox
 `cookies.sqlite` databases; `test_build_isolation_corpus.py` validates the
 corpus shape and checks a fresh build against the committed Node base64
@@ -191,17 +209,31 @@ partition/container coverage is the `e2e-depth.yml` lane described below.
 python3 -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
 ```
 
-Each language binding drives the same corpus from its own suite, so a
-selector that answers differently in one language fails there rather than in
-review. Python's side is `tests/python/test_isolation_corpus.py`, which builds
-every store with the generator above and asserts the ordered selected set, the
-header, the full omission map, and each store's `jar` verdict — plus
-`header(ctx) == send_view(ctx)["header"]` for every case. It runs with the rest
-of `tests/python`, so it needs the wheel installed. A corpus case that no
-implementation of ADR 0006 can satisfy is excluded there by id, with the
-reason recorded beside it and a test that fails if the excluded id ever stops
-existing; the exclusion is never a way to paper over a binding that disagrees
-with the corpus.
+All four surfaces drive the same corpus from their own suites, so a selector
+that answers differently in one language fails there rather than in review:
+
+| Surface | Consumer | Run with |
+| --- | --- | --- |
+| Rust | `rookie-rs/tests/isolation_corpus.rs` (seeds via `rusqlite`) | `cargo test -p rookie-cookies --test isolation_corpus --locked` |
+| CLI | `cli/tests/isolation_corpus.rs` (drives the built binary) | `cargo test -p rookie-cookies-cli --locked` |
+| Python | `tests/python/test_isolation_corpus.py` | `python -m unittest discover -s tests/python -p 'test_*.py'` |
+| Node | `__test__/isolation-corpus.spec.mjs` (committed base64 stores) | `npm test` |
+
+Rust, Python, and Node each assert the ordered selected set, the header, the
+full omission map, and each store's `jar` verdict, plus
+`header(ctx) == send_view(ctx).header` for every case, so the renderer and the
+selection can never diverge in a binding. The Python side builds every store
+with the generator above and needs the wheel installed; the Node side reads
+the committed fixtures and needs no Python at test time.
+
+The CLI consumer is deliberately narrower, and the file says why: `send-view`
+and `header` read a *discovered* profile, so the Firefox stores are seeded as
+a real profile under an isolated `HOME` and every Firefox case is replayed
+through both subcommands, while Chromium discovery would reach the platform
+keychain or DPAPI — which a unit test must not do. The Chromium stores are
+driven through `from-path` instead, where what the CLI adds over the core's
+own corpus test is the flat-format loss policy: each store's declared `jar`
+verdict, with and without `--allow-isolation-loss`.
 
 ## Real-browser E2E (PR subset / nightly / main)
 

@@ -2,7 +2,10 @@
 
 - **Author:** maintainers
 - **Date:** 2026-09-01
-- **Status:** Active program record (PR 0 of 7 in review; PRs 1–6 open)
+- **Status:** Active program record. PRs 0–5 are merged on
+  `worktree-issue-331`; PR 6 (e2e depth extension and the final documentation
+  sweep) is in progress. See the PR plan and acceptance mapping below for the
+  commits that carried each one.
 - **Crate/packages:** `rookie-rs`, `bindings/python` (`rookie_cookies`),
   `bindings/node` (`rookie-cookies`), `cli`
 - **Release context:** 0.7
@@ -183,8 +186,8 @@ its `CookieContext.origin_attributes` is populated.
 | `top_level_site` | `Option<String>` (existing) | Any row has a non-`Unpartitioned` partition identity |
 | `user_context_id` | `Option<u32>` (existing) | A row has a non-`None`, non-`Some(0)` value |
 | `private_browsing_id` | `Option<u32>` (existing) | A row has a non-`None`, non-`Some(0)` value |
-| `first_party_domain` | `Option<String>` (new) | A row has a stored value |
-| `gecko_view_session_context_id` | `Option<String>` (new) | A row has a stored value |
+| `first_party_domain` | `Option<String>` (new) | A row has a stored, non-empty value (the filled `""` default never demands) |
+| `gecko_view_session_context_id` | `Option<String>` (new) | A row has a stored, non-empty value (the filled `""` default never demands) |
 | `origin_attributes` | `Option<String>` (new; exact raw suffix) | A row has an unrecognized attribute name |
 | `ancestor_chain` | `Option<AncestorChain>` (new) | Never demanded — derived from `top_level_site` when absent |
 | Firefox partition port | *(no field)* | Never demanded — derived from `top_level_site`'s explicit port |
@@ -379,68 +382,102 @@ with its own CLI test.
 
 ## PR plan
 
-- [x] **PR 0** — ADR 0006, this program record, Phase-0 doc corrections
-      (this change).
-- [ ] **PR 1** — Rust core: `isolation.rs`, `send_view.rs`, `SendContext`
+The plan below is the shape the program was designed in; the commits that
+carried each item are the record of how it actually landed. PR 3 was split in
+two — the corpus and generator (3a) landed before the Rust core so PR 1 could
+be written against a fixed oracle, and the Rust/CLI consumers (3b) landed
+after it. PRs 1 and 2 landed as one branch, because `jar`'s refusal predicate
+is the same "demanded selectors would be non-empty" computation PR 1
+introduces and splitting them would have meant shipping a half-wired
+`IsolationLoss`.
+
+- [x] **PR 0** — ADR 0006, this program record, Phase-0 doc corrections.
+      `6f5d624`, `299bc7a`, `4f15aad`, plus the review follow-ups `16c8762`,
+      `975f5b6`, `dbce572`, `473d3d4`, `f0dbfc1`.
+- [x] **PR 3a** — Isolation collision corpus and store generator, landed
+      first as the oracle PR 1 is written against. `489faa8`, `d89c66f`,
+      `b213da2`, merged as `5227018`.
+- [x] **PR 1** — Rust core: `isolation.rs`, `send_view.rs`, `SendContext`
       selector fields, `ReadResult::send_view`, `header()` delegation,
       `unknown_ancestor_chain` warning, public-API snapshots, unit and
-      collision tests, `CHANGELOG.md`.
-- [ ] **PR 2** — Rust jar policy: `IsolationLoss`, `jar`/`into_jar`/
+      collision tests, `CHANGELOG.md`. `4955ff5`.
+- [x] **PR 2** — Rust jar policy: `IsolationLoss`, `jar`/`into_jar`/
       `jar_with`/`into_jar_with`, `RequestError::IsolationLossRefused`.
-- [ ] **PR 3** — Isolation collision corpus, `rookie-rs/tests/isolation_corpus.rs`,
-      CLI `send-view` subcommand and selector flags, `--allow-isolation-loss`,
+      `c14c2ca`, merged with PR 1 as `4b7af91`.
+- [x] **PR 3b** — `rookie-rs/tests/isolation_corpus.rs`, CLI `send-view`
+      subcommand and selector flags, `--allow-isolation-loss`,
       `render_cli_error`'s new `required` field for `incomplete_send_context`
-      and `isolation_loss_refused` (the CLI emits neither today), with a CLI
-      test for each.
-- [ ] **PR 4** — Python binding: `send_view`, `compatibility_cookies`,
-      `as_jar`/`jar` opt-in kwargs, stub and typing updates.
-- [ ] **PR 5** — Node binding: `sendView`, `JarOptions.allowIsolationLoss`,
-      generated `.d.ts`/`.js` updates.
+      and `isolation_loss_refused`, with a CLI test for each, and the
+      `from-path --domains` policy gate. `0ac0714`, `6eb1219`, `7770ec3`,
+      merged as `623da20`. `b61477d`, which made the
+      `isolation_loss_refused` message language-neutral, landed on this lane
+      after the PR 1+2 merge even though its subject belongs to PR 2.
+- [x] **PR 4** — Python binding: `send_view`, `compatibility_cookies`,
+      `as_jar`/`jar` opt-in kwargs, stub and typing updates. `e0a1eea`,
+      `9170aa3`, merged as `614ee11`.
+- [x] **PR 5** — Node binding: `sendView`, `JarOptions.allowIsolationLoss`,
+      generated `.d.ts`/`.js` updates. `1ec0e0b`, `0bcde24`, merged as
+      `d9ee18f`.
 - [ ] **PR 6** — E2E depth extension, `browser_coverage.json` contract,
       final docs sweep (README/architecture/testing finalization beyond the
-      PR 0 prose corrections).
+      PR 0 prose corrections). In progress.
 
 ## Acceptance mapping (issue #331 checklist → PR)
 
-- Docs no longer claim `header()` collapses through `Cookie` → PR 0.
+- Docs no longer claim `header()` collapses through `Cookie` → PR 0
+  (`6f5d624`), finished by PR 6's documentation sweep.
 - Chromium ancestor bit gated; Firefox scheme/base domain/port/foreign bit;
   all Firefox `OriginAttributes` equality fields; unknown attributes fail
-  closed → PR 1.
-- One core selection producing both the detailed set and the header → PR 1.
+  closed → PR 1 (`4955ff5`).
+- One core selection producing both the detailed set and the header → PR 1
+  (`4955ff5`): `ReadResult::send_view`, with `header()` rendering from it.
 - Equivalent selector semantics and structured failures on Rust/Python/
-  Node/CLI → PRs 3–5 (the corpus asserts identical selected sets and
-  identical `code`/`required`).
+  Node/CLI → PRs 3a/3b, 4, 5 (`489faa8`, `0ac0714`, `6eb1219`, `e0a1eea`,
+  `1ec0e0b`); the corpus asserts identical selected sets and identical
+  `code`/`required` from all four surfaces.
 - `jar`/`as_jar` cannot silently flatten; eight-field output byte-stable
-  behind opt-in → PRs 2, 4, 5, and 3 (CLI).
-- Synthetic collision tests and real-browser context tests green → PRs 3, 6.
+  behind opt-in → PR 2 (`c14c2ca`), CLI in PR 3b (`6eb1219`, `7770ec3`),
+  Python in PR 4 (`e0a1eea`), Node in PR 5 (`1ec0e0b`).
+- Synthetic collision tests and real-browser context tests green → PR 3a
+  (`489faa8`) and PR 6.
 
 ## Open questions
 
 - Should `from-path --domains` gain the new selector surface, or stay
-  documented as compatibility-only indefinitely? Deferred; see ADR 0006 "Out
-  of scope."
+  documented as compatibility-only indefinitely? Still deferred (ADR 0006
+  "Out of scope"), but the route is no longer an isolation-loss bypass:
+  PR 3b (`7770ec3`) made it open the path a second time through `from_path`
+  and call `into_jar_with` purely as a policy gate, discarding that snapshot
+  before running the flat job. Its printed bytes are unchanged; what changes
+  is that an isolated store is now refused there too unless
+  `--allow-isolation-loss` is passed. The open question is only whether the
+  route should gain selectors, not whether it should be gated.
 - Should the Firefox port-partitioning lane (a non-default-port top-level
   page under the default configuration) get a real-browser e2e test in a
-  later program, or stay covered only by the synthetic corpus?
+  later program, or stay covered only by the synthetic corpus? Still open:
+  the port rule shipped in PR 1 and is unit- and corpus-tested, and no
+  live-browser lane exercises it.
 - Should a pre-2024 Chromium store missing `has_cross_site_ancestor`
   entirely (not just `NULL` on a partitioned row) get a softer rule than
-  "every partitioned row in it is omitted from every send view"? Current
-  design treats it identically to a `NULL` value on the column; revisit if
-  this turns out to affect a meaningfully large population of still-active
-  Chromium installs.
+  "every partitioned row in it is omitted from every send view"? Still open,
+  and the shipped behavior is the strict one: an unknown ancestor bit fails
+  closed, counted under `SendOmissions::ancestor_chain_unknown` per view and
+  as the `unknown_ancestor_chain` read warning. Revisit if this turns out to
+  affect a meaningfully large population of still-active Chromium installs.
 
 ## Risks
 
 - The ancestor-chain derivation and its subdomain widening are the one
   semantic change to already-shipped `SameSite` behavior in this program;
-  flagged for ADR review in PR 0 (ADR 0006 Decision 1), landing in PR 1.
+  flagged for ADR review in PR 0 (ADR 0006 Decision 1), landed in PR 1, and
+  called out as breaking in the changelog.
 - Old Chromium stores lose partitioned cookies from `header()`/`send_view`
   (counted and warned) by design, not by omission.
-- Public-API Windows snapshots in PR 1/2 are hand-derived from the macOS/Linux
-  diff; CI on Windows is the real check.
+- Public-API Windows snapshots in PR 1/2 were hand-derived from the
+  macOS/Linux diff; CI on Windows is the real check.
 - Node header errors use the sync path; the shared `binding_error_details`
-  keeps both paths aligned, but the sync-path `required` assertion needs to
-  be added explicitly in PR 5, not assumed from the async path's coverage.
+  keeps both paths aligned, and PR 5 added the sync-path `required` assertion
+  explicitly rather than inheriting the async path's coverage.
 - `expected_counts` literals across three e2e files (PR 6) must change
   together or the lane will assert stale row counts against a real browser.
 

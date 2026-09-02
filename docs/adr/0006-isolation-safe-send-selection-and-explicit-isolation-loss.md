@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-09-01
+- Implemented in 0.7.0 (issue #331, PRs 0–6); the program record below tracks
+  which change carried which decision
 - Scope: the send-context selector shape, the single send-selection
   operation, and the jar/compatibility-projection loss policy across Rust,
   Python, Node, and the CLI

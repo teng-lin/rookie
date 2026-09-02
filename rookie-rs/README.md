@@ -10,8 +10,10 @@ and
 The monorepo front door is the root
 [`README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/README.md).
 
-The recommended 0.6 entry is `read(ReadRequest::…)`
-([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+The recommended entry is `read(ReadRequest::…)`, then
+`send_view(&SendContext)` for anything you intend to send
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md),
+[ADR 0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)).
 Crate metadata and `version()` identify the installed build.
 The minimum supported Rust version (MSRV) is 1.88.
 
@@ -28,7 +30,7 @@ cargo add rookie-cookies
 ## Recommended usage (0.6 series)
 
 ```rust
-use rookie_cookies::{jar, read, ReadRequest, SendContext};
+use rookie_cookies::{read, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
     // Selecting a profile no longer implies session cookies; ask for them with
@@ -38,25 +40,34 @@ fn main() -> rookie_cookies::Result<()> {
             .profile("default-release")
             .include_session(),
     )?;
-    let flat = jar(ReadRequest::browser("chrome"))?;
     for cookie in snapshot.cookies() {
         println!("{} {}", cookie.domain, cookie.name);
     }
-    let header = snapshot.header(&SendContext::url("https://example.com/"))?;
-    let owned = snapshot.into_cookies();
-    let _ = (flat, header, owned);
+    // The send-side view: which records this browsing context selects, the
+    // header they render to, and what was left out.
+    let view = snapshot.send_view(
+        &SendContext::url("https://app.example.com/")
+            .top_level_site("https://example.com"),
+    )?;
+    println!("{} {}", view.header(), view.omitted().partition());
     Ok(())
 }
 ```
 
 `read` is the recommended job: one unfiltered snapshot, then
-`header(&SendContext)` as a view. There is **no** crate-root `get` or `report`
-function. Bindings-facing `profiles(browser_id)` exists as an alias of
-`browser_profiles`; structured reports use `extract_report` / `browser_report`.
+`send_view(&SendContext)` as a view over it. There is **no** crate-root `get`
+or `report` function. Bindings-facing `profiles(browser_id)` exists as an
+alias of `browser_profiles`; structured reports use `extract_report` /
+`browser_report`.
 
-`jar(request)` is `read(request)?.into_cookies()` projection sugar. It returns
-Rust's language-native `Vec<Cookie>` and discards warnings and
-partition/container context; use `read` when either matters.
+`jar(request)` is `read(request)?.into_jar()` — the *compatibility*
+projection, not the send path. It returns Rust's language-native
+`Vec<Cookie>`, discards warnings, and fails closed rather than discarding
+partition/container context: an isolated snapshot returns
+`RequestError::IsolationLossRefused` (code `isolation_loss_refused`) until
+the caller names the loss with `jar_with`/`into_jar_with` and
+`IsolationLoss::Allow`. `cookies()` / `into_cookies()` stay infallible — they
+are the inventory projection, for looking at rows rather than sending them.
 
 - No-profile `read(ReadRequest::browser("chrome"))` matches the compatibility
   flatten used by `chrome()` / `extract` when `include_expired` is set
@@ -243,7 +254,10 @@ fn main() -> rookie_cookies::Result<()> {
             detailed.context.user_context_id,
         );
     }
-    // The eight-field projection is still a free borrow; it discards isolation.
+    // The eight-field projection is still a free borrow, and still discards
+    // isolation -- which is why it is the *inventory* accessor. Reaching the
+    // same bytes through a name that promises send-safety goes via `jar()`,
+    // which refuses an isolated snapshot instead.
     println!("{} cookies", snapshot.cookies().len());
     Ok(())
 }
@@ -260,52 +274,150 @@ did not survive decode is **omitted** from the snapshot and counted under the
 
 ## Send-safe headers
 
-`ReadResult::header` takes a `SendContext`, not a bare URL. A URL alone cannot
-say which browsing context a request is made from, so the earlier prerelease
-`header(url)` had no way to tell a CHIPS-partitioned cookie from an
-unpartitioned one — it merged them.
+`ReadResult::send_view` is **the** send-selection operation, and it takes a
+`SendContext`, not a bare URL. A URL alone cannot say which browsing context a
+request is made from, so the earlier prerelease `header(url)` had no way to
+tell a CHIPS-partitioned cookie from an unpartitioned one — it merged them.
 
 ```rust
 use rookie_cookies::{read, MethodClass, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
     let snapshot = read(ReadRequest::browser("chrome"))?;
-    let header = snapshot.header(
-        &SendContext::url("https://api.example.com/v1/me")
-            .top_level_site("https://app.example.com")
-            .navigation()
-            .method(MethodClass::Safe),
-    )?;
-    println!("{header}");
+    let context = SendContext::url("https://api.example.com/v1/me")
+        .top_level_site("https://app.example.com")
+        .navigation()
+        .method(MethodClass::Safe);
+    let view = snapshot.send_view(&context)?;
+    for detailed in view.cookies() {
+        println!("{}", detailed.cookie.name);
+    }
+    println!("{}", view.header());
+    println!("{} partition misses", view.omitted().partition());
     Ok(())
 }
 ```
+
+`ReadResult::header(&context)` is exactly `send_view(&context)?.header()`. It
+renders that one selection rather than repeating the match, so the two can
+never disagree, and no binding or CLI subcommand grows a second copy of the
+predicate. Use `header` when a request-header string is all you need, and
+`send_view` when the selected records or the reason for an empty answer
+matter: `SendOmissions` counts every row left out under seven reasons, which
+`entries()` always yields in the fixed order `expired`, `not_applicable`,
+`same_site`, `partition`, `ancestor_chain_unknown`,
+`unparsable_partition_key`, `origin`. Each row is counted exactly once, under
+the first stage it failed — and that evaluation order is *not* the
+serialization order above: a row is tested for expiry, then the RFC 6265
+domain/path/`Secure` filter, then the isolation verdict, then `SameSite`. An
+empty selection is a legitimate answer, not an error.
+
+### Isolation selectors
+
+Four selectors beyond `top_level_site`, `user_context_id`, and
+`private_browsing_id` describe a context those cannot identify. They are flat
+builders on `SendContext`, not a nested selector struct:
+
+| Selector | Argument | What it names |
+| --- | --- | --- |
+| `ancestor_chain` | `AncestorChain::{SameSite, CrossSite}` | Whether the request's frame tree contains a cross-site ancestor |
+| `first_party_domain` | `impl Into<String>` | Firefox `firstPartyDomain` origin attribute |
+| `gecko_view_session_context_id` | `impl Into<String>` | Firefox `geckoViewSessionContextId` origin attribute |
+| `origin_attributes` | `impl Into<String>` | The verbatim stored Firefox `originAttributes` suffix |
+
+`ancestor_chain` is **derived** when omitted: same-site when the request site
+is within `top_level_site` (same scheme, host equal to it or a subdomain of
+it), cross-site otherwise. With no `top_level_site` at all the request is
+assumed first-party, so the derived chain is `SameSite` — which is safe
+because any partitioned row demands `top_level_site`, so that default never
+reaches partition matching. Setting it explicitly is how a caller describes an
+`A → B → A` embed, whose request site and top-level site are equal even though
+an ancestor frame is cross-site. The chain and `SameSite` are coupled through
+the same resolved value: an explicit `CrossSite` on a first-party URL also
+withholds `SameSite=Lax`/`Strict` rows, exactly as a browser treats that frame
+tree. A `SameSite` chain under a *different* top-level site is not honoured —
+that is a frame tree no browser can produce — so the resolved chain is
+`CrossSite` whenever the two sites do not match.
+
+The Firefox partition port has no selector and no token: it is derived from
+the explicit port of the `top_level_site` URL, because that is exactly the
+port a Firefox `partitionKey` records.
 
 A snapshot **demands** a selector as soon as one cookie positively observes the
 corresponding isolated value — one partitioned cookie is enough, there is no
 identity-count threshold. Omitting it is
 `RequestError::IncompleteSendContext`, whose `required` names the missing
-selectors as stable identifiers, in this order:
+selectors as stable identifiers. The vocabulary is append-only, and the order
+is fixed:
 
 | Selector | Demanded when the snapshot contains |
 | --- | --- |
-| `top_level_site` | any cookie with a non-empty `top_frame_site_key` **or** `partition_key` |
+| `top_level_site` | any cookie with a non-empty `top_frame_site_key` **or** `partition_key`, including one whose key no parser in this build understood |
 | `user_context_id` | any cookie with `user_context_id == Some(n)`, `n > 0` |
 | `private_browsing_id` | any cookie with `private_browsing_id == Some(n)`, `n > 0` |
+| `first_party_domain` | any cookie with a stored, non-empty `firstPartyDomain` value |
+| `gecko_view_session_context_id` | any cookie with a stored, non-empty `geckoViewSessionContextId` value |
+| `origin_attributes` | any cookie carrying an origin-attribute name this build does not recognize, or an unreadable value under one it does |
 
-`None` and `Some(0)` never demand a selector; gating on them would make
-`header` unusable against every browser version whose schema lacks these
-columns. Once a selector *is* supplied, cookies in other partitions or
-containers are **omitted**, not an error.
+`ancestor_chain` and the Firefox partition port are never demanded — both are
+derived, so there is no selector-shaped hole for a caller to fill. `None` and
+`Some(0)` container ids never demand a selector either; gating on them would
+make `send_view` unusable against every browser version whose schema lacks
+these columns. Once every demanded selector *is* supplied, a value that
+matches nothing simply **omits** those rows rather than erroring.
+`RequestError::IsolationLossRefused` draws on the same six tokens, so one
+handler covers both errors.
 
 **Stated limitations.** `Site` is (scheme, host) — this crate has no
-public-suffix list — so `https://cdn.example.com` and `https://app.example.com`
-are cross-site here and same-site to a browser. `SameSite=Lax`/`Strict` is
-therefore conservative: it omits cookies a browser would send, never the
-reverse. CHIPS ancestor state is retained on the snapshot but not gated on, so
-a partitioned cookie may be over-included within a matching key. There is one
-same-site rule, not a schemeful/legacy dual mode. A caller needing
-browser-exact behavior needs a browser.
+public-suffix list, and does not gain one. `top_level_site` is therefore
+*caller-normalized*: supply the registrable site you control, already
+normalized. Site membership is same-scheme host equality or subdomain
+containment, so `https://cdn.example.com` is within
+`top_level_site=https://example.com`, while two sibling subdomains are not
+within each other; an IPv4 or IPv6 literal on either side requires exact host
+equality rather than a subdomain check. Passing a public suffix
+(`https://github.io`) as `top_level_site` would make every host under it
+same-site — the known failure mode of that contract, and not something the
+crate can detect. A partitioned Chromium row whose store never recorded
+`has_cross_site_ancestor` is omitted from every send view rather than assumed
+(counted `ancestor_chain_unknown`, and warned as `unknown_ancestor_chain` at
+read time); only stores written before 2024 lack that column. A Firefox row
+carrying an attribute name this build does not recognize — or a `partitionKey`
+it cannot parse, provided the row stored an `originAttributes` value at all —
+is *opaque*: it is reachable only by an `origin_attributes` selector equal to
+its stored suffix byte-for-byte, and that exact match is necessary rather than
+sufficient, since the row still passes through the typed selectors. A row
+whose partition key no parser understood and which stored no suffix has
+nothing to name, so it is unreachable from any context; a Chromium row is
+always in that position, since a Chromium key carries no suffix. Chromium's partition port is identity, not noise: a key naming an
+explicit port does not match a `top_level_site` that does not, though
+Chromium's own `SchemefulSite` serializes without one, so no key a current
+browser writes is affected. There is one same-site rule, not a
+schemeful/legacy dual mode. A caller needing browser-exact behavior —
+storage-access grants, First-Party Sets, nonce-keyed partitions — needs a
+browser.
+
+`jar()` / `into_jar()` refuse exactly when that demand list would be
+non-empty:
+
+```rust
+use rookie_cookies::{read, IsolationLoss, ReadRequest};
+
+fn main() -> rookie_cookies::Result<()> {
+    let snapshot = read(ReadRequest::browser("chrome"))?;
+    match snapshot.jar() {
+        Ok(flat) => println!("{} cookies", flat.len()),
+        // Decide explicitly. `IsolationLoss::Allow` returns byte-for-byte
+        // what `cookies()` holds; the alternative is to name a browsing
+        // context and call `send_view` instead.
+        Err(_) => {
+            let flat = snapshot.jar_with(IsolationLoss::Allow)?;
+            println!("{} cookies, isolation dropped", flat.len());
+        }
+    }
+    Ok(())
+}
+```
 
 ## Session cookies are their own question
 
@@ -401,6 +513,28 @@ fn main() {
 }
 ```
 
+## Migrating to 0.7
+
+Nothing is renamed. `header`, `cookies()`, `into_cookies()`,
+`detailed_cookies()`, the free `jar(request)`, and every named helper keep
+their names and their signatures. Three things change:
+
+| Change | What breaks | What to do |
+| --- | --- | --- |
+| `jar` fails closed on isolation loss | Only a call against a snapshot holding a partitioned, containered, or otherwise isolated cookie. The free `jar(request)` now returns `RequestError::IsolationLossRefused` there instead of a flat list that has silently merged two browsing contexts. An unisolated snapshot returns `Ok` exactly as before. | Call `send_view` if you were going to *send* those cookies; call `jar_with`/`into_jar_with` with `IsolationLoss::Allow` if you were not. The opted-in bytes are identical to 0.6's. |
+| `header` matches on the full partition identity | A `header` call that previously merged two contexts' cookies now splits them; a row carrying an origin attribute this build does not recognize is omitted until named with `origin_attributes`; a partitioned Chromium row with no stored ancestor bit is omitted rather than sent. | Supply the selectors the error's `required` list names. Use `send_view`'s `omitted()` counts to see what a context excluded and why. |
+| Same-site includes subdomains | `SameSite=Lax`/`Strict` rows are now sent for a request host that is a subdomain of `top_level_site`'s host. The rule only widens — nothing that was sent before is withheld now. | Nothing, unless you were relying on literal host equality. Sibling subdomains stay cross-site. |
+
+1. `ReadResult::jar()` / `into_jar()` / `jar_with` / `into_jar_with`,
+   `send_view`, `SendView`, `SendOmissions`, `AncestorChain`, and
+   `IsolationLoss` are additions; the public-API snapshots for 0.7 add lines
+   and remove none.
+2. Match `RequestError::IsolationLossRefused` wherever you already match
+   `IncompleteSendContext` — they share the `required` vocabulary.
+3. Prefer `send_view` over `header` when you need to explain an empty or
+   surprising result; `header` alone cannot tell "no cookies here" from
+   "everything was excluded".
+
 ## Migrate 0.5.6 → 0.6.0
 
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
@@ -410,7 +544,7 @@ fn main() {
 | Gecko session cookies | Not a first-class policy | Add `.include_session()` to `ReadRequest` or `ExtractRequest`; `.profile(query)` is optional and only selects which profile |
 | Path APIs | `*_based`, `any_browser` | `direct_path::{extract_from_path, PathExtractRequest}` (legacy deprecated until 0.7) |
 | Errors | Flat `anyhow::Error` | Typed `rookie_cookies::Error` (`Request` / `Stopped` / `Source` / `Engine`) with a stable `code()`. **`rookie_cookies::Result` is no longer `anyhow::Result`**; bridge functions keep `anyhow::Result` and `rookie_cookies::anyhow::Result` still resolves |
-| Header / get | Not a job view | `ReadResult::header(&SendContext)` — **no** crate-root `get` or `report` |
+| Header / get | Not a job view | `ReadResult::send_view(&SendContext)`, with `header(&SendContext)` rendering it — **no** crate-root `get` or `report` |
 | IE helpers | `internet_explorer` / `internet_explorer_based` | Deprecated (ESE native C library; IE discontinued) |
 
 1. For Gecko session import, add `.include_session()`. Add `.profile(...)`
