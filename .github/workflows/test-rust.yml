@@ -179,6 +179,9 @@ jobs:
       - name: Test E2E Python helpers
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: python -m unittest discover -s tests/e2e -p 'test_*.py' -v
+      - name: Test isolation collision corpus
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        run: python -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
       - name: Test raw DevTools lifecycle helper
         if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
         run: node --test tests/e2e/test_navigate_chromium_cdp.mjs

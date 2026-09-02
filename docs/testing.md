@@ -156,6 +156,26 @@ On Windows, `cargo test` also generates a current-user **DPAPI `v10`** Cookies
 CLI snapshot tests use a generated Firefox database (JSON/Netscape, stderr
 logs, errors, help/version, profiles, spaces/Unicode paths).
 
+### Synthetic isolation corpus
+
+`tests/isolation_corpus/` (top level, deliberately not under `tests/e2e/`) is
+a hand-authored oracle for the isolation-safe send-selection semantics ADR
+0006 defines: `corpus.json` names four synthetic stores (Chromium/Firefox,
+isolated/plain) and a set of `SendContext` cases, each with an expected
+selected set, header, omission counts, or a structured `incomplete_send_context`
+error, plus a per-store `jar` verdict. `build_isolation_corpus.py` (stdlib
+only) materializes the stores as real Chromium `Cookies`/Firefox
+`cookies.sqlite` databases; `test_build_isolation_corpus.py` validates the
+corpus shape and checks a fresh build against the committed Node base64
+fixtures under `bindings/node/__test__/fixtures/`. It is **not** browser
+evidence: it exercises the shared Rust selection algorithm against synthetic,
+hand-computed rows, not a real browser's own cookie jar. Real-browser
+partition/container coverage is the `e2e-depth.yml` lane described below.
+
+```console
+python3 -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
+```
+
 ## Real-browser E2E (PR subset / nightly / main)
 
 `.github/workflows/e2e.yml` gates pull requests with real Ubuntu Chrome and
