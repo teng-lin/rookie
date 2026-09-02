@@ -16,7 +16,8 @@
     "exact_set": "The complete decoded cookie set is compared with an independent manifest.",
     "active_writer": "Extraction reads the same store while its browser is still writing it.",
     "locked_writer_safety": "When a browser exclusively owns a rollback-journal store, every public surface refuses an unsafe read with a typed error and succeeds exactly after browser close.",
-    "partitioned": "Browser-produced partition or container identity is asserted semantically."
+    "partitioned": "Browser-produced partition or container identity is asserted semantically.",
+    "send_selection": "Context-selected detailed sets are compared exactly against an independent raw-store oracle on every public surface."
   },
   "depth_levels": {
     "none": "The cell makes no claim for this capability.",
@@ -35,7 +36,8 @@
       "exact_set": "live",
       "active_writer": "none",
       "locked_writer_safety": "none",
-      "partitioned": "none"
+      "partitioned": "none",
+      "send_selection": "none"
     },
     "hosted_gecko": {
       "registry_id": "live",
@@ -48,7 +50,8 @@
       "exact_set": "live",
       "active_writer": "none",
       "locked_writer_safety": "none",
-      "partitioned": "none"
+      "partitioned": "none",
+      "send_selection": "none"
     },
     "hosted_native": {
       "registry_id": "none",
@@ -61,7 +64,8 @@
       "exact_set": "live",
       "active_writer": "none",
       "locked_writer_safety": "none",
-      "partitioned": "none"
+      "partitioned": "none",
+      "send_selection": "none"
     },
     "fixture_chromium": {
       "registry_id": "fixture",
@@ -74,7 +78,8 @@
       "exact_set": "fixture",
       "active_writer": "none",
       "locked_writer_safety": "none",
-      "partitioned": "none"
+      "partitioned": "none",
+      "send_selection": "none"
     },
     "fixture_gecko": {
       "registry_id": "fixture",
@@ -87,7 +92,8 @@
       "exact_set": "fixture",
       "active_writer": "none",
       "locked_writer_safety": "none",
-      "partitioned": "none"
+      "partitioned": "none",
+      "send_selection": "none"
     },
     "fixture_native": {
       "registry_id": "fixture",
@@ -100,7 +106,8 @@
       "exact_set": "none",
       "active_writer": "none",
       "locked_writer_safety": "none",
-      "partitioned": "none"
+      "partitioned": "none",
+      "send_selection": "none"
     }
   },
   "representative_depth_lanes": {
@@ -133,7 +140,7 @@
       "runner": "tests/e2e/run_partition_context_e2e.py",
       "platforms": ["linux"],
       "engines": ["chromium", "gecko"],
-      "capabilities": ["partitioned", "detailed", "discovery"],
+      "capabilities": ["partitioned", "detailed", "discovery", "send_selection"],
       "surfaces": ["rust", "python", "node", "cli"]
     },
     "firefox_container": {
@@ -141,7 +148,7 @@
       "runner": "tests/e2e/run_firefox_container_e2e.py",
       "platforms": ["linux"],
       "engines": ["gecko"],
-      "capabilities": ["partitioned", "detailed", "discovery"],
+      "capabilities": ["partitioned", "detailed", "discovery", "send_selection"],
       "surfaces": ["rust", "python", "node", "cli"]
     },
     "nightly_stress": {
@@ -170,7 +177,7 @@
     "has_cross_site_ancestor": {
       "classification": "live",
       "engines": ["chromium"],
-      "rationale": "The live Chromium partition workflow asserts the cross-site ancestor bit on both CHIPS identities."
+      "rationale": "The live Chromium partition workflow seeds one host of the A site through both an A -> A and an A -> B -> A frame chain, asserts the stored bit is 0 and 1 on the two otherwise identical rows, and then proves each ancestor chain selects only its own row."
     },
     "source_scheme": {
       "classification": "live",
@@ -200,7 +207,7 @@
     "partition_key": {
       "classification": "live",
       "engines": ["gecko"],
-      "rationale": "The Firefox dFPI lane asserts two browser-produced partition keys and their send-time isolation."
+      "rationale": "The Firefox dFPI lane asserts browser-produced partition keys and their send-time isolation, including the foreign-by-ancestor `,f` tuple field Firefox writes for an A -> B -> A embed, which is compared as a distinct partition rather than folded into the plain A key."
     },
     "private_browsing_id": {
       "classification": "non_persistable",

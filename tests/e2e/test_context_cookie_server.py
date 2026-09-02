@@ -131,6 +131,67 @@ class ContextCookieServerTests(unittest.TestCase):
         )
         self.assertIn("unpartitioned-seeded", body)
 
+    def test_chain_top_embeds_both_ancestor_chains_onto_the_a_site(self) -> None:
+        status, headers, body = self.request("top.rookie-a.test", "/chain-top")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [value for name, value in headers if name.lower() == "set-cookie"], []
+        )
+        self.assertIn(
+            f"https://{SERVER.ALLOWED_NESTED_HOST}:{self.port}"
+            "/set-ancestor?chain=same_site",
+            body,
+        )
+        self.assertIn(f"https://{SERVER.ALLOWED_THIRD_HOST}:{self.port}/relay", body)
+        self.assertIn("ancestor-seeded", body)
+
+    def test_relay_puts_a_cross_site_hop_above_the_a_site_frame(self) -> None:
+        status, headers, body = self.request(SERVER.ALLOWED_THIRD_HOST, "/relay")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [value for name, value in headers if name.lower() == "set-cookie"], []
+        )
+        self.assertIn(
+            f"https://{SERVER.ALLOWED_NESTED_HOST}:{self.port}"
+            "/set-ancestor?chain=cross_site",
+            body,
+        )
+        self.assertIn("parent.postMessage", body)
+
+    def test_set_ancestor_writes_one_partitioned_row_per_chain(self) -> None:
+        for chain in ("same_site", "cross_site"):
+            with self.subTest(chain=chain):
+                status, headers, body = self.request(
+                    SERVER.ALLOWED_NESTED_HOST, f"/set-ancestor?chain={chain}"
+                )
+                self.assertEqual(status, 200)
+                cookies = [
+                    value for name, value in headers if name.lower() == "set-cookie"
+                ]
+                self.assertEqual(
+                    cookies,
+                    [
+                        f"rookie_ancestor=ancestor-{chain}; Secure; SameSite=None; "
+                        "Partitioned; Path=/; Max-Age=3600"
+                    ],
+                )
+                self.assertIn(chain, body)
+
+    def test_ancestor_routes_are_host_and_chain_restricted(self) -> None:
+        for host, target in (
+            ("attacker.test", "/chain-top"),
+            (SERVER.ALLOWED_NESTED_HOST, "/chain-top"),
+            ("attacker.test", "/relay"),
+            ("top.rookie-a.test", "/relay"),
+            ("attacker.test", "/set-ancestor?chain=same_site"),
+            (SERVER.ALLOWED_THIRD_HOST, "/set-ancestor?chain=same_site"),
+            (SERVER.ALLOWED_NESTED_HOST, "/set-ancestor"),
+            (SERVER.ALLOWED_NESTED_HOST, "/set-ancestor?chain=first_party"),
+        ):
+            with self.subTest(host=host, target=target):
+                status, _, _ = self.request(host, target)
+                self.assertEqual(status, 400)
+
     def test_event_log_records_host_path_and_cookie_header(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
         try:
