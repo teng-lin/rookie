@@ -470,6 +470,21 @@ did not have to wait on a real-browser lane:
   closed, counted under `SendOmissions::ancestor_chain_unknown` per view and
   as the `unknown_ancestor_chain` read warning. Revisit if this turns out to
   affect a meaningfully large population of still-active Chromium installs.
+- Should a Firefox CHIPS cookie set in a first-party context be selectable
+  from that context? The real-browser lane (PR 6a) showed Firefox stores a
+  `Partitioned` cookie set by a direct same-site iframe with
+  `partitionKey=(https,site)`, exactly like a third-party partition, and
+  would send it to a first-party request under that site. ADR 0006's
+  "a partitioned Firefox row never matches a first-party context" rule
+  withholds it, so the Firefox `nested_derived`/`nested_same_site` send views
+  in that lane select nothing while Chromium's select the bit-0 row. This is
+  the conservative direction (a withheld cookie, never an over-sent one) and
+  the lane pins both engine shapes; the candidate relaxation is to drop the
+  first-party guard and rely on `site == top_level_site && port && f ==
+  (sites_match && resolved == CrossSite)` alone, which in a first-party
+  context matches only a row whose partition is the request's own site with
+  `f` unset. Deferred to a follow-up because it changes the corpus, the
+  binding suites, and the e2e oracle together.
 
 ## Risks
 

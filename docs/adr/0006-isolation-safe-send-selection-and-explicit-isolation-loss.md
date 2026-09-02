@@ -409,6 +409,12 @@ isolation loss is acceptable.
 - Browser-side policy heuristics: storage-access grants, First-Party Sets,
   and any related-site-set membership.
 - Nonce-keyed / ephemeral partitions that do not persist to disk.
+- Firefox CHIPS cookies set in a first-party context. Firefox persists them
+  with `partitionKey=(https,site)` like any partition, and the rule above
+  that a partitioned Firefox row never matches a first-party context
+  withholds them where the browser would send them. That is the conservative
+  direction; relaxing it is recorded as an open question in the program
+  record.
 - A Firefox port-partitioning e2e lane. Firefox records the port in
   `partitionKey` whenever the top-level URL has a non-default one, under the
   default configuration; such a lane needs a top-level page on a
