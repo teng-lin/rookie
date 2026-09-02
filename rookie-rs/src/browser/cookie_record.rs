@@ -290,7 +290,11 @@ impl IsolationKey {
         PartitionState::Partitioned { top_frame_site_key } => Some(top_frame_site_key.clone()),
         PartitionState::Unpartitioned | PartitionState::Unknown => None,
       },
-      has_cross_site_ancestor: legacy_optional_boolean(&self.has_cross_site_ancestor, semantics),
+      // Not `legacy_optional_boolean`: this column is half of a partition key,
+      // and reading a stray `2` as "truthy" invents an ancestor state the
+      // browser never recorded. `is_persistent` keeps the legacy coercion,
+      // which only affects an advisory flag.
+      has_cross_site_ancestor: strict_optional_boolean(&self.has_cross_site_ancestor),
       source_scheme: known(&self.source_scheme),
       source_port: known(&self.source_port),
       is_persistent: legacy_optional_boolean(&self.is_persistent, semantics),
@@ -416,6 +420,14 @@ fn legacy_boolean(value: &Observation<bool>, semantics: LegacyProjectionSemantic
       *value != 0
     }
     Observation::Missing | Observation::Unknown(_) => false,
+  }
+}
+
+/// A boolean that is only known when the store said exactly `0` or `1`.
+fn strict_optional_boolean(value: &Observation<bool>) -> Option<bool> {
+  match value {
+    Observation::Known(value) => Some(*value),
+    Observation::Missing | Observation::Unknown(_) => None,
   }
 }
 

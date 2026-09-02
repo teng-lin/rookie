@@ -9,14 +9,16 @@ use crate::common::enums::{Cookie, DetailedCookie};
 use crate::direct_path::{self, ChromiumCredentialSource, PathExtractRequest};
 use crate::error::map_job_result;
 use crate::execution::{AppBoundPolicy, ExecutionControl};
-use crate::header_filter::{
-  partition_identity, redact_url, same_site_permits, sendable_octets, site_from_url, GetFilter,
-  PartitionIdentity, Site,
+use crate::header_filter::{redact_url, same_site_permits, sendable_octets, GetFilter};
+use crate::isolation::{
+  demanded_selectors, isolated_rows, missing_selectors, partition_identity, IsolationLoss,
+  PartitionIdentity, RequestIsolation, StoredIsolation,
 };
 use crate::read_warning::{ReadWarningCode, ReadWarningCounts};
 use crate::report;
 use crate::selection::ProfileSelection;
-use crate::send_context::{selector, MethodClass, ResourceKind, SendContext};
+use crate::send_context::{MethodClass, ResourceKind, SendContext};
+use crate::send_view::{SendOmissions, SendView};
 use crate::session::SessionPolicy;
 use crate::target::BrowserTarget;
 use crate::{CancellationHandle, RequestError, Result};
@@ -208,6 +210,10 @@ impl ReadRequest {
 pub struct ReadResult {
   cookies: Vec<DetailedCookie>,
   projected: Vec<Cookie>,
+  /// One entry per `cookies` entry, in the same order. Parsing a partition key
+  /// is the same answer every time it is asked, so it is asked once here
+  /// rather than once per row per send view.
+  isolation: Vec<StoredIsolation>,
   warnings: Vec<ReadWarning>,
   browser_id: Option<String>,
   profile_id: Option<String>,
@@ -224,23 +230,115 @@ impl ReadResult {
       .iter()
       .map(|detailed| detailed.cookie.clone())
       .collect();
+    let isolation = cookies
+      .iter()
+      .map(|detailed| StoredIsolation::from_context(&detailed.context))
+      .collect();
     Self {
       cookies,
       projected,
+      isolation,
       warnings,
       browser_id,
       profile_id,
     }
   }
 
-  /// Borrows the compatibility projection in stable extraction order.
+  /// Borrows the **inventory** projection in stable extraction order.
   ///
-  /// Isolation is discarded here: the eight-field [`Cookie`] cannot represent
-  /// a CHIPS partition or a Firefox container. Use
-  /// [`detailed_cookies`](Self::detailed_cookies) when that matters, and never
-  /// merge two isolated contexts on the strength of this list.
+  /// This is the list of what the browser stored, flattened to eight fields
+  /// for display and auditing. Isolation is discarded: the eight-field
+  /// [`Cookie`] cannot represent a CHIPS partition or a Firefox container, so
+  /// two rows from different contexts are indistinguishable here.
+  ///
+  /// It stays infallible on purpose. Asking to *see* the rows is not the same
+  /// as asking for something send-safe, and a caller who wants the latter
+  /// should use [`jar`](Self::jar), which refuses rather than flattening, or
+  /// [`send_view`](Self::send_view), which selects one context.
   pub fn cookies(&self) -> &[Cookie] {
     &self.projected
+  }
+
+  /// Borrows the compatibility projection, or refuses if it would lose
+  /// isolation.
+  ///
+  /// A flat cookie list cannot represent a partition or a container, so
+  /// handing one to an HTTP client is how an isolated credential gets sent
+  /// from a context it never belonged to. This refuses whenever the snapshot
+  /// holds a row that some context would have to name a selector to
+  /// disambiguate, which is the same condition
+  /// [`header`](Self::header) reports as `incomplete_send_context`.
+  ///
+  /// A snapshot with no isolated rows returns `Ok` exactly as before.
+  ///
+  /// # Errors
+  ///
+  /// [`RequestError::IsolationLossRefused`], carrying how many rows are
+  /// isolated and the selector tokens that would be required.
+  ///
+  /// # Examples
+  ///
+  /// ```no_run
+  /// use rookie_cookies::{read, IsolationLoss, ReadRequest};
+  ///
+  /// let snapshot = read(ReadRequest::browser("chrome"))?;
+  /// match snapshot.jar() {
+  ///   Ok(cookies) => println!("{} send-safe cookies", cookies.len()),
+  ///   // The caller has decided a flat list is acceptable anyway.
+  ///   Err(_) => println!("{} cookies", snapshot.jar_with(IsolationLoss::Allow)?.len()),
+  /// }
+  /// # Ok::<(), rookie_cookies::Error>(())
+  /// ```
+  pub fn jar(&self) -> Result<&[Cookie]> {
+    self.jar_with(IsolationLoss::Refuse)
+  }
+
+  /// [`jar`](Self::jar) under an explicit isolation-loss policy.
+  ///
+  /// [`IsolationLoss::Allow`] is the affirmative, named opt-in. Its output is
+  /// byte-for-byte what [`cookies`](Self::cookies) returns; this changes when
+  /// a call can fail, never what a successful one contains.
+  pub fn jar_with(&self, loss: IsolationLoss) -> Result<&[Cookie]> {
+    map_job_result(
+      self
+        .isolation_loss_check(loss)
+        .map(|()| self.projected.as_slice()),
+    )
+  }
+
+  /// Consumes the snapshot and returns its compatibility projection, or
+  /// refuses if that would lose isolation.
+  ///
+  /// The owning counterpart of [`jar`](Self::jar), and what the free
+  /// [`jar`](crate::jar) function calls.
+  pub fn into_jar(self) -> Result<Vec<Cookie>> {
+    self.into_jar_with(IsolationLoss::Refuse)
+  }
+
+  /// [`into_jar`](Self::into_jar) under an explicit isolation-loss policy.
+  pub fn into_jar_with(self, loss: IsolationLoss) -> Result<Vec<Cookie>> {
+    map_job_result(self.isolation_loss_check(loss))?;
+    Ok(self.projected)
+  }
+
+  fn isolation_loss_check(&self, loss: IsolationLoss) -> anyhow::Result<()> {
+    if matches!(loss, IsolationLoss::Allow) {
+      return Ok(());
+    }
+    let required = demanded_selectors(&self.isolation);
+    if required.is_empty() {
+      return Ok(());
+    }
+    // The refusal does not ask which context the caller meant. Any isolated
+    // row makes a flat list ambiguous, and the tokens are the same vocabulary
+    // `incomplete_send_context` uses so one handler covers both.
+    Err(
+      RequestError::IsolationLossRefused {
+        isolated_rows: isolated_rows(&self.isolation),
+        required: required.into_iter().map(str::to_owned).collect(),
+      }
+      .into(),
+    )
   }
 
   /// Borrows the snapshot's native records, isolation intact.
@@ -250,7 +348,10 @@ impl ReadResult {
     &self.cookies
   }
 
-  /// Consumes the snapshot and returns its compatibility projection.
+  /// Consumes the snapshot and returns its **inventory** projection.
+  ///
+  /// Infallible, for the same reason [`cookies`](Self::cookies) is. Use
+  /// [`into_jar`](Self::into_jar) for the send-safe question.
   pub fn into_cookies(self) -> Vec<Cookie> {
     self.projected
   }
@@ -295,13 +396,26 @@ impl ReadResult {
   ///
   /// # Stated limitations
   ///
-  /// `Site` is (scheme, host), not eTLD+1, so `SameSite=Lax`/`Strict` is
-  /// **conservative**: it omits cookies a browser would send to a sibling
-  /// subdomain, never the reverse. CHIPS ancestor state
-  /// (`has_cross_site_ancestor`) is retained on the snapshot but not gated on,
-  /// so a partitioned cookie may be over-included within a matching key. There
-  /// is one same-site rule, not a schemeful/legacy dual mode. A caller needing
-  /// browser-exact behavior needs a browser.
+  /// `Site` is (scheme, host), not eTLD+1, and this crate has no
+  /// public-suffix list. A request host that equals the top-level site's host
+  /// or is a subdomain of it is same-site; two *sibling* subdomains are
+  /// cross-site here and same-site to a browser. `SameSite=Lax`/`Strict` is
+  /// therefore **conservative**: it omits cookies a browser would send,
+  /// never the reverse. The caller supplies an already-normalized registrable
+  /// site.
+  ///
+  /// A request is same-site only when the two sites match *and* no ancestor
+  /// is cross-site, so an explicit
+  /// [`ancestor_chain`](crate::SendContext::ancestor_chain) of
+  /// [`AncestorChain::CrossSite`](crate::AncestorChain::CrossSite) withholds
+  /// `Lax` and `Strict` cookies even on a first-party URL. That matches how a
+  /// browser treats an `A -> B -> A` frame.
+  ///
+  /// A partitioned Chromium row whose store predates `has_cross_site_ancestor`
+  /// is omitted rather than assumed, because that bit is part of Chromium's
+  /// partition-key equality and no selector can supply what the row itself
+  /// never recorded. There is one same-site rule, not a schemeful/legacy dual
+  /// mode. A caller needing browser-exact behavior needs a browser.
   ///
   /// # Errors
   ///
@@ -332,34 +446,60 @@ impl ReadResult {
   /// # Ok::<(), rookie_cookies::Error>(())
   /// ```
   pub fn header(&self, context: &SendContext) -> Result<String> {
-    map_job_result(self.header_for(context))
+    map_job_result(self.send_view_for(context).map(|view| view.header()))
   }
 
-  fn header_for(&self, context: &SendContext) -> anyhow::Result<String> {
+  /// Selects the cookies `context` would send, without flattening them.
+  ///
+  /// This is **the** send-selection operation.
+  /// [`header`](Self::header) is a thin renderer over it, and the Python,
+  /// Node, and CLI surfaces call through it rather than reimplementing the
+  /// match, so a collision case cannot be decided one way in Rust and another
+  /// way in a binding.
+  ///
+  /// The returned [`SendView`] borrows this snapshot, so the selected records
+  /// keep their full [`DetailedCookie`] identity, and
+  /// [`SendView::omitted`] explains what was left out and why. An empty view
+  /// is a legitimate answer, not an error.
+  ///
+  /// # Errors
+  ///
+  /// The same conditions [`header`](Self::header) documents: an invalid URL
+  /// or top-level site, an unrepresentable clock, or an
+  /// [`RequestError::IncompleteSendContext`] naming the selectors this
+  /// snapshot demands and `context` did not supply.
+  ///
+  /// # Examples
+  ///
+  /// ```no_run
+  /// use rookie_cookies::{read, ReadRequest, SendContext};
+  ///
+  /// let snapshot = read(ReadRequest::browser("chrome"))?;
+  /// let view = snapshot.send_view(
+  ///   &SendContext::url("https://example.com/").top_level_site("https://example.com"),
+  /// )?;
+  /// println!("{} selected, {} omitted", view.len(), view.omitted().total());
+  /// # Ok::<(), rookie_cookies::Error>(())
+  /// ```
+  pub fn send_view(&self, context: &SendContext) -> Result<SendView<'_>> {
+    map_job_result(self.send_view_for(context))
+  }
+
+  fn send_view_for(&self, context: &SendContext) -> anyhow::Result<SendView<'_>> {
     // 1. Parse both URLs before anything else. An unparseable top-level site
     //    must not silently degrade into the first-party assumption.
     let filter = GetFilter::for_url(&context.url)?;
-    let request_site = site_from_url(&context.url).ok_or_else(|| RequestError::InvalidUrl {
-      display: redact_url(&context.url),
-    })?;
-    let top_level_site = match context.top_level_site.as_deref() {
-      None => None,
-      Some(raw) => Some(
-        site_from_url(raw).ok_or_else(|| RequestError::InvalidTopLevelSite {
-          display: redact_url(raw),
-        })?,
-      ),
-    };
+    let request = RequestIsolation::resolve(context)?;
 
     // 2. Resolve the clock.
     let now_epoch = unix_seconds(context.now.unwrap_or_else(SystemTime::now))
       .map_err(|_| RequestError::ClockUnrepresentable)?;
 
-    // 3-4. A snapshot demands a selector as soon as ONE cookie positively
-    //      observes the corresponding isolated value. There is no
-    //      "more than one identity" threshold: two cookies in the same
-    //      partition are just as unmergeable with an unpartitioned one.
-    let required = self.missing_selectors(context);
+    // 3. A snapshot demands a selector as soon as ONE cookie positively
+    //    observes the corresponding isolated value. There is no
+    //    "more than one identity" threshold: two cookies in the same
+    //    partition are just as unmergeable with an unpartitioned one.
+    let required = missing_selectors(&self.isolation, context);
     if !required.is_empty() {
       return Err(
         RequestError::IncompleteSendContext {
@@ -370,123 +510,51 @@ impl ReadResult {
       );
     }
 
-    // The same-site context. With no top-level site supplied (and step 4 not
-    // having errored), the request is assumed first-party.
-    let same_site_context = top_level_site
-      .as_ref()
-      .is_none_or(|site| *site == request_site);
     let navigation = context.resource == ResourceKind::Navigation;
     let safe_method = context.method == MethodClass::Safe;
 
-    // 5.
-    let mut kept: Vec<&Cookie> = self
-      .cookies
-      .iter()
-      .filter(|detailed| {
-        is_unexpired(&detailed.cookie, now_epoch)
-          && filter.keeps(&detailed.cookie)
-          && isolation_matches(&detailed.context, context, top_level_site.as_ref())
-          && same_site_permits(
-            detailed.cookie.same_site,
-            same_site_context,
-            navigation,
-            safe_method,
-          )
-      })
-      .map(|detailed| &detailed.cookie)
-      .collect();
-    // 6. The 0.6-beta header order.
+    // 4. One pass. Each omitted row is counted once, under the first stage it
+    //    failed, so the counts partition the snapshot rather than overlapping.
+    let mut omitted = SendOmissions::default();
+    let mut kept: Vec<&DetailedCookie> = Vec::new();
+    // The two vectors are built together in `new` and are never mutated, so a
+    // length mismatch would mean rows were silently dropped from the zip.
+    debug_assert_eq!(self.cookies.len(), self.isolation.len());
+    for (detailed, stored) in self.cookies.iter().zip(&self.isolation) {
+      if !is_unexpired(&detailed.cookie, now_epoch) {
+        omitted.record_expired();
+        continue;
+      }
+      if !filter.keeps(&detailed.cookie) {
+        omitted.record_not_applicable();
+        continue;
+      }
+      if let Err(reason) = request.verdict(stored) {
+        omitted.record_isolation(reason);
+        continue;
+      }
+      if !same_site_permits(
+        detailed.cookie.same_site,
+        request.same_site_context(),
+        navigation,
+        safe_method,
+      ) {
+        omitted.record_same_site();
+        continue;
+      }
+      kept.push(detailed);
+    }
+    // 5. The 0.6-beta header order.
     kept.sort_by(|left, right| {
       right
+        .cookie
         .path
         .len()
-        .cmp(&left.path.len())
-        .then_with(|| left.name.cmp(&right.name))
+        .cmp(&left.cookie.path.len())
+        .then_with(|| left.cookie.name.cmp(&right.cookie.name))
     });
-    // 7.
-    Ok(
-      kept
-        .into_iter()
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-        .collect::<Vec<_>>()
-        .join("; "),
-    )
+    Ok(SendView::new(kept, omitted))
   }
-
-  /// The selector tokens this snapshot demands and `context` did not supply,
-  /// in the order the contract declares them, deduplicated.
-  fn missing_selectors(&self, context: &SendContext) -> Vec<String> {
-    let mut required = Vec::new();
-    if context.top_level_site.is_none()
-      && self
-        .cookies
-        .iter()
-        .any(|detailed| partition_identity(&detailed.context) != PartitionIdentity::Unpartitioned)
-    {
-      required.push(selector::TOP_LEVEL_SITE.to_owned());
-    }
-    // `None` and `Some(0)` never demand a selector. Gating on them would make
-    // `header` unusable against every browser version whose schema lacks these
-    // columns -- which is most of them.
-    if context.user_context_id.is_none()
-      && self
-        .cookies
-        .iter()
-        .any(|detailed| detailed.context.user_context_id.is_some_and(|id| id > 0))
-    {
-      required.push(selector::USER_CONTEXT_ID.to_owned());
-    }
-    if context.private_browsing_id.is_none()
-      && self.cookies.iter().any(|detailed| {
-        detailed
-          .context
-          .private_browsing_id
-          .is_some_and(|id| id > 0)
-      })
-    {
-      required.push(selector::PRIVATE_BROWSING_ID.to_owned());
-    }
-    required
-  }
-}
-
-/// Whether one stored cookie's isolation identity admits this send.
-///
-/// Once a selector *has* been supplied, a cookie in another partition or
-/// container is simply omitted -- not an error. The error in step 4 exists
-/// only for the selector that was never supplied at all.
-fn isolation_matches(
-  stored: &crate::enums::CookieContext,
-  context: &SendContext,
-  top_level_site: Option<&Site>,
-) -> bool {
-  match partition_identity(stored) {
-    // An unpartitioned cookie is sent in every top-level context. That is what
-    // "unpartitioned" means, and it is why the missing-vs-default rule below
-    // applies to container identity rather than to partitions.
-    PartitionIdentity::Unpartitioned => {}
-    PartitionIdentity::Unparsable => return false,
-    PartitionIdentity::Site(site) => {
-      if top_level_site != Some(&site) {
-        return false;
-      }
-    }
-  }
-  // Missing vs default: a cookie whose container field is `None` is the
-  // default container ONLY when the caller supplied no selector for it. Once
-  // the caller says "container 2", the crate does not know an unlabelled
-  // cookie belongs there, and guessing is how containers merge.
-  if let Some(selected) = context.user_context_id {
-    if stored.user_context_id != Some(selected) {
-      return false;
-    }
-  }
-  if let Some(selected) = context.private_browsing_id {
-    if stored.private_browsing_id != Some(selected) {
-      return false;
-    }
-  }
-  true
 }
 
 impl std::fmt::Debug for ReadResult {
@@ -542,10 +610,17 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
 
 /// Executes one [`ReadRequest`] and returns its flat cookie projection.
 ///
-/// This is convenience sugar for `read(request)?.into_cookies()`, matching the
-/// binding-level `jar` jobs. Warnings and isolation context are discarded; use
-/// [`read`] when either matters. Unlike Python, Rust has no standard-library
-/// cookie-jar type, so the language-native projection is a `Vec<Cookie>`.
+/// This is convenience sugar for `read(request)?.into_jar()`. Warnings and
+/// isolation context are discarded; use [`read`] when either matters. Unlike
+/// Python, Rust has no standard-library cookie-jar type, so the language-native
+/// projection is a `Vec<Cookie>`.
+///
+/// **Changed in 0.7.0.** This fails closed. A snapshot holding a partitioned or
+/// containered cookie returns
+/// [`RequestError::IsolationLossRefused`] instead of a flat list that has
+/// silently merged two browsing contexts. A snapshot with no isolated rows
+/// behaves exactly as before. To keep the old behavior deliberately, call
+/// [`ReadResult::into_jar_with`] with [`IsolationLoss::Allow`].
 ///
 /// # Examples
 ///
@@ -557,7 +632,7 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
 /// # Ok::<(), rookie_cookies::Error>(())
 /// ```
 pub fn jar(request: ReadRequest) -> Result<Vec<Cookie>> {
-  read(request).map(ReadResult::into_cookies)
+  read(request).and_then(ReadResult::into_jar)
 }
 
 fn read_inner(request: ReadRequest) -> anyhow::Result<ReadResult> {
@@ -807,6 +882,8 @@ struct OmittedRows {
   malformed_host_identity: u64,
   /// Retained in the snapshot, but a non-match against every send context.
   unparsable_partition_key: u64,
+  /// Partitioned, but from a store that predates the ancestor-chain column.
+  unknown_ancestor_chain: u64,
 }
 
 impl OmittedRows {
@@ -824,6 +901,12 @@ impl OmittedRows {
       warnings.record(
         ReadWarningCode::UnparsablePartitionKey,
         self.unparsable_partition_key,
+      );
+    }
+    if self.unknown_ancestor_chain > 0 {
+      warnings.record(
+        ReadWarningCode::UnknownAncestorChain,
+        self.unknown_ancestor_chain,
       );
     }
   }
@@ -865,8 +948,19 @@ fn filter_snapshot_at(
       // a reason to drop a cookie from the inventory -- but it will never
       // match a send context, so the loss has to be visible here. `header`
       // takes `&self` and cannot add a warning of its own.
-      if partition_identity(&detailed.context) == PartitionIdentity::Unparsable {
-        omitted.unparsable_partition_key += 1;
+      match partition_identity(&detailed.context) {
+        PartitionIdentity::Unparsable => omitted.unparsable_partition_key += 1,
+        // Chromium compares the ancestor bit as part of the partition key, so
+        // a partitioned row that never recorded it cannot be matched by any
+        // context. The row stays in the inventory; the loss is counted here
+        // because `send_view` takes `&self` and cannot add a warning.
+        PartitionIdentity::Chromium {
+          cross_site_ancestor: None,
+          ..
+        } => omitted.unknown_ancestor_chain += 1,
+        PartitionIdentity::Unpartitioned
+        | PartitionIdentity::Chromium { .. }
+        | PartitionIdentity::Firefox { .. } => {}
       }
       if !include_expired {
         if let Some(expires) = cookie.expires {
@@ -900,6 +994,12 @@ fn read_warnings(counts: ReadWarningCounts) -> Vec<ReadWarning> {
 
 #[allow(dead_code)]
 fn _keep_record_link(_: &CookieRecord) {}
+
+#[cfg(test)]
+mod isolation_tests;
+
+#[cfg(test)]
+mod jar_tests;
 
 #[cfg(test)]
 mod send_context_tests;

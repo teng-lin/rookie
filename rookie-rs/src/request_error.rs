@@ -46,6 +46,11 @@ pub enum RequestError {
     display: String,
     required: Vec<String>,
   },
+  /// A flat projection was asked for a snapshot whose isolation it cannot hold.
+  IsolationLossRefused {
+    isolated_rows: u64,
+    required: Vec<String>,
+  },
   /// App-Bound recovery was requested but is unavailable in this build.
   AppBoundUnavailable {
     policy: AppBoundPolicy,
@@ -69,6 +74,7 @@ impl RequestError {
       Self::InvalidTopLevelSite { .. } => "invalid_top_level_site",
       Self::ClockUnrepresentable => "clock_unrepresentable",
       Self::IncompleteSendContext { .. } => "incomplete_send_context",
+      Self::IsolationLossRefused { .. } => "isolation_loss_refused",
       Self::AppBoundUnavailable { .. } => "app_bound_unavailable",
       Self::ConflictingCredentialSelectors => "conflicting_credential_selectors",
       Self::ConflictingProfileSelection => "conflicting_profile_selection",
@@ -91,6 +97,7 @@ impl RequestError {
       | Self::InvalidTopLevelSite { .. }
       | Self::ClockUnrepresentable
       | Self::IncompleteSendContext { .. }
+      | Self::IsolationLossRefused { .. }
       | Self::AppBoundUnavailable { .. }
       | Self::ConflictingCredentialSelectors
       | Self::ConflictingProfileSelection => None,
@@ -153,6 +160,14 @@ impl fmt::Display for RequestError {
         "send context for {display} is missing required selectors: {}",
         required.join(", ")
       ),
+      Self::IsolationLossRefused {
+        isolated_rows,
+        required,
+      } => write!(
+        formatter,
+        "snapshot holds {isolated_rows} isolated cookies; select a context with `send_view`/`header` (needs: {}) or opt in with `IsolationLoss::Allow`",
+        required.join(", ")
+      ),
       Self::AppBoundUnavailable { policy } => write!(
         formatter,
         "App-Bound policy {} is unavailable in this build",
@@ -173,6 +188,20 @@ impl std::error::Error for RequestError {}
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_isolation_refusal_message_reads_as_one_sentence() {
+    // A lost line-continuation backslash in the format literal is invisible in
+    // the source and shows up as a run of spaces in the user's terminal.
+    let message = RequestError::IsolationLossRefused {
+      isolated_rows: 2,
+      required: vec!["top_level_site".to_owned()],
+    }
+    .to_string();
+    assert!(!message.contains("  "), "double space in {message:?}");
+    assert!(message.contains("top_level_site"));
+    assert!(message.contains("IsolationLoss::Allow"));
+  }
 
   #[test]
   fn codes_are_stable_snake_case() {

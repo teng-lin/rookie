@@ -11,6 +11,7 @@ pub(crate) enum ReadWarningCode {
   InvalidOctets,
   MalformedHostIdentity,
   UnparsablePartitionKey,
+  UnknownAncestorChain,
 }
 
 impl ReadWarningCode {
@@ -21,6 +22,7 @@ impl ReadWarningCode {
       Self::InvalidOctets => "invalid_octets",
       Self::MalformedHostIdentity => "malformed_host_identity",
       Self::UnparsablePartitionKey => "unparsable_partition_key",
+      Self::UnknownAncestorChain => "unknown_ancestor_chain",
     }
   }
 
@@ -49,6 +51,7 @@ pub(crate) struct ReadWarningCounts {
   invalid_octets: u64,
   malformed_host_identity: u64,
   unparsable_partition_key: u64,
+  unknown_ancestor_chain: u64,
 }
 
 impl ReadWarningCounts {
@@ -65,6 +68,7 @@ impl ReadWarningCounts {
       ReadWarningCode::InvalidOctets => &mut self.invalid_octets,
       ReadWarningCode::MalformedHostIdentity => &mut self.malformed_host_identity,
       ReadWarningCode::UnparsablePartitionKey => &mut self.unparsable_partition_key,
+      ReadWarningCode::UnknownAncestorChain => &mut self.unknown_ancestor_chain,
     };
     *count = count.saturating_add(occurrences);
   }
@@ -81,6 +85,10 @@ impl ReadWarningCounts {
       (
         ReadWarningCode::UnparsablePartitionKey,
         self.unparsable_partition_key,
+      ),
+      (
+        ReadWarningCode::UnknownAncestorChain,
+        self.unknown_ancestor_chain,
       ),
     ]
     .into_iter()
