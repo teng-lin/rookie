@@ -4,8 +4,10 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **Python guide** (PyPI landing page and repo tutorial). Rust
 stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The recommended 0.6 entry is `jar` / `read`
-([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+The recommended entry is `read`, then `send_view` for anything you intend
+to send
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md),
+[ADR 0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)).
 Package metadata and `version()` identify the installed build.
 
 CPython **≥ 3.11**. Wheels are `cp311-abi3` (tested 3.11–3.14). CPython 3.8–3.10
@@ -27,30 +29,37 @@ pip install rookie-cookies
 import rookie_cookies as cookies
 
 # Gecko session import — profile selection and session policy are independent
-session_jar = cookies.jar(
+snapshot = cookies.read(
     browser="firefox", profile="default-release", include_session=True
 )
 
-# Domain-intact records (storage_state / allowlists)
-rows = cookies.read(browser="chrome", profile="Work").as_list()
-header = cookies.read(browser="chrome", profile="Default").header(
-    "https://example.com/"
+# A browsing context in; the cookies it selects, the header they render to,
+# and a count of what was left out and why.
+view = snapshot.send_view(
+    "https://app.example.com/",
+    top_level_site="https://example.com",
 )
+print(view["header"], view["omitted"]["partition"])
+
+# Isolation-intact records (storage_state / allowlists / auditing)
+rows = cookies.read(browser="chrome", profile="Work").detailed_cookies()
 ```
 
-`jar` is `read(...).as_jar()`. `read` never URL-filters, and `http.cookiejar`
-cannot own send-match for a Chromium CHIPS partition or a Firefox container
-cookie — no field its send-match consults can carry that identity through.
-`ReadResult.send_view` and `ReadResult.header` (see [ADR
-0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md))
-are where isolation-aware send-match happens. There is **no** module-level
-`header()` — call `ReadResult.header(...)` on a snapshot you already took.
+`read` never URL-filters. `ReadResult.send_view` is where isolation-aware
+send-match happens, and `ReadResult.header` renders that same selection as a
+`Cookie` request-header string (see [ADR
+0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)).
+There is **no** module-level `header()` or `send_view()` — call them on a
+snapshot you already took.
 
-Because a jar cannot represent isolation, `jar` / `as_jar` **fail closed** from
-0.7: an isolated snapshot raises `isolation_loss_refused` rather than
-flattening scoped credentials into unscoped ones. Pass
-`allow_isolation_loss=True` to accept the loss. Unisolated snapshots are
-unaffected.
+`jar` is `read(...).as_jar()`, the *compatibility* projection rather than the
+send path: `http.cookiejar` cannot own send-match for a Chromium CHIPS
+partition or a Firefox container cookie, because no field its send-match
+consults can carry that identity through. So `jar` / `as_jar` **fail closed**:
+an isolated snapshot raises `isolation_loss_refused` rather than flattening
+scoped credentials into unscoped ones. Pass `allow_isolation_loss=True` to
+accept the loss — the output is then byte-for-byte what 0.6 returned.
+Unisolated snapshots are unaffected.
 
 - No-profile `read(browser="chrome")` matches `chrome()` (persistent /
   legacy-eligible cookies).
@@ -66,7 +75,7 @@ unaffected.
 Named helpers (`chrome()`, `firefox()`, `load()`) still work. They are the
 compatibility bridge from
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) and will break
-in a later major version. Prefer `read` / `jar` for new code.
+in a later major version. Prefer `read` plus `send_view` for new code.
 
 ## Isolation-aware cookies
 
@@ -90,13 +99,15 @@ optional, since browser schemas vary and a missing field means the source
 never exposed it (not that the cookie has some default value).
 
 Snapshot warnings (`ReadResult.warnings`, each `{"code": ..., "count": ...}`)
-include two isolation-related codes: `malformed_host_identity` (a row whose
+include three isolation-related codes: `malformed_host_identity` (a row whose
 host did not survive decode was omitted from the snapshot, not emitted as
-`domain: ""`), `unparsable_partition_key` (retained in the snapshot, but
-never matched by `header()` since its partition can't be identified), and,
-from 0.7, `unknown_ancestor_chain` (a partitioned Chromium row whose
+`domain: ""`), `unparsable_partition_key` (retained in the snapshot, but never
+selected by `send_view()` / `header()` since its partition can't be
+identified), and `unknown_ancestor_chain` (a partitioned Chromium row whose
 `has_cross_site_ancestor` bit the store did not record; retained, never
-matched).
+selected). Warning text reads `N rows affected (code)` — deliberately not
+"skipped", since the last two count rows the snapshot keeps. Branch on `code`;
+the text is diagnostic only.
 
 ## Sending cookies (`header`)
 
@@ -483,12 +494,14 @@ Wheels were `cp38-abi3` until the 0.6 break.
 
 Nothing is renamed. `jar`, `as_jar`, `header`, `as_list`,
 `detailed_cookies`, and every named helper keep their names and their
-meanings. Two things change, and both are additions:
+meanings, and every 0.6 call still type-checks — the opt-in is a defaulted
+keyword-only argument. Three things change:
 
 | Change | What breaks | What to do |
 | --- | --- | --- |
 | `jar` / `as_jar` fail closed on isolation loss | Only a call against a snapshot that holds a partitioned or containered cookie. It now raises `RookieRequestError` with `code == "isolation_loss_refused"` instead of silently flattening. Unisolated snapshots are unaffected. | Move to `send_view()` / `header()` if you were going to *send* those cookies, or pass `allow_isolation_loss=True` if you were not. |
 | `header()` matches on full partition identity | A `header()` call that previously merged two contexts' cookies now splits them, and a row carrying an origin attribute this build does not recognize is omitted until you name it with `origin_attributes`. | Supply the selectors the error's `required` list names. Use `send_view()`'s `omitted` counts to see what a context excluded and why. |
+| Same-site includes subdomains | A `SameSite=Lax`/`Strict` row is now selected for a request host that is a subdomain of `top_level_site`'s host, where 0.6 required literal host equality. The rule only widens — nothing that was sent before is withheld now. | Nothing, unless you were relying on literal host equality. Sibling subdomains stay cross-site, and an IP literal on either side still needs an exact match. |
 
 1. Wherever you called `jar(...)` / `as_jar()` in order to send cookies,
    call `send_view(url, top_level_site=...)` instead and use its `"header"`.
@@ -506,7 +519,7 @@ meanings. Two things change, and both are additions:
 
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
-| Recommended entry | `chrome()` / `to_cookiejar(...)` | `jar(browser=..., profile=...)` or `read(...).as_list()` |
+| Recommended entry | `chrome()` / `to_cookiejar(...)` | `read(browser=..., profile=...)`, then `send_view(...)` to send or `as_list()` to inspect |
 | Gecko session cookies | Not a first-class policy | Pass `include_session=True` to `read` / `jar`; `profile=` is optional and only selects which profile |
 | CPython | 3.8-era / `cp38-abi3` | **≥ 3.11**, `cp311-abi3` |
 | Path APIs | `firefox_based`, `chromium_based`, `any_browser` | `extract_from_path` (`cookies_from_path` / `chromium_cookies_from_path` are deprecated aliases onto it, kept until ≥ 0.7) |

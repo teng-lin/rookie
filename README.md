@@ -22,17 +22,20 @@ This project started as a maintained fork of
 archived. We still ship that project's public call shapes (`chrome()`,
 `firefox()`, `load()`, and friends) so existing consumers keep working.
 
-That compatibility is a **bridge, not a promise**. New work should use the 0.6
-job API (`read` / `jar`). Later releases will break the old surface as we
-add capabilities and clean up the design. Plan on migrating; do not take the
-legacy helpers as frozen forever.
+That compatibility is a **bridge, not a promise**. New work should use the
+job API: `read` for a snapshot, then the send view (`send_view` in Rust and
+Python, `sendView` in Node, `send-view` on the CLI) for anything you intend to
+send. Later releases will break the old surface as we add capabilities and
+clean up the design. Plan on migrating; do not take the legacy helpers as
+frozen forever.
 
 ## What is different from upstream rookie
 
 We keep the old names working while the library grows past a bag of
 per-browser functions:
 
-- One recommended job (`read` / `jar`) instead of “call `chrome()` and hope”.
+- One recommended job (`read`, plus the send view for what you will send)
+  instead of “call `chrome()` and hope”.
 - Profile queries so profile and Gecko session-source selection are explicit.
 - Structured reports, explicit-path builders, timeouts, and cancellation.
 - Chromium formats through **legacy DPAPI**, **`v10` / `v11`**, and **App-Bound
@@ -57,7 +60,7 @@ at Chrome's legacy `v10`/DPAPI cookies. Checked against source on 2026-08-22:
 | Linux KWallet-corruption empty-key fallback | ✓ | ✗ | not implemented | — | ✓ | ✓ |
 | Output | structured report with typed issue taxonomy, jar, or list | dict / dataclass list | cookie objects / CLI formats | cookiejar / curl / header formats | `CookieJar`; failed rows silently dropped | CSV/JSON/db file dump via CLI; no structured issue taxonomy |
 | Testing rigor | 34 real-browser CI combinations, 3 fuzz targets, scheduled OSV scans | ~623 lines of tests, no fuzzing, no browser-matrix CI | 82 test files, no fuzzing, no browser-matrix CI | no fuzzing or hardening signal observed | unit tests folded into yt-dlp's larger suite, no browser-matrix CI | CI + codecov, no fuzzing or real-browser E2E |
-| CHIPS partition / Firefox container identity* | ✓ captured and preserved through `read()`/`DetailedCookie`; only the compatibility projection (Rust `jar()`/`cookies()`, Python `as_jar()`/`as_list()`, Node `jar`/`cookies`) discards it | not implemented | not implemented | not implemented | not implemented | not implemented |
+| CHIPS partition / Firefox container identity* | ✓ captured, preserved through `read()`/`DetailedCookie`, and matched on by the send view; the flat compatibility projection cannot carry it, so the inventory accessors (Rust `cookies()`, Python `as_list()`, Node `cookies`) drop it and the send-safe names (`jar`/`as_jar`, CLI `--format json\|netscape`) refuse rather than drop it silently | not implemented | not implemented | not implemented | not implemented | not implemented |
 
 \* CHIPS partitions a cookie by the top-level site that embedded it, so the
 same third-party cookie doesn't leak across unrelated sites; Firefox
@@ -186,22 +189,32 @@ Gecko `jar(profile="Default")` returns a smaller jar than it did in earlier
 session source, so selecting a Chrome profile never recovered session state
 held only in browser memory.
 
-`read` never URL-filters the snapshot; `ReadResult.header` is a **view** over a
-send context. Rust passes `&SendContext`; Python and Node also accept a bare URL
-as convenience syntax for the conservative default context. A bare URL is not
-enough once the snapshot contains a partitioned or container-scoped cookie, so
-those calls fail with the missing selectors instead of merging isolation
-boundaries. There is no top-level binding `header()`, and no crate-root Rust
-`get` / `report`.
+`read` never URL-filters the snapshot. The **send view** — `send_view` in Rust
+and Python, `sendView` in Node, `send-view` on the CLI — is the one operation
+that decides which stored rows a browsing context may send, and `header`
+renders that same selection as a `Cookie` request-header string rather than
+matching again. Rust passes `&SendContext`; Python and Node also accept a bare
+URL as convenience syntax for the conservative default context. A bare URL is
+not enough once the snapshot contains a partitioned or container-scoped
+cookie, so those calls fail with the missing selectors
+(`incomplete_send_context`, whose `required` names them) instead of merging
+isolation boundaries. There is no top-level binding `header()` or `sendView()`,
+and no crate-root Rust `get` / `report`.
 
-`jar` is warning-discarding projection sugar over the same `read` job. Python
-returns `http.cookiejar.CookieJar`; Node returns `CookieObject[]`; Rust returns
-`Vec<Cookie>`. Use `read` when warnings or partition/container context matter.
-From 0.7 `jar` also fails closed on an isolated snapshot: a flat cookie list
-has no field for a CHIPS partition key or a container id, so it raises
-`isolation_loss_refused` rather than silently merging two browsing contexts,
-and accepting that loss is an explicit opt-in (`allow_isolation_loss=True` in
-Python).
+`jar` is the warning-discarding **compatibility** projection over the same
+`read` job, not the send path. Python returns `http.cookiejar.CookieJar`; Node
+returns `CookieObject[]`; Rust returns `Vec<Cookie>`; the CLI's `--format
+json|netscape` is the same shape. None of those has a field for a CHIPS
+partition key, a Firefox `partitionKey` tuple, or container identity, so all
+of them **fail closed** on an isolated snapshot with `isolation_loss_refused`
+rather than turning context-scoped credentials into unscoped ones. Accepting
+that loss is an explicit, named opt-in — `IsolationLoss::Allow` through
+`jar_with`/`into_jar_with` in Rust, `allow_isolation_loss=True` in Python,
+`allowIsolationLoss: true` in Node, `--allow-isolation-loss` on the CLI — and
+the opted-in output is byte-for-byte what these produced in 0.6. A snapshot
+with no isolated rows is unaffected. The infallible inventory accessors
+(Rust `cookies()`, Python `as_list()`, Node's `cookies` getter) are unchanged:
+they are for looking at raw rows, and never promised send-safety.
 
 ### Python
 
@@ -221,29 +234,36 @@ view = snapshot.send_view(
 )
 print(view["header"], view["omitted"]["partition"])
 
+# `as_list()` is the inventory projection. `as_jar()` / `jar(...)` are
+# compatibility only: they refuse an isolated snapshot unless
+# `allow_isolation_loss=True` names the loss.
 rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```
 
 ### Node.js
 
 ```javascript
-import { jar, read } from "rookie-cookies";
+import { read } from "rookie-cookies";
 
-// A flat list cannot carry a partition or a container, so an isolated
-// snapshot refuses unless the loss is named.
-const sessionCookies = await jar({
+// Gecko session import — profile selection and session policy are independent
+const snapshot = await read({
   browser: "firefox",
   profile: "default-release",
   includeSession: true,
-  allowIsolationLoss: true,
 });
 
-const snapshot = await read({
-  browser: "chrome",
-  profile: "Work",
+// A browsing context in; the cookies it selects, the header, and a count of
+// what was left out and why.
+const view = snapshot.sendView({
+  url: "https://app.example.com/",
+  topLevelSite: "https://example.com",
 });
-const view = snapshot.sendView("https://example.com/");
-console.log(sessionCookies, view.header, view.omitted);
+console.log(view.header, view.omitted.partition);
+
+// `snapshot.cookies` is the inventory projection. The flat `jar(...)` job is
+// compatibility only: it cannot carry a partition or a container, so it
+// refuses an isolated snapshot unless `allowIsolationLoss: true` names the loss.
+console.log(snapshot.cookies.length);
 ```
 
 Extraction is async. Always `await`.
@@ -251,19 +271,28 @@ Extraction is async. Always `await`.
 ### Rust
 
 ```rust
-use rookie_cookies::{jar, read, ReadRequest, SendContext};
+use rookie_cookies::{read, ReadRequest, SendContext};
 
 fn main() -> rookie_cookies::Result<()> {
-    let session_cookies = jar(
+    // Gecko session import — profile selection and session policy are independent
+    let snapshot = read(
         ReadRequest::browser("firefox")
             .profile("default-release")
             .include_session(),
     )?;
-    let snapshot = read(
-        ReadRequest::browser("chrome").profile("Work"),
+
+    // A browsing context in; the cookies it selects, the header, and a count
+    // of what was left out and why.
+    let view = snapshot.send_view(
+        &SendContext::url("https://app.example.com/")
+            .top_level_site("https://example.com"),
     )?;
-    println!("{} cookies", session_cookies.len());
-    println!("{}", snapshot.header(&SendContext::url("https://example.com/"))?);
+    println!("{} {}", view.header(), view.omitted().partition());
+
+    // `cookies()` is the inventory projection. `jar()`/`into_jar()` are
+    // compatibility only: they refuse an isolated snapshot unless
+    // `jar_with(IsolationLoss::Allow)` names the loss.
+    println!("{} cookies", snapshot.cookies().len());
     Ok(())
 }
 ```
@@ -318,8 +347,32 @@ errors and wrapped or non-library failures retain their normal human
 `Display` output and are not promised to be JSON. Failed jobs do not write a
 partial cookie result to stdout.
 
-Coming from the legacy named helpers? Each language guide documents the
-compatibility surface and its migration to the recommended 0.6 API:
+### Migrating to 0.7
+
+Nothing is renamed, and every 0.6 call site still compiles: `read`, `header`,
+`jar` / `as_jar`, the inventory accessors, and every named helper keep their
+names, and the opt-in arrives as a defaulted keyword or a superset options
+type rather than a changed argument list. Three behaviors change, and each
+language guide has the full table:
+[python](bindings/python/README.md#migrating-to-07) ·
+[javascript](bindings/node/README.md#migrating-to-07) ·
+[rust](rookie-rs/README.md#migrating-to-07).
+
+1. **`jar` fails closed.** Only against a snapshot that holds an isolated
+   cookie, and only until you say which you meant: a browsing context (the
+   send view) or a flat list you have accepted the loss on (the opt-in above).
+2. **Send selection matches the full partition identity.** Chromium's
+   ancestor-chain bit, Firefox's partition port and foreign-ancestor bit, and
+   every Firefox `OriginAttributes` equality field now separate rows that
+   0.6 merged. A row carrying an attribute this build does not recognize is
+   omitted until named exactly. Supply the selectors the error's `required`
+   list names.
+3. **Same-site includes subdomains.** A request to `www.example.com` under
+   `top_level_site=https://example.com` is same-site where 0.6 called it
+   cross-site. The rule only widens; sibling subdomains stay cross-site.
+
+Coming from the legacy named helpers? Each language guide also documents the
+compatibility surface and its migration to the recommended API:
 [python](bindings/python/README.md) · [javascript](bindings/node/README.md) · [rust](rookie-rs/README.md).
 
 ## Security
