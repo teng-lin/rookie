@@ -1,0 +1,1165 @@
+{
+  "schema_version": 1,
+  "kind": "isolation-collision-corpus",
+  "clock_epoch_seconds": 1893456000,
+  "stores": {
+    "chromium_isolated": {
+      "schema_version": 1,
+      "engine": "chromium",
+      "rows": [
+        {
+          "id": "chromium_ancestor_same_site",
+          "host_key": "nested.rookie-a.test",
+          "name": "chips",
+          "value": "chromium_ancestor_same_site",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test",
+          "has_cross_site_ancestor": 0,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_cross_site",
+          "host_key": "nested.rookie-a.test",
+          "name": "chips",
+          "value": "chromium_ancestor_cross_site",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test",
+          "has_cross_site_ancestor": 1,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_unknown",
+          "host_key": "nested.rookie-a.test",
+          "name": "chips",
+          "value": "chromium_ancestor_unknown",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test",
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_samesite_none",
+          "host_key": "nested.rookie-a.test",
+          "name": "y_none",
+          "value": "chromium_ancestor_samesite_none",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_samesite_strict",
+          "host_key": "nested.rookie-a.test",
+          "name": "z_strict",
+          "value": "chromium_ancestor_samesite_strict",
+          "path": "/",
+          "is_secure": 0,
+          "is_httponly": 0,
+          "samesite": 2,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_third_party_cross_site",
+          "host_key": "third.rookie-b.test",
+          "name": "chips",
+          "value": "chromium_ancestor_third_party_cross_site",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test",
+          "has_cross_site_ancestor": 1,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_child_subdomain_same_site",
+          "host_key": "sub.rookie-a.test",
+          "name": "chips",
+          "value": "chromium_site_child_subdomain_same_site",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test",
+          "has_cross_site_ancestor": 0,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_sibling_subdomain_cross_site",
+          "host_key": "a.rookie-a.test",
+          "name": "chips",
+          "value": "chromium_site_sibling_subdomain_cross_site",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://b.rookie-a.test",
+          "has_cross_site_ancestor": 1,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_stored_key_with_port",
+          "host_key": "rookie-a.test",
+          "name": "chips",
+          "value": "chromium_site_stored_key_with_port",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test:8443",
+          "has_cross_site_ancestor": 0,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_idn_host",
+          "host_key": "xn--mnchen-3ya.rookie-a.test",
+          "name": "chips",
+          "value": "chromium_site_idn_host",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://xn--mnchen-3ya.rookie-a.test",
+          "has_cross_site_ancestor": 0,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_ipv4_same_site_row",
+          "host_key": "7.198.51.100.7",
+          "name": "chips",
+          "value": "chromium_site_ipv4_same_site_row",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://198.51.100.7",
+          "has_cross_site_ancestor": 0,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_ipv4_cross_site_row",
+          "host_key": "7.198.51.100.7",
+          "name": "chips",
+          "value": "chromium_site_ipv4_cross_site_row",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://198.51.100.7",
+          "has_cross_site_ancestor": 1,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_ipv6_same_site_row",
+          "host_key": "ffff::1",
+          "name": "chips",
+          "value": "chromium_site_ipv6_same_site_row",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://[::1]",
+          "has_cross_site_ancestor": 0,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_site_ipv6_cross_site_row",
+          "host_key": "ffff::1",
+          "name": "chips",
+          "value": "chromium_site_ipv6_cross_site_row",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://[::1]",
+          "has_cross_site_ancestor": 1,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_header_deep",
+          "host_key": "headers.rookie-a.test",
+          "name": "mid",
+          "value": "chromium_header_deep",
+          "path": "/account",
+          "is_secure": 0,
+          "is_httponly": 0,
+          "samesite": 1,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_header_root_a",
+          "host_key": "headers.rookie-a.test",
+          "name": "alpha",
+          "value": "chromium_header_root_a",
+          "path": "/",
+          "is_secure": 0,
+          "is_httponly": 0,
+          "samesite": 1,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_header_root_b",
+          "host_key": "headers.rookie-a.test",
+          "name": "zeta",
+          "value": "chromium_header_root_b",
+          "path": "/",
+          "is_secure": 0,
+          "is_httponly": 0,
+          "samesite": 1,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        }
+      ],
+      "jar": {
+        "expect": {
+          "error": {
+            "code": "isolation_loss_refused",
+            "required": [
+              "top_level_site"
+            ]
+          }
+        }
+      }
+    },
+    "chromium_plain": {
+      "schema_version": 1,
+      "engine": "chromium",
+      "rows": [
+        {
+          "id": "chromium_plain_basic",
+          "host_key": "rookie-a.test",
+          "name": "sid",
+          "value": "chromium_plain_basic",
+          "path": "/",
+          "is_secure": 0,
+          "is_httponly": 0,
+          "samesite": 1,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        }
+      ],
+      "jar": {
+        "expect": "ok"
+      }
+    },
+    "firefox_isolated": {
+      "schema_version": 1,
+      "engine": "firefox",
+      "rows": [
+        {
+          "id": "firefox_attr_default",
+          "host": "attrs.rookie-a.test",
+          "name": "a_default",
+          "value": "firefox_attr_default",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": ""
+        },
+        {
+          "id": "firefox_attr_usercontext",
+          "host": "attrs.rookie-a.test",
+          "name": "b_usercontext",
+          "value": "firefox_attr_usercontext",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^userContextId=2"
+        },
+        {
+          "id": "firefox_attr_privatebrowsing",
+          "host": "attrs.rookie-a.test",
+          "name": "c_privatebrowsing",
+          "value": "firefox_attr_privatebrowsing",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^privateBrowsingId=1"
+        },
+        {
+          "id": "firefox_attr_firstparty",
+          "host": "attrs.rookie-a.test",
+          "name": "d_firstparty",
+          "value": "firefox_attr_firstparty",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^firstPartyDomain=rookie-a.test"
+        },
+        {
+          "id": "firefox_attr_geckoview",
+          "host": "attrs.rookie-a.test",
+          "name": "e_geckoview",
+          "value": "firefox_attr_geckoview",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^geckoViewSessionContextId=session-1"
+        },
+        {
+          "id": "firefox_port_default",
+          "host": "third.rookie-b.test",
+          "name": "chips_port",
+          "value": "firefox_port_default",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%29"
+        },
+        {
+          "id": "firefox_port_8443",
+          "host": "third.rookie-b.test",
+          "name": "chips_port",
+          "value": "firefox_port_8443",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%2C8443%29"
+        },
+        {
+          "id": "firefox_foreign_true",
+          "host": "rookie-a.test",
+          "name": "chips_ancestor",
+          "value": "firefox_foreign_true",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%2Cf%29"
+        },
+        {
+          "id": "firefox_foreign_false",
+          "host": "other.rookie-c.test",
+          "name": "chips_ancestor",
+          "value": "firefox_foreign_false",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%29"
+        }
+      ],
+      "jar": {
+        "expect": {
+          "error": {
+            "code": "isolation_loss_refused",
+            "required": [
+              "top_level_site",
+              "user_context_id",
+              "private_browsing_id",
+              "first_party_domain",
+              "gecko_view_session_context_id"
+            ]
+          }
+        }
+      }
+    },
+    "firefox_unknown_attr": {
+      "schema_version": 1,
+      "engine": "firefox",
+      "rows": [
+        {
+          "id": "firefox_unknown_default",
+          "host": "unknown.rookie-a.test",
+          "name": "u_default",
+          "value": "firefox_unknown_default",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": ""
+        },
+        {
+          "id": "firefox_unknown_future",
+          "host": "unknown.rookie-a.test",
+          "name": "u_future",
+          "value": "firefox_unknown_future",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^futureAttr=1"
+        },
+        {
+          "id": "firefox_unknown_partitioned",
+          "host": "unknown.rookie-a.test",
+          "name": "u_partitioned",
+          "value": "firefox_unknown_partitioned",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%29"
+        }
+      ],
+      "jar": {
+        "expect": {
+          "error": {
+            "code": "isolation_loss_refused",
+            "required": [
+              "top_level_site",
+              "origin_attributes"
+            ]
+          }
+        }
+      }
+    },
+    "firefox_plain": {
+      "schema_version": 1,
+      "engine": "firefox",
+      "rows": [
+        {
+          "id": "firefox_plain_basic",
+          "host": "rookie-a.test",
+          "name": "sid",
+          "value": "firefox_plain_basic",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": ""
+        }
+      ],
+      "jar": {
+        "expect": "ok"
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "chromium_ancestor_derived_same_site",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://nested.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_same_site",
+          "chromium_ancestor_samesite_none",
+          "chromium_ancestor_samesite_strict"
+        ],
+        "header": "chips=chromium_ancestor_same_site; y_none=chromium_ancestor_samesite_none; z_strict=chromium_ancestor_samesite_strict",
+        "omitted": {
+          "not_applicable": 12,
+          "partition": 1,
+          "ancestor_chain_unknown": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_explicit_cross_site_a_to_b_to_a",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://nested.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "cross_site",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_cross_site",
+          "chromium_ancestor_samesite_none"
+        ],
+        "header": "chips=chromium_ancestor_cross_site; y_none=chromium_ancestor_samesite_none",
+        "omitted": {
+          "not_applicable": 12,
+          "same_site": 1,
+          "partition": 1,
+          "ancestor_chain_unknown": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_explicit_same_site_on_same_site_request",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://nested.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "same_site",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_same_site",
+          "chromium_ancestor_samesite_none",
+          "chromium_ancestor_samesite_strict"
+        ],
+        "header": "chips=chromium_ancestor_same_site; y_none=chromium_ancestor_samesite_none; z_strict=chromium_ancestor_samesite_strict",
+        "omitted": {
+          "not_applicable": 12,
+          "partition": 1,
+          "ancestor_chain_unknown": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_explicit_same_site_clamped_to_cross_site",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://third.rookie-b.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "same_site",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_third_party_cross_site"
+        ],
+        "header": "chips=chromium_ancestor_third_party_cross_site",
+        "omitted": {
+          "not_applicable": 16
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_derived_cross_site",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://third.rookie-b.test/",
+        "top_level_site": "https://rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_third_party_cross_site"
+        ],
+        "header": "chips=chromium_ancestor_third_party_cross_site",
+        "omitted": {
+          "not_applicable": 16
+        }
+      }
+    },
+    {
+      "id": "chromium_site_child_subdomain_derived_same_site",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://sub.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_site_child_subdomain_same_site"
+        ],
+        "header": "chips=chromium_site_child_subdomain_same_site",
+        "omitted": {
+          "not_applicable": 16
+        }
+      }
+    },
+    {
+      "id": "chromium_site_sibling_subdomain_derived_cross_site",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://a.rookie-a.test/",
+        "top_level_site": "https://b.rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_site_sibling_subdomain_cross_site"
+        ],
+        "header": "chips=chromium_site_sibling_subdomain_cross_site",
+        "omitted": {
+          "not_applicable": 16
+        }
+      }
+    },
+    {
+      "id": "chromium_site_stored_key_with_port_requires_matching_port",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [],
+        "header": "",
+        "omitted": {
+          "not_applicable": 16,
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_site_stored_key_with_port_matches_when_port_matches",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://rookie-a.test/",
+        "top_level_site": "https://rookie-a.test:8443",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_site_stored_key_with_port"
+        ],
+        "header": "chips=chromium_site_stored_key_with_port",
+        "omitted": {
+          "not_applicable": 16
+        }
+      }
+    },
+    {
+      "id": "chromium_site_idn_host_exact_match",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://xn--mnchen-3ya.rookie-a.test/",
+        "top_level_site": "https://xn--mnchen-3ya.rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_site_idn_host"
+        ],
+        "header": "chips=chromium_site_idn_host",
+        "omitted": {
+          "not_applicable": 16
+        }
+      }
+    },
+    {
+      "id": "chromium_site_ipv4_exact_host_equality_required",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://7.198.51.100.7/",
+        "top_level_site": "https://198.51.100.7",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_site_ipv4_cross_site_row"
+        ],
+        "header": "chips=chromium_site_ipv4_cross_site_row",
+        "omitted": {
+          "not_applicable": 15,
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_site_ipv6_exact_host_equality_required",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://[ffff::1]/",
+        "top_level_site": "https://[::1]",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_site_ipv6_cross_site_row"
+        ],
+        "header": "chips=chromium_site_ipv6_cross_site_row",
+        "omitted": {
+          "not_applicable": 15,
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_header_order_longest_path_then_name",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://headers.rookie-a.test/account",
+        "top_level_site": "https://headers.rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_header_deep",
+          "chromium_header_root_a",
+          "chromium_header_root_b"
+        ],
+        "header": "mid=chromium_header_deep; alpha=chromium_header_root_a; zeta=chromium_header_root_b",
+        "omitted": {
+          "not_applicable": 14
+        }
+      }
+    },
+    {
+      "id": "chromium_missing_top_level_site_demands_it",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://headers.rookie-a.test/",
+        "now": 1893456000
+      },
+      "expect": {
+        "error": {
+          "code": "incomplete_send_context",
+          "required": [
+            "top_level_site"
+          ]
+        }
+      }
+    },
+    {
+      "id": "chromium_plain_basic_send",
+      "store": "chromium_plain",
+      "context": {
+        "url": "https://rookie-a.test/",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_plain_basic"
+        ],
+        "header": "sid=chromium_plain_basic",
+        "omitted": {}
+      }
+    },
+    {
+      "id": "firefox_isolated_missing_everything",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "now": 1893456000
+      },
+      "expect": {
+        "error": {
+          "code": "incomplete_send_context",
+          "required": [
+            "top_level_site",
+            "user_context_id",
+            "private_browsing_id",
+            "first_party_domain",
+            "gecko_view_session_context_id"
+          ]
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_select_user_context_id",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 2,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_attr_usercontext"
+        ],
+        "header": "b_usercontext=firefox_attr_usercontext",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 4
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_select_private_browsing_id",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 1,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_attr_privatebrowsing"
+        ],
+        "header": "c_privatebrowsing=firefox_attr_privatebrowsing",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 4
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_select_first_party_domain",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "rookie-a.test",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_attr_firstparty"
+        ],
+        "header": "d_firstparty=firefox_attr_firstparty",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 4
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_first_party_domain_no_match_selects_nothing",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "no-match.test",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [],
+        "header": "",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 5
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_select_gecko_view_session_context_id",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "session-1",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_attr_geckoview"
+        ],
+        "header": "e_geckoview=firefox_attr_geckoview",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 4
+        }
+      }
+    },
+    {
+      "id": "firefox_attr_default_context_selects_default_row",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://attrs.rookie-a.test/",
+        "top_level_site": "https://attrs.rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_attr_default"
+        ],
+        "header": "a_default=firefox_attr_default",
+        "omitted": {
+          "not_applicable": 4,
+          "origin": 4
+        }
+      }
+    },
+    {
+      "id": "firefox_port_default_matches_without_explicit_port",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://third.rookie-b.test/",
+        "top_level_site": "https://rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_port_default"
+        ],
+        "header": "chips_port=firefox_port_default",
+        "omitted": {
+          "not_applicable": 7,
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_port_8443_requires_explicit_port",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://third.rookie-b.test/",
+        "top_level_site": "https://rookie-a.test:8443",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_port_8443"
+        ],
+        "header": "chips_port=firefox_port_8443",
+        "omitted": {
+          "not_applicable": 7,
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_foreign_true_requires_explicit_cross_site_ancestor",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "ancestor_chain": "cross_site",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_foreign_true"
+        ],
+        "header": "chips_ancestor=firefox_foreign_true",
+        "omitted": {
+          "not_applicable": 8
+        }
+      }
+    },
+    {
+      "id": "firefox_foreign_false_via_derived_cross_site",
+      "store": "firefox_isolated",
+      "context": {
+        "url": "https://other.rookie-c.test/",
+        "top_level_site": "https://rookie-a.test",
+        "user_context_id": 0,
+        "private_browsing_id": 0,
+        "first_party_domain": "",
+        "gecko_view_session_context_id": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_foreign_false"
+        ],
+        "header": "chips_ancestor=firefox_foreign_false",
+        "omitted": {
+          "not_applicable": 8
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_missing_selector",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "now": 1893456000
+      },
+      "expect": {
+        "error": {
+          "code": "incomplete_send_context",
+          "required": [
+            "top_level_site",
+            "origin_attributes"
+          ]
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_exact_future_suffix",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "origin_attributes": "^futureAttr=1",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_unknown_default",
+          "firefox_unknown_future"
+        ],
+        "header": "u_default=firefox_unknown_default; u_future=firefox_unknown_future",
+        "omitted": {
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_exact_empty_suffix",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "origin_attributes": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_unknown_default"
+        ],
+        "header": "u_default=firefox_unknown_default",
+        "omitted": {
+          "partition": 1,
+          "origin": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_partitioned_row_survives_raw_selector",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "cross_site",
+        "origin_attributes": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_unknown_default",
+          "firefox_unknown_partitioned"
+        ],
+        "header": "u_default=firefox_unknown_default; u_partitioned=firefox_unknown_partitioned",
+        "omitted": {
+          "origin": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_plain_basic_send",
+      "store": "firefox_plain",
+      "context": {
+        "url": "https://rookie-a.test/",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_plain_basic"
+        ],
+        "header": "sid=firefox_plain_basic",
+        "omitted": {}
+      }
+    }
+  ],
+  "notes": [
+    "Ancestor-chain resolution is clamped, not merely derived: resolved = cross_site if the request site differs from top_level_site, else (explicit ancestor_chain or same_site); same_site_context = sites_match && resolved==same_site. A request whose site differs from the top level cannot be a first-party frame in a real browser frame tree, so an explicit ancestor_chain=same_site there is silently clamped to cross_site rather than accepted or rejected (chromium_ancestor_explicit_same_site_clamped_to_cross_site selects the same row as the plain derived-cross-site case). An explicit ancestor_chain=cross_site on a same-site request also clears same_site_context, which is what lets a SameSite=Strict cookie be omitted even though the request and top-level site are literally the same host (chromium_ancestor_explicit_cross_site_a_to_b_to_a).",
+    "The Chromium ancestor-bit rows (same_site/cross_site/unknown) are hosted on nested.rookie-a.test, a subdomain of the top-level site, because that is the only relationship under which an explicit ancestor_chain=same_site is ever honored rather than clamped away. chromium_ancestor_third_party_cross_site models the genuinely cross-site (third-party) case on its own, single row: only bit=1 is a state a real Chromium store can produce there, since bit=0 at a cross-site host is now unreachable by any selector.",
+    "IP literals (IPv4/IPv6) are exempt from the subdomain rule for ancestor_chain derivation and same_site_context: site membership requires exact host equality, never a suffix/subdomain check (ADR 0006 Decision 1).",
+    "chromium_site_ipv4_same_site_row and chromium_site_ipv6_same_site_row exist to prove the exemption: a naive dot-boundary subdomain check would treat '7.198.51.100.7' as a subdomain of '198.51.100.7' (and 'ffff::1' as ending with '::1'), but exact host equality correctly derives cross_site instead, so only the *_cross_site_row is ever selected.",
+    "A Chromium top_frame_site_key's port (if present, e.g. 'https://rookie-a.test:8443') must equal top_level_site's explicit port, the same rule as Firefox's partitionKey port -- it is no longer stripped/ignored. chromium_site_stored_key_with_port_requires_matching_port (top_level_site without a port) selects nothing; chromium_site_stored_key_with_port_matches_when_port_matches (top_level_site with :8443) selects the row.",
+    "A Chromium partitioned row whose has_cross_site_ancestor column is NULL (chromium_ancestor_unknown) is omitted from every context regardless of the selector supplied, and is counted under ancestor_chain_unknown, never partition.",
+    "Sibling subdomains (a.rookie-a.test under top-level b.rookie-a.test) stay cross-site because neither host is a subdomain of the other; a child subdomain (sub.rookie-a.test under top-level rookie-a.test) is same-site under the same rule.",
+    "The demand for a selector token is computed once over the whole snapshot (every row in the store), not per case. Every case against firefox_isolated must supply all five typed tokens even when it targets a single dimension, because the store's other row groups (containers, first-party domain, gecko view session, the partition rows) collectively observe every typed token at least once.",
+    "Firefox default fill applies to all four typed OriginAttributes fields whenever originAttributes is present at all (including the empty '' suffix), because Firefox omits default-valued attributes from the suffix: user_context_id=0, private_browsing_id=0, first_party_domain=\"\", gecko_view_session_context_id=\"\". A supplied selector must equal the stored value exactly, so first_party_domain=\"\" (not an omitted selector) is how a caller selects the default rows, and first_party_domain=\"no-match.test\" omits every row including the default one (firefox_attr_first_party_domain_no_match_selects_nothing).",
+    "The raw origin_attributes selector governs ONLY opaque rows -- a row whose originAttributes suffix carries a name this build does not recognize (or an unreadable value under a known name). An opaque row is selected iff the selector equals its stored raw suffix exactly, else omitted under origin. A non-opaque row (including one with a recognized partitionKey) ignores origin_attributes entirely and is governed by the typed selectors and the partition verdict instead; firefox_unknown_attr_partitioned_row_survives_raw_selector proves this: origin_attributes=\"\" does not collapse the partitioned row into (or exclude it from) the opaque-row comparison.",
+    "firefox_isolated never demands origin_attributes (every row there has only recognized attribute names), so its cases never supply it.",
+    "firefox_unknown_attr demands top_level_site (its partitioned row is not Unpartitioned) and origin_attributes (its future row is opaque). firefox_unknown_default's and firefox_unknown_future's typed projections are otherwise identical (uc=0, pb=0, fpd=\"\", gvscid=\"\"), so origin_attributes is the only way to select or exclude the opaque row specifically; the non-opaque partitioned row is present or absent from a case's selected set purely on the ordinary partition verdict, independent of whatever origin_attributes value is supplied.",
+    "The omitted counts in every case include every row in the store, not just the rows conceptually 'in scope': a row hosted at a different domain than the request is counted not_applicable (it fails the GetFilter domain check) regardless of its isolation identity.",
+    "Firefox partitionKey has no separate selector or demand token for its port or foreign-ancestor ('f') fields; both are derived from top_level_site (port) and from same_site_context + ancestor_chain (f). firefox_port_8443 and firefox_port_default differ only in the derived port; firefox_foreign_true and firefox_foreign_false differ only in the derived f bit.",
+    "firefox_foreign_true requires an explicit ancestor_chain=cross_site: with the request and top-level site both being 'rookie-a.test', the derived ancestor_chain would be same_site, and a non-empty partitionKey never matches a first-party context (same_site_context && ancestor_chain==same_site) regardless of the stored f bit. The same first-party guard is what excludes firefox_unknown_partitioned from firefox_unknown_attr_exact_future_suffix and firefox_unknown_attr_exact_empty_suffix, both of which leave ancestor_chain to derive same_site on a same-site (subdomain) request.",
+    "jar refuses whenever the demanded-token list for the whole snapshot is non-empty, using the exact same tokens send_view's incomplete_send_context error would demand; chromium_plain and firefox_plain hold no isolated rows, so their jar is ok."
+  ]
+}
