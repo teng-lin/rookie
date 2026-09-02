@@ -111,8 +111,8 @@ caller an explicit, named way to accept that loss.
 - Browser policy heuristics: storage-access grants, First-Party Sets,
   related-site sets.
 - Nonce-keyed/ephemeral partitions.
-- A live-browser e2e lane for Firefox port-partitioning
-  (`privacy.dynamic_firstparty.use_site=false`).
+- A live-browser e2e lane for Firefox port-partitioning (a top-level page on
+  a non-default port under the default configuration; no pref is involved).
 - Extending `from-path --domains` with the new selector surface (stays
   compatibility-only; open question below).
 
@@ -127,8 +127,13 @@ caller an explicit, named way to accept that loss.
 | `top_frame_site_key` parses to a site, `has_cross_site_ancestor` is `NULL` | Never sent; counted `SendOmissions::ancestor_chain_unknown`; `ReadWarning` code `unknown_ancestor_chain` |
 | `top_frame_site_key` present but unparsable | Never sent, regardless of the selector supplied; demands `top_level_site` so the snapshot's other, parsable partitioned rows are not silently sent as if this row were absent; counted `unparsable_partition_key` |
 
-Only pre-2024 Chromium schemas lack the `has_cross_site_ancestor` column at
-all, which is the practical source of the `NULL` case above.
+A store last written by a Chromium that predates the `has_cross_site_ancestor`
+column is the practical source of the unknown-bit case above (absent column,
+`NULL`, or a value other than `0`/`1` all count as unknown). Chromium's own
+schema migration may backfill a value when it next opens the store; the crate
+deliberately does not infer one. The stored key's optional port is identity
+and must equal the `top_level_site` URL's explicit port; the former
+port-stripping is retired.
 
 ### Firefox persistent store (`cookies.sqlite`, `originAttributes` suffix)
 
@@ -139,10 +144,15 @@ Known keys and their selector mapping:
 | --- | --- | --- |
 | `userContextId` | `user_context_id` | `0` |
 | `privateBrowsingId` | `private_browsing_id` | `0` |
-| `firstPartyDomain` | `first_party_domain` | none (absent = unset, not empty string) |
-| `geckoViewSessionContextId` | `gecko_view_session_context_id` | none |
-| `partitionKey` | derived into `PartitionIdentity` (see below) | none |
-| any other key | only reachable via the raw `origin_attributes` selector | fails closed — never treated as default |
+| `firstPartyDomain` | `first_party_domain` | `""` (Firefox omits the default empty value) |
+| `geckoViewSessionContextId` | `gecko_view_session_context_id` | `""` |
+| `partitionKey` | derived into `PartitionIdentity` (see below) | none (unpartitioned) |
+| any other key, or an unreadable value under a known key | only reachable via the raw `origin_attributes` selector | fails closed — never treated as default |
+
+The raw `origin_attributes` selector is an exact comparison against every
+row's stored suffix, ANDed with the typed selectors. For Firefox rows it also
+satisfies the partition gate when the stored `partitionKey` is unparsable,
+because the suffix names the partition verbatim.
 
 `partitionKey` grammar: `(scheme,host[,port][,f])`, strict. Anything else is
 `Unparsable`. Verdict, given a parsed tuple:
@@ -407,9 +417,9 @@ with its own CLI test.
 - Should `from-path --domains` gain the new selector surface, or stay
   documented as compatibility-only indefinitely? Deferred; see ADR 0006 "Out
   of scope."
-- Should the Firefox port-partitioning lane
-  (`privacy.dynamic_firstparty.use_site=false`) get a real-browser e2e test
-  in a later program, or stay covered only by the synthetic corpus?
+- Should the Firefox port-partitioning lane (a non-default-port top-level
+  page under the default configuration) get a real-browser e2e test in a
+  later program, or stay covered only by the synthetic corpus?
 - Should a pre-2024 Chromium store missing `has_cross_site_ancestor`
   entirely (not just `NULL` on a partitioned row) get a softer rule than
   "every partitioned row in it is omitted from every send view"? Current

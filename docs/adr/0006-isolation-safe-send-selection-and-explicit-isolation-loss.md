@@ -100,9 +100,13 @@ disagree.
   `has_cross_site_ancestor` bit. A stored row matches when its site equals
   the request's normalized `top_level_site` and its stored bit equals
   `ancestor_chain == CrossSite` (`Some(true)` for `CrossSite`, `Some(false)`
-  for `SameSite`). Port-stripping on the site key is retained: Chromium
-  serializes a *site* (no port), and the origin-with-port spelling some
-  versions persist is not a second identity.
+  for `SameSite`), where `ancestor_chain` is the *resolved* chain defined
+  below. The stored key is parsed as scheme, host, and an optional port, and
+  the port must equal the `top_level_site` URL's explicit port (`None` for
+  the scheme default) — the same rule as Firefox. Chromium's `SchemefulSite`
+  serializes with the scheme's default port, so real http/https keys carry
+  none; the previous port-stripping was the one widening step in the module
+  and is retired rather than justified.
 - **Firefox `partitionKey`.** The tuple grammar is strict:
   `(scheme,host[,port][,f])`. Anything else — extra fields, a malformed
   bracket, a non-numeric port — is `Unparsable`, not "ignore the tail and
@@ -124,15 +128,23 @@ disagree.
 `StoredIsolation`, computed once per row, parses `origin_attributes` fully:
 the five known attribute names plus a catch-all "this attribute name is
 present but this build does not know it" fact. Firefox omits default-valued
-attributes from the serialized suffix, so the defaults `user_context_id = 0`
-and `private_browsing_id = 0` are filled only when an `origin_attributes`
-value is present — an empty string or a bare `^` counts as present, because
-Firefox still wrote the column; a `None` column, as on every Chromium row,
-does not, and stays genuinely unknown rather than assumed-default. A stored
-`None` (unknown) never matches a supplied selector, and a supplied selector
-never matches a stored unrecognized attribute name: an unrecognized name can
-only be reached by the exact `origin_attributes` raw-suffix selector
-(Decision 5), never inferred from the five typed fields.
+attributes from the serialized suffix, so the defaults `user_context_id = 0`,
+`private_browsing_id = 0`, `first_party_domain = ""`, and
+`gecko_view_session_context_id = ""` are filled only when an
+`origin_attributes` value is present — an empty string or a bare `^` counts
+as present, because Firefox still wrote the column; a `None` column, as on
+every Chromium row, does not, and stays genuinely unknown rather than
+assumed-default. A value under a *known* attribute name that cannot be read
+(`^userContextId=abc`, a JSON `partitionKey` that is not a string) is treated
+exactly like an unrecognized name: it fails closed and demands the raw
+selector, never a default. A stored `None` (unknown) never matches a supplied
+selector, and a supplied selector never matches a stored unrecognized
+attribute name: an unrecognized name can only be reached by the exact
+`origin_attributes` raw-suffix selector (Decision 5), never inferred from the
+five typed fields. The raw selector is an exact string comparison against
+every row's stored suffix, ANDed with the typed selectors — so `""` and `"^"`
+are distinct selectors even though both count as "present" for the default
+fill.
 
 **Missing selector is demanded only when observed.** A token is added to
 `required` if and only if some row in the snapshot positively observes a
@@ -147,7 +159,13 @@ who has not supplied `top_level_site` at all cannot tell isolated rows apart
 from unpartitioned ones, so the demand surfaces the unparsable row's
 existence rather than letting it disappear into a context it does not
 belong to. Any unrecognized attribute name demands `origin_attributes` on
-the same logic.
+the same logic. One escape hatch exists for Firefox rows only: an exact
+`origin_attributes` selector equal to the row's raw suffix satisfies the
+partition gate as well, because the suffix names the partition verbatim —
+so a well-formed key this build does not model (a legacy bare-`baseDomain`
+`partitionKey`, or a `moz-extension` top-level scheme) is reachable by naming
+it, while still counted `unparsable_partition_key` at read time. Chromium
+rows carry no raw suffix, so an unparsable Chromium key stays unreachable.
 
 **A supplied selector that matches nothing omits; it never errors.** Once
 every demanded token is present in the context, `send_view`/`header` never
@@ -163,23 +181,28 @@ site host, on the same scheme, is `SameSite`; otherwise `CrossSite`. **IP
 literals are exempt from the subdomain rule.** When either the request host
 or the top-level site host is an IPv4 or IPv6 literal, site membership is
 exact host equality, never a subdomain check — an IPv6 host is compared
-without its brackets, the form `site_from_url` already normalizes to. An
-explicit `ancestor_chain` selector overrides this derivation only —
-`ancestor_chain` and `same_site_context` are independent terms, and
-supplying one never changes the other. This is what lets a caller express an
-A→B→A embed: the request host is browser-observed same-site with the
-top-level site (so `same_site_context` is derived `true` from host
-comparison, unaffected by any explicit `ancestor_chain`), but the ancestry
-that produced the partition is cross-site. Concretely, when `top_level_site`
-is absent the request is treated as first-party
-(`same_site_context == true`, by the existing no-top-level-site default), and
-an explicit `ancestor_chain(CrossSite)` selects exactly the A→B→A rows: for
-Chromium, rows whose partition site equals the request site with
+without its brackets, the form `site_from_url` already normalizes to. Call
+the outcome of that host comparison `sites_match`. The **resolved** chain is
+then: `CrossSite` whenever `sites_match` is false, regardless of any explicit
+selector (a same-site chain under a different top-level site is a frame tree
+no browser can produce, and honoring it would admit a site's own first-party
+partitioned rows into a third-party send); otherwise the explicit selector
+if supplied, else `SameSite`. `same_site_context` — the SameSite=Strict/Lax
+gate — is `sites_match && resolved == SameSite`, so the two terms are coupled
+through the resolved chain: an explicit `CrossSite` on a same-site request
+also makes the request cross-site for SameSite purposes, exactly as a
+browser treats an A→B→A frame. This is what lets a caller express an A→B→A
+embed: `top_level_site` set to the request's own site plus
+`ancestor_chain(CrossSite)` selects exactly the A→B→A rows — for Chromium,
+rows whose partition site equals the request site with
 `has_cross_site_ancestor == true`; for Firefox, rows whose `partitionKey`
-tuple is `(scheme,site,f)` with `site` equal to the request site and `f ==
-true`. The same subdomain rule (with the same IP-literal exemption) now
-governs `same_site_context`, the SameSite=Strict/Lax gate `header()` already
-applied before this ADR — previously a literal host comparison. This is the one
+tuple is `(scheme,site,f)` with `site` equal to the request site — and omits
+`SameSite=Strict`/`Lax` rows. `top_level_site` cannot be absent in that
+call: any partitioned row demands it, so the no-top-level-site default never
+reaches partition matching. The same subdomain rule (with the same
+IP-literal exemption) now governs `sites_match` for the SameSite gate that
+`header()` already applied before this ADR — previously a literal host
+comparison. This is the one
 semantic change to already-shipped SameSite behavior this ADR makes: a
 request to `www.example.com` with `top_level_site=https://example.com` was
 `CrossSite` before this ADR and is `SameSite` after it; two sibling
@@ -195,14 +218,17 @@ Decision 4 for why this remains sound without a public-suffix list).
 
 **Stored Chromium ancestor bit `None` on a partitioned row fails closed.** A
 Chromium row that declares a partition (`top_frame_site_key` is present) but
-whose `has_cross_site_ancestor` column is `NULL` — only pre-2024 Chromium
-schemas lack the column — is omitted from every send view regardless of the
-requested `ancestor_chain`, counted under `SendOmissions::ancestor_chain_unknown`,
-and counted at read time as the new `ReadWarning` code
-`unknown_ancestor_chain` (mirroring `unparsable_partition_key`). A caller
-cannot supply a selector that resolves this ambiguity — there is no
-"unknown" value on `AncestorChain` to select — because the row's own stored
-identity, not the caller's context, is what is missing.
+whose `has_cross_site_ancestor` column is absent, `NULL`, or not `0`/`1` —
+in practice a store last written by a Chromium that predates the column — is
+omitted from every send view regardless of the requested `ancestor_chain`,
+counted under `SendOmissions::ancestor_chain_unknown`, and counted at read
+time as the new `ReadWarning` code `unknown_ancestor_chain` (mirroring
+`unparsable_partition_key`). A caller cannot supply a selector that resolves
+this ambiguity — there is no "unknown" value on `AncestorChain` to select —
+because the row's own stored identity, not the caller's context, is what is
+missing. Chromium's own schema migration may backfill a value for such rows
+when it next opens the store; this crate deliberately does not infer that
+value, and a store opened by a current Chromium will not exhibit the case.
 
 ### 2. `send_view` is the single selection operation
 
@@ -366,10 +392,15 @@ isolation loss is acceptable.
 - Browser-side policy heuristics: storage-access grants, First-Party Sets,
   and any related-site-set membership.
 - Nonce-keyed / ephemeral partitions that do not persist to disk.
-- A Firefox port-partitioning e2e lane exercising
-  `privacy.dynamic_firstparty.use_site=false` — the port rule in Decision 1
-  is unit- and corpus-tested, not exercised against a live browser toggle in
-  this program.
+- A Firefox port-partitioning e2e lane. Firefox records the port in
+  `partitionKey` whenever the top-level URL has a non-default one, under the
+  default configuration; such a lane needs a top-level page on a
+  non-default port, not a pref. The port rule in Decision 1 is unit- and
+  corpus-tested, not exercised against a live browser in this program.
+  (`privacy.dynamic_firstparty.use_site=false` instead reverts to the legacy
+  bare-`baseDomain` key without parentheses, which the strict grammar
+  reports as unparsable and the raw `origin_attributes` selector can still
+  name.)
 - `from-path --domains`: it stays a flat, compatibility-only route and is not
   extended with the new selector surface. Whether it should gain one is an
   open question in the program record, not a decision this ADR makes.
