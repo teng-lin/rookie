@@ -178,8 +178,10 @@ def build_all_stores(corpus: dict[str, Any], out_dir: Path) -> dict[str, Path]:
 
 NODE_FIXTURE_STORES = {
     "chromium_isolated": "isolation-corpus-chromium.sqlite.base64",
+    "chromium_plain": "isolation-corpus-chromium-plain.sqlite.base64",
     "firefox_isolated": "isolation-corpus-firefox.sqlite.base64",
     "firefox_unknown_attr": "isolation-corpus-firefox-unknown-attr.sqlite.base64",
+    "firefox_plain": "isolation-corpus-firefox-plain.sqlite.base64",
 }
 
 

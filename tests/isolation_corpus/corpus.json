@@ -169,7 +169,7 @@
         },
         {
           "id": "chromium_site_ipv4_same_site_row",
-          "host_key": "7.198.51.100.7",
+          "host_key": "198.51.100.77",
           "name": "chips",
           "value": "chromium_site_ipv4_same_site_row",
           "path": "/",
@@ -185,7 +185,7 @@
         },
         {
           "id": "chromium_site_ipv4_cross_site_row",
-          "host_key": "7.198.51.100.7",
+          "host_key": "198.51.100.77",
           "name": "chips",
           "value": "chromium_site_ipv4_cross_site_row",
           "path": "/",
@@ -482,7 +482,7 @@
           "isHttpOnly": 0,
           "sameSite": 0,
           "expiry": 4102444800000,
-          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%29"
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%2Cf%29"
         }
       ],
       "jar": {
@@ -718,7 +718,7 @@
       "id": "chromium_site_ipv4_exact_host_equality_required",
       "store": "chromium_isolated",
       "context": {
-        "url": "https://7.198.51.100.7/",
+        "url": "https://198.51.100.77/",
         "top_level_site": "https://198.51.100.7",
         "now": 1893456000
       },
@@ -1148,7 +1148,7 @@
     "Ancestor-chain resolution is clamped, not merely derived: resolved = cross_site if the request site differs from top_level_site, else (explicit ancestor_chain or same_site); same_site_context = sites_match && resolved==same_site. A request whose site differs from the top level cannot be a first-party frame in a real browser frame tree, so an explicit ancestor_chain=same_site there is silently clamped to cross_site rather than accepted or rejected (chromium_ancestor_explicit_same_site_clamped_to_cross_site selects the same row as the plain derived-cross-site case). An explicit ancestor_chain=cross_site on a same-site request also clears same_site_context, which is what lets a SameSite=Strict cookie be omitted even though the request and top-level site are literally the same host (chromium_ancestor_explicit_cross_site_a_to_b_to_a).",
     "The Chromium ancestor-bit rows (same_site/cross_site/unknown) are hosted on nested.rookie-a.test, a subdomain of the top-level site, because that is the only relationship under which an explicit ancestor_chain=same_site is ever honored rather than clamped away. chromium_ancestor_third_party_cross_site models the genuinely cross-site (third-party) case on its own, single row: only bit=1 is a state a real Chromium store can produce there, since bit=0 at a cross-site host is now unreachable by any selector.",
     "IP literals (IPv4/IPv6) are exempt from the subdomain rule for ancestor_chain derivation and same_site_context: site membership requires exact host equality, never a suffix/subdomain check (ADR 0006 Decision 1).",
-    "chromium_site_ipv4_same_site_row and chromium_site_ipv6_same_site_row exist to prove the exemption: a naive dot-boundary subdomain check would treat '7.198.51.100.7' as a subdomain of '198.51.100.7' (and 'ffff::1' as ending with '::1'), but exact host equality correctly derives cross_site instead, so only the *_cross_site_row is ever selected.",
+    "chromium_site_ipv4_same_site_row and chromium_site_ipv6_same_site_row exist to prove the exemption: a naive suffix check would treat '198.51.100.77' as within '198.51.100.7' (and 'ffff::1' as within '::1'); no valid host is ever a dot-boundary subdomain of an IPv4 literal, because such a host would itself have to end in a numeric label and fail IPv4 parsing, so the plain-suffix form is the reachable hazard for both literal kinds, but exact host equality correctly derives cross_site instead, so only the *_cross_site_row is ever selected.",
     "A Chromium top_frame_site_key's port (if present, e.g. 'https://rookie-a.test:8443') must equal top_level_site's explicit port, the same rule as Firefox's partitionKey port -- it is no longer stripped/ignored. chromium_site_stored_key_with_port_requires_matching_port (top_level_site without a port) selects nothing; chromium_site_stored_key_with_port_matches_when_port_matches (top_level_site with :8443) selects the row.",
     "A Chromium partitioned row whose has_cross_site_ancestor column is NULL (chromium_ancestor_unknown) is omitted from every context regardless of the selector supplied, and is counted under ancestor_chain_unknown, never partition.",
     "Sibling subdomains (a.rookie-a.test under top-level b.rookie-a.test) stay cross-site because neither host is a subdomain of the other; a child subdomain (sub.rookie-a.test under top-level rookie-a.test) is same-site under the same rule.",
@@ -1159,7 +1159,7 @@
     "firefox_unknown_attr demands top_level_site (its partitioned row is not Unpartitioned) and origin_attributes (its future row is opaque). firefox_unknown_default's and firefox_unknown_future's typed projections are otherwise identical (uc=0, pb=0, fpd=\"\", gvscid=\"\"), so origin_attributes is the only way to select or exclude the opaque row specifically; the non-opaque partitioned row is present or absent from a case's selected set purely on the ordinary partition verdict, independent of whatever origin_attributes value is supplied.",
     "The omitted counts in every case include every row in the store, not just the rows conceptually 'in scope': a row hosted at a different domain than the request is counted not_applicable (it fails the GetFilter domain check) regardless of its isolation identity.",
     "Firefox partitionKey has no separate selector or demand token for its port or foreign-ancestor ('f') fields; both are derived from top_level_site (port) and from same_site_context + ancestor_chain (f). firefox_port_8443 and firefox_port_default differ only in the derived port; firefox_foreign_true and firefox_foreign_false differ only in the derived f bit.",
-    "firefox_foreign_true requires an explicit ancestor_chain=cross_site: with the request and top-level site both being 'rookie-a.test', the derived ancestor_chain would be same_site, and a non-empty partitionKey never matches a first-party context (same_site_context && ancestor_chain==same_site) regardless of the stored f bit. The same first-party guard is what excludes firefox_unknown_partitioned from firefox_unknown_attr_exact_future_suffix and firefox_unknown_attr_exact_empty_suffix, both of which leave ancestor_chain to derive same_site on a same-site (subdomain) request.",
+    "firefox_foreign_true requires an explicit ancestor_chain=cross_site: with the request and top-level site both being 'rookie-a.test', the derived ancestor_chain would be same_site, and a non-empty partitionKey never matches a first-party context (same_site_context && ancestor_chain==same_site) regardless of the stored f bit. The same first-party guard is what excludes firefox_unknown_partitioned from firefox_unknown_attr_exact_future_suffix and firefox_unknown_attr_exact_empty_suffix, both of which leave ancestor_chain to derive same_site on a same-site (subdomain) request. firefox_unknown_partitioned is itself hosted inside its own top-level site (unknown.rookie-a.test under rookie-a.test), so its partitionKey must carry the 'f' field to be selectable at all: f is derived as sites_match && ancestor_chain==cross_site, and with sites_match true the only ancestor_chain that clears the first-party guard is cross_site, which then demands f. A stored f=false partition is reachable only from a host outside the top-level site, which is why firefox_port_default and firefox_foreign_false live on rookie-b.test and rookie-c.test.",
     "jar refuses whenever the demanded-token list for the whole snapshot is non-empty, using the exact same tokens send_view's incomplete_send_context error would demand; chromium_plain and firefox_plain hold no isolated rows, so their jar is ok."
   ]
 }

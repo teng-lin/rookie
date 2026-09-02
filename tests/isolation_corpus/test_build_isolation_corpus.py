@@ -376,14 +376,20 @@ class BuildScriptSmokeTests(unittest.TestCase):
         will actually implement `send_view`/isolation matching, so on a
         fresh checkout there is usually nothing to check against yet.
         """
-        cli_candidates = list((REPO_ROOT / "target").glob("*/rookie-cookies-cli")) + list(
-            (REPO_ROOT / "target").glob("*/rookie-cookies-cli.exe")
-        )
+        # The `rookie-cookies-cli` package builds a binary named
+        # `rookie-cookies` (`[[bin]] name` in `cli/Cargo.toml`), so globbing
+        # for the package name found nothing even on a fully built checkout
+        # and this check skipped unconditionally.
+        cli_candidates = [
+            candidate
+            for pattern in ("*/rookie-cookies", "*/rookie-cookies.exe")
+            for candidate in (REPO_ROOT / "target").glob(pattern)
+            if candidate.is_file()
+        ]
         if not cli_candidates:
             self.skipTest(
-                "no built rookie-cookies-cli binary found under target/; "
-                "skipping the native-open check (this is expected before the "
-                "#331 Rust core lands)"
+                "no built rookie-cookies binary found under target/; "
+                "skipping the native-open check (build the CLI to enable it)"
             )
         cli = cli_candidates[0]
         corpus = load_corpus()
