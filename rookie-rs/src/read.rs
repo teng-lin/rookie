@@ -11,7 +11,8 @@ use crate::error::map_job_result;
 use crate::execution::{AppBoundPolicy, ExecutionControl};
 use crate::header_filter::{redact_url, same_site_permits, sendable_octets, GetFilter};
 use crate::isolation::{
-  missing_selectors, partition_identity, PartitionIdentity, RequestIsolation, StoredIsolation,
+  demanded_selectors, isolated_rows, missing_selectors, partition_identity, IsolationLoss,
+  PartitionIdentity, RequestIsolation, StoredIsolation,
 };
 use crate::read_warning::{ReadWarningCode, ReadWarningCounts};
 use crate::report;
@@ -243,14 +244,101 @@ impl ReadResult {
     }
   }
 
-  /// Borrows the compatibility projection in stable extraction order.
+  /// Borrows the **inventory** projection in stable extraction order.
   ///
-  /// Isolation is discarded here: the eight-field [`Cookie`] cannot represent
-  /// a CHIPS partition or a Firefox container. Use
-  /// [`detailed_cookies`](Self::detailed_cookies) when that matters, and never
-  /// merge two isolated contexts on the strength of this list.
+  /// This is the list of what the browser stored, flattened to eight fields
+  /// for display and auditing. Isolation is discarded: the eight-field
+  /// [`Cookie`] cannot represent a CHIPS partition or a Firefox container, so
+  /// two rows from different contexts are indistinguishable here.
+  ///
+  /// It stays infallible on purpose. Asking to *see* the rows is not the same
+  /// as asking for something send-safe, and a caller who wants the latter
+  /// should use [`jar`](Self::jar), which refuses rather than flattening, or
+  /// [`send_view`](Self::send_view), which selects one context.
   pub fn cookies(&self) -> &[Cookie] {
     &self.projected
+  }
+
+  /// Borrows the compatibility projection, or refuses if it would lose
+  /// isolation.
+  ///
+  /// A flat cookie list cannot represent a partition or a container, so
+  /// handing one to an HTTP client is how an isolated credential gets sent
+  /// from a context it never belonged to. This refuses whenever the snapshot
+  /// holds a row that some context would have to name a selector to
+  /// disambiguate, which is the same condition
+  /// [`header`](Self::header) reports as `incomplete_send_context`.
+  ///
+  /// A snapshot with no isolated rows returns `Ok` exactly as before.
+  ///
+  /// # Errors
+  ///
+  /// [`RequestError::IsolationLossRefused`], carrying how many rows are
+  /// isolated and the selector tokens that would be required.
+  ///
+  /// # Examples
+  ///
+  /// ```no_run
+  /// use rookie_cookies::{read, IsolationLoss, ReadRequest};
+  ///
+  /// let snapshot = read(ReadRequest::browser("chrome"))?;
+  /// match snapshot.jar() {
+  ///   Ok(cookies) => println!("{} send-safe cookies", cookies.len()),
+  ///   // The caller has decided a flat list is acceptable anyway.
+  ///   Err(_) => println!("{} cookies", snapshot.jar_with(IsolationLoss::Allow)?.len()),
+  /// }
+  /// # Ok::<(), rookie_cookies::Error>(())
+  /// ```
+  pub fn jar(&self) -> Result<&[Cookie]> {
+    self.jar_with(IsolationLoss::Refuse)
+  }
+
+  /// [`jar`](Self::jar) under an explicit isolation-loss policy.
+  ///
+  /// [`IsolationLoss::Allow`] is the affirmative, named opt-in. Its output is
+  /// byte-for-byte what [`cookies`](Self::cookies) returns; this changes when
+  /// a call can fail, never what a successful one contains.
+  pub fn jar_with(&self, loss: IsolationLoss) -> Result<&[Cookie]> {
+    map_job_result(
+      self
+        .isolation_loss_check(loss)
+        .map(|()| self.projected.as_slice()),
+    )
+  }
+
+  /// Consumes the snapshot and returns its compatibility projection, or
+  /// refuses if that would lose isolation.
+  ///
+  /// The owning counterpart of [`jar`](Self::jar), and what the free
+  /// [`jar`](crate::jar) function calls.
+  pub fn into_jar(self) -> Result<Vec<Cookie>> {
+    self.into_jar_with(IsolationLoss::Refuse)
+  }
+
+  /// [`into_jar`](Self::into_jar) under an explicit isolation-loss policy.
+  pub fn into_jar_with(self, loss: IsolationLoss) -> Result<Vec<Cookie>> {
+    map_job_result(self.isolation_loss_check(loss))?;
+    Ok(self.projected)
+  }
+
+  fn isolation_loss_check(&self, loss: IsolationLoss) -> anyhow::Result<()> {
+    if matches!(loss, IsolationLoss::Allow) {
+      return Ok(());
+    }
+    let required = demanded_selectors(&self.isolation);
+    if required.is_empty() {
+      return Ok(());
+    }
+    // The refusal does not ask which context the caller meant. Any isolated
+    // row makes a flat list ambiguous, and the tokens are the same vocabulary
+    // `incomplete_send_context` uses so one handler covers both.
+    Err(
+      RequestError::IsolationLossRefused {
+        isolated_rows: isolated_rows(&self.isolation),
+        required: required.into_iter().map(str::to_owned).collect(),
+      }
+      .into(),
+    )
   }
 
   /// Borrows the snapshot's native records, isolation intact.
@@ -260,7 +348,10 @@ impl ReadResult {
     &self.cookies
   }
 
-  /// Consumes the snapshot and returns its compatibility projection.
+  /// Consumes the snapshot and returns its **inventory** projection.
+  ///
+  /// Infallible, for the same reason [`cookies`](Self::cookies) is. Use
+  /// [`into_jar`](Self::into_jar) for the send-safe question.
   pub fn into_cookies(self) -> Vec<Cookie> {
     self.projected
   }
@@ -519,10 +610,17 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
 
 /// Executes one [`ReadRequest`] and returns its flat cookie projection.
 ///
-/// This is convenience sugar for `read(request)?.into_cookies()`, matching the
-/// binding-level `jar` jobs. Warnings and isolation context are discarded; use
-/// [`read`] when either matters. Unlike Python, Rust has no standard-library
-/// cookie-jar type, so the language-native projection is a `Vec<Cookie>`.
+/// This is convenience sugar for `read(request)?.into_jar()`. Warnings and
+/// isolation context are discarded; use [`read`] when either matters. Unlike
+/// Python, Rust has no standard-library cookie-jar type, so the language-native
+/// projection is a `Vec<Cookie>`.
+///
+/// **Changed in 0.7.0.** This fails closed. A snapshot holding a partitioned or
+/// containered cookie returns
+/// [`RequestError::IsolationLossRefused`] instead of a flat list that has
+/// silently merged two browsing contexts. A snapshot with no isolated rows
+/// behaves exactly as before. To keep the old behavior deliberately, call
+/// [`ReadResult::into_jar_with`] with [`IsolationLoss::Allow`].
 ///
 /// # Examples
 ///
@@ -534,7 +632,7 @@ pub fn read(request: ReadRequest) -> Result<ReadResult> {
 /// # Ok::<(), rookie_cookies::Error>(())
 /// ```
 pub fn jar(request: ReadRequest) -> Result<Vec<Cookie>> {
-  read(request).map(ReadResult::into_cookies)
+  read(request).and_then(ReadResult::into_jar)
 }
 
 fn read_inner(request: ReadRequest) -> anyhow::Result<ReadResult> {
@@ -899,6 +997,9 @@ fn _keep_record_link(_: &CookieRecord) {}
 
 #[cfg(test)]
 mod isolation_tests;
+
+#[cfg(test)]
+mod jar_tests;
 
 #[cfg(test)]
 mod send_context_tests;

@@ -1430,6 +1430,26 @@ impl core::marker::Sync for rookie_cookies::FaultKind
 impl core::marker::Unpin for rookie_cookies::FaultKind
 impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::FaultKind
 impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::FaultKind
+#[non_exhaustive] pub enum rookie_cookies::IsolationLoss
+pub rookie_cookies::IsolationLoss::Allow
+pub rookie_cookies::IsolationLoss::Refuse
+impl core::clone::Clone for rookie_cookies::IsolationLoss
+pub fn rookie_cookies::IsolationLoss::clone(&self) -> rookie_cookies::IsolationLoss
+impl core::cmp::Eq for rookie_cookies::IsolationLoss
+impl core::cmp::PartialEq for rookie_cookies::IsolationLoss
+pub fn rookie_cookies::IsolationLoss::eq(&self, &rookie_cookies::IsolationLoss) -> bool
+impl core::default::Default for rookie_cookies::IsolationLoss
+pub fn rookie_cookies::IsolationLoss::default() -> rookie_cookies::IsolationLoss
+impl core::fmt::Debug for rookie_cookies::IsolationLoss
+pub fn rookie_cookies::IsolationLoss::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rookie_cookies::IsolationLoss
+impl core::marker::StructuralPartialEq for rookie_cookies::IsolationLoss
+impl core::marker::Freeze for rookie_cookies::IsolationLoss
+impl core::marker::Send for rookie_cookies::IsolationLoss
+impl core::marker::Sync for rookie_cookies::IsolationLoss
+impl core::marker::Unpin for rookie_cookies::IsolationLoss
+impl core::panic::unwind_safe::RefUnwindSafe for rookie_cookies::IsolationLoss
+impl core::panic::unwind_safe::UnwindSafe for rookie_cookies::IsolationLoss
 #[non_exhaustive] pub enum rookie_cookies::MethodClass
 pub rookie_cookies::MethodClass::Safe
 pub rookie_cookies::MethodClass::Unsafe
@@ -1516,6 +1536,9 @@ pub rookie_cookies::RequestError::InvalidTopLevelSite
 pub rookie_cookies::RequestError::InvalidTopLevelSite::display: alloc::string::String
 pub rookie_cookies::RequestError::InvalidUrl
 pub rookie_cookies::RequestError::InvalidUrl::display: alloc::string::String
+pub rookie_cookies::RequestError::IsolationLossRefused
+pub rookie_cookies::RequestError::IsolationLossRefused::isolated_rows: u64
+pub rookie_cookies::RequestError::IsolationLossRefused::required: alloc::vec::Vec<alloc::string::String>
 pub rookie_cookies::RequestError::LossyProfilePath
 pub rookie_cookies::RequestError::LossyProfilePath::browser_id: alloc::string::String
 pub rookie_cookies::RequestError::LossyProfilePath::query: alloc::string::String
@@ -1820,6 +1843,10 @@ pub fn rookie_cookies::ReadResult::detailed_cookies(&self) -> &[rookie_cookies::
 pub fn rookie_cookies::ReadResult::header(&self, &rookie_cookies::SendContext) -> rookie_cookies::Result<alloc::string::String>
 pub fn rookie_cookies::ReadResult::into_cookies(self) -> alloc::vec::Vec<rookie_cookies::common::enums::Cookie>
 pub fn rookie_cookies::ReadResult::into_detailed_cookies(self) -> alloc::vec::Vec<rookie_cookies::common::enums::DetailedCookie>
+pub fn rookie_cookies::ReadResult::into_jar(self) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::ReadResult::into_jar_with(self, rookie_cookies::IsolationLoss) -> rookie_cookies::Result<alloc::vec::Vec<rookie_cookies::common::enums::Cookie>>
+pub fn rookie_cookies::ReadResult::jar(&self) -> rookie_cookies::Result<&[rookie_cookies::common::enums::Cookie]>
+pub fn rookie_cookies::ReadResult::jar_with(&self, rookie_cookies::IsolationLoss) -> rookie_cookies::Result<&[rookie_cookies::common::enums::Cookie]>
 pub fn rookie_cookies::ReadResult::profile_id(&self) -> core::option::Option<&str>
 pub fn rookie_cookies::ReadResult::send_view(&self, &rookie_cookies::SendContext) -> rookie_cookies::Result<rookie_cookies::SendView<'_>>
 pub fn rookie_cookies::ReadResult::warnings(&self) -> &[rookie_cookies::ReadWarning]

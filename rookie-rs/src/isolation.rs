@@ -39,6 +39,28 @@ pub enum AncestorChain {
   CrossSite,
 }
 
+/// Whether a projection that cannot represent isolation may discard it.
+///
+/// The eight-field [`Cookie`](crate::enums::Cookie), a Netscape cookie file,
+/// and `http.cookiejar` have no cell for a CHIPS partition key, a Firefox
+/// `partitionKey` tuple, or container identity. There is no encoding of that
+/// state a caller could round-trip back into a request, so producing one of
+/// those shapes from an isolated snapshot silently converts scoped credentials
+/// into unscoped ones.
+///
+/// [`Refuse`](Self::Refuse) is the default because the failure it prevents is
+/// invisible: a successful call returns cookies that look correct and are
+/// scoped to a context the caller never asked about.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IsolationLoss {
+  /// Refuse the projection when the snapshot holds any isolated row.
+  #[default]
+  Refuse,
+  /// Produce it anyway. The caller has decided the loss is acceptable.
+  Allow,
+}
+
 /// A (scheme, host) pair.
 ///
 /// **This is not eTLD+1.** The crate has no public-suffix list and does not
@@ -492,6 +514,39 @@ impl StoredIsolation {
     self.unknown_origin_attributes
       || (self.origin_attributes.is_some() && self.partition == PartitionIdentity::Unparsable)
   }
+}
+
+impl StoredIsolation {
+  /// Whether this row belongs to anything other than the unisolated default.
+  ///
+  /// This is exactly the per-row fact [`demanded_selectors`] aggregates, so
+  /// "the snapshot would demand a selector" and "the snapshot holds isolated
+  /// rows" cannot drift apart: a jar refuses precisely when some context would
+  /// have had to name a selector to disambiguate what it holds.
+  pub(crate) fn is_isolated(&self) -> bool {
+    self.partition != PartitionIdentity::Unpartitioned
+      || self.user_context_id.is_some_and(|id| id > 0)
+      || self.private_browsing_id.is_some_and(|id| id > 0)
+      || self
+        .first_party_domain
+        .as_deref()
+        .is_some_and(is_non_default)
+      || self
+        .gecko_view_session_context_id
+        .as_deref()
+        .is_some_and(is_non_default)
+      || self.unknown_origin_attributes
+  }
+}
+
+/// How many rows in `stored` carry isolation a flat projection cannot hold.
+pub(crate) fn isolated_rows(stored: &[StoredIsolation]) -> u64 {
+  stored
+    .iter()
+    .filter(|row| row.is_isolated())
+    .count()
+    .try_into()
+    .unwrap_or(u64::MAX)
 }
 
 /// Supplies an attribute's default, but only when the name never appeared.

@@ -23,7 +23,7 @@ use rookie_cookies::report::{
 use rookie_cookies::MozillaProfile;
 use rookie_cookies::RequestError;
 use rookie_cookies::Result;
-use rookie_cookies::{AncestorChain, SendContext, SendOmissions, SendView};
+use rookie_cookies::{AncestorChain, IsolationLoss, SendContext, SendOmissions, SendView};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -590,6 +590,51 @@ fn the_omission_reasons_are_a_fixed_ordered_vocabulary() {
   let _: fn(&SendOmissions) -> u64 = SendOmissions::unparsable_partition_key;
   let _: fn(&SendOmissions) -> u64 = SendOmissions::origin;
   let _: fn(&SendOmissions) -> u64 = SendOmissions::total;
+}
+
+#[test]
+fn the_jar_names_are_fail_closed_and_the_inventory_names_stay_infallible() {
+  // Which names promise send-safety is the whole contract here: `jar` can
+  // fail, `cookies` cannot, and neither was renamed.
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult) -> Result<&'a [Cookie]> =
+    rookie_cookies::ReadResult::jar;
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult, IsolationLoss) -> Result<&'a [Cookie]> =
+    rookie_cookies::ReadResult::jar_with;
+  let _: fn(rookie_cookies::ReadResult) -> Result<Vec<Cookie>> =
+    rookie_cookies::ReadResult::into_jar;
+  let _: fn(rookie_cookies::ReadResult, IsolationLoss) -> Result<Vec<Cookie>> =
+    rookie_cookies::ReadResult::into_jar_with;
+  let _: fn(rookie_cookies::ReadRequest) -> Result<Vec<Cookie>> = rookie_cookies::jar;
+
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult) -> &'a [Cookie] =
+    rookie_cookies::ReadResult::cookies;
+  let _: fn(rookie_cookies::ReadResult) -> Vec<Cookie> = rookie_cookies::ReadResult::into_cookies;
+}
+
+#[test]
+fn isolation_loss_refuses_by_default_and_is_non_exhaustive() {
+  assert_eq!(IsolationLoss::default(), IsolationLoss::Refuse);
+  assert_ne!(IsolationLoss::Refuse, IsolationLoss::Allow);
+  let policy = IsolationLoss::Allow;
+  match policy {
+    IsolationLoss::Refuse => unreachable!(),
+    IsolationLoss::Allow => {}
+    _ => unreachable!("non_exhaustive requires this arm downstream"),
+  }
+}
+
+#[test]
+fn the_isolation_refusal_reuses_the_selector_token_vocabulary() {
+  let error = RequestError::IsolationLossRefused {
+    isolated_rows: 2,
+    required: vec!["top_level_site".to_owned(), "user_context_id".to_owned()],
+  };
+  assert_eq!(error.code(), "isolation_loss_refused");
+  assert_eq!(error.kind(), "request");
+  assert_eq!(error.browser_id(), None);
+  let message = error.to_string();
+  assert!(message.contains("top_level_site"), "{message}");
+  assert!(message.contains("IsolationLoss::Allow"), "{message}");
 }
 
 /// Seeds one SQLite file and returns its path, in a directory the caller owns.

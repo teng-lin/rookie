@@ -58,6 +58,25 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   otherwise matches. Only stores written before 2024 lack that column. The row
   stays in the snapshot inventory, and the loss is counted both per view and as
   a read warning, so it is visible rather than silent.
+- `jar` fails closed. The free `jar` function, `ReadResult::jar`, and
+  `ReadResult::into_jar` now refuse a snapshot that holds a partitioned,
+  containered, or otherwise isolated cookie, returning the new
+  `isolation_loss_refused` request error rather than a flat list that has
+  silently merged two browsing contexts. The eight-field shape has no cell for
+  a partition key or a container id, so a successful call used to be
+  indistinguishable from one that dropped scoped credentials into an unscoped
+  bag. Nothing is renamed, and a snapshot with no isolated rows returns `Ok`
+  exactly as before.
+
+  To keep the previous behavior, say so: `ReadResult::jar_with` and
+  `ReadResult::into_jar_with` take the new `IsolationLoss` enum, and
+  `IsolationLoss::Allow` produces byte-for-byte the same list as before. The
+  error carries how many rows are isolated and the same selector tokens
+  `incomplete_send_context` uses, so one handler covers both.
+
+  `cookies()` and `into_cookies()` are unaffected and stay infallible. They are
+  the inventory projection, for seeing what the browser stored; `jar` is the
+  one that promises the result is safe to send.
 - Same-site now means that the request host equals the top-level site's host or
   is a subdomain of it, on the same scheme. It previously meant literal host
   equality. A request to `www.example.com` under a `https://example.com`

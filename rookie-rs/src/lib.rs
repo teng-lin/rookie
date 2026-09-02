@@ -83,7 +83,7 @@ pub use anyhow;
 use enums::Cookie;
 pub use error::{EngineError, Error};
 pub use execution::{AppBoundPolicy, ExecutionControl, ParseAppBoundPolicyError};
-pub use isolation::AncestorChain;
+pub use isolation::{AncestorChain, IsolationLoss};
 pub use read::{
   from_path, jar, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult,
   ReadWarning,

@@ -100,7 +100,10 @@ fn binding_error_details(error: &rookie_cookies::Error) -> BindingErrorDetails {
       .and_then(rookie_cookies::direct_path::DirectPathError::path)
       .is_some(),
     required: match request {
-      Some(RequestError::IncompleteSendContext { required, .. }) => required.clone(),
+      Some(
+        RequestError::IncompleteSendContext { required, .. }
+        | RequestError::IsolationLossRefused { required, .. },
+      ) => required.clone(),
       _ => Vec::new(),
     },
   }
