@@ -634,7 +634,7 @@ fn the_isolation_refusal_reuses_the_selector_token_vocabulary() {
   assert_eq!(error.browser_id(), None);
   let message = error.to_string();
   assert!(message.contains("top_level_site"), "{message}");
-  assert!(message.contains("IsolationLoss::Allow"), "{message}");
+  assert!(message.contains("allow isolation loss"), "{message}");
 }
 
 /// Seeds one SQLite file and returns its path, in a directory the caller owns.

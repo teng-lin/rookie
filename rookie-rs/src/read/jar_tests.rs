@@ -90,7 +90,7 @@ fn jar_refuses_an_isolated_snapshot_by_default() {
   // The message names the way out rather than only the problem.
   let message = error.to_string();
   assert!(message.contains("top_level_site"), "{message}");
-  assert!(message.contains("IsolationLoss::Allow"), "{message}");
+  assert!(message.contains("allow isolation loss"), "{message}");
 
   // The inventory projection is unaffected: asking to see the rows is not the
   // same question as asking for something send-safe.

@@ -165,7 +165,7 @@ impl fmt::Display for RequestError {
         required,
       } => write!(
         formatter,
-        "snapshot holds {isolated_rows} isolated cookies; select a context with `send_view`/`header` (needs: {}) or opt in with `IsolationLoss::Allow`",
+        "snapshot holds {isolated_rows} isolated cookies; select a browsing context through the send view or header (needs: {}) or explicitly allow isolation loss",
         required.join(", ")
       ),
       Self::AppBoundUnavailable { policy } => write!(
@@ -200,7 +200,9 @@ mod tests {
     .to_string();
     assert!(!message.contains("  "), "double space in {message:?}");
     assert!(message.contains("top_level_site"));
-    assert!(message.contains("IsolationLoss::Allow"));
+    // Language-neutral: the same text reaches Python, Node, and CLI users.
+    assert!(message.contains("allow isolation loss"));
+    assert!(!message.contains("::"), "{message:?}");
   }
 
   #[test]
